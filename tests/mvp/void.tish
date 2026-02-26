@@ -1,0 +1,5 @@
+// MVP test: void operator (evaluates operand, returns null)
+any x = void (1 + 2)
+print(typeof x)
+print(x === null)
+any dummy = void print("side effect")

@@ -46,6 +46,7 @@ Tish is a minimal, TS/JS-compatible language designed for both interpretation an
 - `break`, `continue`, `return expr`
 - `throw expr` / `try stmt catch (e) stmt`
 - `typeof expr` — returns `"number"`, `"string"`, `"boolean"`, `"object"`, `"function"`
+- `void expr` — evaluates expr, returns `null` (Tish uses null instead of JS undefined)
 - Postfix `++` / `--` on identifiers
 
 Blocks: `{ stmt; stmt }` or indentation (Indent/Dedent tokens).
@@ -63,7 +64,7 @@ fun double(x) = x * 2   // single-expression, implicit return
 - `parseInt(s, radix?)`, `parseFloat(s)`
 - `isFinite(v)`, `isNaN(v)`
 - `Infinity`, `NaN` — globals
-- `Math.abs(x)`, `Math.sqrt(x)`, `Math.min(a, b, ...)`, `Math.max(a, b, ...)`
+- `Math.abs(x)`, `Math.sqrt(x)`, `Math.min(a, b, ...)`, `Math.max(a, b, ...)`, `Math.floor(x)`, `Math.ceil(x)`, `Math.round(x)`
 
 ### Assignment
 

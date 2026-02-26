@@ -739,6 +739,7 @@ impl<'a> Parser<'a> {
             Some(TokenKind::Minus) => UnaryOp::Neg,
             Some(TokenKind::Plus) => UnaryOp::Pos,
             Some(TokenKind::BitNot) => UnaryOp::BitNot,
+            Some(TokenKind::Void) => UnaryOp::Void,
             Some(TokenKind::TypeOf) => {
                 let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
                 self.advance();

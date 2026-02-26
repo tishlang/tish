@@ -27,6 +27,9 @@ pub enum Value {
     NativeMathSqrt,
     NativeMathMin,
     NativeMathMax,
+    NativeMathFloor,
+    NativeMathCeil,
+    NativeMathRound,
 }
 
 impl Value {
@@ -57,6 +60,9 @@ impl Value {
             Value::NativeMathSqrt => "[NativeFunction: Math.sqrt]".to_string(),
             Value::NativeMathMin => "[NativeFunction: Math.min]".to_string(),
             Value::NativeMathMax => "[NativeFunction: Math.max]".to_string(),
+            Value::NativeMathFloor => "[NativeFunction: Math.floor]".to_string(),
+            Value::NativeMathCeil => "[NativeFunction: Math.ceil]".to_string(),
+            Value::NativeMathRound => "[NativeFunction: Math.round]".to_string(),
         }
     }
 

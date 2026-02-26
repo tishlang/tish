@@ -100,6 +100,7 @@ fn test_mvp_programs_interpreter_vs_native() {
         "bitwise.tish",
         "math.tish",
         "optional_chaining.tish",
+        "void.tish",
     ];
     for name in test_files {
         let path = mvp_dir.join(name);

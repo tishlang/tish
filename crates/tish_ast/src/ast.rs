@@ -206,6 +206,7 @@ pub enum UnaryOp {
     Neg,
     Pos,
     BitNot,
+    Void,
 }
 
 #[derive(Debug, Clone)]

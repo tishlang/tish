@@ -61,7 +61,7 @@ impl Codegen {
         self.write("use std::collections::HashMap;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tish_runtime::{print as tish_print, is_finite as tish_is_finite, is_nan as tish_is_nan, math_abs as tish_math_abs, math_max as tish_math_max, math_min as tish_math_min, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, TishError, Value};\n\n");
+        self.write("use tish_runtime::{print as tish_print, is_finite as tish_is_finite, is_nan as tish_is_nan, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, TishError, Value};\n\n");
 
         // First pass: emit function declarations
         for stmt in &program.statements {
@@ -111,6 +111,9 @@ impl Codegen {
         self.writeln("(Arc::from(\"sqrt\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sqrt(args)))),");
         self.writeln("(Arc::from(\"min\"), Value::Function(Rc::new(|args: &[Value]| tish_math_min(args)))),");
         self.writeln("(Arc::from(\"max\"), Value::Function(Rc::new(|args: &[Value]| tish_math_max(args)))),");
+        self.writeln("(Arc::from(\"floor\"), Value::Function(Rc::new(|args: &[Value]| tish_math_floor(args)))),");
+        self.writeln("(Arc::from(\"ceil\"), Value::Function(Rc::new(|args: &[Value]| tish_math_ceil(args)))),");
+        self.writeln("(Arc::from(\"round\"), Value::Function(Rc::new(|args: &[Value]| tish_math_round(args)))),");
         self.indent -= 1;
         self.writeln("])));");
 
@@ -443,6 +446,7 @@ impl Codegen {
                         "Value::Number({{ let Value::Number(n) = &{} else {{ panic!(\"Expected number\") }}; (!(*n as i32)) as f64 }})",
                         o
                     ),
+                    UnaryOp::Void => format!("{{ {}; Value::Null }}", o),
                 }
             }
             Expr::Call { callee, args, .. } => {

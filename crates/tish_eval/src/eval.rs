@@ -73,6 +73,9 @@ impl Evaluator {
             math.insert("sqrt".into(), Value::NativeMathSqrt);
             math.insert("min".into(), Value::NativeMathMin);
             math.insert("max".into(), Value::NativeMathMax);
+            math.insert("floor".into(), Value::NativeMathFloor);
+            math.insert("ceil".into(), Value::NativeMathCeil);
+            math.insert("round".into(), Value::NativeMathRound);
             s.set("Math".into(), Value::Object(Rc::new(math)));
         }
         Self { scope }
@@ -451,7 +454,10 @@ impl Evaluator {
                     | Value::NativeMathAbs
                     | Value::NativeMathSqrt
                     | Value::NativeMathMin
-                    | Value::NativeMathMax => "function".into(),
+                    | Value::NativeMathMax
+                    | Value::NativeMathFloor
+                    | Value::NativeMathCeil
+                    | Value::NativeMathRound => "function".into(),
                 }))
             }
             Expr::PostfixInc { name, .. } => {
@@ -555,6 +561,7 @@ impl Evaluator {
                 let n = Self::to_int32(v)?;
                 Ok(Value::Number((!n) as f64))
             }
+            UnaryOp::Void => Ok(Value::Null),
         }
     }
 
@@ -638,6 +645,27 @@ impl Evaluator {
                 .collect();
             let n = nums.into_iter().fold(f64::NEG_INFINITY, f64::max);
             return Ok(Value::Number(if n == f64::NEG_INFINITY { f64::NAN } else { n }));
+        }
+        if matches!(f, Value::NativeMathFloor) {
+            let n = args.get(0).and_then(|v| match v {
+                Value::Number(n) => Some(*n),
+                _ => None,
+            }).unwrap_or(f64::NAN);
+            return Ok(Value::Number(n.floor()));
+        }
+        if matches!(f, Value::NativeMathCeil) {
+            let n = args.get(0).and_then(|v| match v {
+                Value::Number(n) => Some(*n),
+                _ => None,
+            }).unwrap_or(f64::NAN);
+            return Ok(Value::Number(n.ceil()));
+        }
+        if matches!(f, Value::NativeMathRound) {
+            let n = args.get(0).and_then(|v| match v {
+                Value::Number(n) => Some(*n),
+                _ => None,
+            }).unwrap_or(f64::NAN);
+            return Ok(Value::Number(n.round()));
         }
         if matches!(f, Value::NativeIsNaN) {
             let b = args.get(0).map_or(true, |v| match v {

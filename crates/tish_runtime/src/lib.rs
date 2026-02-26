@@ -202,6 +202,33 @@ pub fn math_max(args: &[Value]) -> Value {
     Value::Number(if n == f64::NEG_INFINITY { f64::NAN } else { n })
 }
 
+/// Math.floor
+pub fn math_floor(args: &[Value]) -> Value {
+    let n = args.get(0).and_then(|v| match v {
+        Value::Number(n) => Some(*n),
+        _ => None,
+    }).unwrap_or(f64::NAN);
+    Value::Number(n.floor())
+}
+
+/// Math.ceil
+pub fn math_ceil(args: &[Value]) -> Value {
+    let n = args.get(0).and_then(|v| match v {
+        Value::Number(n) => Some(*n),
+        _ => None,
+    }).unwrap_or(f64::NAN);
+    Value::Number(n.ceil())
+}
+
+/// Math.round
+pub fn math_round(args: &[Value]) -> Value {
+    let n = args.get(0).and_then(|v| match v {
+        Value::Number(n) => Some(*n),
+        _ => None,
+    }).unwrap_or(f64::NAN);
+    Value::Number(n.round())
+}
+
 /// Get property from object by string key.
 pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
     let key = key.as_ref();

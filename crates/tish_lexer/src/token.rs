@@ -47,6 +47,7 @@ pub enum TokenKind {
     Default,
     Do,
     TypeOf,
+    Void,
     Of,
 
     // Punctuation
@@ -118,6 +119,7 @@ impl TokenKind {
             "default" => TokenKind::Default,
             "do" => TokenKind::Do,
             "typeof" => TokenKind::TypeOf,
+            "void" => TokenKind::Void,
             "of" => TokenKind::Of,
             _ => TokenKind::Ident,
         }
