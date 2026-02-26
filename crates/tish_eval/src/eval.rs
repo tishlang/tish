@@ -68,6 +68,12 @@ impl Evaluator {
             s.set("isNaN".into(), Value::NativeIsNaN);
             s.set("Infinity".into(), Value::Number(f64::INFINITY));
             s.set("NaN".into(), Value::Number(f64::NAN));
+            let mut math = HashMap::new();
+            math.insert("abs".into(), Value::NativeMathAbs);
+            math.insert("sqrt".into(), Value::NativeMathSqrt);
+            math.insert("min".into(), Value::NativeMathMin);
+            math.insert("max".into(), Value::NativeMathMax);
+            s.set("Math".into(), Value::Object(Rc::new(math)));
         }
         Self { scope }
     }
@@ -122,6 +128,33 @@ impl Evaluator {
                     if !self.eval_expr(cond)?.is_truthy() {
                         break;
                     }
+                    match self.eval_statement(body) {
+                        Ok(_) => {}
+                        Err(EvalError::Break) => break,
+                        Err(EvalError::Continue) => continue,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(Value::Null)
+            }
+            Statement::ForOf { name, iterable, body, .. } => {
+                let iter_val = self.eval_expr(iterable)?;
+                let elements = match &iter_val {
+                    crate::value::Value::Array(arr) => arr.iter().cloned().collect::<Vec<_>>(),
+                    crate::value::Value::String(s) => {
+                        s.chars()
+                            .map(|c| crate::value::Value::String(Arc::from(c.to_string())))
+                            .collect::<Vec<_>>()
+                    }
+                    _ => {
+                        return Err(EvalError::Error(format!(
+                            "for-of requires iterable (array or string), got {}",
+                            iter_val.to_string()
+                        )));
+                    }
+                };
+                for elem in elements {
+                    self.scope.borrow_mut().set(Arc::clone(name), elem);
                     match self.eval_statement(body) {
                         Ok(_) => {}
                         Err(EvalError::Break) => break,
@@ -413,8 +446,12 @@ impl Evaluator {
                     Value::NativePrint
                     | Value::NativeParseInt
                     | Value::NativeParseFloat
-                    | Value::NativeIsFinite
-                    | Value::NativeIsNaN => "function".into(),
+                    |                     Value::NativeIsFinite
+                    | Value::NativeIsNaN
+                    | Value::NativeMathAbs
+                    | Value::NativeMathSqrt
+                    | Value::NativeMathMin
+                    | Value::NativeMathMax => "function".into(),
                 }))
             }
             Expr::PostfixInc { name, .. } => {
@@ -459,6 +496,7 @@ impl Evaluator {
             BinOp::Mul => self.binop_number(l, r, |a, b| Value::Number(a * b)),
             BinOp::Div => self.binop_number(l, r, |a, b| Value::Number(a / b)),
             BinOp::Mod => self.binop_number(l, r, |a, b| Value::Number(a % b)),
+            BinOp::Pow => self.binop_number(l, r, |a, b| Value::Number(a.powf(b))),
             BinOp::StrictEq => Ok(Value::Bool(l.strict_eq(r))),
             BinOp::StrictNe => Ok(Value::Bool(!l.strict_eq(r))),
             BinOp::Lt => self.binop_number(l, r, |a, b| Value::Bool(a < b)),
@@ -467,8 +505,29 @@ impl Evaluator {
             BinOp::Ge => self.binop_number(l, r, |a, b| Value::Bool(a >= b)),
             BinOp::And => Ok(Value::Bool(l.is_truthy() && r.is_truthy())),
             BinOp::Or => Ok(Value::Bool(l.is_truthy() || r.is_truthy())),
+            BinOp::BitAnd => self.binop_int32(l, r, |a, b| Value::Number((a & b) as f64)),
+            BinOp::BitOr => self.binop_int32(l, r, |a, b| Value::Number((a | b) as f64)),
+            BinOp::BitXor => self.binop_int32(l, r, |a, b| Value::Number((a ^ b) as f64)),
+            BinOp::Shl => self.binop_int32(l, r, |a, b| Value::Number((a << b) as f64)),
+            BinOp::Shr => self.binop_int32(l, r, |a, b| Value::Number((a >> b) as f64)),
             BinOp::Eq | BinOp::Ne => Err("Loose equality not supported".to_string()),
         }
+    }
+
+    fn to_int32(v: &Value) -> Result<i32, String> {
+        match v {
+            Value::Number(n) => Ok(*n as i32),
+            _ => Err(format!("Bitwise operands must be numbers, got {:?}", v)),
+        }
+    }
+
+    fn binop_int32<F>(&self, l: &Value, r: &Value, f: F) -> Result<Value, String>
+    where
+        F: FnOnce(i32, i32) -> Value,
+    {
+        let a = Self::to_int32(l)?;
+        let b = Self::to_int32(r)?;
+        Ok(f(a, b))
     }
 
     fn binop_number<F>(&self, l: &Value, r: &Value, f: F) -> Result<Value, String>
@@ -492,6 +551,10 @@ impl Evaluator {
                 Value::Number(n) => Ok(Value::Number(*n)),
                 _ => Err(format!("Cannot apply unary + to {:?}", v)),
             },
+            UnaryOp::BitNot => {
+                let n = Self::to_int32(v)?;
+                Ok(Value::Number((!n) as f64))
+            }
         }
     }
 
@@ -533,6 +596,48 @@ impl Evaluator {
                 _ => false,
             });
             return Ok(Value::Bool(b));
+        }
+        if matches!(f, Value::NativeMathAbs) {
+            let n = args
+                .get(0)
+                .and_then(|v| match v {
+                    Value::Number(n) => Some(*n),
+                    _ => None,
+                })
+                .unwrap_or(f64::NAN);
+            return Ok(Value::Number(n.abs()));
+        }
+        if matches!(f, Value::NativeMathSqrt) {
+            let n = args
+                .get(0)
+                .and_then(|v| match v {
+                    Value::Number(n) => Some(*n),
+                    _ => None,
+                })
+                .unwrap_or(f64::NAN);
+            return Ok(Value::Number(n.sqrt()));
+        }
+        if matches!(f, Value::NativeMathMin) {
+            let nums: Vec<f64> = args
+                .iter()
+                .filter_map(|v| match v {
+                    Value::Number(n) => Some(*n),
+                    _ => None,
+                })
+                .collect();
+            let n = nums.into_iter().fold(f64::INFINITY, f64::min);
+            return Ok(Value::Number(if n == f64::INFINITY { f64::NAN } else { n }));
+        }
+        if matches!(f, Value::NativeMathMax) {
+            let nums: Vec<f64> = args
+                .iter()
+                .filter_map(|v| match v {
+                    Value::Number(n) => Some(*n),
+                    _ => None,
+                })
+                .collect();
+            let n = nums.into_iter().fold(f64::NEG_INFINITY, f64::max);
+            return Ok(Value::Number(if n == f64::NEG_INFINITY { f64::NAN } else { n }));
         }
         if matches!(f, Value::NativeIsNaN) {
             let b = args.get(0).map_or(true, |v| match v {

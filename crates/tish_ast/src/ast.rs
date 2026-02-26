@@ -46,6 +46,12 @@ pub enum Statement {
         body: Box<Statement>,
         span: Span,
     },
+    ForOf {
+        name: Arc<str>,
+        iterable: Expr,
+        body: Box<Statement>,
+        span: Span,
+    },
     Return {
         value: Option<Expr>,
         span: Span,
@@ -176,6 +182,7 @@ pub enum BinOp {
     Mul,
     Div,
     Mod,
+    Pow,
     Eq,
     Ne,
     StrictEq,
@@ -186,6 +193,11 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +205,7 @@ pub enum UnaryOp {
     Not,
     Neg,
     Pos,
+    BitNot,
 }
 
 #[derive(Debug, Clone)]

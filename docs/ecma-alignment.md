@@ -16,7 +16,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 | §10 Source code | Follow | + indent/tab normalization |
 | §11 Lexical grammar | Follow | + `fun`/`any`, optional braces |
 | §12–15 Expressions, Statements | Follow subset | No `this`, `with`, `class` |
-| §16 Errors | Omit in MVP | No throw/try/catch yet; map to abort |
+| §16 Errors | Follow | throw, try/catch |
 | §17 Literals | Follow | number, string, boolean, null, [], {}. Omit template/BigInt. |
 | §18 Global | Follow | Single global |
 | §19 Fundamental | Follow | Object, Function, Error. Symbol Omit. |
@@ -47,11 +47,12 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **call** — Follow
 - **coalesce** — Follow (`??`)
 - **conditional** — Follow (`a ? b : c`)
-- **division, multiplication, modulus, exponentiation** — Follow
+- **division, multiplication, modulus, exponentiation** — Follow (`**` right-associative)
 - **logical-and, logical-or, logical-not** — Follow
 - **member, optional-chaining** — Follow (`?.`)
 - **object** — Follow (plain `{}`)
 - **strict-equals** — Follow (`===`, `!==`)
+- **increment/decrement** — Follow (postfix `++`, `--` on identifiers)
 - **typeof** — Follow
 - **async, await, generators, yield** — Omit
 - **class, new, super, this** — Omit
@@ -69,8 +70,8 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **variable** — as `any`
 - **function** — as `fun`
 - **class, debugger, with** — Omit
-- **throw, try** — Omit in MVP
-- **switch, do-while** — Omit in MVP
+- **throw, try** — Follow
+- **switch, do-while** — Follow
 - **for-in, for-of** — Omit or Simplify
 
 ## test262/built-ins

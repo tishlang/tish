@@ -1,0 +1,10 @@
+// MVP test: for-of loop (iterate arrays and strings)
+any arr = [10, 20, 30]
+any sum = 0
+for (any x of arr)
+  sum = sum + x
+print("array sum:", sum)
+
+any s = "abc"
+for (any c of s)
+  print("char:", c)

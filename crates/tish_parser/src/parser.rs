@@ -271,6 +271,41 @@ impl<'a> Parser<'a> {
         let span_start = self.expect(TokenKind::For)?.span.start;
         self.expect(TokenKind::LParen)?;
         let init = if matches!(self.peek_kind(), Some(TokenKind::Any)) {
+            let any_span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
+            self.advance();
+            let name = self
+                .expect(TokenKind::Ident)?
+                .literal
+                .clone()
+                .ok_or("Expected identifier")?
+                .into();
+            if matches!(self.peek_kind(), Some(TokenKind::Of)) {
+                self.advance();
+                let iterable = self.parse_expr()?;
+                self.expect(TokenKind::RParen)?;
+                let body = Box::new(self.parse_block_or_statement()?);
+                return Ok(Statement::ForOf {
+                    name,
+                    iterable,
+                    body,
+                    span: self.span_end(span_start),
+                });
+            }
+            let init_expr = if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
+                self.advance();
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
+                self.advance();
+            }
+            Some(Box::new(Statement::VarDecl {
+                name,
+                init: init_expr,
+                span: self.span_end(any_span_start),
+            }))
+        } else if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
             Some(Box::new(self.parse_var_decl()?))
         } else if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
             None
@@ -427,7 +462,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_assign(&mut self) -> Result<Expr, String> {
-        let left = self.parse_nullish_coalesce()?;
+        let left = self.parse_conditional()?;
         if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
             if let Expr::Ident { name, span } = &left {
                 let name = Arc::clone(name);
@@ -443,6 +478,26 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(left)
+    }
+
+    fn parse_conditional(&mut self) -> Result<Expr, String> {
+        let cond = self.parse_nullish_coalesce()?;
+        if matches!(self.peek_kind(), Some(TokenKind::Question)) {
+            let start = cond.span().start;
+            self.advance(); // ?
+            let then_branch = self.parse_expr()?;
+            self.expect(TokenKind::Colon)?;
+            let else_branch = self.parse_conditional()?; // right-associative
+            let end = else_branch.span().end;
+            Ok(Expr::Conditional {
+                cond: Box::new(cond),
+                then_branch: Box::new(then_branch),
+                else_branch: Box::new(else_branch),
+                span: Span { start, end },
+            })
+        } else {
+            Ok(cond)
+        }
     }
 
     fn parse_nullish_coalesce(&mut self) -> Result<Expr, String> {
@@ -479,15 +534,88 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_and(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_equality()?;
+        let mut left = self.parse_bit_or()?;
         while matches!(self.peek_kind(), Some(TokenKind::And)) {
+            self.advance();
+            let right = self.parse_bit_or()?;
+            let start = left.span().start;
+            let end = right.span().end;
+            left = Expr::Binary {
+                left: Box::new(left),
+                op: BinOp::And,
+                right: Box::new(right),
+                span: Span { start, end },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_bit_or(&mut self) -> Result<Expr, String> {
+        let mut left = self.parse_bit_xor()?;
+        while matches!(self.peek_kind(), Some(TokenKind::BitOr)) {
+            self.advance();
+            let right = self.parse_bit_xor()?;
+            let start = left.span().start;
+            let end = right.span().end;
+            left = Expr::Binary {
+                left: Box::new(left),
+                op: BinOp::BitOr,
+                right: Box::new(right),
+                span: Span { start, end },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_bit_xor(&mut self) -> Result<Expr, String> {
+        let mut left = self.parse_bit_and()?;
+        while matches!(self.peek_kind(), Some(TokenKind::BitXor)) {
+            self.advance();
+            let right = self.parse_bit_and()?;
+            let start = left.span().start;
+            let end = right.span().end;
+            left = Expr::Binary {
+                left: Box::new(left),
+                op: BinOp::BitXor,
+                right: Box::new(right),
+                span: Span { start, end },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_bit_and(&mut self) -> Result<Expr, String> {
+        let mut left = self.parse_shift()?;
+        while matches!(self.peek_kind(), Some(TokenKind::BitAnd)) {
+            self.advance();
+            let right = self.parse_shift()?;
+            let start = left.span().start;
+            let end = right.span().end;
+            left = Expr::Binary {
+                left: Box::new(left),
+                op: BinOp::BitAnd,
+                right: Box::new(right),
+                span: Span { start, end },
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_shift(&mut self) -> Result<Expr, String> {
+        let mut left = self.parse_equality()?;
+        loop {
+            let op = match self.peek_kind() {
+                Some(TokenKind::Shl) => BinOp::Shl,
+                Some(TokenKind::Shr) => BinOp::Shr,
+                _ => break,
+            };
             self.advance();
             let right = self.parse_equality()?;
             let start = left.span().start;
             let end = right.span().end;
             left = Expr::Binary {
                 left: Box::new(left),
-                op: BinOp::And,
+                op,
                 right: Box::new(right),
                 span: Span { start, end },
             };
@@ -566,7 +694,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_factor(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_unary()?;
+        let mut left = self.parse_pow()?;
         loop {
             let op = match self.peek_kind() {
                 Some(TokenKind::Star) => BinOp::Mul,
@@ -575,7 +703,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_unary()?;
+            let right = self.parse_pow()?;
             let start = left.span().start;
             let end = right.span().end;
             left = Expr::Binary {
@@ -588,11 +716,29 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
+    fn parse_pow(&mut self) -> Result<Expr, String> {
+        let left = self.parse_unary()?;
+        if matches!(self.peek_kind(), Some(TokenKind::StarStar)) {
+            self.advance();
+            let right = self.parse_pow()?; // right-associative
+            let start = left.span().start;
+            let end = right.span().end;
+            return Ok(Expr::Binary {
+                left: Box::new(left),
+                op: BinOp::Pow,
+                right: Box::new(right),
+                span: Span { start, end },
+            });
+        }
+        Ok(left)
+    }
+
     fn parse_unary(&mut self) -> Result<Expr, String> {
         let op = match self.peek_kind() {
             Some(TokenKind::Not) => UnaryOp::Not,
             Some(TokenKind::Minus) => UnaryOp::Neg,
             Some(TokenKind::Plus) => UnaryOp::Pos,
+            Some(TokenKind::BitNot) => UnaryOp::BitNot,
             Some(TokenKind::TypeOf) => {
                 let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
                 self.advance();
@@ -710,19 +856,8 @@ impl<'a> Parser<'a> {
                     }
                 }
                 TokenKind::Question => {
-                    self.advance(); // ?
-                    self.expect(TokenKind::Colon)?;
-                    let then_branch = self.parse_expr()?;
-                    self.expect(TokenKind::Colon)?;
-                    let else_branch = self.parse_expr()?;
-                    let start = expr.span().start;
-                    let end = else_branch.span().end;
-                    expr = Expr::Conditional {
-                        cond: Box::new(expr),
-                        then_branch: Box::new(then_branch),
-                        else_branch: Box::new(else_branch),
-                        span: Span { start, end },
-                    };
+                    // Ternary is parsed in parse_conditional for correct precedence
+                    break;
                 }
                 _ => break,
             }

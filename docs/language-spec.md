@@ -10,7 +10,7 @@ Tish is a minimal, TS/JS-compatible language designed for both interpretation an
 
 - `fun` — function declaration (replaces `function`)
 - `any` — variable declaration (replaces `let`; block-scoped)
-- `if`, `else`, `while`, `for`, `return`, `break`, `continue`
+- `if`, `else`, `while`, `for`, `return`, `break`, `continue`, `switch`, `case`, `default`, `do`, `throw`, `try`, `catch`, `typeof`
 - `true`, `false`, `null`
 
 ### Literals
@@ -27,7 +27,7 @@ Tish is a minimal, TS/JS-compatible language designed for both interpretation an
 | Op  | Meaning                 |
 |-----|-------------------------|
 | `+` | Add (numbers) / concat (strings) |
-| `-` `*` `/` `%` | Arithmetic |
+| `-` `*` `/` `%` `**` | Arithmetic (`**` = exponentiation) |
 | `===` `!==` | Strict equality (no coercion) |
 | `<` `<=` `>` `>=` | Comparison |
 | `&&` `\|\|` `!` | Logical |
@@ -37,9 +37,13 @@ Tish is a minimal, TS/JS-compatible language designed for both interpretation an
 ### Control Flow
 
 - `if (cond) stmt` / `if (cond) stmt else stmt`
-- `while (cond) stmt`
+- `while (cond) stmt` / `do stmt while (cond)`
 - `for (init; cond; update) stmt` — C-style
+- `switch (expr) { case val: stmt... default: stmt }`
 - `break`, `continue`, `return expr`
+- `throw expr` / `try stmt catch (e) stmt`
+- `typeof expr` — returns `"number"`, `"string"`, `"boolean"`, `"object"`, `"function"`
+- Postfix `++` / `--` on identifiers
 
 Blocks: `{ stmt; stmt }` or indentation (Indent/Dedent tokens).
 
@@ -49,6 +53,13 @@ Blocks: `{ stmt; stmt }` or indentation (Indent/Dedent tokens).
 fun name(a, b) { return a + b }
 fun double(x) = x * 2   // single-expression, implicit return
 ```
+
+### Builtins
+
+- `print(...)` — print args space-separated
+- `parseInt(s, radix?)`, `parseFloat(s)`
+- `isFinite(v)`, `isNaN(v)`
+- `Infinity`, `NaN` — globals
 
 ### Assignment
 

@@ -84,6 +84,9 @@ fn test_mvp_programs_interpreter_vs_native() {
         "inc_dec.tish",
         "try_catch.tish",
         "builtins.tish",
+        "exponentiation.tish",
+        "for_of.tish",
+        "bitwise.tish",
     ];
     for name in test_files {
         let path = mvp_dir.join(name);

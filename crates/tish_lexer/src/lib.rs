@@ -305,6 +305,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('=') {
                     self.advance();
                     TokenKind::Le
+                } else if self.peek() == Some('<') {
+                    self.advance();
+                    TokenKind::Shl
                 } else {
                     TokenKind::Lt
                 }
@@ -313,10 +316,15 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('=') {
                     self.advance();
                     TokenKind::Ge
+                } else if self.peek() == Some('>') {
+                    self.advance();
+                    TokenKind::Shr
                 } else {
                     TokenKind::Gt
                 }
             }
+            '^' => TokenKind::BitXor,
+            '~' => TokenKind::BitNot,
             '+' => {
                 if self.peek() == Some('+') {
                     self.advance();
@@ -333,7 +341,14 @@ impl<'a> Lexer<'a> {
                     TokenKind::Minus
                 }
             }
-            '*' => TokenKind::Star,
+            '*' => {
+                if self.peek() == Some('*') {
+                    self.advance();
+                    TokenKind::StarStar
+                } else {
+                    TokenKind::Star
+                }
+            }
             '/' => {
                 if self.peek() == Some('/') {
                     self.advance();

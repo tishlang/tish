@@ -5,8 +5,14 @@ Minimal, TS/JS-compatible language. Runs via interpreter or compiles to native. 
 ## Build & Run
 
 ```bash
-cargo build
+cargo build -p tish
 cargo run -p tish -- run <file.tish>
+```
+
+The binary is `target/debug/tish` (or `target/release/tish` with `--release`). Run it directly to skip cargo overhead:
+
+```bash
+./target/release/tish run <file.tish>
 ```
 
 ## Test

@@ -47,6 +47,7 @@ pub enum TokenKind {
     Default,
     Do,
     TypeOf,
+    Of,
 
     // Punctuation
     LParen,
@@ -75,6 +76,7 @@ pub enum TokenKind {
     PlusPlus,
     MinusMinus,
     Star,
+    StarStar,
     Slash,
     Percent,
     And,
@@ -82,6 +84,10 @@ pub enum TokenKind {
     Not,
     BitAnd,
     BitOr,
+    BitXor,
+    BitNot,
+    Shl,
+    Shr,
     OptionalChain,
     NullishCoalesce,
     Question,
@@ -112,6 +118,7 @@ impl TokenKind {
             "default" => TokenKind::Default,
             "do" => TokenKind::Do,
             "typeof" => TokenKind::TypeOf,
+            "of" => TokenKind::Of,
             _ => TokenKind::Ident,
         }
     }

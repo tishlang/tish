@@ -57,7 +57,7 @@ impl Codegen {
         self.write("use std::collections::HashMap;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tish_runtime::{print as tish_print, is_finite as tish_is_finite, is_nan as tish_is_nan, parse_float as tish_parse_float, parse_int as tish_parse_int, TishError, Value};\n\n");
+        self.write("use tish_runtime::{print as tish_print, is_finite as tish_is_finite, is_nan as tish_is_nan, math_abs as tish_math_abs, math_max as tish_math_max, math_min as tish_math_min, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, TishError, Value};\n\n");
 
         // First pass: emit function declarations
         for stmt in &program.statements {
@@ -101,6 +101,14 @@ impl Codegen {
         self.writeln("let isNaN = Value::Function(Rc::new(|args: &[Value]| tish_is_nan(args)));");
         self.writeln("let Infinity = Value::Number(f64::INFINITY);");
         self.writeln("let NaN = Value::Number(f64::NAN);");
+        self.writeln("let Math = Value::Object(Rc::new(HashMap::from([");
+        self.indent += 1;
+        self.writeln("(Arc::from(\"abs\"), Value::Function(Rc::new(|args: &[Value]| tish_math_abs(args)))),");
+        self.writeln("(Arc::from(\"sqrt\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sqrt(args)))),");
+        self.writeln("(Arc::from(\"min\"), Value::Function(Rc::new(|args: &[Value]| tish_math_min(args)))),");
+        self.writeln("(Arc::from(\"max\"), Value::Function(Rc::new(|args: &[Value]| tish_math_max(args)))),");
+        self.indent -= 1;
+        self.writeln("])));");
 
         for stmt in &program.statements {
             self.emit_statement(stmt)?;
@@ -189,6 +197,41 @@ impl Codegen {
                 self.write(&format!("while {}.is_truthy() {{\n", c));
                 self.indent += 1;
                 self.emit_statement(body)?;
+                self.indent -= 1;
+                self.writeln("}");
+            }
+            Statement::ForOf { name, iterable, body, .. } => {
+                let iter_expr = self.emit_expr(iterable)?;
+                self.writeln(&format!("{{ let _fof = {};", iter_expr));
+                self.indent += 1;
+                self.writeln("match &_fof {");
+                self.indent += 1;
+                self.writeln("Value::Array(ref _arr) => {");
+                self.indent += 1;
+                self.writeln("for _v in _arr.iter() {");
+                self.indent += 1;
+                self.writeln(&format!("let {} = _v.clone();", name.as_ref()));
+                self.emit_statement(body)?;
+                self.indent -= 1;
+                self.writeln("}");
+                self.indent -= 1;
+                self.writeln("}");
+                self.writeln("Value::String(ref _s) => {");
+                self.indent += 1;
+                self.writeln("for _ch in _s.chars() {");
+                self.indent += 1;
+                self.writeln(&format!(
+                    "let {} = Value::String(std::sync::Arc::from(_ch.to_string()));",
+                    name.as_ref()
+                ));
+                self.emit_statement(body)?;
+                self.indent -= 1;
+                self.writeln("}");
+                self.indent -= 1;
+                self.writeln("}");
+                self.writeln("_ => panic!(\"for-of requires array or string\"),");
+                self.indent -= 1;
+                self.writeln("}");
                 self.indent -= 1;
                 self.writeln("}");
             }
@@ -352,6 +395,10 @@ impl Codegen {
                     ),
                     UnaryOp::Pos => format!(
                         "Value::Number({{ let Value::Number(n) = &{} else {{ panic!(\"Expected number\") }}; *n }})",
+                        o
+                    ),
+                    UnaryOp::BitNot => format!(
+                        "Value::Number({{ let Value::Number(n) = &{} else {{ panic!(\"Expected number\") }}; (!(*n as i32)) as f64 }})",
                         o
                     ),
                 }
@@ -518,6 +565,10 @@ impl Codegen {
                 "Value::Number({{ let Value::Number(a) = &{} else {{ panic!() }}; let Value::Number(b) = &{} else {{ panic!() }}; a / b }})",
                 l, r
             ),
+            BinOp::Pow => format!(
+                "Value::Number({{ let Value::Number(a) = &{} else {{ panic!() }}; let Value::Number(b) = &{} else {{ panic!() }}; a.powf(*b) }})",
+                l, r
+            ),
             BinOp::Mod => format!(
                 "Value::Number({{ let Value::Number(a) = &{} else {{ panic!() }}; let Value::Number(b) = &{} else {{ panic!() }}; a % b }})",
                 l, r
@@ -542,6 +593,26 @@ impl Codegen {
             ),
             BinOp::And => format!("Value::Bool({}.is_truthy() && {}.is_truthy())", l, r),
             BinOp::Or => format!("Value::Bool({}.is_truthy() || {}.is_truthy())", l, r),
+            BinOp::BitAnd => format!(
+                "Value::Number({{ let Value::Number(a) = &{} else {{ panic!() }}; let Value::Number(b) = &{} else {{ panic!() }}; ((*a as i32) & (*b as i32)) as f64 }})",
+                l, r
+            ),
+            BinOp::BitOr => format!(
+                "Value::Number({{ let Value::Number(a) = &{} else {{ panic!() }}; let Value::Number(b) = &{} else {{ panic!() }}; ((*a as i32) | (*b as i32)) as f64 }})",
+                l, r
+            ),
+            BinOp::BitXor => format!(
+                "Value::Number({{ let Value::Number(a) = &{} else {{ panic!() }}; let Value::Number(b) = &{} else {{ panic!() }}; ((*a as i32) ^ (*b as i32)) as f64 }})",
+                l, r
+            ),
+            BinOp::Shl => format!(
+                "Value::Number({{ let Value::Number(a) = &{} else {{ panic!() }}; let Value::Number(b) = &{} else {{ panic!() }}; ((*a as i32) << (*b as i32)) as f64 }})",
+                l, r
+            ),
+            BinOp::Shr => format!(
+                "Value::Number({{ let Value::Number(a) = &{} else {{ panic!() }}; let Value::Number(b) = &{} else {{ panic!() }}; ((*a as i32) >> (*b as i32)) as f64 }})",
+                l, r
+            ),
             BinOp::Eq | BinOp::Ne => {
                 return Err(CompileError {
                     message: "Loose equality not supported".to_string(),

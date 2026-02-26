@@ -23,6 +23,10 @@ pub enum Value {
     NativeParseFloat,
     NativeIsFinite,
     NativeIsNaN,
+    NativeMathAbs,
+    NativeMathSqrt,
+    NativeMathMin,
+    NativeMathMax,
 }
 
 impl Value {
@@ -49,6 +53,10 @@ impl Value {
             Value::NativeParseFloat => "[NativeFunction: parseFloat]".to_string(),
             Value::NativeIsFinite => "[NativeFunction: isFinite]".to_string(),
             Value::NativeIsNaN => "[NativeFunction: isNaN]".to_string(),
+            Value::NativeMathAbs => "[NativeFunction: Math.abs]".to_string(),
+            Value::NativeMathSqrt => "[NativeFunction: Math.sqrt]".to_string(),
+            Value::NativeMathMin => "[NativeFunction: Math.min]".to_string(),
+            Value::NativeMathMax => "[NativeFunction: Math.max]".to_string(),
         }
     }
 

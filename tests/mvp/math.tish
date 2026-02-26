@@ -1,0 +1,9 @@
+// MVP test: Math builtins
+print(Math.abs(-5))
+print(Math.abs(5))
+print(Math.sqrt(4))
+print(Math.sqrt(2))
+print(Math.min(1, 2, 3))
+print(Math.max(1, 2, 3))
+print(Math.min(5))
+print(Math.max(5))

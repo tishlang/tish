@@ -158,6 +158,50 @@ pub fn is_nan(args: &[Value]) -> Value {
     Value::Bool(b)
 }
 
+/// Math.abs
+pub fn math_abs(args: &[Value]) -> Value {
+    let n = args.get(0).and_then(|v| match v {
+        Value::Number(n) => Some(*n),
+        _ => None,
+    }).unwrap_or(f64::NAN);
+    Value::Number(n.abs())
+}
+
+/// Math.sqrt
+pub fn math_sqrt(args: &[Value]) -> Value {
+    let n = args.get(0).and_then(|v| match v {
+        Value::Number(n) => Some(*n),
+        _ => None,
+    }).unwrap_or(f64::NAN);
+    Value::Number(n.sqrt())
+}
+
+/// Math.min
+pub fn math_min(args: &[Value]) -> Value {
+    let nums: Vec<f64> = args
+        .iter()
+        .filter_map(|v| match v {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    let n = nums.into_iter().fold(f64::INFINITY, f64::min);
+    Value::Number(if n == f64::INFINITY { f64::NAN } else { n })
+}
+
+/// Math.max
+pub fn math_max(args: &[Value]) -> Value {
+    let nums: Vec<f64> = args
+        .iter()
+        .filter_map(|v| match v {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    let n = nums.into_iter().fold(f64::NEG_INFINITY, f64::max);
+    Value::Number(if n == f64::NEG_INFINITY { f64::NAN } else { n })
+}
+
 /// Get property from object by string key.
 pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
     let key = key.as_ref();
