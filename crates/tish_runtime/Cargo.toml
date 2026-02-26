@@ -1,0 +1,7 @@
+[package]
+name = "tish_runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal runtime for Tish compiled output"
+
+[dependencies]

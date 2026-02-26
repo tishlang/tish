@@ -1,0 +1,9 @@
+[package]
+name = "tish_eval"
+version = "0.1.0"
+edition = "2021"
+description = "Tish tree-walk interpreter"
+
+[dependencies]
+tish_ast = { path = "../tish_ast" }
+tish_parser = { path = "../tish_parser" }

@@ -1,0 +1,7 @@
+[package]
+name = "tish_lexer"
+version = "0.1.0"
+edition = "2021"
+description = "Tish lexer with indent normalization and tab/space handling"
+
+[dependencies]

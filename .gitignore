@@ -1,0 +1,8 @@
+/target/
+**/*.rs.bk
+tish_hello
+/tish_hello
+*.swp
+*.swo
+.DS_Store
+target/*

@@ -1,0 +1,11 @@
+[package]
+name = "tish_output"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "tish_hello"
+path = "src/main.rs"
+
+[dependencies]
+tish_runtime = { path = "/Users/a_/Projects/tish/tish/crates/tish_runtime" }

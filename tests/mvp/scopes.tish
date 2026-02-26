@@ -1,0 +1,14 @@
+// MVP test: variable scopes - shadowing, block scope
+any x = 1
+print("outer x:", x)
+{
+  any x = 2
+  print("inner x:", x)
+}
+print("outer x after block:", x)
+any y = 10
+{
+  any y = 20
+  print("inner y:", y)
+}
+print("outer y:", y)

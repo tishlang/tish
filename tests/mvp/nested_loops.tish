@@ -1,0 +1,10 @@
+// MVP test: nested loops - multiplication table, verify loop variable scope
+any i = 0
+any j = 0
+for (any row = 1; row <= 3; row = row + 1) {
+  for (any col = 1; col <= 3; col = col + 1) {
+    print(row, "x", col, "=", row * col)
+  }
+}
+print("i after loops:", i)
+print("j after loops:", j)

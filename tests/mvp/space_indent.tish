@@ -1,0 +1,8 @@
+// MVP test: tab vs space - use spaces for indentation (same as tab_indent.tish)
+any x = 1
+if (x === 1)
+  print("space-indented")
+  any y = 2
+  if (y === 2)
+    print("nested with spaces")
+print("done")

@@ -1,0 +1,8 @@
+// MVP test: strict equality - no coercion
+print(1 === 1)
+print(1 === 2)
+print(1 === "1")
+print("1" === "1")
+print(1 + 2)
+print(1 !== "1")
+print(null === null)

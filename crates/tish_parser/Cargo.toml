@@ -1,0 +1,9 @@
+[package]
+name = "tish_parser"
+version = "0.1.0"
+edition = "2021"
+description = "Tish recursive descent parser"
+
+[dependencies]
+tish_lexer = { path = "../tish_lexer" }
+tish_ast = { path = "../tish_ast" }
