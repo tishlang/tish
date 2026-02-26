@@ -27,9 +27,8 @@ impl fmt::Display for TishError {
 
 impl std::error::Error for TishError {}
 
-/// Log level for console output filtering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum LogLevel {
+enum LogLevel {
     Debug = 0,
     Info = 1,
     Log = 2,
@@ -37,8 +36,7 @@ pub enum LogLevel {
     Error = 4,
 }
 
-/// Get the current log level from TISH_LOG_LEVEL environment variable.
-pub fn get_log_level() -> LogLevel {
+fn get_log_level() -> LogLevel {
     match std::env::var("TISH_LOG_LEVEL").as_deref() {
         Ok("debug") => LogLevel::Debug,
         Ok("info") => LogLevel::Info,
@@ -168,14 +166,6 @@ pub fn json_stringify(args: &[Value]) -> Value {
 pub fn json_parse(args: &[Value]) -> Value {
     let s = args.first().map(|v| v.to_display_string()).unwrap_or_default();
     core_json_parse(&s).unwrap_or(Value::Null)
-}
-
-pub fn runtime_in_operator(args: &[Value]) -> Value {
-    let (key, obj) = match (args.first(), args.get(1)) {
-        (Some(k), Some(o)) => (k, o),
-        _ => return Value::Bool(false),
-    };
-    in_operator(key, obj)
 }
 
 fn extract_num(v: Option<&Value>) -> Option<f64> {
