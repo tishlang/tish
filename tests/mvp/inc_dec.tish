@@ -1,13 +1,13 @@
 // MVP test: postfix and prefix ++ and --
 any a = 5
-print(a++)
-print(a)
+console.log(a++)
+console.log(a)
 any b = 10
-print(b--)
-print(b)
+console.log(b--)
+console.log(b)
 any c = 3
-print(++c)
-print(c)
+console.log(++c)
+console.log(c)
 any d = 7
-print(--d)
-print(d)
+console.log(--d)
+console.log(d)

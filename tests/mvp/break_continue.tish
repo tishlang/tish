@@ -9,11 +9,11 @@ for (any i = 0; i < 3; i = i + 1) {
       break
   }
 }
-print("found:", found)
+console.log("found:", found)
 any count = 0
 for (any i = 0; i < 5; i = i + 1) {
   if (i === 3)
     break
   count = count + 1
 }
-print("count:", count)
+console.log("count:", count)

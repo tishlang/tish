@@ -1,10 +1,10 @@
 // MVP test: optional braces - braced version (explicit blocks)
 any n = 3
 if (n > 0) {
-  print("positive")
+  console.log("positive")
   any x = 1
   if (x === 1) {
-    print("nested if, with braces")
+    console.log("nested if, with braces")
   }
 }
-print("done")
+console.log("done")

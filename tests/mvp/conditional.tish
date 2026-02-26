@@ -1,9 +1,9 @@
 // MVP test: conditional (ternary) operator
 any a = 1
 any b = 2
-print(a > b ? "bigger" : "smaller")
-print(a < b ? "smaller" : "bigger")
-print(a === 1 ? 100 : 200)
-print(null ? "yes" : "no")
-print(true ? "t" : "f")
-print(false ? "t" : "f")
+console.log(a > b ? "bigger" : "smaller")
+console.log(a < b ? "smaller" : "bigger")
+console.log(a === 1 ? 100 : 200)
+console.log(null ? "yes" : "no")
+console.log(true ? "t" : "f")
+console.log(false ? "t" : "f")

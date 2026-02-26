@@ -98,10 +98,63 @@ impl Value {
     }
 }
 
-/// Builtin print: prints all arguments space-separated, then newline.
-pub fn print(args: &[Value]) {
-    let parts: Vec<String> = args.iter().map(Value::to_display_string).collect();
-    println!("{}", parts.join(" "));
+/// Log level for console output filtering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LogLevel {
+    Debug = 0,
+    Info = 1,
+    Log = 2,
+    Warn = 3,
+    Error = 4,
+}
+
+/// Get the current log level from TISH_LOG_LEVEL environment variable.
+/// Default is Log (shows log, warn, error).
+pub fn get_log_level() -> LogLevel {
+    match std::env::var("TISH_LOG_LEVEL").as_deref() {
+        Ok("debug") => LogLevel::Debug,
+        Ok("info") => LogLevel::Info,
+        Ok("warn") => LogLevel::Warn,
+        Ok("error") => LogLevel::Error,
+        _ => LogLevel::Log,
+    }
+}
+
+fn format_args(args: &[Value]) -> String {
+    args.iter().map(Value::to_display_string).collect::<Vec<_>>().join(" ")
+}
+
+/// console.debug: prints to stdout if log level is debug.
+pub fn console_debug(args: &[Value]) {
+    if get_log_level() <= LogLevel::Debug {
+        println!("{}", format_args(args));
+    }
+}
+
+/// console.info: prints to stdout if log level is info or lower.
+pub fn console_info(args: &[Value]) {
+    if get_log_level() <= LogLevel::Info {
+        println!("{}", format_args(args));
+    }
+}
+
+/// console.log: prints to stdout if log level is log or lower.
+pub fn console_log(args: &[Value]) {
+    if get_log_level() <= LogLevel::Log {
+        println!("{}", format_args(args));
+    }
+}
+
+/// console.warn: prints to stderr if log level is warn or lower.
+pub fn console_warn(args: &[Value]) {
+    if get_log_level() <= LogLevel::Warn {
+        eprintln!("{}", format_args(args));
+    }
+}
+
+/// console.error: always prints to stderr (never filtered).
+pub fn console_error(args: &[Value]) {
+    eprintln!("{}", format_args(args));
 }
 
 /// Builtin parseInt: parse string to integer. Optional radix 2-36.

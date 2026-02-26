@@ -3,10 +3,10 @@ fun double(x) = x * 2
 fun add(a, b) = a + b
 any a = 10
 any b = 20
-print("double", a, "=", double(a))
-print("add", a, b, "=", add(a, b))
+console.log("double", a, "=", double(a))
+console.log("add", a, b, "=", add(a, b))
 fun greet(name) {
-  print("Hello,", name)
+  console.log("Hello,", name)
   return null
 }
 greet("Tish")

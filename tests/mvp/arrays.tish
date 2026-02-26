@@ -1,12 +1,12 @@
 // MVP test: arrays and indexing
 any arr = [1, 2, 3]
-print(arr[0])
-print(arr[1])
-print(arr[2])
+console.log(arr[0])
+console.log(arr[1])
+console.log(arr[2])
 any sum = 0
 for (any i = 0; i < 3; i = i + 1)
   sum = sum + arr[i]
-print("sum:", sum)
+console.log("sum:", sum)
 any nested = [[1, 2], [3, 4]]
-print(nested[0][1])
-print(nested[1][0])
+console.log(nested[0][1])
+console.log(nested[1][0])

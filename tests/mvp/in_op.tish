@@ -1,11 +1,11 @@
 // MVP test: in operator
 any o = { a: 1, b: 2 }
-print("a" in o)
-print("b" in o)
-print("c" in o)
+console.log("a" in o)
+console.log("b" in o)
+console.log("c" in o)
 
 any arr = [10, 20, 30]
-print(0 in arr)
-print(2 in arr)
-print(3 in arr)
-print("length" in arr)
+console.log(0 in arr)
+console.log(2 in arr)
+console.log(3 in arr)
+console.log("length" in arr)

@@ -1,14 +1,14 @@
 // MVP test: try/catch and throw
 try {
-  print("in try")
+  console.log("in try")
   throw "oops"
-  print("never")
+  console.log("never")
 } catch (e) {
-  print("caught:", e)
+  console.log("caught:", e)
 }
-print("done")
+console.log("done")
 try {
   throw 42
 } catch (x) {
-  print("got", x)
+  console.log("got", x)
 }

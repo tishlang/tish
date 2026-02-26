@@ -61,7 +61,13 @@ impl Evaluator {
         let scope = Scope::new();
         {
             let mut s = scope.borrow_mut();
-            s.set("print".into(), Value::NativePrint);
+            let mut console = HashMap::new();
+            console.insert("debug".into(), Value::NativeConsoleDebug);
+            console.insert("info".into(), Value::NativeConsoleInfo);
+            console.insert("log".into(), Value::NativeConsoleLog);
+            console.insert("warn".into(), Value::NativeConsoleWarn);
+            console.insert("error".into(), Value::NativeConsoleError);
+            s.set("console".into(), Value::Object(Rc::new(console)));
             s.set("parseInt".into(), Value::NativeParseInt);
             s.set("parseFloat".into(), Value::NativeParseFloat);
             s.set("decodeURI".into(), Value::NativeDecodeURI);
@@ -455,10 +461,14 @@ impl Evaluator {
                     Value::Array(_) => "object".into(),
                     Value::Object(_) => "object".into(),
                     Value::Function { .. } => "function".into(),
-                    Value::NativePrint
+                    Value::NativeConsoleDebug
+                    | Value::NativeConsoleInfo
+                    | Value::NativeConsoleLog
+                    | Value::NativeConsoleWarn
+                    | Value::NativeConsoleError
                     | Value::NativeParseInt
                     | Value::NativeParseFloat
-                    |                     Value::NativeIsFinite
+                    | Value::NativeIsFinite
                     | Value::NativeIsNaN
                     | Value::NativeMathAbs
                     | Value::NativeMathSqrt
@@ -624,10 +634,48 @@ impl Evaluator {
         }
     }
 
+    fn get_log_level() -> u8 {
+        match std::env::var("TISH_LOG_LEVEL").as_deref() {
+            Ok("debug") => 0,
+            Ok("info") => 1,
+            Ok("warn") => 3,
+            Ok("error") => 4,
+            _ => 2, // default: log
+        }
+    }
+
     fn call_func(&self, f: &Value, args: &[Value]) -> Result<Value, EvalError> {
-        if matches!(f, Value::NativePrint) {
+        if matches!(f, Value::NativeConsoleDebug) {
+            if Self::get_log_level() <= 0 {
+                let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+                println!("{}", parts.join(" "));
+            }
+            return Ok(Value::Null);
+        }
+        if matches!(f, Value::NativeConsoleInfo) {
+            if Self::get_log_level() <= 1 {
+                let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+                println!("{}", parts.join(" "));
+            }
+            return Ok(Value::Null);
+        }
+        if matches!(f, Value::NativeConsoleLog) {
+            if Self::get_log_level() <= 2 {
+                let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+                println!("{}", parts.join(" "));
+            }
+            return Ok(Value::Null);
+        }
+        if matches!(f, Value::NativeConsoleWarn) {
+            if Self::get_log_level() <= 3 {
+                let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+                eprintln!("{}", parts.join(" "));
+            }
+            return Ok(Value::Null);
+        }
+        if matches!(f, Value::NativeConsoleError) {
             let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
-            println!("{}", parts.join(" "));
+            eprintln!("{}", parts.join(" "));
             return Ok(Value::Null);
         }
         if matches!(f, Value::NativeParseInt) {
@@ -1060,7 +1108,11 @@ impl Evaluator {
                 format!("{{{}}}", entries.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(","))
             }
             Value::Function { .. }
-            | Value::NativePrint
+            | Value::NativeConsoleDebug
+            | Value::NativeConsoleInfo
+            | Value::NativeConsoleLog
+            | Value::NativeConsoleWarn
+            | Value::NativeConsoleError
             | Value::NativeParseInt
             | Value::NativeParseFloat
             | Value::NativeIsFinite
@@ -1072,7 +1124,7 @@ impl Evaluator {
             | Value::NativeMathFloor
             | Value::NativeMathCeil
             | Value::NativeMathRound
-                    | Value::NativeJsonParse
+            | Value::NativeJsonParse
             | Value::NativeJsonStringify
             | Value::NativeDecodeURI
             | Value::NativeEncodeURI => "null".to_string(),

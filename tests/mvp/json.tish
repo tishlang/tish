@@ -1,17 +1,17 @@
 // MVP test: JSON.parse and JSON.stringify
 any obj = { x: 1, y: "hi", z: true }
 any s = JSON.stringify(obj)
-print(s)
+console.log(s)
 
 any parsed = JSON.parse(s)
-print(parsed.x)
-print(parsed.y)
-print(parsed.z)
+console.log(parsed.x)
+console.log(parsed.y)
+console.log(parsed.z)
 
 any arr = [1, 2, "a"]
-print(JSON.stringify(arr))
+console.log(JSON.stringify(arr))
 
 any arr2 = JSON.parse("[1,2,\"a\"]")
-print(arr2[0])
-print(arr2[1])
-print(arr2[2])
+console.log(arr2[0])
+console.log(arr2[1])
+console.log(arr2[2])

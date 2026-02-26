@@ -5,10 +5,10 @@ fun sum(...args) {
     total = total + x
   return total
 }
-print(sum(1, 2, 3))
-print(sum(10, 20))
+console.log(sum(1, 2, 3))
+console.log(sum(10, 20))
 
 fun greet(first, ...rest) {
   return first + ":" + rest.length
 }
-print(greet("a", "b", "c"))
+console.log(greet("a", "b", "c"))

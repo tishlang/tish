@@ -2,18 +2,18 @@
 any x = 2
 switch (x) {
   case 1:
-    print("one")
+    console.log("one")
   case 2:
-    print("two")
+    console.log("two")
   case 3:
-    print("three")
+    console.log("three")
 }
-print("done")
+console.log("done")
 any y = 99
 switch (y) {
   case 1:
-    print("one")
+    console.log("one")
   default:
-    print("default")
+    console.log("default")
 }
-print("end")
+console.log("end")

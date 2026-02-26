@@ -1,7 +1,7 @@
 // MVP test: do-while loop
 any i = 0
 do {
-  print(i)
+  console.log(i)
   i = i + 1
 } while (i < 3)
-print("done")
+console.log("done")

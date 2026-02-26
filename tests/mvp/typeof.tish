@@ -1,9 +1,9 @@
 // MVP test: typeof operator
-print(typeof 1)
-print(typeof "hi")
-print(typeof true)
-print(typeof null)
-print(typeof [1, 2])
-print(typeof { a: 1 })
+console.log(typeof 1)
+console.log(typeof "hi")
+console.log(typeof true)
+console.log(typeof null)
+console.log(typeof [1, 2])
+console.log(typeof { a: 1 })
 fun f() { return 1 }
-print(typeof f)
+console.log(typeof f)
