@@ -48,6 +48,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **coalesce** — Follow (`??`)
 - **conditional** — Follow (`a ? b : c`)
 - **division, multiplication, modulus, exponentiation** — Follow (`**` right-associative)
+- **bitwise** — Follow (`&` `|` `^` `~` `<<` `>>`, 32-bit integer semantics)
 - **logical-and, logical-or, logical-not** — Follow
 - **member, optional-chaining** — Follow (`?.`)
 - **object** — Follow (plain `{}`)
@@ -72,7 +73,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **class, debugger, with** — Omit
 - **throw, try** — Follow
 - **switch, do-while** — Follow
-- **for-in, for-of** — Omit or Simplify
+- **for-in, for-of** — for-of Follow (arrays and strings); for-in Omit
 
 ## test262/built-ins
 

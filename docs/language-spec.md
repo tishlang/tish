@@ -28,9 +28,11 @@ Tish is a minimal, TS/JS-compatible language designed for both interpretation an
 |-----|-------------------------|
 | `+` | Add (numbers) / concat (strings) |
 | `-` `*` `/` `%` `**` | Arithmetic (`**` = exponentiation) |
+| `&` `|` `^` `~` `<<` `>>` | Bitwise (32-bit integer semantics) |
 | `===` `!==` | Strict equality (no coercion) |
 | `<` `<=` `>` `>=` | Comparison |
 | `&&` `\|\|` `!` | Logical |
+| `? :` | Conditional (ternary) |
 | `??` | Nullish coalescing |
 | `?.` | Optional chaining |
 
@@ -39,6 +41,7 @@ Tish is a minimal, TS/JS-compatible language designed for both interpretation an
 - `if (cond) stmt` / `if (cond) stmt else stmt`
 - `while (cond) stmt` / `do stmt while (cond)`
 - `for (init; cond; update) stmt` — C-style
+- `for (any x of arr)` — iterate arrays and strings
 - `switch (expr) { case val: stmt... default: stmt }`
 - `break`, `continue`, `return expr`
 - `throw expr` / `try stmt catch (e) stmt`
@@ -60,6 +63,7 @@ fun double(x) = x * 2   // single-expression, implicit return
 - `parseInt(s, radix?)`, `parseFloat(s)`
 - `isFinite(v)`, `isNaN(v)`
 - `Infinity`, `NaN` — globals
+- `Math.abs(x)`, `Math.sqrt(x)`, `Math.min(a, b, ...)`, `Math.max(a, b, ...)`
 
 ### Assignment
 
@@ -89,7 +93,7 @@ VarDecl     := 'any' Ident ('=' Expr)? ';'?
 ExprStmt    := Expr ';'?
 If          := 'if' '(' Expr ')' Statement ('else' Statement)?
 While       := 'while' '(' Expr ')' Statement
-For         := 'for' '(' Init? ';' Cond? ';' Update? ')' Statement
+For         := 'for' '(' Init? ';' Cond? ';' Update? ')' Statement  |  'for' '(' 'any' Ident 'of' Expr ')' Statement
 Return      := 'return' Expr? ';'?
 FunDecl     := 'fun' Ident '(' Params? ')' '=' Expr  |  'fun' Ident '(' Params? ')' Block
 Expr        := Assign | NullishCoalesce | Or | ...

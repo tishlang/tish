@@ -73,11 +73,20 @@ fn test_mvp_programs_interpreter_vs_native() {
         bin.display()
     );
 
-    // Test a representative subset (full set is slow - each compile takes ~1-2s)
+    // Plan Section 7 MVP programs + extended feature set (each compile ~1-2s)
     let test_files = [
-        "strict_equality.tish",
-        "arrays.tish",
+        // Plan-mandated concrete MVP programs
+        "nested_loops.tish",
+        "scopes.tish",
+        "optional_braces.tish",
+        "tab_indent.tish",
+        "space_indent.tish",
         "fun_any.tish",
+        "strict_equality.tish",
+        // Extended features
+        "arrays.tish",
+        "objects.tish",
+        "conditional.tish",
         "switch.tish",
         "do_while.tish",
         "typeof.tish",
@@ -87,6 +96,8 @@ fn test_mvp_programs_interpreter_vs_native() {
         "exponentiation.tish",
         "for_of.tish",
         "bitwise.tish",
+        "math.tish",
+        "optional_chaining.tish",
     ];
     for name in test_files {
         let path = mvp_dir.join(name);

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run Tish and JS equivalents, show output and compare execution time.
-# Usage: ./scripts/run_performance_manual.sh
+# Usage: ./scripts/run_performance_manual.sh [--release]
+#   --release   use release build (recommended for fair Tish vs JS timing)
 
 set -e
 cd "$(dirname "$0")/.."
@@ -8,13 +9,17 @@ node_cmd="${NODE:-node}"
 tish_dir="tests/mvp"
 perf_dir="performance/mvp"
 target_dir="${CARGO_TARGET_DIR:-$(pwd)/target}"
-tish_bin="$target_dir/debug/tish"
+profile="debug"
+[[ "${1:-}" == "--release" ]] && { profile="release"; shift; }
+tish_bin="$target_dir/$profile/tish"
+rel_flag=""
+[[ "$profile" == "release" ]] && rel_flag="--release"
 if [[ ! -x "$tish_bin" ]]; then
-  echo "Building tish..."
-  cargo build -p tish -q 2>/dev/null || true
+  echo "Building tish ($profile)..."
+  cargo build -p tish $rel_flag -q 2>/dev/null || true
 fi
 if [[ ! -x "$tish_bin" ]]; then
-  tish_bin="cargo run -p tish -q --"
+  tish_bin="cargo run -p tish $rel_flag -q --"
 fi
 
 # Millisecond timer (using node, always available for this script)
