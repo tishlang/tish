@@ -36,11 +36,12 @@ pub fn json_stringify(value: &Value) -> String {
             format!("[{}]", items.join(","))
         }
         Value::Object(obj) => {
-            let pairs: Vec<String> = obj
+            let mut pairs: Vec<_> = obj
                 .iter()
-                .map(|(k, v)| format!("\"{}\":{}", escape_json_string(k), json_stringify(v)))
+                .map(|(k, v)| (k.as_ref(), format!("\"{}\":{}", escape_json_string(k), json_stringify(v))))
                 .collect();
-            format!("{{{}}}", pairs.join(","))
+            pairs.sort_by(|a, b| a.0.cmp(b.0));
+            format!("{{{}}}", pairs.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(","))
         }
         Value::Function(_) => "null".to_string(),
     }

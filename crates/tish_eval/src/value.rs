@@ -44,7 +44,17 @@ pub enum Value {
 impl Value {
     pub fn to_string(&self) -> String {
         match self {
-            Value::Number(n) => n.to_string(),
+            Value::Number(n) => {
+                if n.is_nan() {
+                    "NaN".to_string()
+                } else if *n == f64::INFINITY {
+                    "Infinity".to_string()
+                } else if *n == f64::NEG_INFINITY {
+                    "-Infinity".to_string()
+                } else {
+                    n.to_string()
+                }
+            }
             Value::String(s) => s.to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),

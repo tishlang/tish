@@ -5,7 +5,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 /// Native function signature.
-pub type NativeFn = Rc<dyn Fn(&[Value]) -> Result<Value, String>>;
+/// Returns Value directly (not Result) for simplicity and backward compatibility.
+pub type NativeFn = Rc<dyn Fn(&[Value]) -> Value>;
 
 /// Runtime value for Tish programs.
 /// Used by both interpreter and compiled code.

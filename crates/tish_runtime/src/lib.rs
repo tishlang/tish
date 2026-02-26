@@ -7,11 +7,6 @@ use std::fmt;
 
 pub use tish_core::{
     Value, NativeFn,
-    add, sub, mul, div, modulo, pow,
-    lt, le, gt, ge,
-    bit_and, bit_or, bit_xor, shl, shr, bit_not,
-    logical_not, neg, pos,
-    get_prop, get_index, in_operator,
     json_parse as core_json_parse, json_stringify as core_json_stringify,
     percent_decode, percent_encode,
 };
@@ -180,9 +175,85 @@ pub fn runtime_in_operator(args: &[Value]) -> Value {
         (Some(k), Some(o)) => (k, o),
         _ => return Value::Bool(false),
     };
-    in_operator(key, obj).unwrap_or(Value::Bool(false))
+    in_operator(key, obj)
 }
 
 fn extract_num(v: Option<&Value>) -> Option<f64> {
     v.and_then(|v| match v { Value::Number(n) => Some(*n), _ => None })
+}
+
+use std::sync::Arc;
+
+/// Get property from object/array by string key.
+pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
+    let key = key.as_ref();
+    match obj {
+        Value::Object(map) => {
+            let k: Arc<str> = key.into();
+            map.get(&k).cloned().unwrap_or(Value::Null)
+        }
+        Value::Array(arr) => {
+            if key == "length" {
+                Value::Number(arr.len() as f64)
+            } else if let Ok(idx) = key.parse::<usize>() {
+                arr.get(idx).cloned().unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            }
+        }
+        Value::String(s) => {
+            if key == "length" {
+                Value::Number(s.chars().count() as f64)
+            } else {
+                Value::Null
+            }
+        }
+        _ => Value::Null,
+    }
+}
+
+/// Get index from array or object.
+pub fn get_index(obj: &Value, index: &Value) -> Value {
+    match obj {
+        Value::Array(arr) => {
+            let idx = match index {
+                Value::Number(n) => *n as usize,
+                _ => return Value::Null,
+            };
+            arr.get(idx).cloned().unwrap_or(Value::Null)
+        }
+        Value::Object(map) => {
+            let key: Arc<str> = match index {
+                Value::Number(n) => n.to_string().into(),
+                Value::String(s) => Arc::clone(s),
+                _ => return Value::Null,
+            };
+            map.get(&key).cloned().unwrap_or(Value::Null)
+        }
+        _ => Value::Null,
+    }
+}
+
+/// 'in' operator: check if key exists in object/array.
+pub fn in_operator(key: &Value, obj: &Value) -> Value {
+    let key_str: Arc<str> = match key {
+        Value::String(s) => Arc::clone(s),
+        Value::Number(n) => n.to_string().into(),
+        _ => return Value::Bool(false),
+    };
+    
+    let result = match obj {
+        Value::Object(map) => map.contains_key(&key_str),
+        Value::Array(arr) => {
+            key_str.as_ref() == "length"
+                || key_str
+                    .parse::<usize>()
+                    .ok()
+                    .map(|i| i < arr.len())
+                    .unwrap_or(false)
+        }
+        _ => false,
+    };
+    
+    Value::Bool(result)
 }
