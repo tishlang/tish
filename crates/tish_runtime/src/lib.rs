@@ -240,8 +240,17 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
                 .unwrap_or(Value::Null)
         }
         Value::Array(arr) => {
-            if let Ok(idx) = key.parse::<usize>() {
+            if key == "length" {
+                Value::Number(arr.len() as f64)
+            } else if let Ok(idx) = key.parse::<usize>() {
                 arr.get(idx).cloned().unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            }
+        }
+        Value::String(s) => {
+            if key == "length" {
+                Value::Number(s.chars().count() as f64)
             } else {
                 Value::Null
             }

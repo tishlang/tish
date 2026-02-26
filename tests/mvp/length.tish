@@ -1,0 +1,7 @@
+// MVP test: .length property on arrays and strings
+any arr = [10, 20, 30, 40]
+print("array length:", arr.length)
+any s = "hello"
+print("string length:", s.length)
+print("empty array:", [].length)
+print("empty string:", "".length)

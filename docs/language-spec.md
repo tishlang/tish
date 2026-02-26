@@ -16,10 +16,10 @@ Tish is a minimal, TS/JS-compatible language designed for both interpretation an
 ### Literals
 
 - Numbers: `1`, `1.5`, `0.5`
-- Strings: `"hello"`, `'world'` (escapes: `\n`, `\r`, `\t`, `\\`, `\"`, `\'`)
+- Strings: `"hello"`, `'world'` (escapes: `\n`, `\r`, `\t`, `\\`, `\"`, `\'`) — `.length` returns character count
 - Booleans: `true`, `false`
 - Null: `null`
-- Arrays: `[1, 2, 3]`
+- Arrays: `[1, 2, 3]` — `.length` returns element count
 - Objects: `{ x: 1, y: 2 }` (fixed keys at parse time)
 
 ### Operators

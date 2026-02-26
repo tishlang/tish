@@ -87,6 +87,7 @@ fn test_mvp_programs_interpreter_vs_native() {
         // Extended features
         "arrays.tish",
         "break_continue.tish",
+        "length.tish",
         "objects.tish",
         "conditional.tish",
         "switch.tish",

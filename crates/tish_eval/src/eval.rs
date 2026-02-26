@@ -707,10 +707,21 @@ impl Evaluator {
                 .cloned()
                 .ok_or_else(|| format!("Property not found: {}", key)),
             Value::Array(arr) => {
-                let idx: usize = key.parse().map_err(|_| "Invalid array index")?;
-                arr.get(idx)
-                    .cloned()
-                    .ok_or_else(|| format!("Index out of bounds: {}", idx))
+                if key == "length" {
+                    Ok(Value::Number(arr.len() as f64))
+                } else {
+                    let idx: usize = key.parse().map_err(|_| "Invalid array index")?;
+                    arr.get(idx)
+                        .cloned()
+                        .ok_or_else(|| format!("Index out of bounds: {}", idx))
+                }
+            }
+            Value::String(s) => {
+                if key == "length" {
+                    Ok(Value::Number(s.chars().count() as f64))
+                } else {
+                    Err(format!("Cannot read property '{}' of string", key))
+                }
             }
             _ => Err(format!("Cannot read property of {:?}", obj)),
         }
