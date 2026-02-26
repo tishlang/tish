@@ -22,3 +22,11 @@ cargo test -p tish
 - `test_mvp_programs_interpreter_vs_native` – compile to native, run, compare output
 
 Run any MVP file: `cargo run -p tish -- run tests/mvp/<name>.tish`.
+
+Manual verification (show output for each .tish file):
+
+```bash
+./scripts/run_tests_manual.sh
+```
+
+Add `--native` to also compile and run each file natively.
