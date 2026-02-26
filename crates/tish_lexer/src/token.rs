@@ -39,6 +39,14 @@ pub enum TokenKind {
     Return,
     Break,
     Continue,
+    Throw,
+    Try,
+    Catch,
+    Switch,
+    Case,
+    Default,
+    Do,
+    TypeOf,
 
     // Punctuation
     LParen,
@@ -64,6 +72,8 @@ pub enum TokenKind {
     Ge,
     Plus,
     Minus,
+    PlusPlus,
+    MinusMinus,
     Star,
     Slash,
     Percent,
@@ -94,6 +104,14 @@ impl TokenKind {
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "null" => TokenKind::Null,
+            "throw" => TokenKind::Throw,
+            "try" => TokenKind::Try,
+            "catch" => TokenKind::Catch,
+            "switch" => TokenKind::Switch,
+            "case" => TokenKind::Case,
+            "default" => TokenKind::Default,
+            "do" => TokenKind::Do,
+            "typeof" => TokenKind::TypeOf,
             _ => TokenKind::Ident,
         }
     }

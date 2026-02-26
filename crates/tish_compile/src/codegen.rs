@@ -57,7 +57,7 @@ impl Codegen {
         self.write("use std::collections::HashMap;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tish_runtime::{print as tish_print, Value};\n\n");
+        self.write("use tish_runtime::{print as tish_print, TishError, Value};\n\n");
 
         // First pass: emit function declarations
         for stmt in &program.statements {
@@ -76,6 +76,17 @@ impl Codegen {
 
         self.writeln("fn main() {");
         self.indent += 1;
+        self.writeln("if let Err(e) = run() {");
+        self.indent += 1;
+        self.writeln("eprintln!(\"Error: {}\", e);");
+        self.writeln("std::process::exit(1);");
+        self.indent -= 1;
+        self.writeln("}");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("fn run() -> Result<(), Box<dyn std::error::Error>> {");
+        self.indent += 1;
 
         // Initialize builtins
         self.writeln("let print = Value::Function(Rc::new(|args: &[Value]| {");
@@ -89,6 +100,7 @@ impl Codegen {
             self.emit_statement(stmt)?;
         }
 
+        self.writeln("Ok(())");
         self.indent -= 1;
         self.writeln("}");
         Ok(())
@@ -212,6 +224,92 @@ impl Codegen {
             }
             Statement::Break { .. } => self.writeln("break;"),
             Statement::Continue { .. } => self.writeln("continue;"),
+            Statement::Switch { expr, cases, default_body, .. } => {
+                let e = self.emit_expr(expr)?;
+                self.writeln(&format!("let _sv = {};", e));
+                self.writeln("match () {");
+                self.indent += 1;
+                for (case_expr, body) in cases {
+                    if let Some(ce) = case_expr {
+                        let c = self.emit_expr(ce)?;
+                        self.write(&format!("_ if _sv.strict_eq(&{}) => {{\n", c));
+                    } else {
+                        self.writeln("_ => {");
+                    }
+                    self.indent += 1;
+                    for s in body {
+                        self.emit_statement(s)?;
+                    }
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
+                if let Some(body) = default_body {
+                    self.writeln("_ => {");
+                    self.indent += 1;
+                    for s in body {
+                        self.emit_statement(s)?;
+                    }
+                    self.indent -= 1;
+                    self.writeln("}");
+                } else if !cases.is_empty() {
+                    self.writeln("_ => {}");
+                }
+                self.indent -= 1;
+                self.writeln("}");
+            }
+            Statement::DoWhile { body, cond, .. } => {
+                let c = self.emit_expr(cond)?;
+                self.write(&format!("loop {{\n"));
+                self.indent += 1;
+                self.emit_statement(body)?;
+                self.write(&format!("if !{}.is_truthy() {{ break; }}\n", c));
+                self.indent -= 1;
+                self.writeln("}");
+            }
+            Statement::Throw { value, .. } => {
+                let v = self.emit_expr(value)?;
+                self.writeln(&format!(
+                    "return Err(Box::new(tish_runtime::TishError::Throw({})) as Box<dyn std::error::Error>);",
+                    v
+                ));
+            }
+            Statement::Try {
+                body,
+                catch_param,
+                catch_body,
+                ..
+            } => {
+                self.writeln("let _try_result: Result<Value, Box<dyn std::error::Error>> = (|| {");
+                self.indent += 1;
+                self.emit_statement(body)?;
+                self.writeln("Ok(Value::Null)");
+                self.indent -= 1;
+                self.writeln("})();");
+                if let Some(param) = catch_param {
+                    self.writeln("if let Err(e) = _try_result {");
+                    self.indent += 1;
+                    self.writeln("match e.downcast::<tish_runtime::TishError>() {");
+                    self.indent += 1;
+                    self.writeln("Ok(tish_err) => {");
+                    self.indent += 1;
+                    self.writeln("if let tish_runtime::TishError::Throw(v) = *tish_err {");
+                    self.writeln(&format!("let {} = v.clone();", param.as_ref()));
+                    self.emit_statement(catch_body)?;
+                    self.writeln("} else { return Err(Box::new(tish_err)); }");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.writeln("Err(orig) => return Err(orig),");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.indent -= 1;
+                } else {
+                    self.writeln("if let Err(_e) = _try_result {");
+                    self.indent += 1;
+                    self.emit_statement(catch_body)?;
+                    self.indent -= 1;
+                }
+                self.writeln("}");
+            }
             Statement::FunDecl { name, .. } => {
                 let rust_name = self.func_names.get(name).unwrap();
                 self.writeln(&format!(
@@ -257,7 +355,11 @@ impl Codegen {
                 let arg_exprs: Result<Vec<_>, _> =
                     args.iter().map(|a| self.emit_expr(a)).collect();
                 let arg_exprs = arg_exprs?;
-                let args_vec = arg_exprs.join(", ");
+                let args_vec = arg_exprs
+                    .iter()
+                    .map(|a| format!("{}.clone()", a))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!(
                     "({{\n\
                      {}    let f = &{};\n\
@@ -354,6 +456,31 @@ impl Codegen {
             Expr::Assign { name, value, .. } => {
                 let val = self.emit_expr(value)?;
                 format!("{{ let _v = {}; {} = _v.clone(); _v }}", val, name.as_ref())
+            }
+            Expr::TypeOf { operand, .. } => {
+                let o = self.emit_expr(operand)?;
+                format!(
+                    "Value::String(match &{} {{ \
+                     Value::Number(_) => \"number\".into(), Value::String(_) => \"string\".into(), \
+                     Value::Bool(_) => \"boolean\".into(), Value::Null => \"object\".into(), \
+                     Value::Array(_) => \"object\".into(), Value::Object(_) => \"object\".into(), \
+                     Value::Function(_) => \"function\".into(), _ => \"object\".into() }})",
+                    o
+                )
+            }
+            Expr::PostfixInc { name, .. } => {
+                format!(
+                    "{{ let _v = {}.clone(); {} = Value::Number(match &_v {{ Value::Number(n) => n + 1.0, _ => panic!(\"++ needs number\") }}); _v }}",
+                    name.as_ref(),
+                    name.as_ref()
+                )
+            }
+            Expr::PostfixDec { name, .. } => {
+                format!(
+                    "{{ let _v = {}.clone(); {} = Value::Number(match &_v {{ Value::Number(n) => n - 1.0, _ => panic!(\"-- needs number\") }}); _v }}",
+                    name.as_ref(),
+                    name.as_ref()
+                )
             }
         })
     }

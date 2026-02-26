@@ -74,6 +74,10 @@ impl<'a> Parser<'a> {
             TokenKind::While => self.parse_while()?,
             TokenKind::For => self.parse_for()?,
             TokenKind::Return => self.parse_return()?,
+            TokenKind::Switch => self.parse_switch()?,
+            TokenKind::Do => self.parse_do_while()?,
+            TokenKind::Throw => self.parse_throw()?,
+            TokenKind::Try => self.parse_try()?,
             TokenKind::Break => {
                 self.advance();
                 let span_end = self.peek().map(|t| t.span.end).unwrap_or(span_start);
@@ -327,6 +331,97 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_switch(&mut self) -> Result<Statement, String> {
+        let span_start = self.expect(TokenKind::Switch)?.span.start;
+        self.expect(TokenKind::LParen)?;
+        let expr = self.parse_expr()?;
+        self.expect(TokenKind::RParen)?;
+        self.expect(TokenKind::LBrace)?;
+        let mut cases = Vec::new();
+        let mut default_body = None;
+        loop {
+            if matches!(self.peek_kind(), Some(TokenKind::Case)) {
+                self.advance();
+                let case_expr = self.parse_expr()?;
+                self.expect(TokenKind::Colon)?;
+                let mut body = Vec::new();
+                while !matches!(self.peek_kind(), Some(TokenKind::Case))
+                    && !matches!(self.peek_kind(), Some(TokenKind::Default))
+                    && !matches!(self.peek_kind(), Some(TokenKind::RBrace))
+                    && self.peek_kind().is_some()
+                {
+                    body.push(self.parse_statement()?);
+                }
+                cases.push((Some(case_expr), body));
+            } else if matches!(self.peek_kind(), Some(TokenKind::Default)) {
+                self.advance();
+                self.expect(TokenKind::Colon)?;
+                let mut body = Vec::new();
+                while !matches!(self.peek_kind(), Some(TokenKind::RBrace))
+                    && self.peek_kind().is_some()
+                {
+                    body.push(self.parse_statement()?);
+                }
+                default_body = Some(body);
+                break;
+            } else if matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
+                break;
+            } else {
+                return Err("Expected case or default in switch".to_string());
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Statement::Switch {
+            expr,
+            cases,
+            default_body,
+            span: self.span_end(span_start),
+        })
+    }
+
+    fn parse_do_while(&mut self) -> Result<Statement, String> {
+        let span_start = self.expect(TokenKind::Do)?.span.start;
+        let body = Box::new(self.parse_block_or_statement()?);
+        self.expect(TokenKind::While)?;
+        self.expect(TokenKind::LParen)?;
+        let cond = self.parse_expr()?;
+        self.expect(TokenKind::RParen)?;
+        Ok(Statement::DoWhile {
+            body,
+            cond,
+            span: self.span_end(span_start),
+        })
+    }
+
+    fn parse_throw(&mut self) -> Result<Statement, String> {
+        let span_start = self.expect(TokenKind::Throw)?.span.start;
+        let value = self.parse_expr()?;
+        Ok(Statement::Throw {
+            value,
+            span: self.span_end(span_start),
+        })
+    }
+
+    fn parse_try(&mut self) -> Result<Statement, String> {
+        let span_start = self.expect(TokenKind::Try)?.span.start;
+        let body = Box::new(self.parse_block_or_statement()?);
+        self.expect(TokenKind::Catch)?;
+        self.expect(TokenKind::LParen)?;
+        let catch_param = self
+            .expect(TokenKind::Ident)?
+            .literal
+            .clone()
+            .map(|s| s.into());
+        self.expect(TokenKind::RParen)?;
+        let catch_body = Box::new(self.parse_block_or_statement()?);
+        Ok(Statement::Try {
+            body,
+            catch_param,
+            catch_body,
+            span: self.span_end(span_start),
+        })
+    }
+
     fn parse_expr(&mut self) -> Result<Expr, String> {
         self.parse_assign()
     }
@@ -498,6 +593,19 @@ impl<'a> Parser<'a> {
             Some(TokenKind::Not) => UnaryOp::Not,
             Some(TokenKind::Minus) => UnaryOp::Neg,
             Some(TokenKind::Plus) => UnaryOp::Pos,
+            Some(TokenKind::TypeOf) => {
+                let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
+                self.advance();
+                let operand = self.parse_unary()?;
+                let end = operand.span().end;
+                return Ok(Expr::TypeOf {
+                    operand: Box::new(operand),
+                    span: Span {
+                        start: span_start,
+                        end,
+                    },
+                });
+            }
             _ => return self.parse_postfix(),
         };
         let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
@@ -570,6 +678,36 @@ impl<'a> Parser<'a> {
                         optional: false,
                         span: Span { start, end },
                     };
+                }
+                TokenKind::PlusPlus => {
+                    if let Expr::Ident { name, span } = &expr {
+                        let name = Arc::clone(name);
+                        let tok = self.advance().ok_or("Unexpected EOF")?;
+                        expr = Expr::PostfixInc {
+                            name,
+                            span: Span {
+                                start: span.start,
+                                end: tok.span.end,
+                            },
+                        };
+                    } else {
+                        break;
+                    }
+                }
+                TokenKind::MinusMinus => {
+                    if let Expr::Ident { name, span } = &expr {
+                        let name = Arc::clone(name);
+                        let tok = self.advance().ok_or("Unexpected EOF")?;
+                        expr = Expr::PostfixDec {
+                            name,
+                            span: Span {
+                                start: span.start,
+                                end: tok.span.end,
+                            },
+                        };
+                    } else {
+                        break;
+                    }
                 }
                 TokenKind::Question => {
                     self.advance(); // ?
@@ -702,6 +840,9 @@ impl ExprSpan for Expr {
             Expr::Array { span, .. } => span.clone(),
             Expr::Object { span, .. } => span.clone(),
             Expr::Assign { span, .. } => span.clone(),
+            Expr::TypeOf { span, .. } => span.clone(),
+            Expr::PostfixInc { span, .. } => span.clone(),
+            Expr::PostfixDec { span, .. } => span.clone(),
         }
     }
 }

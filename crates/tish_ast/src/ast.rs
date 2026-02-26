@@ -62,6 +62,27 @@ pub enum Statement {
         body: Box<Statement>,
         span: Span,
     },
+    Switch {
+        expr: Expr,
+        cases: Vec<(Option<Expr>, Vec<Statement>)>,
+        default_body: Option<Vec<Statement>>,
+        span: Span,
+    },
+    DoWhile {
+        body: Box<Statement>,
+        cond: Expr,
+        span: Span,
+    },
+    Throw {
+        value: Expr,
+        span: Span,
+    },
+    Try {
+        body: Box<Statement>,
+        catch_param: Option<Arc<str>>,
+        catch_body: Box<Statement>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +145,18 @@ pub enum Expr {
     Assign {
         name: Arc<str>,
         value: Box<Expr>,
+        span: Span,
+    },
+    TypeOf {
+        operand: Box<Expr>,
+        span: Span,
+    },
+    PostfixInc {
+        name: Arc<str>,
+        span: Span,
+    },
+    PostfixDec {
+        name: Arc<str>,
         span: Span,
     },
 }

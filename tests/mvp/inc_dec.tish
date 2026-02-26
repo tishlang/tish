@@ -1,0 +1,7 @@
+// MVP test: postfix ++ and --
+any a = 5
+print(a++)
+print(a)
+any b = 10
+print(b--)
+print(b)

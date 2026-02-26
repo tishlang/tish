@@ -4,6 +4,23 @@
 //! for native-compiled Tish programs.
 
 use std::collections::HashMap;
+use std::fmt;
+
+/// Error type for Tish throw/catch.
+#[derive(Debug, Clone)]
+pub enum TishError {
+    Throw(Value),
+}
+
+impl fmt::Display for TishError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TishError::Throw(v) => write!(f, "{}", v.to_display_string()),
+        }
+    }
+}
+
+impl std::error::Error for TishError {}
 use std::rc::Rc;
 use std::sync::Arc;
 

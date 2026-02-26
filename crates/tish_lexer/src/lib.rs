@@ -317,8 +317,22 @@ impl<'a> Lexer<'a> {
                     TokenKind::Gt
                 }
             }
-            '+' => TokenKind::Plus,
-            '-' => TokenKind::Minus,
+            '+' => {
+                if self.peek() == Some('+') {
+                    self.advance();
+                    TokenKind::PlusPlus
+                } else {
+                    TokenKind::Plus
+                }
+            }
+            '-' => {
+                if self.peek() == Some('-') {
+                    self.advance();
+                    TokenKind::MinusMinus
+                } else {
+                    TokenKind::Minus
+                }
+            }
             '*' => TokenKind::Star,
             '/' => {
                 if self.peek() == Some('/') {

@@ -94,22 +94,19 @@ impl Evaluator {
                 let value = init
                     .as_ref()
                     .map(|e| self.eval_expr(e))
-                    .transpose()
-                    .map_err(|e: String| EvalError::Error(e))?
+                    .transpose()?
                     .unwrap_or(Value::Null);
                 self.scope.borrow_mut().set(Arc::clone(name), value);
                 Ok(Value::Null)
             }
-            Statement::ExprStmt { expr, .. } => self
-                .eval_expr(expr)
-                .map_err(EvalError::Error),
+            Statement::ExprStmt { expr, .. } => self.eval_expr(expr),
             Statement::If {
                 cond,
                 then_branch,
                 else_branch,
                 ..
             } => {
-                let c = self.eval_expr(cond).map_err(EvalError::Error)?;
+                let c = self.eval_expr(cond)?;
                 if c.is_truthy() {
                     self.eval_statement(then_branch)
                 } else if let Some(eb) = else_branch {
@@ -120,7 +117,7 @@ impl Evaluator {
             }
             Statement::While { cond, body, .. } => {
                 loop {
-                    if !self.eval_expr(cond).map_err(EvalError::Error)?.is_truthy() {
+                    if !self.eval_expr(cond)?.is_truthy() {
                         break;
                     }
                     match self.eval_statement(body) {
@@ -146,8 +143,7 @@ impl Evaluator {
                     let cond_ok = cond
                         .as_ref()
                         .map(|c| self.eval_expr(c).map(|v| v.is_truthy()))
-                        .transpose()
-                        .map_err(EvalError::Error)?
+                        .transpose()?
                         .unwrap_or(true);
                     if !cond_ok {
                         break;
@@ -157,14 +153,14 @@ impl Evaluator {
                         Err(EvalError::Break) => break,
                         Err(EvalError::Continue) => {
                             if let Some(u) = update {
-                                self.eval_expr(u).map_err(EvalError::Error)?;
+                                self.eval_expr(u)?;
                             }
                             continue;
                         }
                         Err(e) => return Err(e),
                     }
                     if let Some(u) = update {
-                        self.eval_expr(u).map_err(EvalError::Error)?;
+                        self.eval_expr(u)?;
                     }
                 }
                 Ok(Value::Null)
@@ -173,8 +169,7 @@ impl Evaluator {
                 let v = value
                     .as_ref()
                     .map(|e| self.eval_expr(e))
-                    .transpose()
-                    .map_err(EvalError::Error)?
+                    .transpose()?
                     .unwrap_or(Value::Null);
                 Err(EvalError::Return(v))
             }
@@ -196,10 +191,103 @@ impl Evaluator {
                 self.scope.borrow_mut().set(Arc::clone(name), func);
                 Ok(Value::Null)
             }
+            Statement::Switch { expr, cases, default_body, .. } => {
+                let v = self.eval_expr(expr)?;
+                let mut matched = false;
+                for (case_expr, body) in cases {
+                    if let Some(ce) = case_expr {
+                        let cv = self.eval_expr(ce)?;
+                        if v.strict_eq(&cv) {
+                            matched = true;
+                            let scope = Scope::child(Rc::clone(&self.scope));
+                            let prev = std::mem::replace(&mut self.scope, scope);
+                            for s in body {
+                                match self.eval_statement(s) {
+                                    Ok(_) => {}
+                                    Err(EvalError::Break) => {
+                                        self.scope = prev;
+                                        return Ok(Value::Null);
+                                    }
+                                    Err(e) => {
+                                        self.scope = prev;
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                            self.scope = prev;
+                            break;
+                        }
+                    }
+                }
+                if !matched {
+                    if let Some(body) = default_body {
+                        let scope = Scope::child(Rc::clone(&self.scope));
+                        let prev = std::mem::replace(&mut self.scope, scope);
+                        for s in body {
+                            match self.eval_statement(s) {
+                                Ok(_) => {}
+                                Err(EvalError::Break) => break,
+                                Err(e) => {
+                                    self.scope = prev;
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        self.scope = prev;
+                    }
+                }
+                Ok(Value::Null)
+            }
+            Statement::DoWhile { body, cond, .. } => {
+                loop {
+                    match self.eval_statement(body) {
+                        Ok(_) => {}
+                        Err(EvalError::Break) => break,
+                        Err(EvalError::Continue) => {
+                            if !self.eval_expr(cond)?.is_truthy() {
+                                break;
+                            }
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                    if !self.eval_expr(cond)?.is_truthy() {
+                        break;
+                    }
+                }
+                Ok(Value::Null)
+            }
+            Statement::Throw { value, .. } => {
+                let v = self.eval_expr(value)?;
+                Err(EvalError::Throw(v))
+            }
+            Statement::Try {
+                body,
+                catch_param,
+                catch_body,
+                ..
+            } => {
+                match self.eval_statement(body) {
+                    Ok(v) => Ok(v),
+                    Err(EvalError::Throw(thrown)) => {
+                        if let Some(param) = catch_param {
+                            let scope = Scope::child(Rc::clone(&self.scope));
+                            let prev = std::mem::replace(&mut self.scope, Rc::clone(&scope));
+                            scope.borrow_mut().set(Arc::clone(param), thrown);
+                            let res = self.eval_statement(catch_body);
+                            self.scope = prev;
+                            res
+                        } else {
+                            self.eval_statement(catch_body)
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            }
         }
     }
 
-    fn eval_expr(&self, expr: &Expr) -> Result<Value, String> {
+    fn eval_expr(&self, expr: &Expr) -> Result<Value, EvalError> {
         match expr {
             Expr::Literal { value, .. } => Ok(match value {
                 Literal::Number(n) => Value::Number(*n),
@@ -211,7 +299,7 @@ impl Evaluator {
                 .scope
                 .borrow()
                 .get(name.as_ref())
-                .ok_or_else(|| format!("Undefined variable: {}", name)),
+                .ok_or_else(|| EvalError::Error(format!("Undefined variable: {}", name))),
             Expr::Binary {
                 left,
                 op,
@@ -220,11 +308,11 @@ impl Evaluator {
             } => {
                 let l = self.eval_expr(left)?;
                 let r = self.eval_expr(right)?;
-                self.eval_binop(&l, *op, &r)
+                self.eval_binop(&l, *op, &r).map_err(EvalError::Error)
             }
             Expr::Unary { op, operand, .. } => {
                 let o = self.eval_expr(operand)?;
-                self.eval_unary(*op, &o)
+                self.eval_unary(*op, &o).map_err(EvalError::Error)
             }
             Expr::Call { callee, args, .. } => {
                 let f = self.eval_expr(callee)?;
@@ -248,14 +336,14 @@ impl Evaluator {
                         let v = self.eval_expr(e)?;
                         match v {
                             Value::String(s) => s,
-                            _ => return Err("Property key must be string".to_string()),
+                            _ => return Err(EvalError::Error("Property key must be string".to_string())),
                         }
                     }
                 };
                 match self.get_prop(&obj, &key) {
                     Ok(v) => Ok(v),
                     Err(_) if *optional => Ok(Value::Null),
-                    Err(e) => Err(e),
+                    Err(e) => Err(EvalError::Error(e)),
                 }
             }
             Expr::Index {
@@ -269,7 +357,7 @@ impl Evaluator {
                     return Ok(Value::Null);
                 }
                 let idx = self.eval_expr(index)?;
-                self.get_index(&obj, &idx)
+                self.get_index(&obj, &idx).map_err(EvalError::Error)
             }
             Expr::Conditional {
                 cond,
@@ -306,9 +394,46 @@ impl Evaluator {
             Expr::Assign { name, value, .. } => {
                 let v = self.eval_expr(value)?;
                 if !self.scope.borrow_mut().assign(name.as_ref(), v.clone()) {
-                    return Err(format!("Undefined variable: {}", name));
+                    return Err(EvalError::Error(format!("Undefined variable: {}", name)));
                 }
                 Ok(v)
+            }
+            Expr::TypeOf { operand, .. } => {
+                let v = self.eval_expr(operand)?;
+                Ok(Value::String(match &v {
+                    Value::Number(_) => "number".into(),
+                    Value::String(_) => "string".into(),
+                    Value::Bool(_) => "boolean".into(),
+                    Value::Null => "object".into(),
+                    Value::Array(_) => "object".into(),
+                    Value::Object(_) => "object".into(),
+                    Value::Function { .. } => "function".into(),
+                    Value::NativePrint => "function".into(),
+                }))
+            }
+            Expr::PostfixInc { name, .. } => {
+                let v = self.scope.borrow().get(name.as_ref())
+                    .ok_or_else(|| EvalError::Error(format!("Undefined variable: {}", name)))?;
+                let n = match &v {
+                    Value::Number(x) => *x,
+                    _ => return Err(EvalError::Error(format!("Cannot apply ++ to {:?}", v))),
+                };
+                if !self.scope.borrow_mut().assign(name.as_ref(), Value::Number(n + 1.0)) {
+                    return Err(EvalError::Error(format!("Undefined variable: {}", name)));
+                }
+                Ok(Value::Number(n))
+            }
+            Expr::PostfixDec { name, .. } => {
+                let v = self.scope.borrow().get(name.as_ref())
+                    .ok_or_else(|| EvalError::Error(format!("Undefined variable: {}", name)))?;
+                let n = match &v {
+                    Value::Number(x) => *x,
+                    _ => return Err(EvalError::Error(format!("Cannot apply -- to {:?}", v))),
+                };
+                if !self.scope.borrow_mut().assign(name.as_ref(), Value::Number(n - 1.0)) {
+                    return Err(EvalError::Error(format!("Undefined variable: {}", name)));
+                }
+                Ok(Value::Number(n))
             }
         }
     }
@@ -364,7 +489,7 @@ impl Evaluator {
         }
     }
 
-    fn call_func(&self, f: &Value, args: &[Value]) -> Result<Value, String> {
+    fn call_func(&self, f: &Value, args: &[Value]) -> Result<Value, EvalError> {
         if matches!(f, Value::NativePrint) {
             let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
             println!("{}", parts.join(" "));
@@ -372,7 +497,7 @@ impl Evaluator {
         }
         let (params, body) = match f {
             Value::Function { params, body } => (params.clone(), Box::clone(body)),
-            _ => return Err("Not a function".to_string()),
+            _ => return Err(EvalError::Error("Not a function".to_string())),
         };
         // Create new scope with params, parent = current scope
         let scope = Scope::child(Rc::clone(&self.scope));
@@ -389,9 +514,10 @@ impl Evaluator {
         match eval.eval_statement(&body) {
             Ok(v) => Ok(v),
             Err(EvalError::Return(v)) => Ok(v),
-            Err(EvalError::Error(s)) => Err(s),
-            Err(EvalError::Break) => Err("break outside loop".to_string()),
-            Err(EvalError::Continue) => Err("continue outside loop".to_string()),
+            Err(EvalError::Throw(v)) => Err(EvalError::Throw(v)),
+            Err(EvalError::Error(s)) => Err(EvalError::Error(s)),
+            Err(EvalError::Break) => Err(EvalError::Error("break outside loop".to_string())),
+            Err(EvalError::Continue) => Err(EvalError::Error("continue outside loop".to_string())),
         }
     }
 
@@ -440,6 +566,7 @@ enum EvalError {
     Return(Value),
     Break,
     Continue,
+    Throw(Value),
     Error(String),
 }
 
@@ -449,6 +576,7 @@ impl EvalError {
             EvalError::Return(_) => "return".to_string(),
             EvalError::Break => "break".to_string(),
             EvalError::Continue => "continue".to_string(),
+            EvalError::Throw(v) => v.to_string(),
             EvalError::Error(s) => s.clone(),
         }
     }
@@ -460,6 +588,7 @@ impl std::fmt::Display for EvalError {
             EvalError::Return(_) => write!(f, "return"),
             EvalError::Break => write!(f, "break"),
             EvalError::Continue => write!(f, "continue"),
+            EvalError::Throw(v) => write!(f, "{}", v.to_string()),
             EvalError::Error(s) => write!(f, "{}", s),
         }
     }

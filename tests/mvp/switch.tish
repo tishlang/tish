@@ -1,0 +1,19 @@
+// MVP test: switch statement
+any x = 2
+switch (x) {
+  case 1:
+    print("one")
+  case 2:
+    print("two")
+  case 3:
+    print("three")
+}
+print("done")
+any y = 99
+switch (y) {
+  case 1:
+    print("one")
+  default:
+    print("default")
+}
+print("end")

@@ -1,0 +1,14 @@
+// MVP test: try/catch and throw
+try {
+  print("in try")
+  throw "oops"
+  print("never")
+} catch (e) {
+  print("caught:", e)
+}
+print("done")
+try {
+  throw 42
+} catch (x) {
+  print("got", x)
+}

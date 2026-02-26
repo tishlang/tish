@@ -43,7 +43,16 @@ fn test_mvp_programs_interpreter_vs_native() {
     }
 
     // Test a representative subset (full set is slow - each compile takes ~1-2s)
-    let test_files = ["strict_equality.tish", "arrays.tish", "fun_any.tish"];
+    let test_files = [
+        "strict_equality.tish",
+        "arrays.tish",
+        "fun_any.tish",
+        "switch.tish",
+        "do_while.tish",
+        "typeof.tish",
+        "inc_dec.tish",
+        "try_catch.tish",
+    ];
     for name in test_files {
         let path = mvp_dir.join(name);
         if !path.exists() {
