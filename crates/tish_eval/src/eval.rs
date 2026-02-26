@@ -791,11 +791,11 @@ impl Evaluator {
         }
         if matches!(f, Value::NativeDecodeURI) {
             let s = args.get(0).map(|v| v.to_string()).unwrap_or_default();
-            return Ok(Value::String(Self::percent_decode(&s).into()));
+            return Ok(Value::String(tish_core::percent_decode(&s).unwrap_or(s).into()));
         }
         if matches!(f, Value::NativeEncodeURI) {
             let s = args.get(0).map(|v| v.to_string()).unwrap_or_default();
-            return Ok(Value::String(Self::percent_encode(&s).into()));
+            return Ok(Value::String(tish_core::percent_encode(&s).into()));
         }
         let (params, rest_param, body) = match f {
             Value::Function { params, rest_param, body } => {
@@ -1131,43 +1131,6 @@ impl Evaluator {
         }
     }
 
-    fn percent_decode(s: &str) -> String {
-        let mut out = Vec::new();
-        let mut i = 0;
-        let bytes = s.as_bytes();
-        while i < bytes.len() {
-            if bytes[i] == b'%' && i + 2 < bytes.len() {
-                let h = (bytes[i + 1] as char).to_digit(16);
-                let l = (bytes[i + 2] as char).to_digit(16);
-                if let (Some(h), Some(l)) = (h, l) {
-                    out.push((h * 16 + l) as u8);
-                    i += 3;
-                    continue;
-                }
-            }
-            out.push(bytes[i]);
-            i += 1;
-        }
-        String::from_utf8_lossy(&out).into_owned()
-    }
-
-    fn percent_encode(s: &str) -> String {
-        const SAFE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789;-/?:@&=+$,_.!~*'()";
-        let mut out = String::new();
-        for c in s.chars() {
-            if c.len_utf8() == 1 {
-                let b = c as u32 as u8;
-                if SAFE.contains(&b) {
-                    out.push(c);
-                    continue;
-                }
-            }
-            for b in c.to_string().as_bytes() {
-                out.push_str(&format!("%{:02X}", b));
-            }
-        }
-        out
-    }
 }
 
 #[derive(Debug)]

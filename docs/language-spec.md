@@ -60,11 +60,33 @@ fun double(x) = x * 2   // single-expression, implicit return
 
 ### Builtins
 
-- `print(...)` — print args space-separated
+**Console (log levels)**:
+- `console.log(...)` — general output (default level)
+- `console.info(...)` — informational messages
+- `console.debug(...)` — debug messages (hidden by default)
+- `console.warn(...)` — warnings (outputs to stderr)
+- `console.error(...)` — errors (always outputs to stderr)
+
+Log level controlled via `TISH_LOG_LEVEL` environment variable:
+- Values: `debug`, `info`, `log` (default), `warn`, `error`
+- Example: `TISH_LOG_LEVEL=debug ./program` shows all messages
+- Example: `TISH_LOG_LEVEL=warn ./program` shows only warnings and errors
+
+**Parsing**:
 - `parseInt(s, radix?)`, `parseFloat(s)`
 - `isFinite(v)`, `isNaN(v)`
-- `Infinity`, `NaN` — globals
+
+**Globals**:
+- `Infinity`, `NaN`
+
+**Math**:
 - `Math.abs(x)`, `Math.sqrt(x)`, `Math.min(a, b, ...)`, `Math.max(a, b, ...)`, `Math.floor(x)`, `Math.ceil(x)`, `Math.round(x)`
+
+**JSON**:
+- `JSON.parse(s)`, `JSON.stringify(v)`
+
+**URI**:
+- `encodeURI(s)`, `decodeURI(s)`
 
 ### Assignment
 

@@ -7,3 +7,4 @@ description = "Tish tree-walk interpreter"
 [dependencies]
 tish_ast = { path = "../tish_ast" }
 tish_parser = { path = "../tish_parser" }
+tish_core = { path = "../tish_core" }

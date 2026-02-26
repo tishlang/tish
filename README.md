@@ -2,6 +2,25 @@
 
 Minimal, TS/JS-compatible language. Runs via interpreter or compiles to native. See `docs/` for spec and ECMA alignment.
 
+## Quick Example
+
+```javascript
+// hello.tish
+any name = "World"
+console.log("Hello,", name)
+
+fun add(a, b) = a + b
+console.log("1 + 2 =", add(1, 2))
+```
+
+```bash
+cargo run -p tish -- run hello.tish
+# Hello, World
+# 1 + 2 = 3
+```
+
+**Log levels**: Control output with `TISH_LOG_LEVEL=debug|info|log|warn|error`
+
 ## Build & Run
 
 ```bash

@@ -5,3 +5,4 @@ edition = "2021"
 description = "Minimal runtime for Tish compiled output"
 
 [dependencies]
+tish_core = { path = "../tish_core" }

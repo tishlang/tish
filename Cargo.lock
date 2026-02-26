@@ -177,10 +177,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tish_core"
+version = "0.1.0"
+
+[[package]]
 name = "tish_eval"
 version = "0.1.0"
 dependencies = [
  "tish_ast",
+ "tish_core",
  "tish_parser",
 ]
 
@@ -199,6 +204,9 @@ dependencies = [
 [[package]]
 name = "tish_runtime"
 version = "0.1.0"
+dependencies = [
+ "tish_core",
+]
 
 [[package]]
 name = "unicode-ident"

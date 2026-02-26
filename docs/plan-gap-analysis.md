@@ -1,6 +1,6 @@
 # Tish Plan Gap Analysis
 
-Audit of plan vs implementation. Last updated: 2025-02-24.
+Audit of plan vs implementation. Last updated: 2026-02-26.
 
 ## Implemented ✓
 
@@ -114,3 +114,33 @@ Audit of plan vs implementation. Last updated: 2025-02-24.
 3. ✓ **decodeURI / encodeURI** — Implemented
 4. ✓ **Prefix ++/--** — Implemented
 5. ✓ **in operator** — Implemented
+6. ✓ **console object** — Implemented (log, info, debug, warn, error with log levels)
+
+---
+
+## Recent Changes
+
+### Console Object (2026-02-26)
+
+Replaced `print()` with JavaScript-compatible `console` object:
+
+| Method | Description | Output |
+|--------|-------------|--------|
+| `console.debug(...)` | Debug messages | stdout (hidden by default) |
+| `console.info(...)` | Info messages | stdout (hidden by default) |
+| `console.log(...)` | General output | stdout |
+| `console.warn(...)` | Warnings | stderr |
+| `console.error(...)` | Errors | stderr (always shown) |
+
+**Log Level Configuration**: `TISH_LOG_LEVEL` environment variable
+- Values: `debug`, `info`, `log` (default), `warn`, `error`
+- Default shows: log, warn, error
+- Debug shows: all messages
+
+**Runtime Override**: The `console` object can be reassigned in code for custom logging.
+
+---
+
+## Architecture Notes
+
+See `docs/architecture-next-steps.md` for planned refactoring to consolidate duplicated code between `tish_eval` and `tish_runtime`.

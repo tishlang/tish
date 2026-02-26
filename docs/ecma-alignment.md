@@ -79,9 +79,12 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 
 - **Array, Boolean, Number, Math, String** — Follow (simplify)
 - **Object** — Follow (plain)
+- **console** — Follow (log, info, debug, warn, error with TISH_LOG_LEVEL)
+- **JSON** — Follow (parse, stringify)
 - **global, Infinity, NaN** — Follow
 - **Error, NativeErrors** — Follow or Simplify
 - **parseInt, parseFloat, isFinite, isNaN** — Follow
+- **decodeURI, encodeURI** — Follow
 - **ArrayBuffer, BigInt, Date, Map, Set** — Omit or optional
 - **Promise, Proxy, Reflect, Symbol** — Omit
 - **RegExp** — Omit or optional
