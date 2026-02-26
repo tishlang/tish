@@ -6,7 +6,6 @@ use std::path::Path;
 use std::process::Command;
 
 use clap::{Parser, Subcommand};
-use tish_ast::Program;
 use tish_compile;
 use tish_eval;
 use tish_parser;

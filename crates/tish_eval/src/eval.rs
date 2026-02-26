@@ -167,7 +167,7 @@ impl Evaluator {
             } => {
                 let params = params.clone();
                 let body = Box::clone(body);
-                let scope = Rc::clone(&self.scope);
+                let _scope = Rc::clone(&self.scope);
                 let func = Value::Function {
                     params,
                     body,

@@ -6,7 +6,6 @@ mod value;
 pub use eval::Evaluator;
 pub use value::Value;
 
-use tish_ast::Program;
 use tish_parser;
 
 pub fn run(source: &str) -> Result<Value, String> {

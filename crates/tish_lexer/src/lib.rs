@@ -16,6 +16,7 @@ const TAB_AS_LEVELS: usize = 1; // 1 tab = 1 indent level
 
 #[derive(Debug, Clone)]
 pub struct Lexer<'a> {
+    #[allow(dead_code)] // reserved for future error/source slicing
     source: &'a str,
     chars: Peekable<Chars<'a>>,
     pos: usize,
@@ -28,7 +29,7 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(source: &'a str) -> Self {
-        let mut lexer = Self {
+        let lexer = Self {
             source,
             chars: source.chars().peekable(),
             pos: 0,
