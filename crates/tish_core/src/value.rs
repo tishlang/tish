@@ -36,19 +36,6 @@ impl std::fmt::Debug for Value {
 }
 
 impl Value {
-    /// Get the type name for error messages.
-    pub fn type_name(&self) -> &'static str {
-        match self {
-            Value::Number(_) => "number",
-            Value::String(_) => "string",
-            Value::Bool(_) => "boolean",
-            Value::Null => "null",
-            Value::Array(_) => "array",
-            Value::Object(_) => "object",
-            Value::Function(_) => "function",
-        }
-    }
-
     /// Convert value to display string (for console output).
     pub fn to_display_string(&self) -> String {
         match self {

@@ -46,27 +46,24 @@ pub fn percent_encode(input: &str) -> String {
     result
 }
 
-/// Percent-encode for encodeURIComponent.
-/// Preserves: A-Z a-z 0-9 - _ . ! ~ * ' ( )
-pub fn percent_encode_component(input: &str) -> String {
-    const UNRESERVED: &[char] = &['-', '_', '.', '!', '~', '*', '\'', '(', ')'];
-
-    let mut result = String::new();
-    for c in input.chars() {
-        if c.is_ascii_alphanumeric() || UNRESERVED.contains(&c) {
-            result.push(c);
-        } else {
-            for byte in c.to_string().as_bytes() {
-                result.push_str(&format!("%{:02X}", byte));
-            }
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn percent_encode_component(input: &str) -> String {
+        const UNRESERVED: &[char] = &['-', '_', '.', '!', '~', '*', '\'', '(', ')'];
+        let mut result = String::new();
+        for c in input.chars() {
+            if c.is_ascii_alphanumeric() || UNRESERVED.contains(&c) {
+                result.push(c);
+            } else {
+                for byte in c.to_string().as_bytes() {
+                    result.push_str(&format!("%{:02X}", byte));
+                }
+            }
+        }
+        result
+    }
 
     #[test]
     fn test_encode_decode_roundtrip() {
