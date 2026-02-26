@@ -30,3 +30,11 @@ Manual verification (show output for each .tish file):
 ```
 
 Add `--native` to also compile and run each file natively.
+
+JavaScript equivalents in `performance/mvp/*.js`. Compare Tish vs JS output and timing:
+
+```bash
+./scripts/run_performance_manual.sh
+```
+
+Runs each pair, prints both outputs, and reports average execution time over 5 runs.
