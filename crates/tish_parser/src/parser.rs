@@ -315,8 +315,6 @@ impl<'a> Parser<'a> {
                 span: self.span_end(any_span_start),
             }))
         } else if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
-            Some(Box::new(self.parse_var_decl()?))
-        } else if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
             None
         } else {
             let st = self.peek().ok_or("Unexpected EOF in for init")?;

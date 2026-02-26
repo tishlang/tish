@@ -1,8 +1,5 @@
 //! Code generation: AST -> Rust source.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use tish_ast::{BinOp, Expr, Literal, MemberProp, Program, Statement, UnaryOp};
 
 #[derive(Debug, Clone)]
@@ -27,8 +24,6 @@ pub fn compile(program: &Program) -> Result<String, CompileError> {
 struct Codegen {
     output: String,
     indent: usize,
-    func_index: usize,
-    func_names: HashMap<Arc<str>, String>, // Tish name -> Rust fn name
     loop_label_index: usize,
     loop_stack: Vec<(String, Option<String>)>, // (break_label, continue_update) for innermost loop
 }
@@ -38,8 +33,6 @@ impl Codegen {
         Self {
             output: String::new(),
             indent: 0,
-            func_index: 0,
-            func_names: HashMap::new(),
             loop_label_index: 0,
             loop_stack: Vec::new(),
         }
@@ -62,21 +55,6 @@ impl Codegen {
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
         self.write("use tish_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, TishError, Value};\n\n");
-
-        // First pass: emit function declarations
-        for stmt in &program.statements {
-            if let Statement::FunDecl { name, .. } = stmt {
-                let rust_name = format!("tish_fn_{}", self.func_index);
-                self.func_index += 1;
-                self.func_names.insert(Arc::clone(name), rust_name);
-            }
-        }
-
-        for stmt in &program.statements {
-            if let Statement::FunDecl { .. } = stmt {
-                self.emit_fun_decl(stmt)?;
-            }
-        }
 
         self.writeln("fn main() {");
         self.indent += 1;
@@ -133,44 +111,6 @@ impl Codegen {
         }
 
         self.writeln("Ok(())");
-        self.indent -= 1;
-        self.writeln("}");
-        Ok(())
-    }
-
-    fn emit_fun_decl(&mut self, stmt: &Statement) -> Result<(), CompileError> {
-        let (name, params, rest_param, body) = match stmt {
-            Statement::FunDecl {
-                name,
-                params,
-                rest_param,
-                body,
-                ..
-            } => (name, params, rest_param, body),
-            _ => unreachable!(),
-        };
-        let rust_name = self.func_names.get(name).unwrap();
-        self.write(&format!(
-            "fn {}(args: &[Value]) -> Value {{\n",
-            rust_name
-        ));
-        self.indent += 1;
-        for (i, p) in params.iter().enumerate() {
-            self.writeln(&format!(
-                "let {} = args.get({}).cloned().unwrap_or(Value::Null);",
-                p.as_ref(),
-                i
-            ));
-        }
-        if let Some(rest_name) = rest_param {
-            self.writeln(&format!(
-                "let {} = Value::Array(std::rc::Rc::new(args[{}..].to_vec()));",
-                rest_name.as_ref(),
-                params.len()
-            ));
-        }
-        self.emit_statement(body)?;
-        self.writeln("Value::Null"); // fallthrough if no return
         self.indent -= 1;
         self.writeln("}");
         Ok(())
@@ -423,13 +363,34 @@ impl Codegen {
                 }
                 self.writeln("}");
             }
-            Statement::FunDecl { name, .. } => {
-                let rust_name = self.func_names.get(name).unwrap();
-                self.writeln(&format!(
-                    "let {} = Value::Function(Rc::new(|args: &[Value]| {}(args)));",
-                    name.as_ref(),
-                    rust_name
-                ));
+            Statement::FunDecl { name, params, rest_param, body, .. } => {
+                self.writeln(&format!("let {} = {{", name.as_ref()));
+                self.indent += 1;
+                self.writeln("let console = console.clone();");
+                self.writeln("let Math = Math.clone();");
+                self.writeln("let JSON = JSON.clone();");
+                self.writeln("Value::Function(Rc::new(move |args: &[Value]| {");
+                self.indent += 1;
+                for (i, p) in params.iter().enumerate() {
+                    self.writeln(&format!(
+                        "let {} = args.get({}).cloned().unwrap_or(Value::Null);",
+                        p.as_ref(),
+                        i
+                    ));
+                }
+                if let Some(rest_name) = rest_param {
+                    self.writeln(&format!(
+                        "let {} = Value::Array(std::rc::Rc::new(args[{}..].to_vec()));",
+                        rest_name.as_ref(),
+                        params.len()
+                    ));
+                }
+                self.emit_statement(body)?;
+                self.writeln("Value::Null");
+                self.indent -= 1;
+                self.writeln("}))");
+                self.indent -= 1;
+                self.writeln("};");
             }
         }
         Ok(())
@@ -506,7 +467,7 @@ impl Codegen {
                 };
                 if *optional {
                     format!(
-                        "{{ let o = {}; if matches!(o, Value::Null) {{ Value::Null }} else {{ \
+                        "{{ let o = {}.clone(); if matches!(o, Value::Null) {{ Value::Null }} else {{ \
                          tish_runtime::get_prop(&o, {}) }} }}",
                         obj, key
                     )
@@ -524,7 +485,7 @@ impl Codegen {
                 let idx = self.emit_expr(index)?;
                 if *optional {
                     format!(
-                        "{{ let o = {}; if matches!(o, Value::Null) {{ Value::Null }} else {{ \
+                        "{{ let o = {}.clone(); if matches!(o, Value::Null) {{ Value::Null }} else {{ \
                          tish_runtime::get_index(&o, &{}) }} }}",
                         obj, idx
                     )
@@ -547,7 +508,7 @@ impl Codegen {
                 let l = self.emit_expr(left)?;
                 let r = self.emit_expr(right)?;
                 format!(
-                    "{{ let _v = {}; if matches!(_v, Value::Null) {{ {} }} else {{ _v }} }}",
+                    "{{ let _v = {}.clone(); if matches!(_v, Value::Null) {{ {} }} else {{ _v }} }}",
                     l, r
                 )
             }

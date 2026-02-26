@@ -5,7 +5,9 @@
 
 set -e
 cd "$(dirname "$0")/.."
+#node_cmd="${NODE:-node}"
 node_cmd="${NODE:-node}"
+
 tish_dir="tests/mvp"
 perf_dir="performance/mvp"
 target_dir="${CARGO_TARGET_DIR:-$(pwd)/target}"

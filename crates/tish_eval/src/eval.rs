@@ -824,28 +824,24 @@ impl Evaluator {
 
     fn get_prop(&self, obj: &Value, key: &str) -> Result<Value, String> {
         match obj {
-            Value::Object(map) => map
-                .get(key)
-                .cloned()
-                .ok_or_else(|| format!("Property not found: {}", key)),
+            Value::Object(map) => Ok(map.get(key).cloned().unwrap_or(Value::Null)),
             Value::Array(arr) => {
                 if key == "length" {
                     Ok(Value::Number(arr.len() as f64))
+                } else if let Ok(idx) = key.parse::<usize>() {
+                    Ok(arr.get(idx).cloned().unwrap_or(Value::Null))
                 } else {
-                    let idx: usize = key.parse().map_err(|_| "Invalid array index")?;
-                    arr.get(idx)
-                        .cloned()
-                        .ok_or_else(|| format!("Index out of bounds: {}", idx))
+                    Ok(Value::Null)
                 }
             }
             Value::String(s) => {
                 if key == "length" {
                     Ok(Value::Number(s.chars().count() as f64))
                 } else {
-                    Err(format!("Cannot read property '{}' of string", key))
+                    Ok(Value::Null)
                 }
             }
-            _ => Err(format!("Cannot read property of {:?}", obj)),
+            _ => Ok(Value::Null),
         }
     }
 
@@ -854,21 +850,19 @@ impl Evaluator {
             Value::Array(arr) => {
                 let idx = match index {
                     Value::Number(n) => *n as usize,
-                    _ => return Err("Index must be number".to_string()),
+                    _ => return Ok(Value::Null),
                 };
-                arr.get(idx)
-                    .cloned()
-                    .ok_or_else(|| format!("Index out of bounds: {}", idx))
+                Ok(arr.get(idx).cloned().unwrap_or(Value::Null))
             }
             Value::Object(map) => {
                 let key: Arc<str> = match index {
                     Value::Number(n) => n.to_string().into(),
                     Value::String(s) => Arc::clone(s),
-                    _ => return Err("Index must be number or string".to_string()),
+                    _ => return Ok(Value::Null),
                 };
                 Ok(map.get(&key).cloned().unwrap_or(Value::Null))
             }
-            _ => Err(format!("Cannot index {:?}", obj)),
+            _ => Ok(Value::Null),
         }
     }
 
