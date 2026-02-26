@@ -16,6 +16,7 @@ pub enum Value {
     Object(Rc<HashMap<Arc<str>, Value>>),
     Function {
         params: Vec<Arc<str>>,
+        rest_param: Option<Arc<str>>,
         body: Box<Statement>,
     },
     NativePrint,
@@ -30,6 +31,10 @@ pub enum Value {
     NativeMathFloor,
     NativeMathCeil,
     NativeMathRound,
+    NativeJsonParse,
+    NativeJsonStringify,
+    NativeDecodeURI,
+    NativeEncodeURI,
 }
 
 impl Value {
@@ -63,6 +68,10 @@ impl Value {
             Value::NativeMathFloor => "[NativeFunction: Math.floor]".to_string(),
             Value::NativeMathCeil => "[NativeFunction: Math.ceil]".to_string(),
             Value::NativeMathRound => "[NativeFunction: Math.round]".to_string(),
+            Value::NativeJsonParse => "[NativeFunction: JSON.parse]".to_string(),
+            Value::NativeJsonStringify => "[NativeFunction: JSON.stringify]".to_string(),
+            Value::NativeDecodeURI => "[NativeFunction: decodeURI]".to_string(),
+            Value::NativeEncodeURI => "[NativeFunction: encodeURI]".to_string(),
         }
     }
 

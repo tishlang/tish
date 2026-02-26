@@ -49,6 +49,7 @@ pub enum TokenKind {
     TypeOf,
     Void,
     Of,
+    In,
 
     // Punctuation
     LParen,
@@ -60,6 +61,7 @@ pub enum TokenKind {
     Semicolon,
     Comma,
     Dot,
+    Spread,
     Colon,
 
     // Operators
@@ -121,6 +123,7 @@ impl TokenKind {
             "typeof" => TokenKind::TypeOf,
             "void" => TokenKind::Void,
             "of" => TokenKind::Of,
+            "in" => TokenKind::In,
             _ => TokenKind::Ident,
         }
     }

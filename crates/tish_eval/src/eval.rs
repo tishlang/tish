@@ -64,6 +64,8 @@ impl Evaluator {
             s.set("print".into(), Value::NativePrint);
             s.set("parseInt".into(), Value::NativeParseInt);
             s.set("parseFloat".into(), Value::NativeParseFloat);
+            s.set("decodeURI".into(), Value::NativeDecodeURI);
+            s.set("encodeURI".into(), Value::NativeEncodeURI);
             s.set("isFinite".into(), Value::NativeIsFinite);
             s.set("isNaN".into(), Value::NativeIsNaN);
             s.set("Infinity".into(), Value::Number(f64::INFINITY));
@@ -77,6 +79,10 @@ impl Evaluator {
             math.insert("ceil".into(), Value::NativeMathCeil);
             math.insert("round".into(), Value::NativeMathRound);
             s.set("Math".into(), Value::Object(Rc::new(math)));
+            let mut json = HashMap::new();
+            json.insert("parse".into(), Value::NativeJsonParse);
+            json.insert("stringify".into(), Value::NativeJsonStringify);
+            s.set("JSON".into(), Value::Object(Rc::new(json)));
         }
         Self { scope }
     }
@@ -216,14 +222,17 @@ impl Evaluator {
             Statement::FunDecl {
                 name,
                 params,
+                rest_param,
                 body,
                 ..
             } => {
                 let params = params.clone();
+                let rest_param = rest_param.clone();
                 let body = Box::clone(body);
                 let _scope = Rc::clone(&self.scope);
                 let func = Value::Function {
                     params,
+                    rest_param,
                     body,
                 };
                 self.scope.borrow_mut().set(Arc::clone(name), func);
@@ -457,7 +466,11 @@ impl Evaluator {
                     | Value::NativeMathMax
                     | Value::NativeMathFloor
                     | Value::NativeMathCeil
-                    | Value::NativeMathRound => "function".into(),
+                    | Value::NativeMathRound
+                    | Value::NativeJsonParse
+                    | Value::NativeJsonStringify
+                    | Value::NativeDecodeURI
+                    | Value::NativeEncodeURI => "function".into(),
                 }))
             }
             Expr::PostfixInc { name, .. } => {
@@ -483,6 +496,32 @@ impl Evaluator {
                     return Err(EvalError::Error(format!("Undefined variable: {}", name)));
                 }
                 Ok(Value::Number(n))
+            }
+            Expr::PrefixInc { name, .. } => {
+                let v = self.scope.borrow().get(name.as_ref())
+                    .ok_or_else(|| EvalError::Error(format!("Undefined variable: {}", name)))?;
+                let n = match &v {
+                    Value::Number(x) => *x,
+                    _ => return Err(EvalError::Error(format!("Cannot apply ++ to {:?}", v))),
+                };
+                let new_val = Value::Number(n + 1.0);
+                if !self.scope.borrow_mut().assign(name.as_ref(), new_val.clone()) {
+                    return Err(EvalError::Error(format!("Undefined variable: {}", name)));
+                }
+                Ok(new_val)
+            }
+            Expr::PrefixDec { name, .. } => {
+                let v = self.scope.borrow().get(name.as_ref())
+                    .ok_or_else(|| EvalError::Error(format!("Undefined variable: {}", name)))?;
+                let n = match &v {
+                    Value::Number(x) => *x,
+                    _ => return Err(EvalError::Error(format!("Cannot apply -- to {:?}", v))),
+                };
+                let new_val = Value::Number(n - 1.0);
+                if !self.scope.borrow_mut().assign(name.as_ref(), new_val.clone()) {
+                    return Err(EvalError::Error(format!("Undefined variable: {}", name)));
+                }
+                Ok(new_val)
             }
         }
     }
@@ -516,6 +555,26 @@ impl Evaluator {
             BinOp::BitXor => self.binop_int32(l, r, |a, b| Value::Number((a ^ b) as f64)),
             BinOp::Shl => self.binop_int32(l, r, |a, b| Value::Number((a << b) as f64)),
             BinOp::Shr => self.binop_int32(l, r, |a, b| Value::Number((a >> b) as f64)),
+            BinOp::In => {
+                let key: Arc<str> = match l {
+                    Value::String(s) => Arc::clone(s),
+                    Value::Number(n) => n.to_string().into(),
+                    _ => return Err(format!("'in' requires string or number key, got {:?}", l)),
+                };
+                let ok = match r {
+                    Value::Object(map) => map.contains_key(&key),
+                    Value::Array(arr) => {
+                        key.as_ref() == "length"
+                            || key
+                                .parse::<usize>()
+                                .ok()
+                                .map(|i| i < arr.len())
+                                .unwrap_or(false)
+                    }
+                    _ => return Err(format!("'in' requires object or array, got {:?}", r)),
+                };
+                Ok(Value::Bool(ok))
+            }
             BinOp::Eq | BinOp::Ne => Err("Loose equality not supported".to_string()),
         }
     }
@@ -674,8 +733,26 @@ impl Evaluator {
             });
             return Ok(Value::Bool(b));
         }
-        let (params, body) = match f {
-            Value::Function { params, body } => (params.clone(), Box::clone(body)),
+        if matches!(f, Value::NativeJsonParse) {
+            let s = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            return Ok(Self::json_parse(&s));
+        }
+        if matches!(f, Value::NativeJsonStringify) {
+            let v = args.get(0).cloned().unwrap_or(Value::Null);
+            return Ok(Value::String(Self::json_stringify_value(&v).into()));
+        }
+        if matches!(f, Value::NativeDecodeURI) {
+            let s = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            return Ok(Value::String(Self::percent_decode(&s).into()));
+        }
+        if matches!(f, Value::NativeEncodeURI) {
+            let s = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            return Ok(Value::String(Self::percent_encode(&s).into()));
+        }
+        let (params, rest_param, body) = match f {
+            Value::Function { params, rest_param, body } => {
+                (params.clone(), rest_param.clone(), Box::clone(body))
+            }
             _ => return Err(EvalError::Error("Not a function".to_string())),
         };
         // Create new scope with params, parent = current scope
@@ -685,6 +762,10 @@ impl Evaluator {
             for (i, p) in params.iter().enumerate() {
                 let val = args.get(i).cloned().unwrap_or(Value::Null);
                 s.set(Arc::clone(p), val);
+            }
+            if let Some(rest_name) = rest_param {
+                let rest_vals: Vec<Value> = args.iter().skip(params.len()).cloned().collect();
+                s.set(rest_name, Value::Array(Rc::new(rest_vals)));
             }
         }
         let mut eval = Evaluator {
@@ -748,6 +829,292 @@ impl Evaluator {
             }
             _ => Err(format!("Cannot index {:?}", obj)),
         }
+    }
+
+    fn json_parse(s: &str) -> Value {
+        let s = s.trim();
+        if s.is_empty() {
+            return Value::Null;
+        }
+        match Self::json_parse_str(s) {
+            Ok(v) => v,
+            Err(()) => Value::Null,
+        }
+    }
+
+    fn json_parse_str(s: &str) -> Result<Value, ()> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err(());
+        }
+        if s == "null" {
+            return Ok(Value::Null);
+        }
+        if s == "true" {
+            return Ok(Value::Bool(true));
+        }
+        if s == "false" {
+            return Ok(Value::Bool(false));
+        }
+        if s.starts_with('"') {
+            return Self::json_parse_string_full(s);
+        }
+        if s.starts_with('[') {
+            return Self::json_parse_array(s);
+        }
+        if s.starts_with('{') {
+            return Self::json_parse_object(s);
+        }
+        if let Ok(n) = s.parse::<f64>() {
+            return Ok(Value::Number(n));
+        }
+        Err(())
+    }
+
+    fn json_parse_string(s: &str) -> Result<(Value, &str), ()> {
+        let s = &s[1..];
+        let mut out = String::new();
+        let mut i = 0;
+        let chars: Vec<char> = s.chars().collect();
+        while i < chars.len() {
+            if chars[i] == '"' {
+                let rest_start = s.chars().take(i + 1).map(|c| c.len_utf8()).sum::<usize>();
+                return Ok((Value::String(out.into()), &s[rest_start..]));
+            }
+            if chars[i] == '\\' {
+                i += 1;
+                if i >= chars.len() {
+                    return Err(());
+                }
+                match chars[i] {
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    _ => return Err(()),
+                }
+            } else {
+                out.push(chars[i]);
+            }
+            i += 1;
+        }
+        Err(())
+    }
+
+    fn json_parse_string_full(s: &str) -> Result<Value, ()> {
+        Self::json_parse_string(s).map(|(v, _)| v)
+    }
+
+    fn json_parse_array(s: &str) -> Result<Value, ()> {
+        let s = s[1..].trim_start();
+        if s.starts_with(']') {
+            return Ok(Value::Array(Rc::new(vec![])));
+        }
+        let mut vals = Vec::new();
+        let mut rest = s;
+        loop {
+            let (v, next) = Self::json_parse_one(rest)?;
+            vals.push(v);
+            rest = next.trim_start();
+            if rest.starts_with(']') {
+                break;
+            }
+            if !rest.starts_with(',') {
+                return Err(());
+            }
+            rest = rest[1..].trim_start();
+        }
+        Ok(Value::Array(Rc::new(vals)))
+    }
+
+    fn json_parse_object(s: &str) -> Result<Value, ()> {
+        let s = s[1..].trim_start();
+        if s.starts_with('}') {
+            return Ok(Value::Object(Rc::new(HashMap::new())));
+        }
+        let mut map = HashMap::new();
+        let mut rest = s;
+        loop {
+            if !rest.starts_with('"') {
+                return Err(());
+            }
+            let (key_val, next) = Self::json_parse_string(rest)?;
+            let key = match &key_val {
+                Value::String(k) => Arc::clone(k),
+                _ => return Err(()),
+            };
+            rest = next.trim_start();
+            if !rest.starts_with(':') {
+                return Err(());
+            }
+            rest = rest[1..].trim_start();
+            let (val, next) = Self::json_parse_one(rest)?;
+            map.insert(key, val);
+            rest = next.trim_start();
+            if rest.starts_with('}') {
+                break;
+            }
+            if !rest.starts_with(',') {
+                return Err(());
+            }
+            rest = rest[1..].trim_start();
+        }
+        Ok(Value::Object(Rc::new(map)))
+    }
+
+    fn json_parse_one(s: &str) -> Result<(Value, &str), ()> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err(());
+        }
+        if s.starts_with('"') {
+            let (v, rest) = Self::json_parse_string(s)?;
+            Ok((v, rest))
+        } else if s.starts_with('[') {
+            let mut depth = 0;
+            let mut i = 0;
+            for c in s.chars() {
+                if c == '[' {
+                    depth += 1;
+                } else if c == ']' {
+                    depth -= 1;
+                    if depth == 0 {
+                        let v = Self::json_parse_array(&s[..=i])?;
+                        return Ok((v, &s[i + 1..]));
+                    }
+                }
+                i += 1;
+            }
+            Err(())
+        } else if s.starts_with('{') {
+            let mut depth = 0;
+            let mut i = 0;
+            for c in s.chars() {
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        let v = Self::json_parse_object(&s[..=i])?;
+                        return Ok((v, &s[i + 1..]));
+                    }
+                }
+                i += 1;
+            }
+            Err(())
+        } else if s.starts_with("null") {
+            Ok((Value::Null, &s[4..]))
+        } else if s.starts_with("true") {
+            Ok((Value::Bool(true), &s[4..]))
+        } else if s.starts_with("false") {
+            Ok((Value::Bool(false), &s[5..]))
+        } else {
+            let end = s
+                .find(|c: char| !c.is_ascii_digit() && c != '-' && c != '+' && c != '.' && c != 'e' && c != 'E')
+                .unwrap_or(s.len());
+            let num_str = &s[..end];
+            let n: f64 = num_str.parse().map_err(|_| ())?;
+            Ok((Value::Number(n), &s[end..]))
+        }
+    }
+
+    fn json_stringify_value(v: &Value) -> String {
+        match v {
+            Value::Null => "null".to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Number(n) => {
+                if n.is_finite() {
+                    n.to_string()
+                } else {
+                    "null".to_string()
+                }
+            }
+            Value::String(s) => format!(
+                "\"{}\"",
+                s.replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n")
+                    .replace('\r', "\\r")
+                    .replace('\t', "\\t")
+            ),
+            Value::Array(arr) => {
+                let inner: Vec<String> = arr.iter().map(Self::json_stringify_value).collect();
+                format!("[{}]", inner.join(","))
+            }
+            Value::Object(map) => {
+                let mut entries: Vec<_> = map
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.as_ref(),
+                            format!(
+                                "\"{}\":{}",
+                                k.replace('\\', "\\\\").replace('"', "\\\""),
+                                Self::json_stringify_value(v)
+                            ),
+                        )
+                    })
+                    .collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                format!("{{{}}}", entries.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(","))
+            }
+            Value::Function { .. }
+            | Value::NativePrint
+            | Value::NativeParseInt
+            | Value::NativeParseFloat
+            | Value::NativeIsFinite
+            | Value::NativeIsNaN
+            | Value::NativeMathAbs
+            | Value::NativeMathSqrt
+            | Value::NativeMathMin
+            | Value::NativeMathMax
+            | Value::NativeMathFloor
+            | Value::NativeMathCeil
+            | Value::NativeMathRound
+                    | Value::NativeJsonParse
+            | Value::NativeJsonStringify
+            | Value::NativeDecodeURI
+            | Value::NativeEncodeURI => "null".to_string(),
+        }
+    }
+
+    fn percent_decode(s: &str) -> String {
+        let mut out = Vec::new();
+        let mut i = 0;
+        let bytes = s.as_bytes();
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let h = (bytes[i + 1] as char).to_digit(16);
+                let l = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (h, l) {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn percent_encode(s: &str) -> String {
+        const SAFE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789;-/?:@&=+$,_.!~*'()";
+        let mut out = String::new();
+        for c in s.chars() {
+            if c.len_utf8() == 1 {
+                let b = c as u32 as u8;
+                if SAFE.contains(&b) {
+                    out.push(c);
+                    continue;
+                }
+            }
+            for b in c.to_string().as_bytes() {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+        out
     }
 }
 

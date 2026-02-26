@@ -197,7 +197,22 @@ impl<'a> Parser<'a> {
             .into();
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::new();
+        let mut rest_param = None;
         while !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+            if matches!(self.peek_kind(), Some(TokenKind::Spread)) {
+                self.advance();
+                let name = self
+                    .expect(TokenKind::Ident)?
+                    .literal
+                    .clone()
+                    .ok_or("Expected rest param name")?
+                    .into();
+                rest_param = Some(name);
+                if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+                    return Err("Rest parameter must be last".to_string());
+                }
+                break;
+            }
             let p = self
                 .expect(TokenKind::Ident)?
                 .literal
@@ -229,6 +244,7 @@ impl<'a> Parser<'a> {
         Ok(Statement::FunDecl {
             name,
             params,
+            rest_param,
             body,
             span: self.span_end(span_start),
         })
@@ -655,6 +671,7 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::Le) => BinOp::Le,
                 Some(TokenKind::Gt) => BinOp::Gt,
                 Some(TokenKind::Ge) => BinOp::Ge,
+                Some(TokenKind::In) => BinOp::In,
                 _ => break,
             };
             self.advance();
@@ -734,6 +751,40 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, String> {
+        if matches!(self.peek_kind(), Some(TokenKind::PlusPlus)) {
+            let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
+            self.advance();
+            let operand = self.parse_unary()?;
+            if let Expr::Ident { name, span } = &operand {
+                let name = Arc::clone(name);
+                let end = span.end;
+                return Ok(Expr::PrefixInc {
+                    name,
+                    span: Span {
+                        start: span_start,
+                        end,
+                    },
+                });
+            }
+            return Err("Prefix ++ requires an identifier".to_string());
+        }
+        if matches!(self.peek_kind(), Some(TokenKind::MinusMinus)) {
+            let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
+            self.advance();
+            let operand = self.parse_unary()?;
+            if let Expr::Ident { name, span } = &operand {
+                let name = Arc::clone(name);
+                let end = span.end;
+                return Ok(Expr::PrefixDec {
+                    name,
+                    span: Span {
+                        start: span_start,
+                        end,
+                    },
+                });
+            }
+            return Err("Prefix -- requires an identifier".to_string());
+        }
         let op = match self.peek_kind() {
             Some(TokenKind::Not) => UnaryOp::Not,
             Some(TokenKind::Minus) => UnaryOp::Neg,
@@ -979,6 +1030,8 @@ impl ExprSpan for Expr {
             Expr::TypeOf { span, .. } => span.clone(),
             Expr::PostfixInc { span, .. } => span.clone(),
             Expr::PostfixDec { span, .. } => span.clone(),
+            Expr::PrefixInc { span, .. } => span.clone(),
+            Expr::PrefixDec { span, .. } => span.clone(),
         }
     }
 }

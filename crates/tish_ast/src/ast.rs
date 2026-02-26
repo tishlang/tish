@@ -65,6 +65,7 @@ pub enum Statement {
     FunDecl {
         name: Arc<str>,
         params: Vec<Arc<str>>,
+        rest_param: Option<Arc<str>>,
         body: Box<Statement>,
         span: Span,
     },
@@ -165,6 +166,14 @@ pub enum Expr {
         name: Arc<str>,
         span: Span,
     },
+    PrefixInc {
+        name: Arc<str>,
+        span: Span,
+    },
+    PrefixDec {
+        name: Arc<str>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,6 +207,7 @@ pub enum BinOp {
     BitXor,
     Shl,
     Shr,
+    In,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

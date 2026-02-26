@@ -1,7 +1,13 @@
-// MVP test: postfix ++ and --
+// MVP test: postfix and prefix ++ and --
 any a = 5
 print(a++)
 print(a)
 any b = 10
 print(b--)
 print(b)
+any c = 3
+print(++c)
+print(c)
+any d = 7
+print(--d)
+print(d)

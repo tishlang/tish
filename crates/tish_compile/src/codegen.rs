@@ -61,7 +61,7 @@ impl Codegen {
         self.write("use std::collections::HashMap;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tish_runtime::{print as tish_print, is_finite as tish_is_finite, is_nan as tish_is_nan, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, TishError, Value};\n\n");
+        self.write("use tish_runtime::{print as tish_print, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, TishError, Value};\n\n");
 
         // First pass: emit function declarations
         for stmt in &program.statements {
@@ -101,6 +101,8 @@ impl Codegen {
         self.writeln("}));");
         self.writeln("let parseInt = Value::Function(Rc::new(|args: &[Value]| tish_parse_int(args)));");
         self.writeln("let parseFloat = Value::Function(Rc::new(|args: &[Value]| tish_parse_float(args)));");
+        self.writeln("let decodeURI = Value::Function(Rc::new(|args: &[Value]| tish_decode_uri(args)));");
+        self.writeln("let encodeURI = Value::Function(Rc::new(|args: &[Value]| tish_encode_uri(args)));");
         self.writeln("let isFinite = Value::Function(Rc::new(|args: &[Value]| tish_is_finite(args)));");
         self.writeln("let isNaN = Value::Function(Rc::new(|args: &[Value]| tish_is_nan(args)));");
         self.writeln("let Infinity = Value::Number(f64::INFINITY);");
@@ -116,6 +118,12 @@ impl Codegen {
         self.writeln("(Arc::from(\"round\"), Value::Function(Rc::new(|args: &[Value]| tish_math_round(args)))),");
         self.indent -= 1;
         self.writeln("])));");
+        self.writeln("let JSON = Value::Object(Rc::new(HashMap::from([");
+        self.indent += 1;
+        self.writeln("(Arc::from(\"parse\"), Value::Function(Rc::new(|args: &[Value]| tish_json_parse(args)))),");
+        self.writeln("(Arc::from(\"stringify\"), Value::Function(Rc::new(|args: &[Value]| tish_json_stringify(args)))),");
+        self.indent -= 1;
+        self.writeln("])));");
 
         for stmt in &program.statements {
             self.emit_statement(stmt)?;
@@ -128,13 +136,14 @@ impl Codegen {
     }
 
     fn emit_fun_decl(&mut self, stmt: &Statement) -> Result<(), CompileError> {
-        let (name, params, body) = match stmt {
+        let (name, params, rest_param, body) = match stmt {
             Statement::FunDecl {
                 name,
                 params,
+                rest_param,
                 body,
                 ..
-            } => (name, params, body),
+            } => (name, params, rest_param, body),
             _ => unreachable!(),
         };
         let rust_name = self.func_names.get(name).unwrap();
@@ -148,6 +157,13 @@ impl Codegen {
                 "let {} = args.get({}).cloned().unwrap_or(Value::Null);",
                 p.as_ref(),
                 i
+            ));
+        }
+        if let Some(rest_name) = rest_param {
+            self.writeln(&format!(
+                "let {} = Value::Array(std::rc::Rc::new(args[{}..].to_vec()));",
+                rest_name.as_ref(),
+                params.len()
             ));
         }
         self.emit_statement(body)?;
@@ -581,6 +597,22 @@ impl Codegen {
                     name.as_ref()
                 )
             }
+            Expr::PrefixInc { name, .. } => {
+                format!(
+                    "{{ {} = Value::Number(match &{} {{ Value::Number(n) => n + 1.0, _ => panic!(\"++ needs number\") }}); {}.clone() }}",
+                    name.as_ref(),
+                    name.as_ref(),
+                    name.as_ref()
+                )
+            }
+            Expr::PrefixDec { name, .. } => {
+                format!(
+                    "{{ {} = Value::Number(match &{} {{ Value::Number(n) => n - 1.0, _ => panic!(\"-- needs number\") }}); {}.clone() }}",
+                    name.as_ref(),
+                    name.as_ref(),
+                    name.as_ref()
+                )
+            }
         })
     }
 
@@ -657,6 +689,10 @@ impl Codegen {
             ),
             BinOp::Shr => format!(
                 "Value::Number({{ let Value::Number(a) = &{} else {{ panic!() }}; let Value::Number(b) = &{} else {{ panic!() }}; ((*a as i32) >> (*b as i32)) as f64 }})",
+                l, r
+            ),
+            BinOp::In => format!(
+                "tish_in_operator(&[{}.clone(), {}.clone()])",
                 l, r
             ),
             BinOp::Eq | BinOp::Ne => {

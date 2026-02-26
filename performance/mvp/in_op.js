@@ -1,0 +1,11 @@
+// MVP perf: in operator
+const o = { a: 1, b: 2 };
+console.log("a" in o);
+console.log("b" in o);
+console.log("c" in o);
+
+const arr = [10, 20, 30];
+console.log(0 in arr);
+console.log(2 in arr);
+console.log(3 in arr);
+console.log("length" in arr);

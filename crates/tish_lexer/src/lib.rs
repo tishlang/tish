@@ -271,6 +271,14 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('?') {
                     self.advance();
                     TokenKind::OptionalChain
+                } else if self.peek() == Some('.') {
+                    self.advance();
+                    if self.peek() == Some('.') {
+                        self.advance();
+                        TokenKind::Spread
+                    } else {
+                        return Err("Unexpected .. (use ... for rest params)".to_string());
+                    }
                 } else {
                     TokenKind::Dot
                 }

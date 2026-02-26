@@ -1,0 +1,17 @@
+// MVP test: JSON.parse and JSON.stringify
+any obj = { x: 1, y: "hi", z: true }
+any s = JSON.stringify(obj)
+print(s)
+
+any parsed = JSON.parse(s)
+print(parsed.x)
+print(parsed.y)
+print(parsed.z)
+
+any arr = [1, 2, "a"]
+print(JSON.stringify(arr))
+
+any arr2 = JSON.parse("[1,2,\"a\"]")
+print(arr2[0])
+print(arr2[1])
+print(arr2[2])
