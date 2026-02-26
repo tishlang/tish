@@ -1,0 +1,12 @@
+// MVP test: arrays and indexing
+any arr = [1, 2, 3]
+print(arr[0])
+print(arr[1])
+print(arr[2])
+any sum = 0
+for (any i = 0; i < 3; i = i + 1)
+  sum = sum + arr[i]
+print("sum:", sum)
+any nested = [[1, 2], [3, 4]]
+print(nested[0][1])
+print(nested[1][0])

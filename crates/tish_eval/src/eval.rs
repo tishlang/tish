@@ -119,8 +119,16 @@ impl Evaluator {
                 }
             }
             Statement::While { cond, body, .. } => {
-                while self.eval_expr(cond).map_err(EvalError::Error)?.is_truthy() {
-                    self.eval_statement(body)?;
+                loop {
+                    if !self.eval_expr(cond).map_err(EvalError::Error)?.is_truthy() {
+                        break;
+                    }
+                    match self.eval_statement(body) {
+                        Ok(_) => {}
+                        Err(EvalError::Break) => break,
+                        Err(EvalError::Continue) => continue,
+                        Err(e) => return Err(e),
+                    }
                 }
                 Ok(Value::Null)
             }
@@ -134,14 +142,27 @@ impl Evaluator {
                 if let Some(i) = init {
                     self.eval_statement(i)?;
                 }
-                while cond
-                    .as_ref()
-                    .map(|c| self.eval_expr(c).map(|v| v.is_truthy()))
-                    .transpose()
-                    .map_err(EvalError::Error)?
-                    .unwrap_or(true)
-                {
-                    self.eval_statement(body)?;
+                loop {
+                    let cond_ok = cond
+                        .as_ref()
+                        .map(|c| self.eval_expr(c).map(|v| v.is_truthy()))
+                        .transpose()
+                        .map_err(EvalError::Error)?
+                        .unwrap_or(true);
+                    if !cond_ok {
+                        break;
+                    }
+                    match self.eval_statement(body) {
+                        Ok(_) => {}
+                        Err(EvalError::Break) => break,
+                        Err(EvalError::Continue) => {
+                            if let Some(u) = update {
+                                self.eval_expr(u).map_err(EvalError::Error)?;
+                            }
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
                     if let Some(u) = update {
                         self.eval_expr(u).map_err(EvalError::Error)?;
                     }
@@ -231,7 +252,11 @@ impl Evaluator {
                         }
                     }
                 };
-                self.get_prop(&obj, &key)
+                match self.get_prop(&obj, &key) {
+                    Ok(v) => Ok(v),
+                    Err(_) if *optional => Ok(Value::Null),
+                    Err(e) => Err(e),
+                }
             }
             Expr::Index {
                 object,
@@ -387,20 +412,23 @@ impl Evaluator {
     }
 
     fn get_index(&self, obj: &Value, index: &Value) -> Result<Value, String> {
-        let idx = match index {
-            Value::Number(n) => *n as usize,
-            _ => return Err("Index must be number".to_string()),
-        };
         match obj {
-            Value::Array(arr) => arr
-                .get(idx)
-                .cloned()
-                .ok_or_else(|| format!("Index out of bounds: {}", idx)),
-            Value::Object(map) => {
-                let key: Arc<str> = idx.to_string().into();
-                map.get(&key)
+            Value::Array(arr) => {
+                let idx = match index {
+                    Value::Number(n) => *n as usize,
+                    _ => return Err("Index must be number".to_string()),
+                };
+                arr.get(idx)
                     .cloned()
-                    .ok_or_else(|| format!("Property not found: {}", idx))
+                    .ok_or_else(|| format!("Index out of bounds: {}", idx))
+            }
+            Value::Object(map) => {
+                let key: Arc<str> = match index {
+                    Value::Number(n) => n.to_string().into(),
+                    Value::String(s) => Arc::clone(s),
+                    _ => return Err("Index must be number or string".to_string()),
+                };
+                Ok(map.get(&key).cloned().unwrap_or(Value::Null))
             }
             _ => Err(format!("Cannot index {:?}", obj)),
         }

@@ -1,0 +1,19 @@
+// MVP test: break and continue in nested loops
+any found = 0
+for (any i = 0; i < 3; i = i + 1) {
+  for (any j = 0; j < 3; j = j + 1) {
+    if (j === 1)
+      continue
+    found = found + 1
+    if (i === 2 && j === 2)
+      break
+  }
+}
+print("found:", found)
+any count = 0
+for (any i = 0; i < 5; i = i + 1) {
+  if (i === 3)
+    break
+  count = count + 1
+}
+print("count:", count)

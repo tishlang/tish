@@ -110,14 +110,20 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
 
 /// Get index from array or object.
 pub fn get_index(obj: &Value, index: &Value) -> Value {
-    let idx = match index {
-        Value::Number(n) => *n as usize,
-        _ => return Value::Null,
-    };
     match obj {
-        Value::Array(arr) => arr.get(idx).cloned().unwrap_or(Value::Null),
+        Value::Array(arr) => {
+            let idx = match index {
+                Value::Number(n) => *n as usize,
+                _ => return Value::Null,
+            };
+            arr.get(idx).cloned().unwrap_or(Value::Null)
+        }
         Value::Object(map) => {
-            let key: Arc<str> = idx.to_string().into();
+            let key: Arc<str> = match index {
+                Value::Number(n) => n.to_string().into(),
+                Value::String(s) => Arc::clone(s),
+                _ => return Value::Null,
+            };
             map.get(&key).cloned().unwrap_or(Value::Null)
         }
         _ => Value::Null,

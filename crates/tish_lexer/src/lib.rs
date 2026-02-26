@@ -354,6 +354,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('?') {
                     self.advance();
                     TokenKind::NullishCoalesce
+                } else if self.peek() == Some('.') {
+                    self.advance();
+                    TokenKind::OptionalChain
                 } else {
                     TokenKind::Question
                 }

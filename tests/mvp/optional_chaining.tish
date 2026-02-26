@@ -1,0 +1,10 @@
+// MVP test: optional chaining ?. and nullish coalescing ??
+any x = null
+print(x ?? "default")
+any y = 0
+print(y ?? 99)
+any z = "hello"
+print(z ?? "default")
+any obj = { a: 1, b: 2 }
+print(obj?.a)
+print(obj?.c ?? "missing")

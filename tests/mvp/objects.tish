@@ -1,0 +1,9 @@
+// MVP test: plain objects and dot/index access
+any pt = { x: 10, y: 20 }
+print(pt.x)
+print(pt.y)
+print(pt["x"])
+any name = "y"
+print(pt[name])
+any rec = { a: 1, b: 2, c: 3 }
+print(rec.a, rec.b, rec.c)
