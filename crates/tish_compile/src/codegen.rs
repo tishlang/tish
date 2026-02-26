@@ -29,6 +29,8 @@ struct Codegen {
     indent: usize,
     func_index: usize,
     func_names: HashMap<Arc<str>, String>, // Tish name -> Rust fn name
+    loop_label_index: usize,
+    loop_stack: Vec<(String, Option<String>)>, // (break_label, continue_update) for innermost loop
 }
 
 impl Codegen {
@@ -38,6 +40,8 @@ impl Codegen {
             indent: 0,
             func_index: 0,
             func_names: HashMap::new(),
+            loop_label_index: 0,
+            loop_stack: Vec::new(),
         }
     }
 
@@ -194,9 +198,13 @@ impl Codegen {
             }
             Statement::While { cond, body, .. } => {
                 let c = self.emit_expr(cond)?;
-                self.write(&format!("while {}.is_truthy() {{\n", c));
+                let label = format!("'while_loop_{}", self.loop_label_index);
+                self.loop_label_index += 1;
+                self.loop_stack.push((label.clone(), None));
+                self.write(&format!("{}: while {}.is_truthy() {{\n", label, c));
                 self.indent += 1;
                 self.emit_statement(body)?;
+                self.loop_stack.pop();
                 self.indent -= 1;
                 self.writeln("}");
             }
@@ -247,17 +255,26 @@ impl Codegen {
                 if let Some(i) = init {
                     self.emit_statement(i)?;
                 }
+                let label = format!("'for_loop_{}", self.loop_label_index);
+                self.loop_label_index += 1;
                 let cond_expr = cond
                     .as_ref()
                     .map(|c| format!("{}.is_truthy()", self.emit_expr(c).unwrap()))
                     .unwrap_or_else(|| "true".to_string());
-                self.write(&format!("while {} {{\n", cond_expr));
+                let update_code = update.as_ref().map(|u| {
+                    let ue = self.emit_expr(u).unwrap();
+                    format!("{};", ue)
+                });
+                self.loop_stack.push((label.clone(), update_code));
+                self.write(&format!("{}: loop {{\n", label));
                 self.indent += 1;
+                self.writeln(&format!("if !{} {{ break; }}", cond_expr));
                 self.emit_statement(body)?;
                 if let Some(u) = update {
                     let ue = self.emit_expr(u)?;
                     self.writeln(&format!("{};", ue));
                 }
+                self.loop_stack.pop();
                 self.indent -= 1;
                 self.writeln("}");
                 self.indent -= 1;
@@ -271,8 +288,29 @@ impl Codegen {
                     .unwrap_or_else(|| "Value::Null".to_string());
                 self.writeln(&format!("return {};", v));
             }
-            Statement::Break { .. } => self.writeln("break;"),
-            Statement::Continue { .. } => self.writeln("continue;"),
+            Statement::Break { .. } => {
+                if let Some((label, _)) = self.loop_stack.last() {
+                    self.writeln(&format!("break {};", label));
+                } else {
+                    self.writeln("break;");
+                }
+            }
+            Statement::Continue { .. } => {
+                let snippet = self.loop_stack.last().map(|(label, update)| {
+                    (
+                        label.clone(),
+                        update.clone(),
+                    )
+                });
+                if let Some((label, Some(update))) = snippet {
+                    self.writeln(&update);
+                    self.writeln(&format!("continue {};", label));
+                } else if let Some((label, None)) = snippet {
+                    self.writeln(&format!("continue {};", label));
+                } else {
+                    self.writeln("continue;");
+                }
+            }
             Statement::Switch { expr, cases, default_body, .. } => {
                 let e = self.emit_expr(expr)?;
                 self.writeln(&format!("let _sv = {};", e));
@@ -308,10 +346,14 @@ impl Codegen {
             }
             Statement::DoWhile { body, cond, .. } => {
                 let c = self.emit_expr(cond)?;
-                self.write(&format!("loop {{\n"));
+                let label = format!("'dowhile_loop_{}", self.loop_label_index);
+                self.loop_label_index += 1;
+                self.loop_stack.push((label.clone(), None));
+                self.write(&format!("{}: loop {{\n", label));
                 self.indent += 1;
                 self.emit_statement(body)?;
                 self.write(&format!("if !{}.is_truthy() {{ break; }}\n", c));
+                self.loop_stack.pop();
                 self.indent -= 1;
                 self.writeln("}");
             }
