@@ -61,11 +61,13 @@ impl Evaluator {
         let scope = Scope::new();
         {
             let mut s = scope.borrow_mut();
-            // Builtin: print
-            s.set(
-                "print".into(),
-                Value::NativePrint,
-            );
+            s.set("print".into(), Value::NativePrint);
+            s.set("parseInt".into(), Value::NativeParseInt);
+            s.set("parseFloat".into(), Value::NativeParseFloat);
+            s.set("isFinite".into(), Value::NativeIsFinite);
+            s.set("isNaN".into(), Value::NativeIsNaN);
+            s.set("Infinity".into(), Value::Number(f64::INFINITY));
+            s.set("NaN".into(), Value::Number(f64::NAN));
         }
         Self { scope }
     }
@@ -408,7 +410,11 @@ impl Evaluator {
                     Value::Array(_) => "object".into(),
                     Value::Object(_) => "object".into(),
                     Value::Function { .. } => "function".into(),
-                    Value::NativePrint => "function".into(),
+                    Value::NativePrint
+                    | Value::NativeParseInt
+                    | Value::NativeParseFloat
+                    | Value::NativeIsFinite
+                    | Value::NativeIsNaN => "function".into(),
                 }))
             }
             Expr::PostfixInc { name, .. } => {
@@ -494,6 +500,46 @@ impl Evaluator {
             let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
             println!("{}", parts.join(" "));
             return Ok(Value::Null);
+        }
+        if matches!(f, Value::NativeParseInt) {
+            let s = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            let s = s.trim();
+            let radix = args
+                .get(1)
+                .and_then(|v| match v {
+                    Value::Number(n) => Some(*n as i32),
+                    _ => None,
+                })
+                .unwrap_or(10);
+            let n = if radix >= 2 && radix <= 36 {
+                let prefix: String = s
+                    .chars()
+                    .take_while(|c| *c == '-' || *c == '+' || c.is_digit(radix as u32))
+                    .collect();
+                i64::from_str_radix(&prefix, radix as u32).ok().map(|n| n as f64)
+            } else {
+                None
+            };
+            return Ok(Value::Number(n.unwrap_or(f64::NAN)));
+        }
+        if matches!(f, Value::NativeParseFloat) {
+            let s = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            let n: f64 = s.trim().parse().unwrap_or(f64::NAN);
+            return Ok(Value::Number(n));
+        }
+        if matches!(f, Value::NativeIsFinite) {
+            let b = args.get(0).map_or(false, |v| match v {
+                Value::Number(n) => n.is_finite(),
+                _ => false,
+            });
+            return Ok(Value::Bool(b));
+        }
+        if matches!(f, Value::NativeIsNaN) {
+            let b = args.get(0).map_or(true, |v| match v {
+                Value::Number(n) => n.is_nan(),
+                _ => true,
+            });
+            return Ok(Value::Bool(b));
         }
         let (params, body) = match f {
             Value::Function { params, body } => (params.clone(), Box::clone(body)),

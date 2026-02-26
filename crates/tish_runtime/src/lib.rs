@@ -104,6 +104,60 @@ pub fn print(args: &[Value]) {
     println!("{}", parts.join(" "));
 }
 
+/// Builtin parseInt: parse string to integer. Optional radix 2-36.
+pub fn parse_int(args: &[Value]) -> Value {
+    let s = args
+        .get(0)
+        .map(Value::to_display_string)
+        .unwrap_or_default();
+    let s = s.trim();
+    let radix = args
+        .get(1)
+        .and_then(|v| match v {
+            Value::Number(n) => Some(*n as i32),
+            _ => None,
+        })
+        .unwrap_or(10);
+    if radix >= 2 && radix <= 36 {
+        let prefix: String = s
+            .chars()
+            .take_while(|c| *c == '-' || *c == '+' || c.is_digit(radix as u32))
+            .collect();
+        if let Ok(n) = i64::from_str_radix(&prefix, radix as u32) {
+            return Value::Number(n as f64);
+        }
+    }
+    Value::Number(f64::NAN)
+}
+
+/// Builtin parseFloat: parse string to float.
+pub fn parse_float(args: &[Value]) -> Value {
+    let s = args
+        .get(0)
+        .map(Value::to_display_string)
+        .unwrap_or_default();
+    let n: f64 = s.trim().parse().unwrap_or(f64::NAN);
+    Value::Number(n)
+}
+
+/// Builtin isFinite: true if value is finite number.
+pub fn is_finite(args: &[Value]) -> Value {
+    let b = args.get(0).map_or(false, |v| match v {
+        Value::Number(n) => n.is_finite(),
+        _ => false,
+    });
+    Value::Bool(b)
+}
+
+/// Builtin isNaN: true if value is NaN or not a number.
+pub fn is_nan(args: &[Value]) -> Value {
+    let b = args.get(0).map_or(true, |v| match v {
+        Value::Number(n) => n.is_nan(),
+        _ => true,
+    });
+    Value::Bool(b)
+}
+
 /// Get property from object by string key.
 pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
     let key = key.as_ref();

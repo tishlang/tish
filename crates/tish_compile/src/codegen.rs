@@ -57,7 +57,7 @@ impl Codegen {
         self.write("use std::collections::HashMap;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tish_runtime::{print as tish_print, TishError, Value};\n\n");
+        self.write("use tish_runtime::{print as tish_print, is_finite as tish_is_finite, is_nan as tish_is_nan, parse_float as tish_parse_float, parse_int as tish_parse_int, TishError, Value};\n\n");
 
         // First pass: emit function declarations
         for stmt in &program.statements {
@@ -95,6 +95,12 @@ impl Codegen {
         self.writeln("Value::Null");
         self.indent -= 1;
         self.writeln("}));");
+        self.writeln("let parseInt = Value::Function(Rc::new(|args: &[Value]| tish_parse_int(args)));");
+        self.writeln("let parseFloat = Value::Function(Rc::new(|args: &[Value]| tish_parse_float(args)));");
+        self.writeln("let isFinite = Value::Function(Rc::new(|args: &[Value]| tish_is_finite(args)));");
+        self.writeln("let isNaN = Value::Function(Rc::new(|args: &[Value]| tish_is_nan(args)));");
+        self.writeln("let Infinity = Value::Number(f64::INFINITY);");
+        self.writeln("let NaN = Value::Number(f64::NAN);");
 
         for stmt in &program.statements {
             self.emit_statement(stmt)?;

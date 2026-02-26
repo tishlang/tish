@@ -1,5 +1,6 @@
-//! Integration tests: run MVP programs via interpreter and native backend.
-//! Compares output from both backends to ensure parity.
+//! Full-stack integration tests: parse, interpreter, and native compile of .tish files.
+//!
+//! Run with: `cargo test -p tish` (full stack) or `cargo test` (all packages).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -8,16 +9,43 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
+fn mvp_dir() -> PathBuf {
+    workspace_root().join("tests").join("mvp")
+}
+
 fn target_dir() -> PathBuf {
-    // Use CARGO_TARGET_DIR if set, else default to workspace/target
     std::env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| workspace_root().join("target"))
 }
 
+fn tish_bin() -> PathBuf {
+    target_dir().join("debug").join("tish")
+}
+
+/// Full stack: lex + parse each .tish file and assert no parse error.
+#[test]
+fn test_full_stack_parse() {
+    let mvp_dir = mvp_dir();
+    for entry in std::fs::read_dir(&mvp_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().map(|e| e == "tish").unwrap_or(false) {
+            let source = std::fs::read_to_string(&path).unwrap();
+            let result = tish_parser::parse(&source);
+            assert!(
+                result.is_ok(),
+                "Parse failed for {}: {:?}",
+                path.display(),
+                result.err()
+            );
+        }
+    }
+}
+
+/// Full stack: parse + interpret each .tish file and assert no runtime error.
 #[test]
 fn test_mvp_programs_interpreter() {
-    let mvp_dir = workspace_root().join("tests").join("mvp");
+    let mvp_dir = mvp_dir();
     for entry in std::fs::read_dir(&mvp_dir).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
@@ -34,13 +62,16 @@ fn test_mvp_programs_interpreter() {
     }
 }
 
+/// Full stack: compile each .tish file to native, run, and compare output to interpreter.
 #[test]
 fn test_mvp_programs_interpreter_vs_native() {
-    let mvp_dir = workspace_root().join("tests").join("mvp");
-    let tish_bin = target_dir().join("debug").join("tish");
-    if !tish_bin.exists() {
-        return;
-    }
+    let mvp_dir = mvp_dir();
+    let bin = tish_bin();
+    assert!(
+        bin.exists(),
+        "tish binary not found at {}. Run `cargo build -p tish` first.",
+        bin.display()
+    );
 
     // Test a representative subset (full set is slow - each compile takes ~1-2s)
     let test_files = [
@@ -52,6 +83,7 @@ fn test_mvp_programs_interpreter_vs_native() {
         "typeof.tish",
         "inc_dec.tish",
         "try_catch.tish",
+        "builtins.tish",
     ];
     for name in test_files {
         let path = mvp_dir.join(name);
@@ -61,7 +93,7 @@ fn test_mvp_programs_interpreter_vs_native() {
         {
             let path_str = path.to_string_lossy();
 
-            let interp_out = Command::new(&tish_bin)
+            let interp_out = Command::new(&bin)
                 .args(["run", &path_str])
                 .current_dir(workspace_root())
                 .output()
@@ -74,7 +106,7 @@ fn test_mvp_programs_interpreter_vs_native() {
             );
 
             let out_bin = std::env::temp_dir().join(format!("tish_test_{}", path.file_stem().unwrap().to_string_lossy()));
-            let compile_out = Command::new(&tish_bin)
+            let compile_out = Command::new(&bin)
                 .args(["compile", &path_str, "-o"])
                 .arg(out_bin.to_string_lossy().as_ref())
                 .current_dir(workspace_root())

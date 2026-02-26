@@ -19,6 +19,10 @@ pub enum Value {
         body: Box<Statement>,
     },
     NativePrint,
+    NativeParseInt,
+    NativeParseFloat,
+    NativeIsFinite,
+    NativeIsNaN,
 }
 
 impl Value {
@@ -41,6 +45,10 @@ impl Value {
             }
             Value::Function { .. } => "[Function]".to_string(),
             Value::NativePrint => "[NativeFunction: print]".to_string(),
+            Value::NativeParseInt => "[NativeFunction: parseInt]".to_string(),
+            Value::NativeParseFloat => "[NativeFunction: parseFloat]".to_string(),
+            Value::NativeIsFinite => "[NativeFunction: isFinite]".to_string(),
+            Value::NativeIsNaN => "[NativeFunction: isNaN]".to_string(),
         }
     }
 

@@ -11,8 +11,14 @@ cargo run -p tish -- run <file.tish>
 
 ## Test
 
+Full-stack tests (parse → interpret → compile) for all `tests/mvp/*.tish` files:
+
 ```bash
-cargo test
+cargo test -p tish
 ```
 
-MVP programs live in `tests/mvp/`. Run any with `cargo run -p tish -- run tests/mvp/<name>.tish`.
+- `test_full_stack_parse` – lex + parse each .tish file
+- `test_mvp_programs_interpreter` – parse + run via interpreter
+- `test_mvp_programs_interpreter_vs_native` – compile to native, run, compare output
+
+Run any MVP file: `cargo run -p tish -- run tests/mvp/<name>.tish`.
