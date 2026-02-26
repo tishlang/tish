@@ -694,10 +694,7 @@ impl Codegen {
                 "Value::Number({{ let Value::Number(a) = &{} else {{ panic!() }}; let Value::Number(b) = &{} else {{ panic!() }}; ((*a as i32) >> (*b as i32)) as f64 }})",
                 l, r
             ),
-            BinOp::In => format!(
-                "tish_in_operator(&[{}.clone(), {}.clone()])",
-                l, r
-            ),
+            BinOp::In => format!("tish_in_operator(&{}, &{})", l, r),
             BinOp::Eq | BinOp::Ne => {
                 return Err(CompileError {
                     message: "Loose equality not supported".to_string(),

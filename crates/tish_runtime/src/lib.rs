@@ -5,10 +5,13 @@
 
 use std::fmt;
 
-pub use tish_core::{
-    Value, NativeFn,
-    json_parse as core_json_parse, json_stringify as core_json_stringify,
-    percent_decode, percent_encode,
+pub use tish_core::Value;
+
+use tish_core::{
+    json_parse as core_json_parse,
+    json_stringify as core_json_stringify,
+    percent_decode,
+    percent_encode,
 };
 
 /// Error type for Tish throw/catch.
@@ -104,11 +107,11 @@ pub fn parse_float(args: &[Value]) -> Value {
 }
 
 pub fn is_finite(args: &[Value]) -> Value {
-    Value::Bool(args.first().map_or(false, |v| matches!(v, Value::Number(n) if n.is_finite())))
+    Value::Bool(args.first().is_some_and(|v| matches!(v, Value::Number(n) if n.is_finite())))
 }
 
 pub fn is_nan(args: &[Value]) -> Value {
-    Value::Bool(args.first().map_or(true, |v| matches!(v, Value::Number(n) if n.is_nan()) || !matches!(v, Value::Number(_))))
+    Value::Bool(args.first().is_none_or(|v| matches!(v, Value::Number(n) if n.is_nan()) || !matches!(v, Value::Number(_))))
 }
 
 pub fn decode_uri(args: &[Value]) -> Value {

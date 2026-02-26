@@ -13,7 +13,7 @@ pub fn json_parse(json: &str) -> Result<Value, String> {
     }
     let (value, rest) = parse_value(json)?;
     if !rest.trim().is_empty() {
-        return Err(format!("SyntaxError: Unexpected token at end of JSON"));
+        return Err("SyntaxError: Unexpected token at end of JSON".to_string());
     }
     Ok(value)
 }
@@ -81,18 +81,18 @@ fn parse_value(input: &str) -> Result<(Value, &str), String> {
 }
 
 fn parse_null(input: &str) -> Result<(Value, &str), String> {
-    if input.starts_with("null") {
-        Ok((Value::Null, &input[4..]))
+    if let Some(rest) = input.strip_prefix("null") {
+        Ok((Value::Null, rest))
     } else {
         Err("Expected 'null'".to_string())
     }
 }
 
 fn parse_bool(input: &str) -> Result<(Value, &str), String> {
-    if input.starts_with("true") {
-        Ok((Value::Bool(true), &input[4..]))
-    } else if input.starts_with("false") {
-        Ok((Value::Bool(false), &input[5..]))
+    if let Some(rest) = input.strip_prefix("true") {
+        Ok((Value::Bool(true), rest))
+    } else if let Some(rest) = input.strip_prefix("false") {
+        Ok((Value::Bool(false), rest))
     } else {
         Err("Expected 'true' or 'false'".to_string())
     }
@@ -213,8 +213,8 @@ fn parse_array(input: &str) -> Result<(Value, &str), String> {
     let mut items = Vec::new();
 
     input = input.trim_start();
-    if input.starts_with(']') {
-        return Ok((Value::Array(Rc::new(items)), &input[1..]));
+    if let Some(rest) = input.strip_prefix(']') {
+        return Ok((Value::Array(Rc::new(items)), rest));
     }
 
     loop {
@@ -235,8 +235,8 @@ fn parse_object(input: &str) -> Result<(Value, &str), String> {
     let mut map = HashMap::new();
 
     input = input.trim_start();
-    if input.starts_with('}') {
-        return Ok((Value::Object(Rc::new(map)), &input[1..]));
+    if let Some(rest) = input.strip_prefix('}') {
+        return Ok((Value::Object(Rc::new(map)), rest));
     }
 
     loop {

@@ -127,8 +127,4 @@ impl TokenKind {
             _ => TokenKind::Ident,
         }
     }
-
-    pub fn is_eof(&self) -> bool {
-        matches!(self, TokenKind::Eof)
-    }
 }

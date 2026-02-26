@@ -2,7 +2,7 @@
 
 mod parser;
 
-pub use parser::Parser;
+use parser::Parser;
 
 use tish_ast::Program;
 use tish_lexer::Lexer;

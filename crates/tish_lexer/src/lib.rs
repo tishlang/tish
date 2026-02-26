@@ -80,8 +80,8 @@ impl<'a> Lexer<'a> {
                 _ => break,
             }
         }
-        // Normalize: N spaces = 1 level (round down)
-        (level + INDENT_WIDTH - 1) / INDENT_WIDTH
+        // Normalize: N spaces = 1 level (round up)
+        level.div_ceil(INDENT_WIDTH)
     }
 
     fn skip_whitespace(&mut self) {
@@ -243,7 +243,7 @@ impl<'a> Lexer<'a> {
                 if let Some(tok) = self.pending_dedents.pop_front() {
                     return Ok(Some(tok));
                 }
-                while self.indent_stack.len() > 1 {
+                if self.indent_stack.len() > 1 {
                     self.indent_stack.pop();
                     return Ok(Some(Token {
                         kind: TokenKind::Dedent,

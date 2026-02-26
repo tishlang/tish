@@ -57,6 +57,7 @@ pub struct Evaluator {
 }
 
 impl Evaluator {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let scope = Scope::new();
         {
@@ -164,7 +165,7 @@ impl Evaluator {
                     _ => {
                         return Err(EvalError::Error(format!(
                             "for-of requires iterable (array or string), got {}",
-                            iter_val.to_string()
+                            iter_val
                         )));
                     }
                 };
@@ -543,8 +544,8 @@ impl Evaluator {
                 (Value::String(a), Value::String(b)) => {
                     Ok(Value::String(format!("{}{}", a, b).into()))
                 }
-                (Value::String(a), b) => Ok(Value::String(format!("{}{}", a, b.to_string()).into())),
-                (a, Value::String(b)) => Ok(Value::String(format!("{}{}", a.to_string(), b).into())),
+                (Value::String(a), b) => Ok(Value::String(format!("{}{}", a, b).into())),
+                (a, Value::String(b)) => Ok(Value::String(format!("{}{}", a, b).into())),
                 _ => Err(format!("Cannot add {:?} and {:?}", l, r)),
             },
             BinOp::Sub => self.binop_number(l, r, |a, b| Value::Number(a - b)),
@@ -646,7 +647,7 @@ impl Evaluator {
 
     fn call_func(&self, f: &Value, args: &[Value]) -> Result<Value, EvalError> {
         if matches!(f, Value::NativeConsoleDebug) {
-            if Self::get_log_level() <= 0 {
+            if Self::get_log_level() == 0 {
                 let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
                 println!("{}", parts.join(" "));
             }
@@ -679,7 +680,7 @@ impl Evaluator {
             return Ok(Value::Null);
         }
         if matches!(f, Value::NativeParseInt) {
-            let s = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            let s = args.first().map(|v| v.to_string()).unwrap_or_default();
             let s = s.trim();
             let radix = args
                 .get(1)
@@ -688,7 +689,7 @@ impl Evaluator {
                     _ => None,
                 })
                 .unwrap_or(10);
-            let n = if radix >= 2 && radix <= 36 {
+            let n = if (2..=36).contains(&radix) {
                 let prefix: String = s
                     .chars()
                     .take_while(|c| *c == '-' || *c == '+' || c.is_digit(radix as u32))
@@ -700,20 +701,17 @@ impl Evaluator {
             return Ok(Value::Number(n.unwrap_or(f64::NAN)));
         }
         if matches!(f, Value::NativeParseFloat) {
-            let s = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            let s = args.first().map(|v| v.to_string()).unwrap_or_default();
             let n: f64 = s.trim().parse().unwrap_or(f64::NAN);
             return Ok(Value::Number(n));
         }
         if matches!(f, Value::NativeIsFinite) {
-            let b = args.get(0).map_or(false, |v| match v {
-                Value::Number(n) => n.is_finite(),
-                _ => false,
-            });
+            let b = args.first().is_some_and(|v| matches!(v, Value::Number(n) if n.is_finite()));
             return Ok(Value::Bool(b));
         }
         if matches!(f, Value::NativeMathAbs) {
             let n = args
-                .get(0)
+                .first()
                 .and_then(|v| match v {
                     Value::Number(n) => Some(*n),
                     _ => None,
@@ -723,7 +721,7 @@ impl Evaluator {
         }
         if matches!(f, Value::NativeMathSqrt) {
             let n = args
-                .get(0)
+                .first()
                 .and_then(|v| match v {
                     Value::Number(n) => Some(*n),
                     _ => None,
@@ -754,47 +752,44 @@ impl Evaluator {
             return Ok(Value::Number(if n == f64::NEG_INFINITY { f64::NAN } else { n }));
         }
         if matches!(f, Value::NativeMathFloor) {
-            let n = args.get(0).and_then(|v| match v {
+            let n = args.first().and_then(|v| match v {
                 Value::Number(n) => Some(*n),
                 _ => None,
             }).unwrap_or(f64::NAN);
             return Ok(Value::Number(n.floor()));
         }
         if matches!(f, Value::NativeMathCeil) {
-            let n = args.get(0).and_then(|v| match v {
+            let n = args.first().and_then(|v| match v {
                 Value::Number(n) => Some(*n),
                 _ => None,
             }).unwrap_or(f64::NAN);
             return Ok(Value::Number(n.ceil()));
         }
         if matches!(f, Value::NativeMathRound) {
-            let n = args.get(0).and_then(|v| match v {
+            let n = args.first().and_then(|v| match v {
                 Value::Number(n) => Some(*n),
                 _ => None,
             }).unwrap_or(f64::NAN);
             return Ok(Value::Number(n.round()));
         }
         if matches!(f, Value::NativeIsNaN) {
-            let b = args.get(0).map_or(true, |v| match v {
-                Value::Number(n) => n.is_nan(),
-                _ => true,
-            });
+            let b = args.first().is_none_or(|v| matches!(v, Value::Number(n) if n.is_nan()) || !matches!(v, Value::Number(_)));
             return Ok(Value::Bool(b));
         }
         if matches!(f, Value::NativeJsonParse) {
-            let s = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            let s = args.first().map(|v| v.to_string()).unwrap_or_default();
             return Ok(Self::json_parse(&s));
         }
         if matches!(f, Value::NativeJsonStringify) {
-            let v = args.get(0).cloned().unwrap_or(Value::Null);
+            let v = args.first().cloned().unwrap_or(Value::Null);
             return Ok(Value::String(Self::json_stringify_value(&v).into()));
         }
         if matches!(f, Value::NativeDecodeURI) {
-            let s = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            let s = args.first().map(|v| v.to_string()).unwrap_or_default();
             return Ok(Value::String(tish_core::percent_decode(&s).unwrap_or(s).into()));
         }
         if matches!(f, Value::NativeEncodeURI) {
-            let s = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            let s = args.first().map(|v| v.to_string()).unwrap_or_default();
             return Ok(Value::String(tish_core::percent_encode(&s).into()));
         }
         let (params, rest_param, body) = match f {
@@ -816,9 +811,7 @@ impl Evaluator {
                 s.set(rest_name, Value::Array(Rc::new(rest_vals)));
             }
         }
-        let mut eval = Evaluator {
-            scope: scope,
-        };
+        let mut eval = Evaluator { scope };
         match eval.eval_statement(&body) {
             Ok(v) => Ok(v),
             Err(EvalError::Return(v)) => Ok(v),
@@ -1021,42 +1014,38 @@ impl Evaluator {
             Ok((v, rest))
         } else if s.starts_with('[') {
             let mut depth = 0;
-            let mut i = 0;
-            for c in s.chars() {
+            for (i, c) in s.char_indices() {
                 if c == '[' {
                     depth += 1;
                 } else if c == ']' {
                     depth -= 1;
                     if depth == 0 {
                         let v = Self::json_parse_array(&s[..=i])?;
-                        return Ok((v, &s[i + 1..]));
+                        return Ok((v, &s[i + c.len_utf8()..]));
                     }
                 }
-                i += 1;
             }
             Err(())
         } else if s.starts_with('{') {
             let mut depth = 0;
-            let mut i = 0;
-            for c in s.chars() {
+            for (i, c) in s.char_indices() {
                 if c == '{' {
                     depth += 1;
                 } else if c == '}' {
                     depth -= 1;
                     if depth == 0 {
                         let v = Self::json_parse_object(&s[..=i])?;
-                        return Ok((v, &s[i + 1..]));
+                        return Ok((v, &s[i + c.len_utf8()..]));
                     }
                 }
-                i += 1;
             }
             Err(())
-        } else if s.starts_with("null") {
-            Ok((Value::Null, &s[4..]))
-        } else if s.starts_with("true") {
-            Ok((Value::Bool(true), &s[4..]))
-        } else if s.starts_with("false") {
-            Ok((Value::Bool(false), &s[5..]))
+        } else if let Some(rest) = s.strip_prefix("null") {
+            Ok((Value::Null, rest))
+        } else if let Some(rest) = s.strip_prefix("true") {
+            Ok((Value::Bool(true), rest))
+        } else if let Some(rest) = s.strip_prefix("false") {
+            Ok((Value::Bool(false), rest))
         } else {
             let end = s
                 .find(|c: char| !c.is_ascii_digit() && c != '-' && c != '+' && c != '.' && c != 'e' && c != 'E')
@@ -1142,25 +1131,13 @@ enum EvalError {
     Error(String),
 }
 
-impl EvalError {
-    fn to_string(&self) -> String {
-        match self {
-            EvalError::Return(_) => "return".to_string(),
-            EvalError::Break => "break".to_string(),
-            EvalError::Continue => "continue".to_string(),
-            EvalError::Throw(v) => v.to_string(),
-            EvalError::Error(s) => s.clone(),
-        }
-    }
-}
-
 impl std::fmt::Display for EvalError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             EvalError::Return(_) => write!(f, "return"),
             EvalError::Break => write!(f, "break"),
             EvalError::Continue => write!(f, "continue"),
-            EvalError::Throw(v) => write!(f, "{}", v.to_string()),
+            EvalError::Throw(v) => write!(f, "{}", v),
             EvalError::Error(s) => write!(f, "{}", s),
         }
     }

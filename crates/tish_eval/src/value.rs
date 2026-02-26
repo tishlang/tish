@@ -41,58 +41,60 @@ pub enum Value {
     NativeEncodeURI,
 }
 
-impl Value {
-    pub fn to_string(&self) -> String {
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Number(n) => {
                 if n.is_nan() {
-                    "NaN".to_string()
+                    write!(f, "NaN")
                 } else if *n == f64::INFINITY {
-                    "Infinity".to_string()
+                    write!(f, "Infinity")
                 } else if *n == f64::NEG_INFINITY {
-                    "-Infinity".to_string()
+                    write!(f, "-Infinity")
                 } else {
-                    n.to_string()
+                    write!(f, "{}", n)
                 }
             }
-            Value::String(s) => s.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "null".to_string(),
+            Value::String(s) => write!(f, "{}", s),
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Null => write!(f, "null"),
             Value::Array(arr) => {
                 let inner: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", inner.join(", "))
+                write!(f, "[{}]", inner.join(", "))
             }
             Value::Object(obj) => {
                 let inner: Vec<String> = obj
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", k.as_ref(), v.to_string()))
+                    .map(|(k, v)| format!("{}: {}", k.as_ref(), v))
                     .collect();
-                format!("{{{}}}", inner.join(", "))
+                write!(f, "{{{}}}", inner.join(", "))
             }
-            Value::Function { .. } => "[Function]".to_string(),
-            Value::NativeConsoleDebug => "[NativeFunction: console.debug]".to_string(),
-            Value::NativeConsoleInfo => "[NativeFunction: console.info]".to_string(),
-            Value::NativeConsoleLog => "[NativeFunction: console.log]".to_string(),
-            Value::NativeConsoleWarn => "[NativeFunction: console.warn]".to_string(),
-            Value::NativeConsoleError => "[NativeFunction: console.error]".to_string(),
-            Value::NativeParseInt => "[NativeFunction: parseInt]".to_string(),
-            Value::NativeParseFloat => "[NativeFunction: parseFloat]".to_string(),
-            Value::NativeIsFinite => "[NativeFunction: isFinite]".to_string(),
-            Value::NativeIsNaN => "[NativeFunction: isNaN]".to_string(),
-            Value::NativeMathAbs => "[NativeFunction: Math.abs]".to_string(),
-            Value::NativeMathSqrt => "[NativeFunction: Math.sqrt]".to_string(),
-            Value::NativeMathMin => "[NativeFunction: Math.min]".to_string(),
-            Value::NativeMathMax => "[NativeFunction: Math.max]".to_string(),
-            Value::NativeMathFloor => "[NativeFunction: Math.floor]".to_string(),
-            Value::NativeMathCeil => "[NativeFunction: Math.ceil]".to_string(),
-            Value::NativeMathRound => "[NativeFunction: Math.round]".to_string(),
-            Value::NativeJsonParse => "[NativeFunction: JSON.parse]".to_string(),
-            Value::NativeJsonStringify => "[NativeFunction: JSON.stringify]".to_string(),
-            Value::NativeDecodeURI => "[NativeFunction: decodeURI]".to_string(),
-            Value::NativeEncodeURI => "[NativeFunction: encodeURI]".to_string(),
+            Value::Function { .. } => write!(f, "[Function]"),
+            Value::NativeConsoleDebug => write!(f, "[NativeFunction: console.debug]"),
+            Value::NativeConsoleInfo => write!(f, "[NativeFunction: console.info]"),
+            Value::NativeConsoleLog => write!(f, "[NativeFunction: console.log]"),
+            Value::NativeConsoleWarn => write!(f, "[NativeFunction: console.warn]"),
+            Value::NativeConsoleError => write!(f, "[NativeFunction: console.error]"),
+            Value::NativeParseInt => write!(f, "[NativeFunction: parseInt]"),
+            Value::NativeParseFloat => write!(f, "[NativeFunction: parseFloat]"),
+            Value::NativeIsFinite => write!(f, "[NativeFunction: isFinite]"),
+            Value::NativeIsNaN => write!(f, "[NativeFunction: isNaN]"),
+            Value::NativeMathAbs => write!(f, "[NativeFunction: Math.abs]"),
+            Value::NativeMathSqrt => write!(f, "[NativeFunction: Math.sqrt]"),
+            Value::NativeMathMin => write!(f, "[NativeFunction: Math.min]"),
+            Value::NativeMathMax => write!(f, "[NativeFunction: Math.max]"),
+            Value::NativeMathFloor => write!(f, "[NativeFunction: Math.floor]"),
+            Value::NativeMathCeil => write!(f, "[NativeFunction: Math.ceil]"),
+            Value::NativeMathRound => write!(f, "[NativeFunction: Math.round]"),
+            Value::NativeJsonParse => write!(f, "[NativeFunction: JSON.parse]"),
+            Value::NativeJsonStringify => write!(f, "[NativeFunction: JSON.stringify]"),
+            Value::NativeDecodeURI => write!(f, "[NativeFunction: decodeURI]"),
+            Value::NativeEncodeURI => write!(f, "[NativeFunction: encodeURI]"),
         }
     }
+}
 
+impl Value {
     pub fn is_truthy(&self) -> bool {
         match self {
             Value::Null => false,

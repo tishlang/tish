@@ -134,10 +134,12 @@ fn test_mvp_programs_interpreter_vs_native() {
                 .current_dir(workspace_root())
                 .output()
                 .expect("run tish compile");
-            if !compile_out.status.success() {
-                eprintln!("Compile failed for {}, skipping native compare", path.display());
-                continue;
-            }
+            assert!(
+                compile_out.status.success(),
+                "Compile failed for {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&compile_out.stderr)
+            );
 
             let native_out = Command::new(&out_bin)
                 .current_dir(workspace_root())

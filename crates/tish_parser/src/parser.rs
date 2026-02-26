@@ -148,9 +148,7 @@ impl<'a> Parser<'a> {
             statements.push(self.parse_statement()?);
         }
 
-        if matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
-            self.advance();
-        } else if matches!(self.peek_kind(), Some(TokenKind::Dedent)) {
+        if matches!(self.peek_kind(), Some(TokenKind::RBrace | TokenKind::Dedent)) {
             self.advance();
         }
 
@@ -172,8 +170,7 @@ impl<'a> Parser<'a> {
             .expect(TokenKind::Ident)?
             .literal
             .clone()
-            .ok_or("Expected identifier")?
-            .into();
+            .ok_or("Expected identifier")?;
         let init = if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
             self.advance();
             Some(self.parse_expr()?)
@@ -193,8 +190,7 @@ impl<'a> Parser<'a> {
             .expect(TokenKind::Ident)?
             .literal
             .clone()
-            .ok_or("Expected function name")?
-            .into();
+            .ok_or("Expected function name")?;
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::new();
         let mut rest_param = None;
@@ -205,8 +201,7 @@ impl<'a> Parser<'a> {
                     .expect(TokenKind::Ident)?
                     .literal
                     .clone()
-                    .ok_or("Expected rest param name")?
-                    .into();
+                    .ok_or("Expected rest param name")?;
                 rest_param = Some(name);
                 if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
                     return Err("Rest parameter must be last".to_string());
@@ -217,8 +212,7 @@ impl<'a> Parser<'a> {
                 .expect(TokenKind::Ident)?
                 .literal
                 .clone()
-                .ok_or("Expected param name")?
-                .into();
+                .ok_or("Expected param name")?;
             params.push(p);
             if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
                 self.expect(TokenKind::Comma)?;
@@ -233,7 +227,7 @@ impl<'a> Parser<'a> {
             Box::new(Statement::Block {
                 statements: vec![Statement::Return {
                     value: Some(expr),
-                    span: span.clone(),
+                    span,
                 }],
                 span,
             })
@@ -293,8 +287,7 @@ impl<'a> Parser<'a> {
                 .expect(TokenKind::Ident)?
                 .literal
                 .clone()
-                .ok_or("Expected identifier")?
-                .into();
+                .ok_or("Expected identifier")?;
             if matches!(self.peek_kind(), Some(TokenKind::Of)) {
                 self.advance();
                 let iterable = self.parse_expr()?;
@@ -339,9 +332,7 @@ impl<'a> Parser<'a> {
         if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
             self.advance();
         }
-        let cond = if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
-            None
-        } else if matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+        let cond = if matches!(self.peek_kind(), Some(TokenKind::Semicolon | TokenKind::RParen)) {
             None
         } else {
             let c = self.parse_expr()?;
@@ -461,8 +452,7 @@ impl<'a> Parser<'a> {
         let catch_param = self
             .expect(TokenKind::Ident)?
             .literal
-            .clone()
-            .map(|s| s.into());
+            .clone();
         self.expect(TokenKind::RParen)?;
         let catch_body = Box::new(self.parse_block_or_statement()?);
         Ok(Statement::Try {
@@ -822,11 +812,7 @@ impl<'a> Parser<'a> {
 
     fn parse_postfix(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_primary()?;
-        loop {
-            let kind = match self.peek_kind() {
-                Some(k) => k,
-                None => break,
-            };
+        while let Some(kind) = self.peek_kind() {
             match kind {
                 TokenKind::LParen => {
                     self.advance();
@@ -853,8 +839,7 @@ impl<'a> Parser<'a> {
                         .expect(TokenKind::Ident)?
                         .literal
                         .clone()
-                        .ok_or("Expected property name")?
-                        .into();
+                        .ok_or("Expected property name")?;
                     let start = expr.span().start;
                     let end = self.peek().map(|x| x.span.start).unwrap_or(start);
                     expr = Expr::Member {
@@ -952,7 +937,7 @@ impl<'a> Parser<'a> {
                 span,
             }),
             TokenKind::Ident => Ok(Expr::Ident {
-                name: t.literal.clone().ok_or("Expected ident")?.into(),
+                name: t.literal.clone().ok_or("Expected ident")?,
                 span,
             }),
             TokenKind::LParen => {
@@ -984,8 +969,7 @@ impl<'a> Parser<'a> {
                         .expect(TokenKind::Ident)?
                         .literal
                         .clone()
-                        .ok_or("Expected key")?
-                        .into();
+                        .ok_or("Expected key")?;
                     self.expect(TokenKind::Colon)?;
                     let value = self.parse_expr()?;
                     props.push((key, value));
@@ -1015,23 +999,23 @@ trait ExprSpan {
 impl ExprSpan for Expr {
     fn span(&self) -> Span {
         match self {
-            Expr::Literal { span, .. } => span.clone(),
-            Expr::Ident { span, .. } => span.clone(),
-            Expr::Binary { span, .. } => span.clone(),
-            Expr::Unary { span, .. } => span.clone(),
-            Expr::Call { span, .. } => span.clone(),
-            Expr::Member { span, .. } => span.clone(),
-            Expr::Index { span, .. } => span.clone(),
-            Expr::Conditional { span, .. } => span.clone(),
-            Expr::NullishCoalesce { span, .. } => span.clone(),
-            Expr::Array { span, .. } => span.clone(),
-            Expr::Object { span, .. } => span.clone(),
-            Expr::Assign { span, .. } => span.clone(),
-            Expr::TypeOf { span, .. } => span.clone(),
-            Expr::PostfixInc { span, .. } => span.clone(),
-            Expr::PostfixDec { span, .. } => span.clone(),
-            Expr::PrefixInc { span, .. } => span.clone(),
-            Expr::PrefixDec { span, .. } => span.clone(),
+            Expr::Literal { span, .. } => *span,
+            Expr::Ident { span, .. } => *span,
+            Expr::Binary { span, .. } => *span,
+            Expr::Unary { span, .. } => *span,
+            Expr::Call { span, .. } => *span,
+            Expr::Member { span, .. } => *span,
+            Expr::Index { span, .. } => *span,
+            Expr::Conditional { span, .. } => *span,
+            Expr::NullishCoalesce { span, .. } => *span,
+            Expr::Array { span, .. } => *span,
+            Expr::Object { span, .. } => *span,
+            Expr::Assign { span, .. } => *span,
+            Expr::TypeOf { span, .. } => *span,
+            Expr::PostfixInc { span, .. } => *span,
+            Expr::PostfixDec { span, .. } => *span,
+            Expr::PrefixInc { span, .. } => *span,
+            Expr::PrefixDec { span, .. } => *span,
         }
     }
 }

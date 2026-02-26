@@ -6,9 +6,6 @@ use std::path::Path;
 use std::process::Command;
 
 use clap::{Parser, Subcommand};
-use tish_compile;
-use tish_eval;
-use tish_parser;
 
 #[derive(Parser)]
 #[command(name = "tish")]
@@ -63,7 +60,7 @@ fn run_file(path: &str) -> Result<(), String> {
     let source = fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
     let value = tish_eval::run(&source)?;
     if !matches!(value, tish_eval::Value::Null) {
-        println!("{}", value.to_string());
+        println!("{}", value);
     }
     Ok(())
 }
@@ -91,7 +88,7 @@ fn run_repl() -> Result<(), String> {
                         statements: vec![stmt.clone()],
                     }) {
                         if !matches!(v, tish_eval::Value::Null) {
-                            println!("{}", v.to_string());
+                            println!("{}", v);
                         }
                     }
                 }
