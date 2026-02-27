@@ -33,11 +33,13 @@ impl Scope {
     }
 
     fn get(&self, name: &str) -> Option<Value> {
-        self.vars.get(name).cloned().or_else(|| {
-            self.parent
-                .as_ref()
-                .and_then(|p| p.borrow().get(name))
-        })
+        if let Some(v) = self.vars.get(name) {
+            return Some(v.clone());
+        }
+        if let Some(ref parent) = self.parent {
+            return parent.borrow().get(name);
+        }
+        None
     }
 
     fn set(&mut self, name: Arc<str>, value: Value, mutable: bool) {
@@ -48,17 +50,17 @@ impl Scope {
     }
 
     fn assign(&mut self, name: &str, value: Value) -> Result<bool, String> {
-        if self.vars.contains_key(name) {
+        if let Some(existing) = self.vars.get_mut(name) {
             if self.consts.contains(name) {
                 return Err(format!("Cannot assign to const variable: {}", name));
             }
-            self.vars.insert(name.into(), value);
+            *existing = value;
             return Ok(true);
         }
-        self.parent
-            .as_ref()
-            .map(|p| p.borrow_mut().assign(name, value))
-            .unwrap_or(Ok(false))
+        if let Some(ref parent) = self.parent {
+            return parent.borrow_mut().assign(name, value);
+        }
+        Ok(false)
     }
 }
 
@@ -536,39 +538,55 @@ impl Evaluator {
                                 return Ok(obj.clone());
                             }
                             "sort" => {
-                                let comparator = arg_vals.get(0).cloned();
+                                let comparator = arg_vals.into_iter().next();
                                 let mut arr_mut = arr.borrow_mut();
-                                
+
                                 if let Some(cmp_fn) = comparator {
-                                    let mut indices: Vec<usize> = (0..arr_mut.len()).collect();
-                                    let arr_clone: Vec<Value> = arr_mut.clone();
-                                    
-                                    indices.sort_by(|&a, &b| {
-                                        let va = &arr_clone[a];
-                                        let vb = &arr_clone[b];
-                                        let result = self.call_func(&cmp_fn, &[va.clone(), vb.clone()]);
-                                        match result {
-                                            Ok(Value::Number(n)) => {
-                                                if n < 0.0 {
-                                                    std::cmp::Ordering::Less
-                                                } else if n > 0.0 {
-                                                    std::cmp::Ordering::Greater
-                                                } else {
-                                                    std::cmp::Ordering::Equal
-                                                }
+                                    // Check for fast path: (a, b) => a - b numeric ascending
+                                    let is_numeric_asc = Self::is_numeric_sort_comparator(&cmp_fn, false);
+                                    let is_numeric_desc = !is_numeric_asc && Self::is_numeric_sort_comparator(&cmp_fn, true);
+
+                                    if is_numeric_asc {
+                                        // Fast path: numeric ascending sort
+                                        arr_mut.sort_by(|a, b| {
+                                            let na = match a { Value::Number(n) => *n, _ => f64::NAN };
+                                            let nb = match b { Value::Number(n) => *n, _ => f64::NAN };
+                                            na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
+                                        });
+                                    } else if is_numeric_desc {
+                                        // Fast path: numeric descending sort
+                                        arr_mut.sort_by(|a, b| {
+                                            let na = match a { Value::Number(n) => *n, _ => f64::NAN };
+                                            let nb = match b { Value::Number(n) => *n, _ => f64::NAN };
+                                            nb.partial_cmp(&na).unwrap_or(std::cmp::Ordering::Equal)
+                                        });
+                                    } else {
+                                        // General case: use comparator function
+                                        let len = arr_mut.len();
+                                        let mut indices: Vec<usize> = (0..len).collect();
+                                        let arr_values: Vec<Value> = std::mem::take(&mut *arr_mut);
+
+                                        indices.sort_by(|&i, &j| {
+                                            let result = self.call_func(&cmp_fn, &[arr_values[i].clone(), arr_values[j].clone()]);
+                                            match result {
+                                                Ok(Value::Number(n)) if n < 0.0 => std::cmp::Ordering::Less,
+                                                Ok(Value::Number(n)) if n > 0.0 => std::cmp::Ordering::Greater,
+                                                _ => std::cmp::Ordering::Equal,
                                             }
-                                            _ => std::cmp::Ordering::Equal,
-                                        }
-                                    });
-                                    
-                                    let sorted: Vec<Value> = indices.iter().map(|&i| arr_clone[i].clone()).collect();
-                                    *arr_mut = sorted;
+                                        });
+
+                                        *arr_mut = indices.into_iter().map(|i| arr_values[i].clone()).collect();
+                                    }
                                 } else {
-                                    arr_mut.sort_by(|a, b| {
-                                        let sa = a.to_string();
-                                        let sb = b.to_string();
-                                        sa.cmp(&sb)
-                                    });
+                                    // Default string sort - precompute strings once
+                                    let mut pairs: Vec<(String, usize)> = arr_mut
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, v)| (v.to_string(), i))
+                                        .collect();
+                                    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                                    let arr_values: Vec<Value> = std::mem::take(&mut *arr_mut);
+                                    *arr_mut = pairs.into_iter().map(|(_, i)| arr_values[i].clone()).collect();
                                 }
                                 drop(arr_mut);
                                 return Ok(obj.clone());
@@ -1324,10 +1342,25 @@ impl Evaluator {
             BinOp::Add => match (l, r) {
                 (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
                 (Value::String(a), Value::String(b)) => {
-                    Ok(Value::String(format!("{}{}", a, b).into()))
+                    let mut s = String::with_capacity(a.len() + b.len());
+                    s.push_str(a);
+                    s.push_str(b);
+                    Ok(Value::String(s.into()))
                 }
-                (Value::String(a), b) => Ok(Value::String(format!("{}{}", a, b).into())),
-                (a, Value::String(b)) => Ok(Value::String(format!("{}{}", a, b).into())),
+                (Value::String(a), b) => {
+                    let b_str = b.to_string();
+                    let mut s = String::with_capacity(a.len() + b_str.len());
+                    s.push_str(a);
+                    s.push_str(&b_str);
+                    Ok(Value::String(s.into()))
+                }
+                (a, Value::String(b)) => {
+                    let a_str = a.to_string();
+                    let mut s = String::with_capacity(a_str.len() + b.len());
+                    s.push_str(&a_str);
+                    s.push_str(b);
+                    Ok(Value::String(s.into()))
+                }
                 _ => Err(format!("Cannot add {:?} and {:?}", l, r)),
             },
             BinOp::Sub => self.binop_number(l, r, |a, b| Value::Number(a - b)),
@@ -1370,6 +1403,47 @@ impl Evaluator {
             }
             BinOp::Eq | BinOp::Ne => Err("Loose equality not supported".to_string()),
         }
+    }
+
+    /// Check if a function value is the common numeric sort comparator pattern.
+    /// descending = false: checks for `(a, b) => a - b`
+    /// descending = true: checks for `(a, b) => b - a`
+    fn is_numeric_sort_comparator(f: &Value, descending: bool) -> bool {
+        if let Value::Function { params, body, defaults, rest_param } = f {
+            // Must have exactly 2 params, no defaults, no rest
+            if params.len() != 2 || rest_param.is_some() {
+                return false;
+            }
+            if defaults.iter().any(|d| d.is_some()) {
+                return false;
+            }
+
+            // Body must be a return of a - b (or b - a for descending)
+            let param_a = &params[0];
+            let param_b = &params[1];
+
+            // Check for both Statement::Return and Statement::ExprStmt (arrow implicit return)
+            let expr = match body.as_ref() {
+                Statement::Return { value: Some(e), .. } => e,
+                Statement::ExprStmt { expr: e, .. } => e,
+                _ => return false,
+            };
+
+            // Check for binary subtraction
+            if let Expr::Binary { left, op: BinOp::Sub, right, .. } = expr {
+                // Check left is Ident(a) and right is Ident(b)
+                let (expected_left, expected_right) = if descending {
+                    (param_b, param_a)  // b - a
+                } else {
+                    (param_a, param_b)  // a - b
+                };
+
+                if let (Expr::Ident { name: left_name, .. }, Expr::Ident { name: right_name, .. }) = (left.as_ref(), right.as_ref()) {
+                    return left_name == expected_left && right_name == expected_right;
+                }
+            }
+        }
+        false
     }
 
     fn to_int32(v: &Value) -> Result<i32, String> {

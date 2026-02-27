@@ -125,6 +125,7 @@ fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
         .to_string()
         .replace('\\', "/");
 
+    #[allow(unused_mut)]
     let mut features: Vec<&str> = Vec::new();
     #[cfg(feature = "http")]
     features.push("http");
