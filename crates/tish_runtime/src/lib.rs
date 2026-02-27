@@ -175,6 +175,170 @@ fn extract_num(v: Option<&Value>) -> Option<f64> {
     v.and_then(|v| match v { Value::Number(n) => Some(*n), _ => None })
 }
 
+// ============== New Math Functions ==============
+
+pub fn math_random(_args: &[Value]) -> Value {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let random = RandomState::new().build_hasher().finish() as f64 / u64::MAX as f64;
+    Value::Number(random)
+}
+
+pub fn math_pow(args: &[Value]) -> Value {
+    let base = extract_num(args.first()).unwrap_or(f64::NAN);
+    let exp = extract_num(args.get(1)).unwrap_or(f64::NAN);
+    Value::Number(base.powf(exp))
+}
+
+pub fn math_sin(args: &[Value]) -> Value {
+    let n = extract_num(args.first()).unwrap_or(f64::NAN);
+    Value::Number(n.sin())
+}
+
+pub fn math_cos(args: &[Value]) -> Value {
+    let n = extract_num(args.first()).unwrap_or(f64::NAN);
+    Value::Number(n.cos())
+}
+
+pub fn math_tan(args: &[Value]) -> Value {
+    let n = extract_num(args.first()).unwrap_or(f64::NAN);
+    Value::Number(n.tan())
+}
+
+pub fn math_log(args: &[Value]) -> Value {
+    let n = extract_num(args.first()).unwrap_or(f64::NAN);
+    Value::Number(n.ln())
+}
+
+pub fn math_exp(args: &[Value]) -> Value {
+    let n = extract_num(args.first()).unwrap_or(f64::NAN);
+    Value::Number(n.exp())
+}
+
+pub fn math_sign(args: &[Value]) -> Value {
+    let n = extract_num(args.first()).unwrap_or(f64::NAN);
+    let sign = if n.is_nan() { f64::NAN } else if n > 0.0 { 1.0 } else if n < 0.0 { -1.0 } else { 0.0 };
+    Value::Number(sign)
+}
+
+pub fn math_trunc(args: &[Value]) -> Value {
+    let n = extract_num(args.first()).unwrap_or(f64::NAN);
+    Value::Number(n.trunc())
+}
+
+// ============== Date Functions ==============
+
+pub fn date_now(_args: &[Value]) -> Value {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0);
+    Value::Number(now)
+}
+
+// ============== Array/String Static Functions ==============
+
+pub fn array_is_array(args: &[Value]) -> Value {
+    Value::Bool(matches!(args.first(), Some(Value::Array(_))))
+}
+
+pub fn string_from_char_code(args: &[Value]) -> Value {
+    let s: String = args.iter().filter_map(|v| match v {
+        Value::Number(n) => char::from_u32(*n as u32),
+        _ => None,
+    }).collect();
+    Value::String(s.into())
+}
+
+// ============== Process Functions ==============
+
+#[cfg(feature = "process")]
+pub fn process_exit(args: &[Value]) -> Value {
+    let code = args.first().and_then(|v| match v {
+        Value::Number(n) => Some(*n as i32),
+        _ => None,
+    }).unwrap_or(0);
+    std::process::exit(code);
+}
+
+#[cfg(feature = "process")]
+pub fn process_cwd(_args: &[Value]) -> Value {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    Value::String(cwd.into())
+}
+
+// ============== File I/O Functions ==============
+
+#[cfg(feature = "fs")]
+pub fn read_file(args: &[Value]) -> Value {
+    let path = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Value::String(content.into()),
+        Err(e) => {
+            let mut obj = std::collections::HashMap::new();
+            obj.insert(std::sync::Arc::from("error"), Value::String(e.to_string().into()));
+            Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
+        }
+    }
+}
+
+#[cfg(feature = "fs")]
+pub fn write_file(args: &[Value]) -> Value {
+    let path = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+    let content = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
+    match std::fs::write(&path, &content) {
+        Ok(()) => Value::Bool(true),
+        Err(e) => {
+            let mut obj = std::collections::HashMap::new();
+            obj.insert(std::sync::Arc::from("error"), Value::String(e.to_string().into()));
+            Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
+        }
+    }
+}
+
+#[cfg(feature = "fs")]
+pub fn file_exists(args: &[Value]) -> Value {
+    let path = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+    Value::Bool(std::path::Path::new(&path).exists())
+}
+
+#[cfg(feature = "fs")]
+pub fn read_dir(args: &[Value]) -> Value {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let path = args.first().map(|v| v.to_display_string()).unwrap_or_else(|| ".".to_string());
+    match std::fs::read_dir(&path) {
+        Ok(entries) => {
+            let files: Vec<Value> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| Value::String(e.file_name().to_string_lossy().into()))
+                .collect();
+            Value::Array(Rc::new(RefCell::new(files)))
+        }
+        Err(e) => {
+            let mut obj = std::collections::HashMap::new();
+            obj.insert(std::sync::Arc::from("error"), Value::String(e.to_string().into()));
+            Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
+        }
+    }
+}
+
+#[cfg(feature = "fs")]
+pub fn mkdir(args: &[Value]) -> Value {
+    let path = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+    match std::fs::create_dir_all(&path) {
+        Ok(()) => Value::Bool(true),
+        Err(e) => {
+            let mut obj = std::collections::HashMap::new();
+            obj.insert(std::sync::Arc::from("error"), Value::String(e.to_string().into()));
+            Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
+        }
+    }
+}
+
 use std::sync::Arc;
 
 /// Get property from object/array by string key.

@@ -43,12 +43,42 @@ pub enum Value {
     NativeObjectKeys,
     NativeObjectValues,
     NativeObjectEntries,
+    NativeArrayIsArray,
+    NativeStringFromCharCode,
+    // Date
+    NativeDateNow,
+    // Math extras
+    NativeMathRandom,
+    NativeMathPow,
+    NativeMathSin,
+    NativeMathCos,
+    NativeMathTan,
+    NativeMathLog,
+    NativeMathExp,
+    NativeMathSign,
+    NativeMathTrunc,
+    // Process (feature-gated for security)
+    #[cfg(feature = "process")]
+    NativeProcessExit,
+    #[cfg(feature = "process")]
+    NativeProcessCwd,
     #[cfg(feature = "http")]
     NativeFetch,
     #[cfg(feature = "http")]
     NativeFetchAll,
     #[cfg(feature = "http")]
     NativeServe,
+    // File I/O
+    #[cfg(feature = "fs")]
+    NativeReadFile,
+    #[cfg(feature = "fs")]
+    NativeWriteFile,
+    #[cfg(feature = "fs")]
+    NativeFileExists,
+    #[cfg(feature = "fs")]
+    NativeReadDir,
+    #[cfg(feature = "fs")]
+    NativeMkdir,
 }
 
 impl std::fmt::Display for Value {
@@ -104,12 +134,38 @@ impl std::fmt::Display for Value {
             Value::NativeObjectKeys => write!(f, "[NativeFunction: Object.keys]"),
             Value::NativeObjectValues => write!(f, "[NativeFunction: Object.values]"),
             Value::NativeObjectEntries => write!(f, "[NativeFunction: Object.entries]"),
+            Value::NativeArrayIsArray => write!(f, "[NativeFunction: Array.isArray]"),
+            Value::NativeStringFromCharCode => write!(f, "[NativeFunction: String.fromCharCode]"),
+            Value::NativeDateNow => write!(f, "[NativeFunction: Date.now]"),
+            Value::NativeMathRandom => write!(f, "[NativeFunction: Math.random]"),
+            Value::NativeMathPow => write!(f, "[NativeFunction: Math.pow]"),
+            Value::NativeMathSin => write!(f, "[NativeFunction: Math.sin]"),
+            Value::NativeMathCos => write!(f, "[NativeFunction: Math.cos]"),
+            Value::NativeMathTan => write!(f, "[NativeFunction: Math.tan]"),
+            Value::NativeMathLog => write!(f, "[NativeFunction: Math.log]"),
+            Value::NativeMathExp => write!(f, "[NativeFunction: Math.exp]"),
+            Value::NativeMathSign => write!(f, "[NativeFunction: Math.sign]"),
+            Value::NativeMathTrunc => write!(f, "[NativeFunction: Math.trunc]"),
+            #[cfg(feature = "process")]
+            Value::NativeProcessExit => write!(f, "[NativeFunction: process.exit]"),
+            #[cfg(feature = "process")]
+            Value::NativeProcessCwd => write!(f, "[NativeFunction: process.cwd]"),
             #[cfg(feature = "http")]
             Value::NativeFetch => write!(f, "[NativeFunction: fetch]"),
             #[cfg(feature = "http")]
             Value::NativeFetchAll => write!(f, "[NativeFunction: fetchAll]"),
             #[cfg(feature = "http")]
             Value::NativeServe => write!(f, "[NativeFunction: serve]"),
+            #[cfg(feature = "fs")]
+            Value::NativeReadFile => write!(f, "[NativeFunction: readFile]"),
+            #[cfg(feature = "fs")]
+            Value::NativeWriteFile => write!(f, "[NativeFunction: writeFile]"),
+            #[cfg(feature = "fs")]
+            Value::NativeFileExists => write!(f, "[NativeFunction: fileExists]"),
+            #[cfg(feature = "fs")]
+            Value::NativeReadDir => write!(f, "[NativeFunction: readDir]"),
+            #[cfg(feature = "fs")]
+            Value::NativeMkdir => write!(f, "[NativeFunction: mkdir]"),
         }
     }
 }

@@ -55,9 +55,13 @@ impl Codegen {
         self.write("use std::collections::HashMap;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tish_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, TishError, Value};\n");
+        self.write("use tish_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, TishError, Value};\n");
+        #[cfg(feature = "process")]
+        self.write("use tish_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd};\n");
         #[cfg(feature = "http")]
         self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_serve as tish_http_serve};\n");
+        #[cfg(feature = "fs")]
+        self.write("use tish_runtime::{read_file as tish_read_file, write_file as tish_write_file, file_exists as tish_file_exists, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
         self.write("\n");
 
         self.writeln("fn main() {");
@@ -101,6 +105,17 @@ impl Codegen {
         self.writeln("(Arc::from(\"floor\"), Value::Function(Rc::new(|args: &[Value]| tish_math_floor(args)))),");
         self.writeln("(Arc::from(\"ceil\"), Value::Function(Rc::new(|args: &[Value]| tish_math_ceil(args)))),");
         self.writeln("(Arc::from(\"round\"), Value::Function(Rc::new(|args: &[Value]| tish_math_round(args)))),");
+        self.writeln("(Arc::from(\"random\"), Value::Function(Rc::new(|args: &[Value]| tish_math_random(args)))),");
+        self.writeln("(Arc::from(\"pow\"), Value::Function(Rc::new(|args: &[Value]| tish_math_pow(args)))),");
+        self.writeln("(Arc::from(\"sin\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sin(args)))),");
+        self.writeln("(Arc::from(\"cos\"), Value::Function(Rc::new(|args: &[Value]| tish_math_cos(args)))),");
+        self.writeln("(Arc::from(\"tan\"), Value::Function(Rc::new(|args: &[Value]| tish_math_tan(args)))),");
+        self.writeln("(Arc::from(\"log\"), Value::Function(Rc::new(|args: &[Value]| tish_math_log(args)))),");
+        self.writeln("(Arc::from(\"exp\"), Value::Function(Rc::new(|args: &[Value]| tish_math_exp(args)))),");
+        self.writeln("(Arc::from(\"sign\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sign(args)))),");
+        self.writeln("(Arc::from(\"trunc\"), Value::Function(Rc::new(|args: &[Value]| tish_math_trunc(args)))),");
+        self.writeln("(Arc::from(\"PI\"), Value::Number(std::f64::consts::PI)),");
+        self.writeln("(Arc::from(\"E\"), Value::Number(std::f64::consts::E)),");
         self.indent -= 1;
         self.writeln("]))));");
         self.writeln("let JSON = Value::Object(Rc::new(RefCell::new(HashMap::from([");
@@ -109,6 +124,45 @@ impl Codegen {
         self.writeln("(Arc::from(\"stringify\"), Value::Function(Rc::new(|args: &[Value]| tish_json_stringify(args)))),");
         self.indent -= 1;
         self.writeln("]))));");
+
+        self.writeln("let Array = Value::Object(Rc::new(RefCell::new(HashMap::from([");
+        self.indent += 1;
+        self.writeln("(Arc::from(\"isArray\"), Value::Function(Rc::new(|args: &[Value]| tish_array_is_array(args)))),");
+        self.indent -= 1;
+        self.writeln("]))));");
+
+        self.writeln("let String = Value::Object(Rc::new(RefCell::new(HashMap::from([");
+        self.indent += 1;
+        self.writeln("(Arc::from(\"fromCharCode\"), Value::Function(Rc::new(|args: &[Value]| tish_string_from_char_code(args)))),");
+        self.indent -= 1;
+        self.writeln("]))));");
+
+        self.writeln("let Date = Value::Object(Rc::new(RefCell::new(HashMap::from([");
+        self.indent += 1;
+        self.writeln("(Arc::from(\"now\"), Value::Function(Rc::new(|args: &[Value]| tish_date_now(args)))),");
+        self.indent -= 1;
+        self.writeln("]))));");
+
+        #[cfg(feature = "process")]
+        {
+            self.writeln("let process = Value::Object(Rc::new(RefCell::new({");
+            self.indent += 1;
+            self.writeln("let mut p = HashMap::new();");
+            self.writeln("p.insert(Arc::from(\"exit\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args))));");
+            self.writeln("p.insert(Arc::from(\"cwd\"), Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args))));");
+            self.writeln("let argv: Vec<Value> = std::env::args().map(|s| Value::String(s.into())).collect();");
+            self.writeln("p.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(argv))));");
+            self.writeln("let mut env_obj = HashMap::new();");
+            self.writeln("for (key, value) in std::env::vars() {");
+            self.indent += 1;
+            self.writeln("env_obj.insert(Arc::from(key.as_str()), Value::String(value.into()));");
+            self.indent -= 1;
+            self.writeln("}");
+            self.writeln("p.insert(Arc::from(\"env\"), Value::Object(Rc::new(RefCell::new(env_obj))));");
+            self.writeln("p");
+            self.indent -= 1;
+            self.writeln("})));");
+        }
 
         #[cfg(feature = "http")]
         {
@@ -129,6 +183,15 @@ impl Codegen {
             self.writeln("}");
             self.indent -= 1;
             self.writeln("}));");
+        }
+
+        #[cfg(feature = "fs")]
+        {
+            self.writeln("let readFile = Value::Function(Rc::new(|args: &[Value]| tish_read_file(args)));");
+            self.writeln("let writeFile = Value::Function(Rc::new(|args: &[Value]| tish_write_file(args)));");
+            self.writeln("let fileExists = Value::Function(Rc::new(|args: &[Value]| tish_file_exists(args)));");
+            self.writeln("let readDir = Value::Function(Rc::new(|args: &[Value]| tish_read_dir(args)));");
+            self.writeln("let mkdir = Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)));");
         }
 
         for stmt in &program.statements {

@@ -7,6 +7,8 @@ description = "Tish native compiler backend"
 [features]
 default = []
 http = []
+fs = []
+process = []
 
 [dependencies]
 tish_ast = { path = "../tish_ast" }

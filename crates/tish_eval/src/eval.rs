@@ -95,22 +95,73 @@ impl Evaluator {
             math.insert("floor".into(), Value::NativeMathFloor);
             math.insert("ceil".into(), Value::NativeMathCeil);
             math.insert("round".into(), Value::NativeMathRound);
+            math.insert("random".into(), Value::NativeMathRandom);
+            math.insert("pow".into(), Value::NativeMathPow);
+            math.insert("sin".into(), Value::NativeMathSin);
+            math.insert("cos".into(), Value::NativeMathCos);
+            math.insert("tan".into(), Value::NativeMathTan);
+            math.insert("log".into(), Value::NativeMathLog);
+            math.insert("exp".into(), Value::NativeMathExp);
+            math.insert("sign".into(), Value::NativeMathSign);
+            math.insert("trunc".into(), Value::NativeMathTrunc);
+            math.insert("PI".into(), Value::Number(std::f64::consts::PI));
+            math.insert("E".into(), Value::Number(std::f64::consts::E));
             s.set("Math".into(), Value::Object(Rc::new(RefCell::new(math))), true);
+
             let mut json = HashMap::new();
             json.insert("parse".into(), Value::NativeJsonParse);
             json.insert("stringify".into(), Value::NativeJsonStringify);
             s.set("JSON".into(), Value::Object(Rc::new(RefCell::new(json))), true);
+
             let mut object = HashMap::new();
             object.insert("keys".into(), Value::NativeObjectKeys);
             object.insert("values".into(), Value::NativeObjectValues);
             object.insert("entries".into(), Value::NativeObjectEntries);
             s.set("Object".into(), Value::Object(Rc::new(RefCell::new(object))), true);
 
+            let mut array_obj = HashMap::new();
+            array_obj.insert("isArray".into(), Value::NativeArrayIsArray);
+            s.set("Array".into(), Value::Object(Rc::new(RefCell::new(array_obj))), true);
+
+            let mut string_obj = HashMap::new();
+            string_obj.insert("fromCharCode".into(), Value::NativeStringFromCharCode);
+            s.set("String".into(), Value::Object(Rc::new(RefCell::new(string_obj))), true);
+
+            let mut date = HashMap::new();
+            date.insert("now".into(), Value::NativeDateNow);
+            s.set("Date".into(), Value::Object(Rc::new(RefCell::new(date))), true);
+
+            #[cfg(feature = "process")]
+            {
+                let mut process = HashMap::new();
+                process.insert("exit".into(), Value::NativeProcessExit);
+                process.insert("cwd".into(), Value::NativeProcessCwd);
+                let argv: Vec<Value> = std::env::args()
+                    .map(|s| Value::String(s.into()))
+                    .collect();
+                process.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv))));
+                let mut env_obj = HashMap::new();
+                for (key, value) in std::env::vars() {
+                    env_obj.insert(Arc::from(key.as_str()), Value::String(value.into()));
+                }
+                process.insert("env".into(), Value::Object(Rc::new(RefCell::new(env_obj))));
+                s.set("process".into(), Value::Object(Rc::new(RefCell::new(process))), true);
+            }
+
             #[cfg(feature = "http")]
             {
                 s.set("fetch".into(), Value::NativeFetch, true);
                 s.set("fetchAll".into(), Value::NativeFetchAll, true);
                 s.set("serve".into(), Value::NativeServe, true);
+            }
+
+            #[cfg(feature = "fs")]
+            {
+                s.set("readFile".into(), Value::NativeReadFile, true);
+                s.set("writeFile".into(), Value::NativeWriteFile, true);
+                s.set("fileExists".into(), Value::NativeFileExists, true);
+                s.set("readDir".into(), Value::NativeReadDir, true);
+                s.set("mkdir".into(), Value::NativeMkdir, true);
             }
         }
         Self { scope }
@@ -905,9 +956,25 @@ impl Evaluator {
                     | Value::NativeEncodeURI
                     | Value::NativeObjectKeys
                     | Value::NativeObjectValues
-                    | Value::NativeObjectEntries => "function".into(),
+                    | Value::NativeObjectEntries
+                    | Value::NativeArrayIsArray
+                    | Value::NativeStringFromCharCode
+                    | Value::NativeDateNow
+                    | Value::NativeMathRandom
+                    | Value::NativeMathPow
+                    | Value::NativeMathSin
+                    | Value::NativeMathCos
+                    | Value::NativeMathTan
+                    | Value::NativeMathLog
+                    | Value::NativeMathExp
+                    | Value::NativeMathSign
+                    | Value::NativeMathTrunc => "function".into(),
+                    #[cfg(feature = "process")]
+                    Value::NativeProcessExit | Value::NativeProcessCwd => "function".into(),
                     #[cfg(feature = "http")]
                     Value::NativeFetch | Value::NativeFetchAll | Value::NativeServe => "function".into(),
+                    #[cfg(feature = "fs")]
+                    Value::NativeReadFile | Value::NativeWriteFile | Value::NativeFileExists | Value::NativeReadDir | Value::NativeMkdir => "function".into(),
                 }))
             }
             Expr::PostfixInc { name, .. } => {
@@ -1348,6 +1415,151 @@ impl Evaluator {
             }
             return Ok(Value::Array(Rc::new(RefCell::new(vec![]))));
         }
+        if matches!(f, Value::NativeArrayIsArray) {
+            let is_arr = matches!(args.first(), Some(Value::Array(_)));
+            return Ok(Value::Bool(is_arr));
+        }
+        if matches!(f, Value::NativeStringFromCharCode) {
+            let s: String = args.iter().filter_map(|v| match v {
+                Value::Number(n) => char::from_u32(*n as u32),
+                _ => None,
+            }).collect();
+            return Ok(Value::String(s.into()));
+        }
+        if matches!(f, Value::NativeDateNow) {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as f64)
+                .unwrap_or(0.0);
+            return Ok(Value::Number(now));
+        }
+        if matches!(f, Value::NativeMathRandom) {
+            use std::collections::hash_map::RandomState;
+            use std::hash::{BuildHasher, Hasher};
+            let random = RandomState::new().build_hasher().finish() as f64 / u64::MAX as f64;
+            return Ok(Value::Number(random));
+        }
+        if matches!(f, Value::NativeMathPow) {
+            let base = args.first().and_then(|v| match v {
+                Value::Number(n) => Some(*n),
+                _ => None,
+            }).unwrap_or(f64::NAN);
+            let exp = args.get(1).and_then(|v| match v {
+                Value::Number(n) => Some(*n),
+                _ => None,
+            }).unwrap_or(f64::NAN);
+            return Ok(Value::Number(base.powf(exp)));
+        }
+        if matches!(f, Value::NativeMathSin) {
+            let n = args.first().and_then(|v| match v {
+                Value::Number(n) => Some(*n),
+                _ => None,
+            }).unwrap_or(f64::NAN);
+            return Ok(Value::Number(n.sin()));
+        }
+        if matches!(f, Value::NativeMathCos) {
+            let n = args.first().and_then(|v| match v {
+                Value::Number(n) => Some(*n),
+                _ => None,
+            }).unwrap_or(f64::NAN);
+            return Ok(Value::Number(n.cos()));
+        }
+        if matches!(f, Value::NativeMathTan) {
+            let n = args.first().and_then(|v| match v {
+                Value::Number(n) => Some(*n),
+                _ => None,
+            }).unwrap_or(f64::NAN);
+            return Ok(Value::Number(n.tan()));
+        }
+        if matches!(f, Value::NativeMathLog) {
+            let n = args.first().and_then(|v| match v {
+                Value::Number(n) => Some(*n),
+                _ => None,
+            }).unwrap_or(f64::NAN);
+            return Ok(Value::Number(n.ln()));
+        }
+        if matches!(f, Value::NativeMathExp) {
+            let n = args.first().and_then(|v| match v {
+                Value::Number(n) => Some(*n),
+                _ => None,
+            }).unwrap_or(f64::NAN);
+            return Ok(Value::Number(n.exp()));
+        }
+        if matches!(f, Value::NativeMathSign) {
+            let n = args.first().and_then(|v| match v {
+                Value::Number(n) => Some(*n),
+                _ => None,
+            }).unwrap_or(f64::NAN);
+            let sign = if n.is_nan() { f64::NAN } else if n > 0.0 { 1.0 } else if n < 0.0 { -1.0 } else { 0.0 };
+            return Ok(Value::Number(sign));
+        }
+        if matches!(f, Value::NativeMathTrunc) {
+            let n = args.first().and_then(|v| match v {
+                Value::Number(n) => Some(*n),
+                _ => None,
+            }).unwrap_or(f64::NAN);
+            return Ok(Value::Number(n.trunc()));
+        }
+        #[cfg(feature = "process")]
+        if matches!(f, Value::NativeProcessExit) {
+            let code = args.first().and_then(|v| match v {
+                Value::Number(n) => Some(*n as i32),
+                _ => None,
+            }).unwrap_or(0);
+            std::process::exit(code);
+        }
+        #[cfg(feature = "process")]
+        if matches!(f, Value::NativeProcessCwd) {
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            return Ok(Value::String(cwd.into()));
+        }
+        #[cfg(feature = "fs")]
+        if matches!(f, Value::NativeReadFile) {
+            let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+            match std::fs::read_to_string(&path) {
+                Ok(content) => return Ok(Value::String(content.into())),
+                Err(e) => return Err(EvalError::Error(format!("readFile error: {}", e))),
+            }
+        }
+        #[cfg(feature = "fs")]
+        if matches!(f, Value::NativeWriteFile) {
+            let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+            let content = args.get(1).map(|v| v.to_string()).unwrap_or_default();
+            match std::fs::write(&path, &content) {
+                Ok(()) => return Ok(Value::Bool(true)),
+                Err(e) => return Err(EvalError::Error(format!("writeFile error: {}", e))),
+            }
+        }
+        #[cfg(feature = "fs")]
+        if matches!(f, Value::NativeFileExists) {
+            let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+            return Ok(Value::Bool(std::path::Path::new(&path).exists()));
+        }
+        #[cfg(feature = "fs")]
+        if matches!(f, Value::NativeReadDir) {
+            let path = args.first().map(|v| v.to_string()).unwrap_or_else(|| ".".to_string());
+            match std::fs::read_dir(&path) {
+                Ok(entries) => {
+                    let files: Vec<Value> = entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| Value::String(e.file_name().to_string_lossy().into()))
+                        .collect();
+                    return Ok(Value::Array(Rc::new(RefCell::new(files))));
+                }
+                Err(e) => return Err(EvalError::Error(format!("readDir error: {}", e))),
+            }
+        }
+        #[cfg(feature = "fs")]
+        if matches!(f, Value::NativeMkdir) {
+            let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+            match std::fs::create_dir_all(&path) {
+                Ok(()) => return Ok(Value::Bool(true)),
+                Err(e) => return Err(EvalError::Error(format!("mkdir error: {}", e))),
+            }
+        }
         #[cfg(feature = "http")]
         if matches!(f, Value::NativeFetch) {
             return crate::http::fetch(args).map_err(EvalError::Error);
@@ -1728,9 +1940,25 @@ impl Evaluator {
             | Value::NativeEncodeURI
             | Value::NativeObjectKeys
             | Value::NativeObjectValues
-            | Value::NativeObjectEntries => "null".to_string(),
+            | Value::NativeObjectEntries
+            | Value::NativeArrayIsArray
+            | Value::NativeStringFromCharCode
+            | Value::NativeDateNow
+            | Value::NativeMathRandom
+            | Value::NativeMathPow
+            | Value::NativeMathSin
+            | Value::NativeMathCos
+            | Value::NativeMathTan
+            | Value::NativeMathLog
+            | Value::NativeMathExp
+            | Value::NativeMathSign
+            | Value::NativeMathTrunc => "null".to_string(),
+            #[cfg(feature = "process")]
+            Value::NativeProcessExit | Value::NativeProcessCwd => "null".to_string(),
             #[cfg(feature = "http")]
             Value::NativeFetch | Value::NativeFetchAll | Value::NativeServe => "null".to_string(),
+            #[cfg(feature = "fs")]
+            Value::NativeReadFile | Value::NativeWriteFile | Value::NativeFileExists | Value::NativeReadDir | Value::NativeMkdir => "null".to_string(),
         }
     }
 

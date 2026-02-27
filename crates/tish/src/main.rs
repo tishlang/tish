@@ -125,10 +125,18 @@ fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
         .to_string()
         .replace('\\', "/");
 
+    let mut features: Vec<&str> = Vec::new();
     #[cfg(feature = "http")]
-    let features_str = ", features = [\"http\"]";
-    #[cfg(not(feature = "http"))]
-    let features_str = "";
+    features.push("http");
+    #[cfg(feature = "fs")]
+    features.push("fs");
+    #[cfg(feature = "process")]
+    features.push("process");
+    let features_str = if features.is_empty() {
+        String::new()
+    } else {
+        format!(", features = {:?}", features)
+    };
 
     let cargo_toml = format!(
         r#"[package]
