@@ -8,6 +8,31 @@ pub struct Span {
     pub end: (usize, usize),
 }
 
+/// Type annotation for variables, parameters, and return types.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeAnnotation {
+    /// Primitive types: number, string, boolean, null
+    Simple(Arc<str>),
+    /// Array type: T[]
+    Array(Box<TypeAnnotation>),
+    /// Object type: { key: Type, ... }
+    Object(Vec<(Arc<str>, TypeAnnotation)>),
+    /// Function type: (T1, T2) => R
+    Function {
+        params: Vec<TypeAnnotation>,
+        returns: Box<TypeAnnotation>,
+    },
+    /// Union type: T1 | T2
+    Union(Vec<TypeAnnotation>),
+}
+
+/// Function parameter with optional type annotation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedParam {
+    pub name: Arc<str>,
+    pub type_ann: Option<TypeAnnotation>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Program {
     pub statements: Vec<Statement>,
@@ -22,6 +47,7 @@ pub enum Statement {
     VarDecl {
         name: Arc<str>,
         mutable: bool, // true for `let`, false for `const`
+        type_ann: Option<TypeAnnotation>,
         init: Option<Expr>,
         span: Span,
     },
@@ -65,8 +91,9 @@ pub enum Statement {
     },
     FunDecl {
         name: Arc<str>,
-        params: Vec<Arc<str>>,
-        rest_param: Option<Arc<str>>,
+        params: Vec<TypedParam>,
+        rest_param: Option<TypedParam>,
+        return_type: Option<TypeAnnotation>,
         body: Box<Statement>,
         span: Span,
     },
@@ -178,6 +205,20 @@ pub enum Expr {
     CompoundAssign {
         name: Arc<str>,
         op: CompoundOp,
+        value: Box<Expr>,
+        span: Span,
+    },
+    /// Property assignment: obj.prop = value
+    MemberAssign {
+        object: Box<Expr>,
+        prop: Arc<str>,
+        value: Box<Expr>,
+        span: Span,
+    },
+    /// Index assignment: arr[index] = value
+    IndexAssign {
+        object: Box<Expr>,
+        index: Box<Expr>,
         value: Box<Expr>,
         span: Span,
     },

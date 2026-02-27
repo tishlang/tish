@@ -111,20 +111,72 @@ Log level controlled via `TISH_LOG_LEVEL` environment variable:
 - **No prototypes**: Plain objects and arrays; fixed shapes.
 - **Closures**: Functions capture by name; lexical scope.
 
+## Type Annotations (Optional)
+
+Tish supports optional TypeScript-style type annotations. Types are parsed but not enforced at runtime (gradual typing).
+
+### Syntax
+
+```tish
+// Variable declarations
+let x: number = 42
+const name: string = "hello"
+let arr: number[] = [1, 2, 3]
+
+// Function parameters and return types
+fun add(a: number, b: number): number {
+    return a + b
+}
+
+// Object types
+let person: { name: string, age: number } = { name: "Alice", age: 30 }
+
+// Union types
+let value: number | string = 42
+
+// Rest parameters
+fun sum(...args: number[]): number { ... }
+```
+
+### Supported Types
+
+| Type | Description |
+|------|-------------|
+| `number` | Numeric values (f64) |
+| `string` | String values |
+| `boolean` | `true` or `false` |
+| `null` | The null value |
+| `void` | No return value (functions) |
+| `T[]` | Array of type T |
+| `{ k: T }` | Object with typed properties |
+| `T \| U` | Union (either T or U) |
+| `(T) => R` | Function type (future) |
+
+### Notes
+
+- Type annotations are optional; omitting them is equivalent to dynamic typing
+- Types are parsed and stored in the AST but not enforced during evaluation (Phase 2)
+- Future phases will add type inference and type checking
+
 ## Grammar (informal)
 
 ```
 Program     := Statement*
 Statement   := Block | VarDecl | ExprStmt | If | While | For | Return | Break | Continue | FunDecl
 Block       := Indent Statement* Dedent  |  '{' Statement* '}'
-VarDecl     := ('let' | 'const') Ident ('=' Expr)? ';'?
+VarDecl     := ('let' | 'const') Ident TypeAnn? ('=' Expr)? ';'?
 ExprStmt    := Expr ';'?
 If          := 'if' '(' Expr ')' Statement ('else' Statement)?
 While       := 'while' '(' Expr ')' Statement
 For         := 'for' '(' Init? ';' Cond? ';' Update? ')' Statement  |  'for' '(' ('let'|'const') Ident 'of' Expr ')' Statement
 Return      := 'return' Expr? ';'?
-FunDecl     := 'fun' Ident '(' Params? ')' '=' Expr  |  'fun' Ident '(' Params? ')' Block
+FunDecl     := 'fun' Ident '(' TypedParams? ')' TypeAnn? '=' Expr  |  'fun' Ident '(' TypedParams? ')' TypeAnn? Block
 Expr        := Assign | NullishCoalesce | Or | ...
 Assign      := Ident '=' Expr
 NullishCoalesce := Or ('??' Or)*
+
+TypeAnn     := ':' Type
+Type        := Ident | Type '[]' | '{' (Ident TypeAnn ',')* '}' | '(' (Type ',')* ')' '=>' Type | Type '|' Type
+TypedParams := TypedParam (',' TypedParam)*
+TypedParam  := Ident TypeAnn?
 ```

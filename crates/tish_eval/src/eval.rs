@@ -1,5 +1,6 @@
 //! Tree-walk evaluator for Tish.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -77,7 +78,7 @@ impl Evaluator {
             console.insert("log".into(), Value::NativeConsoleLog);
             console.insert("warn".into(), Value::NativeConsoleWarn);
             console.insert("error".into(), Value::NativeConsoleError);
-            s.set("console".into(), Value::Object(Rc::new(console)), true);
+            s.set("console".into(), Value::Object(Rc::new(RefCell::new(console))), true);
             s.set("parseInt".into(), Value::NativeParseInt, true);
             s.set("parseFloat".into(), Value::NativeParseFloat, true);
             s.set("decodeURI".into(), Value::NativeDecodeURI, true);
@@ -94,11 +95,11 @@ impl Evaluator {
             math.insert("floor".into(), Value::NativeMathFloor);
             math.insert("ceil".into(), Value::NativeMathCeil);
             math.insert("round".into(), Value::NativeMathRound);
-            s.set("Math".into(), Value::Object(Rc::new(math)), true);
+            s.set("Math".into(), Value::Object(Rc::new(RefCell::new(math))), true);
             let mut json = HashMap::new();
             json.insert("parse".into(), Value::NativeJsonParse);
             json.insert("stringify".into(), Value::NativeJsonStringify);
-            s.set("JSON".into(), Value::Object(Rc::new(json)), true);
+            s.set("JSON".into(), Value::Object(Rc::new(RefCell::new(json))), true);
         }
         Self { scope }
     }
@@ -165,7 +166,7 @@ impl Evaluator {
             Statement::ForOf { name, iterable, body, .. } => {
                 let iter_val = self.eval_expr(iterable)?;
                 let elements = match &iter_val {
-                    crate::value::Value::Array(arr) => arr.iter().cloned().collect::<Vec<_>>(),
+                    crate::value::Value::Array(arr) => arr.borrow().iter().cloned().collect::<Vec<_>>(),
                     crate::value::Value::String(s) => {
                         s.chars()
                             .map(|c| crate::value::Value::String(Arc::from(c.to_string())))
@@ -242,13 +243,14 @@ impl Evaluator {
                 body,
                 ..
             } => {
-                let params = params.clone();
-                let rest_param = rest_param.clone();
+                // Extract just the parameter names (ignoring type annotations for now)
+                let param_names: Vec<Arc<str>> = params.iter().map(|p| Arc::clone(&p.name)).collect();
+                let rest_param_name = rest_param.as_ref().map(|p| Arc::clone(&p.name));
                 let body = Box::clone(body);
                 let _scope = Rc::clone(&self.scope);
                 let func = Value::Function {
-                    params,
-                    rest_param,
+                    params: param_names,
+                    rest_param: rest_param_name,
                     body,
                 };
                 self.scope.borrow_mut().set(Arc::clone(name), func, true);
@@ -445,14 +447,14 @@ impl Evaluator {
             Expr::Array { elements, .. } => {
                 let vals: Result<Vec<_>, _> =
                     elements.iter().map(|e| self.eval_expr(e)).collect();
-                Ok(Value::Array(Rc::new(vals?)))
+                Ok(Value::Array(Rc::new(RefCell::new(vals?))))
             }
             Expr::Object { props, .. } => {
                 let mut map = HashMap::new();
                 for (k, v) in props {
                     map.insert(Arc::clone(k), self.eval_expr(v)?);
                 }
-                Ok(Value::Object(Rc::new(map)))
+                Ok(Value::Object(Rc::new(RefCell::new(map))))
             }
             Expr::Assign { name, value, .. } => {
                 let v = self.eval_expr(value)?;
@@ -566,6 +568,59 @@ impl Evaluator {
                     Err(e) => Err(EvalError::Error(e)),
                 }
             }
+            Expr::MemberAssign { object, prop, value, .. } => {
+                let obj_val = self.eval_expr(object)?;
+                let val = self.eval_expr(value)?;
+                match obj_val {
+                    Value::Object(map) => {
+                        map.borrow_mut().insert(Arc::clone(prop), val.clone());
+                        Ok(val)
+                    }
+                    _ => Err(EvalError::Error(format!(
+                        "Cannot assign property '{}' on non-object: {:?}",
+                        prop, obj_val
+                    ))),
+                }
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                let obj_val = self.eval_expr(object)?;
+                let idx_val = self.eval_expr(index)?;
+                let val = self.eval_expr(value)?;
+                match obj_val {
+                    Value::Array(arr) => {
+                        let idx = match &idx_val {
+                            Value::Number(n) => *n as usize,
+                            _ => return Err(EvalError::Error(format!(
+                                "Array index must be a number, got {:?}",
+                                idx_val
+                            ))),
+                        };
+                        let mut arr_mut = arr.borrow_mut();
+                        // Extend array if necessary (JS behavior)
+                        while arr_mut.len() <= idx {
+                            arr_mut.push(Value::Null);
+                        }
+                        arr_mut[idx] = val.clone();
+                        Ok(val)
+                    }
+                    Value::Object(map) => {
+                        let key: Arc<str> = match &idx_val {
+                            Value::Number(n) => n.to_string().into(),
+                            Value::String(s) => Arc::clone(s),
+                            _ => return Err(EvalError::Error(format!(
+                                "Object key must be string or number, got {:?}",
+                                idx_val
+                            ))),
+                        };
+                        map.borrow_mut().insert(key, val.clone());
+                        Ok(val)
+                    }
+                    _ => Err(EvalError::Error(format!(
+                        "Cannot assign index on non-array/object: {:?}",
+                        obj_val
+                    ))),
+                }
+            }
         }
     }
 
@@ -605,13 +660,13 @@ impl Evaluator {
                     _ => return Err(format!("'in' requires string or number key, got {:?}", l)),
                 };
                 let ok = match r {
-                    Value::Object(map) => map.contains_key(&key),
+                    Value::Object(map) => map.borrow().contains_key(&key),
                     Value::Array(arr) => {
                         key.as_ref() == "length"
                             || key
                                 .parse::<usize>()
                                 .ok()
-                                .map(|i| i < arr.len())
+                                .map(|i| i < arr.borrow().len())
                                 .unwrap_or(false)
                     }
                     _ => return Err(format!("'in' requires object or array, got {:?}", r)),
@@ -840,7 +895,7 @@ impl Evaluator {
             }
             if let Some(rest_name) = rest_param {
                 let rest_vals: Vec<Value> = args.iter().skip(params.len()).cloned().collect();
-                s.set(rest_name, Value::Array(Rc::new(rest_vals)), true);
+                s.set(rest_name, Value::Array(Rc::new(RefCell::new(rest_vals))), true);
             }
         }
         let mut eval = Evaluator { scope };
@@ -856,12 +911,12 @@ impl Evaluator {
 
     fn get_prop(&self, obj: &Value, key: &str) -> Result<Value, String> {
         match obj {
-            Value::Object(map) => Ok(map.get(key).cloned().unwrap_or(Value::Null)),
+            Value::Object(map) => Ok(map.borrow().get(key).cloned().unwrap_or(Value::Null)),
             Value::Array(arr) => {
                 if key == "length" {
-                    Ok(Value::Number(arr.len() as f64))
+                    Ok(Value::Number(arr.borrow().len() as f64))
                 } else if let Ok(idx) = key.parse::<usize>() {
-                    Ok(arr.get(idx).cloned().unwrap_or(Value::Null))
+                    Ok(arr.borrow().get(idx).cloned().unwrap_or(Value::Null))
                 } else {
                     Ok(Value::Null)
                 }
@@ -884,7 +939,7 @@ impl Evaluator {
                     Value::Number(n) => *n as usize,
                     _ => return Ok(Value::Null),
                 };
-                Ok(arr.get(idx).cloned().unwrap_or(Value::Null))
+                Ok(arr.borrow().get(idx).cloned().unwrap_or(Value::Null))
             }
             Value::Object(map) => {
                 let key: Arc<str> = match index {
@@ -892,7 +947,7 @@ impl Evaluator {
                     Value::String(s) => Arc::clone(s),
                     _ => return Ok(Value::Null),
                 };
-                Ok(map.get(&key).cloned().unwrap_or(Value::Null))
+                Ok(map.borrow().get(&key).cloned().unwrap_or(Value::Null))
             }
             _ => Ok(Value::Null),
         }
@@ -976,7 +1031,7 @@ impl Evaluator {
     fn json_parse_array(s: &str) -> Result<Value, ()> {
         let s = s[1..].trim_start();
         if s.starts_with(']') {
-            return Ok(Value::Array(Rc::new(vec![])));
+            return Ok(Value::Array(Rc::new(RefCell::new(vec![]))));
         }
         let mut vals = Vec::new();
         let mut rest = s;
@@ -992,13 +1047,13 @@ impl Evaluator {
             }
             rest = rest[1..].trim_start();
         }
-        Ok(Value::Array(Rc::new(vals)))
+        Ok(Value::Array(Rc::new(RefCell::new(vals))))
     }
 
     fn json_parse_object(s: &str) -> Result<Value, ()> {
         let s = s[1..].trim_start();
         if s.starts_with('}') {
-            return Ok(Value::Object(Rc::new(HashMap::new())));
+            return Ok(Value::Object(Rc::new(RefCell::new(HashMap::new()))));
         }
         let mut map = HashMap::new();
         let mut rest = s;
@@ -1027,7 +1082,7 @@ impl Evaluator {
             }
             rest = rest[1..].trim_start();
         }
-        Ok(Value::Object(Rc::new(map)))
+        Ok(Value::Object(Rc::new(RefCell::new(map))))
     }
 
     fn json_parse_one(s: &str) -> Result<(Value, &str), ()> {
@@ -1102,15 +1157,16 @@ impl Evaluator {
                     .replace('\t', "\\t")
             ),
             Value::Array(arr) => {
-                let inner: Vec<String> = arr.iter().map(Self::json_stringify_value).collect();
+                let inner: Vec<String> = arr.borrow().iter().map(Self::json_stringify_value).collect();
                 format!("[{}]", inner.join(","))
             }
             Value::Object(map) => {
                 let mut entries: Vec<_> = map
+                    .borrow()
                     .iter()
                     .map(|(k, v)| {
                         (
-                            k.as_ref(),
+                            k.as_ref().to_string(),
                             format!(
                                 "\"{}\":{}",
                                 k.replace('\\', "\\\\").replace('"', "\\\""),
@@ -1119,7 +1175,7 @@ impl Evaluator {
                         )
                     })
                     .collect();
-                entries.sort_by(|a, b| a.0.cmp(b.0));
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
                 format!("{{{}}}", entries.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(","))
             }
             Value::Function { .. }

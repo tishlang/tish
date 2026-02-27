@@ -1,6 +1,7 @@
 //! JSON parsing and stringification for Tish values.
 
 use crate::Value;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -32,15 +33,16 @@ pub fn json_stringify(value: &Value) -> String {
         }
         Value::String(s) => format!("\"{}\"", escape_json_string(s)),
         Value::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(json_stringify).collect();
+            let items: Vec<String> = arr.borrow().iter().map(json_stringify).collect();
             format!("[{}]", items.join(","))
         }
         Value::Object(obj) => {
-            let mut pairs: Vec<_> = obj
+            let borrowed = obj.borrow();
+            let mut pairs: Vec<_> = borrowed
                 .iter()
-                .map(|(k, v)| (k.as_ref(), format!("\"{}\":{}", escape_json_string(k), json_stringify(v))))
+                .map(|(k, v)| (k.as_ref().to_string(), format!("\"{}\":{}", escape_json_string(k), json_stringify(v))))
                 .collect();
-            pairs.sort_by(|a, b| a.0.cmp(b.0));
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
             format!("{{{}}}", pairs.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(","))
         }
         Value::Function(_) => "null".to_string(),
@@ -214,7 +216,7 @@ fn parse_array(input: &str) -> Result<(Value, &str), String> {
 
     input = input.trim_start();
     if let Some(rest) = input.strip_prefix(']') {
-        return Ok((Value::Array(Rc::new(items)), rest));
+        return Ok((Value::Array(Rc::new(RefCell::new(items))), rest));
     }
 
     loop {
@@ -224,7 +226,7 @@ fn parse_array(input: &str) -> Result<(Value, &str), String> {
 
         match input.chars().next() {
             Some(',') => input = &input[1..],
-            Some(']') => return Ok((Value::Array(Rc::new(items)), &input[1..])),
+            Some(']') => return Ok((Value::Array(Rc::new(RefCell::new(items))), &input[1..])),
             _ => return Err("Expected ',' or ']' in array".to_string()),
         }
     }
@@ -236,7 +238,7 @@ fn parse_object(input: &str) -> Result<(Value, &str), String> {
 
     input = input.trim_start();
     if let Some(rest) = input.strip_prefix('}') {
-        return Ok((Value::Object(Rc::new(map)), rest));
+        return Ok((Value::Object(Rc::new(RefCell::new(map))), rest));
     }
 
     loop {
@@ -263,7 +265,7 @@ fn parse_object(input: &str) -> Result<(Value, &str), String> {
 
         match input.chars().next() {
             Some(',') => input = &input[1..],
-            Some('}') => return Ok((Value::Object(Rc::new(map)), &input[1..])),
+            Some('}') => return Ok((Value::Object(Rc::new(RefCell::new(map))), &input[1..])),
             _ => return Err("Expected ',' or '}' in object".to_string()),
         }
     }
@@ -291,7 +293,7 @@ mod tests {
         
         match (&value, &reparsed) {
             (Value::Object(a), Value::Object(b)) => {
-                assert_eq!(a.len(), b.len());
+                assert_eq!(a.borrow().len(), b.borrow().len());
             }
             _ => panic!("Expected objects"),
         }

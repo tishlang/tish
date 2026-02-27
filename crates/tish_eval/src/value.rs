@@ -1,5 +1,6 @@
 //! Runtime values for the Tish interpreter.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -12,8 +13,8 @@ pub enum Value {
     String(Arc<str>),
     Bool(bool),
     Null,
-    Array(Rc<Vec<Value>>),
-    Object(Rc<HashMap<Arc<str>, Value>>),
+    Array(Rc<RefCell<Vec<Value>>>),
+    Object(Rc<RefCell<HashMap<Arc<str>, Value>>>),
     Function {
         params: Vec<Arc<str>>,
         rest_param: Option<Arc<str>>,
@@ -59,11 +60,12 @@ impl std::fmt::Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Null => write!(f, "null"),
             Value::Array(arr) => {
-                let inner: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
+                let inner: Vec<String> = arr.borrow().iter().map(|v| v.to_string()).collect();
                 write!(f, "[{}]", inner.join(", "))
             }
             Value::Object(obj) => {
                 let inner: Vec<String> = obj
+                    .borrow()
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k.as_ref(), v))
                     .collect();

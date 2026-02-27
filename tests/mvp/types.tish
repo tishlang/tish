@@ -1,0 +1,49 @@
+// Type annotation tests - parsed but not enforced (Phase 2)
+
+// Simple type annotations
+let x: number = 42
+let name: string = "hello"
+let flag: boolean = true
+let empty: null = null
+
+// Array types
+let nums: number[] = [1, 2, 3]
+let strs: string[] = ["a", "b", "c"]
+
+// Function with typed parameters and return type
+fun add(a: number, b: number): number {
+    return a + b
+}
+
+// Function returning void
+fun greet(msg: string): void {
+    console.log(msg)
+}
+
+// Verify values work
+console.log(add(x, 10))
+greet("Welcome!")
+console.log(name)
+console.log(nums[1])
+
+// Const with type
+const PI: number = 3.14159
+console.log(PI)
+
+// Object type annotation
+let person: { name: string, age: number } = { name: "Alice", age: 30 }
+console.log(person.name)
+
+// Union types
+let value: number | string = 42
+console.log(value)
+
+// Function with rest params typed
+fun sum(...args: number[]): number {
+    let total: number = 0
+    for (let n of args) {
+        total = total + n
+    }
+    return total
+}
+console.log(sum(1, 2, 3, 4, 5))

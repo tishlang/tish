@@ -1,6 +1,6 @@
 # Tish Plan Gap Analysis
 
-Audit of plan vs implementation. Last updated: 2026-02-26.
+Audit of plan vs implementation. Last updated: 2026-02-27.
 
 ## Breaking Change: `any` → `let`/`const`
 
@@ -63,6 +63,7 @@ const y = 10    // immutable binding (error on reassignment)
 | Math.abs, sqrt, min, max, floor, ceil, round | Follow | ✓ |
 | array.length, string.length | Follow | ✓ |
 | **compound assignment** (`+=`, `-=`, `*=`, `/=`, `%=`) | Not in plan | ✓ Added |
+| **type annotations** (optional, parsed not enforced) | Not in plan | ✓ Added |
 
 ### Plan Section 7 (concrete MVP tests)
 | Test | .tish | .js |
@@ -75,8 +76,10 @@ const y = 10    // immutable binding (error on reassignment)
 | Strict equality | strict_equality.tish | strict_equality.js |
 | **Objects (comprehensive)** | objects.tish, objects_perf.tish | objects.js, objects_perf.js |
 | **Compound assignment** | compound_assign.tish | compound_assign.js |
+| **Type annotations** | types.tish | types.js |
+| **Mutation** | mutation.tish | mutation.js |
 
-**Total: 31 .tish / 31 .js tests (1:1 parity)**
+**Total: 34 .tish / 34 .js tests (1:1 parity)**
 
 ---
 
@@ -95,8 +98,8 @@ const y = 10    // immutable binding (error on reassignment)
 
 | Feature | Current | Gap | Effort |
 |---------|---------|-----|--------|
-| **Property assignment** | Read-only | `obj.x = val` and `arr[i] = val` not supported | Medium |
-| **Mutable arrays** | Immutable `Rc<Vec>` | Needed for `.push()`, `.pop()` | Medium |
+| **Property assignment** | ✓ Implemented | `obj.x = val` and `arr[i] = val` now work | — |
+| **Mutable arrays/objects** | ✓ Implemented | `Rc<RefCell<...>>` enables mutation | — |
 | **Computed property names** | Dynamic access only | `{ [expr]: val }` in literals not supported | Small |
 
 ### Plan "Omit or Simplify" — optional
@@ -114,7 +117,7 @@ const y = 10    // immutable binding (error on reassignment)
 |---------|----------|---------|-----|
 | **Boolean** | 3.1.5 | bool literals | No Boolean(x) constructor |
 | **String** | 3.1.5 | strings, .length | No String(x), .slice, .substring |
-| **Array** | 3.1.5 | arrays, .length, indexing | No Array(n), .push, .pop (requires mutable arrays) |
+| **Array** | 3.1.5 | arrays, .length, indexing, mutation | `.push()`, `.pop()` now possible (mutable arrays enabled) |
 | **Error/NativeErrors** | 3.1.5 | throw/catch work | No Error constructor, no .message |
 
 ### Other features (not in plan MVP)
@@ -174,6 +177,63 @@ const y = 10    // immutable binding (error on reassignment)
 ---
 
 ## Recent Changes
+
+### Mutable Objects and Arrays (2026-02-27)
+
+Property and index assignment now work:
+
+```tish
+// Object property assignment
+let obj = { x: 1 }
+obj.x = 10
+obj.newProp = "hello"
+
+// Array index assignment  
+let arr = [1, 2, 3]
+arr[1] = 20
+arr[5] = 100  // extends array with nulls
+
+// Object bracket notation
+let data = {}
+data["key"] = "value"
+```
+
+**Implementation details:**
+- Changed `Rc<Vec>` to `Rc<RefCell<Vec>>` for arrays
+- Changed `Rc<HashMap>` to `Rc<RefCell<HashMap>>` for objects
+- Added `Expr::MemberAssign` and `Expr::IndexAssign` AST nodes
+- Array index assignment auto-extends array (fills gaps with null)
+
+### Type Annotations (2026-02-27) — Phase 2
+
+Added optional TypeScript-style type annotations. Types are parsed and stored in the AST but not enforced during evaluation (gradual typing).
+
+```tish
+let x: number = 42
+const name: string = "hello"
+let nums: number[] = [1, 2, 3]
+
+fun add(a: number, b: number): number {
+    return a + b
+}
+
+// Object types
+let person: { name: string, age: number } = { name: "Alice", age: 30 }
+
+// Union types
+let value: number | string = 42
+```
+
+**Supported types:**
+- Primitives: `number`, `string`, `boolean`, `null`, `void`
+- Arrays: `T[]`
+- Objects: `{ key: Type, ... }`
+- Unions: `T | U`
+- Function types (syntax only, not yet used)
+
+**Next phases:**
+- Phase 3: Type inference engine
+- Phase 4: Type checking with errors
 
 ### Compound Assignment (2026-02-26)
 

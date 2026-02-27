@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use tish_ast::{
-    BinOp, CompoundOp, Expr, Literal, MemberProp, Program, Span, Statement, UnaryOp,
+    BinOp, CompoundOp, Expr, Literal, MemberProp, Program, Span, Statement, TypeAnnotation,
+    TypedParam, UnaryOp,
 };
 use tish_lexer::{Token, TokenKind};
 
@@ -176,6 +177,15 @@ impl<'a> Parser<'a> {
             .literal
             .clone()
             .ok_or("Expected identifier")?;
+        
+        // Optional type annotation: `: Type`
+        let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+            self.advance(); // consume :
+            Some(self.parse_type_annotation()?)
+        } else {
+            None
+        };
+        
         let init = if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
             self.advance();
             Some(self.parse_expr()?)
@@ -185,9 +195,95 @@ impl<'a> Parser<'a> {
         Ok(Statement::VarDecl {
             name,
             mutable,
+            type_ann,
             init,
             span: self.span_end(span_start),
         })
+    }
+    
+    /// Parse a type annotation (number, string, T[], {a: T}, etc.)
+    fn parse_type_annotation(&mut self) -> Result<TypeAnnotation, String> {
+        let base = self.parse_type_primary()?;
+        
+        // Check for array suffix: T[]
+        if matches!(self.peek_kind(), Some(TokenKind::LBracket)) {
+            self.advance(); // [
+            self.expect(TokenKind::RBracket)?; // ]
+            return Ok(TypeAnnotation::Array(Box::new(base)));
+        }
+        
+        // Check for union: T | U
+        if matches!(self.peek_kind(), Some(TokenKind::BitOr)) {
+            let mut types = vec![base];
+            while matches!(self.peek_kind(), Some(TokenKind::BitOr)) {
+                self.advance(); // |
+                types.push(self.parse_type_primary()?);
+            }
+            return Ok(TypeAnnotation::Union(types));
+        }
+        
+        Ok(base)
+    }
+    
+    /// Parse a primary type (identifier, object, or function type)
+    fn parse_type_primary(&mut self) -> Result<TypeAnnotation, String> {
+        match self.peek_kind() {
+            Some(TokenKind::Ident) => {
+                let tok = self.advance().ok_or("Expected type name")?;
+                let name = tok.literal.clone().ok_or("Expected type name")?;
+                Ok(TypeAnnotation::Simple(name))
+            }
+            // Handle keywords that can be type names
+            Some(TokenKind::Null) => {
+                self.advance();
+                Ok(TypeAnnotation::Simple("null".into()))
+            }
+            Some(TokenKind::Void) => {
+                self.advance();
+                Ok(TypeAnnotation::Simple("void".into()))
+            }
+            Some(TokenKind::LBrace) => {
+                // Object type: { key: Type, ... }
+                self.advance(); // {
+                let mut props = Vec::new();
+                while !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
+                    let key = self.expect(TokenKind::Ident)?.literal.clone()
+                        .ok_or("Expected property name")?;
+                    self.expect(TokenKind::Colon)?;
+                    let typ = self.parse_type_annotation()?;
+                    props.push((key, typ));
+                    if !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
+                        // Allow trailing comma or require comma between items
+                        if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                            self.advance();
+                        }
+                    }
+                }
+                self.expect(TokenKind::RBrace)?;
+                Ok(TypeAnnotation::Object(props))
+            }
+            Some(TokenKind::LParen) => {
+                // Function type: (T1, T2) => R
+                self.advance(); // (
+                let mut params = Vec::new();
+                while !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+                    params.push(self.parse_type_annotation()?);
+                    if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+                        self.expect(TokenKind::Comma)?;
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+                // Expect => for return type
+                self.expect(TokenKind::Assign)?; // = 
+                self.expect(TokenKind::Gt)?; // > (forms =>)
+                let returns = self.parse_type_annotation()?;
+                Ok(TypeAnnotation::Function {
+                    params,
+                    returns: Box::new(returns),
+                })
+            }
+            _ => Err("Expected type annotation".to_string()),
+        }
     }
 
     fn parse_fun_decl(&mut self) -> Result<Statement, String> {
@@ -203,28 +299,50 @@ impl<'a> Parser<'a> {
         while !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
             if matches!(self.peek_kind(), Some(TokenKind::Spread)) {
                 self.advance();
-                let name = self
+                let param_name = self
                     .expect(TokenKind::Ident)?
                     .literal
                     .clone()
                     .ok_or("Expected rest param name")?;
-                rest_param = Some(name);
+                // Optional type annotation for rest param
+                let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+                    self.advance();
+                    Some(self.parse_type_annotation()?)
+                } else {
+                    None
+                };
+                rest_param = Some(TypedParam { name: param_name, type_ann });
                 if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
                     return Err("Rest parameter must be last".to_string());
                 }
                 break;
             }
-            let p = self
+            let param_name = self
                 .expect(TokenKind::Ident)?
                 .literal
                 .clone()
                 .ok_or("Expected param name")?;
-            params.push(p);
+            // Optional type annotation
+            let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+                self.advance();
+                Some(self.parse_type_annotation()?)
+            } else {
+                None
+            };
+            params.push(TypedParam { name: param_name, type_ann });
             if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
                 self.expect(TokenKind::Comma)?;
             }
         }
         self.expect(TokenKind::RParen)?;
+        
+        // Optional return type: `: Type`
+        let return_type = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+            self.advance();
+            Some(self.parse_type_annotation()?)
+        } else {
+            None
+        };
 
         let body = if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
             self.advance(); // =
@@ -245,6 +363,7 @@ impl<'a> Parser<'a> {
             name,
             params,
             rest_param,
+            return_type,
             body,
             span: self.span_end(span_start),
         })
@@ -319,6 +438,7 @@ impl<'a> Parser<'a> {
             Some(Box::new(Statement::VarDecl {
                 name,
                 mutable,
+                type_ann: None, // For-loop variables don't have type annotations (yet)
                 init: init_expr,
                 span: self.span_end(var_span_start),
             }))
@@ -475,12 +595,14 @@ impl<'a> Parser<'a> {
 
     fn parse_assign(&mut self) -> Result<Expr, String> {
         let left = self.parse_conditional()?;
-        
+
         // Check for simple assignment
         if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
-            if let Expr::Ident { name, span } = &left {
+            let start = left.span().start;
+            
+            // Variable assignment: x = val
+            if let Expr::Ident { name, .. } = &left {
                 let name = Arc::clone(name);
-                let start = span.start;
                 self.advance(); // =
                 let value = self.parse_assign()?;
                 let end = value.span().end;
@@ -490,8 +612,38 @@ impl<'a> Parser<'a> {
                     span: Span { start, end },
                 });
             }
+            
+            // Member assignment: obj.prop = val
+            if let Expr::Member { object, prop: MemberProp::Name(prop_name), .. } = &left {
+                let object = Box::clone(object);
+                let prop = Arc::clone(prop_name);
+                self.advance(); // =
+                let value = self.parse_assign()?;
+                let end = value.span().end;
+                return Ok(Expr::MemberAssign {
+                    object,
+                    prop,
+                    value: Box::new(value),
+                    span: Span { start, end },
+                });
+            }
+            
+            // Index assignment: arr[idx] = val or obj[key] = val
+            if let Expr::Index { object, index, .. } = &left {
+                let object = Box::clone(object);
+                let index = Box::clone(index);
+                self.advance(); // =
+                let value = self.parse_assign()?;
+                let end = value.span().end;
+                return Ok(Expr::IndexAssign {
+                    object,
+                    index,
+                    value: Box::new(value),
+                    span: Span { start, end },
+                });
+            }
         }
-        
+
         // Check for compound assignment (+=, -=, *=, /=, %=)
         let compound_op = match self.peek_kind() {
             Some(TokenKind::PlusAssign) => Some(CompoundOp::Add),
@@ -501,7 +653,7 @@ impl<'a> Parser<'a> {
             Some(TokenKind::PercentAssign) => Some(CompoundOp::Mod),
             _ => None,
         };
-        
+
         if let Some(op) = compound_op {
             if let Expr::Ident { name, span } = &left {
                 let name = Arc::clone(name);
@@ -517,7 +669,7 @@ impl<'a> Parser<'a> {
                 });
             }
         }
-        
+
         Ok(left)
     }
 
@@ -1052,6 +1204,8 @@ impl ExprSpan for Expr {
             Expr::PrefixInc { span, .. } => *span,
             Expr::PrefixDec { span, .. } => *span,
             Expr::CompoundAssign { span, .. } => *span,
+            Expr::MemberAssign { span, .. } => *span,
+            Expr::IndexAssign { span, .. } => *span,
         }
     }
 }

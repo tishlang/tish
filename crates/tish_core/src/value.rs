@@ -1,5 +1,6 @@
 //! Unified Value type for Tish runtime values.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -16,8 +17,8 @@ pub enum Value {
     String(Arc<str>),
     Bool(bool),
     Null,
-    Array(Rc<Vec<Value>>),
-    Object(Rc<HashMap<Arc<str>, Value>>),
+    Array(Rc<RefCell<Vec<Value>>>),
+    Object(Rc<RefCell<HashMap<Arc<str>, Value>>>),
     Function(NativeFn),
 }
 
@@ -28,8 +29,8 @@ impl std::fmt::Debug for Value {
             Value::String(s) => write!(f, "String({:?})", s.as_ref()),
             Value::Bool(b) => write!(f, "Bool({})", b),
             Value::Null => write!(f, "Null"),
-            Value::Array(arr) => write!(f, "Array({:?})", arr.as_ref()),
-            Value::Object(obj) => write!(f, "Object({:?})", obj.as_ref()),
+            Value::Array(arr) => write!(f, "Array({:?})", arr.borrow()),
+            Value::Object(obj) => write!(f, "Object({:?})", obj.borrow()),
             Value::Function(_) => write!(f, "Function"),
         }
     }
@@ -54,11 +55,12 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
             Value::Array(arr) => {
-                let inner: Vec<String> = arr.iter().map(|v| v.to_display_string()).collect();
+                let inner: Vec<String> = arr.borrow().iter().map(|v| v.to_display_string()).collect();
                 format!("[{}]", inner.join(", "))
             }
             Value::Object(obj) => {
                 let inner: Vec<String> = obj
+                    .borrow()
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k.as_ref(), v.to_display_string()))
                     .collect();

@@ -183,13 +183,13 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
     match obj {
         Value::Object(map) => {
             let k: Arc<str> = key.into();
-            map.get(&k).cloned().unwrap_or(Value::Null)
+            map.borrow().get(&k).cloned().unwrap_or(Value::Null)
         }
         Value::Array(arr) => {
             if key == "length" {
-                Value::Number(arr.len() as f64)
+                Value::Number(arr.borrow().len() as f64)
             } else if let Ok(idx) = key.parse::<usize>() {
-                arr.get(idx).cloned().unwrap_or(Value::Null)
+                arr.borrow().get(idx).cloned().unwrap_or(Value::Null)
             } else {
                 Value::Null
             }
@@ -213,7 +213,7 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
                 Value::Number(n) => *n as usize,
                 _ => return Value::Null,
             };
-            arr.get(idx).cloned().unwrap_or(Value::Null)
+            arr.borrow().get(idx).cloned().unwrap_or(Value::Null)
         }
         Value::Object(map) => {
             let key: Arc<str> = match index {
@@ -221,7 +221,7 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
                 Value::String(s) => Arc::clone(s),
                 _ => return Value::Null,
             };
-            map.get(&key).cloned().unwrap_or(Value::Null)
+            map.borrow().get(&key).cloned().unwrap_or(Value::Null)
         }
         _ => Value::Null,
     }
@@ -236,13 +236,13 @@ pub fn in_operator(key: &Value, obj: &Value) -> Value {
     };
     
     let result = match obj {
-        Value::Object(map) => map.contains_key(&key_str),
+        Value::Object(map) => map.borrow().contains_key(&key_str),
         Value::Array(arr) => {
             key_str.as_ref() == "length"
                 || key_str
                     .parse::<usize>()
                     .ok()
-                    .map(|i| i < arr.len())
+                    .map(|i| i < arr.borrow().len())
                     .unwrap_or(false)
         }
         _ => false,

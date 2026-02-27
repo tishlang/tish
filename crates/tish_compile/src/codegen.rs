@@ -51,6 +51,7 @@ impl Codegen {
     }
 
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
+        self.write("use std::cell::RefCell;\n");
         self.write("use std::collections::HashMap;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
@@ -71,7 +72,7 @@ impl Codegen {
         self.indent += 1;
 
         // Initialize builtins
-        self.writeln("let mut console = Value::Object(Rc::new(HashMap::from([");
+        self.writeln("let mut console = Value::Object(Rc::new(RefCell::new(HashMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"debug\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_debug(args); Value::Null }))),");
         self.writeln("(Arc::from(\"info\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_info(args); Value::Null }))),");
@@ -79,7 +80,7 @@ impl Codegen {
         self.writeln("(Arc::from(\"warn\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_warn(args); Value::Null }))),");
         self.writeln("(Arc::from(\"error\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_error(args); Value::Null }))),");
         self.indent -= 1;
-        self.writeln("])));");
+        self.writeln("]))));");
         self.writeln("let parseInt = Value::Function(Rc::new(|args: &[Value]| tish_parse_int(args)));");
         self.writeln("let parseFloat = Value::Function(Rc::new(|args: &[Value]| tish_parse_float(args)));");
         self.writeln("let decodeURI = Value::Function(Rc::new(|args: &[Value]| tish_decode_uri(args)));");
@@ -88,7 +89,7 @@ impl Codegen {
         self.writeln("let isNaN = Value::Function(Rc::new(|args: &[Value]| tish_is_nan(args)));");
         self.writeln("let Infinity = Value::Number(f64::INFINITY);");
         self.writeln("let NaN = Value::Number(f64::NAN);");
-        self.writeln("let Math = Value::Object(Rc::new(HashMap::from([");
+        self.writeln("let Math = Value::Object(Rc::new(RefCell::new(HashMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"abs\"), Value::Function(Rc::new(|args: &[Value]| tish_math_abs(args)))),");
         self.writeln("(Arc::from(\"sqrt\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sqrt(args)))),");
@@ -98,13 +99,13 @@ impl Codegen {
         self.writeln("(Arc::from(\"ceil\"), Value::Function(Rc::new(|args: &[Value]| tish_math_ceil(args)))),");
         self.writeln("(Arc::from(\"round\"), Value::Function(Rc::new(|args: &[Value]| tish_math_round(args)))),");
         self.indent -= 1;
-        self.writeln("])));");
-        self.writeln("let JSON = Value::Object(Rc::new(HashMap::from([");
+        self.writeln("]))));");
+        self.writeln("let JSON = Value::Object(Rc::new(RefCell::new(HashMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"parse\"), Value::Function(Rc::new(|args: &[Value]| tish_json_parse(args)))),");
         self.writeln("(Arc::from(\"stringify\"), Value::Function(Rc::new(|args: &[Value]| tish_json_stringify(args)))),");
         self.indent -= 1;
-        self.writeln("])));");
+        self.writeln("]))));");
 
         for stmt in &program.statements {
             self.emit_statement(stmt)?;
@@ -372,17 +373,18 @@ impl Codegen {
                 self.writeln("let JSON = JSON.clone();");
                 self.writeln("Value::Function(Rc::new(move |args: &[Value]| {");
                 self.indent += 1;
+                // Extract just the parameter names (type annotations are parsed but not used in codegen yet)
                 for (i, p) in params.iter().enumerate() {
                     self.writeln(&format!(
                         "let {} = args.get({}).cloned().unwrap_or(Value::Null);",
-                        p.as_ref(),
+                        p.name.as_ref(),
                         i
                     ));
                 }
-                if let Some(rest_name) = rest_param {
+                if let Some(rest) = rest_param {
                     self.writeln(&format!(
                         "let {} = Value::Array(std::rc::Rc::new(args[{}..].to_vec()));",
-                        rest_name.as_ref(),
+                        rest.name.as_ref(),
                         params.len()
                     ));
                 }
@@ -518,7 +520,7 @@ impl Codegen {
                     elements.iter().map(|e| self.emit_expr(e)).collect();
                 let els = els?;
                 format!(
-                    "Value::Array(Rc::new(vec![{}]))",
+                    "Value::Array(Rc::new(RefCell::new(vec![{}])))",
                     els.join(", ")
                 )
             }
@@ -529,7 +531,7 @@ impl Codegen {
                     parts.push(format!("(Arc::from({:?}), {})", k.as_ref(), val));
                 }
                 format!(
-                    "Value::Object(Rc::new(HashMap::from([{}])))",
+                    "Value::Object(Rc::new(RefCell::new(HashMap::from([{}]))))",
                     parts.join(", ")
                 )
             }
@@ -594,6 +596,27 @@ impl Codegen {
                     op_fn,
                     name.as_ref(),
                     name.as_ref()
+                )
+            }
+            Expr::MemberAssign { object, prop, value, .. } => {
+                let obj = self.emit_expr(object)?;
+                let val = self.emit_expr(value)?;
+                format!(
+                    "{{ let _obj = ({}).clone(); let _val = {}; match _obj {{ Value::Object(map) => {{ map.borrow_mut().insert(Arc::from(\"{}\"), _val.clone()); _val }}, _ => panic!(\"Cannot assign property on non-object\") }} }}",
+                    obj,
+                    val,
+                    prop.as_ref()
+                )
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                let obj = self.emit_expr(object)?;
+                let idx = self.emit_expr(index)?;
+                let val = self.emit_expr(value)?;
+                format!(
+                    "{{ let _obj = ({}).clone(); let _idx = {}; let _val = {}; match _obj {{ Value::Array(arr) => {{ let idx = match &_idx {{ Value::Number(n) => *n as usize, _ => panic!(\"Array index must be number\") }}; let mut arr_mut = arr.borrow_mut(); while arr_mut.len() <= idx {{ arr_mut.push(Value::Null); }} arr_mut[idx] = _val.clone(); _val }}, Value::Object(map) => {{ let key: Arc<str> = match &_idx {{ Value::Number(n) => n.to_string().into(), Value::String(s) => Arc::clone(s), _ => panic!(\"Object key must be string or number\") }}; map.borrow_mut().insert(key, _val.clone()); _val }}, _ => panic!(\"Cannot index assign on non-array/object\") }} }}",
+                    obj,
+                    idx,
+                    val
                 )
             }
         })
