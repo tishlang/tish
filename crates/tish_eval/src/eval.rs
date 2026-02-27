@@ -380,6 +380,293 @@ impl Evaluator {
                 self.eval_unary(*op, &o).map_err(EvalError::Error)
             }
             Expr::Call { callee, args, .. } => {
+                // Check for built-in method calls on arrays/strings
+                if let Expr::Member { object, prop: MemberProp::Name(method_name), .. } = callee.as_ref() {
+                    let obj = self.eval_expr(object)?;
+                    let arg_vals: Result<Vec<_>, _> = args.iter().map(|a| self.eval_expr(a)).collect();
+                    let arg_vals = arg_vals?;
+                    
+                    // Array methods
+                    if let Value::Array(arr) = &obj {
+                        match method_name.as_ref() {
+                            "push" => {
+                                let mut arr_mut = arr.borrow_mut();
+                                for v in &arg_vals {
+                                    arr_mut.push(v.clone());
+                                }
+                                return Ok(Value::Number(arr_mut.len() as f64));
+                            }
+                            "pop" => {
+                                return Ok(arr.borrow_mut().pop().unwrap_or(Value::Null));
+                            }
+                            "shift" => {
+                                let mut arr_mut = arr.borrow_mut();
+                                if arr_mut.is_empty() {
+                                    return Ok(Value::Null);
+                                }
+                                return Ok(arr_mut.remove(0));
+                            }
+                            "unshift" => {
+                                let mut arr_mut = arr.borrow_mut();
+                                for (i, v) in arg_vals.iter().enumerate() {
+                                    arr_mut.insert(i, v.clone());
+                                }
+                                return Ok(Value::Number(arr_mut.len() as f64));
+                            }
+                            "indexOf" => {
+                                let search = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                for (i, v) in arr_borrow.iter().enumerate() {
+                                    if v.strict_eq(&search) {
+                                        return Ok(Value::Number(i as f64));
+                                    }
+                                }
+                                return Ok(Value::Number(-1.0));
+                            }
+                            "includes" => {
+                                let search = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                for v in arr_borrow.iter() {
+                                    if v.strict_eq(&search) {
+                                        return Ok(Value::Bool(true));
+                                    }
+                                }
+                                return Ok(Value::Bool(false));
+                            }
+                            "join" => {
+                                let sep = match arg_vals.get(0) {
+                                    Some(Value::String(s)) => s.to_string(),
+                                    _ => ",".to_string(),
+                                };
+                                let arr_borrow = arr.borrow();
+                                let parts: Vec<String> = arr_borrow.iter().map(|v| v.to_string()).collect();
+                                return Ok(Value::String(parts.join(&sep).into()));
+                            }
+                            "reverse" => {
+                                arr.borrow_mut().reverse();
+                                return Ok(obj.clone());
+                            }
+                            "slice" => {
+                                let arr_borrow = arr.borrow();
+                                let len = arr_borrow.len() as i64;
+                                let start = match arg_vals.get(0) {
+                                    Some(Value::Number(n)) => {
+                                        let n = *n as i64;
+                                        if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                                    }
+                                    _ => 0,
+                                };
+                                let end = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) => {
+                                        let n = *n as i64;
+                                        if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                                    }
+                                    _ => len as usize,
+                                };
+                                let sliced: Vec<Value> = if start < end {
+                                    arr_borrow[start..end].to_vec()
+                                } else {
+                                    vec![]
+                                };
+                                return Ok(Value::Array(Rc::new(RefCell::new(sliced))));
+                            }
+                            "concat" => {
+                                let mut result = arr.borrow().clone();
+                                for v in &arg_vals {
+                                    if let Value::Array(other) = v {
+                                        result.extend(other.borrow().iter().cloned());
+                                    } else {
+                                        result.push(v.clone());
+                                    }
+                                }
+                                return Ok(Value::Array(Rc::new(RefCell::new(result))));
+                            }
+                            _ => {}
+                        }
+                    }
+                    
+                    // String methods
+                    if let Value::String(s) = &obj {
+                        match method_name.as_ref() {
+                            "indexOf" => {
+                                let search = match arg_vals.get(0) {
+                                    Some(Value::String(ss)) => ss.as_ref(),
+                                    _ => return Ok(Value::Number(-1.0)),
+                                };
+                                return Ok(Value::Number(
+                                    s.find(search).map(|i| i as f64).unwrap_or(-1.0)
+                                ));
+                            }
+                            "includes" => {
+                                let search = match arg_vals.get(0) {
+                                    Some(Value::String(ss)) => ss.as_ref(),
+                                    _ => return Ok(Value::Bool(false)),
+                                };
+                                return Ok(Value::Bool(s.contains(search)));
+                            }
+                            "slice" => {
+                                let chars: Vec<char> = s.chars().collect();
+                                let len = chars.len() as i64;
+                                let start = match arg_vals.get(0) {
+                                    Some(Value::Number(n)) => {
+                                        let n = *n as i64;
+                                        if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                                    }
+                                    _ => 0,
+                                };
+                                let end = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) => {
+                                        let n = *n as i64;
+                                        if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                                    }
+                                    _ => len as usize,
+                                };
+                                let sliced: String = if start < end {
+                                    chars[start..end].iter().collect()
+                                } else {
+                                    String::new()
+                                };
+                                return Ok(Value::String(sliced.into()));
+                            }
+                            "substring" => {
+                                let chars: Vec<char> = s.chars().collect();
+                                let len = chars.len();
+                                let start = match arg_vals.get(0) {
+                                    Some(Value::Number(n)) => (*n as usize).min(len),
+                                    _ => 0,
+                                };
+                                let end = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) => (*n as usize).min(len),
+                                    _ => len,
+                                };
+                                let (s, e) = (start.min(end), start.max(end));
+                                return Ok(Value::String(chars[s..e].iter().collect::<String>().into()));
+                            }
+                            "split" => {
+                                let sep = match arg_vals.get(0) {
+                                    Some(Value::String(ss)) => ss.as_ref(),
+                                    _ => return Ok(Value::Array(Rc::new(RefCell::new(vec![obj.clone()])))),
+                                };
+                                let parts: Vec<Value> = s.split(sep)
+                                    .map(|p| Value::String(p.into()))
+                                    .collect();
+                                return Ok(Value::Array(Rc::new(RefCell::new(parts))));
+                            }
+                            "trim" => {
+                                return Ok(Value::String(s.trim().into()));
+                            }
+                            "toUpperCase" => {
+                                return Ok(Value::String(s.to_uppercase().into()));
+                            }
+                            "toLowerCase" => {
+                                return Ok(Value::String(s.to_lowercase().into()));
+                            }
+                            "startsWith" => {
+                                let search = match arg_vals.get(0) {
+                                    Some(Value::String(ss)) => ss.as_ref(),
+                                    _ => return Ok(Value::Bool(false)),
+                                };
+                                return Ok(Value::Bool(s.starts_with(search)));
+                            }
+                            "endsWith" => {
+                                let search = match arg_vals.get(0) {
+                                    Some(Value::String(ss)) => ss.as_ref(),
+                                    _ => return Ok(Value::Bool(false)),
+                                };
+                                return Ok(Value::Bool(s.ends_with(search)));
+                            }
+                            "replace" => {
+                                let search = match arg_vals.get(0) {
+                                    Some(Value::String(ss)) => ss.to_string(),
+                                    _ => return Ok(obj.clone()),
+                                };
+                                let replacement = match arg_vals.get(1) {
+                                    Some(Value::String(ss)) => ss.to_string(),
+                                    _ => String::new(),
+                                };
+                                return Ok(Value::String(s.replacen(&search, &replacement, 1).into()));
+                            }
+                            "replaceAll" => {
+                                let search = match arg_vals.get(0) {
+                                    Some(Value::String(ss)) => ss.to_string(),
+                                    _ => return Ok(obj.clone()),
+                                };
+                                let replacement = match arg_vals.get(1) {
+                                    Some(Value::String(ss)) => ss.to_string(),
+                                    _ => String::new(),
+                                };
+                                return Ok(Value::String(s.replace(&search, &replacement).into()));
+                            }
+                            "charAt" => {
+                                let idx = match arg_vals.get(0) {
+                                    Some(Value::Number(n)) => *n as usize,
+                                    _ => 0,
+                                };
+                                let chars: Vec<char> = s.chars().collect();
+                                return Ok(chars.get(idx)
+                                    .map(|c| Value::String(c.to_string().into()))
+                                    .unwrap_or(Value::String("".into())));
+                            }
+                            "charCodeAt" => {
+                                let idx = match arg_vals.get(0) {
+                                    Some(Value::Number(n)) => *n as usize,
+                                    _ => 0,
+                                };
+                                let chars: Vec<char> = s.chars().collect();
+                                return Ok(chars.get(idx)
+                                    .map(|c| Value::Number(*c as u32 as f64))
+                                    .unwrap_or(Value::Number(f64::NAN)));
+                            }
+                            "repeat" => {
+                                let count = match arg_vals.get(0) {
+                                    Some(Value::Number(n)) if *n >= 0.0 => *n as usize,
+                                    _ => 0,
+                                };
+                                return Ok(Value::String(s.repeat(count).into()));
+                            }
+                            "padStart" => {
+                                let target_len = match arg_vals.get(0) {
+                                    Some(Value::Number(n)) => *n as usize,
+                                    _ => return Ok(obj.clone()),
+                                };
+                                let pad = match arg_vals.get(1) {
+                                    Some(Value::String(p)) => p.to_string(),
+                                    _ => " ".to_string(),
+                                };
+                                let chars: Vec<char> = s.chars().collect();
+                                if chars.len() >= target_len || pad.is_empty() {
+                                    return Ok(obj.clone());
+                                }
+                                let needed = target_len - chars.len();
+                                let padding: String = pad.chars().cycle().take(needed).collect();
+                                return Ok(Value::String(format!("{}{}", padding, s).into()));
+                            }
+                            "padEnd" => {
+                                let target_len = match arg_vals.get(0) {
+                                    Some(Value::Number(n)) => *n as usize,
+                                    _ => return Ok(obj.clone()),
+                                };
+                                let pad = match arg_vals.get(1) {
+                                    Some(Value::String(p)) => p.to_string(),
+                                    _ => " ".to_string(),
+                                };
+                                let chars: Vec<char> = s.chars().collect();
+                                if chars.len() >= target_len || pad.is_empty() {
+                                    return Ok(obj.clone());
+                                }
+                                let needed = target_len - chars.len();
+                                let padding: String = pad.chars().cycle().take(needed).collect();
+                                return Ok(Value::String(format!("{}{}", s, padding).into()));
+                            }
+                            _ => {}
+                        }
+                    }
+                    
+                    // Fall through to normal function call
+                    let f = self.get_prop(&obj, method_name).map_err(EvalError::Error)?;
+                    return self.call_func(&f, &arg_vals);
+                }
+                
                 let f = self.eval_expr(callee)?;
                 let arg_vals: Result<Vec<_>, _> = args.iter().map(|a| self.eval_expr(a)).collect();
                 let arg_vals = arg_vals?;

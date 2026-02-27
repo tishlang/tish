@@ -78,8 +78,10 @@ const y = 10    // immutable binding (error on reassignment)
 | **Compound assignment** | compound_assign.tish | compound_assign.js |
 | **Type annotations** | types.tish | types.js |
 | **Mutation** | mutation.tish | mutation.js |
+| **Array methods** | array_methods.tish | array_methods.js |
+| **String methods** | string_methods.tish | string_methods.js |
 
-**Total: 34 .tish / 34 .js tests (1:1 parity)**
+**Total: 36 .tish / 38 .js tests**
 
 ---
 
@@ -116,8 +118,8 @@ const y = 10    // immutable binding (error on reassignment)
 | Feature | Plan ref | Current | Gap |
 |---------|----------|---------|-----|
 | **Boolean** | 3.1.5 | bool literals | No Boolean(x) constructor |
-| **String** | 3.1.5 | strings, .length | No String(x), .slice, .substring |
-| **Array** | 3.1.5 | arrays, .length, indexing, mutation | `.push()`, `.pop()` now possible (mutable arrays enabled) |
+| **String** | 3.1.5 | strings, .length, methods | ✓ `.indexOf()`, `.includes()`, `.slice()`, `.substring()`, `.split()`, `.trim()`, `.toUpperCase()`, `.toLowerCase()`, `.startsWith()`, `.endsWith()`, `.replace()`, `.replaceAll()`, `.charAt()`, `.charCodeAt()`, `.repeat()`, `.padStart()`, `.padEnd()` |
+| **Array** | 3.1.5 | arrays, .length, mutation, methods | ✓ `.push()`, `.pop()`, `.shift()`, `.unshift()`, `.indexOf()`, `.includes()`, `.join()`, `.reverse()`, `.slice()`, `.concat()` |
 | **Error/NativeErrors** | 3.1.5 | throw/catch work | No Error constructor, no .message |
 
 ### Other features (not in plan MVP)
@@ -163,20 +165,62 @@ const y = 10    // immutable binding (error on reassignment)
 7. ✓ **Compound assignment** — Implemented (`+=`, `-=`, `*=`, `/=`, `%=`)
 
 ### High priority remaining
-8. **Property/index assignment** (`obj.x = val`, `arr[i] = val`) — Enables mutation
-9. **Mutable arrays** — Change to `Rc<RefCell<Vec>>` for `.push()`, `.pop()`
-10. **Computed property names** in object literals
+8. ✓ **Property/index assignment** (`obj.x = val`, `arr[i] = val`) — Implemented
+9. ✓ **Mutable arrays** — `Rc<RefCell<Vec>>` implemented
+10. ✓ **String methods** — 16 methods implemented
+11. ✓ **Array methods** — 10 methods implemented
+12. **Computed property names** in object literals
 
 ### Lower priority
-11. **String methods** (`.slice()`, `.indexOf()`)
-12. **Array methods** (`.push()`, `.pop()`, `.map()`, `.filter()`)
 13. **Object methods** (`Object.keys()`, `Object.values()`)
-14. **Error constructor**
-15. **Logical assignment** (`&&=`, `||=`, `??=`)
+14. **Higher-order array methods** (`.map()`, `.filter()`, `.reduce()`, `.find()`, `.some()`, `.every()`)
+15. **Error constructor**
+16. **Logical assignment** (`&&=`, `||=`, `??=`)
 
 ---
 
 ## Recent Changes
+
+### Array and String Methods (2026-02-27)
+
+Added comprehensive built-in methods for arrays and strings:
+
+**Array methods:**
+| Method | Description |
+|--------|-------------|
+| `.push(val, ...)` | Add elements to end, returns new length |
+| `.pop()` | Remove and return last element |
+| `.shift()` | Remove and return first element |
+| `.unshift(val, ...)` | Add elements to beginning, returns new length |
+| `.indexOf(val)` | Find index of element, or -1 |
+| `.includes(val)` | Check if element exists |
+| `.join(sep)` | Join elements with separator |
+| `.reverse()` | Reverse array in place |
+| `.slice(start, end)` | Extract portion (non-mutating) |
+| `.concat(arr, ...)` | Combine arrays |
+
+**String methods:**
+| Method | Description |
+|--------|-------------|
+| `.indexOf(str)` | Find index of substring, or -1 |
+| `.includes(str)` | Check if substring exists |
+| `.slice(start, end)` | Extract portion |
+| `.substring(start, end)` | Extract portion (like slice) |
+| `.split(sep)` | Split into array |
+| `.trim()` | Remove whitespace |
+| `.toUpperCase()` | Convert to uppercase |
+| `.toLowerCase()` | Convert to lowercase |
+| `.startsWith(str)` | Check prefix |
+| `.endsWith(str)` | Check suffix |
+| `.replace(search, rep)` | Replace first occurrence |
+| `.replaceAll(search, rep)` | Replace all occurrences |
+| `.charAt(idx)` | Get character at index |
+| `.charCodeAt(idx)` | Get char code at index |
+| `.repeat(n)` | Repeat string n times |
+| `.padStart(len, pad)` | Pad at start |
+| `.padEnd(len, pad)` | Pad at end |
+
+All methods work in both interpreter and compiled modes.
 
 ### Mutable Objects and Arrays (2026-02-27)
 

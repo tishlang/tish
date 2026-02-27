@@ -135,7 +135,8 @@ impl Codegen {
                     .transpose()?
                     .unwrap_or_else(|| "Value::Null".to_string());
                 let mutability = if *mutable { "let mut" } else { "let" };
-                self.writeln(&format!("{} {} = {};", mutability, name.as_ref(), expr));
+                // Clone to ensure JS-like reference semantics where multiple variables can hold the same value
+                self.writeln(&format!("{} {} = ({}).clone();", mutability, name.as_ref(), expr));
             }
             Statement::ExprStmt { expr, .. } => {
                 let e = self.emit_expr(expr)?;
@@ -180,7 +181,7 @@ impl Codegen {
                 self.indent += 1;
                 self.writeln("Value::Array(ref _arr) => {");
                 self.indent += 1;
-                self.writeln("for _v in _arr.iter() {");
+                self.writeln("for _v in _arr.borrow().iter() {");
                 self.indent += 1;
                 self.writeln(&format!("let {} = _v.clone();", name.as_ref()));
                 self.emit_statement(body)?;
@@ -383,7 +384,7 @@ impl Codegen {
                 }
                 if let Some(rest) = rest_param {
                     self.writeln(&format!(
-                        "let {} = Value::Array(std::rc::Rc::new(args[{}..].to_vec()));",
+                        "let {} = Value::Array(std::rc::Rc::new(RefCell::new(args[{}..].to_vec())));",
                         rest.name.as_ref(),
                         params.len()
                     ));
@@ -433,6 +434,179 @@ impl Codegen {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                // Check for built-in method calls on arrays/strings
+                if let Expr::Member { object, prop: MemberProp::Name(method_name), .. } = callee.as_ref() {
+                    let obj_expr = self.emit_expr(object)?;
+                    let arg_exprs: Result<Vec<_>, _> =
+                        args.iter().map(|a| self.emit_expr(a)).collect();
+                    let arg_exprs = arg_exprs?;
+                    
+                    // Array methods
+                    match method_name.as_ref() {
+                        "push" => {
+                            let args_vec = arg_exprs.iter()
+                                .map(|a| format!("{}.clone()", a))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            return Ok(format!(
+                                "tish_runtime::array_push(&{}, &[{}])",
+                                obj_expr, args_vec
+                            ));
+                        }
+                        "pop" => {
+                            return Ok(format!("tish_runtime::array_pop(&{})", obj_expr));
+                        }
+                        "shift" => {
+                            return Ok(format!("tish_runtime::array_shift(&{})", obj_expr));
+                        }
+                        "unshift" => {
+                            let args_vec = arg_exprs.iter()
+                                .map(|a| format!("{}.clone()", a))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            return Ok(format!(
+                                "tish_runtime::array_unshift(&{}, &[{}])",
+                                obj_expr, args_vec
+                            ));
+                        }
+                        "indexOf" => {
+                            let search = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tish_runtime::array_index_of(&_obj, &{}), Value::String(_) => tish_runtime::string_index_of(&_obj, &{}), _ => Value::Number(-1.0) }} }}",
+                                obj_expr, search, search
+                            ));
+                        }
+                        "includes" => {
+                            let search = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tish_runtime::array_includes(&_obj, &{}), Value::String(_) => tish_runtime::string_includes(&_obj, &{}), _ => Value::Bool(false) }} }}",
+                                obj_expr, search, search
+                            ));
+                        }
+                        "join" => {
+                            let sep = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::array_join(&{}, &{})",
+                                obj_expr, sep
+                            ));
+                        }
+                        "reverse" => {
+                            return Ok(format!("tish_runtime::array_reverse(&{})", obj_expr));
+                        }
+                        "slice" => {
+                            let start = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let end = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tish_runtime::array_slice(&_obj, &{}, &{}), Value::String(_) => tish_runtime::string_slice(&_obj, &{}, &{}), _ => Value::Null }} }}",
+                                obj_expr, start, end, start, end
+                            ));
+                        }
+                        "concat" => {
+                            let args_vec = arg_exprs.iter()
+                                .map(|a| format!("{}.clone()", a))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            return Ok(format!(
+                                "tish_runtime::array_concat(&{}, &[{}])",
+                                obj_expr, args_vec
+                            ));
+                        }
+                        // String-only methods
+                        "substring" => {
+                            let start = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let end = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::string_substring(&{}, &{}, &{})",
+                                obj_expr, start, end
+                            ));
+                        }
+                        "split" => {
+                            let sep = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::string_split(&{}, &{})",
+                                obj_expr, sep
+                            ));
+                        }
+                        "trim" => {
+                            return Ok(format!("tish_runtime::string_trim(&{})", obj_expr));
+                        }
+                        "toUpperCase" => {
+                            return Ok(format!("tish_runtime::string_to_upper_case(&{})", obj_expr));
+                        }
+                        "toLowerCase" => {
+                            return Ok(format!("tish_runtime::string_to_lower_case(&{})", obj_expr));
+                        }
+                        "startsWith" => {
+                            let search = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
+                            return Ok(format!(
+                                "tish_runtime::string_starts_with(&{}, &{})",
+                                obj_expr, search
+                            ));
+                        }
+                        "endsWith" => {
+                            let search = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
+                            return Ok(format!(
+                                "tish_runtime::string_ends_with(&{}, &{})",
+                                obj_expr, search
+                            ));
+                        }
+                        "replace" => {
+                            let search = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
+                            let replacement = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
+                            return Ok(format!(
+                                "tish_runtime::string_replace(&{}, &{}, &{})",
+                                obj_expr, search, replacement
+                            ));
+                        }
+                        "replaceAll" => {
+                            let search = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
+                            let replacement = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
+                            return Ok(format!(
+                                "tish_runtime::string_replace_all(&{}, &{}, &{})",
+                                obj_expr, search, replacement
+                            ));
+                        }
+                        "charAt" => {
+                            let idx = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            return Ok(format!(
+                                "tish_runtime::string_char_at(&{}, &{})",
+                                obj_expr, idx
+                            ));
+                        }
+                        "charCodeAt" => {
+                            let idx = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            return Ok(format!(
+                                "tish_runtime::string_char_code_at(&{}, &{})",
+                                obj_expr, idx
+                            ));
+                        }
+                        "repeat" => {
+                            let count = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            return Ok(format!(
+                                "tish_runtime::string_repeat(&{}, &{})",
+                                obj_expr, count
+                            ));
+                        }
+                        "padStart" => {
+                            let target_len = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let pad = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::string_pad_start(&{}, &{}, &{})",
+                                obj_expr, target_len, pad
+                            ));
+                        }
+                        "padEnd" => {
+                            let target_len = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let pad = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::string_pad_end(&{}, &{}, &{})",
+                                obj_expr, target_len, pad
+                            ));
+                        }
+                        _ => {} // Fall through to normal function call
+                    }
+                }
+                
                 let callee_expr = self.emit_expr(callee)?;
                 let arg_exprs: Result<Vec<_>, _> =
                     args.iter().map(|a| self.emit_expr(a)).collect();
