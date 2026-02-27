@@ -100,6 +100,13 @@ pub enum TokenKind {
     OptionalChain,
     NullishCoalesce,
     Question,
+    Arrow,
+    
+    // Template literal tokens
+    TemplateNoSub,   // `text` (no interpolation)
+    TemplateHead,    // `text${  (start with interpolation)
+    TemplateMiddle,  // }text${  (middle part)
+    TemplateTail,    // }text`   (end part)
 
     Eof,
 }

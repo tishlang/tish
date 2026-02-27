@@ -793,7 +793,34 @@ impl Codegen {
                     val
                 )
             }
+            Expr::ArrowFunction { params, body, .. } => {
+                self.emit_arrow_function(params, body)?
+            }
+            Expr::TemplateLiteral { quasis, exprs, .. } => {
+                // Build the template string
+                let mut parts = Vec::new();
+                for (i, quasi) in quasis.iter().enumerate() {
+                    // Escape the quasi string for Rust
+                    let escaped = quasi.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t");
+                    parts.push(format!("\"{}\"", escaped));
+                    if i < exprs.len() {
+                        let expr_code = self.emit_expr(&exprs[i])?;
+                        parts.push(format!("&({}).to_display_string()", expr_code));
+                    }
+                }
+                format!("Value::String([{}].concat().into())", parts.join(", "))
+            }
         })
+    }
+
+    fn emit_arrow_function(
+        &mut self,
+        _params: &[tish_ast::TypedParam],
+        _body: &tish_ast::ArrowBody,
+    ) -> Result<String, CompileError> {
+        // Arrow functions are not yet supported in the compiler
+        // They work in the interpreter
+        Err(CompileError { message: "Arrow functions are not yet supported in compiled mode. Use named functions instead.".to_string() })
     }
 
     fn emit_binop(

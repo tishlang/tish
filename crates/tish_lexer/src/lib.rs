@@ -25,6 +25,10 @@ pub struct Lexer<'a> {
     indent_stack: Vec<usize>,
     at_line_start: bool,
     pending_dedents: VecDeque<Token>,
+    /// Stack of brace depths for template literal expressions.
+    /// When non-empty, we're inside a template expression `${...}`.
+    /// Each entry is the brace depth at that template nesting level.
+    template_brace_stack: Vec<usize>,
 }
 
 impl<'a> Lexer<'a> {
@@ -38,6 +42,7 @@ impl<'a> Lexer<'a> {
             indent_stack: vec![0],
             at_line_start: true,
             pending_dedents: VecDeque::new(),
+            template_brace_stack: Vec::new(),
         };
         lexer
     }
@@ -176,6 +181,93 @@ impl<'a> Lexer<'a> {
         s
     }
 
+    fn read_template_literal(&mut self, start: (usize, usize)) -> Result<Option<Token>, String> {
+        let mut s = String::new();
+        loop {
+            match self.advance() {
+                None => return Err("Unterminated template literal".to_string()),
+                Some('`') => {
+                    let end = self.span_start();
+                    return Ok(Some(Token {
+                        kind: TokenKind::TemplateNoSub,
+                        span: Span { start, end },
+                        literal: Some(s.into()),
+                    }));
+                }
+                Some('$') if self.peek() == Some('{') => {
+                    self.advance(); // consume '{'
+                    // Push brace depth 1 (we're inside the ${})
+                    self.template_brace_stack.push(1);
+                    let end = self.span_start();
+                    return Ok(Some(Token {
+                        kind: TokenKind::TemplateHead,
+                        span: Span { start, end },
+                        literal: Some(s.into()),
+                    }));
+                }
+                Some('\\') => {
+                    let escaped = self.advance().ok_or("Unterminated escape")?;
+                    let c = match escaped {
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        '\\' => '\\',
+                        '`' => '`',
+                        '$' => '$',
+                        '{' => '{',
+                        _ => return Err(format!("Unknown escape: \\{}", escaped)),
+                    };
+                    s.push(c);
+                }
+                Some(c) => s.push(c),
+            }
+        }
+    }
+
+    /// Continue reading a template literal after an expression ends (after '}')
+    fn read_template_continuation(&mut self, start: (usize, usize)) -> Result<Option<Token>, String> {
+        let mut s = String::new();
+        loop {
+            match self.advance() {
+                None => return Err("Unterminated template literal".to_string()),
+                Some('`') => {
+                    let end = self.span_start();
+                    return Ok(Some(Token {
+                        kind: TokenKind::TemplateTail,
+                        span: Span { start, end },
+                        literal: Some(s.into()),
+                    }));
+                }
+                Some('$') if self.peek() == Some('{') => {
+                    self.advance(); // consume '{'
+                    // Push brace depth 1 again
+                    self.template_brace_stack.push(1);
+                    let end = self.span_start();
+                    return Ok(Some(Token {
+                        kind: TokenKind::TemplateMiddle,
+                        span: Span { start, end },
+                        literal: Some(s.into()),
+                    }));
+                }
+                Some('\\') => {
+                    let escaped = self.advance().ok_or("Unterminated escape")?;
+                    let c = match escaped {
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        '\\' => '\\',
+                        '`' => '`',
+                        '$' => '$',
+                        '{' => '{',
+                        _ => return Err(format!("Unknown escape: \\{}", escaped)),
+                    };
+                    s.push(c);
+                }
+                Some(c) => s.push(c),
+            }
+        }
+    }
+
     fn emit_indent_or_dedent(&mut self, level: usize) -> Option<Token> {
         let top = *self.indent_stack.last().unwrap();
         let start = self.span_start();
@@ -261,8 +353,26 @@ impl<'a> Lexer<'a> {
         let kind = match c {
             '(' => TokenKind::LParen,
             ')' => TokenKind::RParen,
-            '{' => TokenKind::LBrace,
-            '}' => TokenKind::RBrace,
+            '{' => {
+                // Track brace depth if inside template expression
+                if let Some(depth) = self.template_brace_stack.last_mut() {
+                    *depth += 1;
+                }
+                TokenKind::LBrace
+            }
+            '}' => {
+                // Check if this closes a template expression
+                if let Some(depth) = self.template_brace_stack.last_mut() {
+                    *depth -= 1;
+                    if *depth == 0 {
+                        // This } closes the template expression
+                        self.template_brace_stack.pop();
+                        // Continue reading the template
+                        return self.read_template_continuation(start);
+                    }
+                }
+                TokenKind::RBrace
+            }
             '[' => TokenKind::LBracket,
             ']' => TokenKind::RBracket,
             ';' => TokenKind::Semicolon,
@@ -292,6 +402,9 @@ impl<'a> Lexer<'a> {
                     } else {
                         TokenKind::Eq
                     }
+                } else if self.peek() == Some('>') {
+                    self.advance();
+                    TokenKind::Arrow
                 } else {
                     TokenKind::Assign
                 }
@@ -426,6 +539,9 @@ impl<'a> Lexer<'a> {
                     span: Span { start, end },
                     literal: Some(s.into()),
                 }));
+            }
+            '`' => {
+                return self.read_template_literal(start);
             }
             '0'..='9' => {
                 let num = self.read_number(c);

@@ -222,6 +222,25 @@ pub enum Expr {
         value: Box<Expr>,
         span: Span,
     },
+    /// Arrow function: (params) => body
+    ArrowFunction {
+        params: Vec<TypedParam>,
+        body: ArrowBody,
+        span: Span,
+    },
+    /// Template literal: `text ${expr} text`
+    TemplateLiteral {
+        quasis: Vec<Arc<str>>,    // Static string parts (n+1 for n expressions)
+        exprs: Vec<Expr>,          // Interpolated expressions (n)
+        span: Span,
+    },
+}
+
+/// Body of an arrow function: either an expression or a block
+#[derive(Debug, Clone)]
+pub enum ArrowBody {
+    Expr(Box<Expr>),
+    Block(Box<Statement>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

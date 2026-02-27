@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tish_ast::{BinOp, CompoundOp, Expr, Literal, MemberProp, Statement, UnaryOp};
+use tish_ast::{BinOp, CompoundOp, Expr, Literal, MemberProp, Span, Statement, UnaryOp};
 
 use crate::value::Value;
 
@@ -100,6 +100,11 @@ impl Evaluator {
             json.insert("parse".into(), Value::NativeJsonParse);
             json.insert("stringify".into(), Value::NativeJsonStringify);
             s.set("JSON".into(), Value::Object(Rc::new(RefCell::new(json))), true);
+            let mut object = HashMap::new();
+            object.insert("keys".into(), Value::NativeObjectKeys);
+            object.insert("values".into(), Value::NativeObjectValues);
+            object.insert("entries".into(), Value::NativeObjectEntries);
+            s.set("Object".into(), Value::Object(Rc::new(RefCell::new(object))), true);
         }
         Self { scope }
     }
@@ -481,6 +486,116 @@ impl Evaluator {
                                 }
                                 return Ok(Value::Array(Rc::new(RefCell::new(result))));
                             }
+                            "map" => {
+                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                let mut result = Vec::with_capacity(arr_borrow.len());
+                                for (i, v) in arr_borrow.iter().enumerate() {
+                                    let mapped = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                    result.push(mapped);
+                                }
+                                return Ok(Value::Array(Rc::new(RefCell::new(result))));
+                            }
+                            "filter" => {
+                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                let mut result = Vec::new();
+                                for (i, v) in arr_borrow.iter().enumerate() {
+                                    let keep = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                    if keep.is_truthy() {
+                                        result.push(v.clone());
+                                    }
+                                }
+                                return Ok(Value::Array(Rc::new(RefCell::new(result))));
+                            }
+                            "reduce" => {
+                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                let (mut acc, start_idx) = if arg_vals.len() > 1 {
+                                    (arg_vals[1].clone(), 0)
+                                } else if !arr_borrow.is_empty() {
+                                    (arr_borrow[0].clone(), 1)
+                                } else {
+                                    return Err(EvalError::Error("Reduce of empty array with no initial value".to_string()));
+                                };
+                                for (i, v) in arr_borrow.iter().enumerate().skip(start_idx) {
+                                    acc = self.call_func(&callback, &[acc, v.clone(), Value::Number(i as f64)])?;
+                                }
+                                return Ok(acc);
+                            }
+                            "find" => {
+                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                for (i, v) in arr_borrow.iter().enumerate() {
+                                    let found = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                    if found.is_truthy() {
+                                        return Ok(v.clone());
+                                    }
+                                }
+                                return Ok(Value::Null);
+                            }
+                            "findIndex" => {
+                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                for (i, v) in arr_borrow.iter().enumerate() {
+                                    let found = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                    if found.is_truthy() {
+                                        return Ok(Value::Number(i as f64));
+                                    }
+                                }
+                                return Ok(Value::Number(-1.0));
+                            }
+                            "forEach" => {
+                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                for (i, v) in arr_borrow.iter().enumerate() {
+                                    self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                }
+                                return Ok(Value::Null);
+                            }
+                            "some" => {
+                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                for (i, v) in arr_borrow.iter().enumerate() {
+                                    let result = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                    if result.is_truthy() {
+                                        return Ok(Value::Bool(true));
+                                    }
+                                }
+                                return Ok(Value::Bool(false));
+                            }
+                            "every" => {
+                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                for (i, v) in arr_borrow.iter().enumerate() {
+                                    let result = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                    if !result.is_truthy() {
+                                        return Ok(Value::Bool(false));
+                                    }
+                                }
+                                return Ok(Value::Bool(true));
+                            }
+                            "flat" => {
+                                let depth = match arg_vals.get(0) {
+                                    Some(Value::Number(n)) => *n as usize,
+                                    _ => 1,
+                                };
+                                fn flatten(arr: &[Value], depth: usize) -> Vec<Value> {
+                                    let mut result = Vec::new();
+                                    for v in arr {
+                                        if depth > 0 {
+                                            if let Value::Array(inner) = v {
+                                                result.extend(flatten(&inner.borrow(), depth - 1));
+                                                continue;
+                                            }
+                                        }
+                                        result.push(v.clone());
+                                    }
+                                    result
+                                }
+                                let flattened = flatten(&arr.borrow(), depth);
+                                return Ok(Value::Array(Rc::new(RefCell::new(flattened))));
+                            }
                             _ => {}
                         }
                     }
@@ -780,7 +895,10 @@ impl Evaluator {
                     | Value::NativeJsonParse
                     | Value::NativeJsonStringify
                     | Value::NativeDecodeURI
-                    | Value::NativeEncodeURI => "function".into(),
+                    | Value::NativeEncodeURI
+                    | Value::NativeObjectKeys
+                    | Value::NativeObjectValues
+                    | Value::NativeObjectEntries => "function".into(),
                 }))
             }
             Expr::PostfixInc { name, .. } => {
@@ -907,6 +1025,38 @@ impl Evaluator {
                         obj_val
                     ))),
                 }
+            }
+            Expr::ArrowFunction { params, body, .. } => {
+                use tish_ast::ArrowBody;
+                // Convert arrow function to regular function
+                let param_names: Vec<Arc<str>> = params.iter().map(|p| Arc::clone(&p.name)).collect();
+                let body_stmt = match body {
+                    ArrowBody::Expr(expr) => {
+                        // Expression body: wrap in implicit return
+                        Statement::Return {
+                            value: Some(expr.as_ref().clone()),
+                            span: Span { start: (0, 0), end: (0, 0) },
+                        }
+                    }
+                    ArrowBody::Block(stmt) => stmt.as_ref().clone(),
+                };
+                Ok(Value::Function {
+                    params: param_names,
+                    rest_param: None,
+                    body: Box::new(body_stmt),
+                })
+            }
+            Expr::TemplateLiteral { quasis, exprs, .. } => {
+                // Build the string by interleaving quasis and evaluated expressions
+                let mut result = String::new();
+                for (i, quasi) in quasis.iter().enumerate() {
+                    result.push_str(quasi);
+                    if i < exprs.len() {
+                        let val = self.eval_expr(&exprs[i])?;
+                        result.push_str(&val.to_string());
+                    }
+                }
+                Ok(Value::String(result.into()))
             }
         }
     }
@@ -1165,6 +1315,29 @@ impl Evaluator {
         if matches!(f, Value::NativeEncodeURI) {
             let s = args.first().map(|v| v.to_string()).unwrap_or_default();
             return Ok(Value::String(tish_core::percent_encode(&s).into()));
+        }
+        if matches!(f, Value::NativeObjectKeys) {
+            if let Some(Value::Object(obj)) = args.first() {
+                let keys: Vec<Value> = obj.borrow().keys().map(|k| Value::String(Arc::clone(k))).collect();
+                return Ok(Value::Array(Rc::new(RefCell::new(keys))));
+            }
+            return Ok(Value::Array(Rc::new(RefCell::new(vec![]))));
+        }
+        if matches!(f, Value::NativeObjectValues) {
+            if let Some(Value::Object(obj)) = args.first() {
+                let vals: Vec<Value> = obj.borrow().values().cloned().collect();
+                return Ok(Value::Array(Rc::new(RefCell::new(vals))));
+            }
+            return Ok(Value::Array(Rc::new(RefCell::new(vec![]))));
+        }
+        if matches!(f, Value::NativeObjectEntries) {
+            if let Some(Value::Object(obj)) = args.first() {
+                let entries: Vec<Value> = obj.borrow().iter().map(|(k, v)| {
+                    Value::Array(Rc::new(RefCell::new(vec![Value::String(Arc::clone(k)), v.clone()])))
+                }).collect();
+                return Ok(Value::Array(Rc::new(RefCell::new(entries))));
+            }
+            return Ok(Value::Array(Rc::new(RefCell::new(vec![]))));
         }
         let (params, rest_param, body) = match f {
             Value::Function { params, rest_param, body } => {
@@ -1485,7 +1658,10 @@ impl Evaluator {
             | Value::NativeJsonParse
             | Value::NativeJsonStringify
             | Value::NativeDecodeURI
-            | Value::NativeEncodeURI => "null".to_string(),
+            | Value::NativeEncodeURI
+            | Value::NativeObjectKeys
+            | Value::NativeObjectValues
+            | Value::NativeObjectEntries => "null".to_string(),
         }
     }
 

@@ -1,0 +1,52 @@
+// Test arrow function syntax
+
+let nums = [1, 2, 3, 4, 5];
+
+// Single param, expression body
+let doubled = nums.map(x => x * 2);
+console.log("doubled:", doubled.join(","));
+
+// Multiple params with parentheses
+let sum = nums.reduce((acc, x) => acc + x, 0);
+console.log("sum:", sum);
+
+// Arrow with empty params
+let getHello = () => "Hello";
+console.log(getHello());
+
+// Arrow with block body
+let process = (x) => {
+    let y = x * 2;
+    return y + 1;
+};
+console.log("process(5):", process(5));
+
+// Filter with arrow
+let evens = nums.filter(n => n % 2 === 0);
+console.log("evens:", evens.join(","));
+
+// Arrow functions in chaining
+let result = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    .filter(x => x % 2 === 0)
+    .map(x => x * x)
+    .filter(x => x > 20);
+console.log("chained:", result.join(","));
+
+// Direct arrow call
+let add = (a, b) => a + b;
+console.log("add(5, 3):", add(5, 3));
+
+// Arrow with object param
+let people = [
+    { name: "Alice", age: 25 },
+    { name: "Bob", age: 30 },
+    { name: "Charlie", age: 20 }
+];
+function getName(p) { return p.name; }
+let names = people.map(getName);
+console.log("names:", names.join(","));
+
+// Sort simulation with find
+function isOldest(p) { return p.age === 30; }
+let oldest = people.find(isOldest);
+console.log("oldest:", oldest.name);

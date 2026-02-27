@@ -1,0 +1,71 @@
+// Test higher-order array methods
+
+let nums = [1, 2, 3, 4, 5]
+
+// Define callback functions
+fun double(x) { return x * 2 }
+fun isEven(x) { return x % 2 === 0 }
+fun add(acc, x) { return acc + x }
+fun gtThree(x) { return x > 3 }
+fun gtZero(x) { return x > 0 }
+fun isThree(x) { return x === 3 }
+fun ltThree(x) { return x < 3 }
+
+// map
+let doubled = nums.map(double)
+console.log("map:", doubled.join(","))
+
+// filter
+let evens = nums.filter(isEven)
+console.log("filter:", evens.join(","))
+
+// reduce with initial value
+let sum = nums.reduce(add, 0)
+console.log("reduce:", sum)
+
+// reduce without initial value
+fun multiply(acc, x) { return acc * x }
+let product = nums.reduce(multiply)
+console.log("reduce (no init):", product)
+
+// find
+let found = nums.find(gtThree)
+console.log("find:", found)
+
+// find returns null when not found
+fun gtHundred(x) { return x > 100 }
+let notFound = nums.find(gtHundred)
+console.log("find (not found):", notFound)
+
+// findIndex
+let foundIdx = nums.findIndex(gtThree)
+console.log("findIndex:", foundIdx)
+
+// findIndex returns -1 when not found
+let notFoundIdx = nums.findIndex(gtHundred)
+console.log("findIndex (not found):", notFoundIdx)
+
+// some
+console.log("some (> 3):", nums.some(gtThree))
+console.log("some (> 100):", nums.some(gtHundred))
+
+// every
+console.log("every (> 0):", nums.every(gtZero))
+console.log("every (> 3):", nums.every(gtThree))
+
+// forEach
+let total = 0
+fun addToTotal(x) { total = total + x }
+nums.forEach(addToTotal)
+console.log("forEach total:", total)
+
+// flat
+let nested = [1, [2, 3], [4, [5, 6]]]
+console.log("flat(1):", nested.flat().join(","))
+console.log("flat(2):", nested.flat(2).join(","))
+
+// Chaining
+let result = [1, 2, 3, 4, 5, 6]
+    .filter(isEven)
+    .map(double)
+console.log("chained:", result.join(","))

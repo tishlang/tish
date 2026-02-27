@@ -80,8 +80,12 @@ const y = 10    // immutable binding (error on reassignment)
 | **Mutation** | mutation.tish | mutation.js |
 | **Array methods** | array_methods.tish | array_methods.js |
 | **String methods** | string_methods.tish | string_methods.js |
+| **Higher-order methods** | higher_order_methods.tish | higher_order_methods.js |
+| **Object methods** | object_methods.tish | object_methods.js |
+| **Arrow functions** | arrow_functions.tish | arrow_functions.js |
+| **Template literals** | template_literals.tish | template_literals.js |
 
-**Total: 36 .tish / 38 .js tests**
+**Total: 40 .tish / 42 .js tests**
 
 ---
 
@@ -118,8 +122,9 @@ const y = 10    // immutable binding (error on reassignment)
 | Feature | Plan ref | Current | Gap |
 |---------|----------|---------|-----|
 | **Boolean** | 3.1.5 | bool literals | No Boolean(x) constructor |
-| **String** | 3.1.5 | strings, .length, methods | ✓ `.indexOf()`, `.includes()`, `.slice()`, `.substring()`, `.split()`, `.trim()`, `.toUpperCase()`, `.toLowerCase()`, `.startsWith()`, `.endsWith()`, `.replace()`, `.replaceAll()`, `.charAt()`, `.charCodeAt()`, `.repeat()`, `.padStart()`, `.padEnd()` |
-| **Array** | 3.1.5 | arrays, .length, mutation, methods | ✓ `.push()`, `.pop()`, `.shift()`, `.unshift()`, `.indexOf()`, `.includes()`, `.join()`, `.reverse()`, `.slice()`, `.concat()` |
+| **String** | 3.1.5 | strings, .length, 16 methods | ✓ indexOf, includes, slice, substring, split, trim, toUpperCase, toLowerCase, startsWith, endsWith, replace, replaceAll, charAt, charCodeAt, repeat, padStart, padEnd |
+| **Array** | 3.1.5 | arrays, .length, 18 methods | ✓ push, pop, shift, unshift, indexOf, includes, join, reverse, slice, concat + map, filter, reduce, find, findIndex, forEach, some, every, flat |
+| **Object** | 3.1.5 | objects, dot/bracket access | ✓ Object.keys(), Object.values(), Object.entries() |
 | **Error/NativeErrors** | 3.1.5 | throw/catch work | No Error constructor, no .message |
 
 ### Other features (not in plan MVP)
@@ -172,14 +177,81 @@ const y = 10    // immutable binding (error on reassignment)
 12. **Computed property names** in object literals
 
 ### Lower priority
-13. **Object methods** (`Object.keys()`, `Object.values()`)
-14. **Higher-order array methods** (`.map()`, `.filter()`, `.reduce()`, `.find()`, `.some()`, `.every()`)
-15. **Error constructor**
-16. **Logical assignment** (`&&=`, `||=`, `??=`)
+13. ✓ **Object methods** (`Object.keys()`, `Object.values()`, `Object.entries()`) — Implemented
+14. ✓ **Higher-order array methods** (`.map()`, `.filter()`, `.reduce()`, `.find()`, `.findIndex()`, `.some()`, `.every()`, `.forEach()`, `.flat()`) — Implemented
+15. ✓ **Arrow functions** (`x => x * 2`, `(a, b) => a + b`) — Implemented
+16. ✓ **Template literals** (`\`Hello ${name}\``) — Full interpolation support
+17. **Error constructor**
+18. **Logical assignment** (`&&=`, `||=`, `??=`)
 
 ---
 
 ## Recent Changes
+
+### Arrow Functions and Higher-Order Methods (2026-02-27)
+
+**Arrow function syntax:**
+```tish
+// Single param, expression body
+let doubled = nums.map(x => x * 2)
+
+// Multiple params
+let sum = nums.reduce((acc, x) => acc + x, 0)
+
+// No params
+let getHello = () => "Hello"
+
+// Block body
+let process = (x) => {
+    let y = x * 2
+    return y + 1
+}
+```
+
+Note: Arrow functions work in interpreter mode. Compiler mode requires named functions for now.
+
+**Higher-order array methods:**
+| Method | Description |
+|--------|-------------|
+| `.map(fn)` | Transform each element |
+| `.filter(fn)` | Keep elements where fn returns truthy |
+| `.reduce(fn, init)` | Accumulate to single value |
+| `.find(fn)` | Find first matching element |
+| `.findIndex(fn)` | Find index of first match |
+| `.forEach(fn)` | Execute fn for each element |
+| `.some(fn)` | True if any element passes |
+| `.every(fn)` | True if all elements pass |
+| `.flat(depth)` | Flatten nested arrays |
+
+**Object utility methods:**
+| Method | Description |
+|--------|-------------|
+| `Object.keys(obj)` | Array of property names |
+| `Object.values(obj)` | Array of property values |
+| `Object.entries(obj)` | Array of [key, value] pairs |
+
+**Template literals with interpolation:**
+```tish
+let name = "World"
+console.log(`Hello, ${name}!`)
+
+let a = 5, b = 10
+console.log(`${a} + ${b} = ${a + b}`)
+
+let nums = [1, 2, 3]
+console.log(`Array: ${nums.join(", ")}`)
+
+let multi = `Line 1
+Line 2`
+```
+
+Features:
+- Variable interpolation: `${variable}`
+- Expression interpolation: `${a + b}`
+- Method calls: `${arr.join(",")}`
+- Nested braces: `${{ a: 1 }.a}` works correctly
+- Multiline templates
+- Escape sequences: `\$`, `` \` ``, `\\`
 
 ### Array and String Methods (2026-02-27)
 

@@ -40,6 +40,9 @@ pub enum Value {
     NativeJsonStringify,
     NativeDecodeURI,
     NativeEncodeURI,
+    NativeObjectKeys,
+    NativeObjectValues,
+    NativeObjectEntries,
 }
 
 impl std::fmt::Display for Value {
@@ -92,6 +95,9 @@ impl std::fmt::Display for Value {
             Value::NativeJsonStringify => write!(f, "[NativeFunction: JSON.stringify]"),
             Value::NativeDecodeURI => write!(f, "[NativeFunction: decodeURI]"),
             Value::NativeEncodeURI => write!(f, "[NativeFunction: encodeURI]"),
+            Value::NativeObjectKeys => write!(f, "[NativeFunction: Object.keys]"),
+            Value::NativeObjectValues => write!(f, "[NativeFunction: Object.values]"),
+            Value::NativeObjectEntries => write!(f, "[NativeFunction: Object.entries]"),
         }
     }
 }

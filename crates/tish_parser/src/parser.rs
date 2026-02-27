@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use tish_ast::{
-    BinOp, CompoundOp, Expr, Literal, MemberProp, Program, Span, Statement, TypeAnnotation,
+    ArrowBody, BinOp, CompoundOp, Expr, Literal, MemberProp, Program, Span, Statement, TypeAnnotation,
     TypedParam, UnaryOp,
 };
 use tish_lexer::{Token, TokenKind};
@@ -1123,11 +1123,27 @@ impl<'a> Parser<'a> {
                 value: Literal::Null,
                 span,
             }),
-            TokenKind::Ident => Ok(Expr::Ident {
-                name: t.literal.clone().ok_or("Expected ident")?,
-                span,
-            }),
+            TokenKind::Ident => {
+                let name = t.literal.clone().ok_or("Expected ident")?;
+                // Check if this is a single-param arrow function: x => ...
+                if matches!(self.peek_kind(), Some(TokenKind::Arrow)) {
+                    self.advance(); // consume =>
+                    let body = self.parse_arrow_body()?;
+                    let end = self.previous_span_end();
+                    return Ok(Expr::ArrowFunction {
+                        params: vec![TypedParam { name: name.clone(), type_ann: None }],
+                        body,
+                        span: Span { start: span.start, end },
+                    });
+                }
+                Ok(Expr::Ident { name, span })
+            }
             TokenKind::LParen => {
+                // Check if this is an arrow function: (params) => ...
+                if let Some(arrow_fn) = self.try_parse_arrow_function(&span)? {
+                    return Ok(arrow_fn);
+                }
+                // Otherwise it's a grouping expression
                 let expr = self.parse_expr()?;
                 self.expect(TokenKind::RParen)?;
                 Ok(expr)
@@ -1173,7 +1189,133 @@ impl<'a> Parser<'a> {
                     },
                 })
             }
+            TokenKind::TemplateNoSub => {
+                // Simple template literal without interpolation
+                Ok(Expr::TemplateLiteral {
+                    quasis: vec![t.literal.clone().unwrap_or_default()],
+                    exprs: vec![],
+                    span,
+                })
+            }
+            TokenKind::TemplateHead => {
+                // Template literal with interpolation: `text${
+                let mut quasis = vec![t.literal.clone().unwrap_or_default()];
+                let mut exprs = Vec::new();
+                
+                loop {
+                    // Parse the expression inside ${}
+                    let expr = self.parse_expr()?;
+                    exprs.push(expr);
+                    
+                    // Next token should be TemplateMiddle or TemplateTail
+                    let next = self.advance().ok_or("Unexpected EOF in template literal")?;
+                    match next.kind {
+                        TokenKind::TemplateTail => {
+                            quasis.push(next.literal.clone().unwrap_or_default());
+                            let end = self.previous_span_end();
+                            return Ok(Expr::TemplateLiteral {
+                                quasis,
+                                exprs,
+                                span: Span { start: span.start, end },
+                            });
+                        }
+                        TokenKind::TemplateMiddle => {
+                            quasis.push(next.literal.clone().unwrap_or_default());
+                            // Continue parsing more expressions
+                        }
+                        _ => return Err(format!("Expected template continuation, got {:?}", next.kind)),
+                    }
+                }
+            }
             _ => Err(format!("Unexpected token: {:?}", t.kind)),
+        }
+    }
+
+    /// Try to parse an arrow function starting with '(' already consumed.
+    /// Returns Some(Expr) if successful, None if it's not an arrow function.
+    fn try_parse_arrow_function(&mut self, start_span: &Span) -> Result<Option<Expr>, String> {
+        // Save position for backtracking
+        let saved_pos = self.pos;
+        
+        // Try to parse as arrow function params
+        let mut params = Vec::new();
+        let mut is_arrow = false;
+        
+        // Check for empty params: () => ...
+        if matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+            self.advance(); // consume )
+            if matches!(self.peek_kind(), Some(TokenKind::Arrow)) {
+                self.advance(); // consume =>
+                is_arrow = true;
+            }
+        } else {
+            // Try to parse params: (x, y, z) or (x: Type, y: Type)
+            loop {
+                if !matches!(self.peek_kind(), Some(TokenKind::Ident)) {
+                    break; // Not a valid arrow function param list
+                }
+                let name = self.advance().unwrap().literal.clone().ok_or("Expected param name")?;
+                
+                // Optional type annotation
+                let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+                    self.advance();
+                    Some(self.parse_type_annotation()?)
+                } else {
+                    None
+                };
+                
+                params.push(TypedParam { name, type_ann });
+                
+                if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            
+            if matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+                self.advance(); // consume )
+                if matches!(self.peek_kind(), Some(TokenKind::Arrow)) {
+                    self.advance(); // consume =>
+                    is_arrow = true;
+                }
+            }
+        }
+        
+        if !is_arrow {
+            // Backtrack - it's not an arrow function
+            self.pos = saved_pos;
+            return Ok(None);
+        }
+        
+        let body = self.parse_arrow_body()?;
+        let end = self.previous_span_end();
+        
+        Ok(Some(Expr::ArrowFunction {
+            params,
+            body,
+            span: Span { start: start_span.start, end },
+        }))
+    }
+
+    /// Parse the body of an arrow function (either expression or block)
+    fn parse_arrow_body(&mut self) -> Result<ArrowBody, String> {
+        if matches!(self.peek_kind(), Some(TokenKind::LBrace)) {
+            // Block body
+            let block = self.parse_block()?;
+            Ok(ArrowBody::Block(Box::new(block)))
+        } else {
+            // Expression body
+            let expr = self.parse_expr()?;
+            Ok(ArrowBody::Expr(Box::new(expr)))
+        }
+    }
+
+    fn previous_span_end(&self) -> (usize, usize) {
+        if self.pos > 0 && self.pos <= self.tokens.len() {
+            self.tokens[self.pos - 1].span.end
+        } else {
+            (1, 1)
         }
     }
 }
@@ -1206,6 +1348,8 @@ impl ExprSpan for Expr {
             Expr::CompoundAssign { span, .. } => *span,
             Expr::MemberAssign { span, .. } => *span,
             Expr::IndexAssign { span, .. } => *span,
+            Expr::ArrowFunction { span, .. } => *span,
+            Expr::TemplateLiteral { span, .. } => *span,
         }
     }
 }
