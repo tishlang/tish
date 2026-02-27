@@ -125,6 +125,11 @@ fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
         .to_string()
         .replace('\\', "/");
 
+    #[cfg(feature = "http")]
+    let features_str = ", features = [\"http\"]";
+    #[cfg(not(feature = "http"))]
+    let features_str = "";
+
     let cargo_toml = format!(
         r#"[package]
 name = "tish_output"
@@ -136,9 +141,9 @@ name = "{}"
 path = "src/main.rs"
 
 [dependencies]
-tish_runtime = {{ path = {:?} }}
+tish_runtime = {{ path = {:?}{} }}
 "#,
-        out_name, runtime_path
+        out_name, runtime_path, features_str
     );
 
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)

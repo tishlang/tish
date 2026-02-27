@@ -57,7 +57,7 @@ impl Codegen {
         self.write("use std::sync::Arc;\n");
         self.write("use tish_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, TishError, Value};\n");
         #[cfg(feature = "http")]
-        self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all};\n");
+        self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_serve as tish_http_serve};\n");
         self.write("\n");
 
         self.writeln("fn main() {");
@@ -114,6 +114,21 @@ impl Codegen {
         {
             self.writeln("let fetch = Value::Function(Rc::new(|args: &[Value]| tish_http_fetch(args)));");
             self.writeln("let fetchAll = Value::Function(Rc::new(|args: &[Value]| tish_http_fetch_all(args)));");
+            self.writeln("let serve = Value::Function(Rc::new(|args: &[Value]| {");
+            self.indent += 1;
+            self.writeln("let port = args.first().cloned().unwrap_or(Value::Null);");
+            self.writeln("let handler = args.get(1).cloned().unwrap_or(Value::Null);");
+            self.writeln("if let Value::Function(f) = handler {");
+            self.indent += 1;
+            self.writeln("tish_http_serve(&[port], move |req_args| f(req_args))");
+            self.indent -= 1;
+            self.writeln("} else {");
+            self.indent += 1;
+            self.writeln("Value::Null");
+            self.indent -= 1;
+            self.writeln("}");
+            self.indent -= 1;
+            self.writeln("}));");
         }
 
         for stmt in &program.statements {

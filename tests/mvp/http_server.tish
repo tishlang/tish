@@ -1,0 +1,37 @@
+// HTTP Server Test
+// Run with: cargo run --release -- run tests/mvp/http_server.tish
+// Then visit: http://localhost:3000/
+
+fun handleRequest(req) {
+    console.log("Request:", req.method, req.path)
+    
+    if (req.path === "/") {
+        return {
+            status: 200,
+            body: "Hello from Tish HTTP Server!"
+        }
+    }
+    
+    if (req.path === "/json") {
+        return {
+            status: 200,
+            headers: { contentType: "application/json" },
+            body: JSON.stringify({ message: "Hello JSON", timestamp: 12345 })
+        }
+    }
+    
+    if (req.path === "/echo") {
+        return {
+            status: 200,
+            body: "Echo: " + req.body
+        }
+    }
+    
+    return {
+        status: 404,
+        body: "Not Found: " + req.path
+    }
+}
+
+console.log("Starting Tish HTTP Server...")
+serve(3000, handleRequest)

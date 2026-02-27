@@ -47,6 +47,8 @@ pub enum Value {
     NativeFetch,
     #[cfg(feature = "http")]
     NativeFetchAll,
+    #[cfg(feature = "http")]
+    NativeServe,
 }
 
 impl std::fmt::Display for Value {
@@ -106,6 +108,8 @@ impl std::fmt::Display for Value {
             Value::NativeFetch => write!(f, "[NativeFunction: fetch]"),
             #[cfg(feature = "http")]
             Value::NativeFetchAll => write!(f, "[NativeFunction: fetchAll]"),
+            #[cfg(feature = "http")]
+            Value::NativeServe => write!(f, "[NativeFunction: serve]"),
         }
     }
 }

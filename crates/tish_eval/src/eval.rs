@@ -110,6 +110,7 @@ impl Evaluator {
             {
                 s.set("fetch".into(), Value::NativeFetch, true);
                 s.set("fetchAll".into(), Value::NativeFetchAll, true);
+                s.set("serve".into(), Value::NativeServe, true);
             }
         }
         Self { scope }
@@ -906,7 +907,7 @@ impl Evaluator {
                     | Value::NativeObjectValues
                     | Value::NativeObjectEntries => "function".into(),
                     #[cfg(feature = "http")]
-                    Value::NativeFetch | Value::NativeFetchAll => "function".into(),
+                    Value::NativeFetch | Value::NativeFetchAll | Value::NativeServe => "function".into(),
                 }))
             }
             Expr::PostfixInc { name, .. } => {
@@ -1355,6 +1356,10 @@ impl Evaluator {
         if matches!(f, Value::NativeFetchAll) {
             return crate::http::fetch_all(args).map_err(EvalError::Error);
         }
+        #[cfg(feature = "http")]
+        if matches!(f, Value::NativeServe) {
+            return self.run_http_server(args);
+        }
         let (params, rest_param, body) = match f {
             Value::Function { params, rest_param, body } => {
                 (params.clone(), rest_param.clone(), Box::clone(body))
@@ -1383,6 +1388,52 @@ impl Evaluator {
             Err(EvalError::Break) => Err(EvalError::Error("break outside loop".to_string())),
             Err(EvalError::Continue) => Err(EvalError::Error("continue outside loop".to_string())),
         }
+    }
+
+    #[cfg(feature = "http")]
+    fn run_http_server(&self, args: &[Value]) -> Result<Value, EvalError> {
+        let port = match args.first() {
+            Some(Value::Number(n)) => *n as u16,
+            _ => return Err(EvalError::Error("serve requires a port number".to_string())),
+        };
+
+        let handler = match args.get(1) {
+            Some(f @ Value::Function { .. }) => f.clone(),
+            Some(f @ Value::NativeConsoleLog) => f.clone(),
+            _ => {
+                return Err(EvalError::Error(
+                    "serve requires a handler function".to_string(),
+                ))
+            }
+        };
+
+        let server = crate::http::create_server(port).map_err(EvalError::Error)?;
+        println!("Server listening on http://0.0.0.0:{}", port);
+
+        for mut request in server.incoming_requests() {
+            let req_value = crate::http::request_to_value(&mut request);
+
+            let response_value = match self.call_func(&handler, &[req_value]) {
+                Ok(v) => v,
+                Err(EvalError::Throw(v)) => {
+                    let mut err_obj: HashMap<Arc<str>, Value> = HashMap::new();
+                    err_obj.insert(Arc::from("status"), Value::Number(500.0));
+                    err_obj.insert(Arc::from("body"), Value::String(v.to_string().into()));
+                    Value::Object(Rc::new(RefCell::new(err_obj)))
+                }
+                Err(e) => {
+                    let mut err_obj: HashMap<Arc<str>, Value> = HashMap::new();
+                    err_obj.insert(Arc::from("status"), Value::Number(500.0));
+                    err_obj.insert(Arc::from("body"), Value::String(e.to_string().into()));
+                    Value::Object(Rc::new(RefCell::new(err_obj)))
+                }
+            };
+
+            let (status, headers, body) = crate::http::value_to_response(&response_value);
+            crate::http::send_response(request, status, headers, body);
+        }
+
+        Ok(Value::Null)
     }
 
     fn get_prop(&self, obj: &Value, key: &str) -> Result<Value, String> {
@@ -1679,7 +1730,7 @@ impl Evaluator {
             | Value::NativeObjectValues
             | Value::NativeObjectEntries => "null".to_string(),
             #[cfg(feature = "http")]
-            Value::NativeFetch | Value::NativeFetchAll => "null".to_string(),
+            Value::NativeFetch | Value::NativeFetchAll | Value::NativeServe => "null".to_string(),
         }
     }
 
