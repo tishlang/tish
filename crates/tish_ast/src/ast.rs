@@ -26,11 +26,41 @@ pub enum TypeAnnotation {
     Union(Vec<TypeAnnotation>),
 }
 
-/// Function parameter with optional type annotation.
+/// Function parameter with optional type annotation and default value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedParam {
     pub name: Arc<str>,
     pub type_ann: Option<TypeAnnotation>,
+    pub default: Option<Expr>,
+}
+
+/// Destructuring pattern for array or object destructuring
+#[derive(Debug, Clone, PartialEq)]
+pub enum DestructPattern {
+    /// Array destructuring: [a, b, c] or [a, , c]
+    Array(Vec<Option<DestructElement>>),
+    /// Object destructuring: { a, b: renamed, c }
+    Object(Vec<DestructProp>),
+}
+
+/// Element in array destructuring pattern
+#[derive(Debug, Clone, PartialEq)]
+pub enum DestructElement {
+    /// Simple binding: a
+    Ident(Arc<str>),
+    /// Nested pattern: [a, b] or { x, y }
+    Pattern(Box<DestructPattern>),
+    /// Rest element: ...rest
+    Rest(Arc<str>),
+}
+
+/// Property in object destructuring pattern
+#[derive(Debug, Clone, PartialEq)]
+pub struct DestructProp {
+    /// Original property name in source object
+    pub key: Arc<str>,
+    /// Binding name (may be same as key or renamed)
+    pub value: DestructElement,
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +68,7 @@ pub struct Program {
     pub statements: Vec<Statement>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     Block {
         statements: Vec<Statement>,
@@ -49,6 +79,13 @@ pub enum Statement {
         mutable: bool, // true for `let`, false for `const`
         type_ann: Option<TypeAnnotation>,
         init: Option<Expr>,
+        span: Span,
+    },
+    /// Variable declaration with destructuring pattern
+    VarDeclDestructure {
+        pattern: DestructPattern,
+        mutable: bool,
+        init: Expr,
         span: Span,
     },
     ExprStmt {
@@ -115,12 +152,13 @@ pub enum Statement {
     Try {
         body: Box<Statement>,
         catch_param: Option<Arc<str>>,
-        catch_body: Box<Statement>,
+        catch_body: Option<Box<Statement>>,
+        finally_body: Option<Box<Statement>>,
         span: Span,
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal {
         value: Literal,
@@ -143,7 +181,7 @@ pub enum Expr {
     },
     Call {
         callee: Box<Expr>,
-        args: Vec<Expr>,
+        args: Vec<CallArg>,
         span: Span,
     },
     Member {
@@ -170,11 +208,11 @@ pub enum Expr {
         span: Span,
     },
     Array {
-        elements: Vec<Expr>,
+        elements: Vec<ArrayElement>,
         span: Span,
     },
     Object {
-        props: Vec<(Arc<str>, Expr)>,
+        props: Vec<ObjectProp>,
         span: Span,
     },
     Assign {
@@ -237,10 +275,31 @@ pub enum Expr {
 }
 
 /// Body of an arrow function: either an expression or a block
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ArrowBody {
     Expr(Box<Expr>),
     Block(Box<Statement>),
+}
+
+/// Array element: either a regular expression or spread element
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArrayElement {
+    Expr(Expr),
+    Spread(Expr),
+}
+
+/// Object property: either a regular key-value pair or spread
+#[derive(Debug, Clone, PartialEq)]
+pub enum ObjectProp {
+    KeyValue(Arc<str>, Expr),
+    Spread(Expr),
+}
+
+/// Function call argument: either a regular argument or spread
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallArg {
+    Expr(Expr),
+    Spread(Expr),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,7 +354,7 @@ pub enum UnaryOp {
     Void,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MemberProp {
     Name(Arc<str>),
     Expr(Box<Expr>), // for computed property

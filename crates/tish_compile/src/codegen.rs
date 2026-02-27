@@ -1,6 +1,6 @@
 //! Code generation: AST -> Rust source.
 
-use tish_ast::{BinOp, CompoundOp, Expr, Literal, MemberProp, Program, Statement, UnaryOp};
+use tish_ast::{ArrayElement, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr, Literal, MemberProp, ObjectProp, Program, Statement, UnaryOp};
 
 #[derive(Debug, Clone)]
 pub struct CompileError {
@@ -262,6 +262,15 @@ impl Codegen {
                 // Clone to ensure JS-like reference semantics where multiple variables can hold the same value
                 self.writeln(&format!("{} {} = ({}).clone();", mutability, name.as_ref(), expr));
             }
+            Statement::VarDeclDestructure { pattern, mutable, init, .. } => {
+                let expr = self.emit_expr(init)?;
+                let mutability = if *mutable { "let mut" } else { "let" };
+                self.writeln(&format!("{{ let _destruct_val = ({}).clone();", expr));
+                self.indent += 1;
+                self.emit_destruct_bindings(pattern, "_destruct_val", mutability)?;
+                self.indent -= 1;
+                self.writeln("}");
+            }
             Statement::ExprStmt { expr, .. } => {
                 let e = self.emit_expr(expr)?;
                 self.writeln(&format!("{};", e));
@@ -457,6 +466,7 @@ impl Codegen {
                 body,
                 catch_param,
                 catch_body,
+                finally_body,
                 ..
             } => {
                 self.writeln("let _try_result: Result<Value, Box<dyn std::error::Error>> = (|| {");
@@ -465,30 +475,37 @@ impl Codegen {
                 self.writeln("Ok(Value::Null)");
                 self.indent -= 1;
                 self.writeln("})();");
-                if let Some(param) = catch_param {
-                    self.writeln("if let Err(e) = _try_result {");
-                    self.indent += 1;
-                    self.writeln("match e.downcast::<tish_runtime::TishError>() {");
-                    self.indent += 1;
-                    self.writeln("Ok(tish_err) => {");
-                    self.indent += 1;
-                    self.writeln("if let tish_runtime::TishError::Throw(v) = *tish_err {");
-                    self.writeln(&format!("let {} = v.clone();", param.as_ref()));
-                    self.emit_statement(catch_body)?;
-                    self.writeln("} else { return Err(Box::new(tish_err)); }");
-                    self.indent -= 1;
+                
+                if let Some(catch_stmt) = catch_body {
+                    if let Some(param) = catch_param {
+                        self.writeln("if let Err(e) = _try_result {");
+                        self.indent += 1;
+                        self.writeln("match e.downcast::<tish_runtime::TishError>() {");
+                        self.indent += 1;
+                        self.writeln("Ok(tish_err) => {");
+                        self.indent += 1;
+                        self.writeln("if let tish_runtime::TishError::Throw(v) = *tish_err {");
+                        self.writeln(&format!("let {} = v.clone();", param.as_ref()));
+                        self.emit_statement(catch_stmt)?;
+                        self.writeln("} else { return Err(Box::new(tish_err)); }");
+                        self.indent -= 1;
+                        self.writeln("}");
+                        self.writeln("Err(orig) => return Err(orig),");
+                        self.indent -= 1;
+                        self.writeln("}");
+                        self.indent -= 1;
+                    } else {
+                        self.writeln("if let Err(_e) = _try_result {");
+                        self.indent += 1;
+                        self.emit_statement(catch_stmt)?;
+                        self.indent -= 1;
+                    }
                     self.writeln("}");
-                    self.writeln("Err(orig) => return Err(orig),");
-                    self.indent -= 1;
-                    self.writeln("}");
-                    self.indent -= 1;
-                } else {
-                    self.writeln("if let Err(_e) = _try_result {");
-                    self.indent += 1;
-                    self.emit_statement(catch_body)?;
-                    self.indent -= 1;
                 }
-                self.writeln("}");
+                
+                if let Some(finally_stmt) = finally_body {
+                    self.emit_statement(finally_stmt)?;
+                }
             }
             Statement::FunDecl { name, params, rest_param, body, .. } => {
                 // Use Rc<RefCell<>> pattern to allow recursive function calls
@@ -590,6 +607,104 @@ impl Codegen {
         Ok(())
     }
 
+    fn emit_call_arg(&mut self, arg: &CallArg) -> Result<String, CompileError> {
+        match arg {
+            CallArg::Expr(e) => self.emit_expr(e),
+            CallArg::Spread(e) => {
+                let val = self.emit_expr(e)?;
+                Ok(val)
+            }
+        }
+    }
+
+    fn emit_call_args(&mut self, args: &[CallArg]) -> Result<String, CompileError> {
+        let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
+        if has_spread {
+            let mut parts = Vec::new();
+            for arg in args {
+                match arg {
+                    CallArg::Expr(e) => {
+                        let val = self.emit_expr(e)?;
+                        parts.push(format!("_args.push({}.clone());", val));
+                    }
+                    CallArg::Spread(e) => {
+                        let val = self.emit_expr(e)?;
+                        parts.push(format!("if let Value::Array(ref _spread) = {} {{ _args.extend(_spread.borrow().iter().cloned()); }}", val));
+                    }
+                }
+            }
+            Ok(format!("{{ let mut _args: Vec<Value> = Vec::new(); {} _args }}", parts.join(" ")))
+        } else {
+            let exprs: Result<Vec<_>, _> = args.iter().map(|a| {
+                if let CallArg::Expr(e) = a {
+                    self.emit_expr(e)
+                } else {
+                    Err(CompileError { message: "Unexpected spread".to_string() })
+                }
+            }).collect();
+            let exprs = exprs?;
+            Ok(format!("vec![{}]", exprs.iter().map(|a| format!("{}.clone()", a)).collect::<Vec<_>>().join(", ")))
+        }
+    }
+
+    fn emit_destruct_bindings(&mut self, pattern: &DestructPattern, value_expr: &str, mutability: &str) -> Result<(), CompileError> {
+        match pattern {
+            DestructPattern::Array(elements) => {
+                self.writeln(&format!("if let Value::Array(ref _arr) = {} {{", value_expr));
+                self.indent += 1;
+                self.writeln("let _arr_borrow = _arr.borrow();");
+                for (i, elem) in elements.iter().enumerate() {
+                    if let Some(el) = elem {
+                        match el {
+                            DestructElement::Ident(name) => {
+                                self.writeln(&format!("{} {} = _arr_borrow.get({}).cloned().unwrap_or(Value::Null);", 
+                                    mutability, name.as_ref(), i));
+                            }
+                            DestructElement::Pattern(nested) => {
+                                let nested_var = format!("_nested_{}", i);
+                                self.writeln(&format!("let {} = _arr_borrow.get({}).cloned().unwrap_or(Value::Null);", 
+                                    nested_var, i));
+                                self.emit_destruct_bindings(nested, &nested_var, mutability)?;
+                            }
+                            DestructElement::Rest(name) => {
+                                self.writeln(&format!("{} {} = Value::Array(Rc::new(RefCell::new(_arr_borrow.iter().skip({}).cloned().collect())));", 
+                                    mutability, name.as_ref(), i));
+                            }
+                        }
+                    }
+                }
+                self.indent -= 1;
+                self.writeln("}");
+            }
+            DestructPattern::Object(props) => {
+                self.writeln(&format!("if let Value::Object(ref _obj) = {} {{", value_expr));
+                self.indent += 1;
+                self.writeln("let _obj_borrow = _obj.borrow();");
+                for prop in props {
+                    let key = prop.key.as_ref();
+                    match &prop.value {
+                        DestructElement::Ident(name) => {
+                            self.writeln(&format!("{} {} = _obj_borrow.get({:?}).cloned().unwrap_or(Value::Null);", 
+                                mutability, name.as_ref(), key));
+                        }
+                        DestructElement::Pattern(nested) => {
+                            let nested_var = format!("_nested_{}", key);
+                            self.writeln(&format!("let {} = _obj_borrow.get({:?}).cloned().unwrap_or(Value::Null);", 
+                                nested_var, key));
+                            self.emit_destruct_bindings(nested, &nested_var, mutability)?;
+                        }
+                        DestructElement::Rest(_) => {
+                            return Err(CompileError { message: "Rest in object destructuring not supported".to_string() });
+                        }
+                    }
+                }
+                self.indent -= 1;
+                self.writeln("}");
+            }
+        }
+        Ok(())
+    }
+
     fn emit_expr(&mut self, expr: &Expr) -> Result<String, CompileError> {
         Ok(match expr {
             Expr::Literal { value, .. } => match value {
@@ -628,7 +743,7 @@ impl Codegen {
                 if let Expr::Member { object, prop: MemberProp::Name(method_name), .. } = callee.as_ref() {
                     let obj_expr = self.emit_expr(object)?;
                     let arg_exprs: Result<Vec<_>, _> =
-                        args.iter().map(|a| self.emit_expr(a)).collect();
+                        args.iter().map(|a| self.emit_call_arg(a)).collect();
                     let arg_exprs = arg_exprs?;
                     
                     // Array methods
@@ -798,8 +913,16 @@ impl Codegen {
                 }
                 
                 let callee_expr = self.emit_expr(callee)?;
+                let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
+                if has_spread {
+                    let args_code = self.emit_call_args(args)?;
+                    return Ok(format!(
+                        "{{ let f = &{}; let _spread_args = {}; match f {{ Value::Function(cb) => cb(&_spread_args), _ => panic!(\"Not a function\") }} }}",
+                        callee_expr, args_code
+                    ));
+                }
                 let arg_exprs: Result<Vec<_>, _> =
-                    args.iter().map(|a| self.emit_expr(a)).collect();
+                    args.iter().map(|a| self.emit_call_arg(a)).collect();
                 let arg_exprs = arg_exprs?;
                 let args_vec = arg_exprs
                     .iter()
@@ -880,24 +1003,67 @@ impl Codegen {
                 )
             }
             Expr::Array { elements, .. } => {
-                let els: Result<Vec<_>, _> =
-                    elements.iter().map(|e| self.emit_expr(e)).collect();
-                let els = els?;
-                format!(
-                    "Value::Array(Rc::new(RefCell::new(vec![{}])))",
-                    els.join(", ")
-                )
+                let has_spread = elements.iter().any(|e| matches!(e, ArrayElement::Spread(_)));
+                if has_spread {
+                    let mut parts = Vec::new();
+                    for elem in elements {
+                        match elem {
+                            ArrayElement::Expr(e) => {
+                                let val = self.emit_expr(e)?;
+                                parts.push(format!("_arr.push({});", val));
+                            }
+                            ArrayElement::Spread(e) => {
+                                let val = self.emit_expr(e)?;
+                                parts.push(format!("if let Value::Array(ref _spread) = {} {{ _arr.extend(_spread.borrow().iter().cloned()); }}", val));
+                            }
+                        }
+                    }
+                    format!("{{ let mut _arr: Vec<Value> = Vec::new(); {} Value::Array(Rc::new(RefCell::new(_arr))) }}", parts.join(" "))
+                } else {
+                    let els: Result<Vec<_>, _> = elements.iter().map(|e| {
+                        if let ArrayElement::Expr(expr) = e {
+                            self.emit_expr(expr)
+                        } else {
+                            Err(CompileError { message: "Unexpected spread".to_string() })
+                        }
+                    }).collect();
+                    let els = els?;
+                    format!(
+                        "Value::Array(Rc::new(RefCell::new(vec![{}])))",
+                        els.join(", ")
+                    )
+                }
             }
             Expr::Object { props, .. } => {
-                let mut parts = Vec::new();
-                for (k, v) in props {
-                    let val = self.emit_expr(v)?;
-                    parts.push(format!("(Arc::from({:?}), {})", k.as_ref(), val));
+                let has_spread = props.iter().any(|p| matches!(p, ObjectProp::Spread(_)));
+                if has_spread {
+                    let mut parts = Vec::new();
+                    for prop in props {
+                        match prop {
+                            ObjectProp::KeyValue(k, v) => {
+                                let val = self.emit_expr(v)?;
+                                parts.push(format!("_obj.insert(Arc::from({:?}), {});", k.as_ref(), val));
+                            }
+                            ObjectProp::Spread(e) => {
+                                let val = self.emit_expr(e)?;
+                                parts.push(format!("if let Value::Object(ref _spread) = {} {{ for (k, v) in _spread.borrow().iter() {{ _obj.insert(Arc::clone(k), v.clone()); }} }}", val));
+                            }
+                        }
+                    }
+                    format!("{{ let mut _obj: HashMap<Arc<str>, Value> = HashMap::new(); {} Value::Object(Rc::new(RefCell::new(_obj))) }}", parts.join(" "))
+                } else {
+                    let mut parts = Vec::new();
+                    for prop in props {
+                        if let ObjectProp::KeyValue(k, v) = prop {
+                            let val = self.emit_expr(v)?;
+                            parts.push(format!("(Arc::from({:?}), {})", k.as_ref(), val));
+                        }
+                    }
+                    format!(
+                        "Value::Object(Rc::new(RefCell::new(HashMap::from([{}]))))",
+                        parts.join(", ")
+                    )
                 }
-                format!(
-                    "Value::Object(Rc::new(RefCell::new(HashMap::from([{}]))))",
-                    parts.join(", ")
-                )
             }
             Expr::Assign { name, value, .. } => {
                 let val = self.emit_expr(value)?;

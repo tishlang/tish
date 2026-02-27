@@ -1,41 +1,53 @@
-// Test Object.keys, Object.values, Object.entries
+// Tests for Object.assign() and Object.fromEntries()
 
-let obj = { name: "Alice", age: 30, city: "NYC" }
+console.log("=== Object.assign() tests ===");
 
-// Object.keys
-let keys = Object.keys(obj)
-console.log("keys count:", keys.length)
+// Basic merge
+let target = { a: 1, b: 2 };
+let source = { b: 3, c: 4 };
+let result = Object.assign(target, source);
+console.log(result.a === 1);
+console.log(result.b === 3);
+console.log(result.c === 4);
 
-// Object.values
-let vals = Object.values(obj)
-console.log("values count:", vals.length)
+// Target is modified in place
+console.log(target.b === 3);
+console.log(target.c === 4);
 
-// Object.entries
-let entries = Object.entries(obj)
-console.log("entries count:", entries.length)
+// Multiple sources
+let t2 = { a: 1 };
+let s1 = { b: 2 };
+let s2 = { c: 3 };
+let r2 = Object.assign(t2, s1, s2);
+console.log(r2.a === 1);
+console.log(r2.b === 2);
+console.log(r2.c === 3);
 
-// Iterate with forEach over entries
-fun printEntry(entry) {
-    console.log("  key:", entry[0], "val:", entry[1])
-}
-console.log("entries:")
-Object.entries(obj).forEach(printEntry)
+// Clone object
+let original = { x: 10, y: 20 };
+let clone = Object.assign({}, original);
+console.log(clone.x === 10);
+console.log(clone.y === 20);
 
-// Use with map
-fun getKey(entry) { return entry[0] }
-let keyNames = Object.entries(obj).map(getKey)
-console.log("mapped keys:", keyNames.join(","))
+// Verify clone is separate
+clone.x = 100;
+console.log(original.x === 10);
+console.log(clone.x === 100);
 
-// Empty object
-let empty = {}
-console.log("empty keys:", Object.keys(empty).length)
-console.log("empty values:", Object.values(empty).length)
-console.log("empty entries:", Object.entries(empty).length)
+console.log("=== Object.fromEntries() tests ===");
 
-// Nested object
-let nested = {
-    a: 1,
-    b: { x: 10, y: 20 },
-    c: [1, 2, 3]
-}
-console.log("nested keys:", Object.keys(nested).length)
+// Basic fromEntries
+let entries = [["a", 1], ["b", 2], ["c", 3]];
+let obj = Object.fromEntries(entries);
+console.log(obj.a === 1);
+console.log(obj.b === 2);
+console.log(obj.c === 3);
+
+// With Object.entries round-trip
+let src = { foo: "bar", baz: 42 };
+let ents = Object.entries(src);
+let rebuilt = Object.fromEntries(ents);
+console.log(rebuilt.foo === "bar");
+console.log(rebuilt.baz === 42);
+
+console.log("=== All Object method tests passed ===");

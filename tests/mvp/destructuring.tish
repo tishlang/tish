@@ -1,0 +1,63 @@
+// Tests for destructuring assignment
+
+console.log("=== Array destructuring tests ===");
+
+// Basic array destructuring
+let [a, b, c] = [1, 2, 3];
+console.log(a === 1);
+console.log(b === 2);
+console.log(c === 3);
+
+// Skipping elements (holes)
+let [x, , z] = [10, 20, 30];
+console.log(x === 10);
+console.log(z === 30);
+
+// Rest element
+let [first, ...rest] = [1, 2, 3, 4, 5];
+console.log(first === 1);
+console.log(rest.length === 4);
+console.log(rest[0] === 2);
+
+// Nested array destructuring
+let [[inner1, inner2], outer] = [[1, 2], 3];
+console.log(inner1 === 1);
+console.log(inner2 === 2);
+console.log(outer === 3);
+
+console.log("=== Object destructuring tests ===");
+
+// Basic object destructuring
+let { name, age } = { name: "Alice", age: 30 };
+console.log(name === "Alice");
+console.log(age === 30);
+
+// Renamed binding
+let { foo: renamed } = { foo: "bar" };
+console.log(renamed === "bar");
+
+// Multiple properties
+let { x: px, y: py, z: pz } = { x: 1, y: 2, z: 3 };
+console.log(px === 1);
+console.log(py === 2);
+console.log(pz === 3);
+
+// Nested object destructuring
+let { outer: { inner } } = { outer: { inner: "deep" } };
+console.log(inner === "deep");
+
+// Mixed nested
+let { arr: [elem1, elem2] } = { arr: [100, 200] };
+console.log(elem1 === 100);
+console.log(elem2 === 200);
+
+console.log("=== Const destructuring ===");
+
+const [ca, cb] = [11, 22];
+console.log(ca === 11);
+console.log(cb === 22);
+
+const { cname } = { cname: "Bob" };
+console.log(cname === "Bob");
+
+console.log("=== All destructuring tests passed ===");

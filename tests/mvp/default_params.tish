@@ -1,0 +1,55 @@
+// Tests for default parameters
+
+console.log("=== Default parameter tests ===");
+
+// Basic default parameter
+fun greet(name = "World") {
+    return "Hello, " + name;
+}
+console.log(greet() === "Hello, World");
+console.log(greet("Alice") === "Hello, Alice");
+
+// Multiple defaults
+fun calc(a, b = 10, c = 20) {
+    return a + b + c;
+}
+console.log(calc(1) === 31);
+console.log(calc(1, 2) === 23);
+console.log(calc(1, 2, 3) === 6);
+
+// Default with literal expression
+fun createPoint(x = 0, y = 0) {
+    return { x: x, y: y };
+}
+let p1 = createPoint();
+console.log(p1.x === 0);
+console.log(p1.y === 0);
+
+let p2 = createPoint(5);
+console.log(p2.x === 5);
+console.log(p2.y === 0);
+
+let p3 = createPoint(3, 7);
+console.log(p3.x === 3);
+console.log(p3.y === 7);
+
+// Arrow function with defaults
+let multiply = (a, b = 1) => a * b;
+console.log(multiply(5) === 5);
+console.log(multiply(5, 3) === 15);
+
+// Default object
+fun config(opts = {}) {
+    return opts.debug;
+}
+console.log(config() === null);
+console.log(config({ debug: true }) === true);
+
+// Default array
+fun first(arr = []) {
+    return arr.length > 0 ? arr[0] : null;
+}
+console.log(first() === null);
+console.log(first([1, 2, 3]) === 1);
+
+console.log("=== All default parameter tests passed ===");

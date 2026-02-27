@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tish_ast::Statement;
+use tish_ast::{Expr, Statement};
 
 #[cfg(feature = "regex")]
 pub use crate::regex::TishRegExp;
@@ -20,6 +20,7 @@ pub enum Value {
     Object(Rc<RefCell<HashMap<Arc<str>, Value>>>),
     Function {
         params: Vec<Arc<str>>,
+        defaults: Vec<Option<Expr>>,
         rest_param: Option<Arc<str>>,
         body: Box<Statement>,
     },
@@ -46,6 +47,8 @@ pub enum Value {
     NativeObjectKeys,
     NativeObjectValues,
     NativeObjectEntries,
+    NativeObjectAssign,
+    NativeObjectFromEntries,
     NativeArrayIsArray,
     NativeStringFromCharCode,
     // Date
@@ -142,6 +145,8 @@ impl std::fmt::Display for Value {
             Value::NativeObjectKeys => write!(f, "[NativeFunction: Object.keys]"),
             Value::NativeObjectValues => write!(f, "[NativeFunction: Object.values]"),
             Value::NativeObjectEntries => write!(f, "[NativeFunction: Object.entries]"),
+            Value::NativeObjectAssign => write!(f, "[NativeFunction: Object.assign]"),
+            Value::NativeObjectFromEntries => write!(f, "[NativeFunction: Object.fromEntries]"),
             Value::NativeArrayIsArray => write!(f, "[NativeFunction: Array.isArray]"),
             Value::NativeStringFromCharCode => write!(f, "[NativeFunction: String.fromCharCode]"),
             Value::NativeDateNow => write!(f, "[NativeFunction: Date.now]"),

@@ -1,0 +1,69 @@
+// Tests for try/catch/finally
+
+console.log("=== try/finally tests ===");
+
+// Finally runs after successful try
+let ran1 = false;
+try {
+    let x = 1;
+} finally {
+    ran1 = true;
+}
+console.log(ran1);
+
+// Finally runs after exception caught
+let ran2 = false;
+let caught2 = false;
+try {
+    throw "error";
+} catch (e) {
+    caught2 = true;
+} finally {
+    ran2 = true;
+}
+console.log(caught2);
+console.log(ran2);
+
+// try-finally without catch
+let ran3 = false;
+let error3 = false;
+try {
+    try {
+        throw "inner error";
+    } finally {
+        ran3 = true;
+    }
+} catch (e) {
+    error3 = true;
+}
+console.log(ran3);
+console.log(error3);
+
+// finally cleanup pattern
+let resource = "open";
+try {
+    resource = "using";
+    throw "operation failed";
+} catch (e) {
+    resource = "error: " + e;
+} finally {
+    resource = "closed";
+}
+console.log(resource === "closed");
+
+// Nested try-finally
+let order = "";
+try {
+    order = order + "1";
+    try {
+        order = order + "2";
+    } finally {
+        order = order + "3";
+    }
+    order = order + "4";
+} finally {
+    order = order + "5";
+}
+console.log(order === "12345");
+
+console.log("=== All try/finally tests passed ===");

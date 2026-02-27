@@ -117,6 +117,8 @@ impl Evaluator {
             object.insert("keys".into(), Value::NativeObjectKeys);
             object.insert("values".into(), Value::NativeObjectValues);
             object.insert("entries".into(), Value::NativeObjectEntries);
+            object.insert("assign".into(), Value::NativeObjectAssign);
+            object.insert("fromEntries".into(), Value::NativeObjectFromEntries);
             s.set("Object".into(), Value::Object(Rc::new(RefCell::new(object))), true);
 
             let mut array_obj = HashMap::new();
@@ -199,6 +201,11 @@ impl Evaluator {
                     .transpose()?
                     .unwrap_or(Value::Null);
                 self.scope.borrow_mut().set(Arc::clone(name), value, *mutable);
+                Ok(Value::Null)
+            }
+            Statement::VarDeclDestructure { pattern, mutable, init, .. } => {
+                let value = self.eval_expr(init)?;
+                self.bind_destruct_pattern(pattern, &value, *mutable)?;
                 Ok(Value::Null)
             }
             Statement::ExprStmt { expr, .. } => self.eval_expr(expr),
@@ -311,13 +318,15 @@ impl Evaluator {
                 body,
                 ..
             } => {
-                // Extract just the parameter names (ignoring type annotations for now)
+                // Extract parameter names and defaults
                 let param_names: Vec<Arc<str>> = params.iter().map(|p| Arc::clone(&p.name)).collect();
+                let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
                 let rest_param_name = rest_param.as_ref().map(|p| Arc::clone(&p.name));
                 let body = Box::clone(body);
                 let _scope = Rc::clone(&self.scope);
                 let func = Value::Function {
                     params: param_names,
+                    defaults,
                     rest_param: rest_param_name,
                     body,
                 };
@@ -398,24 +407,37 @@ impl Evaluator {
                 body,
                 catch_param,
                 catch_body,
+                finally_body,
                 ..
             } => {
-                match self.eval_statement(body) {
+                let try_result = self.eval_statement(body);
+                
+                let result = match try_result {
                     Ok(v) => Ok(v),
                     Err(EvalError::Throw(thrown)) => {
-                        if let Some(param) = catch_param {
-                            let scope = Scope::child(Rc::clone(&self.scope));
-                            let prev = std::mem::replace(&mut self.scope, Rc::clone(&scope));
-                            scope.borrow_mut().set(Arc::clone(param), thrown, true);
-                            let res = self.eval_statement(catch_body);
-                            self.scope = prev;
-                            res
+                        if let Some(catch_stmt) = catch_body {
+                            if let Some(param) = catch_param {
+                                let scope = Scope::child(Rc::clone(&self.scope));
+                                let prev = std::mem::replace(&mut self.scope, Rc::clone(&scope));
+                                scope.borrow_mut().set(Arc::clone(param), thrown, true);
+                                let res = self.eval_statement(catch_stmt);
+                                self.scope = prev;
+                                res
+                            } else {
+                                self.eval_statement(catch_stmt)
+                            }
                         } else {
-                            self.eval_statement(catch_body)
+                            Err(EvalError::Throw(thrown))
                         }
                     }
                     Err(e) => Err(e),
+                };
+                
+                if let Some(finally_stmt) = finally_body {
+                    let _ = self.eval_statement(finally_stmt);
                 }
+                
+                result
             }
         }
     }
@@ -451,8 +473,7 @@ impl Evaluator {
                 // Check for built-in method calls on arrays/strings
                 if let Expr::Member { object, prop: MemberProp::Name(method_name), .. } = callee.as_ref() {
                     let obj = self.eval_expr(object)?;
-                    let arg_vals: Result<Vec<_>, _> = args.iter().map(|a| self.eval_expr(a)).collect();
-                    let arg_vals = arg_vals?;
+                    let arg_vals = self.eval_call_args(args)?;
                     
                     // Array methods
                     if let Value::Array(arr) = &obj {
@@ -513,6 +534,73 @@ impl Evaluator {
                             "reverse" => {
                                 arr.borrow_mut().reverse();
                                 return Ok(obj.clone());
+                            }
+                            "sort" => {
+                                let comparator = arg_vals.get(0).cloned();
+                                let mut arr_mut = arr.borrow_mut();
+                                
+                                if let Some(cmp_fn) = comparator {
+                                    let mut indices: Vec<usize> = (0..arr_mut.len()).collect();
+                                    let arr_clone: Vec<Value> = arr_mut.clone();
+                                    
+                                    indices.sort_by(|&a, &b| {
+                                        let va = &arr_clone[a];
+                                        let vb = &arr_clone[b];
+                                        let result = self.call_func(&cmp_fn, &[va.clone(), vb.clone()]);
+                                        match result {
+                                            Ok(Value::Number(n)) => {
+                                                if n < 0.0 {
+                                                    std::cmp::Ordering::Less
+                                                } else if n > 0.0 {
+                                                    std::cmp::Ordering::Greater
+                                                } else {
+                                                    std::cmp::Ordering::Equal
+                                                }
+                                            }
+                                            _ => std::cmp::Ordering::Equal,
+                                        }
+                                    });
+                                    
+                                    let sorted: Vec<Value> = indices.iter().map(|&i| arr_clone[i].clone()).collect();
+                                    *arr_mut = sorted;
+                                } else {
+                                    arr_mut.sort_by(|a, b| {
+                                        let sa = a.to_string();
+                                        let sb = b.to_string();
+                                        sa.cmp(&sb)
+                                    });
+                                }
+                                drop(arr_mut);
+                                return Ok(obj.clone());
+                            }
+                            "splice" => {
+                                let mut arr_mut = arr.borrow_mut();
+                                let len = arr_mut.len() as i64;
+                                
+                                let start = match arg_vals.get(0) {
+                                    Some(Value::Number(n)) => {
+                                        let n = *n as i64;
+                                        if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                                    }
+                                    _ => 0,
+                                };
+                                
+                                let delete_count = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) => (*n as i64).max(0) as usize,
+                                    _ => (len as usize).saturating_sub(start),
+                                };
+                                
+                                let actual_delete = delete_count.min(arr_mut.len().saturating_sub(start));
+                                let removed: Vec<Value> = arr_mut.drain(start..start + actual_delete).collect();
+                                
+                                if arg_vals.len() > 2 {
+                                    let items_to_insert: Vec<Value> = arg_vals[2..].to_vec();
+                                    for (i, item) in items_to_insert.into_iter().enumerate() {
+                                        arr_mut.insert(start + i, item);
+                                    }
+                                }
+                                
+                                return Ok(Value::Array(Rc::new(RefCell::new(removed))));
                             }
                             "slice" => {
                                 let arr_borrow = arr.borrow();
@@ -904,8 +992,7 @@ impl Evaluator {
                 }
                 
                 let f = self.eval_expr(callee)?;
-                let arg_vals: Result<Vec<_>, _> = args.iter().map(|a| self.eval_expr(a)).collect();
-                let arg_vals = arg_vals?;
+                let arg_vals = self.eval_call_args(args)?;
                 self.call_func(&f, &arg_vals)
             }
             Expr::Member {
@@ -968,14 +1055,38 @@ impl Evaluator {
                 }
             }
             Expr::Array { elements, .. } => {
-                let vals: Result<Vec<_>, _> =
-                    elements.iter().map(|e| self.eval_expr(e)).collect();
-                Ok(Value::Array(Rc::new(RefCell::new(vals?))))
+                let mut vals = Vec::new();
+                for elem in elements {
+                    match elem {
+                        tish_ast::ArrayElement::Expr(e) => {
+                            vals.push(self.eval_expr(e)?);
+                        }
+                        tish_ast::ArrayElement::Spread(e) => {
+                            let spread_val = self.eval_expr(e)?;
+                            if let Value::Array(arr) = spread_val {
+                                vals.extend(arr.borrow().iter().cloned());
+                            }
+                        }
+                    }
+                }
+                Ok(Value::Array(Rc::new(RefCell::new(vals))))
             }
             Expr::Object { props, .. } => {
                 let mut map = HashMap::new();
-                for (k, v) in props {
-                    map.insert(Arc::clone(k), self.eval_expr(v)?);
+                for prop in props {
+                    match prop {
+                        tish_ast::ObjectProp::KeyValue(k, v) => {
+                            map.insert(Arc::clone(k), self.eval_expr(v)?);
+                        }
+                        tish_ast::ObjectProp::Spread(e) => {
+                            let spread_val = self.eval_expr(e)?;
+                            if let Value::Object(obj) = spread_val {
+                                for (k, v) in obj.borrow().iter() {
+                                    map.insert(Arc::clone(k), v.clone());
+                                }
+                            }
+                        }
+                    }
                 }
                 Ok(Value::Object(Rc::new(RefCell::new(map))))
             }
@@ -1020,6 +1131,8 @@ impl Evaluator {
                     | Value::NativeObjectKeys
                     | Value::NativeObjectValues
                     | Value::NativeObjectEntries
+                    | Value::NativeObjectAssign
+                    | Value::NativeObjectFromEntries
                     | Value::NativeArrayIsArray
                     | Value::NativeStringFromCharCode
                     | Value::NativeDateNow
@@ -1173,6 +1286,7 @@ impl Evaluator {
                 use tish_ast::ArrowBody;
                 // Convert arrow function to regular function
                 let param_names: Vec<Arc<str>> = params.iter().map(|p| Arc::clone(&p.name)).collect();
+                let defaults: Vec<Option<tish_ast::Expr>> = params.iter().map(|p| p.default.clone()).collect();
                 let body_stmt = match body {
                     ArrowBody::Expr(expr) => {
                         // Expression body: wrap in implicit return
@@ -1185,6 +1299,7 @@ impl Evaluator {
                 };
                 Ok(Value::Function {
                     params: param_names,
+                    defaults,
                     rest_param: None,
                     body: Box::new(body_stmt),
                 })
@@ -1482,6 +1597,51 @@ impl Evaluator {
             }
             return Ok(Value::Array(Rc::new(RefCell::new(vec![]))));
         }
+        if matches!(f, Value::NativeObjectAssign) {
+            let target = match args.first() {
+                Some(Value::Object(obj)) => Rc::clone(obj),
+                Some(Value::Null) | None => {
+                    return Err(EvalError::Error("Object.assign requires a target object".to_string()));
+                }
+                _ => {
+                    return Err(EvalError::Error("Object.assign target must be an object".to_string()));
+                }
+            };
+            
+            for source in args.iter().skip(1) {
+                if let Value::Object(src) = source {
+                    let src_borrow = src.borrow();
+                    let mut target_mut = target.borrow_mut();
+                    for (k, v) in src_borrow.iter() {
+                        target_mut.insert(Arc::clone(k), v.clone());
+                    }
+                }
+            }
+            
+            return Ok(Value::Object(target));
+        }
+        if matches!(f, Value::NativeObjectFromEntries) {
+            let entries = match args.first() {
+                Some(Value::Array(arr)) => arr.borrow().clone(),
+                _ => return Ok(Value::Object(Rc::new(RefCell::new(HashMap::new())))),
+            };
+            
+            let mut result = HashMap::new();
+            for entry in entries {
+                if let Value::Array(pair) = entry {
+                    let pair_borrow = pair.borrow();
+                    if pair_borrow.len() >= 2 {
+                        let key: Arc<str> = match &pair_borrow[0] {
+                            Value::String(s) => Arc::clone(s),
+                            v => v.to_string().into(),
+                        };
+                        result.insert(key, pair_borrow[1].clone());
+                    }
+                }
+            }
+            
+            return Ok(Value::Object(Rc::new(RefCell::new(result))));
+        }
         if matches!(f, Value::NativeArrayIsArray) {
             let is_arr = matches!(args.first(), Some(Value::Array(_)));
             return Ok(Value::Bool(is_arr));
@@ -1643,9 +1803,9 @@ impl Evaluator {
         if matches!(f, Value::NativeRegExpConstructor) {
             return crate::regex::regexp_constructor(args).map_err(EvalError::Error);
         }
-        let (params, rest_param, body) = match f {
-            Value::Function { params, rest_param, body } => {
-                (params.clone(), rest_param.clone(), Box::clone(body))
+        let (params, defaults, rest_param, body) = match f {
+            Value::Function { params, defaults, rest_param, body } => {
+                (params.clone(), defaults.clone(), rest_param.clone(), Box::clone(body))
             }
             _ => return Err(EvalError::Error("Not a function".to_string())),
         };
@@ -1654,7 +1814,21 @@ impl Evaluator {
         {
             let mut s = scope.borrow_mut();
             for (i, p) in params.iter().enumerate() {
-                let val = args.get(i).cloned().unwrap_or(Value::Null);
+                let val = match args.get(i) {
+                    Some(v) => v.clone(),
+                    None => {
+                        // Check for default value
+                        if let Some(Some(default_expr)) = defaults.get(i) {
+                            // Evaluate default in current scope
+                            drop(s);
+                            let default_val = self.eval_expr(default_expr)?;
+                            s = scope.borrow_mut();
+                            default_val
+                        } else {
+                            Value::Null
+                        }
+                    }
+                };
                 s.set(Arc::clone(p), val, true);
             }
             if let Some(rest_name) = rest_param {
@@ -1717,6 +1891,77 @@ impl Evaluator {
         }
 
         Ok(Value::Null)
+    }
+
+    fn eval_call_args(&self, args: &[tish_ast::CallArg]) -> Result<Vec<Value>, EvalError> {
+        let mut result = Vec::new();
+        for arg in args {
+            match arg {
+                tish_ast::CallArg::Expr(e) => {
+                    result.push(self.eval_expr(e)?);
+                }
+                tish_ast::CallArg::Spread(e) => {
+                    let spread_val = self.eval_expr(e)?;
+                    if let Value::Array(arr) = spread_val {
+                        result.extend(arr.borrow().iter().cloned());
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn bind_destruct_pattern(&mut self, pattern: &tish_ast::DestructPattern, value: &Value, mutable: bool) -> Result<(), EvalError> {
+        match pattern {
+            tish_ast::DestructPattern::Array(elements) => {
+                let arr = match value {
+                    Value::Array(a) => a.borrow().clone(),
+                    _ => return Err(EvalError::Error("Cannot destructure non-array value".to_string())),
+                };
+                
+                for (i, elem) in elements.iter().enumerate() {
+                    if let Some(el) = elem {
+                        match el {
+                            tish_ast::DestructElement::Ident(name) => {
+                                let val = arr.get(i).cloned().unwrap_or(Value::Null);
+                                self.scope.borrow_mut().set(Arc::clone(name), val, mutable);
+                            }
+                            tish_ast::DestructElement::Pattern(nested) => {
+                                let val = arr.get(i).cloned().unwrap_or(Value::Null);
+                                self.bind_destruct_pattern(nested, &val, mutable)?;
+                            }
+                            tish_ast::DestructElement::Rest(name) => {
+                                let rest: Vec<Value> = arr.iter().skip(i).cloned().collect();
+                                self.scope.borrow_mut().set(Arc::clone(name), Value::Array(Rc::new(RefCell::new(rest))), mutable);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            tish_ast::DestructPattern::Object(props) => {
+                let obj = match value {
+                    Value::Object(o) => o.borrow().clone(),
+                    _ => return Err(EvalError::Error("Cannot destructure non-object value".to_string())),
+                };
+                
+                for prop in props {
+                    let val = obj.get(&prop.key).cloned().unwrap_or(Value::Null);
+                    match &prop.value {
+                        tish_ast::DestructElement::Ident(name) => {
+                            self.scope.borrow_mut().set(Arc::clone(name), val, mutable);
+                        }
+                        tish_ast::DestructElement::Pattern(nested) => {
+                            self.bind_destruct_pattern(nested, &val, mutable)?;
+                        }
+                        tish_ast::DestructElement::Rest(_) => {
+                            return Err(EvalError::Error("Rest not supported in object destructuring".to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn get_prop(&self, obj: &Value, key: &str) -> Result<Value, String> {
@@ -2028,6 +2273,8 @@ impl Evaluator {
             | Value::NativeObjectKeys
             | Value::NativeObjectValues
             | Value::NativeObjectEntries
+            | Value::NativeObjectAssign
+            | Value::NativeObjectFromEntries
             | Value::NativeArrayIsArray
             | Value::NativeStringFromCharCode
             | Value::NativeDateNow

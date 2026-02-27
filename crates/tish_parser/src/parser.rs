@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use tish_ast::{
-    ArrowBody, BinOp, CompoundOp, Expr, Literal, MemberProp, Program, Span, Statement, TypeAnnotation,
+    ArrowBody, ArrayElement, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
+    DestructProp, Expr, Literal, MemberProp, ObjectProp, Program, Span, Statement, TypeAnnotation,
     TypedParam, UnaryOp,
 };
 use tish_lexer::{Token, TokenKind};
@@ -172,12 +173,26 @@ impl<'a> Parser<'a> {
         } else {
             self.expect(TokenKind::Const)?.span.start
         };
+        
+        // Check for destructuring pattern
+        if matches!(self.peek_kind(), Some(TokenKind::LBracket) | Some(TokenKind::LBrace)) {
+            let pattern = self.parse_destruct_pattern()?;
+            self.expect(TokenKind::Assign)?;
+            let init = self.parse_expr()?;
+            return Ok(Statement::VarDeclDestructure {
+                pattern,
+                mutable,
+                init,
+                span: self.span_end(span_start),
+            });
+        }
+        
         let name = self
             .expect(TokenKind::Ident)?
             .literal
             .clone()
             .ok_or("Expected identifier")?;
-        
+
         // Optional type annotation: `: Type`
         let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
             self.advance(); // consume :
@@ -185,7 +200,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        
+
         let init = if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
             self.advance();
             Some(self.parse_expr()?)
@@ -199,6 +214,98 @@ impl<'a> Parser<'a> {
             init,
             span: self.span_end(span_start),
         })
+    }
+    
+    fn parse_destruct_pattern(&mut self) -> Result<DestructPattern, String> {
+        match self.peek_kind() {
+            Some(TokenKind::LBracket) => self.parse_array_destruct_pattern(),
+            Some(TokenKind::LBrace) => self.parse_object_destruct_pattern(),
+            _ => Err("Expected destructuring pattern".to_string()),
+        }
+    }
+    
+    fn parse_array_destruct_pattern(&mut self) -> Result<DestructPattern, String> {
+        self.expect(TokenKind::LBracket)?;
+        let mut elements = Vec::new();
+        
+        while !matches!(self.peek_kind(), Some(TokenKind::RBracket)) {
+            // Handle holes (elision): [a, , b]
+            if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                elements.push(None);
+                self.advance();
+                continue;
+            }
+            
+            // Rest element: ...rest
+            if matches!(self.peek_kind(), Some(TokenKind::Spread)) {
+                self.advance();
+                let name = self.expect(TokenKind::Ident)?.literal.clone().ok_or("Expected identifier")?;
+                elements.push(Some(DestructElement::Rest(name)));
+                break;
+            }
+            
+            // Nested pattern or identifier
+            let elem = match self.peek_kind() {
+                Some(TokenKind::LBracket) | Some(TokenKind::LBrace) => {
+                    let nested = self.parse_destruct_pattern()?;
+                    DestructElement::Pattern(Box::new(nested))
+                }
+                Some(TokenKind::Ident) => {
+                    let name = self.advance().ok_or("Unexpected EOF")?.literal.clone().ok_or("Expected identifier")?;
+                    DestructElement::Ident(name)
+                }
+                _ => return Err("Expected identifier or pattern in destructuring".to_string()),
+            };
+            elements.push(Some(elem));
+            
+            if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        
+        self.expect(TokenKind::RBracket)?;
+        Ok(DestructPattern::Array(elements))
+    }
+    
+    fn parse_object_destruct_pattern(&mut self) -> Result<DestructPattern, String> {
+        self.expect(TokenKind::LBrace)?;
+        let mut props = Vec::new();
+        
+        while !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
+            let key = self.expect(TokenKind::Ident)?.literal.clone().ok_or("Expected identifier")?;
+            
+            let value = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+                self.advance();
+                // Could be renamed binding or nested pattern
+                match self.peek_kind() {
+                    Some(TokenKind::LBracket) | Some(TokenKind::LBrace) => {
+                        let nested = self.parse_destruct_pattern()?;
+                        DestructElement::Pattern(Box::new(nested))
+                    }
+                    Some(TokenKind::Ident) => {
+                        let name = self.advance().ok_or("Unexpected EOF")?.literal.clone().ok_or("Expected identifier")?;
+                        DestructElement::Ident(name)
+                    }
+                    _ => return Err("Expected identifier or pattern after ':'".to_string()),
+                }
+            } else {
+                // Shorthand: { key } is equivalent to { key: key }
+                DestructElement::Ident(key.clone())
+            };
+            
+            props.push(DestructProp { key, value });
+            
+            if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        
+        self.expect(TokenKind::RBrace)?;
+        Ok(DestructPattern::Object(props))
     }
     
     /// Parse a type annotation (number, string, T[], {a: T}, etc.)
@@ -311,7 +418,7 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                rest_param = Some(TypedParam { name: param_name, type_ann });
+                rest_param = Some(TypedParam { name: param_name, type_ann, default: None });
                 if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
                     return Err("Rest parameter must be last".to_string());
                 }
@@ -329,7 +436,14 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            params.push(TypedParam { name: param_name, type_ann });
+            // Optional default value
+            let default = if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
+                self.advance();
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            params.push(TypedParam { name: param_name, type_ann, default });
             if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
                 self.expect(TokenKind::Comma)?;
             }
@@ -573,18 +687,33 @@ impl<'a> Parser<'a> {
     fn parse_try(&mut self) -> Result<Statement, String> {
         let span_start = self.expect(TokenKind::Try)?.span.start;
         let body = Box::new(self.parse_block_or_statement()?);
-        self.expect(TokenKind::Catch)?;
-        self.expect(TokenKind::LParen)?;
-        let catch_param = self
-            .expect(TokenKind::Ident)?
-            .literal
-            .clone();
-        self.expect(TokenKind::RParen)?;
-        let catch_body = Box::new(self.parse_block_or_statement()?);
+        
+        let mut catch_param = None;
+        let mut catch_body = None;
+        let mut finally_body = None;
+        
+        if matches!(self.peek_kind(), Some(TokenKind::Catch)) {
+            self.advance();
+            self.expect(TokenKind::LParen)?;
+            catch_param = self.expect(TokenKind::Ident)?.literal.clone();
+            self.expect(TokenKind::RParen)?;
+            catch_body = Some(Box::new(self.parse_block_or_statement()?));
+        }
+        
+        if matches!(self.peek_kind(), Some(TokenKind::Finally)) {
+            self.advance();
+            finally_body = Some(Box::new(self.parse_block_or_statement()?));
+        }
+        
+        if catch_body.is_none() && finally_body.is_none() {
+            return Err("try statement requires catch or finally".to_string());
+        }
+        
         Ok(Statement::Try {
             body,
             catch_param,
             catch_body,
+            finally_body,
             span: self.span_end(span_start),
         })
     }
@@ -1005,7 +1134,14 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let mut args = Vec::new();
                     while !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
-                        args.push(self.parse_expr()?);
+                        if matches!(self.peek_kind(), Some(TokenKind::Spread)) {
+                            self.advance();
+                            let arg_expr = self.parse_expr()?;
+                            args.push(CallArg::Spread(arg_expr));
+                        } else {
+                            let arg_expr = self.parse_expr()?;
+                            args.push(CallArg::Expr(arg_expr));
+                        }
                         if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
                             self.expect(TokenKind::Comma)?;
                         }
@@ -1131,7 +1267,7 @@ impl<'a> Parser<'a> {
                     let body = self.parse_arrow_body()?;
                     let end = self.previous_span_end();
                     return Ok(Expr::ArrowFunction {
-                        params: vec![TypedParam { name: name.clone(), type_ann: None }],
+                        params: vec![TypedParam { name: name.clone(), type_ann: None, default: None }],
                         body,
                         span: Span { start: span.start, end },
                     });
@@ -1151,7 +1287,14 @@ impl<'a> Parser<'a> {
             TokenKind::LBracket => {
                 let mut elements = Vec::new();
                 while !matches!(self.peek_kind(), Some(TokenKind::RBracket)) {
-                    elements.push(self.parse_expr()?);
+                    if matches!(self.peek_kind(), Some(TokenKind::Spread)) {
+                        self.advance();
+                        let expr = self.parse_expr()?;
+                        elements.push(ArrayElement::Spread(expr));
+                    } else {
+                        let expr = self.parse_expr()?;
+                        elements.push(ArrayElement::Expr(expr));
+                    }
                     if !matches!(self.peek_kind(), Some(TokenKind::RBracket)) {
                         self.expect(TokenKind::Comma)?;
                     }
@@ -1168,14 +1311,20 @@ impl<'a> Parser<'a> {
             TokenKind::LBrace => {
                 let mut props = Vec::new();
                 while !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
-                    let key = self
-                        .expect(TokenKind::Ident)?
-                        .literal
-                        .clone()
-                        .ok_or("Expected key")?;
-                    self.expect(TokenKind::Colon)?;
-                    let value = self.parse_expr()?;
-                    props.push((key, value));
+                    if matches!(self.peek_kind(), Some(TokenKind::Spread)) {
+                        self.advance();
+                        let expr = self.parse_expr()?;
+                        props.push(ObjectProp::Spread(expr));
+                    } else {
+                        let key = self
+                            .expect(TokenKind::Ident)?
+                            .literal
+                            .clone()
+                            .ok_or("Expected key")?;
+                        self.expect(TokenKind::Colon)?;
+                        let value = self.parse_expr()?;
+                        props.push(ObjectProp::KeyValue(key, value));
+                    }
                     if !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
                         self.expect(TokenKind::Comma)?;
                     }
@@ -1264,7 +1413,15 @@ impl<'a> Parser<'a> {
                     None
                 };
                 
-                params.push(TypedParam { name, type_ann });
+                // Optional default value
+                let default = if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
+                    self.advance();
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                
+                params.push(TypedParam { name, type_ann, default });
                 
                 if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
                     self.advance();

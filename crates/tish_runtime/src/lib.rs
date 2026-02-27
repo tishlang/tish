@@ -512,6 +512,79 @@ pub fn array_reverse(arr: &Value) -> Value {
     }
 }
 
+pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
+    if let Value::Array(arr) = arr {
+        let mut arr_mut = arr.borrow_mut();
+        
+        if let Some(Value::Function(cmp_fn)) = comparator {
+            let mut indices: Vec<usize> = (0..arr_mut.len()).collect();
+            let arr_clone: Vec<Value> = arr_mut.clone();
+            
+            indices.sort_by(|&a, &b| {
+                let va = &arr_clone[a];
+                let vb = &arr_clone[b];
+                let result = cmp_fn(&[va.clone(), vb.clone()]);
+                match result {
+                    Value::Number(n) => {
+                        if n < 0.0 {
+                            std::cmp::Ordering::Less
+                        } else if n > 0.0 {
+                            std::cmp::Ordering::Greater
+                        } else {
+                            std::cmp::Ordering::Equal
+                        }
+                    }
+                    _ => std::cmp::Ordering::Equal,
+                }
+            });
+            
+            let sorted: Vec<Value> = indices.iter().map(|&i| arr_clone[i].clone()).collect();
+            *arr_mut = sorted;
+        } else {
+            arr_mut.sort_by(|a, b| {
+                let sa = a.to_display_string();
+                let sb = b.to_display_string();
+                sa.cmp(&sb)
+            });
+        }
+        drop(arr_mut);
+        Value::Array(Rc::clone(arr))
+    } else {
+        Value::Null
+    }
+}
+
+pub fn array_splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &[Value]) -> Value {
+    if let Value::Array(arr) = arr {
+        let mut arr_mut = arr.borrow_mut();
+        let len = arr_mut.len() as i64;
+        
+        let start_idx = match start {
+            Value::Number(n) => {
+                let n = *n as i64;
+                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+            }
+            _ => 0,
+        };
+        
+        let del_count = match delete_count {
+            Some(Value::Number(n)) => (*n as i64).max(0) as usize,
+            _ => (len as usize).saturating_sub(start_idx),
+        };
+        
+        let actual_delete = del_count.min(arr_mut.len().saturating_sub(start_idx));
+        let removed: Vec<Value> = arr_mut.drain(start_idx..start_idx + actual_delete).collect();
+        
+        for (i, item) in items.iter().enumerate() {
+            arr_mut.insert(start_idx + i, item.clone());
+        }
+        
+        Value::Array(Rc::new(RefCell::new(removed)))
+    } else {
+        Value::Null
+    }
+}
+
 pub fn array_slice(arr: &Value, start: &Value, end: &Value) -> Value {
     if let Value::Array(arr) = arr {
         let arr_borrow = arr.borrow();
