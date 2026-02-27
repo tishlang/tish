@@ -8,6 +8,10 @@ description = "Tish CLI - run, REPL, compile to native"
 name = "tish"
 path = "src/main.rs"
 
+[features]
+default = ["http"]
+http = ["tish_eval/http", "tish_runtime/http", "tish_compile/http"]
+
 [dependencies]
 tish_lexer = { path = "../tish_lexer" }
 tish_ast = { path = "../tish_ast" }

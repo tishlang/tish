@@ -1,6 +1,8 @@
 //! Tish tree-walk interpreter.
 
 mod eval;
+#[cfg(feature = "http")]
+mod http;
 mod value;
 
 pub use eval::Evaluator;

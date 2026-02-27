@@ -4,7 +4,14 @@ version = "0.1.0"
 edition = "2021"
 description = "Tish tree-walk interpreter"
 
+[features]
+default = []
+http = ["tokio", "reqwest", "futures"]
+
 [dependencies]
 tish_ast = { path = "../tish_ast" }
 tish_parser = { path = "../tish_parser" }
 tish_core = { path = "../tish_core" }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
+futures = { version = "0.3", optional = true }

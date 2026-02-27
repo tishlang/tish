@@ -4,5 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Tish native compiler backend"
 
+[features]
+default = []
+http = []
+
 [dependencies]
 tish_ast = { path = "../tish_ast" }

@@ -43,6 +43,10 @@ pub enum Value {
     NativeObjectKeys,
     NativeObjectValues,
     NativeObjectEntries,
+    #[cfg(feature = "http")]
+    NativeFetch,
+    #[cfg(feature = "http")]
+    NativeFetchAll,
 }
 
 impl std::fmt::Display for Value {
@@ -98,6 +102,10 @@ impl std::fmt::Display for Value {
             Value::NativeObjectKeys => write!(f, "[NativeFunction: Object.keys]"),
             Value::NativeObjectValues => write!(f, "[NativeFunction: Object.values]"),
             Value::NativeObjectEntries => write!(f, "[NativeFunction: Object.entries]"),
+            #[cfg(feature = "http")]
+            Value::NativeFetch => write!(f, "[NativeFunction: fetch]"),
+            #[cfg(feature = "http")]
+            Value::NativeFetchAll => write!(f, "[NativeFunction: fetchAll]"),
         }
     }
 }

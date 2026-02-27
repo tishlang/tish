@@ -105,6 +105,12 @@ impl Evaluator {
             object.insert("values".into(), Value::NativeObjectValues);
             object.insert("entries".into(), Value::NativeObjectEntries);
             s.set("Object".into(), Value::Object(Rc::new(RefCell::new(object))), true);
+
+            #[cfg(feature = "http")]
+            {
+                s.set("fetch".into(), Value::NativeFetch, true);
+                s.set("fetchAll".into(), Value::NativeFetchAll, true);
+            }
         }
         Self { scope }
     }
@@ -899,6 +905,8 @@ impl Evaluator {
                     | Value::NativeObjectKeys
                     | Value::NativeObjectValues
                     | Value::NativeObjectEntries => "function".into(),
+                    #[cfg(feature = "http")]
+                    Value::NativeFetch | Value::NativeFetchAll => "function".into(),
                 }))
             }
             Expr::PostfixInc { name, .. } => {
@@ -1339,6 +1347,14 @@ impl Evaluator {
             }
             return Ok(Value::Array(Rc::new(RefCell::new(vec![]))));
         }
+        #[cfg(feature = "http")]
+        if matches!(f, Value::NativeFetch) {
+            return crate::http::fetch(args).map_err(EvalError::Error);
+        }
+        #[cfg(feature = "http")]
+        if matches!(f, Value::NativeFetchAll) {
+            return crate::http::fetch_all(args).map_err(EvalError::Error);
+        }
         let (params, rest_param, body) = match f {
             Value::Function { params, rest_param, body } => {
                 (params.clone(), rest_param.clone(), Box::clone(body))
@@ -1662,6 +1678,8 @@ impl Evaluator {
             | Value::NativeObjectKeys
             | Value::NativeObjectValues
             | Value::NativeObjectEntries => "null".to_string(),
+            #[cfg(feature = "http")]
+            Value::NativeFetch | Value::NativeFetchAll => "null".to_string(),
         }
     }
 

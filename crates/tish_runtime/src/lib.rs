@@ -636,3 +636,11 @@ pub fn string_pad_end(s: &Value, target_len: &Value, pad: &Value) -> Value {
         Value::Null
     }
 }
+
+// ============== HTTP Support ==============
+
+#[cfg(feature = "http")]
+mod http;
+
+#[cfg(feature = "http")]
+pub use http::{fetch as http_fetch, fetch_all as http_fetch_all};
