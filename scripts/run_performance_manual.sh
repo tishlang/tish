@@ -5,8 +5,10 @@
 
 set -e
 cd "$(dirname "$0")/.."
-#node_cmd="${NODE:-node}"
 node_cmd="${NODE:-node}"
+bun_cmd="${BUN:-bun}"
+has_bun=false
+command -v "$bun_cmd" &>/dev/null && has_bun=true
 
 tish_dir="tests/mvp"
 perf_dir="performance/mvp"
@@ -28,6 +30,7 @@ fi
 ms() { "$node_cmd" -e 'console.log(Date.now())'; }
 
 echo "=== Tish vs JavaScript MVP — output + timing ==="
+$has_bun && echo "(Bun detected: $("$bun_cmd" --version 2>/dev/null || echo 'unknown'))"
 echo ""
 
 for f in "$perf_dir"/*.js; do
@@ -44,14 +47,20 @@ for f in "$perf_dir"/*.js; do
   echo "Tish:"
   $tish_bin run "$tish_file" 2>&1 || true
   echo ""
-  echo "JS:"
+  echo "Node:"
   "$node_cmd" "$f" 2>&1 || true
   echo ""
+  if $has_bun; then
+    echo "Bun:"
+    "$bun_cmd" "$f" 2>&1 || true
+    echo ""
+  fi
 
   # Timing (multiple runs to reduce noise; report median or average)
   n=5
   tish_times=()
-  js_times=()
+  node_times=()
+  bun_times=()
   for _ in $(seq 1 "$n"); do
     t0=$(ms)
     $tish_bin run "$tish_file" >/dev/null 2>&1 || true
@@ -62,20 +71,43 @@ for f in "$perf_dir"/*.js; do
     t0=$(ms)
     "$node_cmd" "$f" >/dev/null 2>&1 || true
     t1=$(ms)
-    js_times+=($((t1 - t0)))
+    node_times+=($((t1 - t0)))
   done
+  if $has_bun; then
+    for _ in $(seq 1 "$n"); do
+      t0=$(ms)
+      "$bun_cmd" "$f" >/dev/null 2>&1 || true
+      t1=$(ms)
+      bun_times+=($((t1 - t0)))
+    done
+  fi
 
   tish_sum=0
-  js_sum=0
+  node_sum=0
+  bun_sum=0
   for t in "${tish_times[@]}"; do tish_sum=$((tish_sum + t)); done
-  for t in "${js_times[@]}"; do js_sum=$((js_sum + t)); done
+  for t in "${node_times[@]}"; do node_sum=$((node_sum + t)); done
   tish_avg=$((tish_sum / n))
-  js_avg=$((js_sum / n))
-
-  echo "Time (${n} runs avg): Tish ${tish_avg}ms | JS ${js_avg}ms"
-  if [[ $js_avg -gt 0 ]]; then
-    ratio=$((tish_avg * 100 / js_avg))
-    echo "Tish/JS ratio: ${ratio}%"
+  node_avg=$((node_sum / n))
+  
+  if $has_bun; then
+    for t in "${bun_times[@]}"; do bun_sum=$((bun_sum + t)); done
+    bun_avg=$((bun_sum / n))
+    echo "Time (${n} runs avg): Tish ${tish_avg}ms | Node ${node_avg}ms | Bun ${bun_avg}ms"
+    if [[ $node_avg -gt 0 ]]; then
+      ratio=$((tish_avg * 100 / node_avg))
+      echo "Tish/Node ratio: ${ratio}%"
+    fi
+    if [[ $bun_avg -gt 0 ]]; then
+      ratio=$((tish_avg * 100 / bun_avg))
+      echo "Tish/Bun ratio: ${ratio}%"
+    fi
+  else
+    echo "Time (${n} runs avg): Tish ${tish_avg}ms | Node ${node_avg}ms"
+    if [[ $node_avg -gt 0 ]]; then
+      ratio=$((tish_avg * 100 / node_avg))
+      echo "Tish/Node ratio: ${ratio}%"
+    fi
   fi
   echo ""
 done
