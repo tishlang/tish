@@ -1,21 +1,60 @@
 //! URI encoding/decoding utilities.
 
-/// Percent-decode a string (for decodeURI/decodeURIComponent).
+/// Percent-decode a string (for decodeURI).
+/// Does NOT decode reserved URI characters: ; / ? : @ & = + $ , #
+/// These are characters that encodeURI does not encode, so decodeURI won't decode them.
 pub fn percent_decode(input: &str) -> Result<String, String> {
+    // Reserved characters that decodeURI should NOT decode (because encodeURI doesn't encode them)
+    const RESERVED_ENCODED: &[&str] = &[
+        "%3B", "%3b", // ;
+        "%2F", "%2f", // /
+        "%3F", "%3f", // ?
+        "%3A", "%3a", // :
+        "%40",        // @
+        "%26",        // &
+        "%3D", "%3d", // =
+        "%2B", "%2b", // +
+        "%24",        // $
+        "%2C", "%2c", // ,
+        "%23",        // #
+    ];
+
     let mut result = String::new();
     let mut chars = input.chars().peekable();
 
     while let Some(c) = chars.next() {
         if c == '%' {
+            // Peek at the next two characters to check if this is a reserved sequence
             let mut hex = String::new();
+            let mut peek_chars = Vec::new();
             for _ in 0..2 {
                 match chars.next() {
-                    Some(h) if h.is_ascii_hexdigit() => hex.push(h),
-                    _ => return Err("URIError: malformed URI sequence".to_string()),
+                    Some(h) if h.is_ascii_hexdigit() => {
+                        hex.push(h);
+                        peek_chars.push(h);
+                    }
+                    Some(h) => {
+                        // Not a valid hex sequence, push as-is
+                        result.push('%');
+                        for pc in peek_chars {
+                            result.push(pc);
+                        }
+                        result.push(h);
+                        hex.clear();
+                        break;
+                    }
+                    None => return Err("URIError: malformed URI sequence".to_string()),
                 }
             }
-            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                result.push(byte as char);
+            
+            if hex.len() == 2 {
+                let encoded = format!("%{}", hex);
+                // Check if this is a reserved character that should NOT be decoded
+                if RESERVED_ENCODED.iter().any(|r| r.eq_ignore_ascii_case(&encoded)) {
+                    result.push_str(&encoded);
+                } else if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    result.push(byte as char);
+                }
             }
         } else {
             result.push(c);
