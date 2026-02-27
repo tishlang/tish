@@ -1,10 +1,10 @@
 // MVP test: for-of loop (iterate arrays and strings)
-any arr = [10, 20, 30]
-any sum = 0
-for (any x of arr)
+let arr = [10, 20, 30]
+let sum = 0
+for (let x of arr)
   sum = sum + x
 console.log("array sum:", sum)
 
-any s = "abc"
-for (any c of s)
+let s = "abc"
+for (let c of s)
   console.log("char:", c)

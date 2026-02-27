@@ -1,0 +1,41 @@
+// MVP test: const declarations
+
+// Basic const
+const x = 10
+console.log("x:", x)
+
+// const with different types
+const s = "hello"
+const b = true
+const n = null
+const arr = [1, 2, 3]
+const obj = { a: 1 }
+
+console.log("s:", s)
+console.log("b:", b)
+console.log("n:", n)
+console.log("arr:", arr[0], arr[1], arr[2])
+console.log("obj.a:", obj.a)
+
+// const in blocks
+if (true) {
+  const inner = 42
+  console.log("inner:", inner)
+}
+
+// const in for-of (each iteration gets new binding)
+const items = ["a", "b", "c"]
+for (const item of items) {
+  console.log("item:", item)
+}
+
+// let vs const (let can be reassigned)
+let mutable = 1
+mutable = 2
+console.log("mutable:", mutable)
+
+// const function (function declarations are mutable by default)
+fun greet(name) {
+  return "Hello, " + name
+}
+console.log(greet("World"))

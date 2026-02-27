@@ -4,12 +4,13 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tish_ast::{BinOp, Expr, Literal, MemberProp, Statement, UnaryOp};
+use tish_ast::{BinOp, CompoundOp, Expr, Literal, MemberProp, Statement, UnaryOp};
 
 use crate::value::Value;
 
 struct Scope {
     vars: HashMap<Arc<str>, Value>,
+    consts: std::collections::HashSet<Arc<str>>,
     parent: Option<Rc<std::cell::RefCell<Scope>>>,
 }
 
@@ -17,6 +18,7 @@ impl Scope {
     fn new() -> Rc<std::cell::RefCell<Self>> {
         Rc::new(std::cell::RefCell::new(Self {
             vars: HashMap::new(),
+            consts: std::collections::HashSet::new(),
             parent: None,
         }))
     }
@@ -24,6 +26,7 @@ impl Scope {
     fn child(parent: Rc<std::cell::RefCell<Scope>>) -> Rc<std::cell::RefCell<Self>> {
         Rc::new(std::cell::RefCell::new(Self {
             vars: HashMap::new(),
+            consts: std::collections::HashSet::new(),
             parent: Some(parent),
         }))
     }
@@ -36,19 +39,25 @@ impl Scope {
         })
     }
 
-    fn set(&mut self, name: Arc<str>, value: Value) {
+    fn set(&mut self, name: Arc<str>, value: Value, mutable: bool) {
+        if !mutable {
+            self.consts.insert(Arc::clone(&name));
+        }
         self.vars.insert(name, value);
     }
 
-    fn assign(&mut self, name: &str, value: Value) -> bool {
+    fn assign(&mut self, name: &str, value: Value) -> Result<bool, String> {
         if self.vars.contains_key(name) {
+            if self.consts.contains(name) {
+                return Err(format!("Cannot assign to const variable: {}", name));
+            }
             self.vars.insert(name.into(), value);
-            return true;
+            return Ok(true);
         }
         self.parent
             .as_ref()
             .map(|p| p.borrow_mut().assign(name, value))
-            .unwrap_or(false)
+            .unwrap_or(Ok(false))
     }
 }
 
@@ -68,15 +77,15 @@ impl Evaluator {
             console.insert("log".into(), Value::NativeConsoleLog);
             console.insert("warn".into(), Value::NativeConsoleWarn);
             console.insert("error".into(), Value::NativeConsoleError);
-            s.set("console".into(), Value::Object(Rc::new(console)));
-            s.set("parseInt".into(), Value::NativeParseInt);
-            s.set("parseFloat".into(), Value::NativeParseFloat);
-            s.set("decodeURI".into(), Value::NativeDecodeURI);
-            s.set("encodeURI".into(), Value::NativeEncodeURI);
-            s.set("isFinite".into(), Value::NativeIsFinite);
-            s.set("isNaN".into(), Value::NativeIsNaN);
-            s.set("Infinity".into(), Value::Number(f64::INFINITY));
-            s.set("NaN".into(), Value::Number(f64::NAN));
+            s.set("console".into(), Value::Object(Rc::new(console)), true);
+            s.set("parseInt".into(), Value::NativeParseInt, true);
+            s.set("parseFloat".into(), Value::NativeParseFloat, true);
+            s.set("decodeURI".into(), Value::NativeDecodeURI, true);
+            s.set("encodeURI".into(), Value::NativeEncodeURI, true);
+            s.set("isFinite".into(), Value::NativeIsFinite, true);
+            s.set("isNaN".into(), Value::NativeIsNaN, true);
+            s.set("Infinity".into(), Value::Number(f64::INFINITY), true);
+            s.set("NaN".into(), Value::Number(f64::NAN), true);
             let mut math = HashMap::new();
             math.insert("abs".into(), Value::NativeMathAbs);
             math.insert("sqrt".into(), Value::NativeMathSqrt);
@@ -85,11 +94,11 @@ impl Evaluator {
             math.insert("floor".into(), Value::NativeMathFloor);
             math.insert("ceil".into(), Value::NativeMathCeil);
             math.insert("round".into(), Value::NativeMathRound);
-            s.set("Math".into(), Value::Object(Rc::new(math)));
+            s.set("Math".into(), Value::Object(Rc::new(math)), true);
             let mut json = HashMap::new();
             json.insert("parse".into(), Value::NativeJsonParse);
             json.insert("stringify".into(), Value::NativeJsonStringify);
-            s.set("JSON".into(), Value::Object(Rc::new(json)));
+            s.set("JSON".into(), Value::Object(Rc::new(json)), true);
         }
         Self { scope }
     }
@@ -114,13 +123,13 @@ impl Evaluator {
                 self.scope = prev;
                 Ok(last)
             }
-            Statement::VarDecl { name, init, .. } => {
+            Statement::VarDecl { name, mutable, init, .. } => {
                 let value = init
                     .as_ref()
                     .map(|e| self.eval_expr(e))
                     .transpose()?
                     .unwrap_or(Value::Null);
-                self.scope.borrow_mut().set(Arc::clone(name), value);
+                self.scope.borrow_mut().set(Arc::clone(name), value, *mutable);
                 Ok(Value::Null)
             }
             Statement::ExprStmt { expr, .. } => self.eval_expr(expr),
@@ -170,7 +179,7 @@ impl Evaluator {
                     }
                 };
                 for elem in elements {
-                    self.scope.borrow_mut().set(Arc::clone(name), elem);
+                    self.scope.borrow_mut().set(Arc::clone(name), elem, true);
                     match self.eval_statement(body) {
                         Ok(_) => {}
                         Err(EvalError::Break) => break,
@@ -242,7 +251,7 @@ impl Evaluator {
                     rest_param,
                     body,
                 };
-                self.scope.borrow_mut().set(Arc::clone(name), func);
+                self.scope.borrow_mut().set(Arc::clone(name), func, true);
                 Ok(Value::Null)
             }
             Statement::Switch { expr, cases, default_body, .. } => {
@@ -327,7 +336,7 @@ impl Evaluator {
                         if let Some(param) = catch_param {
                             let scope = Scope::child(Rc::clone(&self.scope));
                             let prev = std::mem::replace(&mut self.scope, Rc::clone(&scope));
-                            scope.borrow_mut().set(Arc::clone(param), thrown);
+                            scope.borrow_mut().set(Arc::clone(param), thrown, true);
                             let res = self.eval_statement(catch_body);
                             self.scope = prev;
                             res
@@ -447,10 +456,11 @@ impl Evaluator {
             }
             Expr::Assign { name, value, .. } => {
                 let v = self.eval_expr(value)?;
-                if !self.scope.borrow_mut().assign(name.as_ref(), v.clone()) {
-                    return Err(EvalError::Error(format!("Undefined variable: {}", name)));
+                match self.scope.borrow_mut().assign(name.as_ref(), v.clone()) {
+                    Ok(true) => Ok(v),
+                    Ok(false) => Err(EvalError::Error(format!("Undefined variable: {}", name))),
+                    Err(e) => Err(EvalError::Error(e)),
                 }
-                Ok(v)
             }
             Expr::TypeOf { operand, .. } => {
                 let v = self.eval_expr(operand)?;
@@ -491,10 +501,11 @@ impl Evaluator {
                     Value::Number(x) => *x,
                     _ => return Err(EvalError::Error(format!("Cannot apply ++ to {:?}", v))),
                 };
-                if !self.scope.borrow_mut().assign(name.as_ref(), Value::Number(n + 1.0)) {
-                    return Err(EvalError::Error(format!("Undefined variable: {}", name)));
+                match self.scope.borrow_mut().assign(name.as_ref(), Value::Number(n + 1.0)) {
+                    Ok(true) => Ok(Value::Number(n)),
+                    Ok(false) => Err(EvalError::Error(format!("Undefined variable: {}", name))),
+                    Err(e) => Err(EvalError::Error(e)),
                 }
-                Ok(Value::Number(n))
             }
             Expr::PostfixDec { name, .. } => {
                 let v = self.scope.borrow().get(name.as_ref())
@@ -503,10 +514,11 @@ impl Evaluator {
                     Value::Number(x) => *x,
                     _ => return Err(EvalError::Error(format!("Cannot apply -- to {:?}", v))),
                 };
-                if !self.scope.borrow_mut().assign(name.as_ref(), Value::Number(n - 1.0)) {
-                    return Err(EvalError::Error(format!("Undefined variable: {}", name)));
+                match self.scope.borrow_mut().assign(name.as_ref(), Value::Number(n - 1.0)) {
+                    Ok(true) => Ok(Value::Number(n)),
+                    Ok(false) => Err(EvalError::Error(format!("Undefined variable: {}", name))),
+                    Err(e) => Err(EvalError::Error(e)),
                 }
-                Ok(Value::Number(n))
             }
             Expr::PrefixInc { name, .. } => {
                 let v = self.scope.borrow().get(name.as_ref())
@@ -516,10 +528,11 @@ impl Evaluator {
                     _ => return Err(EvalError::Error(format!("Cannot apply ++ to {:?}", v))),
                 };
                 let new_val = Value::Number(n + 1.0);
-                if !self.scope.borrow_mut().assign(name.as_ref(), new_val.clone()) {
-                    return Err(EvalError::Error(format!("Undefined variable: {}", name)));
+                match self.scope.borrow_mut().assign(name.as_ref(), new_val.clone()) {
+                    Ok(true) => Ok(new_val),
+                    Ok(false) => Err(EvalError::Error(format!("Undefined variable: {}", name))),
+                    Err(e) => Err(EvalError::Error(e)),
                 }
-                Ok(new_val)
             }
             Expr::PrefixDec { name, .. } => {
                 let v = self.scope.borrow().get(name.as_ref())
@@ -529,10 +542,29 @@ impl Evaluator {
                     _ => return Err(EvalError::Error(format!("Cannot apply -- to {:?}", v))),
                 };
                 let new_val = Value::Number(n - 1.0);
-                if !self.scope.borrow_mut().assign(name.as_ref(), new_val.clone()) {
-                    return Err(EvalError::Error(format!("Undefined variable: {}", name)));
+                match self.scope.borrow_mut().assign(name.as_ref(), new_val.clone()) {
+                    Ok(true) => Ok(new_val),
+                    Ok(false) => Err(EvalError::Error(format!("Undefined variable: {}", name))),
+                    Err(e) => Err(EvalError::Error(e)),
                 }
-                Ok(new_val)
+            }
+            Expr::CompoundAssign { name, op, value, .. } => {
+                let current = self.scope.borrow().get(name.as_ref())
+                    .ok_or_else(|| EvalError::Error(format!("Undefined variable: {}", name)))?;
+                let rhs = self.eval_expr(value)?;
+                let bin_op = match op {
+                    CompoundOp::Add => BinOp::Add,
+                    CompoundOp::Sub => BinOp::Sub,
+                    CompoundOp::Mul => BinOp::Mul,
+                    CompoundOp::Div => BinOp::Div,
+                    CompoundOp::Mod => BinOp::Mod,
+                };
+                let result = self.eval_binop(&current, bin_op, &rhs).map_err(EvalError::Error)?;
+                match self.scope.borrow_mut().assign(name.as_ref(), result.clone()) {
+                    Ok(true) => Ok(result),
+                    Ok(false) => Err(EvalError::Error(format!("Undefined variable: {}", name))),
+                    Err(e) => Err(EvalError::Error(e)),
+                }
             }
         }
     }
@@ -804,11 +836,11 @@ impl Evaluator {
             let mut s = scope.borrow_mut();
             for (i, p) in params.iter().enumerate() {
                 let val = args.get(i).cloned().unwrap_or(Value::Null);
-                s.set(Arc::clone(p), val);
+                s.set(Arc::clone(p), val, true);
             }
             if let Some(rest_name) = rest_param {
                 let rest_vals: Vec<Value> = args.iter().skip(params.len()).cloned().collect();
-                s.set(rest_name, Value::Array(Rc::new(rest_vals)));
+                s.set(rest_name, Value::Array(Rc::new(rest_vals)), true);
             }
         }
         let mut eval = Evaluator { scope };

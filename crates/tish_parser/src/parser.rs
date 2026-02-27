@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use tish_ast::{
-    BinOp, Expr, Literal, MemberProp, Program, Span, Statement, UnaryOp,
+    BinOp, CompoundOp, Expr, Literal, MemberProp, Program, Span, Statement, UnaryOp,
 };
 use tish_lexer::{Token, TokenKind};
 
@@ -68,7 +68,8 @@ impl<'a> Parser<'a> {
 
         let stmt = match kind {
             TokenKind::LBrace | TokenKind::Indent => self.parse_block()?,
-            TokenKind::Any => self.parse_var_decl()?,
+            TokenKind::Let => self.parse_var_decl(true)?,
+            TokenKind::Const => self.parse_var_decl(false)?,
             TokenKind::Fun => self.parse_fun_decl()?,
             TokenKind::If => self.parse_if()?,
             TokenKind::While => self.parse_while()?,
@@ -164,8 +165,12 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_var_decl(&mut self) -> Result<Statement, String> {
-        let span_start = self.expect(TokenKind::Any)?.span.start;
+    fn parse_var_decl(&mut self, mutable: bool) -> Result<Statement, String> {
+        let span_start = if mutable {
+            self.expect(TokenKind::Let)?.span.start
+        } else {
+            self.expect(TokenKind::Const)?.span.start
+        };
         let name = self
             .expect(TokenKind::Ident)?
             .literal
@@ -179,6 +184,7 @@ impl<'a> Parser<'a> {
         };
         Ok(Statement::VarDecl {
             name,
+            mutable,
             init,
             span: self.span_end(span_start),
         })
@@ -280,8 +286,9 @@ impl<'a> Parser<'a> {
     fn parse_for(&mut self) -> Result<Statement, String> {
         let span_start = self.expect(TokenKind::For)?.span.start;
         self.expect(TokenKind::LParen)?;
-        let init = if matches!(self.peek_kind(), Some(TokenKind::Any)) {
-            let any_span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
+        let init = if matches!(self.peek_kind(), Some(TokenKind::Let | TokenKind::Const)) {
+            let mutable = matches!(self.peek_kind(), Some(TokenKind::Let));
+            let var_span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
             self.advance();
             let name = self
                 .expect(TokenKind::Ident)?
@@ -311,8 +318,9 @@ impl<'a> Parser<'a> {
             }
             Some(Box::new(Statement::VarDecl {
                 name,
+                mutable,
                 init: init_expr,
-                span: self.span_end(any_span_start),
+                span: self.span_end(var_span_start),
             }))
         } else if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
             None
@@ -467,6 +475,8 @@ impl<'a> Parser<'a> {
 
     fn parse_assign(&mut self) -> Result<Expr, String> {
         let left = self.parse_conditional()?;
+        
+        // Check for simple assignment
         if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
             if let Expr::Ident { name, span } = &left {
                 let name = Arc::clone(name);
@@ -481,6 +491,33 @@ impl<'a> Parser<'a> {
                 });
             }
         }
+        
+        // Check for compound assignment (+=, -=, *=, /=, %=)
+        let compound_op = match self.peek_kind() {
+            Some(TokenKind::PlusAssign) => Some(CompoundOp::Add),
+            Some(TokenKind::MinusAssign) => Some(CompoundOp::Sub),
+            Some(TokenKind::StarAssign) => Some(CompoundOp::Mul),
+            Some(TokenKind::SlashAssign) => Some(CompoundOp::Div),
+            Some(TokenKind::PercentAssign) => Some(CompoundOp::Mod),
+            _ => None,
+        };
+        
+        if let Some(op) = compound_op {
+            if let Expr::Ident { name, span } = &left {
+                let name = Arc::clone(name);
+                let start = span.start;
+                self.advance(); // consume the compound operator
+                let value = self.parse_assign()?;
+                let end = value.span().end;
+                return Ok(Expr::CompoundAssign {
+                    name,
+                    op,
+                    value: Box::new(value),
+                    span: Span { start, end },
+                });
+            }
+        }
+        
         Ok(left)
     }
 
@@ -1014,6 +1051,7 @@ impl ExprSpan for Expr {
             Expr::PostfixDec { span, .. } => *span,
             Expr::PrefixInc { span, .. } => *span,
             Expr::PrefixDec { span, .. } => *span,
+            Expr::CompoundAssign { span, .. } => *span,
         }
     }
 }

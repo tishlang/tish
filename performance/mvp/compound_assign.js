@@ -1,0 +1,58 @@
+// MVP test: compound assignment operators (+=, -=, *=, /=, %=) - JS equivalent
+
+// Basic compound assignment
+let x = 10;
+x += 5;
+console.log("10 += 5:", x);
+
+x -= 3;
+console.log("15 -= 3:", x);
+
+x *= 2;
+console.log("12 *= 2:", x);
+
+x /= 4;
+console.log("24 /= 4:", x);
+
+x %= 4;
+console.log("6 %= 4:", x);
+
+// String concatenation with +=
+let s = "Hello";
+s += " ";
+s += "World";
+console.log(s);
+
+// Compound assignment in loops
+let sum = 0;
+for (let i = 0; i < 5; i++) {
+  sum += i;
+}
+console.log("sum 0..4:", sum);
+
+// Compound assignment with expressions
+let a = 10;
+let b = 3;
+a += b * 2;
+console.log("10 += (3*2):", a);
+
+// Chained compound (right-to-left evaluation)
+let p = 5;
+let q = 10;
+p += q -= 2;
+console.log("q after q -= 2:", q);
+console.log("p after p += q:", p);
+
+// Compound with negatives
+let n = 20;
+n -= 25;
+console.log("20 -= 25:", n);
+
+// Division and modulo edge cases
+let d = 17;
+d /= 3;
+console.log("17 / 3:", d);
+
+let m = 17;
+m %= 3;
+console.log("17 % 3:", m);

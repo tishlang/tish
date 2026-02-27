@@ -1,5 +1,5 @@
 // MVP test: do-while loop
-any i = 0
+let i = 0
 do {
   console.log(i)
   i = i + 1

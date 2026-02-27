@@ -9,7 +9,8 @@ Tish is a minimal, TS/JS-compatible language designed for both interpretation an
 ### Keywords
 
 - `fun` — function declaration (replaces `function`)
-- `any` — variable declaration (replaces `let`; block-scoped)
+- `let` — mutable variable declaration (block-scoped)
+- `const` — immutable variable declaration (block-scoped, error on reassignment)
 - `if`, `else`, `while`, `for`, `return`, `break`, `continue`, `switch`, `case`, `default`, `do`, `throw`, `try`, `catch`, `typeof`
 - `true`, `false`, `null`
 
@@ -41,7 +42,8 @@ Tish is a minimal, TS/JS-compatible language designed for both interpretation an
 - `if (cond) stmt` / `if (cond) stmt else stmt`
 - `while (cond) stmt` / `do stmt while (cond)`
 - `for (init; cond; update) stmt` — C-style
-- `for (any x of arr)` — iterate arrays and strings
+- `for (let x of arr)` — iterate arrays and strings
+- `for (const x of arr)` — iterate with immutable binding
 - `switch (expr) { case val: stmt... default: stmt }`
 - `break`, `continue`, `return expr`
 - `throw expr` / `try stmt catch (e) stmt`
@@ -90,7 +92,9 @@ Log level controlled via `TISH_LOG_LEVEL` environment variable:
 
 ### Assignment
 
-`x = expr` — assigns to existing variable (no `const`/`let`).
+- `x = expr` — assigns to existing `let` variable
+- Compound: `x += expr`, `x -= expr`, `x *= expr`, `x /= expr`, `x %= expr`
+- **const variables cannot be reassigned** (runtime error)
 
 ## Indentation
 
@@ -100,7 +104,8 @@ Log level controlled via `TISH_LOG_LEVEL` environment variable:
 
 ## Semantics
 
-- **Block scope**: Variables declared with `any` are block-scoped. No hoisting.
+- **Block scope**: Variables declared with `let`/`const` are block-scoped. No hoisting.
+- **Immutability**: `const` bindings cannot be reassigned (like JavaScript).
 - **Strict equality only**: `===` / `!==`; no loose coercion.
 - **No `this`**: Use explicit parameters.
 - **No prototypes**: Plain objects and arrays; fixed shapes.
@@ -112,11 +117,11 @@ Log level controlled via `TISH_LOG_LEVEL` environment variable:
 Program     := Statement*
 Statement   := Block | VarDecl | ExprStmt | If | While | For | Return | Break | Continue | FunDecl
 Block       := Indent Statement* Dedent  |  '{' Statement* '}'
-VarDecl     := 'any' Ident ('=' Expr)? ';'?
+VarDecl     := ('let' | 'const') Ident ('=' Expr)? ';'?
 ExprStmt    := Expr ';'?
 If          := 'if' '(' Expr ')' Statement ('else' Statement)?
 While       := 'while' '(' Expr ')' Statement
-For         := 'for' '(' Init? ';' Cond? ';' Update? ')' Statement  |  'for' '(' 'any' Ident 'of' Expr ')' Statement
+For         := 'for' '(' Init? ';' Cond? ';' Update? ')' Statement  |  'for' '(' ('let'|'const') Ident 'of' Expr ')' Statement
 Return      := 'return' Expr? ';'?
 FunDecl     := 'fun' Ident '(' Params? ')' '=' Expr  |  'fun' Ident '(' Params? ')' Block
 Expr        := Assign | NullishCoalesce | Or | ...

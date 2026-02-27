@@ -337,6 +337,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('+') {
                     self.advance();
                     TokenKind::PlusPlus
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::PlusAssign
                 } else {
                     TokenKind::Plus
                 }
@@ -345,6 +348,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('-') {
                     self.advance();
                     TokenKind::MinusMinus
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::MinusAssign
                 } else {
                     TokenKind::Minus
                 }
@@ -353,6 +359,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('*') {
                     self.advance();
                     TokenKind::StarStar
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::StarAssign
                 } else {
                     TokenKind::Star
                 }
@@ -366,11 +375,21 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     self.skip_block_comment()?;
                     return self.next_token();
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::SlashAssign
                 } else {
                     TokenKind::Slash
                 }
             }
-            '%' => TokenKind::Percent,
+            '%' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::PercentAssign
+                } else {
+                    TokenKind::Percent
+                }
+            }
             '&' => {
                 if self.peek() == Some('&') {
                     self.advance();

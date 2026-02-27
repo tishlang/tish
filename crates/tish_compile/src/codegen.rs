@@ -1,6 +1,6 @@
 //! Code generation: AST -> Rust source.
 
-use tish_ast::{BinOp, Expr, Literal, MemberProp, Program, Statement, UnaryOp};
+use tish_ast::{BinOp, CompoundOp, Expr, Literal, MemberProp, Program, Statement, UnaryOp};
 
 #[derive(Debug, Clone)]
 pub struct CompileError {
@@ -127,13 +127,14 @@ impl Codegen {
                 self.indent -= 1;
                 self.writeln("}");
             }
-            Statement::VarDecl { name, init, .. } => {
+            Statement::VarDecl { name, mutable, init, .. } => {
                 let expr = init
                     .as_ref()
                     .map(|e| self.emit_expr(e))
                     .transpose()?
                     .unwrap_or_else(|| "Value::Null".to_string());
-                self.writeln(&format!("let mut {} = {};", name.as_ref(), expr));
+                let mutability = if *mutable { "let mut" } else { "let" };
+                self.writeln(&format!("{} {} = {};", mutability, name.as_ref(), expr));
             }
             Statement::ExprStmt { expr, .. } => {
                 let e = self.emit_expr(expr)?;
@@ -573,6 +574,24 @@ impl Codegen {
                 format!(
                     "{{ {} = Value::Number(match &{} {{ Value::Number(n) => n - 1.0, _ => panic!(\"-- needs number\") }}); {}.clone() }}",
                     name.as_ref(),
+                    name.as_ref(),
+                    name.as_ref()
+                )
+            }
+            Expr::CompoundAssign { name, op, value, .. } => {
+                let val = self.emit_expr(value)?;
+                let op_fn = match op {
+                    CompoundOp::Add => "add",
+                    CompoundOp::Sub => "sub",
+                    CompoundOp::Mul => "mul",
+                    CompoundOp::Div => "div",
+                    CompoundOp::Mod => "modulo",
+                };
+                format!(
+                    "{{ let _rhs = {}; {} = tish_runtime::ops::{}(&{}, &_rhs)?; {}.clone() }}",
+                    val,
+                    name.as_ref(),
+                    op_fn,
                     name.as_ref(),
                     name.as_ref()
                 )

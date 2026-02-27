@@ -31,7 +31,8 @@ pub enum TokenKind {
     // Identifiers and keywords
     Ident,
     Fun,
-    Any,
+    Let,
+    Const,
     If,
     Else,
     While,
@@ -66,6 +67,11 @@ pub enum TokenKind {
 
     // Operators
     Assign,
+    PlusAssign,
+    MinusAssign,
+    StarAssign,
+    SlashAssign,
+    PercentAssign,
     Eq,
     Ne,
     StrictEq,
@@ -102,7 +108,8 @@ impl TokenKind {
     pub fn keyword_or_ident(s: &str) -> Self {
         match s {
             "fun" => TokenKind::Fun,
-            "any" => TokenKind::Any,
+            "let" => TokenKind::Let,
+            "const" => TokenKind::Const,
             "if" => TokenKind::If,
             "else" => TokenKind::Else,
             "while" => TokenKind::While,

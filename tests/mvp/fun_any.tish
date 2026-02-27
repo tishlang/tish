@@ -1,8 +1,8 @@
-// MVP test: fun and any only - no function/let
+// MVP test: fun and let only - no function/let
 fun double(x) = x * 2
 fun add(a, b) = a + b
-any a = 10
-any b = 20
+let a = 10
+let b = 20
 console.log("double", a, "=", double(a))
 console.log("add", a, b, "=", add(a, b))
 fun greet(name) {

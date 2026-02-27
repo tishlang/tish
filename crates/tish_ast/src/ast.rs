@@ -21,6 +21,7 @@ pub enum Statement {
     },
     VarDecl {
         name: Arc<str>,
+        mutable: bool, // true for `let`, false for `const`
         init: Option<Expr>,
         span: Span,
     },
@@ -174,6 +175,21 @@ pub enum Expr {
         name: Arc<str>,
         span: Span,
     },
+    CompoundAssign {
+        name: Arc<str>,
+        op: CompoundOp,
+        value: Box<Expr>,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompoundOp {
+    Add,  // +=
+    Sub,  // -=
+    Mul,  // *=
+    Div,  // /=
+    Mod,  // %=
 }
 
 #[derive(Debug, Clone, PartialEq)]

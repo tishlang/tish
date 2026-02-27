@@ -1,14 +1,14 @@
 // MVP test: variable scopes - shadowing, block scope
-any x = 1
+let x = 1
 console.log("outer x:", x)
 {
-  any x = 2
+  let x = 2
   console.log("inner x:", x)
 }
 console.log("outer x after block:", x)
-any y = 10
+let y = 10
 {
-  any y = 20
+  let y = 20
   console.log("inner y:", y)
 }
 console.log("outer y:", y)

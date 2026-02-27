@@ -1,5 +1,5 @@
 // MVP test: switch statement
-any x = 2
+let x = 2
 switch (x) {
   case 1:
     console.log("one")
@@ -9,7 +9,7 @@ switch (x) {
     console.log("three")
 }
 console.log("done")
-any y = 99
+let y = 99
 switch (y) {
   case 1:
     console.log("one")

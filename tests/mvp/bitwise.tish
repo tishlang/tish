@@ -1,6 +1,6 @@
 // MVP test: bitwise operators & | ^ ~ << >>
-any a = 12
-any b = 5
+let a = 12
+let b = 5
 console.log("12 & 5 =", a & b)
 console.log("12 | 5 =", a | b)
 console.log("12 ^ 5 =", a ^ b)

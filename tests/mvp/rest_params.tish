@@ -1,7 +1,7 @@
 // MVP test: rest parameters
 fun sum(...args) {
-  any total = 0
-  for (any x of args)
+  let total = 0
+  for (let x of args)
     total = total + x
   return total
 }
