@@ -13,15 +13,38 @@ fun add(a, b) = a + b
 console.log(`1 + 2 = ${add(1, 2)}`)
 ```
 
+## Two Ways to Execute Tish Programs
+
+Tish supports **two execution modes**: interpret or compile to native.
+
+### 1. RUN (Interpreter)
+
+Execute `.tish` files directly without a build step:
+
 ```bash
 tish run hello.tish
 # Hello, World!
 # 1 + 2 = 3
 ```
 
-**Log levels**: Control output with `TISH_LOG_LEVEL=debug|info|log|warn|error`
+Best for: development, scripting, quick iteration.
 
-## Build
+### 2. BUILD (Compile to Native)
+
+Compile `.tish` files to standalone native executables:
+
+```bash
+tish compile hello.tish -o hello
+./hello
+# Hello, World!
+# 1 + 2 = 3
+```
+
+Best for: distribution, performance, deploying without Tish installed.
+
+The compiled binary is **fully standalone** — no Tish or Rust runtime needed to run it.
+
+## Installing Tish
 
 ```bash
 cargo build --release -p tish
@@ -29,30 +52,41 @@ cargo build --release -p tish
 
 The binary is `target/release/tish`. Add it to your PATH or run directly.
 
-## Run (Interpreter)
+**Note**: Compiling to native (`tish compile`) requires `rustc` and must be run from the workspace root (needs access to `crates/tish_runtime`).
+
+## Using just (Recommended)
+
+The project includes a `justfile` for common tasks:
 
 ```bash
-tish run <file.tish>
-```
+# Run a tish file (interpreter, all features)
+just run run hello.tish
 
-## Compile to Native Binary
-
-```bash
-cargo run -p tish -- compile <file.tish> -o <output>
-./<output>
-```
-
-This generates a standalone native executable. Requires `rustc` and must be run from the workspace root (needs access to `crates/tish_runtime`).
-
-Example:
-```bash
-cargo run -p tish -- compile hello.tish -o hello
+# Compile to native binary
+just compile hello.tish hello
 ./hello
-# Hello, World!
-# 1 + 2 = 3
+
+# Run in secure mode (no network/fs/process access)
+just run-secure run hello.tish
 ```
 
-**Note**: The compiled binary is fully standalone and can be distributed without Tish or Rust.
+See `just --list` for all available recipes.
+
+## Feature Flags
+
+Tish has compile-time feature flags for security:
+
+| Flag | Enables |
+|------|---------|
+| `http` | Network access (`fetch`, `fetchAll`, `serve`) |
+| `fs` | File system (`readFile`, `writeFile`, `mkdir`, etc.) |
+| `process` | Process control (`process.exit`, `process.env`, etc.) |
+| `regex` | Regular expressions (`RegExp`, `String.match`, etc.) |
+| `full` | All features |
+
+Default: **no features** (secure mode). Use `--features full` for development.
+
+**Log levels**: Control output with `TISH_LOG_LEVEL=debug|info|log|warn|error`
 
 ## Test
 

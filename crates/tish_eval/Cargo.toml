@@ -9,6 +9,7 @@ default = []
 http = ["tokio", "reqwest", "futures", "tiny_http"]
 fs = []
 process = []
+regex = ["fancy-regex"]
 
 [dependencies]
 tish_ast = { path = "../tish_ast" }
@@ -18,3 +19,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"], optiona
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
 futures = { version = "0.3", optional = true }
 tiny_http = { version = "0.12", optional = true }
+fancy-regex = { version = "0.14", optional = true }

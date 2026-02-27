@@ -46,6 +46,8 @@ pub fn json_stringify(value: &Value) -> String {
             format!("{{{}}}", pairs.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(","))
         }
         Value::Function(_) => "null".to_string(),
+        #[cfg(feature = "regex")]
+        Value::RegExp(_) => "null".to_string(),
     }
 }
 

@@ -9,6 +9,7 @@ default = []
 http = []
 fs = []
 process = []
+regex = []
 
 [dependencies]
 tish_ast = { path = "../tish_ast" }

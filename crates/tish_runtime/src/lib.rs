@@ -808,3 +808,272 @@ mod http;
 
 #[cfg(feature = "http")]
 pub use http::{fetch as http_fetch, fetch_all as http_fetch_all, serve as http_serve};
+
+// ============== RegExp Support ==============
+
+#[cfg(feature = "regex")]
+pub use tish_core::{TishRegExp, RegExpFlags};
+
+#[cfg(feature = "regex")]
+pub fn regexp_new(args: &[Value]) -> Value {
+    let pattern = match args.first() {
+        Some(Value::String(s)) => s.to_string(),
+        Some(v) => v.to_display_string(),
+        None => String::new(),
+    };
+
+    let flags = match args.get(1) {
+        Some(Value::String(s)) => s.to_string(),
+        Some(Value::Null) | None => String::new(),
+        Some(v) => v.to_display_string(),
+    };
+
+    match TishRegExp::new(&pattern, &flags) {
+        Ok(re) => Value::RegExp(Rc::new(RefCell::new(re))),
+        Err(e) => {
+            eprintln!("RegExp error: {}", e);
+            Value::Null
+        }
+    }
+}
+
+#[cfg(feature = "regex")]
+pub fn regexp_test(re: &Value, input: &Value) -> Value {
+    if let Value::RegExp(re) = re {
+        let input_str = input.to_display_string();
+        Value::Bool(re.borrow_mut().test(&input_str))
+    } else {
+        Value::Bool(false)
+    }
+}
+
+#[cfg(feature = "regex")]
+pub fn regexp_exec(re: &Value, input: &Value) -> Value {
+    if let Value::RegExp(re) = re {
+        let input_str = input.to_display_string();
+        regexp_exec_impl(&mut re.borrow_mut(), &input_str)
+    } else {
+        Value::Null
+    }
+}
+
+#[cfg(feature = "regex")]
+fn regexp_exec_impl(re: &mut tish_core::TishRegExp, input: &str) -> Value {
+    let start = if re.flags.global || re.flags.sticky {
+        re.last_index
+    } else {
+        0
+    };
+
+    let char_count = input.chars().count();
+    if start > char_count {
+        if re.flags.global || re.flags.sticky {
+            re.last_index = 0;
+        }
+        return Value::Null;
+    }
+
+    let byte_start: usize = input.chars().take(start).map(|c| c.len_utf8()).sum();
+    let search_str = &input[byte_start..];
+
+    match re.regex.captures(search_str) {
+        Ok(Some(caps)) => {
+            let full_match = caps.get(0).unwrap();
+            
+            if re.flags.sticky && full_match.start() != 0 {
+                re.last_index = 0;
+                return Value::Null;
+            }
+
+            let mut result = Vec::new();
+            result.push(Value::String(full_match.as_str().into()));
+            
+            for i in 1..caps.len() {
+                match caps.get(i) {
+                    Some(m) => result.push(Value::String(m.as_str().into())),
+                    None => result.push(Value::Null),
+                }
+            }
+
+            if re.flags.global || re.flags.sticky {
+                let match_end_chars = input[..byte_start + full_match.end()].chars().count();
+                if full_match.start() == full_match.end() {
+                    re.last_index = match_end_chars + 1;
+                } else {
+                    re.last_index = match_end_chars;
+                }
+            }
+
+            Value::Array(Rc::new(RefCell::new(result)))
+        }
+        Ok(None) | Err(_) => {
+            if re.flags.global || re.flags.sticky {
+                re.last_index = 0;
+            }
+            Value::Null
+        }
+    }
+}
+
+#[cfg(feature = "regex")]
+pub fn string_split_regex(s: &Value, separator: &Value, limit: Option<usize>) -> Value {
+    let input = match s {
+        Value::String(s) => s.as_ref(),
+        _ => return Value::Array(Rc::new(RefCell::new(vec![s.clone()]))),
+    };
+    
+    let max = limit.unwrap_or(usize::MAX);
+    if max == 0 {
+        return Value::Array(Rc::new(RefCell::new(Vec::new())));
+    }
+
+    match separator {
+        Value::RegExp(re) => {
+            let re = re.borrow();
+            let mut result = Vec::new();
+            let mut last_end = 0;
+            
+            for mat in re.regex.find_iter(input) {
+                match mat {
+                    Ok(m) => {
+                        if result.len() >= max - 1 { break; }
+                        result.push(Value::String(input[last_end..m.start()].into()));
+                        last_end = m.end();
+                    }
+                    Err(_) => break,
+                }
+            }
+            
+            if result.len() < max {
+                result.push(Value::String(input[last_end..].into()));
+            }
+            
+            Value::Array(Rc::new(RefCell::new(result)))
+        }
+        Value::String(sep) => {
+            let parts: Vec<Value> = input
+                .splitn(max, sep.as_ref())
+                .map(|s| Value::String(s.into()))
+                .collect();
+            Value::Array(Rc::new(RefCell::new(parts)))
+        }
+        _ => Value::Array(Rc::new(RefCell::new(vec![Value::String(input.into())]))),
+    }
+}
+
+#[cfg(feature = "regex")]
+pub fn string_match_regex(s: &Value, regexp: &Value) -> Value {
+    let input = match s {
+        Value::String(s) => s.as_ref(),
+        _ => return Value::Null,
+    };
+
+    match regexp {
+        Value::RegExp(re) => {
+            let mut re = re.borrow_mut();
+            
+            if re.flags.global {
+                let mut matches = Vec::new();
+                re.last_index = 0;
+                
+                loop {
+                    match re.regex.find_from_pos(input, re.last_index) {
+                        Ok(Some(m)) => {
+                            matches.push(Value::String(m.as_str().into()));
+                            if m.start() == m.end() {
+                                re.last_index = m.end() + 1;
+                            } else {
+                                re.last_index = m.end();
+                            }
+                            if re.last_index > input.len() { break; }
+                        }
+                        _ => break,
+                    }
+                }
+                
+                re.last_index = 0;
+                
+                if matches.is_empty() {
+                    Value::Null
+                } else {
+                    Value::Array(Rc::new(RefCell::new(matches)))
+                }
+            } else {
+                regexp_exec_impl(&mut re, input)
+            }
+        }
+        Value::String(pattern) => {
+            match tish_core::TishRegExp::new(pattern, "") {
+                Ok(mut re) => regexp_exec_impl(&mut re, input),
+                Err(_) => Value::Null,
+            }
+        }
+        _ => Value::Null,
+    }
+}
+
+#[cfg(feature = "regex")]
+pub fn string_replace_regex(s: &Value, search: &Value, replacement: &Value) -> Value {
+    let input = match s {
+        Value::String(s) => s.as_ref(),
+        _ => return s.clone(),
+    };
+    
+    let replacement_str = replacement.to_display_string();
+
+    match search {
+        Value::RegExp(re) => {
+            let re = re.borrow();
+            
+            if re.flags.global {
+                match re.regex.replace_all(input, replacement_str.as_str()) {
+                    std::borrow::Cow::Borrowed(s) => Value::String(s.into()),
+                    std::borrow::Cow::Owned(s) => Value::String(s.into()),
+                }
+            } else {
+                match re.regex.replace(input, replacement_str.as_str()) {
+                    std::borrow::Cow::Borrowed(s) => Value::String(s.into()),
+                    std::borrow::Cow::Owned(s) => Value::String(s.into()),
+                }
+            }
+        }
+        Value::String(pattern) => {
+            Value::String(input.replacen(pattern.as_ref(), &replacement_str, 1).into())
+        }
+        _ => Value::String(input.into()),
+    }
+}
+
+#[cfg(feature = "regex")]
+pub fn string_search_regex(s: &Value, regexp: &Value) -> Value {
+    let input = match s {
+        Value::String(s) => s.as_ref(),
+        _ => return Value::Number(-1.0),
+    };
+
+    match regexp {
+        Value::RegExp(re) => {
+            let re = re.borrow();
+            match re.regex.find(input) {
+                Ok(Some(m)) => {
+                    let char_index = input[..m.start()].chars().count();
+                    Value::Number(char_index as f64)
+                }
+                _ => Value::Number(-1.0),
+            }
+        }
+        Value::String(pattern) => {
+            match tish_core::TishRegExp::new(pattern, "") {
+                Ok(re) => match re.regex.find(input) {
+                    Ok(Some(m)) => {
+                        let char_index = input[..m.start()].chars().count();
+                        Value::Number(char_index as f64)
+                    }
+                    _ => Value::Number(-1.0),
+                },
+                Err(_) => Value::Number(-1.0),
+            }
+        }
+        _ => Value::Number(-1.0),
+    }
+}

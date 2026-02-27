@@ -3,4 +3,9 @@ name = "tish_core"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+regex = ["fancy-regex"]
+
 [dependencies]
+fancy-regex = { version = "0.14", optional = true }

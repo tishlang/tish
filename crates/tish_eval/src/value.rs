@@ -7,6 +7,9 @@ use std::sync::Arc;
 
 use tish_ast::Statement;
 
+#[cfg(feature = "regex")]
+pub use crate::regex::TishRegExp;
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Number(f64),
@@ -79,6 +82,11 @@ pub enum Value {
     NativeReadDir,
     #[cfg(feature = "fs")]
     NativeMkdir,
+    // RegExp
+    #[cfg(feature = "regex")]
+    RegExp(Rc<RefCell<TishRegExp>>),
+    #[cfg(feature = "regex")]
+    NativeRegExpConstructor,
 }
 
 impl std::fmt::Display for Value {
@@ -166,6 +174,13 @@ impl std::fmt::Display for Value {
             Value::NativeReadDir => write!(f, "[NativeFunction: readDir]"),
             #[cfg(feature = "fs")]
             Value::NativeMkdir => write!(f, "[NativeFunction: mkdir]"),
+            #[cfg(feature = "regex")]
+            Value::RegExp(re) => {
+                let re = re.borrow();
+                write!(f, "/{}/{}", re.source, re.flags_string())
+            }
+            #[cfg(feature = "regex")]
+            Value::NativeRegExpConstructor => write!(f, "[Function: RegExp]"),
         }
     }
 }

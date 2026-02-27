@@ -26,6 +26,12 @@ struct Codegen {
     indent: usize,
     loop_label_index: usize,
     loop_stack: Vec<(String, Option<String>)>, // (break_label, continue_update) for innermost loop
+    /// Stack of scopes, each containing function names declared in that scope
+    /// Used to capture sibling functions for mutual recursion
+    function_scope_stack: Vec<Vec<String>>,
+    /// Stack of parameter names from outer function scopes
+    /// Used to clone outer parameters for nested function captures
+    outer_params_stack: Vec<Vec<String>>,
 }
 
 impl Codegen {
@@ -35,6 +41,8 @@ impl Codegen {
             indent: 0,
             loop_label_index: 0,
             loop_stack: Vec::new(),
+            function_scope_stack: vec![Vec::new()], // Start with global scope
+            outer_params_stack: Vec::new(),
         }
     }
 
@@ -44,6 +52,20 @@ impl Codegen {
         }
         self.output.push_str(s);
         self.output.push('\n');
+    }
+
+    /// Pre-scan statements to find all function declarations in this scope
+    fn prescan_function_decls(&self, statements: &[Statement]) -> Vec<String> {
+        statements
+            .iter()
+            .filter_map(|s| {
+                if let Statement::FunDecl { name, .. } = s {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn write(&mut self, s: &str) {
@@ -194,6 +216,13 @@ impl Codegen {
             self.writeln("let mkdir = Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)));");
         }
 
+        // Pre-scan for top-level function declarations and create cells (for mutual recursion)
+        let top_level_funcs = self.prescan_function_decls(&program.statements);
+        *self.function_scope_stack.last_mut().unwrap() = top_level_funcs.clone();
+        for func_name in &top_level_funcs {
+            self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", func_name));
+        }
+
         for stmt in &program.statements {
             self.emit_statement(stmt)?;
         }
@@ -209,9 +238,17 @@ impl Codegen {
             Statement::Block { statements, .. } => {
                 self.writeln("{");
                 self.indent += 1;
+                // Pre-scan for function declarations and create cells (for mutual recursion)
+                let func_names = self.prescan_function_decls(statements);
+                self.function_scope_stack.push(func_names.clone());
+                // Create cells for all functions in this scope
+                for func_name in &func_names {
+                    self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", func_name));
+                }
                 for s in statements {
                     self.emit_statement(s)?;
                 }
+                self.function_scope_stack.pop(); // Exit scope
                 self.indent -= 1;
                 self.writeln("}");
             }
@@ -454,14 +491,54 @@ impl Codegen {
                 self.writeln("}");
             }
             Statement::FunDecl { name, params, rest_param, body, .. } => {
-                self.writeln(&format!("let {} = {{", name.as_ref()));
+                // Use Rc<RefCell<>> pattern to allow recursive function calls
+                // The function can reference itself through the cell
+                let name_str = name.as_ref();
+                // Check if cell was already created by block prescan
+                let cell_exists = self.function_scope_stack
+                    .last()
+                    .map(|scope| scope.contains(&name_str.to_string()))
+                    .unwrap_or(false);
+                if !cell_exists {
+                    self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", name_str));
+                }
+                
+                // Collect all outer parameters that need to be captured
+                let outer_params: Vec<String> = self.outer_params_stack
+                    .iter()
+                    .flat_map(|p| p.iter().cloned())
+                    .collect();
+                
+                self.writeln(&format!("let {} = {{", name_str));
                 self.indent += 1;
+                // Clone the cell so the closure can reference the function recursively
+                self.writeln(&format!("let {}_ref = {}_cell.clone();", name_str, name_str));
+                // Clone sibling function cells for mutual recursion
+                // Collect sibling functions from current scope (all of them, for forward refs)
+                let sibling_fns: Vec<String> = self.function_scope_stack
+                    .last()
+                    .map(|scope| scope.iter().filter(|s| *s != name_str).cloned().collect())
+                    .unwrap_or_default();
+                for sibling in &sibling_fns {
+                    self.writeln(&format!("let {}_ref = {}_cell.clone();", sibling, sibling));
+                }
+                // Clone outer parameters so they can be captured by the move closure
+                for outer_param in &outer_params {
+                    self.writeln(&format!("let {} = {}.clone();", outer_param, outer_param));
+                }
                 self.writeln("let console = console.clone();");
                 self.writeln("let Math = Math.clone();");
                 self.writeln("let JSON = JSON.clone();");
                 self.writeln("Value::Function(Rc::new(move |args: &[Value]| {");
                 self.indent += 1;
+                // Make the function available by its name inside the closure
+                self.writeln(&format!("let {} = {}_ref.borrow().clone();", name_str, name_str));
+                // Make sibling functions available for mutual recursion
+                for sibling in &sibling_fns {
+                    self.writeln(&format!("let {} = {}_ref.borrow().clone();", sibling, sibling));
+                }
                 // Extract just the parameter names (type annotations are parsed but not used in codegen yet)
+                let current_param_names: Vec<String> = params.iter().map(|p| p.name.to_string()).collect();
                 for (i, p) in params.iter().enumerate() {
                     self.writeln(&format!(
                         "let {} = args.get({}).cloned().unwrap_or(Value::Null);",
@@ -476,12 +553,38 @@ impl Codegen {
                         params.len()
                     ));
                 }
-                self.emit_statement(body)?;
+                
+                // Push current params to stack for nested functions
+                self.outer_params_stack.push(current_param_names);
+                
+                // Pre-scan body for nested functions (handles function body as Block)
+                if let Statement::Block { statements, .. } = body.as_ref() {
+                    let nested_func_names = self.prescan_function_decls(statements);
+                    self.function_scope_stack.push(nested_func_names.clone());
+                    // Create cells for nested functions
+                    for func_name in &nested_func_names {
+                        self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", func_name));
+                    }
+                    for s in statements {
+                        self.emit_statement(s)?;
+                    }
+                    self.function_scope_stack.pop();
+                } else {
+                    self.function_scope_stack.push(Vec::new());
+                    self.emit_statement(body)?;
+                    self.function_scope_stack.pop();
+                }
+                
+                // Pop params stack
+                self.outer_params_stack.pop();
+                
                 self.writeln("Value::Null");
                 self.indent -= 1;
                 self.writeln("}))");
                 self.indent -= 1;
                 self.writeln("};");
+                // Update the cell with the actual function value
+                self.writeln(&format!("*{}_cell.borrow_mut() = {}.clone();", name_str, name_str));
             }
         }
         Ok(())

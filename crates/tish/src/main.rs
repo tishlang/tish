@@ -132,6 +132,8 @@ fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
     features.push("fs");
     #[cfg(feature = "process")]
     features.push("process");
+    #[cfg(feature = "regex")]
+    features.push("regex");
     let features_str = if features.is_empty() {
         String::new()
     } else {

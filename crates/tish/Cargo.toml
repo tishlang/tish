@@ -12,11 +12,12 @@ path = "src/main.rs"
 # Default: secure mode with no dangerous capabilities
 default = []
 # Full: all capabilities enabled (for development/trusted environments)
-full = ["http", "fs", "process"]
+full = ["http", "fs", "process", "regex"]
 # Individual capability flags
 http = ["tish_eval/http", "tish_runtime/http", "tish_compile/http"]
 fs = ["tish_eval/fs", "tish_runtime/fs", "tish_compile/fs"]
 process = ["tish_eval/process", "tish_runtime/process", "tish_compile/process"]
+regex = ["tish_eval/regex", "tish_runtime/regex", "tish_compile/regex"]
 
 [dependencies]
 tish_lexer = { path = "../tish_lexer" }

@@ -131,6 +131,11 @@ impl Evaluator {
             date.insert("now".into(), Value::NativeDateNow);
             s.set("Date".into(), Value::Object(Rc::new(RefCell::new(date))), true);
 
+            #[cfg(feature = "regex")]
+            {
+                s.set("RegExp".into(), Value::NativeRegExpConstructor, true);
+            }
+
             #[cfg(feature = "process")]
             {
                 let mut process = HashMap::new();
@@ -716,14 +721,27 @@ impl Evaluator {
                                 return Ok(Value::String(chars[s..e].iter().collect::<String>().into()));
                             }
                             "split" => {
-                                let sep = match arg_vals.get(0) {
-                                    Some(Value::String(ss)) => ss.as_ref(),
-                                    _ => return Ok(Value::Array(Rc::new(RefCell::new(vec![obj.clone()])))),
-                                };
-                                let parts: Vec<Value> = s.split(sep)
-                                    .map(|p| Value::String(p.into()))
-                                    .collect();
-                                return Ok(Value::Array(Rc::new(RefCell::new(parts))));
+                                #[cfg(feature = "regex")]
+                                if let Some(sep) = arg_vals.get(0) {
+                                    let limit = arg_vals.get(1).and_then(|v| match v {
+                                        Value::Number(n) => Some(*n as usize),
+                                        _ => None,
+                                    });
+                                    return Ok(crate::regex::string_split(s, sep, limit));
+                                }
+                                #[cfg(not(feature = "regex"))]
+                                {
+                                    let sep = match arg_vals.get(0) {
+                                        Some(Value::String(ss)) => ss.as_ref(),
+                                        _ => return Ok(Value::Array(Rc::new(RefCell::new(vec![obj.clone()])))),
+                                    };
+                                    let parts: Vec<Value> = s.split(sep)
+                                        .map(|p| Value::String(p.into()))
+                                        .collect();
+                                    return Ok(Value::Array(Rc::new(RefCell::new(parts))));
+                                }
+                                #[cfg(feature = "regex")]
+                                return Ok(Value::Array(Rc::new(RefCell::new(vec![obj.clone()]))));
                             }
                             "trim" => {
                                 return Ok(Value::String(s.trim().into()));
@@ -749,15 +767,24 @@ impl Evaluator {
                                 return Ok(Value::Bool(s.ends_with(search)));
                             }
                             "replace" => {
-                                let search = match arg_vals.get(0) {
-                                    Some(Value::String(ss)) => ss.to_string(),
-                                    _ => return Ok(obj.clone()),
-                                };
-                                let replacement = match arg_vals.get(1) {
-                                    Some(Value::String(ss)) => ss.to_string(),
-                                    _ => String::new(),
-                                };
-                                return Ok(Value::String(s.replacen(&search, &replacement, 1).into()));
+                                #[cfg(feature = "regex")]
+                                if let (Some(search), Some(replace)) = (arg_vals.get(0), arg_vals.get(1)) {
+                                    return Ok(crate::regex::string_replace(s, search, replace));
+                                }
+                                #[cfg(not(feature = "regex"))]
+                                {
+                                    let search = match arg_vals.get(0) {
+                                        Some(Value::String(ss)) => ss.to_string(),
+                                        _ => return Ok(obj.clone()),
+                                    };
+                                    let replacement = match arg_vals.get(1) {
+                                        Some(Value::String(ss)) => ss.to_string(),
+                                        _ => String::new(),
+                                    };
+                                    return Ok(Value::String(s.replacen(&search, &replacement, 1).into()));
+                                }
+                                #[cfg(feature = "regex")]
+                                return Ok(obj.clone());
                             }
                             "replaceAll" => {
                                 let search = match arg_vals.get(0) {
@@ -830,6 +857,42 @@ impl Evaluator {
                                 let needed = target_len - chars.len();
                                 let padding: String = pad.chars().cycle().take(needed).collect();
                                 return Ok(Value::String(format!("{}{}", s, padding).into()));
+                            }
+                            #[cfg(feature = "regex")]
+                            "match" => {
+                                if let Some(regexp) = arg_vals.get(0) {
+                                    return Ok(crate::regex::string_match(s, regexp));
+                                }
+                                return Ok(Value::Null);
+                            }
+                            #[cfg(feature = "regex")]
+                            "search" => {
+                                if let Some(regexp) = arg_vals.get(0) {
+                                    return Ok(crate::regex::string_search(s, regexp));
+                                }
+                                return Ok(Value::Number(-1.0));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // RegExp methods
+                    #[cfg(feature = "regex")]
+                    if let Value::RegExp(re) = &obj {
+                        match method_name.as_ref() {
+                            "test" => {
+                                let input = arg_vals.first()
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_default();
+                                let result = re.borrow_mut().test(&input);
+                                return Ok(Value::Bool(result));
+                            }
+                            "exec" => {
+                                let input = arg_vals.first()
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_default();
+                                let result = re.borrow_mut().exec(&input);
+                                return Ok(result);
                             }
                             _ => {}
                         }
@@ -975,6 +1038,10 @@ impl Evaluator {
                     Value::NativeFetch | Value::NativeFetchAll | Value::NativeServe => "function".into(),
                     #[cfg(feature = "fs")]
                     Value::NativeReadFile | Value::NativeWriteFile | Value::NativeFileExists | Value::NativeReadDir | Value::NativeMkdir => "function".into(),
+                    #[cfg(feature = "regex")]
+                    Value::RegExp(_) => "object".into(),
+                    #[cfg(feature = "regex")]
+                    Value::NativeRegExpConstructor => "function".into(),
                 }))
             }
             Expr::PostfixInc { name, .. } => {
@@ -1572,6 +1639,10 @@ impl Evaluator {
         if matches!(f, Value::NativeServe) {
             return self.run_http_server(args);
         }
+        #[cfg(feature = "regex")]
+        if matches!(f, Value::NativeRegExpConstructor) {
+            return crate::regex::regexp_constructor(args).map_err(EvalError::Error);
+        }
         let (params, rest_param, body) = match f {
             Value::Function { params, rest_param, body } => {
                 (params.clone(), rest_param.clone(), Box::clone(body))
@@ -1665,6 +1736,22 @@ impl Evaluator {
                     Ok(Value::Number(s.chars().count() as f64))
                 } else {
                     Ok(Value::Null)
+                }
+            }
+            #[cfg(feature = "regex")]
+            Value::RegExp(re) => {
+                let re = re.borrow();
+                match key {
+                    "source" => Ok(Value::String(re.source.clone().into())),
+                    "flags" => Ok(Value::String(re.flags_string().into())),
+                    "lastIndex" => Ok(Value::Number(re.last_index as f64)),
+                    "global" => Ok(Value::Bool(re.flags.global)),
+                    "ignoreCase" => Ok(Value::Bool(re.flags.ignore_case)),
+                    "multiline" => Ok(Value::Bool(re.flags.multiline)),
+                    "dotAll" => Ok(Value::Bool(re.flags.dot_all)),
+                    "unicode" => Ok(Value::Bool(re.flags.unicode)),
+                    "sticky" => Ok(Value::Bool(re.flags.sticky)),
+                    _ => Ok(Value::Null),
                 }
             }
             _ => Ok(Value::Null),
@@ -1959,6 +2046,8 @@ impl Evaluator {
             Value::NativeFetch | Value::NativeFetchAll | Value::NativeServe => "null".to_string(),
             #[cfg(feature = "fs")]
             Value::NativeReadFile | Value::NativeWriteFile | Value::NativeFileExists | Value::NativeReadDir | Value::NativeMkdir => "null".to_string(),
+            #[cfg(feature = "regex")]
+            Value::RegExp(_) | Value::NativeRegExpConstructor => "null".to_string(),
         }
     }
 

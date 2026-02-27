@@ -1,11 +1,27 @@
-# Tish build recipes with feature flag support
+# Tish build recipes
 # Install just: cargo install just OR brew install just
 #
-# Feature Flags (compile-time security):
+# ═══════════════════════════════════════════════════════════════════════════════
+# TWO WAYS TO EXECUTE TISH PROGRAMS
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 1. RUN (Interpreter) - Execute directly, no build step:
+#      just run run hello.tish           # runs via interpreter
+#      tish run hello.tish               # if tish is in PATH
+#
+# 2. BUILD (Compile to Native) - Create standalone executable:
+#      just run compile hello.tish -o hello   # compiles to native binary
+#      ./hello                                 # run the standalone binary
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE FLAGS (compile-time security)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
 #   - http    : Network access (fetch, fetchAll, serve)
 #   - fs      : File system access (readFile, writeFile, fileExists, readDir, mkdir)
 #   - process : Process control (process.exit, process.cwd, process.argv, process.env)
-#   - full    : All features enabled (http + fs + process)
+#   - regex   : Regular expression support (RegExp, String.match/replace/search/split)
+#   - full    : All features enabled (http + fs + process + regex)
 #
 # Default: NO features enabled (secure mode)
 
@@ -30,6 +46,9 @@ build-fs:
 build-process:
     cargo build --release --no-default-features --features process
 
+build-regex:
+    cargo build --release --no-default-features --features regex
+
 # Build with multiple specific features
 build-custom FEATURES:
     cargo build --release --no-default-features --features "{{FEATURES}}"
@@ -49,6 +68,27 @@ run-http *ARGS:
 run-fs *ARGS:
     cargo run --release --no-default-features --features fs -- {{ARGS}}
 
+run-regex *ARGS:
+    cargo run --release --no-default-features --features regex -- {{ARGS}}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMPILE TISH PROGRAMS TO NATIVE BINARIES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Compile a .tish file to native binary (with all features)
+# Usage: just compile hello.tish hello
+compile INPUT OUTPUT:
+    cargo run --release --features full -- compile {{INPUT}} -o {{OUTPUT}}
+
+# Compile with secure mode (no dangerous features)
+compile-secure INPUT OUTPUT:
+    cargo run --release --no-default-features -- compile {{INPUT}} -o {{OUTPUT}}
+
+# Compile with specific features
+# Usage: just compile-with "http fs" hello.tish hello
+compile-with FEATURES INPUT OUTPUT:
+    cargo run --release --no-default-features --features "{{FEATURES}}" -- compile {{INPUT}} -o {{OUTPUT}}
+
 # Test secure mode
 test-secure:
     cargo test --no-default-features
@@ -67,6 +107,8 @@ check-all:
     cargo check --no-default-features --features fs
     @echo "Checking process only..."
     cargo check --no-default-features --features process
+    @echo "Checking regex only..."
+    cargo check --no-default-features --features regex
     @echo "Checking full mode..."
     cargo check --features full
     @echo "All feature combinations compile successfully!"
