@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/tish_core",
+    "crates/tish_builtins",
     "crates/tish_lexer",
     "crates/tish_ast",
     "crates/tish_parser",

@@ -19,7 +19,7 @@ pub fn percent_decode(input: &str) -> Result<String, String> {
         "%23",        // #
     ];
 
-    let mut result = String::new();
+    let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
 
     while let Some(c) = chars.next() {
@@ -72,7 +72,7 @@ pub fn percent_encode(input: &str) -> String {
         ',', '#',
     ];
 
-    let mut result = String::new();
+    let mut result = String::with_capacity(input.len());
     for c in input.chars() {
         if c.is_ascii_alphanumeric() || UNRESERVED.contains(&c) {
             result.push(c);

@@ -1,0 +1,12 @@
+[package]
+name = "tish_builtins"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tish_core = { path = "../tish_core" }
+rand = "0.8"
+
+[features]
+default = []
+regex = ["tish_core/regex"]

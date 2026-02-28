@@ -4,6 +4,10 @@
 //! and other builtin functions for compiled Tish programs.
 
 use std::fmt;
+use std::sync::OnceLock;
+use tish_builtins::helpers::extract_num;
+#[cfg(feature = "fs")]
+use tish_builtins::helpers::make_error_value;
 
 pub use tish_core::Value;
 
@@ -104,18 +108,33 @@ enum LogLevel {
     Error = 4,
 }
 
+static LOG_LEVEL: OnceLock<LogLevel> = OnceLock::new();
+
 fn get_log_level() -> LogLevel {
-    match std::env::var("TISH_LOG_LEVEL").as_deref() {
-        Ok("debug") => LogLevel::Debug,
-        Ok("info") => LogLevel::Info,
-        Ok("warn") => LogLevel::Warn,
-        Ok("error") => LogLevel::Error,
-        _ => LogLevel::Log,
-    }
+    *LOG_LEVEL.get_or_init(|| {
+        match std::env::var("TISH_LOG_LEVEL").as_deref() {
+            Ok("debug") => LogLevel::Debug,
+            Ok("info") => LogLevel::Info,
+            Ok("warn") => LogLevel::Warn,
+            Ok("error") => LogLevel::Error,
+            _ => LogLevel::Log,
+        }
+    })
 }
 
 fn format_args(args: &[Value]) -> String {
-    args.iter().map(Value::to_display_string).collect::<Vec<_>>().join(" ")
+    let mut iter = args.iter();
+    match iter.next() {
+        None => String::new(),
+        Some(first) => {
+            let mut result = first.to_display_string();
+            for arg in iter {
+                result.push(' ');
+                result.push_str(&arg.to_display_string());
+            }
+            result
+        }
+    }
 }
 
 pub fn console_debug(args: &[Value]) {
@@ -189,41 +208,33 @@ pub fn encode_uri(args: &[Value]) -> Value {
     Value::String(percent_encode(&s).into())
 }
 
-pub fn math_abs(args: &[Value]) -> Value {
-    let n = extract_num(args.first()).unwrap_or(f64::NAN);
-    Value::Number(n.abs())
+macro_rules! math_unary {
+    ($name:ident, $op:ident) => {
+        pub fn $name(args: &[Value]) -> Value {
+            let n = extract_num(args.first()).unwrap_or(f64::NAN);
+            Value::Number(n.$op())
+        }
+    };
 }
 
-pub fn math_sqrt(args: &[Value]) -> Value {
-    let n = extract_num(args.first()).unwrap_or(f64::NAN);
-    Value::Number(n.sqrt())
-}
+math_unary!(math_abs, abs);
+math_unary!(math_sqrt, sqrt);
+math_unary!(math_floor, floor);
+math_unary!(math_ceil, ceil);
+math_unary!(math_round, round);
 
 pub fn math_min(args: &[Value]) -> Value {
-    let nums: Vec<f64> = args.iter().filter_map(|v| extract_num(Some(v))).collect();
-    let n = nums.into_iter().fold(f64::INFINITY, f64::min);
+    let n = args.iter()
+        .filter_map(|v| extract_num(Some(v)))
+        .fold(f64::INFINITY, f64::min);
     Value::Number(if n == f64::INFINITY { f64::NAN } else { n })
 }
 
 pub fn math_max(args: &[Value]) -> Value {
-    let nums: Vec<f64> = args.iter().filter_map(|v| extract_num(Some(v))).collect();
-    let n = nums.into_iter().fold(f64::NEG_INFINITY, f64::max);
+    let n = args.iter()
+        .filter_map(|v| extract_num(Some(v)))
+        .fold(f64::NEG_INFINITY, f64::max);
     Value::Number(if n == f64::NEG_INFINITY { f64::NAN } else { n })
-}
-
-pub fn math_floor(args: &[Value]) -> Value {
-    let n = extract_num(args.first()).unwrap_or(f64::NAN);
-    Value::Number(n.floor())
-}
-
-pub fn math_ceil(args: &[Value]) -> Value {
-    let n = extract_num(args.first()).unwrap_or(f64::NAN);
-    Value::Number(n.ceil())
-}
-
-pub fn math_round(args: &[Value]) -> Value {
-    let n = extract_num(args.first()).unwrap_or(f64::NAN);
-    Value::Number(n.round())
 }
 
 pub fn json_stringify(args: &[Value]) -> Value {
@@ -234,10 +245,6 @@ pub fn json_stringify(args: &[Value]) -> Value {
 pub fn json_parse(args: &[Value]) -> Value {
     let s = args.first().map(|v| v.to_display_string()).unwrap_or_default();
     core_json_parse(&s).unwrap_or(Value::Null)
-}
-
-fn extract_num(v: Option<&Value>) -> Option<f64> {
-    v.and_then(|v| match v { Value::Number(n) => Some(*n), _ => None })
 }
 
 // ============== New Math Functions ==============
@@ -255,40 +262,21 @@ pub fn math_pow(args: &[Value]) -> Value {
     Value::Number(base.powf(exp))
 }
 
-pub fn math_sin(args: &[Value]) -> Value {
-    let n = extract_num(args.first()).unwrap_or(f64::NAN);
-    Value::Number(n.sin())
-}
-
-pub fn math_cos(args: &[Value]) -> Value {
-    let n = extract_num(args.first()).unwrap_or(f64::NAN);
-    Value::Number(n.cos())
-}
-
-pub fn math_tan(args: &[Value]) -> Value {
-    let n = extract_num(args.first()).unwrap_or(f64::NAN);
-    Value::Number(n.tan())
-}
+math_unary!(math_sin, sin);
+math_unary!(math_cos, cos);
+math_unary!(math_tan, tan);
+math_unary!(math_exp, exp);
+math_unary!(math_trunc, trunc);
 
 pub fn math_log(args: &[Value]) -> Value {
     let n = extract_num(args.first()).unwrap_or(f64::NAN);
     Value::Number(n.ln())
 }
 
-pub fn math_exp(args: &[Value]) -> Value {
-    let n = extract_num(args.first()).unwrap_or(f64::NAN);
-    Value::Number(n.exp())
-}
-
 pub fn math_sign(args: &[Value]) -> Value {
     let n = extract_num(args.first()).unwrap_or(f64::NAN);
     let sign = if n.is_nan() { f64::NAN } else if n > 0.0 { 1.0 } else if n < 0.0 { -1.0 } else { 0.0 };
     Value::Number(sign)
-}
-
-pub fn math_trunc(args: &[Value]) -> Value {
-    let n = extract_num(args.first()).unwrap_or(f64::NAN);
-    Value::Number(n.trunc())
 }
 
 // ============== Date Functions ==============
@@ -342,11 +330,7 @@ pub fn read_file(args: &[Value]) -> Value {
     let path = args.first().map(|v| v.to_display_string()).unwrap_or_default();
     match std::fs::read_to_string(&path) {
         Ok(content) => Value::String(content.into()),
-        Err(e) => {
-            let mut obj = std::collections::HashMap::with_capacity(1);
-            obj.insert(std::sync::Arc::from("error"), Value::String(e.to_string().into()));
-            Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
-        }
+        Err(e) => make_error_value(e),
     }
 }
 
@@ -356,11 +340,7 @@ pub fn write_file(args: &[Value]) -> Value {
     let content = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
     match std::fs::write(&path, &content) {
         Ok(()) => Value::Bool(true),
-        Err(e) => {
-            let mut obj = std::collections::HashMap::with_capacity(1);
-            obj.insert(std::sync::Arc::from("error"), Value::String(e.to_string().into()));
-            Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
-        }
+        Err(e) => make_error_value(e),
     }
 }
 
@@ -383,11 +363,7 @@ pub fn read_dir(args: &[Value]) -> Value {
                 .collect();
             Value::Array(Rc::new(RefCell::new(files)))
         }
-        Err(e) => {
-            let mut obj = std::collections::HashMap::with_capacity(1);
-            obj.insert(std::sync::Arc::from("error"), Value::String(e.to_string().into()));
-            Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
-        }
+        Err(e) => make_error_value(e),
     }
 }
 
@@ -396,11 +372,7 @@ pub fn mkdir(args: &[Value]) -> Value {
     let path = args.first().map(|v| v.to_display_string()).unwrap_or_default();
     match std::fs::create_dir_all(&path) {
         Ok(()) => Value::Bool(true),
-        Err(e) => {
-            let mut obj = std::collections::HashMap::with_capacity(1);
-            obj.insert(std::sync::Arc::from("error"), Value::String(e.to_string().into()));
-            Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
-        }
+        Err(e) => make_error_value(e),
     }
 }
 
@@ -453,6 +425,45 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
             map.borrow().get(&key).cloned().unwrap_or(Value::Null)
         }
         _ => Value::Null,
+    }
+}
+
+/// Set property on object by string key. Returns the value that was set.
+pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
+    match obj {
+        Value::Object(map) => {
+            map.borrow_mut().insert(Arc::from(key), val.clone());
+            val
+        }
+        _ => panic!("Cannot assign property on non-object"),
+    }
+}
+
+/// Set index on array or object. Returns the value that was set.
+pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
+    match obj {
+        Value::Array(arr) => {
+            let index = match idx {
+                Value::Number(n) => *n as usize,
+                _ => panic!("Array index must be number"),
+            };
+            let mut arr_mut = arr.borrow_mut();
+            while arr_mut.len() <= index {
+                arr_mut.push(Value::Null);
+            }
+            arr_mut[index] = val.clone();
+            val
+        }
+        Value::Object(map) => {
+            let key: Arc<str> = match idx {
+                Value::Number(n) => n.to_string().into(),
+                Value::String(s) => Arc::clone(s),
+                _ => panic!("Object key must be string or number"),
+            };
+            map.borrow_mut().insert(key, val.clone());
+            val
+        }
+        _ => panic!("Cannot index assign on non-array/object"),
     }
 }
 
@@ -583,11 +594,11 @@ pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
         
         if let Some(Value::Function(cmp_fn)) = comparator {
             let mut indices: Vec<usize> = (0..arr_mut.len()).collect();
-            let arr_clone: Vec<Value> = arr_mut.clone();
+            let arr_ref: Vec<Value> = arr_mut.clone();
             
             indices.sort_by(|&a, &b| {
-                let va = &arr_clone[a];
-                let vb = &arr_clone[b];
+                let va = &arr_ref[a];
+                let vb = &arr_ref[b];
                 let result = cmp_fn(&[va.clone(), vb.clone()]);
                 match result {
                     Value::Number(n) => {
@@ -603,7 +614,9 @@ pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
                 }
             });
             
-            let sorted: Vec<Value> = indices.iter().map(|&i| arr_clone[i].clone()).collect();
+            let sorted: Vec<Value> = indices.into_iter().map(|i| {
+                std::mem::replace(&mut arr_mut[i], Value::Null)
+            }).collect();
             *arr_mut = sorted;
         } else {
             arr_mut.sort_by(|a, b| {
@@ -994,29 +1007,54 @@ pub fn string_includes(s: &Value, search: &Value) -> Value {
 
 pub fn string_slice(s: &Value, start: &Value, end: &Value) -> Value {
     if let Value::String(s) = s {
-        let chars: Vec<char> = s.chars().collect();
-        let len = chars.len() as i64;
-        let start_idx = match start {
-            Value::Number(n) => {
-                let n = *n as i64;
-                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-            }
-            _ => 0,
-        };
-        let end_idx = match end {
-            Value::Null => len as usize,
-            Value::Number(n) => {
-                let n = *n as i64;
-                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-            }
-            _ => len as usize,
-        };
-        let sliced: String = if start_idx < end_idx {
-            chars[start_idx..end_idx].iter().collect()
+        if s.is_ascii() {
+            let len = s.len() as i64;
+            let start_idx = match start {
+                Value::Number(n) => {
+                    let n = *n as i64;
+                    if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                }
+                _ => 0,
+            };
+            let end_idx = match end {
+                Value::Null => len as usize,
+                Value::Number(n) => {
+                    let n = *n as i64;
+                    if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                }
+                _ => len as usize,
+            };
+            let sliced = if start_idx < end_idx {
+                &s[start_idx..end_idx]
+            } else {
+                ""
+            };
+            Value::String(sliced.to_string().into())
         } else {
-            String::new()
-        };
-        Value::String(sliced.into())
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len() as i64;
+            let start_idx = match start {
+                Value::Number(n) => {
+                    let n = *n as i64;
+                    if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                }
+                _ => 0,
+            };
+            let end_idx = match end {
+                Value::Null => len as usize,
+                Value::Number(n) => {
+                    let n = *n as i64;
+                    if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                }
+                _ => len as usize,
+            };
+            let sliced: String = if start_idx < end_idx {
+                chars[start_idx..end_idx].iter().collect()
+            } else {
+                String::new()
+            };
+            Value::String(sliced.into())
+        }
     } else {
         Value::Null
     }
@@ -1024,19 +1062,34 @@ pub fn string_slice(s: &Value, start: &Value, end: &Value) -> Value {
 
 pub fn string_substring(s: &Value, start: &Value, end: &Value) -> Value {
     if let Value::String(s) = s {
-        let chars: Vec<char> = s.chars().collect();
-        let len = chars.len();
-        let start_idx = match start {
-            Value::Number(n) => (*n as usize).min(len),
-            _ => 0,
-        };
-        let end_idx = match end {
-            Value::Null => len,
-            Value::Number(n) => (*n as usize).min(len),
-            _ => len,
-        };
-        let (s, e) = (start_idx.min(end_idx), start_idx.max(end_idx));
-        Value::String(chars[s..e].iter().collect::<String>().into())
+        if s.is_ascii() {
+            let len = s.len();
+            let start_idx = match start {
+                Value::Number(n) => (*n as usize).min(len),
+                _ => 0,
+            };
+            let end_idx = match end {
+                Value::Null => len,
+                Value::Number(n) => (*n as usize).min(len),
+                _ => len,
+            };
+            let (ss, ee) = (start_idx.min(end_idx), start_idx.max(end_idx));
+            Value::String(s[ss..ee].to_string().into())
+        } else {
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len();
+            let start_idx = match start {
+                Value::Number(n) => (*n as usize).min(len),
+                _ => 0,
+            };
+            let end_idx = match end {
+                Value::Null => len,
+                Value::Number(n) => (*n as usize).min(len),
+                _ => len,
+            };
+            let (ss, ee) = (start_idx.min(end_idx), start_idx.max(end_idx));
+            Value::String(chars[ss..ee].iter().collect::<String>().into())
+        }
     } else {
         Value::Null
     }
@@ -1135,10 +1188,15 @@ pub fn string_char_at(s: &Value, idx: &Value) -> Value {
             Value::Number(n) => *n as usize,
             _ => 0,
         };
-        let chars: Vec<char> = s.chars().collect();
-        chars.get(idx)
-            .map(|c| Value::String(c.to_string().into()))
-            .unwrap_or(Value::String("".into()))
+        if s.is_ascii() {
+            s.as_bytes().get(idx)
+                .map(|&b| Value::String((b as char).to_string().into()))
+                .unwrap_or(Value::String("".into()))
+        } else {
+            s.chars().nth(idx)
+                .map(|c| Value::String(c.to_string().into()))
+                .unwrap_or(Value::String("".into()))
+        }
     } else {
         Value::Null
     }
@@ -1150,10 +1208,15 @@ pub fn string_char_code_at(s: &Value, idx: &Value) -> Value {
             Value::Number(n) => *n as usize,
             _ => 0,
         };
-        let chars: Vec<char> = s.chars().collect();
-        chars.get(idx)
-            .map(|c| Value::Number(*c as u32 as f64))
-            .unwrap_or(Value::Number(f64::NAN))
+        if s.is_ascii() {
+            s.as_bytes().get(idx)
+                .map(|&b| Value::Number(b as f64))
+                .unwrap_or(Value::Number(f64::NAN))
+        } else {
+            s.chars().nth(idx)
+                .map(|c| Value::Number(c as u32 as f64))
+                .unwrap_or(Value::Number(f64::NAN))
+        }
     } else {
         Value::Null
     }

@@ -59,24 +59,12 @@ impl std::fmt::Display for RegExpFlags {
 
 /// Tish RegExp object
 #[cfg(feature = "regex")]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TishRegExp {
     pub source: String,
     pub flags: RegExpFlags,
-    pub regex: Regex,
+    pub regex: Arc<Regex>,
     pub last_index: usize,
-}
-
-#[cfg(feature = "regex")]
-impl Clone for TishRegExp {
-    fn clone(&self) -> Self {
-        Self {
-            source: self.source.clone(),
-            flags: self.flags.clone(),
-            regex: Regex::new(self.regex.as_str()).unwrap(),
-            last_index: self.last_index,
-        }
-    }
 }
 
 #[cfg(feature = "regex")]
@@ -97,7 +85,7 @@ impl TishRegExp {
         let regex = Regex::new(&regex_pattern)
             .map_err(|e| format!("Invalid regular expression: {}", e))?;
         
-        Ok(Self { source: pattern.to_string(), flags, regex, last_index: 0 })
+        Ok(Self { source: pattern.to_string(), flags, regex: Arc::new(regex), last_index: 0 })
     }
 
     pub fn flags_string(&self) -> String { self.flags.to_string() }

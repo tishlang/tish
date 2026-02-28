@@ -13,6 +13,7 @@ regex = ["tish_core/regex"]
 
 [dependencies]
 tish_core = { path = "../tish_core" }
+tish_builtins = { path = "../tish_builtins" }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
 futures = { version = "0.3", optional = true }

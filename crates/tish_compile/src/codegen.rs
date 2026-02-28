@@ -1,5 +1,6 @@
 //! Code generation: AST -> Rust source.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use tish_ast::{ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr, Literal, MemberProp, ObjectProp, Program, Statement, UnaryOp};
 
@@ -78,7 +79,7 @@ impl Codegen {
     }
 
     /// Escape Rust reserved keywords by prefixing with r#
-    fn escape_ident(name: &str) -> String {
+    fn escape_ident(name: &str) -> Cow<'_, str> {
         const RUST_KEYWORDS: &[&str] = &[
             "as", "async", "await", "break", "const", "continue", "crate", "dyn",
             "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in",
@@ -89,10 +90,55 @@ impl Codegen {
             "virtual", "yield",
         ];
         if RUST_KEYWORDS.contains(&name) {
-            format!("r#{}", name)
+            Cow::Owned(format!("r#{}", name))
         } else {
-            name.to_string()
+            Cow::Borrowed(name)
         }
+    }
+
+    /// Check if an expression produces a new value that doesn't need cloning.
+    /// Literals, newly constructed arrays/objects, function calls, and arrow functions
+    /// all produce new values. Variable references and property accesses need cloning.
+    fn needs_clone(expr: &Expr) -> bool {
+        !matches!(
+            expr,
+            Expr::Literal { .. }
+                | Expr::Array { .. }
+                | Expr::Object { .. }
+                | Expr::Call { .. }
+                | Expr::ArrowFunction { .. }
+                | Expr::Binary { .. }
+                | Expr::Unary { .. }
+                | Expr::TypeOf { .. }
+                | Expr::TemplateLiteral { .. }
+        )
+    }
+
+    /// Generate code for a numeric binary operation that returns Number.
+    fn emit_numeric_binop(l: &str, r: &str, op: &str) -> String {
+        format!(
+            "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
+             let Value::Number(b) = &({}) else {{ panic!() }}; a {} b }})",
+            l, r, op
+        )
+    }
+
+    /// Generate code for a numeric comparison that returns Bool.
+    fn emit_numeric_cmp(l: &str, r: &str, op: &str) -> String {
+        format!(
+            "Value::Bool({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
+             let Value::Number(b) = &({}) else {{ panic!() }}; a {} b }})",
+            l, r, op
+        )
+    }
+
+    /// Generate code for a bitwise binary operation.
+    fn emit_bitwise_binop(l: &str, r: &str, op: &str) -> String {
+        format!(
+            "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
+             let Value::Number(b) = &({}) else {{ panic!() }}; ((*a as i32) {} (*b as i32)) as f64 }})",
+            l, r, op
+        )
     }
 
     fn write(&mut self, s: &str) {
@@ -333,15 +379,16 @@ impl Codegen {
                 self.writeln("}");
             }
             Statement::VarDecl { name, mutable, init, .. } => {
-                let expr = init
-                    .as_ref()
-                    .map(|e| self.emit_expr(e))
-                    .transpose()?
-                    .unwrap_or_else(|| "Value::Null".to_string());
+                let (expr_str, clone_needed) = match init.as_ref() {
+                    Some(e) => (self.emit_expr(e)?, Self::needs_clone(e)),
+                    None => ("Value::Null".to_string(), false),
+                };
                 let mutability = if *mutable { "let mut" } else { "let" };
-                // Clone to ensure JS-like reference semantics where multiple variables can hold the same value
-                self.writeln(&format!("{} {} = ({}).clone();", mutability, Self::escape_ident(name.as_ref()), expr));
-                // Track this variable for closure capture
+                if clone_needed {
+                    self.writeln(&format!("{} {} = ({}).clone();", mutability, Self::escape_ident(name.as_ref()), expr_str));
+                } else {
+                    self.writeln(&format!("{} {} = {};", mutability, Self::escape_ident(name.as_ref()), expr_str));
+                }
                 if let Some(scope) = self.outer_vars_stack.last_mut() {
                     scope.push(name.to_string());
                 }
@@ -349,7 +396,8 @@ impl Codegen {
             Statement::VarDeclDestructure { pattern, mutable, init, .. } => {
                 let expr = self.emit_expr(init)?;
                 let mutability = if *mutable { "let mut" } else { "let" };
-                self.writeln(&format!("{{ let _destruct_val = ({}).clone();", expr));
+                let clone_suffix = if Self::needs_clone(init) { ".clone()" } else { "" };
+                self.writeln(&format!("{{ let _destruct_val = ({}){};", expr, clone_suffix));
                 self.indent += 1;
                 self.emit_destruct_bindings(pattern, "_destruct_val", mutability)?;
                 self.indent -= 1;
@@ -642,10 +690,12 @@ impl Codegen {
                     let param_escaped = Self::escape_ident(outer_param);
                     self.writeln(&format!("let {} = {}.clone();", param_escaped, param_escaped));
                 }
-                self.writeln("let console = console.clone();");
-                self.writeln("let Math = Math.clone();");
-                self.writeln("let JSON = JSON.clone();");
-                self.writeln("let Date = Date.clone();");
+                // Only clone builtins that are actually referenced
+                for builtin in &["console", "Math", "JSON", "Date"] {
+                    if referenced.contains(*builtin) {
+                        self.writeln(&format!("let {} = {}.clone();", builtin, builtin));
+                    }
+                }
                 self.writeln("Value::Function(Rc::new(move |args: &[Value]| {");
                 self.indent += 1;
                 // Make the function available by its name inside the closure (only if recursive)
@@ -822,7 +872,7 @@ impl Codegen {
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     format!("{}.borrow().clone()", escaped)
                 } else {
-                    escaped
+                    escaped.into_owned()
                 }
             }
             Expr::Binary { left, op, right, .. } => {
@@ -1391,10 +1441,10 @@ impl Codegen {
                 let obj = self.emit_expr(object)?;
                 let val = self.emit_expr(value)?;
                 format!(
-                    "{{ let _obj = ({}).clone(); let _val = ({}).clone(); match _obj {{ Value::Object(map) => {{ map.borrow_mut().insert(Arc::from(\"{}\"), _val.clone()); _val }}, _ => panic!(\"Cannot assign property on non-object\") }} }}",
+                    "tish_runtime::set_prop(&({}), \"{}\", ({}).clone())",
                     obj,
-                    val,
-                    prop.as_ref()
+                    prop.as_ref(),
+                    val
                 )
             }
             Expr::IndexAssign { object, index, value, .. } => {
@@ -1402,7 +1452,7 @@ impl Codegen {
                 let idx = self.emit_expr(index)?;
                 let val = self.emit_expr(value)?;
                 format!(
-                    "{{ let _obj = ({}).clone(); let _idx = ({}).clone(); let _val = ({}).clone(); match _obj {{ Value::Array(arr) => {{ let idx = match &_idx {{ Value::Number(n) => *n as usize, _ => panic!(\"Array index must be number\") }}; let mut arr_mut = arr.borrow_mut(); while arr_mut.len() <= idx {{ arr_mut.push(Value::Null); }} arr_mut[idx] = _val.clone(); _val }}, Value::Object(map) => {{ let key: Arc<str> = match &_idx {{ Value::Number(n) => n.to_string().into(), Value::String(s) => Arc::clone(s), _ => panic!(\"Object key must be string or number\") }}; map.borrow_mut().insert(key, _val.clone()); _val }}, _ => panic!(\"Cannot index assign on non-array/object\") }} }}",
+                    "tish_runtime::set_index(&({}), &({}), ({}).clone())",
                     obj,
                     idx,
                     val
@@ -1611,10 +1661,12 @@ impl Codegen {
             let var_escaped = Self::escape_ident(outer_var);
             code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", var_escaped, var_escaped));
         }
-        code.push_str("    let console = console.clone();\n");
-        code.push_str("    let Math = Math.clone();\n");
-        code.push_str("    let JSON = JSON.clone();\n");
-        code.push_str("    let Date = Date.clone();\n");
+        // Only clone builtins that are actually referenced
+        for builtin in &["console", "Math", "JSON", "Date"] {
+            if referenced.contains(*builtin) {
+                code.push_str(&format!("    let {} = {}.clone();\n", builtin, builtin));
+            }
+        }
 
         // Clone only function cells that are actually referenced in this arrow
         let referenced_funcs: Vec<String> = self.function_scope_stack
@@ -1713,66 +1765,28 @@ impl Codegen {
                 }} }}",
                 l, r
             ),
-            BinOp::Sub => format!(
-                "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; a - b }})",
-                l, r
-            ),
-            BinOp::Mul => format!(
-                "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; a * b }})",
-                l, r
-            ),
-            BinOp::Div => format!(
-                "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; a / b }})",
-                l, r
-            ),
+            BinOp::Sub => Self::emit_numeric_binop(l, r, "-"),
+            BinOp::Mul => Self::emit_numeric_binop(l, r, "*"),
+            BinOp::Div => Self::emit_numeric_binop(l, r, "/"),
+            BinOp::Mod => Self::emit_numeric_binop(l, r, "%"),
             BinOp::Pow => format!(
-                "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; a.powf(*b) }})",
-                l, r
-            ),
-            BinOp::Mod => format!(
-                "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; a % b }})",
+                "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
+                 let Value::Number(b) = &({}) else {{ panic!() }}; a.powf(*b) }})",
                 l, r
             ),
             BinOp::StrictEq => format!("Value::Bool({}.strict_eq(&{}))", l, r),
             BinOp::StrictNe => format!("Value::Bool(!{}.strict_eq(&{}))", l, r),
-            BinOp::Lt => format!(
-                "Value::Bool({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; a < b }})",
-                l, r
-            ),
-            BinOp::Le => format!(
-                "Value::Bool({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; a <= b }})",
-                l, r
-            ),
-            BinOp::Gt => format!(
-                "Value::Bool({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; a > b }})",
-                l, r
-            ),
-            BinOp::Ge => format!(
-                "Value::Bool({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; a >= b }})",
-                l, r
-            ),
+            BinOp::Lt => Self::emit_numeric_cmp(l, r, "<"),
+            BinOp::Le => Self::emit_numeric_cmp(l, r, "<="),
+            BinOp::Gt => Self::emit_numeric_cmp(l, r, ">"),
+            BinOp::Ge => Self::emit_numeric_cmp(l, r, ">="),
             BinOp::And => format!("Value::Bool({}.is_truthy() && {}.is_truthy())", l, r),
             BinOp::Or => format!("Value::Bool({}.is_truthy() || {}.is_truthy())", l, r),
-            BinOp::BitAnd => format!(
-                "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; ((*a as i32) & (*b as i32)) as f64 }})",
-                l, r
-            ),
-            BinOp::BitOr => format!(
-                "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; ((*a as i32) | (*b as i32)) as f64 }})",
-                l, r
-            ),
-            BinOp::BitXor => format!(
-                "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; ((*a as i32) ^ (*b as i32)) as f64 }})",
-                l, r
-            ),
-            BinOp::Shl => format!(
-                "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; ((*a as i32) << (*b as i32)) as f64 }})",
-                l, r
-            ),
-            BinOp::Shr => format!(
-                "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; let Value::Number(b) = &({}) else {{ panic!() }}; ((*a as i32) >> (*b as i32)) as f64 }})",
-                l, r
-            ),
+            BinOp::BitAnd => Self::emit_bitwise_binop(l, r, "&"),
+            BinOp::BitOr => Self::emit_bitwise_binop(l, r, "|"),
+            BinOp::BitXor => Self::emit_bitwise_binop(l, r, "^"),
+            BinOp::Shl => Self::emit_bitwise_binop(l, r, "<<"),
+            BinOp::Shr => Self::emit_bitwise_binop(l, r, ">>"),
             BinOp::In => format!("tish_in_operator(&{}, &{})", l, r),
             BinOp::Eq | BinOp::Ne => {
                 return Err(CompileError {

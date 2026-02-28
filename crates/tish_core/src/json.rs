@@ -33,17 +33,39 @@ pub fn json_stringify(value: &Value) -> String {
         }
         Value::String(s) => format!("\"{}\"", escape_json_string(s)),
         Value::Array(arr) => {
-            let items: Vec<String> = arr.borrow().iter().map(json_stringify).collect();
-            format!("[{}]", items.join(","))
+            let borrowed = arr.borrow();
+            let mut result = String::with_capacity(borrowed.len() * 8 + 2);
+            result.push('[');
+            let mut first = true;
+            for item in borrowed.iter() {
+                if !first {
+                    result.push(',');
+                }
+                first = false;
+                result.push_str(&json_stringify(item));
+            }
+            result.push(']');
+            result
         }
         Value::Object(obj) => {
             let borrowed = obj.borrow();
-            let mut pairs: Vec<_> = borrowed
-                .iter()
-                .map(|(k, v)| (k.as_ref().to_string(), format!("\"{}\":{}", escape_json_string(k), json_stringify(v))))
-                .collect();
-            pairs.sort_by(|a, b| a.0.cmp(&b.0));
-            format!("{{{}}}", pairs.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(","))
+            let mut keys: Vec<_> = borrowed.keys().collect();
+            keys.sort();
+            let mut result = String::with_capacity(borrowed.len() * 16 + 2);
+            result.push('{');
+            let mut first = true;
+            for key in keys {
+                if !first {
+                    result.push(',');
+                }
+                first = false;
+                result.push('"');
+                result.push_str(&escape_json_string(key));
+                result.push_str("\":");
+                result.push_str(&json_stringify(borrowed.get(key).unwrap()));
+            }
+            result.push('}');
+            result
         }
         Value::Function(_) => "null".to_string(),
         #[cfg(feature = "regex")]
@@ -52,7 +74,7 @@ pub fn json_stringify(value: &Value) -> String {
 }
 
 fn escape_json_string(s: &str) -> String {
-    let mut result = String::new();
+    let mut result = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
             '"' => result.push_str("\\\""),
