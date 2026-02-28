@@ -1,12 +1,10 @@
 //! String builtin methods.
-//!
-//! Shared string method implementations used by both tish_runtime (compiled code)
-//! and can be adapted for tish_eval (interpreter).
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use tish_core::Value;
+use crate::helpers::normalize_index;
 
 /// Create a new string Value from a string slice.
 pub fn from_str(s: &str) -> Value {
@@ -39,89 +37,38 @@ pub fn includes(s: &Value, search: &Value) -> Value {
 
 pub fn slice(s: &Value, start: &Value, end: &Value) -> Value {
     if let Value::String(s) = s {
-        if s.is_ascii() {
+        let result = if s.is_ascii() {
             let len = s.len() as i64;
-            let start_idx = match start {
-                Value::Number(n) => {
-                    let n = *n as i64;
-                    if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-                }
-                _ => 0,
-            };
-            let end_idx = match end {
-                Value::Null => len as usize,
-                Value::Number(n) => {
-                    let n = *n as i64;
-                    if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-                }
-                _ => len as usize,
-            };
-            let sliced = if start_idx < end_idx {
-                &s[start_idx..end_idx]
-            } else {
-                ""
-            };
-            Value::String(sliced.to_string().into())
+            let (si, ei) = (normalize_index(start, len, 0), normalize_index(end, len, len as usize));
+            if si < ei { s[si..ei].to_string() } else { String::new() }
         } else {
             let chars: Vec<char> = s.chars().collect();
             let len = chars.len() as i64;
-            let start_idx = match start {
-                Value::Number(n) => {
-                    let n = *n as i64;
-                    if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-                }
-                _ => 0,
-            };
-            let end_idx = match end {
-                Value::Null => len as usize,
-                Value::Number(n) => {
-                    let n = *n as i64;
-                    if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-                }
-                _ => len as usize,
-            };
-            let sliced: String = if start_idx < end_idx {
-                chars[start_idx..end_idx].iter().collect()
-            } else {
-                String::new()
-            };
-            Value::String(sliced.into())
-        }
+            let (si, ei) = (normalize_index(start, len, 0), normalize_index(end, len, len as usize));
+            if si < ei { chars[si..ei].iter().collect() } else { String::new() }
+        };
+        Value::String(result.into())
     } else {
         Value::Null
     }
 }
 
 pub fn substring(s: &Value, start: &Value, end: &Value) -> Value {
+    fn bounds(start: &Value, end: &Value, len: usize) -> (usize, usize) {
+        let si = match start { Value::Number(n) => (*n as usize).min(len), _ => 0 };
+        let ei = match end { Value::Null => len, Value::Number(n) => (*n as usize).min(len), _ => len };
+        (si.min(ei), si.max(ei))
+    }
     if let Value::String(s) = s {
-        if s.is_ascii() {
-            let len = s.len();
-            let start_idx = match start {
-                Value::Number(n) => (*n as usize).min(len),
-                _ => 0,
-            };
-            let end_idx = match end {
-                Value::Null => len,
-                Value::Number(n) => (*n as usize).min(len),
-                _ => len,
-            };
-            let (ss, ee) = (start_idx.min(end_idx), start_idx.max(end_idx));
-            Value::String(s[ss..ee].to_string().into())
+        let result = if s.is_ascii() {
+            let (ss, ee) = bounds(start, end, s.len());
+            s[ss..ee].to_string()
         } else {
             let chars: Vec<char> = s.chars().collect();
-            let len = chars.len();
-            let start_idx = match start {
-                Value::Number(n) => (*n as usize).min(len),
-                _ => 0,
-            };
-            let end_idx = match end {
-                Value::Null => len,
-                Value::Number(n) => (*n as usize).min(len),
-                _ => len,
-            };
-            let (ss, ee) = (start_idx.min(end_idx), start_idx.max(end_idx));
-            Value::String(chars[ss..ee].iter().collect::<String>().into())
-        }
+            let (ss, ee) = bounds(start, end, chars.len());
+            chars[ss..ee].iter().collect()
+        };
+        Value::String(result.into())
     } else {
         Value::Null
     }
@@ -182,53 +129,33 @@ pub fn ends_with(s: &Value, search: &Value) -> Value {
     }
 }
 
-pub fn replace(s: &Value, search: &Value, replacement: &Value) -> Value {
+fn replace_impl(s: &Value, search: &Value, replacement: &Value, all: bool) -> Value {
     if let Value::String(s) = s {
-        let search_str = match search {
-            Value::String(ss) => ss.to_string(),
-            _ => return Value::String(Arc::clone(s)),
-        };
-        let replacement_str = match replacement {
-            Value::String(ss) => ss.to_string(),
-            _ => String::new(),
-        };
-        Value::String(s.replacen(&search_str, &replacement_str, 1).into())
+        let search_str = match search { Value::String(ss) => ss.as_ref(), _ => return Value::String(Arc::clone(s)) };
+        let repl_str = match replacement { Value::String(ss) => ss.as_ref(), _ => "" };
+        let result = if all { s.replace(search_str, repl_str) } else { s.replacen(search_str, repl_str, 1) };
+        Value::String(result.into())
     } else {
         Value::Null
     }
 }
 
+pub fn replace(s: &Value, search: &Value, replacement: &Value) -> Value {
+    replace_impl(s, search, replacement, false)
+}
+
 pub fn replace_all(s: &Value, search: &Value, replacement: &Value) -> Value {
-    if let Value::String(s) = s {
-        let search_str = match search {
-            Value::String(ss) => ss.to_string(),
-            _ => return Value::String(Arc::clone(s)),
-        };
-        let replacement_str = match replacement {
-            Value::String(ss) => ss.to_string(),
-            _ => String::new(),
-        };
-        Value::String(s.replace(&search_str, &replacement_str).into())
-    } else {
-        Value::Null
-    }
+    replace_impl(s, search, replacement, true)
+}
+
+fn char_at_idx(s: &str, idx: usize) -> Option<char> {
+    if s.is_ascii() { s.as_bytes().get(idx).map(|&b| b as char) } else { s.chars().nth(idx) }
 }
 
 pub fn char_at(s: &Value, idx: &Value) -> Value {
     if let Value::String(s) = s {
-        let idx = match idx {
-            Value::Number(n) => *n as usize,
-            _ => 0,
-        };
-        if s.is_ascii() {
-            s.as_bytes().get(idx)
-                .map(|&b| Value::String((b as char).to_string().into()))
-                .unwrap_or(Value::String("".into()))
-        } else {
-            s.chars().nth(idx)
-                .map(|c| Value::String(c.to_string().into()))
-                .unwrap_or(Value::String("".into()))
-        }
+        let idx = match idx { Value::Number(n) => *n as usize, _ => 0 };
+        char_at_idx(s, idx).map(|c| Value::String(c.to_string().into())).unwrap_or(Value::String("".into()))
     } else {
         Value::Null
     }
@@ -236,19 +163,8 @@ pub fn char_at(s: &Value, idx: &Value) -> Value {
 
 pub fn char_code_at(s: &Value, idx: &Value) -> Value {
     if let Value::String(s) = s {
-        let idx = match idx {
-            Value::Number(n) => *n as usize,
-            _ => 0,
-        };
-        if s.is_ascii() {
-            s.as_bytes().get(idx)
-                .map(|&b| Value::Number(b as f64))
-                .unwrap_or(Value::Number(f64::NAN))
-        } else {
-            s.chars().nth(idx)
-                .map(|c| Value::Number(c as u32 as f64))
-                .unwrap_or(Value::Number(f64::NAN))
-        }
+        let idx = match idx { Value::Number(n) => *n as usize, _ => 0 };
+        char_at_idx(s, idx).map(|c| Value::Number(c as u32 as f64)).unwrap_or(Value::Number(f64::NAN))
     } else {
         Value::Null
     }
@@ -266,48 +182,33 @@ pub fn repeat(s: &Value, count: &Value) -> Value {
     }
 }
 
-pub fn pad_start(s: &Value, target_len: &Value, pad: &Value) -> Value {
+fn pad_impl(s: &Value, target_len: &Value, pad: &Value, at_start: bool) -> Value {
     if let Value::String(s) = s {
         let target_len = match target_len {
             Value::Number(n) => *n as usize,
             _ => return Value::String(Arc::clone(s)),
         };
         let pad_str = match pad {
-            Value::String(p) => p.to_string(),
-            Value::Null => " ".to_string(),
-            _ => " ".to_string(),
+            Value::String(p) if !p.is_empty() => p.as_ref(),
+            _ => " ",
         };
         let char_count = s.chars().count();
-        if char_count >= target_len || pad_str.is_empty() {
+        if char_count >= target_len {
             return Value::String(Arc::clone(s));
         }
         let needed = target_len - char_count;
         let padding: String = pad_str.chars().cycle().take(needed).collect();
-        Value::String(format!("{}{}", padding, s).into())
+        let result = if at_start { format!("{}{}", padding, s) } else { format!("{}{}", s, padding) };
+        Value::String(result.into())
     } else {
         Value::Null
     }
 }
 
+pub fn pad_start(s: &Value, target_len: &Value, pad: &Value) -> Value {
+    pad_impl(s, target_len, pad, true)
+}
+
 pub fn pad_end(s: &Value, target_len: &Value, pad: &Value) -> Value {
-    if let Value::String(s) = s {
-        let target_len = match target_len {
-            Value::Number(n) => *n as usize,
-            _ => return Value::String(Arc::clone(s)),
-        };
-        let pad_str = match pad {
-            Value::String(p) => p.to_string(),
-            Value::Null => " ".to_string(),
-            _ => " ".to_string(),
-        };
-        let char_count = s.chars().count();
-        if char_count >= target_len || pad_str.is_empty() {
-            return Value::String(Arc::clone(s));
-        }
-        let needed = target_len - char_count;
-        let padding: String = pad_str.chars().cycle().take(needed).collect();
-        Value::String(format!("{}{}", s, padding).into())
-    } else {
-        Value::Null
-    }
+    pad_impl(s, target_len, pad, false)
 }

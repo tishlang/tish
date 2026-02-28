@@ -1,11 +1,9 @@
 //! Array builtin methods.
-//!
-//! Shared array method implementations used by both tish_runtime (compiled code)
-//! and can be adapted for tish_eval (interpreter).
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use tish_core::Value;
+use crate::helpers::normalize_index;
 
 /// Create a new array Value from a Vec of Values.
 pub fn from_vec(v: Vec<Value>) -> Value {
@@ -116,25 +114,15 @@ pub fn splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &
     if let Value::Array(arr) = arr {
         let mut arr_mut = arr.borrow_mut();
         let len = arr_mut.len() as i64;
-        
-        let start_idx = match start {
-            Value::Number(n) => {
-                let n = *n as i64;
-                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-            }
-            _ => 0,
-        };
-        
+        let start_idx = normalize_index(start, len, 0);
         let del_count = match delete_count {
             Some(Value::Number(n)) => (*n as i64).max(0) as usize,
             _ => (len as usize).saturating_sub(start_idx),
         };
-        
         let actual_delete = del_count.min(arr_mut.len().saturating_sub(start_idx));
         let removed: Vec<Value> = arr_mut
             .splice(start_idx..start_idx + actual_delete, items.iter().cloned())
             .collect();
-        
         Value::Array(Rc::new(RefCell::new(removed)))
     } else {
         Value::Null
@@ -145,26 +133,9 @@ pub fn slice(arr: &Value, start: &Value, end: &Value) -> Value {
     if let Value::Array(arr) = arr {
         let arr_borrow = arr.borrow();
         let len = arr_borrow.len() as i64;
-        let start_idx = match start {
-            Value::Number(n) => {
-                let n = *n as i64;
-                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-            }
-            _ => 0,
-        };
-        let end_idx = match end {
-            Value::Null => len as usize,
-            Value::Number(n) => {
-                let n = *n as i64;
-                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-            }
-            _ => len as usize,
-        };
-        let sliced: Vec<Value> = if start_idx < end_idx {
-            arr_borrow[start_idx..end_idx].to_vec()
-        } else {
-            vec![]
-        };
+        let start_idx = normalize_index(start, len, 0);
+        let end_idx = normalize_index(end, len, len as usize);
+        let sliced = if start_idx < end_idx { arr_borrow[start_idx..end_idx].to_vec() } else { vec![] };
         Value::Array(Rc::new(RefCell::new(sliced)))
     } else {
         Value::Null
@@ -336,87 +307,59 @@ pub fn flat_map(arr: &Value, callback: &Value) -> Value {
     }
 }
 
-pub fn sort_default(arr: &Value) -> Value {
+fn sort_by_impl<F>(arr: &Value, cmp: F) -> Value
+where F: FnMut(&Value, &Value) -> std::cmp::Ordering {
     if let Value::Array(arr) = arr {
-        let mut arr_mut = arr.borrow_mut();
-        arr_mut.sort_by(|a, b| {
-            let sa = a.to_display_string();
-            let sb = b.to_display_string();
-            sa.cmp(&sb)
-        });
-        drop(arr_mut);
+        arr.borrow_mut().sort_by(cmp);
         Value::Array(Rc::clone(arr))
     } else {
         Value::Null
     }
+}
+
+pub fn sort_default(arr: &Value) -> Value {
+    sort_by_impl(arr, |a, b| a.to_display_string().cmp(&b.to_display_string()))
 }
 
 pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
-    if let Value::Array(arr) = arr {
+    if let (Value::Array(arr), Value::Function(cmp_fn)) = (arr, comparator) {
         let mut arr_mut = arr.borrow_mut();
+        let len = arr_mut.len();
+        let mut indices: Vec<usize> = (0..len).collect();
+        let mut elements: Vec<Value> = std::mem::take(&mut *arr_mut);
+        let mut args_buf: [Value; 2] = [Value::Null, Value::Null];
         
-        if let Value::Function(cmp_fn) = comparator {
-            let len = arr_mut.len();
-            let mut indices: Vec<usize> = (0..len).collect();
-            let mut elements: Vec<Value> = std::mem::take(&mut *arr_mut);
-            let mut args_buf: [Value; 2] = [Value::Null, Value::Null];
-            
-            indices.sort_by(|&a, &b| {
-                args_buf[0] = elements[a].clone();
-                args_buf[1] = elements[b].clone();
-                let result = cmp_fn(&args_buf);
-                match result {
-                    Value::Number(n) => {
-                        if n < 0.0 {
-                            std::cmp::Ordering::Less
-                        } else if n > 0.0 {
-                            std::cmp::Ordering::Greater
-                        } else {
-                            std::cmp::Ordering::Equal
-                        }
-                    }
-                    _ => std::cmp::Ordering::Equal,
-                }
-            });
-            
-            let sorted: Vec<Value> = indices.into_iter().map(|i| {
-                std::mem::replace(&mut elements[i], Value::Null)
-            }).collect();
-            *arr_mut = sorted;
-        }
+        indices.sort_by(|&a, &b| {
+            args_buf[0] = elements[a].clone();
+            args_buf[1] = elements[b].clone();
+            match cmp_fn(&args_buf) {
+                Value::Number(n) if n < 0.0 => std::cmp::Ordering::Less,
+                Value::Number(n) if n > 0.0 => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
+            }
+        });
+        
+        *arr_mut = indices.into_iter().map(|i| std::mem::replace(&mut elements[i], Value::Null)).collect();
         drop(arr_mut);
         Value::Array(Rc::clone(arr))
     } else {
         Value::Null
     }
+}
+
+fn num_cmp(a: &Value, b: &Value, asc: bool) -> std::cmp::Ordering {
+    let (na, nb) = match (a, b) {
+        (Value::Number(a), Value::Number(b)) => (*a, *b),
+        _ => (f64::NAN, f64::NAN),
+    };
+    let cmp = na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal);
+    if asc { cmp } else { cmp.reverse() }
 }
 
 pub fn sort_numeric_asc(arr: &Value) -> Value {
-    if let Value::Array(arr) = arr {
-        let mut arr_mut = arr.borrow_mut();
-        arr_mut.sort_by(|a, b| {
-            let na = match a { Value::Number(n) => *n, _ => f64::NAN };
-            let nb = match b { Value::Number(n) => *n, _ => f64::NAN };
-            na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        drop(arr_mut);
-        Value::Array(Rc::clone(arr))
-    } else {
-        Value::Null
-    }
+    sort_by_impl(arr, |a, b| num_cmp(a, b, true))
 }
 
 pub fn sort_numeric_desc(arr: &Value) -> Value {
-    if let Value::Array(arr) = arr {
-        let mut arr_mut = arr.borrow_mut();
-        arr_mut.sort_by(|a, b| {
-            let na = match a { Value::Number(n) => *n, _ => f64::NAN };
-            let nb = match b { Value::Number(n) => *n, _ => f64::NAN };
-            nb.partial_cmp(&na).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        drop(arr_mut);
-        Value::Array(Rc::clone(arr))
-    } else {
-        Value::Null
-    }
+    sort_by_impl(arr, |a, b| num_cmp(a, b, false))
 }
