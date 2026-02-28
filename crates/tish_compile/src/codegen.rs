@@ -68,11 +68,30 @@ impl Codegen {
             .collect()
     }
 
+    /// Escape Rust reserved keywords by prefixing with r#
+    fn escape_ident(name: &str) -> String {
+        const RUST_KEYWORDS: &[&str] = &[
+            "as", "async", "await", "break", "const", "continue", "crate", "dyn",
+            "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in",
+            "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+            "self", "Self", "static", "struct", "super", "trait", "true", "type",
+            "unsafe", "use", "where", "while", "abstract", "become", "box", "do",
+            "final", "macro", "override", "priv", "try", "typeof", "unsized",
+            "virtual", "yield",
+        ];
+        if RUST_KEYWORDS.contains(&name) {
+            format!("r#{}", name)
+        } else {
+            name.to_string()
+        }
+    }
+
     fn write(&mut self, s: &str) {
         self.output.push_str(s);
     }
 
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
+        self.write("#![allow(unused, non_snake_case)]\n\n");
         self.write("use std::cell::RefCell;\n");
         self.write("use std::collections::HashMap;\n");
         self.write("use std::rc::Rc;\n");
@@ -230,7 +249,8 @@ impl Codegen {
         let top_level_funcs = self.prescan_function_decls(&program.statements);
         *self.function_scope_stack.last_mut().unwrap() = top_level_funcs.clone();
         for func_name in &top_level_funcs {
-            self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", func_name));
+            let escaped = Self::escape_ident(func_name);
+            self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", escaped));
         }
 
         for stmt in &program.statements {
@@ -253,7 +273,8 @@ impl Codegen {
                 self.function_scope_stack.push(func_names.clone());
                 // Create cells for all functions in this scope
                 for func_name in &func_names {
-                    self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", func_name));
+                    let escaped = Self::escape_ident(func_name);
+                    self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", escaped));
                 }
                 for s in statements {
                     self.emit_statement(s)?;
@@ -270,7 +291,7 @@ impl Codegen {
                     .unwrap_or_else(|| "Value::Null".to_string());
                 let mutability = if *mutable { "let mut" } else { "let" };
                 // Clone to ensure JS-like reference semantics where multiple variables can hold the same value
-                self.writeln(&format!("{} {} = ({}).clone();", mutability, name.as_ref(), expr));
+                self.writeln(&format!("{} {} = ({}).clone();", mutability, Self::escape_ident(name.as_ref()), expr));
             }
             Statement::VarDeclDestructure { pattern, mutable, init, .. } => {
                 let expr = self.emit_expr(init)?;
@@ -326,7 +347,7 @@ impl Codegen {
                 self.indent += 1;
                 self.writeln("for _v in _arr.borrow().iter() {");
                 self.indent += 1;
-                self.writeln(&format!("let {} = _v.clone();", name.as_ref()));
+                self.writeln(&format!("let {} = _v.clone();", Self::escape_ident(name.as_ref())));
                 self.emit_statement(body)?;
                 self.indent -= 1;
                 self.writeln("}");
@@ -338,7 +359,7 @@ impl Codegen {
                 self.indent += 1;
                 self.writeln(&format!(
                     "let {} = Value::String(std::sync::Arc::from(_ch.to_string()));",
-                    name.as_ref()
+                    Self::escape_ident(name.as_ref())
                 ));
                 self.emit_statement(body)?;
                 self.indent -= 1;
@@ -495,7 +516,7 @@ impl Codegen {
                         self.writeln("Ok(tish_err) => {");
                         self.indent += 1;
                         self.writeln("if let tish_runtime::TishError::Throw(v) = *tish_err {");
-                        self.writeln(&format!("let {} = v.clone();", param.as_ref()));
+                        self.writeln(&format!("let {} = v.clone();", Self::escape_ident(param.as_ref())));
                         self.emit_statement(catch_stmt)?;
                         self.writeln("} else { return Err(Box::new(tish_err)); }");
                         self.indent -= 1;
@@ -520,11 +541,12 @@ impl Codegen {
             Statement::FunDecl { name, params, rest_param, body, .. } => {
                 // Use Rc<RefCell<>> pattern to allow recursive function calls
                 // The function can reference itself through the cell
-                let name_str = name.as_ref();
+                let name_raw = name.as_ref();
+                let name_str = Self::escape_ident(name_raw);
                 // Check if cell was already created by block prescan
                 let cell_exists = self.function_scope_stack
                     .last()
-                    .map(|scope| scope.contains(&name_str.to_string()))
+                    .map(|scope| scope.contains(&name_raw.to_string()))
                     .unwrap_or(false);
                 if !cell_exists {
                     self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", name_str));
@@ -544,14 +566,16 @@ impl Codegen {
                 // Collect sibling functions from current scope (all of them, for forward refs)
                 let sibling_fns: Vec<String> = self.function_scope_stack
                     .last()
-                    .map(|scope| scope.iter().filter(|s| *s != name_str).cloned().collect())
+                    .map(|scope| scope.iter().filter(|s| s.as_str() != name_raw).cloned().collect())
                     .unwrap_or_default();
                 for sibling in &sibling_fns {
-                    self.writeln(&format!("let {}_ref = {}_cell.clone();", sibling, sibling));
+                    let sibling_escaped = Self::escape_ident(sibling);
+                    self.writeln(&format!("let {}_ref = {}_cell.clone();", sibling_escaped, sibling_escaped));
                 }
                 // Clone outer parameters so they can be captured by the move closure
                 for outer_param in &outer_params {
-                    self.writeln(&format!("let {} = {}.clone();", outer_param, outer_param));
+                    let param_escaped = Self::escape_ident(outer_param);
+                    self.writeln(&format!("let {} = {}.clone();", param_escaped, param_escaped));
                 }
                 self.writeln("let console = console.clone();");
                 self.writeln("let Math = Math.clone();");
@@ -562,21 +586,22 @@ impl Codegen {
                 self.writeln(&format!("let {} = {}_ref.borrow().clone();", name_str, name_str));
                 // Make sibling functions available for mutual recursion
                 for sibling in &sibling_fns {
-                    self.writeln(&format!("let {} = {}_ref.borrow().clone();", sibling, sibling));
+                    let sibling_escaped = Self::escape_ident(sibling);
+                    self.writeln(&format!("let {} = {}_ref.borrow().clone();", sibling_escaped, sibling_escaped));
                 }
                 // Extract just the parameter names (type annotations are parsed but not used in codegen yet)
                 let current_param_names: Vec<String> = params.iter().map(|p| p.name.to_string()).collect();
                 for (i, p) in params.iter().enumerate() {
                     self.writeln(&format!(
                         "let {} = args.get({}).cloned().unwrap_or(Value::Null);",
-                        p.name.as_ref(),
+                        Self::escape_ident(p.name.as_ref()),
                         i
                     ));
                 }
                 if let Some(rest) = rest_param {
                     self.writeln(&format!(
                         "let {} = Value::Array(std::rc::Rc::new(RefCell::new(args[{}..].to_vec())));",
-                        rest.name.as_ref(),
+                        Self::escape_ident(rest.name.as_ref()),
                         params.len()
                     ));
                 }
@@ -590,7 +615,8 @@ impl Codegen {
                     self.function_scope_stack.push(nested_func_names.clone());
                     // Create cells for nested functions
                     for func_name in &nested_func_names {
-                        self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", func_name));
+                        let escaped = Self::escape_ident(func_name);
+                        self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", escaped));
                     }
                     for s in statements {
                         self.emit_statement(s)?;
@@ -668,7 +694,7 @@ impl Codegen {
                         match el {
                             DestructElement::Ident(name) => {
                                 self.writeln(&format!("{} {} = _arr_borrow.get({}).cloned().unwrap_or(Value::Null);", 
-                                    mutability, name.as_ref(), i));
+                                    mutability, Self::escape_ident(name.as_ref()), i));
                             }
                             DestructElement::Pattern(nested) => {
                                 let nested_var = format!("_nested_{}", i);
@@ -678,7 +704,7 @@ impl Codegen {
                             }
                             DestructElement::Rest(name) => {
                                 self.writeln(&format!("{} {} = Value::Array(Rc::new(RefCell::new(_arr_borrow.iter().skip({}).cloned().collect())));", 
-                                    mutability, name.as_ref(), i));
+                                    mutability, Self::escape_ident(name.as_ref()), i));
                             }
                         }
                     }
@@ -695,7 +721,7 @@ impl Codegen {
                     match &prop.value {
                         DestructElement::Ident(name) => {
                             self.writeln(&format!("{} {} = _obj_borrow.get({:?}).cloned().unwrap_or(Value::Null);", 
-                                mutability, name.as_ref(), key));
+                                mutability, Self::escape_ident(name.as_ref()), key));
                         }
                         DestructElement::Pattern(nested) => {
                             let nested_var = format!("_nested_{}", key);
@@ -723,7 +749,7 @@ impl Codegen {
                 Literal::Bool(b) => format!("Value::Bool({})", b),
                 Literal::Null => "Value::Null".to_string(),
             },
-            Expr::Ident { name, .. } => name.to_string(),
+            Expr::Ident { name, .. } => Self::escape_ident(name.as_ref()),
             Expr::Binary { left, op, right, .. } => {
                 let l = self.emit_expr(left)?;
                 let r = self.emit_expr(right)?;
@@ -785,21 +811,21 @@ impl Codegen {
                             ));
                         }
                         "indexOf" => {
-                            let search = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tish_runtime::array_index_of(&_obj, &{}), Value::String(_) => tish_runtime::string_index_of(&_obj, &{}), _ => Value::Number(-1.0) }} }}",
                                 obj_expr, search, search
                             ));
                         }
                         "includes" => {
-                            let search = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tish_runtime::array_includes(&_obj, &{}), Value::String(_) => tish_runtime::string_includes(&_obj, &{}), _ => Value::Bool(false) }} }}",
                                 obj_expr, search, search
                             ));
                         }
                         "join" => {
-                            let sep = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let sep = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::array_join(&{}, &{})",
                                 obj_expr, sep
@@ -809,7 +835,7 @@ impl Codegen {
                             return Ok(format!("tish_runtime::array_reverse(&{})", obj_expr));
                         }
                         "slice" => {
-                            let start = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let start = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let end = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tish_runtime::array_slice(&_obj, &{}, &{}), Value::String(_) => tish_runtime::string_slice(&_obj, &{}, &{}), _ => Value::Null }} }}",
@@ -828,7 +854,7 @@ impl Codegen {
                         }
                         // String-only methods
                         "substring" => {
-                            let start = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let start = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let end = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::string_substring(&{}, &{}, &{})",
@@ -836,7 +862,7 @@ impl Codegen {
                             ));
                         }
                         "split" => {
-                            let sep = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let sep = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::string_split(&{}, &{})",
                                 obj_expr, sep
@@ -852,21 +878,21 @@ impl Codegen {
                             return Ok(format!("tish_runtime::string_to_lower_case(&{})", obj_expr));
                         }
                         "startsWith" => {
-                            let search = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
+                            let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             return Ok(format!(
                                 "tish_runtime::string_starts_with(&{}, &{})",
                                 obj_expr, search
                             ));
                         }
                         "endsWith" => {
-                            let search = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
+                            let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             return Ok(format!(
                                 "tish_runtime::string_ends_with(&{}, &{})",
                                 obj_expr, search
                             ));
                         }
                         "replace" => {
-                            let search = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
+                            let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             let replacement = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             return Ok(format!(
                                 "tish_runtime::string_replace(&{}, &{}, &{})",
@@ -874,7 +900,7 @@ impl Codegen {
                             ));
                         }
                         "replaceAll" => {
-                            let search = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
+                            let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             let replacement = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             return Ok(format!(
                                 "tish_runtime::string_replace_all(&{}, &{}, &{})",
@@ -882,28 +908,28 @@ impl Codegen {
                             ));
                         }
                         "charAt" => {
-                            let idx = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let idx = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             return Ok(format!(
                                 "tish_runtime::string_char_at(&{}, &{})",
                                 obj_expr, idx
                             ));
                         }
                         "charCodeAt" => {
-                            let idx = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let idx = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             return Ok(format!(
                                 "tish_runtime::string_char_code_at(&{}, &{})",
                                 obj_expr, idx
                             ));
                         }
                         "repeat" => {
-                            let count = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let count = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             return Ok(format!(
                                 "tish_runtime::string_repeat(&{}, &{})",
                                 obj_expr, count
                             ));
                         }
                         "padStart" => {
-                            let target_len = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let target_len = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let pad = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::string_pad_start(&{}, &{}, &{})",
@@ -911,7 +937,7 @@ impl Codegen {
                             ));
                         }
                         "padEnd" => {
-                            let target_len = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let target_len = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let pad = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::string_pad_end(&{}, &{}, &{})",
@@ -920,21 +946,21 @@ impl Codegen {
                         }
                         // Higher-order array methods
                         "map" => {
-                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::array_map(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "filter" => {
-                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::array_filter(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "reduce" => {
-                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let initial = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::array_reduce(&{}, &{}, &{})",
@@ -942,49 +968,49 @@ impl Codegen {
                             ));
                         }
                         "forEach" => {
-                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::array_for_each(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "find" => {
-                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::array_find(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "findIndex" => {
-                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::array_find_index(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "some" => {
-                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::array_some(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "every" => {
-                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::array_every(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "sort" => {
-                            let comparator = arg_exprs.get(0).map(|c| format!("Some(&{})", c)).unwrap_or_else(|| "None".to_string());
+                            let comparator = arg_exprs.first().map(|c| format!("Some(&{})", c)).unwrap_or_else(|| "None".to_string());
                             return Ok(format!(
                                 "tish_runtime::array_sort(&{}, {})",
                                 obj_expr, comparator
                             ));
                         }
                         "splice" => {
-                            let start = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let start = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let delete_count = arg_exprs.get(1).map(|d| format!("Some(&{})", d)).unwrap_or_else(|| "None".to_string());
                             let items = if arg_exprs.len() > 2 {
                                 let items_vec = arg_exprs[2..].iter()
@@ -1001,14 +1027,14 @@ impl Codegen {
                             ));
                         }
                         "flat" => {
-                            let depth = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(1.0)".to_string());
+                            let depth = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(1.0)".to_string());
                             return Ok(format!(
                                 "tish_runtime::array_flat(&{}, &{})",
                                 obj_expr, depth
                             ));
                         }
                         "flatMap" => {
-                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tish_runtime::array_flat_map(&{}, &{})",
                                 obj_expr, callback
@@ -1148,7 +1174,7 @@ impl Codegen {
                         match prop {
                             ObjectProp::KeyValue(k, v) => {
                                 let val = self.emit_expr(v)?;
-                                parts.push(format!("_obj.insert(Arc::from({:?}), {});", k.as_ref(), val));
+                                parts.push(format!("_obj.insert(Arc::from({:?}), ({}).clone());", k.as_ref(), val));
                             }
                             ObjectProp::Spread(e) => {
                                 let val = self.emit_expr(e)?;
@@ -1162,7 +1188,7 @@ impl Codegen {
                     for prop in props {
                         if let ObjectProp::KeyValue(k, v) = prop {
                             let val = self.emit_expr(v)?;
-                            parts.push(format!("(Arc::from({:?}), {})", k.as_ref(), val));
+                            parts.push(format!("(Arc::from({:?}), ({}).clone())", k.as_ref(), val));
                         }
                     }
                     format!(
@@ -1173,7 +1199,7 @@ impl Codegen {
             }
             Expr::Assign { name, value, .. } => {
                 let val = self.emit_expr(value)?;
-                format!("{{ let _v = {}; {} = _v.clone(); _v }}", val, name.as_ref())
+                format!("{{ let _v = {}; {} = _v.clone(); _v }}", val, Self::escape_ident(name.as_ref()))
             }
             Expr::TypeOf { operand, .. } => {
                 let o = self.emit_expr(operand)?;
@@ -1187,37 +1213,36 @@ impl Codegen {
                 )
             }
             Expr::PostfixInc { name, .. } => {
+                let n = Self::escape_ident(name.as_ref());
                 format!(
                     "{{ let _v = {}.clone(); {} = Value::Number(match &_v {{ Value::Number(n) => n + 1.0, _ => panic!(\"++ needs number\") }}); _v }}",
-                    name.as_ref(),
-                    name.as_ref()
+                    n, n
                 )
             }
             Expr::PostfixDec { name, .. } => {
+                let n = Self::escape_ident(name.as_ref());
                 format!(
                     "{{ let _v = {}.clone(); {} = Value::Number(match &_v {{ Value::Number(n) => n - 1.0, _ => panic!(\"-- needs number\") }}); _v }}",
-                    name.as_ref(),
-                    name.as_ref()
+                    n, n
                 )
             }
             Expr::PrefixInc { name, .. } => {
+                let n = Self::escape_ident(name.as_ref());
                 format!(
                     "{{ {} = Value::Number(match &{} {{ Value::Number(n) => n + 1.0, _ => panic!(\"++ needs number\") }}); {}.clone() }}",
-                    name.as_ref(),
-                    name.as_ref(),
-                    name.as_ref()
+                    n, n, n
                 )
             }
             Expr::PrefixDec { name, .. } => {
+                let n = Self::escape_ident(name.as_ref());
                 format!(
                     "{{ {} = Value::Number(match &{} {{ Value::Number(n) => n - 1.0, _ => panic!(\"-- needs number\") }}); {}.clone() }}",
-                    name.as_ref(),
-                    name.as_ref(),
-                    name.as_ref()
+                    n, n, n
                 )
             }
             Expr::CompoundAssign { name, op, value, .. } => {
                 let val = self.emit_expr(value)?;
+                let n = Self::escape_ident(name.as_ref());
                 let op_fn = match op {
                     CompoundOp::Add => "add",
                     CompoundOp::Sub => "sub",
@@ -1227,11 +1252,7 @@ impl Codegen {
                 };
                 format!(
                     "{{ let _rhs = ({}).clone(); {} = tish_runtime::ops::{}(&{}, &_rhs)?; {}.clone() }}",
-                    val,
-                    name.as_ref(),
-                    op_fn,
-                    name.as_ref(),
-                    name.as_ref()
+                    val, n, op_fn, n, n
                 )
             }
             Expr::MemberAssign { object, prop, value, .. } => {
@@ -1292,7 +1313,8 @@ impl Codegen {
 
         // Clone captures
         for outer_param in &outer_params {
-            code.push_str(&format!("    let {} = {}.clone();\n", outer_param, outer_param));
+            let param_escaped = Self::escape_ident(outer_param);
+            code.push_str(&format!("    let {} = {}.clone();\n", param_escaped, param_escaped));
         }
         code.push_str("    let console = console.clone();\n");
         code.push_str("    let Math = Math.clone();\n");
@@ -1301,7 +1323,8 @@ impl Codegen {
         // Clone any function cells that might be referenced
         if let Some(scope) = self.function_scope_stack.last() {
             for func_name in scope {
-                code.push_str(&format!("    let {}_ref = {}_cell.clone();\n", func_name, func_name));
+                let escaped = Self::escape_ident(func_name);
+                code.push_str(&format!("    let {}_ref = {}_cell.clone();\n", escaped, escaped));
             }
         }
 
@@ -1310,7 +1333,8 @@ impl Codegen {
         // Make captured functions available
         if let Some(scope) = self.function_scope_stack.last() {
             for func_name in scope {
-                code.push_str(&format!("        let {} = {}_ref.borrow().clone();\n", func_name, func_name));
+                let escaped = Self::escape_ident(func_name);
+                code.push_str(&format!("        let {} = {}_ref.borrow().clone();\n", escaped, escaped));
             }
         }
 
@@ -1319,7 +1343,7 @@ impl Codegen {
         for (i, p) in params.iter().enumerate() {
             code.push_str(&format!(
                 "        let {} = args.get({}).cloned().unwrap_or(Value::Null);\n",
-                p.name.as_ref(),
+                Self::escape_ident(p.name.as_ref()),
                 i
             ));
         }
@@ -1357,7 +1381,7 @@ impl Codegen {
         self.outer_params_stack.pop();
 
         code.push_str("    }))\n");
-        code.push_str("}");
+        code.push('}');
 
         Ok(code)
     }

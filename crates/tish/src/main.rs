@@ -144,6 +144,7 @@ fn find_runtime_path() -> Result<String, String> {
     Err("Could not find tish_runtime crate. Run from workspace root or use cargo run.".to_string())
 }
 
+#[allow(clippy::vec_init_then_push)]
 fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
     let source =
         fs::read_to_string(input_path).map_err(|e| format!("Cannot read {}: {}", input_path, e))?;

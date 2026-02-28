@@ -42,15 +42,18 @@ impl RegExpFlags {
         Ok(result)
     }
 
-    pub fn to_string(&self) -> String {
-        let mut s = String::new();
-        if self.global { s.push('g'); }
-        if self.ignore_case { s.push('i'); }
-        if self.multiline { s.push('m'); }
-        if self.dot_all { s.push('s'); }
-        if self.unicode { s.push('u'); }
-        if self.sticky { s.push('y'); }
-        s
+}
+
+#[cfg(feature = "regex")]
+impl std::fmt::Display for RegExpFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.global { f.write_str("g")?; }
+        if self.ignore_case { f.write_str("i")?; }
+        if self.multiline { f.write_str("m")?; }
+        if self.dot_all { f.write_str("s")?; }
+        if self.unicode { f.write_str("u")?; }
+        if self.sticky { f.write_str("y")?; }
+        Ok(())
     }
 }
 

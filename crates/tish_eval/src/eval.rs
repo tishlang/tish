@@ -1,5 +1,7 @@
 //! Tree-walk evaluator for Tish.
 
+#![allow(clippy::type_complexity, clippy::cloned_ref_to_slice_refs)]
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -504,7 +506,7 @@ impl Evaluator {
                                 return Ok(Value::Number(arr_mut.len() as f64));
                             }
                             "indexOf" => {
-                                let search = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let search = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
                                 for (i, v) in arr_borrow.iter().enumerate() {
                                     if v.strict_eq(&search) {
@@ -514,7 +516,7 @@ impl Evaluator {
                                 return Ok(Value::Number(-1.0));
                             }
                             "includes" => {
-                                let search = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let search = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
                                 for v in arr_borrow.iter() {
                                     if v.strict_eq(&search) {
@@ -524,7 +526,7 @@ impl Evaluator {
                                 return Ok(Value::Bool(false));
                             }
                             "join" => {
-                                let sep = match arg_vals.get(0) {
+                                let sep = match arg_vals.first() {
                                     Some(Value::String(s)) => s.to_string(),
                                     _ => ",".to_string(),
                                 };
@@ -605,7 +607,7 @@ impl Evaluator {
                                 let mut arr_mut = arr.borrow_mut();
                                 let len = arr_mut.len() as i64;
                                 
-                                let start = match arg_vals.get(0) {
+                                let start = match arg_vals.first() {
                                     Some(Value::Number(n)) => {
                                         let n = *n as i64;
                                         if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
@@ -633,7 +635,7 @@ impl Evaluator {
                             "slice" => {
                                 let arr_borrow = arr.borrow();
                                 let len = arr_borrow.len() as i64;
-                                let start = match arg_vals.get(0) {
+                                let start = match arg_vals.first() {
                                     Some(Value::Number(n)) => {
                                         let n = *n as i64;
                                         if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
@@ -666,7 +668,7 @@ impl Evaluator {
                                 return Ok(Value::Array(Rc::new(RefCell::new(result))));
                             }
                             "map" => {
-                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
                                 let mut result = Vec::with_capacity(arr_borrow.len());
                                 // Try fastest path: simple single-expression callbacks
@@ -697,7 +699,7 @@ impl Evaluator {
                                 return Ok(Value::Array(Rc::new(RefCell::new(result))));
                             }
                             "filter" => {
-                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
                                 let mut result = Vec::new();
                                 // Try simple callback fast path
@@ -730,7 +732,7 @@ impl Evaluator {
                                 return Ok(Value::Array(Rc::new(RefCell::new(result))));
                             }
                             "reduce" => {
-                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
                                 let (mut acc, start_idx) = if arg_vals.len() > 1 {
                                     (arg_vals[1].clone(), 0)
@@ -751,7 +753,7 @@ impl Evaluator {
                                 return Ok(acc);
                             }
                             "find" => {
-                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
                                 // Try simple callback fast path
                                 let use_simple = arr_borrow.first().map(|v| {
@@ -783,7 +785,7 @@ impl Evaluator {
                                 return Ok(Value::Null);
                             }
                             "findIndex" => {
-                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
                                 if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
                                     for (i, v) in arr_borrow.iter().enumerate() {
@@ -803,7 +805,7 @@ impl Evaluator {
                                 return Ok(Value::Number(-1.0));
                             }
                             "forEach" => {
-                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
                                 if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
                                     for (i, v) in arr_borrow.iter().enumerate() {
@@ -817,7 +819,7 @@ impl Evaluator {
                                 return Ok(Value::Null);
                             }
                             "some" => {
-                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
                                 // Try simple callback fast path
                                 let use_simple = arr_borrow.first().map(|v| {
@@ -849,7 +851,7 @@ impl Evaluator {
                                 return Ok(Value::Bool(false));
                             }
                             "every" => {
-                                let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
+                                let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
                                 // Try simple callback fast path
                                 let use_simple = arr_borrow.first().map(|v| {
@@ -881,7 +883,7 @@ impl Evaluator {
                                 return Ok(Value::Bool(true));
                             }
                             "flat" => {
-                                let depth = match arg_vals.get(0) {
+                                let depth = match arg_vals.first() {
                                     Some(Value::Number(n)) => *n as usize,
                                     _ => 1,
                                 };
@@ -909,7 +911,7 @@ impl Evaluator {
                     if let Value::String(s) = &obj {
                         match method_name.as_ref() {
                             "indexOf" => {
-                                let search = match arg_vals.get(0) {
+                                let search = match arg_vals.first() {
                                     Some(Value::String(ss)) => ss.as_ref(),
                                     _ => return Ok(Value::Number(-1.0)),
                                 };
@@ -918,7 +920,7 @@ impl Evaluator {
                                 ));
                             }
                             "includes" => {
-                                let search = match arg_vals.get(0) {
+                                let search = match arg_vals.first() {
                                     Some(Value::String(ss)) => ss.as_ref(),
                                     _ => return Ok(Value::Bool(false)),
                                 };
@@ -927,7 +929,7 @@ impl Evaluator {
                             "slice" => {
                                 let chars: Vec<char> = s.chars().collect();
                                 let len = chars.len() as i64;
-                                let start = match arg_vals.get(0) {
+                                let start = match arg_vals.first() {
                                     Some(Value::Number(n)) => {
                                         let n = *n as i64;
                                         if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
@@ -951,7 +953,7 @@ impl Evaluator {
                             "substring" => {
                                 let chars: Vec<char> = s.chars().collect();
                                 let len = chars.len();
-                                let start = match arg_vals.get(0) {
+                                let start = match arg_vals.first() {
                                     Some(Value::Number(n)) => (*n as usize).min(len),
                                     _ => 0,
                                 };
@@ -964,7 +966,7 @@ impl Evaluator {
                             }
                             "split" => {
                                 #[cfg(feature = "regex")]
-                                if let Some(sep) = arg_vals.get(0) {
+                                if let Some(sep) = arg_vals.first() {
                                     let limit = arg_vals.get(1).and_then(|v| match v {
                                         Value::Number(n) => Some(*n as usize),
                                         _ => None,
@@ -995,14 +997,14 @@ impl Evaluator {
                                 return Ok(Value::String(s.to_lowercase().into()));
                             }
                             "startsWith" => {
-                                let search = match arg_vals.get(0) {
+                                let search = match arg_vals.first() {
                                     Some(Value::String(ss)) => ss.as_ref(),
                                     _ => return Ok(Value::Bool(false)),
                                 };
                                 return Ok(Value::Bool(s.starts_with(search)));
                             }
                             "endsWith" => {
-                                let search = match arg_vals.get(0) {
+                                let search = match arg_vals.first() {
                                     Some(Value::String(ss)) => ss.as_ref(),
                                     _ => return Ok(Value::Bool(false)),
                                 };
@@ -1010,7 +1012,7 @@ impl Evaluator {
                             }
                             "replace" => {
                                 #[cfg(feature = "regex")]
-                                if let (Some(search), Some(replace)) = (arg_vals.get(0), arg_vals.get(1)) {
+                                if let (Some(search), Some(replace)) = (arg_vals.first(), arg_vals.get(1)) {
                                     return Ok(crate::regex::string_replace(s, search, replace));
                                 }
                                 #[cfg(not(feature = "regex"))]
@@ -1029,7 +1031,7 @@ impl Evaluator {
                                 return Ok(obj.clone());
                             }
                             "replaceAll" => {
-                                let search = match arg_vals.get(0) {
+                                let search = match arg_vals.first() {
                                     Some(Value::String(ss)) => ss.to_string(),
                                     _ => return Ok(obj.clone()),
                                 };
@@ -1040,7 +1042,7 @@ impl Evaluator {
                                 return Ok(Value::String(s.replace(&search, &replacement).into()));
                             }
                             "charAt" => {
-                                let idx = match arg_vals.get(0) {
+                                let idx = match arg_vals.first() {
                                     Some(Value::Number(n)) => *n as usize,
                                     _ => 0,
                                 };
@@ -1050,7 +1052,7 @@ impl Evaluator {
                                     .unwrap_or(Value::String("".into())));
                             }
                             "charCodeAt" => {
-                                let idx = match arg_vals.get(0) {
+                                let idx = match arg_vals.first() {
                                     Some(Value::Number(n)) => *n as usize,
                                     _ => 0,
                                 };
@@ -1060,14 +1062,14 @@ impl Evaluator {
                                     .unwrap_or(Value::Number(f64::NAN)));
                             }
                             "repeat" => {
-                                let count = match arg_vals.get(0) {
+                                let count = match arg_vals.first() {
                                     Some(Value::Number(n)) if *n >= 0.0 => *n as usize,
                                     _ => 0,
                                 };
                                 return Ok(Value::String(s.repeat(count).into()));
                             }
                             "padStart" => {
-                                let target_len = match arg_vals.get(0) {
+                                let target_len = match arg_vals.first() {
                                     Some(Value::Number(n)) => *n as usize,
                                     _ => return Ok(obj.clone()),
                                 };
@@ -1084,7 +1086,7 @@ impl Evaluator {
                                 return Ok(Value::String(format!("{}{}", padding, s).into()));
                             }
                             "padEnd" => {
-                                let target_len = match arg_vals.get(0) {
+                                let target_len = match arg_vals.first() {
                                     Some(Value::Number(n)) => *n as usize,
                                     _ => return Ok(obj.clone()),
                                 };
@@ -1102,14 +1104,14 @@ impl Evaluator {
                             }
                             #[cfg(feature = "regex")]
                             "match" => {
-                                if let Some(regexp) = arg_vals.get(0) {
+                                if let Some(regexp) = arg_vals.first() {
                                     return Ok(crate::regex::string_match(s, regexp));
                                 }
                                 return Ok(Value::Null);
                             }
                             #[cfg(feature = "regex")]
                             "search" => {
-                                if let Some(regexp) = arg_vals.get(0) {
+                                if let Some(regexp) = arg_vals.first() {
                                     return Ok(crate::regex::string_search(s, regexp));
                                 }
                                 return Ok(Value::Number(-1.0));
@@ -1133,7 +1135,7 @@ impl Evaluator {
                                 let input = arg_vals.first()
                                     .map(|v| v.to_string())
                                     .unwrap_or_default();
-                                let result = crate::regex::regexp_exec(&mut *re.borrow_mut(), &input);
+                                let result = crate::regex::regexp_exec(&mut re.borrow_mut(), &input);
                                 return Ok(result);
                             }
                             _ => {}

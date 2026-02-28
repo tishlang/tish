@@ -117,20 +117,15 @@ pub fn string_match(input: &str, regexp: &Value) -> Value {
                 let mut matches = Vec::new();
                 re.last_index = 0;
 
-                loop {
-                    match re.regex.find_from_pos(input, re.last_index) {
-                        Ok(Some(m)) => {
-                            matches.push(Value::String(m.as_str().into()));
-                            if m.start() == m.end() {
-                                re.last_index = m.end() + 1;
-                            } else {
-                                re.last_index = m.end();
-                            }
-                            if re.last_index > input.len() {
-                                break;
-                            }
-                        }
-                        _ => break,
+                while let Ok(Some(m)) = re.regex.find_from_pos(input, re.last_index) {
+                    matches.push(Value::String(m.as_str().into()));
+                    if m.start() == m.end() {
+                        re.last_index = m.end() + 1;
+                    } else {
+                        re.last_index = m.end();
+                    }
+                    if re.last_index > input.len() {
+                        break;
                     }
                 }
 
