@@ -115,7 +115,7 @@ pub enum TokenKind {
 impl TokenKind {
     pub fn keyword_or_ident(s: &str) -> Self {
         match s {
-            "fun" => TokenKind::Fun,
+            "fun" | "function" => TokenKind::Fun,
             "let" => TokenKind::Let,
             "const" => TokenKind::Const,
             "if" => TokenKind::If,

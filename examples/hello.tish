@@ -1,4 +1,0 @@
-print("Hello, Tish!")
-print(1 + 2)
-any x = 3
-print(x * 2)

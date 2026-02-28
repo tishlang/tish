@@ -1,8 +1,9 @@
 #!/bin/bash
 # Run Tish and JS equivalents, show output and compare execution time.
-# Usage: ./scripts/run_performance_manual.sh [--release] [--summary-only]
+# Usage: ./scripts/run_performance_manual.sh [--release] [--summary-only] [--no-compile]
 #   --release       use release build (recommended for fair Tish vs JS timing)
 #   --summary-only  skip individual test output, show only summary
+#   --no-compile    skip compilation, use cached binaries from previous runs
 
 set -e
 cd "$(dirname "$0")/.."
@@ -26,12 +27,14 @@ perf_dir="performance/mvp"
 target_dir="$(pwd)/target"
 profile="debug"
 summary_only=false
+no_compile=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --release) profile="release"; shift ;;
     --summary-only) summary_only=true; shift ;;
+    --no-compile) no_compile=true; shift ;;
     *) shift ;;
   esac
 done
@@ -47,9 +50,19 @@ if [[ ! -x "$tish_bin" ]]; then
   tish_bin="cargo run -p tish $rel_flag --target-dir $target_dir -q --"
 fi
 
-# Temp directory for compiled outputs
-compile_dir=$(mktemp -d)
-trap "rm -rf $compile_dir" EXIT
+# Directory for compiled outputs - use cache or temp
+cache_dir="$target_dir/perf-cache-$profile"
+if $no_compile; then
+  compile_dir="$cache_dir"
+  if [[ ! -d "$compile_dir" ]]; then
+    echo "Error: No cached binaries found at $compile_dir"
+    echo "Run without --no-compile first to build the cache."
+    exit 1
+  fi
+else
+  compile_dir="$cache_dir"
+  mkdir -p "$compile_dir"
+fi
 
 # Millisecond timer - prefer perl/python for lower overhead, fallback to node
 if command -v perl &>/dev/null; then
@@ -83,28 +96,37 @@ $has_deno && echo "  Deno: $("$deno_cmd" --version 2>/dev/null | head -1 || echo
 $has_qjs && echo "  QuickJS: $(echo 'qjs' 2>/dev/null || echo 'detected')"
 echo ""
 
-# Phase 1: Pre-compile all native binaries
-echo "Compiling native binaries..."
-compile_count=0
-compile_fail=0
-for f in "$perf_dir"/*.js; do
-  [[ -f "$f" ]] || continue
-  base=$(basename "$f" .js)
-  tish_file="$tish_dir/$base.tish"
-  [[ -f "$tish_file" ]] || continue
-  
-  native_bin="$compile_dir/${base}_native"
-  echo -n "  $base... "
-  if $tish_bin compile "$tish_file" -o "$native_bin" >/dev/null 2>&1; then
-    echo "ok"
-    compile_count=$((compile_count + 1))
-  else
-    echo "skip (unsupported features)"
-    compile_fail=$((compile_fail + 1))
-  fi
-done
-echo "Compiled: $compile_count, Skipped: $compile_fail"
-echo ""
+# Phase 1: Pre-compile all native binaries (skip if --no-compile)
+if $no_compile; then
+  # Count existing cached binaries
+  cached_count=$(find "$compile_dir" -name '*_native' -type f -perm +111 2>/dev/null | wc -l | tr -d ' ')
+  echo "Using cached binaries from: $compile_dir"
+  echo "Cached binaries: $cached_count"
+  echo ""
+else
+  echo "Compiling native binaries..."
+  compile_count=0
+  compile_fail=0
+  for f in "$perf_dir"/*.js; do
+    [[ -f "$f" ]] || continue
+    base=$(basename "$f" .js)
+    tish_file="$tish_dir/$base.tish"
+    [[ -f "$tish_file" ]] || continue
+    
+    native_bin="$compile_dir/${base}_native"
+    echo -n "  $base... "
+    if $tish_bin compile "$tish_file" -o "$native_bin" >/dev/null 2>&1; then
+      echo "ok"
+      compile_count=$((compile_count + 1))
+    else
+      echo "skip (unsupported features)"
+      compile_fail=$((compile_fail + 1))
+    fi
+  done
+  echo "Compiled: $compile_count, Skipped: $compile_fail"
+  echo "Cache location: $compile_dir"
+  echo ""
+fi
 
 # Phase 2: Run timing tests
 echo "Running performance tests..."
