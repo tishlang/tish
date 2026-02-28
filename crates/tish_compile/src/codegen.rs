@@ -77,7 +77,7 @@ impl Codegen {
         self.write("use std::collections::HashMap;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tish_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, TishError, Value};\n");
+        self.write("use tish_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, TishError, Value};\n");
         #[cfg(feature = "process")]
         self.write("use tish_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd};\n");
         #[cfg(feature = "http")]
@@ -162,6 +162,16 @@ impl Codegen {
         self.writeln("let Date = Value::Object(Rc::new(RefCell::new(HashMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"now\"), Value::Function(Rc::new(|args: &[Value]| tish_date_now(args)))),");
+        self.indent -= 1;
+        self.writeln("]))));");
+
+        self.writeln("let Object = Value::Object(Rc::new(RefCell::new(HashMap::from([");
+        self.indent += 1;
+        self.writeln("(Arc::from(\"assign\"), Value::Function(Rc::new(|args: &[Value]| tish_object_assign(args)))),");
+        self.writeln("(Arc::from(\"keys\"), Value::Function(Rc::new(|args: &[Value]| tish_object_keys(args)))),");
+        self.writeln("(Arc::from(\"values\"), Value::Function(Rc::new(|args: &[Value]| tish_object_values(args)))),");
+        self.writeln("(Arc::from(\"entries\"), Value::Function(Rc::new(|args: &[Value]| tish_object_entries(args)))),");
+        self.writeln("(Arc::from(\"fromEntries\"), Value::Function(Rc::new(|args: &[Value]| tish_object_from_entries(args)))),");
         self.indent -= 1;
         self.writeln("]))));");
 
@@ -308,7 +318,7 @@ impl Codegen {
             }
             Statement::ForOf { name, iterable, body, .. } => {
                 let iter_expr = self.emit_expr(iterable)?;
-                self.writeln(&format!("{{ let _fof = {};", iter_expr));
+                self.writeln(&format!("{{ let _fof = ({}).clone();", iter_expr));
                 self.indent += 1;
                 self.writeln("match &_fof {");
                 self.indent += 1;
@@ -908,6 +918,102 @@ impl Codegen {
                                 obj_expr, target_len, pad
                             ));
                         }
+                        // Higher-order array methods
+                        "map" => {
+                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::array_map(&{}, &{})",
+                                obj_expr, callback
+                            ));
+                        }
+                        "filter" => {
+                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::array_filter(&{}, &{})",
+                                obj_expr, callback
+                            ));
+                        }
+                        "reduce" => {
+                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let initial = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::array_reduce(&{}, &{}, &{})",
+                                obj_expr, callback, initial
+                            ));
+                        }
+                        "forEach" => {
+                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::array_for_each(&{}, &{})",
+                                obj_expr, callback
+                            ));
+                        }
+                        "find" => {
+                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::array_find(&{}, &{})",
+                                obj_expr, callback
+                            ));
+                        }
+                        "findIndex" => {
+                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::array_find_index(&{}, &{})",
+                                obj_expr, callback
+                            ));
+                        }
+                        "some" => {
+                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::array_some(&{}, &{})",
+                                obj_expr, callback
+                            ));
+                        }
+                        "every" => {
+                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::array_every(&{}, &{})",
+                                obj_expr, callback
+                            ));
+                        }
+                        "sort" => {
+                            let comparator = arg_exprs.get(0).map(|c| format!("Some(&{})", c)).unwrap_or_else(|| "None".to_string());
+                            return Ok(format!(
+                                "tish_runtime::array_sort(&{}, {})",
+                                obj_expr, comparator
+                            ));
+                        }
+                        "splice" => {
+                            let start = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let delete_count = arg_exprs.get(1).map(|d| format!("Some(&{})", d)).unwrap_or_else(|| "None".to_string());
+                            let items = if arg_exprs.len() > 2 {
+                                let items_vec = arg_exprs[2..].iter()
+                                    .map(|a| format!("{}.clone()", a))
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                format!("&[{}]", items_vec)
+                            } else {
+                                "&[]".to_string()
+                            };
+                            return Ok(format!(
+                                "tish_runtime::array_splice(&{}, &{}, {}, {})",
+                                obj_expr, start, delete_count, items
+                            ));
+                        }
+                        "flat" => {
+                            let depth = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Number(1.0)".to_string());
+                            return Ok(format!(
+                                "tish_runtime::array_flat(&{}, &{})",
+                                obj_expr, depth
+                            ));
+                        }
+                        "flatMap" => {
+                            let callback = arg_exprs.get(0).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::array_flat_map(&{}, &{})",
+                                obj_expr, callback
+                            ));
+                        }
                         _ => {} // Fall through to normal function call
                     }
                 }
@@ -1120,7 +1226,7 @@ impl Codegen {
                     CompoundOp::Mod => "modulo",
                 };
                 format!(
-                    "{{ let _rhs = {}; {} = tish_runtime::ops::{}(&{}, &_rhs)?; {}.clone() }}",
+                    "{{ let _rhs = ({}).clone(); {} = tish_runtime::ops::{}(&{}, &_rhs)?; {}.clone() }}",
                     val,
                     name.as_ref(),
                     op_fn,
@@ -1171,12 +1277,89 @@ impl Codegen {
 
     fn emit_arrow_function(
         &mut self,
-        _params: &[tish_ast::TypedParam],
-        _body: &tish_ast::ArrowBody,
+        params: &[tish_ast::TypedParam],
+        body: &tish_ast::ArrowBody,
     ) -> Result<String, CompileError> {
-        // Arrow functions are not yet supported in the compiler
-        // They work in the interpreter
-        Err(CompileError { message: "Arrow functions are not yet supported in compiled mode. Use named functions instead.".to_string() })
+        // Build the arrow function as a Value::Function closure
+        let mut code = String::new();
+        code.push_str("{\n");
+
+        // Collect outer parameters that need to be captured
+        let outer_params: Vec<String> = self.outer_params_stack
+            .iter()
+            .flat_map(|p| p.iter().cloned())
+            .collect();
+
+        // Clone captures
+        for outer_param in &outer_params {
+            code.push_str(&format!("    let {} = {}.clone();\n", outer_param, outer_param));
+        }
+        code.push_str("    let console = console.clone();\n");
+        code.push_str("    let Math = Math.clone();\n");
+        code.push_str("    let JSON = JSON.clone();\n");
+
+        // Clone any function cells that might be referenced
+        if let Some(scope) = self.function_scope_stack.last() {
+            for func_name in scope {
+                code.push_str(&format!("    let {}_ref = {}_cell.clone();\n", func_name, func_name));
+            }
+        }
+
+        code.push_str("    Value::Function(Rc::new(move |args: &[Value]| {\n");
+
+        // Make captured functions available
+        if let Some(scope) = self.function_scope_stack.last() {
+            for func_name in scope {
+                code.push_str(&format!("        let {} = {}_ref.borrow().clone();\n", func_name, func_name));
+            }
+        }
+
+        // Extract parameters from args
+        let current_param_names: Vec<String> = params.iter().map(|p| p.name.to_string()).collect();
+        for (i, p) in params.iter().enumerate() {
+            code.push_str(&format!(
+                "        let {} = args.get({}).cloned().unwrap_or(Value::Null);\n",
+                p.name.as_ref(),
+                i
+            ));
+        }
+
+        // Push current params for potential nested arrows
+        self.outer_params_stack.push(current_param_names);
+
+        // Emit body based on type
+        match body {
+            tish_ast::ArrowBody::Expr(expr) => {
+                let expr_code = self.emit_expr(expr)?;
+                code.push_str(&format!("        {}\n", expr_code));
+            }
+            tish_ast::ArrowBody::Block(block_stmt) => {
+                // For block bodies, emit the block statement
+                self.function_scope_stack.push(Vec::new());
+                
+                // Save current output, emit to temp, then restore
+                let saved_output = std::mem::take(&mut self.output);
+                let saved_indent = self.indent;
+                self.indent = 2; // Base indent inside the closure
+                
+                self.emit_statement(block_stmt)?;
+                
+                let body_code = std::mem::replace(&mut self.output, saved_output);
+                self.indent = saved_indent;
+                self.function_scope_stack.pop();
+                
+                code.push_str(&body_code);
+                code.push_str("        Value::Null\n");
+            }
+        }
+
+        // Pop params
+        self.outer_params_stack.pop();
+
+        code.push_str("    }))\n");
+        code.push_str("}");
+
+        Ok(code)
     }
 
     fn emit_binop(

@@ -7,6 +7,71 @@ use std::fmt;
 
 pub use tish_core::Value;
 
+/// Operators module for compound assignment operations
+pub mod ops {
+    use tish_core::Value;
+
+    /// Add two values (supports number + number, string + any)
+    pub fn add(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+        match (left, right) {
+            (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
+            (Value::String(a), Value::String(b)) => {
+                let mut s = String::with_capacity(a.len() + b.len());
+                s.push_str(a);
+                s.push_str(b);
+                Ok(Value::String(s.into()))
+            }
+            (Value::String(a), b) => {
+                let b_str = b.to_display_string();
+                let mut s = String::with_capacity(a.len() + b_str.len());
+                s.push_str(a);
+                s.push_str(&b_str);
+                Ok(Value::String(s.into()))
+            }
+            (a, Value::String(b)) => {
+                let a_str = a.to_display_string();
+                let mut s = String::with_capacity(a_str.len() + b.len());
+                s.push_str(&a_str);
+                s.push_str(b);
+                Ok(Value::String(s.into()))
+            }
+            _ => Err(format!("Cannot add {:?} and {:?}", left, right).into()),
+        }
+    }
+
+    /// Subtract two numbers
+    pub fn sub(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+        match (left, right) {
+            (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a - b)),
+            _ => Err(format!("Cannot subtract {:?} from {:?}", right, left).into()),
+        }
+    }
+
+    /// Multiply two numbers
+    pub fn mul(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+        match (left, right) {
+            (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a * b)),
+            _ => Err(format!("Cannot multiply {:?} and {:?}", left, right).into()),
+        }
+    }
+
+    /// Divide two numbers
+    pub fn div(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+        match (left, right) {
+            (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a / b)),
+            _ => Err(format!("Cannot divide {:?} by {:?}", left, right).into()),
+        }
+    }
+
+    /// Modulo two numbers
+    pub fn modulo(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+        match (left, right) {
+            (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a % b)),
+            _ => Err(format!("Cannot modulo {:?} by {:?}", left, right).into()),
+        }
+    }
+}
+
 use tish_core::{
     json_parse as core_json_parse,
     json_stringify as core_json_stringify,
@@ -551,6 +616,240 @@ pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
         Value::Array(Rc::clone(arr))
     } else {
         Value::Null
+    }
+}
+
+// Higher-order array methods
+
+pub fn array_map(arr: &Value, callback: &Value) -> Value {
+    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
+        let arr_borrow = arr.borrow();
+        let result: Vec<Value> = arr_borrow.iter().enumerate().map(|(i, v)| {
+            cb(&[v.clone(), Value::Number(i as f64)])
+        }).collect();
+        Value::Array(Rc::new(RefCell::new(result)))
+    } else {
+        Value::Null
+    }
+}
+
+pub fn array_filter(arr: &Value, callback: &Value) -> Value {
+    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
+        let arr_borrow = arr.borrow();
+        let result: Vec<Value> = arr_borrow.iter().enumerate().filter_map(|(i, v)| {
+            let keep = cb(&[v.clone(), Value::Number(i as f64)]);
+            if keep.is_truthy() { Some(v.clone()) } else { None }
+        }).collect();
+        Value::Array(Rc::new(RefCell::new(result)))
+    } else {
+        Value::Null
+    }
+}
+
+pub fn array_reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
+    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
+        let arr_borrow = arr.borrow();
+        let mut acc = initial.clone();
+        for (i, v) in arr_borrow.iter().enumerate() {
+            acc = cb(&[acc, v.clone(), Value::Number(i as f64)]);
+        }
+        acc
+    } else {
+        Value::Null
+    }
+}
+
+pub fn array_for_each(arr: &Value, callback: &Value) -> Value {
+    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
+        let arr_borrow = arr.borrow();
+        for (i, v) in arr_borrow.iter().enumerate() {
+            cb(&[v.clone(), Value::Number(i as f64)]);
+        }
+    }
+    Value::Null
+}
+
+pub fn array_find(arr: &Value, callback: &Value) -> Value {
+    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
+        let arr_borrow = arr.borrow();
+        for (i, v) in arr_borrow.iter().enumerate() {
+            let result = cb(&[v.clone(), Value::Number(i as f64)]);
+            if result.is_truthy() {
+                return v.clone();
+            }
+        }
+    }
+    Value::Null
+}
+
+pub fn array_find_index(arr: &Value, callback: &Value) -> Value {
+    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
+        let arr_borrow = arr.borrow();
+        for (i, v) in arr_borrow.iter().enumerate() {
+            let result = cb(&[v.clone(), Value::Number(i as f64)]);
+            if result.is_truthy() {
+                return Value::Number(i as f64);
+            }
+        }
+    }
+    Value::Number(-1.0)
+}
+
+pub fn array_some(arr: &Value, callback: &Value) -> Value {
+    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
+        let arr_borrow = arr.borrow();
+        for (i, v) in arr_borrow.iter().enumerate() {
+            let result = cb(&[v.clone(), Value::Number(i as f64)]);
+            if result.is_truthy() {
+                return Value::Bool(true);
+            }
+        }
+    }
+    Value::Bool(false)
+}
+
+pub fn array_every(arr: &Value, callback: &Value) -> Value {
+    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
+        let arr_borrow = arr.borrow();
+        for (i, v) in arr_borrow.iter().enumerate() {
+            let result = cb(&[v.clone(), Value::Number(i as f64)]);
+            if !result.is_truthy() {
+                return Value::Bool(false);
+            }
+        }
+        Value::Bool(true)
+    } else {
+        Value::Bool(false)
+    }
+}
+
+pub fn array_flat(arr: &Value, depth: &Value) -> Value {
+    fn flatten(arr: &[Value], depth: i32, result: &mut Vec<Value>) {
+        for v in arr {
+            if depth > 0 {
+                if let Value::Array(inner) = v {
+                    flatten(&inner.borrow(), depth - 1, result);
+                    continue;
+                }
+            }
+            result.push(v.clone());
+        }
+    }
+    
+    if let Value::Array(arr) = arr {
+        let d = match depth {
+            Value::Number(n) => *n as i32,
+            _ => 1,
+        };
+        let mut result = Vec::new();
+        flatten(&arr.borrow(), d, &mut result);
+        Value::Array(Rc::new(RefCell::new(result)))
+    } else {
+        Value::Null
+    }
+}
+
+pub fn array_flat_map(arr: &Value, callback: &Value) -> Value {
+    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
+        let arr_borrow = arr.borrow();
+        let mut result: Vec<Value> = Vec::new();
+        for (i, v) in arr_borrow.iter().enumerate() {
+            let mapped = cb(&[v.clone(), Value::Number(i as f64)]);
+            if let Value::Array(inner) = mapped {
+                result.extend(inner.borrow().iter().cloned());
+            } else {
+                result.push(mapped);
+            }
+        }
+        Value::Array(Rc::new(RefCell::new(result)))
+    } else {
+        Value::Null
+    }
+}
+
+// ============== Object Functions ==============
+
+pub fn object_assign(args: &[Value]) -> Value {
+    let target = match args.first() {
+        Some(Value::Object(obj)) => obj,
+        _ => return Value::Null,
+    };
+    
+    let mut target_mut = target.borrow_mut();
+    for source in args.iter().skip(1) {
+        if let Value::Object(src) = source {
+            let src_borrow = src.borrow();
+            for (k, v) in src_borrow.iter() {
+                target_mut.insert(Arc::clone(k), v.clone());
+            }
+        }
+    }
+    drop(target_mut);
+    Value::Object(Rc::clone(target))
+}
+
+pub fn object_keys(args: &[Value]) -> Value {
+    if let Some(Value::Object(obj)) = args.first() {
+        let obj_borrow = obj.borrow();
+        let keys: Vec<Value> = obj_borrow.keys()
+            .map(|k| Value::String(Arc::clone(k)))
+            .collect();
+        Value::Array(Rc::new(RefCell::new(keys)))
+    } else {
+        Value::Array(Rc::new(RefCell::new(Vec::new())))
+    }
+}
+
+pub fn object_values(args: &[Value]) -> Value {
+    if let Some(Value::Object(obj)) = args.first() {
+        let obj_borrow = obj.borrow();
+        let values: Vec<Value> = obj_borrow.values().cloned().collect();
+        Value::Array(Rc::new(RefCell::new(values)))
+    } else {
+        Value::Array(Rc::new(RefCell::new(Vec::new())))
+    }
+}
+
+pub fn object_entries(args: &[Value]) -> Value {
+    if let Some(Value::Object(obj)) = args.first() {
+        let obj_borrow = obj.borrow();
+        let entries: Vec<Value> = obj_borrow.iter()
+            .map(|(k, v)| {
+                Value::Array(Rc::new(RefCell::new(vec![
+                    Value::String(Arc::clone(k)),
+                    v.clone(),
+                ])))
+            })
+            .collect();
+        Value::Array(Rc::new(RefCell::new(entries)))
+    } else {
+        Value::Array(Rc::new(RefCell::new(Vec::new())))
+    }
+}
+
+pub fn object_from_entries(args: &[Value]) -> Value {
+    use std::collections::HashMap;
+    
+    if let Some(Value::Array(entries)) = args.first() {
+        let entries_borrow = entries.borrow();
+        let mut obj: HashMap<Arc<str>, Value> = HashMap::new();
+        
+        for entry in entries_borrow.iter() {
+            if let Value::Array(pair) = entry {
+                let pair_borrow = pair.borrow();
+                if pair_borrow.len() >= 2 {
+                    let key: Arc<str> = match &pair_borrow[0] {
+                        Value::String(s) => Arc::clone(s),
+                        v => v.to_display_string().into(),
+                    };
+                    obj.insert(key, pair_borrow[1].clone());
+                }
+            }
+        }
+        
+        Value::Object(Rc::new(RefCell::new(obj)))
+    } else {
+        Value::Object(Rc::new(RefCell::new(std::collections::HashMap::new())))
     }
 }
 

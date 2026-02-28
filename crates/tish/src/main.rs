@@ -99,6 +99,51 @@ fn run_repl() -> Result<(), String> {
     Ok(())
 }
 
+/// Find the tish_runtime crate path using multiple strategies
+fn find_runtime_path() -> Result<String, String> {
+    // Strategy 1: CARGO_MANIFEST_DIR (works during cargo run/build)
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let path = Path::new(&manifest_dir).join("..").join("tish_runtime");
+        if let Ok(canonical) = path.canonicalize() {
+            return Ok(canonical.display().to_string().replace('\\', "/"));
+        }
+    }
+
+    // Strategy 2: Relative to executable location (target/debug/tish or target/release/tish)
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let path = exe_dir.join("..").join("..").join("crates").join("tish_runtime");
+            if let Ok(canonical) = path.canonicalize() {
+                return Ok(canonical.display().to_string().replace('\\', "/"));
+            }
+        }
+    }
+
+    // Strategy 3: Current working directory based (common dev scenario)
+    let cwd_based = Path::new("crates").join("tish_runtime");
+    if let Ok(canonical) = cwd_based.canonicalize() {
+        return Ok(canonical.display().to_string().replace('\\', "/"));
+    }
+
+    // Strategy 4: Look for Cargo.toml to find workspace root
+    if let Ok(mut current) = std::env::current_dir() {
+        for _ in 0..10 {
+            let cargo_toml = current.join("Cargo.toml");
+            if cargo_toml.exists() {
+                let runtime = current.join("crates").join("tish_runtime");
+                if runtime.exists() {
+                    return Ok(runtime.display().to_string().replace('\\', "/"));
+                }
+            }
+            if !current.pop() {
+                break;
+            }
+        }
+    }
+
+    Err("Could not find tish_runtime crate. Run from workspace root or use cargo run.".to_string())
+}
+
 fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
     let source =
         fs::read_to_string(input_path).map_err(|e| format!("Cannot read {}: {}", input_path, e))?;
@@ -114,16 +159,9 @@ fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
     fs::create_dir_all(&build_dir).map_err(|e| format!("Cannot create build dir: {}", e))?;
     fs::create_dir_all(build_dir.join("src")).map_err(|e| format!("Cannot create src: {}", e))?;
 
-    // Path to tish_runtime: from crates/tish we go up to workspace, then into crates/tish_runtime
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-    let runtime_path = Path::new(&manifest_dir)
-        .join("..")
-        .join("tish_runtime")
-        .canonicalize()
-        .map_err(|e| format!("Cannot resolve tish_runtime path: {}", e))?
-        .display()
-        .to_string()
-        .replace('\\', "/");
+    // Path to tish_runtime: try multiple strategies to locate it
+    let runtime_path = find_runtime_path()
+        .map_err(|e| format!("Cannot resolve tish_runtime path: {}", e))?;
 
     #[allow(unused_mut)]
     let mut features: Vec<&str> = Vec::new();
