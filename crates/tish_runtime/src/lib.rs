@@ -593,13 +593,19 @@ pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
         let mut arr_mut = arr.borrow_mut();
         
         if let Some(Value::Function(cmp_fn)) = comparator {
-            let mut indices: Vec<usize> = (0..arr_mut.len()).collect();
-            let arr_ref: Vec<Value> = arr_mut.clone();
+            let len = arr_mut.len();
+            let mut indices: Vec<usize> = (0..len).collect();
+            
+            // Take ownership of elements to avoid double-borrow
+            let mut elements: Vec<Value> = std::mem::take(&mut *arr_mut);
+            
+            // Reusable args buffer to avoid per-comparison Vec allocation
+            let mut args_buf: [Value; 2] = [Value::Null, Value::Null];
             
             indices.sort_by(|&a, &b| {
-                let va = &arr_ref[a];
-                let vb = &arr_ref[b];
-                let result = cmp_fn(&[va.clone(), vb.clone()]);
+                args_buf[0] = elements[a].clone();
+                args_buf[1] = elements[b].clone();
+                let result = cmp_fn(&args_buf);
                 match result {
                     Value::Number(n) => {
                         if n < 0.0 {
@@ -614,8 +620,9 @@ pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
                 }
             });
             
+            // Reconstruct array in sorted order
             let sorted: Vec<Value> = indices.into_iter().map(|i| {
-                std::mem::replace(&mut arr_mut[i], Value::Null)
+                std::mem::replace(&mut elements[i], Value::Null)
             }).collect();
             *arr_mut = sorted;
         } else {
