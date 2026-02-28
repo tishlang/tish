@@ -123,6 +123,37 @@ impl Codegen {
         )
     }
 
+    /// Generate code for increment/decrement operations.
+    /// `is_prefix`: true for ++x/--x, false for x++/x--
+    /// `delta`: "+1.0" or "-1.0"
+    /// `op_name`: "++" or "--" for error message
+    fn emit_inc_dec(&self, name: &str, is_prefix: bool, delta: &str, op_name: &str) -> String {
+        let n = Self::escape_ident(name);
+        let is_wrapped = self.refcell_wrapped_vars.contains(name);
+        
+        if is_prefix {
+            if is_wrapped {
+                format!(
+                    "{{ *{n}.borrow_mut() = Value::Number(match &*{n}.borrow() {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); {n}.borrow().clone() }}"
+                )
+            } else {
+                format!(
+                    "{{ {n} = Value::Number(match &{n} {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); {n}.clone() }}"
+                )
+            }
+        } else {
+            if is_wrapped {
+                format!(
+                    "{{ let _v = {n}.borrow().clone(); *{n}.borrow_mut() = Value::Number(match &_v {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); _v }}"
+                )
+            } else {
+                format!(
+                    "{{ let _v = {n}.clone(); {n} = Value::Number(match &_v {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); _v }}"
+                )
+            }
+        }
+    }
+
     /// Generate code for a numeric comparison that returns Bool.
     fn emit_numeric_cmp(l: &str, r: &str, op: &str) -> String {
         format!(
@@ -762,13 +793,10 @@ impl Codegen {
     }
 
     fn emit_call_arg(&mut self, arg: &CallArg) -> Result<String, CompileError> {
-        match arg {
-            CallArg::Expr(e) => self.emit_expr(e),
-            CallArg::Spread(e) => {
-                let val = self.emit_expr(e)?;
-                Ok(val)
-            }
-        }
+        let e = match arg {
+            CallArg::Expr(e) | CallArg::Spread(e) => e,
+        };
+        self.emit_expr(e)
     }
 
     fn emit_call_args(&mut self, args: &[CallArg]) -> Result<String, CompileError> {
@@ -779,8 +807,7 @@ impl Codegen {
                 match arg {
                     CallArg::Expr(e) => {
                         let val = self.emit_expr(e)?;
-                        let clone_suffix = if Self::needs_clone(e) { ".clone()" } else { "" };
-                        parts.push(format!("_args.push({}{});", val, clone_suffix));
+                        parts.push(format!("_args.push({}.clone());", val));
                     }
                     CallArg::Spread(e) => {
                         let val = self.emit_expr(e)?;
@@ -790,17 +817,15 @@ impl Codegen {
             }
             Ok(format!("{{ let mut _args: Vec<Value> = Vec::new(); {} _args }}", parts.join(" ")))
         } else {
-            let mut arg_parts = Vec::new();
-            for arg in args {
-                if let CallArg::Expr(e) = arg {
-                    let val = self.emit_expr(e)?;
-                    let clone_suffix = if Self::needs_clone(e) { ".clone()" } else { "" };
-                    arg_parts.push(format!("{}{}", val, clone_suffix));
+            let exprs: Result<Vec<_>, _> = args.iter().map(|a| {
+                if let CallArg::Expr(e) = a {
+                    self.emit_expr(e)
                 } else {
-                    return Err(CompileError { message: "Unexpected spread".to_string() });
+                    Err(CompileError { message: "Unexpected spread".to_string() })
                 }
-            }
-            Ok(format!("vec![{}]", arg_parts.join(", ")))
+            }).collect();
+            let exprs = exprs?;
+            Ok(format!("vec![{}]", exprs.iter().map(|a| format!("{}.clone()", a)).collect::<Vec<_>>().join(", ")))
         }
     }
 
@@ -1287,8 +1312,7 @@ impl Codegen {
                         match elem {
                             ArrayElement::Expr(e) => {
                                 let val = self.emit_expr(e)?;
-                                let clone_suffix = if Self::needs_clone(e) { ".clone()" } else { "" };
-                                parts.push(format!("_arr.push(({}){}); ", val, clone_suffix));
+                                parts.push(format!("_arr.push(({}).clone());", val));
                             }
                             ArrayElement::Spread(e) => {
                                 let val = self.emit_expr(e)?;
@@ -1298,16 +1322,14 @@ impl Codegen {
                     }
                     format!("{{ let mut _arr: Vec<Value> = Vec::new(); {} Value::Array(Rc::new(RefCell::new(_arr))) }}", parts.join(" "))
                 } else {
-                    let mut els = Vec::new();
-                    for elem in elements {
-                        if let ArrayElement::Expr(expr) = elem {
-                            let v = self.emit_expr(expr)?;
-                            let clone_suffix = if Self::needs_clone(expr) { ".clone()" } else { "" };
-                            els.push(format!("({}){}", v, clone_suffix));
+                    let els: Result<Vec<_>, _> = elements.iter().map(|e| {
+                        if let ArrayElement::Expr(expr) = e {
+                            self.emit_expr(expr).map(|v| format!("({}).clone()", v))
                         } else {
-                            return Err(CompileError { message: "Unexpected spread".to_string() });
+                            Err(CompileError { message: "Unexpected spread".to_string() })
                         }
-                    }
+                    }).collect();
+                    let els = els?;
                     format!(
                         "Value::Array(Rc::new(RefCell::new(vec![{}])))",
                         els.join(", ")
@@ -1322,8 +1344,7 @@ impl Codegen {
                         match prop {
                             ObjectProp::KeyValue(k, v) => {
                                 let val = self.emit_expr(v)?;
-                                let clone_suffix = if Self::needs_clone(v) { ".clone()" } else { "" };
-                                parts.push(format!("_obj.insert(Arc::from({:?}), ({}){}); ", k.as_ref(), val, clone_suffix));
+                                parts.push(format!("_obj.insert(Arc::from({:?}), ({}).clone());", k.as_ref(), val));
                             }
                             ObjectProp::Spread(e) => {
                                 let val = self.emit_expr(e)?;
@@ -1337,8 +1358,7 @@ impl Codegen {
                     for prop in props {
                         if let ObjectProp::KeyValue(k, v) = prop {
                             let val = self.emit_expr(v)?;
-                            let clone_suffix = if Self::needs_clone(v) { ".clone()" } else { "" };
-                            parts.push(format!("(Arc::from({:?}), ({}){})", k.as_ref(), val, clone_suffix));
+                            parts.push(format!("(Arc::from({:?}), ({}).clone())", k.as_ref(), val));
                         }
                     }
                     format!(
@@ -1350,17 +1370,10 @@ impl Codegen {
             Expr::Assign { name, value, .. } => {
                 let val = self.emit_expr(value)?;
                 let escaped = Self::escape_ident(name.as_ref());
-                let needs_clone = Self::needs_clone(value);
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    if needs_clone {
-                        format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v; {}.borrow().clone() }}", val, escaped, escaped)
-                    } else {
-                        format!("{{ *{}.borrow_mut() = {}; {}.borrow().clone() }}", escaped, val, escaped)
-                    }
-                } else if needs_clone {
-                    format!("{{ let _v = ({}).clone(); {} = _v; {}.clone() }}", val, escaped, escaped)
+                    format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, escaped)
                 } else {
-                    format!("{{ {} = {}; {}.clone() }}", escaped, val, escaped)
+                    format!("{{ let _v = ({}).clone(); {} = _v.clone(); _v }}", val, escaped)
                 }
             }
             Expr::TypeOf { operand, .. } => {
@@ -1374,62 +1387,10 @@ impl Codegen {
                     o
                 )
             }
-            Expr::PostfixInc { name, .. } => {
-                let n = Self::escape_ident(name.as_ref());
-                if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    format!(
-                        "{{ let _v = {}.borrow().clone(); *{}.borrow_mut() = Value::Number(match &_v {{ Value::Number(n) => n + 1.0, _ => panic!(\"++ needs number\") }}); _v }}",
-                        n, n
-                    )
-                } else {
-                    format!(
-                        "{{ let _v = {}.clone(); {} = Value::Number(match &_v {{ Value::Number(n) => n + 1.0, _ => panic!(\"++ needs number\") }}); _v }}",
-                        n, n
-                    )
-                }
-            }
-            Expr::PostfixDec { name, .. } => {
-                let n = Self::escape_ident(name.as_ref());
-                if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    format!(
-                        "{{ let _v = {}.borrow().clone(); *{}.borrow_mut() = Value::Number(match &_v {{ Value::Number(n) => n - 1.0, _ => panic!(\"-- needs number\") }}); _v }}",
-                        n, n
-                    )
-                } else {
-                    format!(
-                        "{{ let _v = {}.clone(); {} = Value::Number(match &_v {{ Value::Number(n) => n - 1.0, _ => panic!(\"-- needs number\") }}); _v }}",
-                        n, n
-                    )
-                }
-            }
-            Expr::PrefixInc { name, .. } => {
-                let n = Self::escape_ident(name.as_ref());
-                if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    format!(
-                        "{{ *{}.borrow_mut() = Value::Number(match &*{}.borrow() {{ Value::Number(n) => n + 1.0, _ => panic!(\"++ needs number\") }}); {}.borrow().clone() }}",
-                        n, n, n
-                    )
-                } else {
-                    format!(
-                        "{{ {} = Value::Number(match &{} {{ Value::Number(n) => n + 1.0, _ => panic!(\"++ needs number\") }}); {}.clone() }}",
-                        n, n, n
-                    )
-                }
-            }
-            Expr::PrefixDec { name, .. } => {
-                let n = Self::escape_ident(name.as_ref());
-                if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    format!(
-                        "{{ *{}.borrow_mut() = Value::Number(match &*{}.borrow() {{ Value::Number(n) => n - 1.0, _ => panic!(\"-- needs number\") }}); {}.borrow().clone() }}",
-                        n, n, n
-                    )
-                } else {
-                    format!(
-                        "{{ {} = Value::Number(match &{} {{ Value::Number(n) => n - 1.0, _ => panic!(\"-- needs number\") }}); {}.clone() }}",
-                        n, n, n
-                    )
-                }
-            }
+            Expr::PostfixInc { name, .. } => self.emit_inc_dec(name.as_ref(), false, "+ 1.0", "++"),
+            Expr::PostfixDec { name, .. } => self.emit_inc_dec(name.as_ref(), false, "- 1.0", "--"),
+            Expr::PrefixInc { name, .. } => self.emit_inc_dec(name.as_ref(), true, "+ 1.0", "++"),
+            Expr::PrefixDec { name, .. } => self.emit_inc_dec(name.as_ref(), true, "- 1.0", "--"),
             Expr::CompoundAssign { name, op, value, .. } => {
                 let val = self.emit_expr(value)?;
                 let n = Self::escape_ident(name.as_ref());
@@ -1455,26 +1416,22 @@ impl Codegen {
             Expr::MemberAssign { object, prop, value, .. } => {
                 let obj = self.emit_expr(object)?;
                 let val = self.emit_expr(value)?;
-                let clone_suffix = if Self::needs_clone(value) { ".clone()" } else { "" };
                 format!(
-                    "tish_runtime::set_prop(&({}), \"{}\", ({}){})",
+                    "tish_runtime::set_prop(&({}), \"{}\", ({}).clone())",
                     obj,
                     prop.as_ref(),
-                    val,
-                    clone_suffix
+                    val
                 )
             }
             Expr::IndexAssign { object, index, value, .. } => {
                 let obj = self.emit_expr(object)?;
                 let idx = self.emit_expr(index)?;
                 let val = self.emit_expr(value)?;
-                let clone_suffix = if Self::needs_clone(value) { ".clone()" } else { "" };
                 format!(
-                    "tish_runtime::set_index(&({}), &({}), ({}){})",
+                    "tish_runtime::set_index(&({}), &({}), ({}).clone())",
                     obj,
                     idx,
-                    val,
-                    clone_suffix
+                    val
                 )
             }
             Expr::ArrowFunction { params, body, .. } => {

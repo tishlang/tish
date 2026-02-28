@@ -326,7 +326,6 @@ impl Evaluator {
                 let defaults: Arc<[Option<Expr>]> = params.iter().map(|p| p.default.clone()).collect();
                 let rest_param_name = rest_param.as_ref().map(|p| Arc::clone(&p.name));
                 let body = Arc::new(body.as_ref().clone());
-                let _scope = Rc::clone(&self.scope);
                 let func = Value::Function {
                     params: param_names,
                     defaults,
@@ -975,7 +974,7 @@ impl Evaluator {
                                 }
                                 #[cfg(not(feature = "regex"))]
                                 {
-                                    let sep = match arg_vals.get(0) {
+                                    let sep = match arg_vals.first() {
                                         Some(Value::String(ss)) => ss.as_ref(),
                                         _ => return Ok(Value::Array(Rc::new(RefCell::new(vec![obj.clone()])))),
                                     };
@@ -1017,7 +1016,7 @@ impl Evaluator {
                                 }
                                 #[cfg(not(feature = "regex"))]
                                 {
-                                    let search = match arg_vals.get(0) {
+                                    let search = match arg_vals.first() {
                                         Some(Value::String(ss)) => ss.to_string(),
                                         _ => return Ok(obj.clone()),
                                     };
@@ -1077,11 +1076,11 @@ impl Evaluator {
                                     Some(Value::String(p)) => p.to_string(),
                                     _ => " ".to_string(),
                                 };
-                                let chars: Vec<char> = s.chars().collect();
-                                if chars.len() >= target_len || pad.is_empty() {
+                                let char_count = s.chars().count();
+                                if char_count >= target_len || pad.is_empty() {
                                     return Ok(obj.clone());
                                 }
-                                let needed = target_len - chars.len();
+                                let needed = target_len - char_count;
                                 let padding: String = pad.chars().cycle().take(needed).collect();
                                 return Ok(Value::String(format!("{}{}", padding, s).into()));
                             }
@@ -1094,11 +1093,11 @@ impl Evaluator {
                                     Some(Value::String(p)) => p.to_string(),
                                     _ => " ".to_string(),
                                 };
-                                let chars: Vec<char> = s.chars().collect();
-                                if chars.len() >= target_len || pad.is_empty() {
+                                let char_count = s.chars().count();
+                                if char_count >= target_len || pad.is_empty() {
                                     return Ok(obj.clone());
                                 }
-                                let needed = target_len - chars.len();
+                                let needed = target_len - char_count;
                                 let padding: String = pad.chars().cycle().take(needed).collect();
                                 return Ok(Value::String(format!("{}{}", s, padding).into()));
                             }

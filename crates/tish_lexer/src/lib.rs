@@ -11,13 +11,11 @@ use std::collections::VecDeque;
 use std::iter::Peekable;
 use std::str::Chars;
 
-const INDENT_WIDTH: usize = 2; // spaces per indent level
-const TAB_AS_LEVELS: usize = 1; // 1 tab = 1 indent level
+const INDENT_WIDTH: usize = 2;
+const TAB_AS_LEVELS: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct Lexer<'a> {
-    #[allow(dead_code)] // reserved for future error/source slicing
-    source: &'a str,
     chars: Peekable<Chars<'a>>,
     pos: usize,
     line: usize,
@@ -25,16 +23,12 @@ pub struct Lexer<'a> {
     indent_stack: Vec<usize>,
     at_line_start: bool,
     pending_dedents: VecDeque<Token>,
-    /// Stack of brace depths for template literal expressions.
-    /// When non-empty, we're inside a template expression `${...}`.
-    /// Each entry is the brace depth at that template nesting level.
     template_brace_stack: Vec<usize>,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(source: &'a str) -> Self {
-        let lexer = Self {
-            source,
+        Self {
             chars: source.chars().peekable(),
             pos: 0,
             line: 1,
@@ -43,8 +37,7 @@ impl<'a> Lexer<'a> {
             at_line_start: true,
             pending_dedents: VecDeque::new(),
             template_brace_stack: Vec::new(),
-        };
-        lexer
+        }
     }
 
     fn peek(&mut self) -> Option<char> {
@@ -68,8 +61,6 @@ impl<'a> Lexer<'a> {
         (self.line, self.col)
     }
 
-    /// Convert leading whitespace to logical indent level.
-    /// Tab = 1 level; N spaces = 1 level (INDENT_WIDTH spaces per level).
     fn read_indent_level(&mut self) -> usize {
         let mut level = 0;
         loop {
@@ -85,7 +76,6 @@ impl<'a> Lexer<'a> {
                 _ => break,
             }
         }
-        // Normalize: N spaces = 1 level (round up)
         level.div_ceil(INDENT_WIDTH)
     }
 
@@ -104,9 +94,7 @@ impl<'a> Lexer<'a> {
 
     fn skip_line_comment(&mut self) {
         while let Some(c) = self.advance() {
-            if c == '\n' {
-                break;
-            }
+            if c == '\n' { break; }
         }
     }
 
@@ -114,14 +102,8 @@ impl<'a> Lexer<'a> {
         let mut depth = 1;
         while depth > 0 {
             match self.advance() {
-                Some('*') if self.peek() == Some('/') => {
-                    self.advance();
-                    depth -= 1;
-                }
-                Some('/') if self.peek() == Some('*') => {
-                    self.advance();
-                    depth += 1;
-                }
+                Some('*') if self.peek() == Some('/') => { self.advance(); depth -= 1; }
+                Some('/') if self.peek() == Some('*') => { self.advance(); depth += 1; }
                 None => return Err("Unterminated block comment".to_string()),
                 _ => {}
             }
@@ -143,26 +125,28 @@ impl<'a> Lexer<'a> {
         s
     }
 
+    /// Handle escape sequence, returning the unescaped character.
+    /// `extra_allowed` contains additional characters that can be escaped in this context.
+    fn handle_escape(&mut self, extra_allowed: &[char]) -> Result<char, String> {
+        let escaped = self.advance().ok_or("Unterminated escape")?;
+        match escaped {
+            'n' => Ok('\n'),
+            'r' => Ok('\r'),
+            't' => Ok('\t'),
+            '\\' => Ok('\\'),
+            c if extra_allowed.contains(&c) => Ok(c),
+            _ => Err(format!("Unknown escape: \\{}", escaped)),
+        }
+    }
+
     fn read_string(&mut self, quote: char) -> Result<String, String> {
         let mut s = String::with_capacity(32);
-        // Opening quote already consumed by next_token
+        let extra = if quote == '"' { &['"', '\''][..] } else { &['\'', '"'][..] };
         loop {
             match self.advance() {
                 None => return Err("Unterminated string".to_string()),
                 Some(c) if c == quote => break,
-                Some('\\') => {
-                    let escaped = self.advance().ok_or("Unterminated escape")?;
-                    let c = match escaped {
-                        'n' => '\n',
-                        'r' => '\r',
-                        't' => '\t',
-                        '\\' => '\\',
-                        '"' => '"',
-                        '\'' => '\'',
-                        _ => return Err(format!("Unknown escape: \\{}", escaped)),
-                    };
-                    s.push(c);
-                }
+                Some('\\') => s.push(self.handle_escape(extra)?),
                 Some(c) => s.push(c),
             }
         }
@@ -183,88 +167,27 @@ impl<'a> Lexer<'a> {
         s
     }
 
-    fn read_template_literal(&mut self, start: (usize, usize)) -> Result<Option<Token>, String> {
-        let mut s = String::with_capacity(64);
+    /// Read a template literal. If `is_continuation` is true, we're continuing after a `}`.
+    fn read_template(&mut self, start: (usize, usize), is_continuation: bool) -> Result<Option<Token>, String> {
+        let mut s = String::with_capacity(if is_continuation { 32 } else { 64 });
+        let extra = &['`', '$', '{'][..];
+        
         loop {
             match self.advance() {
                 None => return Err("Unterminated template literal".to_string()),
                 Some('`') => {
                     let end = self.span_start();
-                    return Ok(Some(Token {
-                        kind: TokenKind::TemplateNoSub,
-                        span: Span { start, end },
-                        literal: Some(s.into()),
-                    }));
+                    let kind = if is_continuation { TokenKind::TemplateTail } else { TokenKind::TemplateNoSub };
+                    return Ok(Some(Token { kind, span: Span { start, end }, literal: Some(s.into()) }));
                 }
                 Some('$') if self.peek() == Some('{') => {
-                    self.advance(); // consume '{'
-                    // Push brace depth 1 (we're inside the ${})
+                    self.advance();
                     self.template_brace_stack.push(1);
                     let end = self.span_start();
-                    return Ok(Some(Token {
-                        kind: TokenKind::TemplateHead,
-                        span: Span { start, end },
-                        literal: Some(s.into()),
-                    }));
+                    let kind = if is_continuation { TokenKind::TemplateMiddle } else { TokenKind::TemplateHead };
+                    return Ok(Some(Token { kind, span: Span { start, end }, literal: Some(s.into()) }));
                 }
-                Some('\\') => {
-                    let escaped = self.advance().ok_or("Unterminated escape")?;
-                    let c = match escaped {
-                        'n' => '\n',
-                        'r' => '\r',
-                        't' => '\t',
-                        '\\' => '\\',
-                        '`' => '`',
-                        '$' => '$',
-                        '{' => '{',
-                        _ => return Err(format!("Unknown escape: \\{}", escaped)),
-                    };
-                    s.push(c);
-                }
-                Some(c) => s.push(c),
-            }
-        }
-    }
-
-    /// Continue reading a template literal after an expression ends (after '}')
-    fn read_template_continuation(&mut self, start: (usize, usize)) -> Result<Option<Token>, String> {
-        let mut s = String::new();
-        loop {
-            match self.advance() {
-                None => return Err("Unterminated template literal".to_string()),
-                Some('`') => {
-                    let end = self.span_start();
-                    return Ok(Some(Token {
-                        kind: TokenKind::TemplateTail,
-                        span: Span { start, end },
-                        literal: Some(s.into()),
-                    }));
-                }
-                Some('$') if self.peek() == Some('{') => {
-                    self.advance(); // consume '{'
-                    // Push brace depth 1 again
-                    self.template_brace_stack.push(1);
-                    let end = self.span_start();
-                    return Ok(Some(Token {
-                        kind: TokenKind::TemplateMiddle,
-                        span: Span { start, end },
-                        literal: Some(s.into()),
-                    }));
-                }
-                Some('\\') => {
-                    let escaped = self.advance().ok_or("Unterminated escape")?;
-                    let c = match escaped {
-                        'n' => '\n',
-                        'r' => '\r',
-                        't' => '\t',
-                        '\\' => '\\',
-                        '`' => '`',
-                        '$' => '$',
-                        '{' => '{',
-                        _ => return Err(format!("Unknown escape: \\{}", escaped)),
-                    };
-                    s.push(c);
-                }
+                Some('\\') => s.push(self.handle_escape(extra)?),
                 Some(c) => s.push(c),
             }
         }
@@ -278,25 +201,17 @@ impl<'a> Lexer<'a> {
             self.indent_stack.push(level);
             Some(Token {
                 kind: TokenKind::Indent,
-                span: Span {
-                    start: (start.0, start.1),
-                    end: (start.0, start.1),
-                },
+                span: Span { start, end: start },
                 literal: None,
             })
         } else if level < top {
-            // Pop and emit one Dedent per level; return first, queue rest
             while self.indent_stack.len() > 1 && *self.indent_stack.last().unwrap() > level {
                 self.indent_stack.pop();
-                let dedent = Token {
+                self.pending_dedents.push_back(Token {
                     kind: TokenKind::Dedent,
-                    span: Span {
-                        start: (start.0, start.1),
-                        end: (start.0, start.1),
-                    },
+                    span: Span { start, end: start },
                     literal: None,
-                };
-                self.pending_dedents.push_back(dedent);
+                });
             }
             if *self.indent_stack.last().unwrap_or(&0) != level {
                 self.indent_stack.push(level);
@@ -308,12 +223,10 @@ impl<'a> Lexer<'a> {
     }
 
     pub fn next_token(&mut self) -> Result<Option<Token>, String> {
-        // Drain pending dedents first
         if let Some(tok) = self.pending_dedents.pop_front() {
             return Ok(Some(tok));
         }
 
-        // At line start: handle indentation
         if self.at_line_start {
             self.at_line_start = false;
             let level = self.read_indent_level();
@@ -333,7 +246,6 @@ impl<'a> Lexer<'a> {
         let c = match self.advance() {
             Some(c) => c,
             None => {
-                // Emit pending dedents at EOF
                 if let Some(tok) = self.pending_dedents.pop_front() {
                     return Ok(Some(tok));
                 }
@@ -341,10 +253,7 @@ impl<'a> Lexer<'a> {
                     self.indent_stack.pop();
                     return Ok(Some(Token {
                         kind: TokenKind::Dedent,
-                        span: Span {
-                            start: (self.line, self.col),
-                            end: (self.line, self.col),
-                        },
+                        span: Span { start: (self.line, self.col), end: (self.line, self.col) },
                         literal: None,
                     }));
                 }
@@ -356,21 +265,15 @@ impl<'a> Lexer<'a> {
             '(' => TokenKind::LParen,
             ')' => TokenKind::RParen,
             '{' => {
-                // Track brace depth if inside template expression
-                if let Some(depth) = self.template_brace_stack.last_mut() {
-                    *depth += 1;
-                }
+                if let Some(depth) = self.template_brace_stack.last_mut() { *depth += 1; }
                 TokenKind::LBrace
             }
             '}' => {
-                // Check if this closes a template expression
                 if let Some(depth) = self.template_brace_stack.last_mut() {
                     *depth -= 1;
                     if *depth == 0 {
-                        // This } closes the template expression
                         self.template_brace_stack.pop();
-                        // Continue reading the template
-                        return self.read_template_continuation(start);
+                        return self.read_template(start, true);
                     }
                 }
                 TokenKind::RBrace
@@ -380,179 +283,87 @@ impl<'a> Lexer<'a> {
             ';' => TokenKind::Semicolon,
             ',' => TokenKind::Comma,
             '.' => {
-                if self.peek() == Some('?') {
+                if self.peek() == Some('?') { self.advance(); TokenKind::OptionalChain }
+                else if self.peek() == Some('.') {
                     self.advance();
-                    TokenKind::OptionalChain
-                } else if self.peek() == Some('.') {
-                    self.advance();
-                    if self.peek() == Some('.') {
-                        self.advance();
-                        TokenKind::Spread
-                    } else {
-                        return Err("Unexpected .. (use ... for rest params)".to_string());
-                    }
-                } else {
-                    TokenKind::Dot
-                }
+                    if self.peek() == Some('.') { self.advance(); TokenKind::Spread }
+                    else { return Err("Unexpected .. (use ... for rest params)".to_string()); }
+                } else { TokenKind::Dot }
             }
             '=' => {
                 if self.peek() == Some('=') {
                     self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        TokenKind::StrictEq
-                    } else {
-                        TokenKind::Eq
-                    }
-                } else if self.peek() == Some('>') {
-                    self.advance();
-                    TokenKind::Arrow
-                } else {
-                    TokenKind::Assign
-                }
+                    if self.peek() == Some('=') { self.advance(); TokenKind::StrictEq } else { TokenKind::Eq }
+                } else if self.peek() == Some('>') { self.advance(); TokenKind::Arrow }
+                else { TokenKind::Assign }
             }
             '!' => {
                 if self.peek() == Some('=') {
                     self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        TokenKind::StrictNe
-                    } else {
-                        TokenKind::Ne
-                    }
-                } else {
-                    TokenKind::Not
-                }
+                    if self.peek() == Some('=') { self.advance(); TokenKind::StrictNe } else { TokenKind::Ne }
+                } else { TokenKind::Not }
             }
             '<' => {
-                if self.peek() == Some('=') {
-                    self.advance();
-                    TokenKind::Le
-                } else if self.peek() == Some('<') {
-                    self.advance();
-                    TokenKind::Shl
-                } else {
-                    TokenKind::Lt
-                }
+                if self.peek() == Some('=') { self.advance(); TokenKind::Le }
+                else if self.peek() == Some('<') { self.advance(); TokenKind::Shl }
+                else { TokenKind::Lt }
             }
             '>' => {
-                if self.peek() == Some('=') {
-                    self.advance();
-                    TokenKind::Ge
-                } else if self.peek() == Some('>') {
-                    self.advance();
-                    TokenKind::Shr
-                } else {
-                    TokenKind::Gt
-                }
+                if self.peek() == Some('=') { self.advance(); TokenKind::Ge }
+                else if self.peek() == Some('>') { self.advance(); TokenKind::Shr }
+                else { TokenKind::Gt }
             }
             '^' => TokenKind::BitXor,
             '~' => TokenKind::BitNot,
             '+' => {
-                if self.peek() == Some('+') {
-                    self.advance();
-                    TokenKind::PlusPlus
-                } else if self.peek() == Some('=') {
-                    self.advance();
-                    TokenKind::PlusAssign
-                } else {
-                    TokenKind::Plus
-                }
+                if self.peek() == Some('+') { self.advance(); TokenKind::PlusPlus }
+                else if self.peek() == Some('=') { self.advance(); TokenKind::PlusAssign }
+                else { TokenKind::Plus }
             }
             '-' => {
-                if self.peek() == Some('-') {
-                    self.advance();
-                    TokenKind::MinusMinus
-                } else if self.peek() == Some('=') {
-                    self.advance();
-                    TokenKind::MinusAssign
-                } else {
-                    TokenKind::Minus
-                }
+                if self.peek() == Some('-') { self.advance(); TokenKind::MinusMinus }
+                else if self.peek() == Some('=') { self.advance(); TokenKind::MinusAssign }
+                else { TokenKind::Minus }
             }
             '*' => {
-                if self.peek() == Some('*') {
-                    self.advance();
-                    TokenKind::StarStar
-                } else if self.peek() == Some('=') {
-                    self.advance();
-                    TokenKind::StarAssign
-                } else {
-                    TokenKind::Star
-                }
+                if self.peek() == Some('*') { self.advance(); TokenKind::StarStar }
+                else if self.peek() == Some('=') { self.advance(); TokenKind::StarAssign }
+                else { TokenKind::Star }
             }
             '/' => {
-                if self.peek() == Some('/') {
-                    self.advance();
-                    self.skip_line_comment();
-                    return self.next_token();
-                } else if self.peek() == Some('*') {
-                    self.advance();
-                    self.skip_block_comment()?;
-                    return self.next_token();
-                } else if self.peek() == Some('=') {
-                    self.advance();
-                    TokenKind::SlashAssign
-                } else {
-                    TokenKind::Slash
-                }
+                if self.peek() == Some('/') { self.advance(); self.skip_line_comment(); return self.next_token(); }
+                else if self.peek() == Some('*') { self.advance(); self.skip_block_comment()?; return self.next_token(); }
+                else if self.peek() == Some('=') { self.advance(); TokenKind::SlashAssign }
+                else { TokenKind::Slash }
             }
             '%' => {
-                if self.peek() == Some('=') {
-                    self.advance();
-                    TokenKind::PercentAssign
-                } else {
-                    TokenKind::Percent
-                }
+                if self.peek() == Some('=') { self.advance(); TokenKind::PercentAssign }
+                else { TokenKind::Percent }
             }
             '&' => {
-                if self.peek() == Some('&') {
-                    self.advance();
-                    TokenKind::And
-                } else {
-                    TokenKind::BitAnd
-                }
+                if self.peek() == Some('&') { self.advance(); TokenKind::And }
+                else { TokenKind::BitAnd }
             }
             '|' => {
-                if self.peek() == Some('|') {
-                    self.advance();
-                    TokenKind::Or
-                } else {
-                    TokenKind::BitOr
-                }
+                if self.peek() == Some('|') { self.advance(); TokenKind::Or }
+                else { TokenKind::BitOr }
             }
             '?' => {
-                if self.peek() == Some('?') {
-                    self.advance();
-                    TokenKind::NullishCoalesce
-                } else if self.peek() == Some('.') {
-                    self.advance();
-                    TokenKind::OptionalChain
-                } else {
-                    TokenKind::Question
-                }
+                if self.peek() == Some('?') { self.advance(); TokenKind::NullishCoalesce }
+                else if self.peek() == Some('.') { self.advance(); TokenKind::OptionalChain }
+                else { TokenKind::Question }
             }
             ':' => TokenKind::Colon,
             '"' | '\'' => {
                 let s = self.read_string(c)?;
                 let end = self.span_start();
-                return Ok(Some(Token {
-                    kind: TokenKind::String,
-                    span: Span { start, end },
-                    literal: Some(s.into()),
-                }));
+                return Ok(Some(Token { kind: TokenKind::String, span: Span { start, end }, literal: Some(s.into()) }));
             }
-            '`' => {
-                return self.read_template_literal(start);
-            }
+            '`' => return self.read_template(start, false),
             '0'..='9' => {
                 let num = self.read_number(c);
                 let end = self.span_start();
-                return Ok(Some(Token {
-                    kind: TokenKind::Number,
-                    span: Span { start, end },
-                    literal: Some(num.into()),
-                }));
+                return Ok(Some(Token { kind: TokenKind::Number, span: Span { start, end }, literal: Some(num.into()) }));
             }
             'a'..='z' | 'A'..='Z' | '_' => {
                 let ident = self.read_ident_or_keyword(c);
@@ -561,26 +372,15 @@ impl<'a> Lexer<'a> {
                 return Ok(Some(Token {
                     kind,
                     span: Span { start, end },
-                    literal: if matches!(kind, TokenKind::Ident) {
-                        Some(ident.into())
-                    } else {
-                        None
-                    },
+                    literal: if matches!(kind, TokenKind::Ident) { Some(ident.into()) } else { None },
                 }));
             }
-            '\n' => {
-                self.at_line_start = true;
-                return self.next_token();
-            }
+            '\n' => { self.at_line_start = true; return self.next_token(); }
             _ => return Err(format!("Unexpected character: {:?}", c)),
         };
 
         let end = self.span_start();
-        Ok(Some(Token {
-            kind,
-            span: Span { start, end },
-            literal: None,
-        }))
+        Ok(Some(Token { kind, span: Span { start, end }, literal: None }))
     }
 }
 

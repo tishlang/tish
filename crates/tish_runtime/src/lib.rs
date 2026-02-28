@@ -11,11 +11,95 @@ use tish_builtins::helpers::make_error_value;
 
 pub use tish_core::Value;
 
+// Re-export array methods from tish_builtins
+pub use tish_builtins::array::{
+    push as array_push_impl,
+    pop as array_pop,
+    shift as array_shift,
+    unshift as array_unshift_impl,
+    index_of as array_index_of_impl,
+    includes as array_includes_impl,
+    join as array_join_impl,
+    reverse as array_reverse,
+    splice as array_splice_impl,
+    slice as array_slice_impl,
+    concat as array_concat_impl,
+    flat as array_flat_impl,
+    map as array_map,
+    filter as array_filter,
+    reduce as array_reduce,
+    for_each as array_for_each,
+    find as array_find,
+    find_index as array_find_index,
+    some as array_some,
+    every as array_every,
+    flat_map as array_flat_map,
+    sort_default as array_sort_default,
+    sort_with_comparator as array_sort_with_comparator,
+    sort_numeric_asc as array_sort_numeric_asc,
+    sort_numeric_desc as array_sort_numeric_desc,
+};
+
+// Re-export string methods from tish_builtins
+pub use tish_builtins::string::{
+    index_of as string_index_of_impl,
+    includes as string_includes_impl,
+    slice as string_slice_impl,
+    substring as string_substring_impl,
+    split as string_split_impl,
+    trim as string_trim,
+    to_upper_case as string_to_upper_case,
+    to_lower_case as string_to_lower_case,
+    starts_with as string_starts_with_impl,
+    ends_with as string_ends_with_impl,
+    replace as string_replace_impl,
+    replace_all as string_replace_all_impl,
+    char_at as string_char_at_impl,
+    char_code_at as string_char_code_at_impl,
+    repeat as string_repeat_impl,
+    pad_start as string_pad_start_impl,
+    pad_end as string_pad_end_impl,
+};
+
+// Wrapper functions to maintain API compatibility
+pub fn array_push(arr: &Value, args: &[Value]) -> Value { array_push_impl(arr, args) }
+pub fn array_unshift(arr: &Value, args: &[Value]) -> Value { array_unshift_impl(arr, args) }
+pub fn array_index_of(arr: &Value, search: &Value) -> Value { array_index_of_impl(arr, search) }
+pub fn array_includes(arr: &Value, search: &Value) -> Value { array_includes_impl(arr, search) }
+pub fn array_join(arr: &Value, sep: &Value) -> Value { array_join_impl(arr, sep) }
+pub fn array_splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &[Value]) -> Value {
+    array_splice_impl(arr, start, delete_count, items)
+}
+pub fn array_slice(arr: &Value, start: &Value, end: &Value) -> Value { array_slice_impl(arr, start, end) }
+pub fn array_concat(arr: &Value, args: &[Value]) -> Value { array_concat_impl(arr, args) }
+pub fn array_flat(arr: &Value, depth: &Value) -> Value { array_flat_impl(arr, depth) }
+
+pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
+    match comparator {
+        Some(cmp) => array_sort_with_comparator(arr, cmp),
+        None => array_sort_default(arr),
+    }
+}
+
+pub fn string_index_of(s: &Value, search: &Value) -> Value { string_index_of_impl(s, search) }
+pub fn string_includes(s: &Value, search: &Value) -> Value { string_includes_impl(s, search) }
+pub fn string_slice(s: &Value, start: &Value, end: &Value) -> Value { string_slice_impl(s, start, end) }
+pub fn string_substring(s: &Value, start: &Value, end: &Value) -> Value { string_substring_impl(s, start, end) }
+pub fn string_split(s: &Value, sep: &Value) -> Value { string_split_impl(s, sep) }
+pub fn string_starts_with(s: &Value, search: &Value) -> Value { string_starts_with_impl(s, search) }
+pub fn string_ends_with(s: &Value, search: &Value) -> Value { string_ends_with_impl(s, search) }
+pub fn string_replace(s: &Value, search: &Value, replacement: &Value) -> Value { string_replace_impl(s, search, replacement) }
+pub fn string_replace_all(s: &Value, search: &Value, replacement: &Value) -> Value { string_replace_all_impl(s, search, replacement) }
+pub fn string_char_at(s: &Value, idx: &Value) -> Value { string_char_at_impl(s, idx) }
+pub fn string_char_code_at(s: &Value, idx: &Value) -> Value { string_char_code_at_impl(s, idx) }
+pub fn string_repeat(s: &Value, count: &Value) -> Value { string_repeat_impl(s, count) }
+pub fn string_pad_start(s: &Value, target_len: &Value, pad: &Value) -> Value { string_pad_start_impl(s, target_len, pad) }
+pub fn string_pad_end(s: &Value, target_len: &Value, pad: &Value) -> Value { string_pad_end_impl(s, target_len, pad) }
+
 /// Operators module for compound assignment operations
 pub mod ops {
     use tish_core::Value;
 
-    /// Add two values (supports number + number, string + any)
     pub fn add(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
@@ -43,7 +127,6 @@ pub mod ops {
         }
     }
 
-    /// Subtract two numbers
     pub fn sub(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a - b)),
@@ -51,7 +134,6 @@ pub mod ops {
         }
     }
 
-    /// Multiply two numbers
     pub fn mul(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a * b)),
@@ -59,7 +141,6 @@ pub mod ops {
         }
     }
 
-    /// Divide two numbers
     pub fn div(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a / b)),
@@ -67,7 +148,6 @@ pub mod ops {
         }
     }
 
-    /// Modulo two numbers
     pub fn modulo(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a % b)),
@@ -208,33 +288,45 @@ pub fn encode_uri(args: &[Value]) -> Value {
     Value::String(percent_encode(&s).into())
 }
 
-macro_rules! math_unary {
-    ($name:ident, $op:ident) => {
-        pub fn $name(args: &[Value]) -> Value {
-            let n = extract_num(args.first()).unwrap_or(f64::NAN);
-            Value::Number(n.$op())
-        }
-    };
-}
+// Math functions - use tish_builtins::math
+pub use tish_builtins::math::{
+    abs as tish_math_abs_impl,
+    sqrt as tish_math_sqrt_impl,
+    floor as tish_math_floor_impl,
+    ceil as tish_math_ceil_impl,
+    round as tish_math_round_impl,
+    sin as tish_math_sin_impl,
+    cos as tish_math_cos_impl,
+    tan as tish_math_tan_impl,
+    exp as tish_math_exp_impl,
+    trunc as tish_math_trunc_impl,
+    min as tish_math_min_impl,
+    max as tish_math_max_impl,
+    pow as tish_math_pow_impl,
+    sign as tish_math_sign_impl,
+    random as tish_math_random_impl,
+};
 
-math_unary!(math_abs, abs);
-math_unary!(math_sqrt, sqrt);
-math_unary!(math_floor, floor);
-math_unary!(math_ceil, ceil);
-math_unary!(math_round, round);
+// Wrapper functions to maintain API (existing callers use math_* naming)
+pub fn math_abs(args: &[Value]) -> Value { tish_math_abs_impl(args) }
+pub fn math_sqrt(args: &[Value]) -> Value { tish_math_sqrt_impl(args) }
+pub fn math_floor(args: &[Value]) -> Value { tish_math_floor_impl(args) }
+pub fn math_ceil(args: &[Value]) -> Value { tish_math_ceil_impl(args) }
+pub fn math_round(args: &[Value]) -> Value { tish_math_round_impl(args) }
+pub fn math_min(args: &[Value]) -> Value { tish_math_min_impl(args) }
+pub fn math_max(args: &[Value]) -> Value { tish_math_max_impl(args) }
+pub fn math_sin(args: &[Value]) -> Value { tish_math_sin_impl(args) }
+pub fn math_cos(args: &[Value]) -> Value { tish_math_cos_impl(args) }
+pub fn math_tan(args: &[Value]) -> Value { tish_math_tan_impl(args) }
+pub fn math_exp(args: &[Value]) -> Value { tish_math_exp_impl(args) }
+pub fn math_trunc(args: &[Value]) -> Value { tish_math_trunc_impl(args) }
+pub fn math_pow(args: &[Value]) -> Value { tish_math_pow_impl(args) }
+pub fn math_sign(args: &[Value]) -> Value { tish_math_sign_impl(args) }
+pub fn math_random(args: &[Value]) -> Value { tish_math_random_impl(args) }
 
-pub fn math_min(args: &[Value]) -> Value {
-    let n = args.iter()
-        .filter_map(|v| extract_num(Some(v)))
-        .fold(f64::INFINITY, f64::min);
-    Value::Number(if n == f64::INFINITY { f64::NAN } else { n })
-}
-
-pub fn math_max(args: &[Value]) -> Value {
-    let n = args.iter()
-        .filter_map(|v| extract_num(Some(v)))
-        .fold(f64::NEG_INFINITY, f64::max);
-    Value::Number(if n == f64::NEG_INFINITY { f64::NAN } else { n })
+pub fn math_log(args: &[Value]) -> Value {
+    let n = extract_num(args.first()).unwrap_or(f64::NAN);
+    Value::Number(n.ln())
 }
 
 pub fn json_stringify(args: &[Value]) -> Value {
@@ -247,40 +339,6 @@ pub fn json_parse(args: &[Value]) -> Value {
     core_json_parse(&s).unwrap_or(Value::Null)
 }
 
-// ============== New Math Functions ==============
-
-pub fn math_random(_args: &[Value]) -> Value {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let random = RandomState::new().build_hasher().finish() as f64 / u64::MAX as f64;
-    Value::Number(random)
-}
-
-pub fn math_pow(args: &[Value]) -> Value {
-    let base = extract_num(args.first()).unwrap_or(f64::NAN);
-    let exp = extract_num(args.get(1)).unwrap_or(f64::NAN);
-    Value::Number(base.powf(exp))
-}
-
-math_unary!(math_sin, sin);
-math_unary!(math_cos, cos);
-math_unary!(math_tan, tan);
-math_unary!(math_exp, exp);
-math_unary!(math_trunc, trunc);
-
-pub fn math_log(args: &[Value]) -> Value {
-    let n = extract_num(args.first()).unwrap_or(f64::NAN);
-    Value::Number(n.ln())
-}
-
-pub fn math_sign(args: &[Value]) -> Value {
-    let n = extract_num(args.first()).unwrap_or(f64::NAN);
-    let sign = if n.is_nan() { f64::NAN } else if n > 0.0 { 1.0 } else if n < 0.0 { -1.0 } else { 0.0 };
-    Value::Number(sign)
-}
-
-// ============== Date Functions ==============
-
 pub fn date_now(_args: &[Value]) -> Value {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
@@ -289,8 +347,6 @@ pub fn date_now(_args: &[Value]) -> Value {
         .unwrap_or(0.0);
     Value::Number(now)
 }
-
-// ============== Array/String Static Functions ==============
 
 pub fn array_is_array(args: &[Value]) -> Value {
     Value::Bool(matches!(args.first(), Some(Value::Array(_))))
@@ -303,8 +359,6 @@ pub fn string_from_char_code(args: &[Value]) -> Value {
     }).collect();
     Value::String(s.into())
 }
-
-// ============== Process Functions ==============
 
 #[cfg(feature = "process")]
 pub fn process_exit(args: &[Value]) -> Value {
@@ -322,8 +376,6 @@ pub fn process_cwd(_args: &[Value]) -> Value {
         .unwrap_or_default();
     Value::String(cwd.into())
 }
-
-// ============== File I/O Functions ==============
 
 #[cfg(feature = "fs")]
 pub fn read_file(args: &[Value]) -> Value {
@@ -377,8 +429,9 @@ pub fn mkdir(args: &[Value]) -> Value {
 }
 
 use std::sync::Arc;
+use std::cell::RefCell;
+use std::rc::Rc;
 
-/// Get property from object/array by string key.
 pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
     let key = key.as_ref();
     match obj {
@@ -406,7 +459,6 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
     }
 }
 
-/// Get index from array or object.
 pub fn get_index(obj: &Value, index: &Value) -> Value {
     match obj {
         Value::Array(arr) => {
@@ -428,7 +480,6 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
     }
 }
 
-/// Set property on object by string key. Returns the value that was set.
 pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
     match obj {
         Value::Object(map) => {
@@ -439,7 +490,6 @@ pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
     }
 }
 
-/// Set index on array or object. Returns the value that was set.
 pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
     match obj {
         Value::Array(arr) => {
@@ -467,7 +517,6 @@ pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
     }
 }
 
-/// 'in' operator: check if key exists in object/array.
 pub fn in_operator(key: &Value, obj: &Value) -> Value {
     let key_str: Arc<str> = match key {
         Value::String(s) => Arc::clone(s),
@@ -491,349 +540,15 @@ pub fn in_operator(key: &Value, obj: &Value) -> Value {
     Value::Bool(result)
 }
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
-// ============== Array Methods ==============
-
-pub fn array_push(arr: &Value, args: &[Value]) -> Value {
-    if let Value::Array(arr) = arr {
-        let mut arr_mut = arr.borrow_mut();
-        for v in args {
-            arr_mut.push(v.clone());
-        }
-        Value::Number(arr_mut.len() as f64)
-    } else {
-        Value::Null
-    }
-}
-
-pub fn array_pop(arr: &Value) -> Value {
-    if let Value::Array(arr) = arr {
-        arr.borrow_mut().pop().unwrap_or(Value::Null)
-    } else {
-        Value::Null
-    }
-}
-
-pub fn array_shift(arr: &Value) -> Value {
-    if let Value::Array(arr) = arr {
-        let mut arr_mut = arr.borrow_mut();
-        if arr_mut.is_empty() {
-            Value::Null
-        } else {
-            arr_mut.remove(0)
-        }
-    } else {
-        Value::Null
-    }
-}
-
-pub fn array_unshift(arr: &Value, args: &[Value]) -> Value {
-    if let Value::Array(arr) = arr {
-        let mut arr_mut = arr.borrow_mut();
-        for (i, v) in args.iter().enumerate() {
-            arr_mut.insert(i, v.clone());
-        }
-        Value::Number(arr_mut.len() as f64)
-    } else {
-        Value::Null
-    }
-}
-
-pub fn array_index_of(arr: &Value, search: &Value) -> Value {
-    if let Value::Array(arr) = arr {
-        let arr_borrow = arr.borrow();
-        for (i, v) in arr_borrow.iter().enumerate() {
-            if v.strict_eq(search) {
-                return Value::Number(i as f64);
-            }
-        }
-    }
-    Value::Number(-1.0)
-}
-
-pub fn array_includes(arr: &Value, search: &Value) -> Value {
-    if let Value::Array(arr) = arr {
-        let arr_borrow = arr.borrow();
-        for v in arr_borrow.iter() {
-            if v.strict_eq(search) {
-                return Value::Bool(true);
-            }
-        }
-    }
-    Value::Bool(false)
-}
-
-pub fn array_join(arr: &Value, sep: &Value) -> Value {
-    if let Value::Array(arr) = arr {
-        let separator = match sep {
-            Value::String(s) => s.to_string(),
-            _ => ",".to_string(),
-        };
-        let arr_borrow = arr.borrow();
-        let parts: Vec<String> = arr_borrow.iter().map(|v| v.to_display_string()).collect();
-        Value::String(parts.join(&separator).into())
-    } else {
-        Value::Null
-    }
-}
-
-pub fn array_reverse(arr: &Value) -> Value {
-    if let Value::Array(arr) = arr {
-        arr.borrow_mut().reverse();
-        Value::Array(Rc::clone(arr))
-    } else {
-        Value::Null
-    }
-}
-
-pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
-    if let Value::Array(arr) = arr {
-        let mut arr_mut = arr.borrow_mut();
-        
-        if let Some(Value::Function(cmp_fn)) = comparator {
-            let len = arr_mut.len();
-            let mut indices: Vec<usize> = (0..len).collect();
-            
-            // Take ownership of elements to avoid double-borrow
-            let mut elements: Vec<Value> = std::mem::take(&mut *arr_mut);
-            
-            // Reusable args buffer to avoid per-comparison Vec allocation
-            let mut args_buf: [Value; 2] = [Value::Null, Value::Null];
-            
-            indices.sort_by(|&a, &b| {
-                args_buf[0] = elements[a].clone();
-                args_buf[1] = elements[b].clone();
-                let result = cmp_fn(&args_buf);
-                match result {
-                    Value::Number(n) => {
-                        if n < 0.0 {
-                            std::cmp::Ordering::Less
-                        } else if n > 0.0 {
-                            std::cmp::Ordering::Greater
-                        } else {
-                            std::cmp::Ordering::Equal
-                        }
-                    }
-                    _ => std::cmp::Ordering::Equal,
-                }
-            });
-            
-            // Reconstruct array in sorted order
-            let sorted: Vec<Value> = indices.into_iter().map(|i| {
-                std::mem::replace(&mut elements[i], Value::Null)
-            }).collect();
-            *arr_mut = sorted;
-        } else {
-            arr_mut.sort_by(|a, b| {
-                let sa = a.to_display_string();
-                let sb = b.to_display_string();
-                sa.cmp(&sb)
-            });
-        }
-        drop(arr_mut);
-        Value::Array(Rc::clone(arr))
-    } else {
-        Value::Null
-    }
-}
-
-/// Fast path for numeric ascending sort: (a, b) => a - b
-pub fn array_sort_numeric_asc(arr: &Value) -> Value {
-    if let Value::Array(arr) = arr {
-        let mut arr_mut = arr.borrow_mut();
-        arr_mut.sort_by(|a, b| {
-            let na = match a { Value::Number(n) => *n, _ => f64::NAN };
-            let nb = match b { Value::Number(n) => *n, _ => f64::NAN };
-            na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        drop(arr_mut);
-        Value::Array(Rc::clone(arr))
-    } else {
-        Value::Null
-    }
-}
-
-/// Fast path for numeric descending sort: (a, b) => b - a
-pub fn array_sort_numeric_desc(arr: &Value) -> Value {
-    if let Value::Array(arr) = arr {
-        let mut arr_mut = arr.borrow_mut();
-        arr_mut.sort_by(|a, b| {
-            let na = match a { Value::Number(n) => *n, _ => f64::NAN };
-            let nb = match b { Value::Number(n) => *n, _ => f64::NAN };
-            nb.partial_cmp(&na).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        drop(arr_mut);
-        Value::Array(Rc::clone(arr))
-    } else {
-        Value::Null
-    }
-}
-
-// Higher-order array methods
-
-pub fn array_map(arr: &Value, callback: &Value) -> Value {
-    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
-        let result: Vec<Value> = arr_borrow.iter().enumerate().map(|(i, v)| {
-            cb(&[v.clone(), Value::Number(i as f64)])
-        }).collect();
-        Value::Array(Rc::new(RefCell::new(result)))
-    } else {
-        Value::Null
-    }
-}
-
-pub fn array_filter(arr: &Value, callback: &Value) -> Value {
-    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
-        let result: Vec<Value> = arr_borrow.iter().enumerate().filter_map(|(i, v)| {
-            let keep = cb(&[v.clone(), Value::Number(i as f64)]);
-            if keep.is_truthy() { Some(v.clone()) } else { None }
-        }).collect();
-        Value::Array(Rc::new(RefCell::new(result)))
-    } else {
-        Value::Null
-    }
-}
-
-pub fn array_reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
-    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
-        let mut acc = initial.clone();
-        for (i, v) in arr_borrow.iter().enumerate() {
-            acc = cb(&[acc, v.clone(), Value::Number(i as f64)]);
-        }
-        acc
-    } else {
-        Value::Null
-    }
-}
-
-pub fn array_for_each(arr: &Value, callback: &Value) -> Value {
-    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
-        for (i, v) in arr_borrow.iter().enumerate() {
-            cb(&[v.clone(), Value::Number(i as f64)]);
-        }
-    }
-    Value::Null
-}
-
-pub fn array_find(arr: &Value, callback: &Value) -> Value {
-    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
-        for (i, v) in arr_borrow.iter().enumerate() {
-            let result = cb(&[v.clone(), Value::Number(i as f64)]);
-            if result.is_truthy() {
-                return v.clone();
-            }
-        }
-    }
-    Value::Null
-}
-
-pub fn array_find_index(arr: &Value, callback: &Value) -> Value {
-    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
-        for (i, v) in arr_borrow.iter().enumerate() {
-            let result = cb(&[v.clone(), Value::Number(i as f64)]);
-            if result.is_truthy() {
-                return Value::Number(i as f64);
-            }
-        }
-    }
-    Value::Number(-1.0)
-}
-
-pub fn array_some(arr: &Value, callback: &Value) -> Value {
-    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
-        for (i, v) in arr_borrow.iter().enumerate() {
-            let result = cb(&[v.clone(), Value::Number(i as f64)]);
-            if result.is_truthy() {
-                return Value::Bool(true);
-            }
-        }
-    }
-    Value::Bool(false)
-}
-
-pub fn array_every(arr: &Value, callback: &Value) -> Value {
-    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
-        for (i, v) in arr_borrow.iter().enumerate() {
-            let result = cb(&[v.clone(), Value::Number(i as f64)]);
-            if !result.is_truthy() {
-                return Value::Bool(false);
-            }
-        }
-        Value::Bool(true)
-    } else {
-        Value::Bool(false)
-    }
-}
-
-pub fn array_flat(arr: &Value, depth: &Value) -> Value {
-    fn flatten(arr: &[Value], depth: i32, result: &mut Vec<Value>) {
-        for v in arr {
-            if depth > 0 {
-                if let Value::Array(inner) = v {
-                    flatten(&inner.borrow(), depth - 1, result);
-                    continue;
-                }
-            }
-            result.push(v.clone());
-        }
-    }
-    
-    if let Value::Array(arr) = arr {
-        let d = match depth {
-            Value::Number(n) => *n as i32,
-            _ => 1,
-        };
-        let mut result = Vec::new();
-        flatten(&arr.borrow(), d, &mut result);
-        Value::Array(Rc::new(RefCell::new(result)))
-    } else {
-        Value::Null
-    }
-}
-
-pub fn array_flat_map(arr: &Value, callback: &Value) -> Value {
-    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
-        let mut result: Vec<Value> = Vec::new();
-        for (i, v) in arr_borrow.iter().enumerate() {
-            let mapped = cb(&[v.clone(), Value::Number(i as f64)]);
-            if let Value::Array(inner) = mapped {
-                result.extend(inner.borrow().iter().cloned());
-            } else {
-                result.push(mapped);
-            }
-        }
-        Value::Array(Rc::new(RefCell::new(result)))
-    } else {
-        Value::Null
-    }
-}
-
-// ============== Object Functions ==============
-
+// Object functions
 pub fn object_assign(args: &[Value]) -> Value {
     let target = match args.first() {
         Some(Value::Object(obj)) => obj,
         _ => return Value::Null,
     };
     
-    // Pre-calculate total additional capacity needed
     let additional_capacity: usize = args.iter().skip(1).map(|source| {
-        if let Value::Object(src) = source {
-            src.borrow().len()
-        } else {
-            0
-        }
+        if let Value::Object(src) = source { src.borrow().len() } else { 0 }
     }).sum();
     
     let mut target_mut = target.borrow_mut();
@@ -895,7 +610,6 @@ pub fn object_from_entries(args: &[Value]) -> Value {
     
     if let Some(Value::Array(entries)) = args.first() {
         let entries_borrow = entries.borrow();
-        // Pre-allocate with known capacity
         let mut obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(entries_borrow.len());
         
         for entry in entries_borrow.iter() {
@@ -913,390 +627,18 @@ pub fn object_from_entries(args: &[Value]) -> Value {
         
         Value::Object(Rc::new(RefCell::new(obj)))
     } else {
-        Value::Object(Rc::new(RefCell::new(HashMap::new())))
+        Value::Object(Rc::new(RefCell::new(std::collections::HashMap::new())))
     }
 }
 
-pub fn array_splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &[Value]) -> Value {
-    if let Value::Array(arr) = arr {
-        let mut arr_mut = arr.borrow_mut();
-        let len = arr_mut.len() as i64;
-        
-        let start_idx = match start {
-            Value::Number(n) => {
-                let n = *n as i64;
-                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-            }
-            _ => 0,
-        };
-        
-        let del_count = match delete_count {
-            Some(Value::Number(n)) => (*n as i64).max(0) as usize,
-            _ => (len as usize).saturating_sub(start_idx),
-        };
-        
-        let actual_delete = del_count.min(arr_mut.len().saturating_sub(start_idx));
-        
-        // Use Vec::splice for efficient in-place modification
-        let removed: Vec<Value> = arr_mut
-            .splice(start_idx..start_idx + actual_delete, items.iter().cloned())
-            .collect();
-        
-        Value::Array(Rc::new(RefCell::new(removed)))
-    } else {
-        Value::Null
-    }
-}
-
-pub fn array_slice(arr: &Value, start: &Value, end: &Value) -> Value {
-    if let Value::Array(arr) = arr {
-        let arr_borrow = arr.borrow();
-        let len = arr_borrow.len() as i64;
-        let start_idx = match start {
-            Value::Number(n) => {
-                let n = *n as i64;
-                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-            }
-            _ => 0,
-        };
-        let end_idx = match end {
-            Value::Null => len as usize,
-            Value::Number(n) => {
-                let n = *n as i64;
-                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-            }
-            _ => len as usize,
-        };
-        let sliced: Vec<Value> = if start_idx < end_idx {
-            arr_borrow[start_idx..end_idx].to_vec()
-        } else {
-            vec![]
-        };
-        Value::Array(Rc::new(RefCell::new(sliced)))
-    } else {
-        Value::Null
-    }
-}
-
-pub fn array_concat(arr: &Value, args: &[Value]) -> Value {
-    if let Value::Array(arr) = arr {
-        let mut result = arr.borrow().clone();
-        for v in args {
-            if let Value::Array(other) = v {
-                result.extend(other.borrow().iter().cloned());
-            } else {
-                result.push(v.clone());
-            }
-        }
-        Value::Array(Rc::new(RefCell::new(result)))
-    } else {
-        Value::Null
-    }
-}
-
-// ============== String Methods ==============
-
-pub fn string_index_of(s: &Value, search: &Value) -> Value {
-    if let (Value::String(s), Value::String(search)) = (s, search) {
-        Value::Number(s.find(search.as_ref()).map(|i| i as f64).unwrap_or(-1.0))
-    } else {
-        Value::Number(-1.0)
-    }
-}
-
-pub fn string_includes(s: &Value, search: &Value) -> Value {
-    if let (Value::String(s), Value::String(search)) = (s, search) {
-        Value::Bool(s.contains(search.as_ref()))
-    } else {
-        Value::Bool(false)
-    }
-}
-
-pub fn string_slice(s: &Value, start: &Value, end: &Value) -> Value {
-    if let Value::String(s) = s {
-        if s.is_ascii() {
-            let len = s.len() as i64;
-            let start_idx = match start {
-                Value::Number(n) => {
-                    let n = *n as i64;
-                    if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-                }
-                _ => 0,
-            };
-            let end_idx = match end {
-                Value::Null => len as usize,
-                Value::Number(n) => {
-                    let n = *n as i64;
-                    if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-                }
-                _ => len as usize,
-            };
-            let sliced = if start_idx < end_idx {
-                &s[start_idx..end_idx]
-            } else {
-                ""
-            };
-            Value::String(sliced.to_string().into())
-        } else {
-            let chars: Vec<char> = s.chars().collect();
-            let len = chars.len() as i64;
-            let start_idx = match start {
-                Value::Number(n) => {
-                    let n = *n as i64;
-                    if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-                }
-                _ => 0,
-            };
-            let end_idx = match end {
-                Value::Null => len as usize,
-                Value::Number(n) => {
-                    let n = *n as i64;
-                    if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-                }
-                _ => len as usize,
-            };
-            let sliced: String = if start_idx < end_idx {
-                chars[start_idx..end_idx].iter().collect()
-            } else {
-                String::new()
-            };
-            Value::String(sliced.into())
-        }
-    } else {
-        Value::Null
-    }
-}
-
-pub fn string_substring(s: &Value, start: &Value, end: &Value) -> Value {
-    if let Value::String(s) = s {
-        if s.is_ascii() {
-            let len = s.len();
-            let start_idx = match start {
-                Value::Number(n) => (*n as usize).min(len),
-                _ => 0,
-            };
-            let end_idx = match end {
-                Value::Null => len,
-                Value::Number(n) => (*n as usize).min(len),
-                _ => len,
-            };
-            let (ss, ee) = (start_idx.min(end_idx), start_idx.max(end_idx));
-            Value::String(s[ss..ee].to_string().into())
-        } else {
-            let chars: Vec<char> = s.chars().collect();
-            let len = chars.len();
-            let start_idx = match start {
-                Value::Number(n) => (*n as usize).min(len),
-                _ => 0,
-            };
-            let end_idx = match end {
-                Value::Null => len,
-                Value::Number(n) => (*n as usize).min(len),
-                _ => len,
-            };
-            let (ss, ee) = (start_idx.min(end_idx), start_idx.max(end_idx));
-            Value::String(chars[ss..ee].iter().collect::<String>().into())
-        }
-    } else {
-        Value::Null
-    }
-}
-
-pub fn string_split(s: &Value, sep: &Value) -> Value {
-    if let Value::String(s) = s {
-        let separator = match sep {
-            Value::String(ss) => ss.as_ref(),
-            _ => return Value::Array(Rc::new(RefCell::new(vec![Value::String(Arc::clone(s))]))),
-        };
-        let parts: Vec<Value> = s.split(separator)
-            .map(|p| Value::String(p.into()))
-            .collect();
-        Value::Array(Rc::new(RefCell::new(parts)))
-    } else {
-        Value::Null
-    }
-}
-
-pub fn string_trim(s: &Value) -> Value {
-    if let Value::String(s) = s {
-        Value::String(s.trim().into())
-    } else {
-        Value::Null
-    }
-}
-
-pub fn string_to_upper_case(s: &Value) -> Value {
-    if let Value::String(s) = s {
-        Value::String(s.to_uppercase().into())
-    } else {
-        Value::Null
-    }
-}
-
-pub fn string_to_lower_case(s: &Value) -> Value {
-    if let Value::String(s) = s {
-        Value::String(s.to_lowercase().into())
-    } else {
-        Value::Null
-    }
-}
-
-pub fn string_starts_with(s: &Value, search: &Value) -> Value {
-    if let (Value::String(s), Value::String(search)) = (s, search) {
-        Value::Bool(s.starts_with(search.as_ref()))
-    } else {
-        Value::Bool(false)
-    }
-}
-
-pub fn string_ends_with(s: &Value, search: &Value) -> Value {
-    if let (Value::String(s), Value::String(search)) = (s, search) {
-        Value::Bool(s.ends_with(search.as_ref()))
-    } else {
-        Value::Bool(false)
-    }
-}
-
-pub fn string_replace(s: &Value, search: &Value, replacement: &Value) -> Value {
-    if let Value::String(s) = s {
-        let search_str = match search {
-            Value::String(ss) => ss.to_string(),
-            _ => return Value::String(Arc::clone(s)),
-        };
-        let replacement_str = match replacement {
-            Value::String(ss) => ss.to_string(),
-            _ => String::new(),
-        };
-        Value::String(s.replacen(&search_str, &replacement_str, 1).into())
-    } else {
-        Value::Null
-    }
-}
-
-pub fn string_replace_all(s: &Value, search: &Value, replacement: &Value) -> Value {
-    if let Value::String(s) = s {
-        let search_str = match search {
-            Value::String(ss) => ss.to_string(),
-            _ => return Value::String(Arc::clone(s)),
-        };
-        let replacement_str = match replacement {
-            Value::String(ss) => ss.to_string(),
-            _ => String::new(),
-        };
-        Value::String(s.replace(&search_str, &replacement_str).into())
-    } else {
-        Value::Null
-    }
-}
-
-pub fn string_char_at(s: &Value, idx: &Value) -> Value {
-    if let Value::String(s) = s {
-        let idx = match idx {
-            Value::Number(n) => *n as usize,
-            _ => 0,
-        };
-        if s.is_ascii() {
-            s.as_bytes().get(idx)
-                .map(|&b| Value::String((b as char).to_string().into()))
-                .unwrap_or(Value::String("".into()))
-        } else {
-            s.chars().nth(idx)
-                .map(|c| Value::String(c.to_string().into()))
-                .unwrap_or(Value::String("".into()))
-        }
-    } else {
-        Value::Null
-    }
-}
-
-pub fn string_char_code_at(s: &Value, idx: &Value) -> Value {
-    if let Value::String(s) = s {
-        let idx = match idx {
-            Value::Number(n) => *n as usize,
-            _ => 0,
-        };
-        if s.is_ascii() {
-            s.as_bytes().get(idx)
-                .map(|&b| Value::Number(b as f64))
-                .unwrap_or(Value::Number(f64::NAN))
-        } else {
-            s.chars().nth(idx)
-                .map(|c| Value::Number(c as u32 as f64))
-                .unwrap_or(Value::Number(f64::NAN))
-        }
-    } else {
-        Value::Null
-    }
-}
-
-pub fn string_repeat(s: &Value, count: &Value) -> Value {
-    if let Value::String(s) = s {
-        let count = match count {
-            Value::Number(n) if *n >= 0.0 => *n as usize,
-            _ => 0,
-        };
-        Value::String(s.repeat(count).into())
-    } else {
-        Value::Null
-    }
-}
-
-pub fn string_pad_start(s: &Value, target_len: &Value, pad: &Value) -> Value {
-    if let Value::String(s) = s {
-        let target_len = match target_len {
-            Value::Number(n) => *n as usize,
-            _ => return Value::String(Arc::clone(s)),
-        };
-        let pad_str = match pad {
-            Value::String(p) => p.to_string(),
-            Value::Null => " ".to_string(),
-            _ => " ".to_string(),
-        };
-        let chars: Vec<char> = s.chars().collect();
-        if chars.len() >= target_len || pad_str.is_empty() {
-            return Value::String(Arc::clone(s));
-        }
-        let needed = target_len - chars.len();
-        let padding: String = pad_str.chars().cycle().take(needed).collect();
-        Value::String(format!("{}{}", padding, s).into())
-    } else {
-        Value::Null
-    }
-}
-
-pub fn string_pad_end(s: &Value, target_len: &Value, pad: &Value) -> Value {
-    if let Value::String(s) = s {
-        let target_len = match target_len {
-            Value::Number(n) => *n as usize,
-            _ => return Value::String(Arc::clone(s)),
-        };
-        let pad_str = match pad {
-            Value::String(p) => p.to_string(),
-            Value::Null => " ".to_string(),
-            _ => " ".to_string(),
-        };
-        let chars: Vec<char> = s.chars().collect();
-        if chars.len() >= target_len || pad_str.is_empty() {
-            return Value::String(Arc::clone(s));
-        }
-        let needed = target_len - chars.len();
-        let padding: String = pad_str.chars().cycle().take(needed).collect();
-        Value::String(format!("{}{}", s, padding).into())
-    } else {
-        Value::Null
-    }
-}
-
-// ============== HTTP Support ==============
-
+// HTTP Support
 #[cfg(feature = "http")]
 mod http;
 
 #[cfg(feature = "http")]
 pub use http::{fetch as http_fetch, fetch_all as http_fetch_all, serve as http_serve};
 
-// ============== RegExp Support ==============
-
+// RegExp Support
 #[cfg(feature = "regex")]
 pub use tish_core::{TishRegExp, RegExpFlags};
 
@@ -1345,17 +687,11 @@ pub fn regexp_exec(re: &Value, input: &Value) -> Value {
 
 #[cfg(feature = "regex")]
 fn regexp_exec_impl(re: &mut tish_core::TishRegExp, input: &str) -> Value {
-    let start = if re.flags.global || re.flags.sticky {
-        re.last_index
-    } else {
-        0
-    };
+    let start = if re.flags.global || re.flags.sticky { re.last_index } else { 0 };
 
     let char_count = input.chars().count();
     if start > char_count {
-        if re.flags.global || re.flags.sticky {
-            re.last_index = 0;
-        }
+        if re.flags.global || re.flags.sticky { re.last_index = 0; }
         return Value::Null;
     }
 
@@ -1393,9 +729,7 @@ fn regexp_exec_impl(re: &mut tish_core::TishRegExp, input: &str) -> Value {
             Value::Array(Rc::new(RefCell::new(result)))
         }
         Ok(None) | Err(_) => {
-            if re.flags.global || re.flags.sticky {
-                re.last_index = 0;
-            }
+            if re.flags.global || re.flags.sticky { re.last_index = 0; }
             Value::Null
         }
     }
@@ -1474,11 +808,7 @@ pub fn string_match_regex(s: &Value, regexp: &Value) -> Value {
                 
                 re.last_index = 0;
                 
-                if matches.is_empty() {
-                    Value::Null
-                } else {
-                    Value::Array(Rc::new(RefCell::new(matches)))
-                }
+                if matches.is_empty() { Value::Null } else { Value::Array(Rc::new(RefCell::new(matches))) }
             } else {
                 regexp_exec_impl(&mut re, input)
             }

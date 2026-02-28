@@ -2,6 +2,55 @@
 
 use std::sync::Arc;
 
+/// Macro to generate single-operator binary parsing functions.
+/// Reduces boilerplate for Or, And, BitOr, BitXor, BitAnd parsers.
+macro_rules! binary_single_op {
+    ($name:ident, $next:ident, $token:ident, $op:expr) => {
+        fn $name(&mut self) -> Result<Expr, String> {
+            let mut left = self.$next()?;
+            while matches!(self.peek_kind(), Some(TokenKind::$token)) {
+                self.advance();
+                let right = self.$next()?;
+                let start = left.span().start;
+                let end = right.span().end;
+                left = Expr::Binary {
+                    left: Box::new(left),
+                    op: $op,
+                    right: Box::new(right),
+                    span: Span { start, end },
+                };
+            }
+            Ok(left)
+        }
+    };
+}
+
+/// Macro for multi-operator binary parsing with a match block.
+macro_rules! binary_multi_op {
+    ($name:ident, $next:ident, $( $token:ident => $op:expr ),+ $(,)?) => {
+        fn $name(&mut self) -> Result<Expr, String> {
+            let mut left = self.$next()?;
+            loop {
+                let op = match self.peek_kind() {
+                    $( Some(TokenKind::$token) => $op, )+
+                    _ => break,
+                };
+                self.advance();
+                let right = self.$next()?;
+                let start = left.span().start;
+                let end = right.span().end;
+                left = Expr::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                    span: Span { start, end },
+                };
+            }
+            Ok(left)
+        }
+    };
+}
+
 use tish_ast::{
     ArrowBody, ArrayElement, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
     DestructProp, Expr, Literal, MemberProp, ObjectProp, Program, Span, Statement, TypeAnnotation,
@@ -54,7 +103,7 @@ impl<'a> Parser<'a> {
 
     pub fn parse_program(&mut self) -> Result<Program, String> {
         let mut statements = Vec::with_capacity(8);
-        while self.peek_kind().is_some() && !matches!(self.peek_kind(), Some(TokenKind::Eof)) {
+        while self.peek_kind().is_some() {
             if matches!(self.peek_kind(), Some(TokenKind::Dedent)) {
                 self.advance();
                 continue;
@@ -838,206 +887,21 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    fn parse_or(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_and()?;
-        while matches!(self.peek_kind(), Some(TokenKind::Or)) {
-            self.advance();
-            let right = self.parse_and()?;
-            let start = left.span().start;
-            let end = right.span().end;
-            left = Expr::Binary {
-                left: Box::new(left),
-                op: BinOp::Or,
-                right: Box::new(right),
-                span: Span { start, end },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_and(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_bit_or()?;
-        while matches!(self.peek_kind(), Some(TokenKind::And)) {
-            self.advance();
-            let right = self.parse_bit_or()?;
-            let start = left.span().start;
-            let end = right.span().end;
-            left = Expr::Binary {
-                left: Box::new(left),
-                op: BinOp::And,
-                right: Box::new(right),
-                span: Span { start, end },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_bit_or(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_bit_xor()?;
-        while matches!(self.peek_kind(), Some(TokenKind::BitOr)) {
-            self.advance();
-            let right = self.parse_bit_xor()?;
-            let start = left.span().start;
-            let end = right.span().end;
-            left = Expr::Binary {
-                left: Box::new(left),
-                op: BinOp::BitOr,
-                right: Box::new(right),
-                span: Span { start, end },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_bit_xor(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_bit_and()?;
-        while matches!(self.peek_kind(), Some(TokenKind::BitXor)) {
-            self.advance();
-            let right = self.parse_bit_and()?;
-            let start = left.span().start;
-            let end = right.span().end;
-            left = Expr::Binary {
-                left: Box::new(left),
-                op: BinOp::BitXor,
-                right: Box::new(right),
-                span: Span { start, end },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_bit_and(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_shift()?;
-        while matches!(self.peek_kind(), Some(TokenKind::BitAnd)) {
-            self.advance();
-            let right = self.parse_shift()?;
-            let start = left.span().start;
-            let end = right.span().end;
-            left = Expr::Binary {
-                left: Box::new(left),
-                op: BinOp::BitAnd,
-                right: Box::new(right),
-                span: Span { start, end },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_shift(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_equality()?;
-        loop {
-            let op = match self.peek_kind() {
-                Some(TokenKind::Shl) => BinOp::Shl,
-                Some(TokenKind::Shr) => BinOp::Shr,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_equality()?;
-            let start = left.span().start;
-            let end = right.span().end;
-            left = Expr::Binary {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-                span: Span { start, end },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_equality(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_comparison()?;
-        loop {
-            let op = match self.peek_kind() {
-                Some(TokenKind::StrictEq) => BinOp::StrictEq,
-                Some(TokenKind::StrictNe) => BinOp::StrictNe,
-                Some(TokenKind::Eq) => BinOp::Eq,
-                Some(TokenKind::Ne) => BinOp::Ne,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_comparison()?;
-            let start = left.span().start;
-            let end = right.span().end;
-            left = Expr::Binary {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-                span: Span { start, end },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_comparison(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_term()?;
-        loop {
-            let op = match self.peek_kind() {
-                Some(TokenKind::Lt) => BinOp::Lt,
-                Some(TokenKind::Le) => BinOp::Le,
-                Some(TokenKind::Gt) => BinOp::Gt,
-                Some(TokenKind::Ge) => BinOp::Ge,
-                Some(TokenKind::In) => BinOp::In,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_term()?;
-            let start = left.span().start;
-            let end = right.span().end;
-            left = Expr::Binary {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-                span: Span { start, end },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_term(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_factor()?;
-        loop {
-            let op = match self.peek_kind() {
-                Some(TokenKind::Plus) => BinOp::Add,
-                Some(TokenKind::Minus) => BinOp::Sub,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_factor()?;
-            let start = left.span().start;
-            let end = right.span().end;
-            left = Expr::Binary {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-                span: Span { start, end },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_factor(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_pow()?;
-        loop {
-            let op = match self.peek_kind() {
-                Some(TokenKind::Star) => BinOp::Mul,
-                Some(TokenKind::Slash) => BinOp::Div,
-                Some(TokenKind::Percent) => BinOp::Mod,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_pow()?;
-            let start = left.span().start;
-            let end = right.span().end;
-            left = Expr::Binary {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-                span: Span { start, end },
-            };
-        }
-        Ok(left)
-    }
+    // Binary operators generated by macros to reduce duplication
+    binary_single_op!(parse_or, parse_and, Or, BinOp::Or);
+    binary_single_op!(parse_and, parse_bit_or, And, BinOp::And);
+    binary_single_op!(parse_bit_or, parse_bit_xor, BitOr, BinOp::BitOr);
+    binary_single_op!(parse_bit_xor, parse_bit_and, BitXor, BinOp::BitXor);
+    binary_single_op!(parse_bit_and, parse_shift, BitAnd, BinOp::BitAnd);
+    
+    binary_multi_op!(parse_shift, parse_equality, Shl => BinOp::Shl, Shr => BinOp::Shr);
+    binary_multi_op!(parse_equality, parse_comparison,
+        StrictEq => BinOp::StrictEq, StrictNe => BinOp::StrictNe,
+        Eq => BinOp::Eq, Ne => BinOp::Ne);
+    binary_multi_op!(parse_comparison, parse_term,
+        Lt => BinOp::Lt, Le => BinOp::Le, Gt => BinOp::Gt, Ge => BinOp::Ge, In => BinOp::In);
+    binary_multi_op!(parse_term, parse_factor, Plus => BinOp::Add, Minus => BinOp::Sub);
+    binary_multi_op!(parse_factor, parse_pow, Star => BinOp::Mul, Slash => BinOp::Div, Percent => BinOp::Mod);
 
     fn parse_pow(&mut self) -> Result<Expr, String> {
         let left = self.parse_unary()?;
@@ -1057,39 +921,25 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, String> {
-        if matches!(self.peek_kind(), Some(TokenKind::PlusPlus)) {
+        // Handle prefix ++/-- (consolidated)
+        if let Some(is_inc) = match self.peek_kind() {
+            Some(TokenKind::PlusPlus) => Some(true),
+            Some(TokenKind::MinusMinus) => Some(false),
+            _ => None,
+        } {
             let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
             self.advance();
             let operand = self.parse_unary()?;
             if let Expr::Ident { name, span } = &operand {
                 let name = Arc::clone(name);
-                let end = span.end;
-                return Ok(Expr::PrefixInc {
-                    name,
-                    span: Span {
-                        start: span_start,
-                        end,
-                    },
+                let span = Span { start: span_start, end: span.end };
+                return Ok(if is_inc {
+                    Expr::PrefixInc { name, span }
+                } else {
+                    Expr::PrefixDec { name, span }
                 });
             }
-            return Err("Prefix ++ requires an identifier".to_string());
-        }
-        if matches!(self.peek_kind(), Some(TokenKind::MinusMinus)) {
-            let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
-            self.advance();
-            let operand = self.parse_unary()?;
-            if let Expr::Ident { name, span } = &operand {
-                let name = Arc::clone(name);
-                let end = span.end;
-                return Ok(Expr::PrefixDec {
-                    name,
-                    span: Span {
-                        start: span_start,
-                        end,
-                    },
-                });
-            }
-            return Err("Prefix -- requires an identifier".to_string());
+            return Err(format!("Prefix {} requires an identifier", if is_inc { "++" } else { "--" }));
         }
         let op = match self.peek_kind() {
             Some(TokenKind::Not) => UnaryOp::Not,
@@ -1185,31 +1035,16 @@ impl<'a> Parser<'a> {
                         span: Span { start, end },
                     };
                 }
-                TokenKind::PlusPlus => {
-                    if let Expr::Ident { name, span } = &expr {
+                TokenKind::PlusPlus | TokenKind::MinusMinus => {
+                    if let Expr::Ident { name, span: ident_span } = &expr {
                         let name = Arc::clone(name);
+                        let is_inc = kind == TokenKind::PlusPlus;
                         let tok = self.advance().ok_or("Unexpected EOF")?;
-                        expr = Expr::PostfixInc {
-                            name,
-                            span: Span {
-                                start: span.start,
-                                end: tok.span.end,
-                            },
-                        };
-                    } else {
-                        break;
-                    }
-                }
-                TokenKind::MinusMinus => {
-                    if let Expr::Ident { name, span } = &expr {
-                        let name = Arc::clone(name);
-                        let tok = self.advance().ok_or("Unexpected EOF")?;
-                        expr = Expr::PostfixDec {
-                            name,
-                            span: Span {
-                                start: span.start,
-                                end: tok.span.end,
-                            },
+                        let span = Span { start: ident_span.start, end: tok.span.end };
+                        expr = if is_inc {
+                            Expr::PostfixInc { name, span }
+                        } else {
+                            Expr::PostfixDec { name, span }
                         };
                     } else {
                         break;
