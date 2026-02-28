@@ -619,6 +619,38 @@ pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
     }
 }
 
+/// Fast path for numeric ascending sort: (a, b) => a - b
+pub fn array_sort_numeric_asc(arr: &Value) -> Value {
+    if let Value::Array(arr) = arr {
+        let mut arr_mut = arr.borrow_mut();
+        arr_mut.sort_by(|a, b| {
+            let na = match a { Value::Number(n) => *n, _ => f64::NAN };
+            let nb = match b { Value::Number(n) => *n, _ => f64::NAN };
+            na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        drop(arr_mut);
+        Value::Array(Rc::clone(arr))
+    } else {
+        Value::Null
+    }
+}
+
+/// Fast path for numeric descending sort: (a, b) => b - a
+pub fn array_sort_numeric_desc(arr: &Value) -> Value {
+    if let Value::Array(arr) = arr {
+        let mut arr_mut = arr.borrow_mut();
+        arr_mut.sort_by(|a, b| {
+            let na = match a { Value::Number(n) => *n, _ => f64::NAN };
+            let nb = match b { Value::Number(n) => *n, _ => f64::NAN };
+            nb.partial_cmp(&na).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        drop(arr_mut);
+        Value::Array(Rc::clone(arr))
+    } else {
+        Value::Null
+    }
+}
+
 // Higher-order array methods
 
 pub fn array_map(arr: &Value, callback: &Value) -> Value {
@@ -775,7 +807,18 @@ pub fn object_assign(args: &[Value]) -> Value {
         _ => return Value::Null,
     };
     
+    // Pre-calculate total additional capacity needed
+    let additional_capacity: usize = args.iter().skip(1).map(|source| {
+        if let Value::Object(src) = source {
+            src.borrow().len()
+        } else {
+            0
+        }
+    }).sum();
+    
     let mut target_mut = target.borrow_mut();
+    target_mut.reserve(additional_capacity);
+    
     for source in args.iter().skip(1) {
         if let Value::Object(src) = source {
             let src_borrow = src.borrow();
@@ -832,7 +875,8 @@ pub fn object_from_entries(args: &[Value]) -> Value {
     
     if let Some(Value::Array(entries)) = args.first() {
         let entries_borrow = entries.borrow();
-        let mut obj: HashMap<Arc<str>, Value> = HashMap::new();
+        // Pre-allocate with known capacity
+        let mut obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(entries_borrow.len());
         
         for entry in entries_borrow.iter() {
             if let Value::Array(pair) = entry {
@@ -849,7 +893,7 @@ pub fn object_from_entries(args: &[Value]) -> Value {
         
         Value::Object(Rc::new(RefCell::new(obj)))
     } else {
-        Value::Object(Rc::new(RefCell::new(std::collections::HashMap::with_capacity(1))))
+        Value::Object(Rc::new(RefCell::new(HashMap::new())))
     }
 }
 
@@ -872,11 +916,11 @@ pub fn array_splice(arr: &Value, start: &Value, delete_count: Option<&Value>, it
         };
         
         let actual_delete = del_count.min(arr_mut.len().saturating_sub(start_idx));
-        let removed: Vec<Value> = arr_mut.drain(start_idx..start_idx + actual_delete).collect();
         
-        for (i, item) in items.iter().enumerate() {
-            arr_mut.insert(start_idx + i, item.clone());
-        }
+        // Use Vec::splice for efficient in-place modification
+        let removed: Vec<Value> = arr_mut
+            .splice(start_idx..start_idx + actual_delete, items.iter().cloned())
+            .collect();
         
         Value::Array(Rc::new(RefCell::new(removed)))
     } else {

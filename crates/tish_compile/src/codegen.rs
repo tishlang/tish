@@ -99,6 +99,46 @@ impl Codegen {
         self.output.push_str(s);
     }
 
+    /// Detect if an expression is a numeric sort comparator: (a, b) => a - b or (a, b) => b - a
+    /// Returns Some(true) for ascending, Some(false) for descending, None if not detected
+    fn detect_numeric_sort_comparator(expr: &Expr) -> Option<bool> {
+        use tish_ast::ArrowBody;
+        
+        if let Expr::ArrowFunction { params, body, .. } = expr {
+            // Must have exactly 2 params
+            if params.len() != 2 {
+                return None;
+            }
+            let param_a = params[0].name.as_ref();
+            let param_b = params[1].name.as_ref();
+            
+            // Body must be a single expression that's a subtraction
+            let body_expr = match body {
+                ArrowBody::Expr(e) => e.as_ref(),
+                ArrowBody::Block(stmt) => {
+                    if let Statement::ExprStmt { expr, .. } = stmt.as_ref() {
+                        expr
+                    } else {
+                        return None;
+                    }
+                }
+            };
+            
+            if let Expr::Binary { left, op: BinOp::Sub, right, .. } = body_expr {
+                // Check for a - b (ascending) or b - a (descending)
+                if let (Expr::Ident { name: left_name, .. }, Expr::Ident { name: right_name, .. }) = (left.as_ref(), right.as_ref()) {
+                    if left_name.as_ref() == param_a && right_name.as_ref() == param_b {
+                        return Some(true); // ascending
+                    }
+                    if left_name.as_ref() == param_b && right_name.as_ref() == param_a {
+                        return Some(false); // descending
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
         self.write("#![allow(unused, non_snake_case)]\n\n");
         self.write("use std::cell::RefCell;\n");
@@ -1038,6 +1078,23 @@ impl Codegen {
                             ));
                         }
                         "sort" => {
+                            // Check for numeric sort fast path: (a, b) => a - b or (a, b) => b - a
+                            if let Some(CallArg::Expr(comparator_expr)) = args.first() {
+                                if let Some(ascending) = Self::detect_numeric_sort_comparator(comparator_expr) {
+                                    if ascending {
+                                        return Ok(format!(
+                                            "tish_runtime::array_sort_numeric_asc(&{})",
+                                            obj_expr
+                                        ));
+                                    } else {
+                                        return Ok(format!(
+                                            "tish_runtime::array_sort_numeric_desc(&{})",
+                                            obj_expr
+                                        ));
+                                    }
+                                }
+                            }
+                            // General case: use the callback
                             let comparator = arg_exprs.first().map(|c| format!("Some(&{})", c)).unwrap_or_else(|| "None".to_string());
                             return Ok(format!(
                                 "tish_runtime::array_sort(&{}, {})",
