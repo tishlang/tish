@@ -125,6 +125,30 @@ fmt:
 lint:
     cargo clippy --features full -- -D warnings
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEST262 - JavaScript Conformance Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Run all test262 tests
+test262:
+    ./scripts/run_test262.sh
+
+# Run test262 tests with verbose output
+test262-verbose:
+    ./scripts/run_test262.sh --verbose
+
+# Run filtered test262 tests (e.g., just test262-filter expressions)
+test262-filter PATTERN:
+    ./scripts/run_test262.sh --filter "{{PATTERN}}"
+
+# Run test262 verbose with filter
+test262-filter-verbose PATTERN:
+    ./scripts/run_test262.sh --verbose --filter "{{PATTERN}}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UTILITIES
+# ═══════════════════════════════════════════════════════════════════════════════
+
 # Show binary sizes for different builds
 sizes:
     @echo "Building secure binary..."

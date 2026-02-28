@@ -5,7 +5,6 @@
 use crate::value::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Read as _;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -107,7 +106,7 @@ async fn fetch_all_async(requests: Vec<Value>) -> Result<Value, String> {
         .map(|r| match r {
             Ok(v) => v,
             Err(e) => {
-                let mut obj = HashMap::new();
+                let mut obj = HashMap::with_capacity(2);
                 obj.insert(Arc::from("error"), Value::String(e.into()));
                 obj.insert(Arc::from("ok"), Value::Bool(false));
                 Value::Object(Rc::new(RefCell::new(obj)))
@@ -158,12 +157,12 @@ fn build_response_object(
     headers: &reqwest::header::HeaderMap,
     body: String,
 ) -> Value {
-    let mut obj: HashMap<Arc<str>, Value> = HashMap::new();
+    let mut obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(4);
     obj.insert(Arc::from("status"), Value::Number(status));
     obj.insert(Arc::from("ok"), Value::Bool(ok));
     obj.insert(Arc::from("body"), Value::String(body.into()));
 
-    let mut headers_obj: HashMap<Arc<str>, Value> = HashMap::new();
+    let mut headers_obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(headers.len());
     for (key, value) in headers.iter() {
         if let Ok(v) = value.to_str() {
             headers_obj.insert(Arc::from(key.as_str()), Value::String(v.into()));
@@ -186,7 +185,7 @@ pub fn create_server(port: u16) -> Result<tiny_http::Server, String> {
 
 /// Convert a tiny_http::Request into a Tish Value object.
 pub fn request_to_value(request: &mut tiny_http::Request) -> Value {
-    let mut obj: HashMap<Arc<str>, Value> = HashMap::new();
+    let mut obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(6);
 
     obj.insert(
         Arc::from("method"),
@@ -203,7 +202,7 @@ pub fn request_to_value(request: &mut tiny_http::Request) -> Value {
     let query_string = request.url().split('?').nth(1).unwrap_or("");
     obj.insert(Arc::from("query"), Value::String(query_string.into()));
 
-    let mut headers_obj: HashMap<Arc<str>, Value> = HashMap::new();
+    let mut headers_obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(request.headers().len());
     for header in request.headers() {
         headers_obj.insert(
             Arc::from(header.field.as_str().as_str()),

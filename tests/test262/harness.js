@@ -1,53 +1,45 @@
 // Test262 Harness for Tish
 // Provides assertion functions compatible with test262 test format
+// Note: Uses standalone functions since tish functions aren't objects
 
 let _testCount = 0;
 let _passCount = 0;
 let _failCount = 0;
 
-function assert(condition, message) {
-    _testCount += 1;
-    if (!condition) {
-        _failCount += 1;
-        console.error("FAIL:", message || "Assertion failed");
-    } else {
-        _passCount += 1;
-    }
-}
-
-assert.sameValue = function(actual, expected, message) {
-    _testCount += 1;
-    if (actual !== expected) {
-        _failCount += 1;
-        console.error("FAIL:", message || "Expected " + expected + ", got " + actual);
-    } else {
-        _passCount += 1;
-    }
-};
-
-assert.notSameValue = function(actual, unexpected, message) {
-    _testCount += 1;
-    if (actual === unexpected) {
-        _failCount += 1;
-        console.error("FAIL:", message || "Expected value to differ from " + unexpected);
-    } else {
-        _passCount += 1;
-    }
-};
-
-assert.throws = function(expectedErrorType, func, message) {
-    _testCount += 1;
-    let threw = false;
-    try {
-        func();
-    } catch (e) {
-        threw = true;
-    }
-    if (!threw) {
-        _failCount += 1;
-        console.error("FAIL:", message || "Expected function to throw");
-    } else {
-        _passCount += 1;
+// Create assert as an object with methods
+let assert = {
+    sameValue: (actual, expected, message) => {
+        _testCount += 1;
+        if (actual !== expected) {
+            _failCount += 1;
+            console.error("FAIL:", message || "Expected " + expected + ", got " + actual);
+        } else {
+            _passCount += 1;
+        }
+    },
+    notSameValue: (actual, unexpected, message) => {
+        _testCount += 1;
+        if (actual === unexpected) {
+            _failCount += 1;
+            console.error("FAIL:", message || "Expected value to differ from " + unexpected);
+        } else {
+            _passCount += 1;
+        }
+    },
+    throws: (expectedErrorType, func, message) => {
+        _testCount += 1;
+        let threw = false;
+        try {
+            func();
+        } catch (e) {
+            threw = true;
+        }
+        if (!threw) {
+            _failCount += 1;
+            console.error("FAIL:", message || "Expected function to throw");
+        } else {
+            _passCount += 1;
+        }
     }
 };
 

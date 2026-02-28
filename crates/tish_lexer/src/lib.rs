@@ -130,7 +130,8 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_number(&mut self, first: char) -> String {
-        let mut s = String::from(first);
+        let mut s = String::with_capacity(16);
+        s.push(first);
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() || c == '.' {
                 s.push(c);
@@ -143,7 +144,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_string(&mut self, quote: char) -> Result<String, String> {
-        let mut s = String::new();
+        let mut s = String::with_capacity(32);
         // Opening quote already consumed by next_token
         loop {
             match self.advance() {
@@ -169,7 +170,8 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_ident_or_keyword(&mut self, first: char) -> String {
-        let mut s = String::from(first);
+        let mut s = String::with_capacity(16);
+        s.push(first);
         while let Some(c) = self.peek() {
             if c.is_ascii_alphanumeric() || c == '_' {
                 s.push(c);
@@ -182,7 +184,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_template_literal(&mut self, start: (usize, usize)) -> Result<Option<Token>, String> {
-        let mut s = String::new();
+        let mut s = String::with_capacity(64);
         loop {
             match self.advance() {
                 None => return Err("Unterminated template literal".to_string()),

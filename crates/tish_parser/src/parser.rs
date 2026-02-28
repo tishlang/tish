@@ -53,7 +53,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_program(&mut self) -> Result<Program, String> {
-        let mut statements = Vec::new();
+        let mut statements = Vec::with_capacity(8);
         while self.peek_kind().is_some() && !matches!(self.peek_kind(), Some(TokenKind::Eof)) {
             if matches!(self.peek_kind(), Some(TokenKind::Dedent)) {
                 self.advance();
@@ -140,7 +140,7 @@ impl<'a> Parser<'a> {
             self.advance(); // Indent
         }
 
-        let mut statements = Vec::new();
+        let mut statements = Vec::with_capacity(4);
         loop {
             if matches!(self.peek_kind(), Some(TokenKind::RBrace))
                 || matches!(self.peek_kind(), Some(TokenKind::Dedent))
@@ -401,7 +401,7 @@ impl<'a> Parser<'a> {
             .clone()
             .ok_or("Expected function name")?;
         self.expect(TokenKind::LParen)?;
-        let mut params = Vec::new();
+        let mut params = Vec::with_capacity(4);
         let mut rest_param = None;
         while !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
             if matches!(self.peek_kind(), Some(TokenKind::Spread)) {

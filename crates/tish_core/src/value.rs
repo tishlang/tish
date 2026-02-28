@@ -233,4 +233,32 @@ impl Value {
             _ => false,
         }
     }
+
+    /// Create a new array Value from a Vec.
+    pub fn array(items: Vec<Value>) -> Self {
+        Value::Array(Rc::new(RefCell::new(items)))
+    }
+
+    /// Create a new object Value from a HashMap.
+    pub fn object(map: HashMap<Arc<str>, Value>) -> Self {
+        Value::Object(Rc::new(RefCell::new(map)))
+    }
+
+    /// Create an empty array Value.
+    pub fn empty_array() -> Self {
+        Value::Array(Rc::new(RefCell::new(Vec::new())))
+    }
+
+    /// Create an empty object Value.
+    pub fn empty_object() -> Self {
+        Value::Object(Rc::new(RefCell::new(HashMap::new())))
+    }
+
+    /// Extract the number value, if this is a Number.
+    pub fn as_number(&self) -> Option<f64> {
+        match self {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        }
+    }
 }

@@ -12,3 +12,12 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.bench]
+inherits = "release"
+debug = true

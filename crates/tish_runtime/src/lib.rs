@@ -343,7 +343,7 @@ pub fn read_file(args: &[Value]) -> Value {
     match std::fs::read_to_string(&path) {
         Ok(content) => Value::String(content.into()),
         Err(e) => {
-            let mut obj = std::collections::HashMap::new();
+            let mut obj = std::collections::HashMap::with_capacity(1);
             obj.insert(std::sync::Arc::from("error"), Value::String(e.to_string().into()));
             Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
         }
@@ -357,7 +357,7 @@ pub fn write_file(args: &[Value]) -> Value {
     match std::fs::write(&path, &content) {
         Ok(()) => Value::Bool(true),
         Err(e) => {
-            let mut obj = std::collections::HashMap::new();
+            let mut obj = std::collections::HashMap::with_capacity(1);
             obj.insert(std::sync::Arc::from("error"), Value::String(e.to_string().into()));
             Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
         }
@@ -384,7 +384,7 @@ pub fn read_dir(args: &[Value]) -> Value {
             Value::Array(Rc::new(RefCell::new(files)))
         }
         Err(e) => {
-            let mut obj = std::collections::HashMap::new();
+            let mut obj = std::collections::HashMap::with_capacity(1);
             obj.insert(std::sync::Arc::from("error"), Value::String(e.to_string().into()));
             Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
         }
@@ -397,7 +397,7 @@ pub fn mkdir(args: &[Value]) -> Value {
     match std::fs::create_dir_all(&path) {
         Ok(()) => Value::Bool(true),
         Err(e) => {
-            let mut obj = std::collections::HashMap::new();
+            let mut obj = std::collections::HashMap::with_capacity(1);
             obj.insert(std::sync::Arc::from("error"), Value::String(e.to_string().into()));
             Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
         }
@@ -849,7 +849,7 @@ pub fn object_from_entries(args: &[Value]) -> Value {
         
         Value::Object(Rc::new(RefCell::new(obj)))
     } else {
-        Value::Object(Rc::new(RefCell::new(std::collections::HashMap::new())))
+        Value::Object(Rc::new(RefCell::new(std::collections::HashMap::with_capacity(1))))
     }
 }
 

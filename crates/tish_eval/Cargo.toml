@@ -9,7 +9,7 @@ default = []
 http = ["tokio", "reqwest", "futures", "tiny_http"]
 fs = []
 process = []
-regex = ["fancy-regex"]
+regex = ["fancy-regex", "tish_core/regex"]
 
 [dependencies]
 tish_ast = { path = "../tish_ast" }

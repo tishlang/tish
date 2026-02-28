@@ -203,13 +203,47 @@ impl Value {
 
     pub fn strict_eq(&self, other: &Value) -> bool {
         match (self, other) {
-            (Value::Number(a), Value::Number(b)) => a == b,
+            (Value::Number(a), Value::Number(b)) => {
+                if a.is_nan() || b.is_nan() {
+                    false
+                } else {
+                    a == b
+                }
+            }
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
             (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
             _ => false,
+        }
+    }
+
+    /// Create a new array Value from a Vec.
+    pub fn array(items: Vec<Value>) -> Self {
+        Value::Array(Rc::new(RefCell::new(items)))
+    }
+
+    /// Create a new object Value from a HashMap.
+    pub fn object(map: HashMap<Arc<str>, Value>) -> Self {
+        Value::Object(Rc::new(RefCell::new(map)))
+    }
+
+    /// Create an empty array Value.
+    pub fn empty_array() -> Self {
+        Value::Array(Rc::new(RefCell::new(Vec::new())))
+    }
+
+    /// Create an empty object Value.
+    pub fn empty_object() -> Self {
+        Value::Object(Rc::new(RefCell::new(HashMap::new())))
+    }
+
+    /// Extract the number value, if this is a Number.
+    pub fn as_number(&self) -> Option<f64> {
+        match self {
+            Value::Number(n) => Some(*n),
+            _ => None,
         }
     }
 }
