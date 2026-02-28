@@ -2,7 +2,7 @@
 # Run Tish and JS equivalents, show output and compare execution time.
 # Usage: ./scripts/run_performance_manual.sh [--release] [--summary-only] [--no-compile]
 #   --release       use release build (recommended for fair Tish vs JS timing)
-#   --summary-only  skip individual test output, show only summary
+#   --summary-onlfy  skip individual test output, show only summary
 #   --no-compile    skip compilation, use cached binaries from previous runs
 
 set -e
@@ -163,6 +163,7 @@ for f in "$perf_dir"/*.js; do
   fi
 
   # Timing (multiple runs to reduce noise; report average)
+  #n=50
   n=5
   tish_run_times=()
   tish_native_times=()
