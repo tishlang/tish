@@ -10,7 +10,10 @@ use tish_ast::{Expr, Statement};
 #[cfg(feature = "regex")]
 pub use crate::regex::TishRegExp;
 
-#[derive(Debug, Clone)]
+/// Native function type - takes args, returns Result<Value, String>
+pub type NativeFn = fn(&[Value]) -> Result<Value, String>;
+
+#[derive(Clone)]
 pub enum Value {
     Number(f64),
     String(Arc<str>),
@@ -18,78 +21,39 @@ pub enum Value {
     Null,
     Array(Rc<RefCell<Vec<Value>>>),
     Object(Rc<RefCell<HashMap<Arc<str>, Value>>>),
+    /// User-defined function with AST body
     Function {
         params: Arc<[Arc<str>]>,
         defaults: Arc<[Option<Expr>]>,
         rest_param: Option<Arc<str>>,
         body: Arc<Statement>,
     },
-    NativeConsoleDebug,
-    NativeConsoleInfo,
-    NativeConsoleLog,
-    NativeConsoleWarn,
-    NativeConsoleError,
-    NativeParseInt,
-    NativeParseFloat,
-    NativeIsFinite,
-    NativeIsNaN,
-    NativeMathAbs,
-    NativeMathSqrt,
-    NativeMathMin,
-    NativeMathMax,
-    NativeMathFloor,
-    NativeMathCeil,
-    NativeMathRound,
-    NativeJsonParse,
-    NativeJsonStringify,
-    NativeDecodeURI,
-    NativeEncodeURI,
-    NativeObjectKeys,
-    NativeObjectValues,
-    NativeObjectEntries,
-    NativeObjectAssign,
-    NativeObjectFromEntries,
-    NativeArrayIsArray,
-    NativeStringFromCharCode,
-    // Date
-    NativeDateNow,
-    // Math extras
-    NativeMathRandom,
-    NativeMathPow,
-    NativeMathSin,
-    NativeMathCos,
-    NativeMathTan,
-    NativeMathLog,
-    NativeMathExp,
-    NativeMathSign,
-    NativeMathTrunc,
-    // Process (feature-gated for security)
-    #[cfg(feature = "process")]
-    NativeProcessExit,
-    #[cfg(feature = "process")]
-    NativeProcessCwd,
+    /// Native/builtin function
+    Native(NativeFn),
+    /// HTTP serve function (needs special handling for callbacks)
     #[cfg(feature = "http")]
-    NativeFetch,
-    #[cfg(feature = "http")]
-    NativeFetchAll,
-    #[cfg(feature = "http")]
-    NativeServe,
-    // File I/O
-    #[cfg(feature = "fs")]
-    NativeReadFile,
-    #[cfg(feature = "fs")]
-    NativeWriteFile,
-    #[cfg(feature = "fs")]
-    NativeFileExists,
-    #[cfg(feature = "fs")]
-    NativeReadDir,
-    #[cfg(feature = "fs")]
-    NativeMkdir,
-    // RegExp
+    Serve,
     #[cfg(feature = "regex")]
     RegExp(Rc<RefCell<TishRegExp>>),
-    #[cfg(feature = "regex")]
-    NativeRegExpConstructor,
+}
+
+impl std::fmt::Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Number(n) => write!(f, "Number({})", n),
+            Value::String(s) => write!(f, "String({:?})", s.as_ref()),
+            Value::Bool(b) => write!(f, "Bool({})", b),
+            Value::Null => write!(f, "Null"),
+            Value::Array(arr) => write!(f, "Array({:?})", arr.borrow()),
+            Value::Object(obj) => write!(f, "Object({:?})", obj.borrow()),
+            Value::Function { .. } => write!(f, "Function"),
+            Value::Native(_) => write!(f, "Native"),
+            #[cfg(feature = "http")]
+            Value::Serve => write!(f, "Serve"),
+            #[cfg(feature = "regex")]
+            Value::RegExp(re) => write!(f, "RegExp(/{}/{})", re.borrow().source, re.borrow().flags_string()),
+        }
+    }
 }
 
 impl std::fmt::Display for Value {
@@ -122,70 +86,14 @@ impl std::fmt::Display for Value {
                 write!(f, "{{{}}}", inner.join(", "))
             }
             Value::Function { .. } => write!(f, "[Function]"),
-            Value::NativeConsoleDebug => write!(f, "[NativeFunction: console.debug]"),
-            Value::NativeConsoleInfo => write!(f, "[NativeFunction: console.info]"),
-            Value::NativeConsoleLog => write!(f, "[NativeFunction: console.log]"),
-            Value::NativeConsoleWarn => write!(f, "[NativeFunction: console.warn]"),
-            Value::NativeConsoleError => write!(f, "[NativeFunction: console.error]"),
-            Value::NativeParseInt => write!(f, "[NativeFunction: parseInt]"),
-            Value::NativeParseFloat => write!(f, "[NativeFunction: parseFloat]"),
-            Value::NativeIsFinite => write!(f, "[NativeFunction: isFinite]"),
-            Value::NativeIsNaN => write!(f, "[NativeFunction: isNaN]"),
-            Value::NativeMathAbs => write!(f, "[NativeFunction: Math.abs]"),
-            Value::NativeMathSqrt => write!(f, "[NativeFunction: Math.sqrt]"),
-            Value::NativeMathMin => write!(f, "[NativeFunction: Math.min]"),
-            Value::NativeMathMax => write!(f, "[NativeFunction: Math.max]"),
-            Value::NativeMathFloor => write!(f, "[NativeFunction: Math.floor]"),
-            Value::NativeMathCeil => write!(f, "[NativeFunction: Math.ceil]"),
-            Value::NativeMathRound => write!(f, "[NativeFunction: Math.round]"),
-            Value::NativeJsonParse => write!(f, "[NativeFunction: JSON.parse]"),
-            Value::NativeJsonStringify => write!(f, "[NativeFunction: JSON.stringify]"),
-            Value::NativeDecodeURI => write!(f, "[NativeFunction: decodeURI]"),
-            Value::NativeEncodeURI => write!(f, "[NativeFunction: encodeURI]"),
-            Value::NativeObjectKeys => write!(f, "[NativeFunction: Object.keys]"),
-            Value::NativeObjectValues => write!(f, "[NativeFunction: Object.values]"),
-            Value::NativeObjectEntries => write!(f, "[NativeFunction: Object.entries]"),
-            Value::NativeObjectAssign => write!(f, "[NativeFunction: Object.assign]"),
-            Value::NativeObjectFromEntries => write!(f, "[NativeFunction: Object.fromEntries]"),
-            Value::NativeArrayIsArray => write!(f, "[NativeFunction: Array.isArray]"),
-            Value::NativeStringFromCharCode => write!(f, "[NativeFunction: String.fromCharCode]"),
-            Value::NativeDateNow => write!(f, "[NativeFunction: Date.now]"),
-            Value::NativeMathRandom => write!(f, "[NativeFunction: Math.random]"),
-            Value::NativeMathPow => write!(f, "[NativeFunction: Math.pow]"),
-            Value::NativeMathSin => write!(f, "[NativeFunction: Math.sin]"),
-            Value::NativeMathCos => write!(f, "[NativeFunction: Math.cos]"),
-            Value::NativeMathTan => write!(f, "[NativeFunction: Math.tan]"),
-            Value::NativeMathLog => write!(f, "[NativeFunction: Math.log]"),
-            Value::NativeMathExp => write!(f, "[NativeFunction: Math.exp]"),
-            Value::NativeMathSign => write!(f, "[NativeFunction: Math.sign]"),
-            Value::NativeMathTrunc => write!(f, "[NativeFunction: Math.trunc]"),
-            #[cfg(feature = "process")]
-            Value::NativeProcessExit => write!(f, "[NativeFunction: process.exit]"),
-            #[cfg(feature = "process")]
-            Value::NativeProcessCwd => write!(f, "[NativeFunction: process.cwd]"),
+            Value::Native(_) => write!(f, "[NativeFunction]"),
             #[cfg(feature = "http")]
-            Value::NativeFetch => write!(f, "[NativeFunction: fetch]"),
-            #[cfg(feature = "http")]
-            Value::NativeFetchAll => write!(f, "[NativeFunction: fetchAll]"),
-            #[cfg(feature = "http")]
-            Value::NativeServe => write!(f, "[NativeFunction: serve]"),
-            #[cfg(feature = "fs")]
-            Value::NativeReadFile => write!(f, "[NativeFunction: readFile]"),
-            #[cfg(feature = "fs")]
-            Value::NativeWriteFile => write!(f, "[NativeFunction: writeFile]"),
-            #[cfg(feature = "fs")]
-            Value::NativeFileExists => write!(f, "[NativeFunction: fileExists]"),
-            #[cfg(feature = "fs")]
-            Value::NativeReadDir => write!(f, "[NativeFunction: readDir]"),
-            #[cfg(feature = "fs")]
-            Value::NativeMkdir => write!(f, "[NativeFunction: mkdir]"),
+            Value::Serve => write!(f, "[NativeFunction: serve]"),
             #[cfg(feature = "regex")]
             Value::RegExp(re) => {
                 let re = re.borrow();
                 write!(f, "/{}/{}", re.source, re.flags_string())
             }
-            #[cfg(feature = "regex")]
-            Value::NativeRegExpConstructor => write!(f, "[Function: RegExp]"),
         }
     }
 }

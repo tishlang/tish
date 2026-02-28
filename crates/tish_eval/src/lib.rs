@@ -3,6 +3,7 @@
 mod eval;
 #[cfg(feature = "http")]
 mod http;
+mod natives;
 #[cfg(feature = "regex")]
 pub mod regex;
 mod value;

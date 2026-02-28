@@ -1176,6 +1176,7 @@ dependencies = [
  "reqwest",
  "tiny_http",
  "tish_ast",
+ "tish_builtins",
  "tish_core",
  "tish_parser",
  "tokio",

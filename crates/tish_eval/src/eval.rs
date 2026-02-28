@@ -73,80 +73,82 @@ pub struct Evaluator {
 impl Evaluator {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
+        use crate::natives;
+        
         let scope = Scope::new();
         {
             let mut s = scope.borrow_mut();
             let mut console = HashMap::with_capacity(5);
-            console.insert("debug".into(), Value::NativeConsoleDebug);
-            console.insert("info".into(), Value::NativeConsoleInfo);
-            console.insert("log".into(), Value::NativeConsoleLog);
-            console.insert("warn".into(), Value::NativeConsoleWarn);
-            console.insert("error".into(), Value::NativeConsoleError);
+            console.insert("debug".into(), Value::Native(natives::console_debug));
+            console.insert("info".into(), Value::Native(natives::console_info));
+            console.insert("log".into(), Value::Native(natives::console_log));
+            console.insert("warn".into(), Value::Native(natives::console_warn));
+            console.insert("error".into(), Value::Native(natives::console_error));
             s.set("console".into(), Value::Object(Rc::new(RefCell::new(console))), true);
-            s.set("parseInt".into(), Value::NativeParseInt, true);
-            s.set("parseFloat".into(), Value::NativeParseFloat, true);
-            s.set("decodeURI".into(), Value::NativeDecodeURI, true);
-            s.set("encodeURI".into(), Value::NativeEncodeURI, true);
-            s.set("isFinite".into(), Value::NativeIsFinite, true);
-            s.set("isNaN".into(), Value::NativeIsNaN, true);
+            s.set("parseInt".into(), Value::Native(natives::parse_int), true);
+            s.set("parseFloat".into(), Value::Native(natives::parse_float), true);
+            s.set("decodeURI".into(), Value::Native(natives::decode_uri), true);
+            s.set("encodeURI".into(), Value::Native(natives::encode_uri), true);
+            s.set("isFinite".into(), Value::Native(natives::is_finite), true);
+            s.set("isNaN".into(), Value::Native(natives::is_nan), true);
             s.set("Infinity".into(), Value::Number(f64::INFINITY), true);
             s.set("NaN".into(), Value::Number(f64::NAN), true);
             let mut math = HashMap::with_capacity(18);
-            math.insert("abs".into(), Value::NativeMathAbs);
-            math.insert("sqrt".into(), Value::NativeMathSqrt);
-            math.insert("min".into(), Value::NativeMathMin);
-            math.insert("max".into(), Value::NativeMathMax);
-            math.insert("floor".into(), Value::NativeMathFloor);
-            math.insert("ceil".into(), Value::NativeMathCeil);
-            math.insert("round".into(), Value::NativeMathRound);
-            math.insert("random".into(), Value::NativeMathRandom);
-            math.insert("pow".into(), Value::NativeMathPow);
-            math.insert("sin".into(), Value::NativeMathSin);
-            math.insert("cos".into(), Value::NativeMathCos);
-            math.insert("tan".into(), Value::NativeMathTan);
-            math.insert("log".into(), Value::NativeMathLog);
-            math.insert("exp".into(), Value::NativeMathExp);
-            math.insert("sign".into(), Value::NativeMathSign);
-            math.insert("trunc".into(), Value::NativeMathTrunc);
+            math.insert("abs".into(), Value::Native(natives::math_abs));
+            math.insert("sqrt".into(), Value::Native(natives::math_sqrt));
+            math.insert("min".into(), Value::Native(natives::math_min));
+            math.insert("max".into(), Value::Native(natives::math_max));
+            math.insert("floor".into(), Value::Native(natives::math_floor));
+            math.insert("ceil".into(), Value::Native(natives::math_ceil));
+            math.insert("round".into(), Value::Native(natives::math_round));
+            math.insert("random".into(), Value::Native(natives::math_random));
+            math.insert("pow".into(), Value::Native(natives::math_pow));
+            math.insert("sin".into(), Value::Native(natives::math_sin));
+            math.insert("cos".into(), Value::Native(natives::math_cos));
+            math.insert("tan".into(), Value::Native(natives::math_tan));
+            math.insert("log".into(), Value::Native(natives::math_log));
+            math.insert("exp".into(), Value::Native(natives::math_exp));
+            math.insert("sign".into(), Value::Native(natives::math_sign));
+            math.insert("trunc".into(), Value::Native(natives::math_trunc));
             math.insert("PI".into(), Value::Number(std::f64::consts::PI));
             math.insert("E".into(), Value::Number(std::f64::consts::E));
             s.set("Math".into(), Value::Object(Rc::new(RefCell::new(math))), true);
 
             let mut json = HashMap::with_capacity(2);
-            json.insert("parse".into(), Value::NativeJsonParse);
-            json.insert("stringify".into(), Value::NativeJsonStringify);
+            json.insert("parse".into(), Value::Native(Self::json_parse_native));
+            json.insert("stringify".into(), Value::Native(Self::json_stringify_native));
             s.set("JSON".into(), Value::Object(Rc::new(RefCell::new(json))), true);
 
             let mut object = HashMap::with_capacity(5);
-            object.insert("keys".into(), Value::NativeObjectKeys);
-            object.insert("values".into(), Value::NativeObjectValues);
-            object.insert("entries".into(), Value::NativeObjectEntries);
-            object.insert("assign".into(), Value::NativeObjectAssign);
-            object.insert("fromEntries".into(), Value::NativeObjectFromEntries);
+            object.insert("keys".into(), Value::Native(Self::object_keys));
+            object.insert("values".into(), Value::Native(Self::object_values));
+            object.insert("entries".into(), Value::Native(Self::object_entries));
+            object.insert("assign".into(), Value::Native(Self::object_assign));
+            object.insert("fromEntries".into(), Value::Native(Self::object_from_entries));
             s.set("Object".into(), Value::Object(Rc::new(RefCell::new(object))), true);
 
             let mut array_obj = HashMap::with_capacity(1);
-            array_obj.insert("isArray".into(), Value::NativeArrayIsArray);
+            array_obj.insert("isArray".into(), Value::Native(natives::array_is_array));
             s.set("Array".into(), Value::Object(Rc::new(RefCell::new(array_obj))), true);
 
             let mut string_obj = HashMap::with_capacity(1);
-            string_obj.insert("fromCharCode".into(), Value::NativeStringFromCharCode);
+            string_obj.insert("fromCharCode".into(), Value::Native(natives::string_from_char_code));
             s.set("String".into(), Value::Object(Rc::new(RefCell::new(string_obj))), true);
 
             let mut date = HashMap::with_capacity(1);
-            date.insert("now".into(), Value::NativeDateNow);
+            date.insert("now".into(), Value::Native(natives::date_now));
             s.set("Date".into(), Value::Object(Rc::new(RefCell::new(date))), true);
 
             #[cfg(feature = "regex")]
             {
-                s.set("RegExp".into(), Value::NativeRegExpConstructor, true);
+                s.set("RegExp".into(), Value::Native(Self::regexp_constructor_native), true);
             }
 
             #[cfg(feature = "process")]
             {
                 let mut process = HashMap::with_capacity(4);
-                process.insert("exit".into(), Value::NativeProcessExit);
-                process.insert("cwd".into(), Value::NativeProcessCwd);
+                process.insert("exit".into(), Value::Native(natives::process_exit));
+                process.insert("cwd".into(), Value::Native(natives::process_cwd));
                 let argv: Vec<Value> = std::env::args()
                     .map(|s| Value::String(s.into()))
                     .collect();
@@ -160,18 +162,18 @@ impl Evaluator {
 
             #[cfg(feature = "http")]
             {
-                s.set("fetch".into(), Value::NativeFetch, true);
-                s.set("fetchAll".into(), Value::NativeFetchAll, true);
-                s.set("serve".into(), Value::NativeServe, true);
+                s.set("fetch".into(), Value::Native(Self::fetch_native), true);
+                s.set("fetchAll".into(), Value::Native(Self::fetch_all_native), true);
+                s.set("serve".into(), Value::Serve, true);
             }
 
             #[cfg(feature = "fs")]
             {
-                s.set("readFile".into(), Value::NativeReadFile, true);
-                s.set("writeFile".into(), Value::NativeWriteFile, true);
-                s.set("fileExists".into(), Value::NativeFileExists, true);
-                s.set("readDir".into(), Value::NativeReadDir, true);
-                s.set("mkdir".into(), Value::NativeMkdir, true);
+                s.set("readFile".into(), Value::Native(natives::read_file), true);
+                s.set("writeFile".into(), Value::Native(natives::write_file), true);
+                s.set("fileExists".into(), Value::Native(natives::file_exists), true);
+                s.set("readDir".into(), Value::Native(natives::read_dir), true);
+                s.set("mkdir".into(), Value::Native(natives::mkdir), true);
             }
         }
         Self { scope }
@@ -1262,54 +1264,11 @@ impl Evaluator {
                     Value::Null => "object".into(),
                     Value::Array(_) => "object".into(),
                     Value::Object(_) => "object".into(),
-                    Value::Function { .. } => "function".into(),
-                    Value::NativeConsoleDebug
-                    | Value::NativeConsoleInfo
-                    | Value::NativeConsoleLog
-                    | Value::NativeConsoleWarn
-                    | Value::NativeConsoleError
-                    | Value::NativeParseInt
-                    | Value::NativeParseFloat
-                    | Value::NativeIsFinite
-                    | Value::NativeIsNaN
-                    | Value::NativeMathAbs
-                    | Value::NativeMathSqrt
-                    | Value::NativeMathMin
-                    | Value::NativeMathMax
-                    | Value::NativeMathFloor
-                    | Value::NativeMathCeil
-                    | Value::NativeMathRound
-                    | Value::NativeJsonParse
-                    | Value::NativeJsonStringify
-                    | Value::NativeDecodeURI
-                    | Value::NativeEncodeURI
-                    | Value::NativeObjectKeys
-                    | Value::NativeObjectValues
-                    | Value::NativeObjectEntries
-                    | Value::NativeObjectAssign
-                    | Value::NativeObjectFromEntries
-                    | Value::NativeArrayIsArray
-                    | Value::NativeStringFromCharCode
-                    | Value::NativeDateNow
-                    | Value::NativeMathRandom
-                    | Value::NativeMathPow
-                    | Value::NativeMathSin
-                    | Value::NativeMathCos
-                    | Value::NativeMathTan
-                    | Value::NativeMathLog
-                    | Value::NativeMathExp
-                    | Value::NativeMathSign
-                    | Value::NativeMathTrunc => "function".into(),
-                    #[cfg(feature = "process")]
-                    Value::NativeProcessExit | Value::NativeProcessCwd => "function".into(),
+                    Value::Function { .. } | Value::Native(_) => "function".into(),
                     #[cfg(feature = "http")]
-                    Value::NativeFetch | Value::NativeFetchAll | Value::NativeServe => "function".into(),
-                    #[cfg(feature = "fs")]
-                    Value::NativeReadFile | Value::NativeWriteFile | Value::NativeFileExists | Value::NativeReadDir | Value::NativeMkdir => "function".into(),
+                    Value::Serve => "function".into(),
                     #[cfg(feature = "regex")]
                     Value::RegExp(_) => "object".into(),
-                    #[cfg(feature = "regex")]
-                    Value::NativeRegExpConstructor => "function".into(),
                 }))
             }
             Expr::PostfixInc { name, .. } => {
@@ -1628,16 +1587,6 @@ impl Evaluator {
         }
     }
 
-    fn get_log_level() -> u8 {
-        match std::env::var("TISH_LOG_LEVEL").as_deref() {
-            Ok("debug") => 0,
-            Ok("info") => 1,
-            Ok("warn") => 3,
-            Ok("error") => 4,
-            _ => 2, // default: log
-        }
-    }
-
     /// Optimized callback invocation for array methods.
     /// Creates a reusable scope that can be updated for each iteration.
     fn create_callback_scope(&self, f: &Value) -> Option<(Rc<RefCell<Scope>>, Arc<[Arc<str>]>, Arc<Statement>)> {
@@ -1770,364 +1719,14 @@ impl Evaluator {
 
     fn call_func(&self, f: &Value, args: &[Value]) -> Result<Value, EvalError> {
         match f {
-            Value::NativeConsoleDebug => {
-                if Self::get_log_level() == 0 {
-                    let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
-                    println!("{}", parts.join(" "));
-                }
-                Ok(Value::Null)
-            }
-            Value::NativeConsoleInfo => {
-                if Self::get_log_level() <= 1 {
-                    let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
-                    println!("{}", parts.join(" "));
-                }
-                Ok(Value::Null)
-            }
-            Value::NativeConsoleLog => {
-                if Self::get_log_level() <= 2 {
-                    let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
-                    println!("{}", parts.join(" "));
-                }
-                Ok(Value::Null)
-            }
-            Value::NativeConsoleWarn => {
-                if Self::get_log_level() <= 3 {
-                    let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
-                    eprintln!("{}", parts.join(" "));
-                }
-                Ok(Value::Null)
-            }
-            Value::NativeConsoleError => {
-                let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
-                eprintln!("{}", parts.join(" "));
-                Ok(Value::Null)
-            }
-            Value::NativeParseInt => {
-                let s = args.first().map(|v| v.to_string()).unwrap_or_default();
-                let s = s.trim();
-                let radix = args
-                    .get(1)
-                    .and_then(|v| match v {
-                        Value::Number(n) => Some(*n as i32),
-                        _ => None,
-                    })
-                    .unwrap_or(10);
-                let n = if (2..=36).contains(&radix) {
-                    let prefix: String = s
-                        .chars()
-                        .take_while(|c| *c == '-' || *c == '+' || c.is_digit(radix as u32))
-                        .collect();
-                    i64::from_str_radix(&prefix, radix as u32).ok().map(|n| n as f64)
-                } else {
-                    None
-                };
-                Ok(Value::Number(n.unwrap_or(f64::NAN)))
-            }
-            Value::NativeParseFloat => {
-                let s = args.first().map(|v| v.to_string()).unwrap_or_default();
-                let n: f64 = s.trim().parse().unwrap_or(f64::NAN);
-                Ok(Value::Number(n))
-            }
-            Value::NativeIsFinite => {
-                let b = args.first().is_some_and(|v| matches!(v, Value::Number(n) if n.is_finite()));
-                Ok(Value::Bool(b))
-            }
-            Value::NativeIsNaN => {
-                let b = args.first().is_none_or(|v| matches!(v, Value::Number(n) if n.is_nan()) || !matches!(v, Value::Number(_)));
-                Ok(Value::Bool(b))
-            }
-            Value::NativeMathAbs => {
-                let n = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                Ok(Value::Number(n.abs()))
-            }
-            Value::NativeMathSqrt => {
-                let n = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                Ok(Value::Number(n.sqrt()))
-            }
-            Value::NativeMathMin => {
-                let nums: Vec<f64> = args.iter().filter_map(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).collect();
-                let n = nums.into_iter().fold(f64::INFINITY, f64::min);
-                Ok(Value::Number(if n == f64::INFINITY { f64::NAN } else { n }))
-            }
-            Value::NativeMathMax => {
-                let nums: Vec<f64> = args.iter().filter_map(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).collect();
-                let n = nums.into_iter().fold(f64::NEG_INFINITY, f64::max);
-                Ok(Value::Number(if n == f64::NEG_INFINITY { f64::NAN } else { n }))
-            }
-            Value::NativeMathFloor => {
-                let n = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                Ok(Value::Number(n.floor()))
-            }
-            Value::NativeMathCeil => {
-                let n = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                Ok(Value::Number(n.ceil()))
-            }
-            Value::NativeMathRound => {
-                let n = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                Ok(Value::Number(n.round()))
-            }
-            Value::NativeMathRandom => {
-                use std::collections::hash_map::RandomState;
-                use std::hash::{BuildHasher, Hasher};
-                let random = RandomState::new().build_hasher().finish() as f64 / u64::MAX as f64;
-                Ok(Value::Number(random))
-            }
-            Value::NativeMathPow => {
-                let base = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                let exp = args.get(1).and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                Ok(Value::Number(base.powf(exp)))
-            }
-            Value::NativeMathSin => {
-                let n = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                Ok(Value::Number(n.sin()))
-            }
-            Value::NativeMathCos => {
-                let n = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                Ok(Value::Number(n.cos()))
-            }
-            Value::NativeMathTan => {
-                let n = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                Ok(Value::Number(n.tan()))
-            }
-            Value::NativeMathLog => {
-                let n = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                Ok(Value::Number(n.ln()))
-            }
-            Value::NativeMathExp => {
-                let n = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                Ok(Value::Number(n.exp()))
-            }
-            Value::NativeMathSign => {
-                let n = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                let sign = if n.is_nan() { f64::NAN } else if n > 0.0 { 1.0 } else if n < 0.0 { -1.0 } else { 0.0 };
-                Ok(Value::Number(sign))
-            }
-            Value::NativeMathTrunc => {
-                let n = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                }).unwrap_or(f64::NAN);
-                Ok(Value::Number(n.trunc()))
-            }
-            Value::NativeJsonParse => {
-                let s = args.first().map(|v| v.to_string()).unwrap_or_default();
-                Ok(Self::json_parse(&s))
-            }
-            Value::NativeJsonStringify => {
-                let v = args.first().cloned().unwrap_or(Value::Null);
-                Ok(Value::String(Self::json_stringify_value(&v).into()))
-            }
-            Value::NativeDecodeURI => {
-                let s = args.first().map(|v| v.to_string()).unwrap_or_default();
-                Ok(Value::String(tish_core::percent_decode(&s).unwrap_or(s).into()))
-            }
-            Value::NativeEncodeURI => {
-                let s = args.first().map(|v| v.to_string()).unwrap_or_default();
-                Ok(Value::String(tish_core::percent_encode(&s).into()))
-            }
-            Value::NativeObjectKeys => {
-                if let Some(Value::Object(obj)) = args.first() {
-                    let keys: Vec<Value> = obj.borrow().keys().map(|k| Value::String(Arc::clone(k))).collect();
-                    Ok(Value::Array(Rc::new(RefCell::new(keys))))
-                } else {
-                    Ok(Value::Array(Rc::new(RefCell::new(vec![]))))
-                }
-            }
-            Value::NativeObjectValues => {
-                if let Some(Value::Object(obj)) = args.first() {
-                    let vals: Vec<Value> = obj.borrow().values().cloned().collect();
-                    Ok(Value::Array(Rc::new(RefCell::new(vals))))
-                } else {
-                    Ok(Value::Array(Rc::new(RefCell::new(vec![]))))
-                }
-            }
-            Value::NativeObjectEntries => {
-                if let Some(Value::Object(obj)) = args.first() {
-                    let entries: Vec<Value> = obj.borrow().iter().map(|(k, v)| {
-                        Value::Array(Rc::new(RefCell::new(vec![Value::String(Arc::clone(k)), v.clone()])))
-                    }).collect();
-                    Ok(Value::Array(Rc::new(RefCell::new(entries))))
-                } else {
-                    Ok(Value::Array(Rc::new(RefCell::new(vec![]))))
-                }
-            }
-            Value::NativeObjectAssign => {
-                let target = match args.first() {
-                    Some(Value::Object(obj)) => Rc::clone(obj),
-                    Some(Value::Null) | None => {
-                        return Err(EvalError::Error("Object.assign requires a target object".to_string()));
-                    }
-                    _ => {
-                        return Err(EvalError::Error("Object.assign target must be an object".to_string()));
-                    }
-                };
-                for source in args.iter().skip(1) {
-                    if let Value::Object(src) = source {
-                        let src_borrow = src.borrow();
-                        let mut target_mut = target.borrow_mut();
-                        for (k, v) in src_borrow.iter() {
-                            target_mut.insert(Arc::clone(k), v.clone());
-                        }
-                    }
-                }
-                Ok(Value::Object(target))
-            }
-            Value::NativeObjectFromEntries => {
-                let entries = match args.first() {
-                    Some(Value::Array(arr)) => arr.borrow().clone(),
-                    _ => return Ok(Value::Object(Rc::new(RefCell::new(HashMap::new())))),
-                };
-                let mut result = HashMap::new();
-                for entry in entries {
-                    if let Value::Array(pair) = entry {
-                        let pair_borrow = pair.borrow();
-                        if pair_borrow.len() >= 2 {
-                            let key: Arc<str> = match &pair_borrow[0] {
-                                Value::String(s) => Arc::clone(s),
-                                v => v.to_string().into(),
-                            };
-                            result.insert(key, pair_borrow[1].clone());
-                        }
-                    }
-                }
-                Ok(Value::Object(Rc::new(RefCell::new(result))))
-            }
-            Value::NativeArrayIsArray => {
-                let is_arr = matches!(args.first(), Some(Value::Array(_)));
-                Ok(Value::Bool(is_arr))
-            }
-            Value::NativeStringFromCharCode => {
-                let s: String = args.iter().filter_map(|v| match v {
-                    Value::Number(n) => char::from_u32(*n as u32),
-                    _ => None,
-                }).collect();
-                Ok(Value::String(s.into()))
-            }
-            Value::NativeDateNow => {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_millis() as f64)
-                    .unwrap_or(0.0);
-                Ok(Value::Number(now))
-            }
-            #[cfg(feature = "process")]
-            Value::NativeProcessExit => {
-                let code = args.first().and_then(|v| match v {
-                    Value::Number(n) => Some(*n as i32),
-                    _ => None,
-                }).unwrap_or(0);
-                std::process::exit(code);
-            }
-            #[cfg(feature = "process")]
-            Value::NativeProcessCwd => {
-                let cwd = std::env::current_dir()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default();
-                Ok(Value::String(cwd.into()))
-            }
-            #[cfg(feature = "fs")]
-            Value::NativeReadFile => {
-                let path = args.first().map(|v| v.to_string()).unwrap_or_default();
-                match std::fs::read_to_string(&path) {
-                    Ok(content) => Ok(Value::String(content.into())),
-                    Err(e) => Err(EvalError::Error(format!("readFile error: {}", e))),
-                }
-            }
-            #[cfg(feature = "fs")]
-            Value::NativeWriteFile => {
-                let path = args.first().map(|v| v.to_string()).unwrap_or_default();
-                let content = args.get(1).map(|v| v.to_string()).unwrap_or_default();
-                match std::fs::write(&path, &content) {
-                    Ok(()) => Ok(Value::Bool(true)),
-                    Err(e) => Err(EvalError::Error(format!("writeFile error: {}", e))),
-                }
-            }
-            #[cfg(feature = "fs")]
-            Value::NativeFileExists => {
-                let path = args.first().map(|v| v.to_string()).unwrap_or_default();
-                Ok(Value::Bool(std::path::Path::new(&path).exists()))
-            }
-            #[cfg(feature = "fs")]
-            Value::NativeReadDir => {
-                let path = args.first().map(|v| v.to_string()).unwrap_or_else(|| ".".to_string());
-                match std::fs::read_dir(&path) {
-                    Ok(entries) => {
-                        let files: Vec<Value> = entries
-                            .filter_map(|e| e.ok())
-                            .map(|e| Value::String(e.file_name().to_string_lossy().into()))
-                            .collect();
-                        Ok(Value::Array(Rc::new(RefCell::new(files))))
-                    }
-                    Err(e) => Err(EvalError::Error(format!("readDir error: {}", e))),
-                }
-            }
-            #[cfg(feature = "fs")]
-            Value::NativeMkdir => {
-                let path = args.first().map(|v| v.to_string()).unwrap_or_default();
-                match std::fs::create_dir_all(&path) {
-                    Ok(()) => Ok(Value::Bool(true)),
-                    Err(e) => Err(EvalError::Error(format!("mkdir error: {}", e))),
-                }
+            Value::Native(native_fn) => {
+                native_fn(args).map_err(EvalError::Error)
             }
             #[cfg(feature = "http")]
-            Value::NativeFetch => crate::http::fetch(args).map_err(EvalError::Error),
-            #[cfg(feature = "http")]
-            Value::NativeFetchAll => crate::http::fetch_all(args).map_err(EvalError::Error),
-            #[cfg(feature = "http")]
-            Value::NativeServe => self.run_http_server(args),
-            #[cfg(feature = "regex")]
-            Value::NativeRegExpConstructor => crate::regex::regexp_constructor(args).map_err(EvalError::Error),
+            Value::Serve => self.run_http_server(args),
             #[cfg(feature = "regex")]
             Value::RegExp(_) => Err(EvalError::Error("RegExp is not callable".to_string())),
             Value::Function { params, defaults, rest_param, body } => {
-                // Arc clones are cheap - just incrementing reference counts
                 let scope = Scope::child(Rc::clone(&self.scope));
                 {
                     let mut s = scope.borrow_mut();
@@ -2174,8 +1773,7 @@ impl Evaluator {
         };
 
         let handler = match args.get(1) {
-            Some(f @ Value::Function { .. }) => f.clone(),
-            Some(f @ Value::NativeConsoleLog) => f.clone(),
+            Some(f @ Value::Function { .. }) | Some(f @ Value::Native(_)) => f.clone(),
             _ => {
                 return Err(EvalError::Error(
                     "serve requires a handler function".to_string(),
@@ -2568,53 +2166,105 @@ impl Evaluator {
                 entries.sort_by(|a, b| a.0.cmp(&b.0));
                 format!("{{{}}}", entries.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(","))
             }
-            Value::Function { .. }
-            | Value::NativeConsoleDebug
-            | Value::NativeConsoleInfo
-            | Value::NativeConsoleLog
-            | Value::NativeConsoleWarn
-            | Value::NativeConsoleError
-            | Value::NativeParseInt
-            | Value::NativeParseFloat
-            | Value::NativeIsFinite
-            | Value::NativeIsNaN
-            | Value::NativeMathAbs
-            | Value::NativeMathSqrt
-            | Value::NativeMathMin
-            | Value::NativeMathMax
-            | Value::NativeMathFloor
-            | Value::NativeMathCeil
-            | Value::NativeMathRound
-            | Value::NativeJsonParse
-            | Value::NativeJsonStringify
-            | Value::NativeDecodeURI
-            | Value::NativeEncodeURI
-            | Value::NativeObjectKeys
-            | Value::NativeObjectValues
-            | Value::NativeObjectEntries
-            | Value::NativeObjectAssign
-            | Value::NativeObjectFromEntries
-            | Value::NativeArrayIsArray
-            | Value::NativeStringFromCharCode
-            | Value::NativeDateNow
-            | Value::NativeMathRandom
-            | Value::NativeMathPow
-            | Value::NativeMathSin
-            | Value::NativeMathCos
-            | Value::NativeMathTan
-            | Value::NativeMathLog
-            | Value::NativeMathExp
-            | Value::NativeMathSign
-            | Value::NativeMathTrunc => "null".to_string(),
-            #[cfg(feature = "process")]
-            Value::NativeProcessExit | Value::NativeProcessCwd => "null".to_string(),
+            Value::Function { .. } | Value::Native(_) => "null".to_string(),
             #[cfg(feature = "http")]
-            Value::NativeFetch | Value::NativeFetchAll | Value::NativeServe => "null".to_string(),
-            #[cfg(feature = "fs")]
-            Value::NativeReadFile | Value::NativeWriteFile | Value::NativeFileExists | Value::NativeReadDir | Value::NativeMkdir => "null".to_string(),
+            Value::Serve => "null".to_string(),
             #[cfg(feature = "regex")]
-            Value::RegExp(_) | Value::NativeRegExpConstructor => "null".to_string(),
+            Value::RegExp(_) => "null".to_string(),
         }
+    }
+
+    // Static native wrapper functions (these need to be fn pointers, not closures with &self)
+    fn json_parse_native(args: &[Value]) -> Result<Value, String> {
+        let s = args.first().map(|v| v.to_string()).unwrap_or_default();
+        Ok(Self::json_parse(&s))
+    }
+
+    fn json_stringify_native(args: &[Value]) -> Result<Value, String> {
+        let v = args.first().cloned().unwrap_or(Value::Null);
+        Ok(Value::String(Self::json_stringify_value(&v).into()))
+    }
+
+    fn object_keys(args: &[Value]) -> Result<Value, String> {
+        if let Some(Value::Object(obj)) = args.first() {
+            let keys: Vec<Value> = obj.borrow().keys().map(|k| Value::String(Arc::clone(k))).collect();
+            Ok(Value::Array(Rc::new(RefCell::new(keys))))
+        } else {
+            Ok(Value::Array(Rc::new(RefCell::new(Vec::new()))))
+        }
+    }
+
+    fn object_values(args: &[Value]) -> Result<Value, String> {
+        if let Some(Value::Object(obj)) = args.first() {
+            let values: Vec<Value> = obj.borrow().values().cloned().collect();
+            Ok(Value::Array(Rc::new(RefCell::new(values))))
+        } else {
+            Ok(Value::Array(Rc::new(RefCell::new(Vec::new()))))
+        }
+    }
+
+    fn object_entries(args: &[Value]) -> Result<Value, String> {
+        if let Some(Value::Object(obj)) = args.first() {
+            let entries: Vec<Value> = obj.borrow().iter().map(|(k, v)| {
+                Value::Array(Rc::new(RefCell::new(vec![
+                    Value::String(Arc::clone(k)),
+                    v.clone(),
+                ])))
+            }).collect();
+            Ok(Value::Array(Rc::new(RefCell::new(entries))))
+        } else {
+            Ok(Value::Array(Rc::new(RefCell::new(Vec::new()))))
+        }
+    }
+
+    fn object_assign(args: &[Value]) -> Result<Value, String> {
+        if let Some(Value::Object(target)) = args.first() {
+            let mut t = target.borrow_mut();
+            for src in args.iter().skip(1) {
+                if let Value::Object(src_obj) = src {
+                    for (k, v) in src_obj.borrow().iter() {
+                        t.insert(Arc::clone(k), v.clone());
+                    }
+                }
+            }
+            drop(t);
+            Ok(args.first().cloned().unwrap())
+        } else {
+            Ok(Value::Null)
+        }
+    }
+
+    fn object_from_entries(args: &[Value]) -> Result<Value, String> {
+        if let Some(Value::Array(arr)) = args.first() {
+            let mut map = HashMap::new();
+            for entry in arr.borrow().iter() {
+                if let Value::Array(pair) = entry {
+                    let pair = pair.borrow();
+                    if let (Some(key), Some(value)) = (pair.first(), pair.get(1)) {
+                        let key_str: Arc<str> = key.to_string().into();
+                        map.insert(key_str, value.clone());
+                    }
+                }
+            }
+            Ok(Value::Object(Rc::new(RefCell::new(map))))
+        } else {
+            Ok(Value::Object(Rc::new(RefCell::new(HashMap::new()))))
+        }
+    }
+
+    #[cfg(feature = "regex")]
+    fn regexp_constructor_native(args: &[Value]) -> Result<Value, String> {
+        crate::regex::regexp_constructor(args)
+    }
+
+    #[cfg(feature = "http")]
+    fn fetch_native(args: &[Value]) -> Result<Value, String> {
+        crate::http::fetch(args)
+    }
+
+    #[cfg(feature = "http")]
+    fn fetch_all_native(args: &[Value]) -> Result<Value, String> {
+        crate::http::fetch_all(args)
     }
 
 }
