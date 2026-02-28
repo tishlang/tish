@@ -19,10 +19,10 @@ pub enum Value {
     Array(Rc<RefCell<Vec<Value>>>),
     Object(Rc<RefCell<HashMap<Arc<str>, Value>>>),
     Function {
-        params: Vec<Arc<str>>,
-        defaults: Vec<Option<Expr>>,
+        params: Arc<[Arc<str>]>,
+        defaults: Arc<[Option<Expr>]>,
         rest_param: Option<Arc<str>>,
-        body: Box<Statement>,
+        body: Arc<Statement>,
     },
     NativeConsoleDebug,
     NativeConsoleInfo,

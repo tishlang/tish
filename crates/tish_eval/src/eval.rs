@@ -319,11 +319,11 @@ impl Evaluator {
                 body,
                 ..
             } => {
-                // Extract parameter names and defaults
-                let param_names: Vec<Arc<str>> = params.iter().map(|p| Arc::clone(&p.name)).collect();
-                let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
+                // Extract parameter names and defaults using Arc for cheap cloning
+                let param_names: Arc<[Arc<str>]> = params.iter().map(|p| Arc::clone(&p.name)).collect();
+                let defaults: Arc<[Option<Expr>]> = params.iter().map(|p| p.default.clone()).collect();
                 let rest_param_name = rest_param.as_ref().map(|p| Arc::clone(&p.name));
-                let body = Box::clone(body);
+                let body = Arc::new(body.as_ref().clone());
                 let _scope = Rc::clone(&self.scope);
                 let func = Value::Function {
                     params: param_names,
@@ -560,19 +560,30 @@ impl Evaluator {
                                             nb.partial_cmp(&na).unwrap_or(std::cmp::Ordering::Equal)
                                         });
                                     } else {
-                                        // General case: use comparator function
+                                        // General case: use comparator function with optimized scope reuse
                                         let len = arr_mut.len();
                                         let mut indices: Vec<usize> = (0..len).collect();
                                         let arr_values: Vec<Value> = std::mem::take(&mut *arr_mut);
 
-                                        indices.sort_by(|&i, &j| {
-                                            let result = self.call_func(&cmp_fn, &[arr_values[i].clone(), arr_values[j].clone()]);
-                                            match result {
-                                                Ok(Value::Number(n)) if n < 0.0 => std::cmp::Ordering::Less,
-                                                Ok(Value::Number(n)) if n > 0.0 => std::cmp::Ordering::Greater,
-                                                _ => std::cmp::Ordering::Equal,
-                                            }
-                                        });
+                                        if let Some((scope, params, body)) = self.create_callback_scope(&cmp_fn) {
+                                            indices.sort_by(|&i, &j| {
+                                                let result = self.call_with_scope(&scope, &params, &body, &[arr_values[i].clone(), arr_values[j].clone()]);
+                                                match result {
+                                                    Ok(Value::Number(n)) if n < 0.0 => std::cmp::Ordering::Less,
+                                                    Ok(Value::Number(n)) if n > 0.0 => std::cmp::Ordering::Greater,
+                                                    _ => std::cmp::Ordering::Equal,
+                                                }
+                                            });
+                                        } else {
+                                            indices.sort_by(|&i, &j| {
+                                                let result = self.call_func(&cmp_fn, &[arr_values[i].clone(), arr_values[j].clone()]);
+                                                match result {
+                                                    Ok(Value::Number(n)) if n < 0.0 => std::cmp::Ordering::Less,
+                                                    Ok(Value::Number(n)) if n > 0.0 => std::cmp::Ordering::Greater,
+                                                    _ => std::cmp::Ordering::Equal,
+                                                }
+                                            });
+                                        }
 
                                         *arr_mut = indices.into_iter().map(|i| arr_values[i].clone()).collect();
                                     }
@@ -658,9 +669,30 @@ impl Evaluator {
                                 let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
                                 let mut result = Vec::with_capacity(arr_borrow.len());
-                                for (i, v) in arr_borrow.iter().enumerate() {
-                                    let mapped = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
-                                    result.push(mapped);
+                                // Try fastest path: simple single-expression callbacks
+                                let first_result = self.eval_simple_callback(&callback, &[arr_borrow.first().cloned().unwrap_or(Value::Null)]);
+                                if first_result.is_some() {
+                                    // Simple callback path - inline evaluation
+                                    for v in arr_borrow.iter() {
+                                        if let Some(r) = self.eval_simple_callback(&callback, &[v.clone()]) {
+                                            result.push(r?);
+                                        } else {
+                                            // Shouldn't happen, but fall back
+                                            result.push(self.call_func(&callback, &[v.clone()])?);
+                                        }
+                                    }
+                                } else if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
+                                    // Reusable scope path
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let mapped = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        result.push(mapped);
+                                    }
+                                } else {
+                                    // Full call_func path
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let mapped = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        result.push(mapped);
+                                    }
                                 }
                                 return Ok(Value::Array(Rc::new(RefCell::new(result))));
                             }
@@ -668,10 +700,31 @@ impl Evaluator {
                                 let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
                                 let mut result = Vec::new();
-                                for (i, v) in arr_borrow.iter().enumerate() {
-                                    let keep = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
-                                    if keep.is_truthy() {
-                                        result.push(v.clone());
+                                // Try simple callback fast path
+                                let use_simple = arr_borrow.first().map(|v| {
+                                    self.eval_simple_callback(&callback, &[v.clone()]).is_some()
+                                }).unwrap_or(false);
+                                if use_simple {
+                                    for v in arr_borrow.iter() {
+                                        if let Some(keep) = self.eval_simple_callback(&callback, &[v.clone()]) {
+                                            if keep?.is_truthy() {
+                                                result.push(v.clone());
+                                            }
+                                        }
+                                    }
+                                } else if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let keep = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        if keep.is_truthy() {
+                                            result.push(v.clone());
+                                        }
+                                    }
+                                } else {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let keep = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        if keep.is_truthy() {
+                                            result.push(v.clone());
+                                        }
                                     }
                                 }
                                 return Ok(Value::Array(Rc::new(RefCell::new(result))));
@@ -686,18 +739,45 @@ impl Evaluator {
                                 } else {
                                     return Err(EvalError::Error("Reduce of empty array with no initial value".to_string()));
                                 };
-                                for (i, v) in arr_borrow.iter().enumerate().skip(start_idx) {
-                                    acc = self.call_func(&callback, &[acc, v.clone(), Value::Number(i as f64)])?;
+                                if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
+                                    for (i, v) in arr_borrow.iter().enumerate().skip(start_idx) {
+                                        acc = self.call_with_scope(&scope, &params, &body, &[acc, v.clone(), Value::Number(i as f64)])?;
+                                    }
+                                } else {
+                                    for (i, v) in arr_borrow.iter().enumerate().skip(start_idx) {
+                                        acc = self.call_func(&callback, &[acc, v.clone(), Value::Number(i as f64)])?;
+                                    }
                                 }
                                 return Ok(acc);
                             }
                             "find" => {
                                 let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
-                                for (i, v) in arr_borrow.iter().enumerate() {
-                                    let found = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
-                                    if found.is_truthy() {
-                                        return Ok(v.clone());
+                                // Try simple callback fast path
+                                let use_simple = arr_borrow.first().map(|v| {
+                                    self.eval_simple_callback(&callback, &[v.clone()]).is_some()
+                                }).unwrap_or(false);
+                                if use_simple {
+                                    for v in arr_borrow.iter() {
+                                        if let Some(found) = self.eval_simple_callback(&callback, &[v.clone()]) {
+                                            if found?.is_truthy() {
+                                                return Ok(v.clone());
+                                            }
+                                        }
+                                    }
+                                } else if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let found = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        if found.is_truthy() {
+                                            return Ok(v.clone());
+                                        }
+                                    }
+                                } else {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let found = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        if found.is_truthy() {
+                                            return Ok(v.clone());
+                                        }
                                     }
                                 }
                                 return Ok(Value::Null);
@@ -705,10 +785,19 @@ impl Evaluator {
                             "findIndex" => {
                                 let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
-                                for (i, v) in arr_borrow.iter().enumerate() {
-                                    let found = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
-                                    if found.is_truthy() {
-                                        return Ok(Value::Number(i as f64));
+                                if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let found = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        if found.is_truthy() {
+                                            return Ok(Value::Number(i as f64));
+                                        }
+                                    }
+                                } else {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let found = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        if found.is_truthy() {
+                                            return Ok(Value::Number(i as f64));
+                                        }
                                     }
                                 }
                                 return Ok(Value::Number(-1.0));
@@ -716,18 +805,45 @@ impl Evaluator {
                             "forEach" => {
                                 let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
-                                for (i, v) in arr_borrow.iter().enumerate() {
-                                    self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                    }
+                                } else {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                    }
                                 }
                                 return Ok(Value::Null);
                             }
                             "some" => {
                                 let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
-                                for (i, v) in arr_borrow.iter().enumerate() {
-                                    let result = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
-                                    if result.is_truthy() {
-                                        return Ok(Value::Bool(true));
+                                // Try simple callback fast path
+                                let use_simple = arr_borrow.first().map(|v| {
+                                    self.eval_simple_callback(&callback, &[v.clone()]).is_some()
+                                }).unwrap_or(false);
+                                if use_simple {
+                                    for v in arr_borrow.iter() {
+                                        if let Some(result) = self.eval_simple_callback(&callback, &[v.clone()]) {
+                                            if result?.is_truthy() {
+                                                return Ok(Value::Bool(true));
+                                            }
+                                        }
+                                    }
+                                } else if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let result = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        if result.is_truthy() {
+                                            return Ok(Value::Bool(true));
+                                        }
+                                    }
+                                } else {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let result = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        if result.is_truthy() {
+                                            return Ok(Value::Bool(true));
+                                        }
                                     }
                                 }
                                 return Ok(Value::Bool(false));
@@ -735,10 +851,31 @@ impl Evaluator {
                             "every" => {
                                 let callback = arg_vals.get(0).cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
-                                for (i, v) in arr_borrow.iter().enumerate() {
-                                    let result = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
-                                    if !result.is_truthy() {
-                                        return Ok(Value::Bool(false));
+                                // Try simple callback fast path
+                                let use_simple = arr_borrow.first().map(|v| {
+                                    self.eval_simple_callback(&callback, &[v.clone()]).is_some()
+                                }).unwrap_or(false);
+                                if use_simple {
+                                    for v in arr_borrow.iter() {
+                                        if let Some(result) = self.eval_simple_callback(&callback, &[v.clone()]) {
+                                            if !result?.is_truthy() {
+                                                return Ok(Value::Bool(false));
+                                            }
+                                        }
+                                    }
+                                } else if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let result = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        if !result.is_truthy() {
+                                            return Ok(Value::Bool(false));
+                                        }
+                                    }
+                                } else {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let result = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        if !result.is_truthy() {
+                                            return Ok(Value::Bool(false));
+                                        }
                                     }
                                 }
                                 return Ok(Value::Bool(true));
@@ -1301,9 +1438,9 @@ impl Evaluator {
             }
             Expr::ArrowFunction { params, body, .. } => {
                 use tish_ast::ArrowBody;
-                // Convert arrow function to regular function
-                let param_names: Vec<Arc<str>> = params.iter().map(|p| Arc::clone(&p.name)).collect();
-                let defaults: Vec<Option<tish_ast::Expr>> = params.iter().map(|p| p.default.clone()).collect();
+                // Convert arrow function to regular function using Arc for cheap cloning
+                let param_names: Arc<[Arc<str>]> = params.iter().map(|p| Arc::clone(&p.name)).collect();
+                let defaults: Arc<[Option<tish_ast::Expr>]> = params.iter().map(|p| p.default.clone()).collect();
                 let body_stmt = match body {
                     ArrowBody::Expr(expr) => {
                         // Expression body: wrap in implicit return
@@ -1318,7 +1455,7 @@ impl Evaluator {
                     params: param_names,
                     defaults,
                     rest_param: None,
-                    body: Box::new(body_stmt),
+                    body: Arc::new(body_stmt),
                 })
             }
             Expr::TemplateLiteral { quasis, exprs, .. } => {
@@ -1497,6 +1634,136 @@ impl Evaluator {
             Ok("warn") => 3,
             Ok("error") => 4,
             _ => 2, // default: log
+        }
+    }
+
+    /// Optimized callback invocation for array methods.
+    /// Creates a reusable scope that can be updated for each iteration.
+    fn create_callback_scope(&self, f: &Value) -> Option<(Rc<RefCell<Scope>>, Arc<[Arc<str>]>, Arc<Statement>)> {
+        if let Value::Function { params, body, defaults, rest_param } = f {
+            // Only optimize simple cases: no defaults used, no rest params
+            if rest_param.is_some() || defaults.iter().any(|d| d.is_some()) {
+                return None;
+            }
+            let scope = Scope::child(Rc::clone(&self.scope));
+            // Pre-initialize parameters to Null
+            {
+                let mut s = scope.borrow_mut();
+                for p in params.iter() {
+                    s.set(Arc::clone(p), Value::Null, true);
+                }
+            }
+            return Some((scope, Arc::clone(params), Arc::clone(body)));
+        }
+        None
+    }
+
+    /// Fast callback invocation that reuses an existing scope.
+    fn call_with_scope(
+        &self,
+        scope: &Rc<RefCell<Scope>>,
+        params: &[Arc<str>],
+        body: &Statement,
+        args: &[Value],
+    ) -> Result<Value, EvalError> {
+        {
+            let mut s = scope.borrow_mut();
+            for (i, p) in params.iter().enumerate() {
+                let val = args.get(i).cloned().unwrap_or(Value::Null);
+                // Direct assignment - we know these vars exist and are mutable
+                if let Some(existing) = s.vars.get_mut(p.as_ref()) {
+                    *existing = val;
+                }
+            }
+        }
+        let mut eval = Evaluator { scope: Rc::clone(scope) };
+        match eval.eval_statement(body) {
+            Ok(v) => Ok(v),
+            Err(EvalError::Return(v)) => Ok(v),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Try to evaluate a simple callback expression directly without creating a scope.
+    /// Returns Some(result) for simple patterns like `x => x * 2` or `x => x > 5`.
+    fn eval_simple_callback(
+        &self,
+        f: &Value,
+        args: &[Value],
+    ) -> Option<Result<Value, EvalError>> {
+        if let Value::Function { params, body, defaults, rest_param } = f {
+            // Only optimize single-parameter functions without defaults or rest
+            if params.len() != 1 || rest_param.is_some() || defaults.iter().any(|d| d.is_some()) {
+                return None;
+            }
+            let param_name = &params[0];
+            let arg = args.first().cloned().unwrap_or(Value::Null);
+
+            // Get the expression from the body
+            let expr = match body.as_ref() {
+                Statement::Return { value: Some(e), .. } => e,
+                Statement::ExprStmt { expr: e, .. } => e,
+                _ => return None,
+            };
+
+            // Fast path for common patterns
+            match expr {
+                // x * constant or x + constant, etc.
+                Expr::Binary { left, op, right, .. } => {
+                    let left_val = self.eval_simple_operand(left, param_name, &arg)?;
+                    let right_val = self.eval_simple_operand(right, param_name, &arg)?;
+                    Some(self.eval_binop(&left_val, *op, &right_val).map_err(EvalError::Error))
+                }
+                // Just return the parameter
+                Expr::Ident { name, .. } if name == param_name => {
+                    Some(Ok(arg))
+                }
+                // Property access: x.prop
+                Expr::Member { object, prop, optional, .. } => {
+                    if let Expr::Ident { name, .. } = object.as_ref() {
+                        if name == param_name {
+                            return self.eval_simple_member(&arg, prop, *optional);
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Evaluate a simple operand (identifier or literal).
+    fn eval_simple_operand(&self, expr: &Expr, param_name: &Arc<str>, param_val: &Value) -> Option<Value> {
+        match expr {
+            Expr::Ident { name, .. } if name == param_name => Some(param_val.clone()),
+            Expr::Literal { value, .. } => match value {
+                Literal::Number(n) => Some(Value::Number(*n)),
+                Literal::String(s) => Some(Value::String(Arc::clone(s))),
+                Literal::Bool(b) => Some(Value::Bool(*b)),
+                Literal::Null => Some(Value::Null),
+            },
+            _ => None,
+        }
+    }
+
+    /// Evaluate simple member access.
+    fn eval_simple_member(&self, obj: &Value, property: &MemberProp, _optional: bool) -> Option<Result<Value, EvalError>> {
+        match property {
+            MemberProp::Name(name) => {
+                match obj {
+                    Value::Object(o) => {
+                        let result = o.borrow().get(name.as_ref()).cloned().unwrap_or(Value::Null);
+                        Some(Ok(result))
+                    }
+                    Value::Array(arr) if name.as_ref() == "length" => {
+                        Some(Ok(Value::Number(arr.borrow().len() as f64)))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -1859,10 +2126,7 @@ impl Evaluator {
             #[cfg(feature = "regex")]
             Value::RegExp(_) => Err(EvalError::Error("RegExp is not callable".to_string())),
             Value::Function { params, defaults, rest_param, body } => {
-                let params = params.clone();
-                let defaults = defaults.clone();
-                let rest_param = rest_param.clone();
-                let body = Box::clone(body);
+                // Arc clones are cheap - just incrementing reference counts
                 let scope = Scope::child(Rc::clone(&self.scope));
                 {
                     let mut s = scope.borrow_mut();
@@ -1882,13 +2146,13 @@ impl Evaluator {
                         };
                         s.set(Arc::clone(p), val, true);
                     }
-                    if let Some(rest_name) = rest_param {
+                    if let Some(ref rest_name) = rest_param {
                         let rest_vals: Vec<Value> = args.iter().skip(params.len()).cloned().collect();
-                        s.set(rest_name, Value::Array(Rc::new(RefCell::new(rest_vals))), true);
+                        s.set(Arc::clone(rest_name), Value::Array(Rc::new(RefCell::new(rest_vals))), true);
                     }
                 }
                 let mut eval = Evaluator { scope };
-                match eval.eval_statement(&body) {
+                match eval.eval_statement(body) {
                     Ok(v) => Ok(v),
                     Err(EvalError::Return(v)) => Ok(v),
                     Err(EvalError::Throw(v)) => Err(EvalError::Throw(v)),
