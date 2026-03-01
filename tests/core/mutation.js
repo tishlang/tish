@@ -1,0 +1,57 @@
+// Test property and index assignment (mutation)
+
+// Object property assignment
+let obj = { x: 1, y: 2 };
+console.log(obj.x);
+obj.x = 10;
+console.log(obj.x);
+
+// Add new property
+obj.z = 30;
+console.log(obj.z);
+
+// Nested object assignment
+let nested = { a: { b: 1 } };
+nested.a.b = 42;
+console.log(nested.a.b);
+
+// Array index assignment
+let arr = [1, 2, 3];
+console.log(arr[1]);
+arr[1] = 20;
+console.log(arr[1]);
+
+// Extend array with assignment (JS behavior)
+arr[5] = 100;
+console.log(arr.length);
+console.log(arr[5]);
+console.log(arr[4]); // undefined in JS, null in Tish
+
+// Object bracket notation assignment
+let data = {};
+data["key"] = "value";
+console.log(data.key);
+
+// Numeric key on object
+data[42] = "answer";
+console.log(data["42"]);
+
+// Mixed mutations
+let counter = { count: 0 };
+counter.count = counter.count + 1;
+console.log(counter.count);
+counter.count = counter.count + 5;
+console.log(counter.count);
+
+// Array of objects
+let items = [{ name: "a" }, { name: "b" }];
+items[0].name = "updated";
+console.log(items[0].name);
+
+// Function returning object, then mutate
+function makeObj() {
+    return { val: 0 };
+}
+let result = makeObj();
+result.val = 999;
+console.log(result.val);

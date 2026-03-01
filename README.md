@@ -99,11 +99,11 @@ Tests:
 - `test_mvp_programs_interpreter` – run via interpreter
 - `test_mvp_programs_interpreter_vs_native` – compile to native, compare output
 
-Run any test file: `tish run tests/mvp/<name>.tish`
+Run any test file: `tish run tests/core/<name>.tish`
 
 ## Performance Comparison
 
-JavaScript equivalents in `performance/mvp/*.js`. Compare Tish vs Node.js/Bun:
+JavaScript equivalents in `tests/core/*.js`. Compare Tish vs Node.js/Bun:
 
 ```bash
 ./scripts/run_performance_manual.sh

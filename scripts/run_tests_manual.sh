@@ -6,14 +6,14 @@ set -e
 cd "$(dirname "$0")/.."
 tish_bin="cargo run -p tish -q --"
 
-mvp_dir="tests/mvp"
+core_dir="tests/core"
 run_native=false
 [[ "${1:-}" == "--native" ]] && run_native=true
 
 echo "=== Tish manual test run ==="
 echo ""
 
-for f in "$mvp_dir"/*.tish; do
+for f in "$core_dir"/*.tish; do
   [[ -f "$f" ]] || continue
   name=$(basename "$f")
   echo "─────────────────────────────────────────"

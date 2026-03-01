@@ -1,0 +1,95 @@
+// RegExp tests
+
+// RegExp constructor (called as function)
+let re1 = RegExp("hello", "");
+let re2 = RegExp("world", "gi");
+
+console.log("=== RegExp constructor ===");
+console.log(typeof re1 === "object");
+console.log(re1.source === "hello");
+console.log(re2.source === "world");
+console.log(re2.global === true);
+console.log(re2.ignoreCase === true);
+
+// test() method
+console.log("=== test() method ===");
+let pattern = RegExp("foo", "");
+console.log(pattern.test("foobar") === true);
+console.log(pattern.test("barfoo") === true);
+console.log(pattern.test("baz") === false);
+
+// Case insensitive
+let iPattern = RegExp("FOO", "i");
+console.log(iPattern.test("foobar") === true);
+console.log(iPattern.test("FooBar") === true);
+
+// exec() method
+console.log("=== exec() method ===");
+let exec1 = RegExp("(\\d+)", "");
+let result = exec1.exec("abc123def");
+console.log(result !== null);
+console.log(result[0] === "123");
+console.log(result[1] === "123");
+
+// exec with no match
+let noMatch = exec1.exec("abc");
+console.log(noMatch === null);
+
+// Global flag and lastIndex
+console.log("=== global flag ===");
+let globalRe = RegExp("o", "g");
+console.log(globalRe.test("foo") === true);
+console.log(globalRe.lastIndex > 0);
+
+// String.match() with regex
+console.log("=== String.match() ===");
+let str = "The quick brown fox";
+let matchResult = str.match(RegExp("quick", ""));
+console.log(matchResult !== null);
+console.log(matchResult[0] === "quick");
+
+// String.match() global - returns all matches
+let allMatches = "foo bar foo baz foo".match(RegExp("foo", "g"));
+console.log(allMatches !== null);
+console.log(allMatches.length === 3);
+
+// String.replace() with regex
+console.log("=== String.replace() ===");
+let replaced1 = "hello world".replace(RegExp("world", ""), "there");
+console.log(replaced1 === "hello there");
+
+// Global replace
+let replaced2 = "foo bar foo".replace(RegExp("foo", "g"), "baz");
+console.log(replaced2 === "baz bar baz");
+
+// String.search() with regex
+console.log("=== String.search() ===");
+let searchIdx = "hello world".search(RegExp("world", ""));
+console.log(searchIdx === 6);
+
+let noSearchIdx = "hello world".search(RegExp("xyz", ""));
+console.log(noSearchIdx === -1);
+
+// String.split() with regex
+console.log("=== String.split() ===");
+let splitResult = "one1two2three".split(RegExp("\\d", ""));
+console.log(splitResult.length === 3);
+console.log(splitResult[0] === "one");
+console.log(splitResult[1] === "two");
+console.log(splitResult[2] === "three");
+
+// Multiline flag
+console.log("=== multiline flag ===");
+let multiRe = RegExp("^foo", "m");
+console.log(multiRe.test("foo\nbar") === true);
+console.log(multiRe.test("bar\nfoo") === true);
+
+// DotAll flag
+console.log("=== dotAll flag ===");
+let dotRe = RegExp("foo.bar", "s");
+console.log(dotRe.test("foo\nbar") === true);
+
+let noDotRe = RegExp("foo.bar", "");
+console.log(noDotRe.test("foo\nbar") === false);
+
+console.log("=== All regex tests passed ===");

@@ -1,0 +1,37 @@
+// Test File I/O functions
+// Note: These tests require the 'fs' feature
+
+let testDir = "/tmp/tish_test_" + Date.now()
+let testFile = testDir + "/test.txt"
+let testContent = "Hello from Tish!"
+
+// mkdir
+let mkdirResult = mkdir(testDir)
+console.log("mkdir success:", mkdirResult === true)
+
+// fileExists (should be false initially for file)
+console.log("file doesn't exist yet:", fileExists(testFile) === false)
+console.log("dir exists:", fileExists(testDir) === true)
+
+// writeFile
+let writeResult = writeFile(testFile, testContent)
+console.log("writeFile success:", writeResult === true)
+
+// fileExists after write
+console.log("file exists after write:", fileExists(testFile) === true)
+
+// readFile
+let content = readFile(testFile)
+console.log("readFile content matches:", content === testContent)
+
+// readDir
+let files = readDir(testDir)
+console.log("readDir is array:", Array.isArray(files))
+console.log("readDir contains file:", files.includes("test.txt"))
+
+// Overwrite file
+writeFile(testFile, "Updated content")
+let newContent = readFile(testFile)
+console.log("file updated:", newContent === "Updated content")
+
+console.log("All file I/O tests completed")

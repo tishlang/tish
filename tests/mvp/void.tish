@@ -1,5 +1,0 @@
-// MVP test: void operator (evaluates operand, returns null)
-let x = void (1 + 2)
-console.log(typeof x)
-console.log(x === null)
-let dummy = void console.log("side effect")

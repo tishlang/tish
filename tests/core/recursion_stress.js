@@ -1,0 +1,238 @@
+// Recursion and closure stress tests
+// Tests call stack depth, closure capture, and nested function performance
+
+let start = 0;
+let end = 0;
+
+console.log("=== Recursion & Closure Stress Tests ===");
+console.log("");
+
+// === TAIL-RECURSIVE PATTERNS ===
+console.log("--- Tail Recursion Patterns ---");
+
+function sumTailRec(n, acc) {
+    if (n <= 0) return acc;
+    return sumTailRec(n - 1, acc + n);
+}
+start = Date.now();
+for (let i = 0; i < 100; i++) {
+    sumTailRec(500, 0);
+}
+end = Date.now();
+console.log("Tail recursion (500 depth x100): " + (end - start) + "ms");
+
+function fibTailRec(n, a, b) {
+    if (n === 0) return a;
+    if (n === 1) return b;
+    return fibTailRec(n - 1, b, a + b);
+}
+start = Date.now();
+for (let i = 0; i < 1000; i++) {
+    fibTailRec(50, 0, 1);
+}
+end = Date.now();
+console.log("Fibonacci tail-rec (50 depth x1000): " + (end - start) + "ms");
+
+// === TREE RECURSION ===
+console.log("");
+console.log("--- Tree Recursion ---");
+
+function treeRecurse(depth) {
+    if (depth <= 0) return 1;
+    return treeRecurse(depth - 1) + treeRecurse(depth - 1);
+}
+start = Date.now();
+treeRecurse(15);
+end = Date.now();
+console.log("Binary tree (depth 15, 2^15 calls): " + (end - start) + "ms");
+
+function ternaryTree(depth) {
+    if (depth <= 0) return 1;
+    return ternaryTree(depth - 1) + ternaryTree(depth - 1) + ternaryTree(depth - 1);
+}
+start = Date.now();
+ternaryTree(10);
+end = Date.now();
+console.log("Ternary tree (depth 10, 3^10 calls): " + (end - start) + "ms");
+
+// === MUTUAL RECURSION ===
+console.log("");
+console.log("--- Mutual Recursion ---");
+
+function isEven(n) {
+    if (n === 0) return true;
+    return isOdd(n - 1);
+}
+function isOdd(n) {
+    if (n === 0) return false;
+    return isEven(n - 1);
+}
+start = Date.now();
+for (let i = 0; i < 500; i++) {
+    isEven(100);
+}
+end = Date.now();
+console.log("Mutual recursion (100 depth x500): " + (end - start) + "ms");
+
+// === NESTED FUNCTION CALLS ===
+console.log("");
+console.log("--- Nested Function Calls ---");
+
+function outerWithHelper(n) {
+    function helper(x) {
+        return x * 2;
+    }
+    return helper(n) + helper(n + 1);
+}
+start = Date.now();
+for (let i = 0; i < 5000; i++) {
+    outerWithHelper(i);
+}
+end = Date.now();
+console.log("Nested helper fn (5000x): " + (end - start) + "ms");
+
+function deepNestedCalls(a) {
+    function level2(b) {
+        function level3(c) {
+            function level4(d) {
+                return a + b + c + d;
+            }
+            return level4(4);
+        }
+        return level3(3);
+    }
+    return level2(2);
+}
+start = Date.now();
+for (let i = 0; i < 5000; i++) {
+    deepNestedCalls(i);
+}
+end = Date.now();
+console.log("4-level nested fn (5000x): " + (end - start) + "ms");
+
+function multiHelper(base) {
+    function add(x) { return base + x; }
+    function mult(x) { return base * x; }
+    function sub(x) { return base - x; }
+    return add(1) + mult(2) + sub(3);
+}
+start = Date.now();
+for (let i = 0; i < 5000; i++) {
+    multiHelper(i);
+}
+end = Date.now();
+console.log("Multi-helper fn (5000x): " + (end - start) + "ms");
+
+// === ARROW FUNCTION CREATION ===
+console.log("");
+console.log("--- Arrow Function Creation ---");
+
+start = Date.now();
+for (let i = 0; i < 5000; i++) {
+    let fn = () => 42;
+}
+end = Date.now();
+console.log("Create simple arrow (5000x): " + (end - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 5000; i++) {
+    let fn = (a, b, c) => a + b + c;
+}
+end = Date.now();
+console.log("Create 3-param arrow (5000x): " + (end - start) + "ms");
+
+// === ARROW FUNCTION INVOCATION ===
+console.log("");
+console.log("--- Arrow Function Invocation ---");
+
+let simpleArrow = () => 42;
+start = Date.now();
+for (let i = 0; i < 10000; i++) {
+    simpleArrow();
+}
+end = Date.now();
+console.log("Call simple arrow (10000x): " + (end - start) + "ms");
+
+let addArrow = (a, b) => a + b;
+start = Date.now();
+for (let i = 0; i < 10000; i++) {
+    addArrow(i, 1);
+}
+end = Date.now();
+console.log("Call 2-param arrow (10000x): " + (end - start) + "ms");
+
+// === HIGHER ORDER FUNCTIONS ===
+console.log("");
+console.log("--- Higher Order Functions ---");
+
+function applyTwice(f, x) {
+    return f(f(x));
+}
+let double = (x) => x * 2;
+start = Date.now();
+for (let i = 0; i < 5000; i++) {
+    applyTwice(double, i);
+}
+end = Date.now();
+console.log("Apply twice (5000x): " + (end - start) + "ms");
+
+let add1 = (x) => x + 1;
+let times2 = (x) => x * 2;
+
+function applyBoth(f, g, x) {
+    return f(g(x));
+}
+start = Date.now();
+for (let i = 0; i < 5000; i++) {
+    applyBoth(add1, times2, i);
+}
+end = Date.now();
+console.log("Apply both (5000x): " + (end - start) + "ms");
+
+function pipeline3(f1, f2, f3, x) {
+    return f3(f2(f1(x)));
+}
+start = Date.now();
+for (let i = 0; i < 3000; i++) {
+    pipeline3(add1, times2, add1, i);
+}
+end = Date.now();
+console.log("3-func pipeline (3000x): " + (end - start) + "ms");
+
+// === RECURSIVE DATA STRUCTURES ===
+console.log("");
+console.log("--- Recursive Data Processing ---");
+
+function buildTree(depth) {
+    if (depth <= 0) return { val: 1, left: null, right: null };
+    return {
+        val: depth,
+        left: buildTree(depth - 1),
+        right: buildTree(depth - 1)
+    };
+}
+start = Date.now();
+let tree = buildTree(10);
+end = Date.now();
+console.log("Build binary tree (depth 10): " + (end - start) + "ms");
+
+function sumTree(node) {
+    if (node === null) return 0;
+    return node.val + sumTree(node.left) + sumTree(node.right);
+}
+start = Date.now();
+for (let i = 0; i < 50; i++) {
+    sumTree(tree);
+}
+end = Date.now();
+console.log("Sum tree (2047 nodes x50): " + (end - start) + "ms");
+
+function countNodes(node) {
+    if (node === null) return 0;
+    return 1 + countNodes(node.left) + countNodes(node.right);
+}
+let nodeCount = countNodes(tree);
+console.log("Tree has " + nodeCount + " nodes");
+
+console.log("");
+console.log("=== Recursion Stress Tests Complete ===");

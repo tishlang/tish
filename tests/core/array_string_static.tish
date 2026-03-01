@@ -1,0 +1,19 @@
+// Test Array.isArray and String.fromCharCode
+
+// Array.isArray
+console.log("Array.isArray([]):", Array.isArray([]))
+console.log("Array.isArray([1,2,3]):", Array.isArray([1, 2, 3]))
+console.log("Array.isArray({}):", Array.isArray({}))
+console.log("Array.isArray('string'):", Array.isArray("string"))
+console.log("Array.isArray(null):", Array.isArray(null))
+console.log("Array.isArray(42):", Array.isArray(42))
+
+// String.fromCharCode
+console.log("String.fromCharCode(65):", String.fromCharCode(65))
+console.log("String.fromCharCode(66, 67, 68):", String.fromCharCode(66, 67, 68))
+console.log("String.fromCharCode(72, 105):", String.fromCharCode(72, 105))
+
+// Combined test
+let hello = String.fromCharCode(72, 101, 108, 108, 111)
+console.log("Hello from charCodes:", hello)
+console.log("hello === 'Hello':", hello === "Hello")

@@ -1,0 +1,115 @@
+// Comprehensive test: plain objects and property access
+// Tests: literals, dot access, bracket access, nested objects, objects with functions
+// NOTE: Tish uses null where JS uses undefined (Tish has no undefined type)
+
+// Basic object creation
+let pt = { x: 10, y: 20 }
+console.log(pt.x)
+console.log(pt.y)
+
+// Bracket access with string literal
+console.log(pt["x"])
+
+// Dynamic property access
+let propName = "y"
+console.log(pt[propName])
+
+// Multiple properties
+let rec = { a: 1, b: 2, c: 3 }
+console.log(rec.a, rec.b, rec.c)
+
+// Nested objects
+let nested = {
+  outer: {
+    inner: {
+      value: 42
+    }
+  }
+}
+console.log(nested.outer.inner.value)
+console.log(nested["outer"]["inner"]["value"])
+
+// Mixed dot and bracket access
+console.log(nested.outer["inner"].value)
+
+// Objects with different value types
+let mixed = {
+  num: 123,
+  str: "hello",
+  bool: true,
+  nil: null,
+  arr: [1, 2, 3],
+  obj: { nested: true }
+}
+console.log(mixed.num)
+console.log(mixed.str)
+console.log(mixed.bool)
+console.log(mixed.nil)
+console.log(mixed.arr[1])
+console.log(mixed.obj.nested)
+
+// Dynamic property access with bracket notation
+let dynamicKey = "x"
+console.log(pt[dynamicKey])
+
+// Objects as function parameters
+fun getX(obj) = obj.x
+fun getY(obj) = obj.y
+console.log(getX(pt))
+console.log(getY(pt))
+
+// Functions returning objects
+fun makePoint(x, y) {
+  return { x: x, y: y }
+}
+let p = makePoint(100, 200)
+console.log(p.x, p.y)
+
+// Object in conditional
+let config = { enabled: true, count: 5 }
+if (config.enabled)
+  console.log("enabled with count:", config.count)
+
+// Object in loop iteration (accessing properties)
+let items = [
+  { name: "a", val: 1 },
+  { name: "b", val: 2 },
+  { name: "c", val: 3 }
+]
+for (let item of items)
+  console.log(item.name, item.val)
+
+// typeof object
+console.log(typeof {})
+console.log(typeof { x: 1 })
+console.log(typeof nested)
+
+// Object equality (reference comparison)
+let obj1 = { x: 1 }
+let obj2 = { x: 1 }
+let obj3 = obj1
+console.log(obj1 === obj2)
+console.log(obj1 === obj3)
+
+// 'in' operator
+let testIn = { a: 1, b: 2 }
+console.log("a" in testIn)
+console.log("c" in testIn)
+
+// Optional chaining with objects
+let maybeNull = null
+console.log(maybeNull?.x)
+let hasX = { x: 99 }
+console.log(hasX?.x)
+
+// Deep optional chaining
+let deep = { a: { b: { c: 1 } } }
+let shallow = { a: null }
+console.log(deep?.a?.b?.c)
+console.log(shallow?.a?.b?.c)
+
+// Nullish coalescing with object properties
+let withNull = { val: null }
+let withValue = { val: 42 }
+console.log(withNull.val ?? "default")
+console.log(withValue.val ?? "default")

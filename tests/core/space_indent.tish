@@ -1,0 +1,8 @@
+// MVP test: tab vs space - use spaces for indentation (same as tab_indent.tish)
+let x = 1
+if (x === 1)
+  console.log("space-indented")
+  let y = 2
+  if (y === 2)
+    console.log("nested with spaces")
+console.log("done")

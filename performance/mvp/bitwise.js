@@ -1,9 +1,0 @@
-// MVP test: bitwise operators & | ^ ~ << >>
-const a = 12;
-const b = 5;
-console.log("12 & 5 =", a & b);
-console.log("12 | 5 =", a | b);
-console.log("12 ^ 5 =", a ^ b);
-console.log("~0 =", ~0);
-console.log("1 << 4 =", 1 << 4);
-console.log("16 >> 2 =", 16 >> 2);

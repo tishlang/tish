@@ -1,0 +1,17 @@
+// MVP test: JSON.parse and JSON.stringify
+let obj = { x: 1, y: "hi", z: true }
+let s = JSON.stringify(obj)
+console.log(s)
+
+let parsed = JSON.parse(s)
+console.log(parsed.x)
+console.log(parsed.y)
+console.log(parsed.z)
+
+let arr = [1, 2, "a"]
+console.log(JSON.stringify(arr))
+
+let arr2 = JSON.parse("[1,2,\"a\"]")
+console.log(arr2[0])
+console.log(arr2[1])
+console.log(arr2[2])

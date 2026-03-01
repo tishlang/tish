@@ -1,0 +1,13 @@
+// MVP test: postfix and prefix ++ and -- (JS equivalent of inc_dec.tish)
+let a = 5;
+console.log(a++);
+console.log(a);
+let b = 10;
+console.log(b--);
+console.log(b);
+let c = 3;
+console.log(++c);
+console.log(c);
+let d = 7;
+console.log(--d);
+console.log(d);

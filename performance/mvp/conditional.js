@@ -1,9 +1,0 @@
-// MVP test: conditional (ternary) operator (JS equivalent of conditional.tish)
-let a = 1;
-let b = 2;
-console.log(a > b ? "bigger" : "smaller");
-console.log(a < b ? "smaller" : "bigger");
-console.log(a === 1 ? 100 : 200);
-console.log(null ? "yes" : "no");
-console.log(true ? "t" : "f");
-console.log(false ? "t" : "f");

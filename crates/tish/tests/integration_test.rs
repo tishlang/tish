@@ -9,8 +9,8 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
-fn mvp_dir() -> PathBuf {
-    workspace_root().join("tests").join("mvp")
+fn core_dir() -> PathBuf {
+    workspace_root().join("tests").join("core")
 }
 
 fn target_dir() -> PathBuf {
@@ -26,8 +26,8 @@ fn tish_bin() -> PathBuf {
 /// Full stack: lex + parse each .tish file and assert no parse error.
 #[test]
 fn test_full_stack_parse() {
-    let mvp_dir = mvp_dir();
-    for entry in std::fs::read_dir(&mvp_dir).unwrap() {
+    let core_dir = core_dir();
+    for entry in std::fs::read_dir(&core_dir).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().map(|e| e == "tish").unwrap_or(false) {
             let source = std::fs::read_to_string(&path).unwrap();
@@ -45,8 +45,8 @@ fn test_full_stack_parse() {
 /// Full stack: parse + interpret each .tish file and assert no runtime error.
 #[test]
 fn test_mvp_programs_interpreter() {
-    let mvp_dir = mvp_dir();
-    for entry in std::fs::read_dir(&mvp_dir).unwrap() {
+    let core_dir = core_dir();
+    for entry in std::fs::read_dir(&core_dir).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
         if path.extension().map(|e| e == "tish").unwrap_or(false) {
@@ -65,7 +65,7 @@ fn test_mvp_programs_interpreter() {
 /// Full stack: compile each .tish file to native, run, and compare output to interpreter.
 #[test]
 fn test_mvp_programs_interpreter_vs_native() {
-    let mvp_dir = mvp_dir();
+    let core_dir = core_dir();
     let bin = tish_bin();
     assert!(
         bin.exists(),
@@ -108,7 +108,7 @@ fn test_mvp_programs_interpreter_vs_native() {
         "in_op.tish",
     ];
     for name in test_files {
-        let path = mvp_dir.join(name);
+        let path = core_dir.join(name);
         if !path.exists() {
             continue;
         }

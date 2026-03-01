@@ -1,0 +1,13 @@
+// Test Date functionality
+
+let start = Date.now()
+console.log("Date.now() returns a number:", typeof start === "number")
+
+// Verify it's a reasonable timestamp (after year 2020)
+let minTime = 1577836800000
+console.log("Timestamp is reasonable:", start > minTime)
+
+// Test that successive calls return increasing values
+let t1 = Date.now()
+let t2 = Date.now()
+console.log("Time progresses:", t2 >= t1)

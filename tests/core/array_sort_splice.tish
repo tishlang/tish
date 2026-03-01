@@ -1,0 +1,72 @@
+// Tests for array.sort() and array.splice()
+
+// === array.sort() ===
+console.log("=== array.sort() tests ===");
+
+// Default string sort
+let arr1 = [3, 1, 4, 1, 5, 9, 2, 6];
+arr1.sort();
+console.log(arr1[0] === 1);
+console.log(arr1[1] === 1);
+
+// With comparator - numeric ascending
+let arr2 = [3, 1, 4, 1, 5, 9, 2, 6];
+arr2.sort((a, b) => a - b);
+console.log(arr2[0] === 1);
+console.log(arr2[1] === 1);
+console.log(arr2[7] === 9);
+
+// With comparator - numeric descending
+let arr3 = [3, 1, 4, 1, 5, 9, 2, 6];
+arr3.sort((a, b) => b - a);
+console.log(arr3[0] === 9);
+console.log(arr3[7] === 1);
+
+// Sort strings
+let words = ["banana", "apple", "cherry"];
+words.sort();
+console.log(words[0] === "apple");
+console.log(words[1] === "banana");
+console.log(words[2] === "cherry");
+
+// Sort by string length
+let byLen = ["aaa", "a", "aa"];
+byLen.sort((a, b) => a.length - b.length);
+console.log(byLen[0] === "a");
+console.log(byLen[1] === "aa");
+console.log(byLen[2] === "aaa");
+
+// === array.splice() ===
+console.log("=== array.splice() tests ===");
+
+// Remove elements
+let arr4 = [1, 2, 3, 4, 5];
+let removed = arr4.splice(1, 2);
+console.log(arr4.length === 3);
+console.log(arr4[0] === 1);
+console.log(arr4[1] === 4);
+console.log(removed.length === 2);
+console.log(removed[0] === 2);
+console.log(removed[1] === 3);
+
+// Insert elements
+let arr5 = [1, 2, 5];
+arr5.splice(2, 0, 3, 4);
+console.log(arr5.length === 5);
+console.log(arr5[2] === 3);
+console.log(arr5[3] === 4);
+
+// Replace elements
+let arr6 = [1, 2, 3, 4, 5];
+arr6.splice(1, 3, "a", "b");
+console.log(arr6.length === 4);
+console.log(arr6[1] === "a");
+console.log(arr6[2] === "b");
+
+// Negative index
+let arr7 = [1, 2, 3, 4, 5];
+arr7.splice(-2, 1);
+console.log(arr7.length === 4);
+console.log(arr7[3] === 5);
+
+console.log("=== All sort/splice tests passed ===");

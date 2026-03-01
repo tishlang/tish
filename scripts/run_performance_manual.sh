@@ -21,8 +21,8 @@ command -v "$bun_cmd" &>/dev/null && has_bun=true
 command -v "$deno_cmd" &>/dev/null && has_deno=true
 command -v "$qjs_cmd" &>/dev/null && has_qjs=true
 
-tish_dir="tests/mvp"
-perf_dir="performance/mvp"
+tish_dir="tests/core"
+perf_dir="tests/core"
 # Always use local target directory for consistent builds
 target_dir="$(pwd)/target"
 profile="debug"

@@ -1,0 +1,80 @@
+// Tests for spread operator
+
+console.log("=== Array spread tests ===");
+
+// Basic array spread
+let arr1 = [1, 2, 3];
+let arr2 = [...arr1, 4, 5];
+console.log(arr2.length === 5);
+console.log(arr2[0] === 1);
+console.log(arr2[3] === 4);
+
+// Spread in middle
+let arr3 = [0, ...arr1, 4];
+console.log(arr3.length === 5);
+console.log(arr3[0] === 0);
+console.log(arr3[1] === 1);
+console.log(arr3[4] === 4);
+
+// Multiple spreads
+let arr4 = [1, 2];
+let arr5 = [3, 4];
+let combined = [...arr4, ...arr5];
+console.log(combined.length === 4);
+console.log(combined[0] === 1);
+console.log(combined[2] === 3);
+
+// Copy array
+let original = [1, 2, 3];
+let copy = [...original];
+console.log(copy.length === 3);
+copy[0] = 100;
+console.log(original[0] === 1);
+
+console.log("=== Object spread tests ===");
+
+// Basic object spread
+let obj1 = { a: 1, b: 2 };
+let obj2 = { ...obj1, c: 3 };
+console.log(obj2.a === 1);
+console.log(obj2.b === 2);
+console.log(obj2.c === 3);
+
+// Override with spread
+let obj3 = { a: 1, b: 2 };
+let obj4 = { ...obj3, b: 10 };
+console.log(obj4.a === 1);
+console.log(obj4.b === 10);
+
+// Multiple object spreads
+let o1 = { x: 1 };
+let o2 = { y: 2 };
+let merged = { ...o1, ...o2 };
+console.log(merged.x === 1);
+console.log(merged.y === 2);
+
+// Clone object
+let srcObj = { foo: "bar" };
+let cloneObj = { ...srcObj };
+console.log(cloneObj.foo === "bar");
+cloneObj.foo = "baz";
+console.log(srcObj.foo === "bar");
+
+console.log("=== Function call spread tests ===");
+
+fun sum3(a, b, c) {
+    return a + b + c;
+}
+
+let nums = [1, 2, 3];
+let result = sum3(...nums);
+console.log(result === 6);
+
+// Mixed args and spread
+fun add4(a, b, c, d) {
+    return a + b + c + d;
+}
+let pair = [2, 3];
+console.log(add4(1, ...pair, 4) === 10);
+
+console.log("=== All spread tests passed ===");
