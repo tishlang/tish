@@ -1,0 +1,61 @@
+// JSON API - HTTP server with JSON responses
+// Demonstrates JSON.stringify and content-type headers
+
+let users = [
+    { id: 1, name: "Alice", email: "alice@example.com" },
+    { id: 2, name: "Bob", email: "bob@example.com" },
+    { id: 3, name: "Charlie", email: "charlie@example.com" }
+]
+
+fn jsonResponse(data) {
+    return {
+        status: 200,
+        headers: { contentType: "application/json" },
+        body: JSON.stringify(data)
+    }
+}
+
+fn errorResponse(status, message) {
+    return {
+        status: status,
+        headers: { contentType: "application/json" },
+        body: JSON.stringify({ error: message })
+    }
+}
+
+fn handleRequest(req) {
+    console.log("Request:", req.method, req.path)
+    
+    if (req.path === "/health") {
+        return jsonResponse({ status: "healthy" })
+    }
+    
+    if (req.path === "/") {
+        return jsonResponse({
+            name: "JSON API Example",
+            version: "1.0.0",
+            endpoints: ["/users", "/users/:id", "/health"]
+        })
+    }
+    
+    if (req.path === "/users") {
+        return jsonResponse(users)
+    }
+    
+    if (req.path.startsWith("/users/")) {
+        let idStr = req.path.slice(7)
+        let id = parseInt(idStr)
+        let user = users.find(u => u.id === id)
+        
+        if (user) {
+            return jsonResponse(user)
+        }
+        return errorResponse(404, "User not found")
+    }
+    
+    return errorResponse(404, "Not found: " + req.path)
+}
+
+let port = 3000
+console.log(`Starting JSON API on port ${port}...`)
+serve(port, handleRequest)

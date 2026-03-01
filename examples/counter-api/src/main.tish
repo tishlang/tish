@@ -1,0 +1,91 @@
+// Counter API - Stateful counter service
+// Demonstrates in-memory state with HTTP endpoints
+
+let counters = {}
+
+fn jsonResponse(data) {
+    return {
+        status: 200,
+        headers: { contentType: "application/json" },
+        body: JSON.stringify(data)
+    }
+}
+
+fn errorResponse(status, message) {
+    return {
+        status: status,
+        headers: { contentType: "application/json" },
+        body: JSON.stringify({ error: message })
+    }
+}
+
+fn getCounter(name) {
+    if (counters[name] === undefined) {
+        counters[name] = 0
+    }
+    return counters[name]
+}
+
+fn handleRequest(req) {
+    console.log("Request:", req.method, req.path)
+    
+    if (req.path === "/health") {
+        return jsonResponse({ status: "healthy" })
+    }
+    
+    if (req.path === "/") {
+        return jsonResponse({
+            name: "Counter API",
+            version: "1.0.0",
+            endpoints: {
+                "GET /counters": "List all counters",
+                "GET /counter/:name": "Get counter value",
+                "POST /counter/:name/increment": "Increment counter",
+                "POST /counter/:name/decrement": "Decrement counter",
+                "POST /counter/:name/reset": "Reset counter to 0"
+            }
+        })
+    }
+    
+    if (req.path === "/counters") {
+        return jsonResponse(counters)
+    }
+    
+    if (req.path.startsWith("/counter/")) {
+        let rest = req.path.slice(9)
+        let parts = rest.split("/")
+        let name = parts[0]
+        let action = parts[1]
+        
+        if (!name) {
+            return errorResponse(400, "Counter name required")
+        }
+        
+        if (!action) {
+            return jsonResponse({ name: name, value: getCounter(name) })
+        }
+        
+        if (action === "increment" && req.method === "POST") {
+            counters[name] = getCounter(name) + 1
+            return jsonResponse({ name: name, value: counters[name] })
+        }
+        
+        if (action === "decrement" && req.method === "POST") {
+            counters[name] = getCounter(name) - 1
+            return jsonResponse({ name: name, value: counters[name] })
+        }
+        
+        if (action === "reset" && req.method === "POST") {
+            counters[name] = 0
+            return jsonResponse({ name: name, value: 0 })
+        }
+        
+        return errorResponse(400, "Unknown action: " + action)
+    }
+    
+    return errorResponse(404, "Not found: " + req.path)
+}
+
+let port = 3000
+console.log(`Starting Counter API on port ${port}...`)
+serve(port, handleRequest)

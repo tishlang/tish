@@ -1,0 +1,9 @@
+// Hello World - Minimal Tish example
+// Demonstrates basic console output
+
+let version = "1.0.0"
+let name = "Tish"
+
+console.log(`Hello from ${name}!`)
+console.log(`Version: ${version}`)
+console.log("Deployment successful.")

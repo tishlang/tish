@@ -1,0 +1,18 @@
+name: http-hello
+
+build:
+  source: ./src/main.tish
+  features:
+    - http
+
+deploy:
+  replicas: 2
+  strategy: rolling
+
+networking:
+  port: 3000
+  protocol: http
+  health_check:
+    path: /health
+    interval: 10s
+    timeout: 5s

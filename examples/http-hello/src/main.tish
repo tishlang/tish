@@ -1,0 +1,9 @@
+// HTTP Hello - Placeholder example
+// Note: HTTP serve() not yet implemented in tish runtime
+
+let appName = "http-hello"
+let version = "1.0.0"
+
+console.log(`Starting ${appName} v${version}`)
+console.log("HTTP server functionality coming soon!")
+console.log("For now, this is a placeholder deployment.")
