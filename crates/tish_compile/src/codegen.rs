@@ -1,8 +1,197 @@
 //! Code generation: AST -> Rust source.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tish_ast::{ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr, Literal, MemberProp, ObjectProp, Program, Statement, UnaryOp};
+use crate::types::{RustType, TypeContext};
+
+/// Tracks variable usage for move/clone optimization.
+/// A variable can be moved instead of cloned if it's at its last use.
+#[derive(Debug, Default)]
+struct UsageAnalyzer {
+    /// Count of remaining uses for each variable in the current scope
+    use_counts: HashMap<String, usize>,
+}
+
+impl UsageAnalyzer {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Analyze a list of statements to count variable uses
+    fn analyze_statements(&mut self, stmts: &[Statement]) {
+        for stmt in stmts {
+            self.analyze_statement(stmt);
+        }
+    }
+
+    fn analyze_statement(&mut self, stmt: &Statement) {
+        match stmt {
+            Statement::VarDecl { init, .. } => {
+                if let Some(e) = init {
+                    self.analyze_expr(e);
+                }
+            }
+            Statement::VarDeclDestructure { init, .. } => self.analyze_expr(init),
+            Statement::ExprStmt { expr, .. } => self.analyze_expr(expr),
+            Statement::Return { value, .. } => {
+                if let Some(e) = value {
+                    self.analyze_expr(e);
+                }
+            }
+            Statement::If { cond, then_branch, else_branch, .. } => {
+                self.analyze_expr(cond);
+                self.analyze_statement(then_branch);
+                if let Some(e) = else_branch {
+                    self.analyze_statement(e);
+                }
+            }
+            Statement::Block { statements, .. } => self.analyze_statements(statements),
+            Statement::For { init, cond, update, body, .. } => {
+                if let Some(i) = init {
+                    self.analyze_statement(i);
+                }
+                if let Some(c) = cond {
+                    self.analyze_expr(c);
+                }
+                if let Some(u) = update {
+                    self.analyze_expr(u);
+                }
+                self.analyze_statement(body);
+            }
+            Statement::ForOf { iterable, body, .. } => {
+                self.analyze_expr(iterable);
+                self.analyze_statement(body);
+            }
+            Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
+                self.analyze_expr(cond);
+                self.analyze_statement(body);
+            }
+            Statement::Switch { expr, cases, default_body, .. } => {
+                self.analyze_expr(expr);
+                for (case_expr, stmts) in cases {
+                    if let Some(e) = case_expr {
+                        self.analyze_expr(e);
+                    }
+                    self.analyze_statements(stmts);
+                }
+                if let Some(stmts) = default_body {
+                    self.analyze_statements(stmts);
+                }
+            }
+            Statement::Throw { value, .. } => self.analyze_expr(value),
+            Statement::Try { body, catch_body, finally_body, .. } => {
+                self.analyze_statement(body);
+                if let Some(c) = catch_body {
+                    self.analyze_statement(c);
+                }
+                if let Some(f) = finally_body {
+                    self.analyze_statement(f);
+                }
+            }
+            Statement::FunDecl { body, .. } => {
+                self.analyze_statement(body);
+            }
+            Statement::Break { .. } | Statement::Continue { .. } => {}
+        }
+    }
+
+    fn analyze_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Ident { name, .. } => {
+                *self.use_counts.entry(name.to_string()).or_insert(0) += 1;
+            }
+            Expr::Literal { .. } => {}
+            Expr::Binary { left, right, .. } => {
+                self.analyze_expr(left);
+                self.analyze_expr(right);
+            }
+            Expr::Unary { operand, .. } => self.analyze_expr(operand),
+            Expr::Call { callee, args, .. } => {
+                self.analyze_expr(callee);
+                for arg in args {
+                    match arg {
+                        CallArg::Expr(e) | CallArg::Spread(e) => self.analyze_expr(e),
+                    }
+                }
+            }
+            Expr::Member { object, prop, .. } => {
+                self.analyze_expr(object);
+                if let MemberProp::Expr(e) = prop {
+                    self.analyze_expr(e);
+                }
+            }
+            Expr::Index { object, index, .. } => {
+                self.analyze_expr(object);
+                self.analyze_expr(index);
+            }
+            Expr::Array { elements, .. } => {
+                for elem in elements {
+                    match elem {
+                        ArrayElement::Expr(e) | ArrayElement::Spread(e) => self.analyze_expr(e),
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for prop in props {
+                    match prop {
+                        ObjectProp::KeyValue(_, v) => self.analyze_expr(v),
+                        ObjectProp::Spread(e) => self.analyze_expr(e),
+                    }
+                }
+            }
+            Expr::ArrowFunction { body, .. } => {
+                match body {
+                    ArrowBody::Expr(e) => self.analyze_expr(e),
+                    ArrowBody::Block(s) => self.analyze_statement(s),
+                }
+            }
+            Expr::Assign { value, .. } => self.analyze_expr(value),
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                self.analyze_expr(cond);
+                self.analyze_expr(then_branch);
+                self.analyze_expr(else_branch);
+            }
+            Expr::NullishCoalesce { left, right, .. } => {
+                self.analyze_expr(left);
+                self.analyze_expr(right);
+            }
+            Expr::TypeOf { operand, .. } => self.analyze_expr(operand),
+            Expr::TemplateLiteral { exprs, .. } => {
+                for e in exprs {
+                    self.analyze_expr(e);
+                }
+            }
+            Expr::CompoundAssign { value, name, .. } => {
+                *self.use_counts.entry(name.to_string()).or_insert(0) += 1;
+                self.analyze_expr(value);
+            }
+            Expr::PostfixInc { name, .. } | Expr::PostfixDec { name, .. } | Expr::PrefixInc { name, .. } | Expr::PrefixDec { name, .. } => {
+                *self.use_counts.entry(name.to_string()).or_insert(0) += 1;
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                self.analyze_expr(object);
+                self.analyze_expr(value);
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                self.analyze_expr(object);
+                self.analyze_expr(index);
+                self.analyze_expr(value);
+            }
+        }
+    }
+
+    /// Check if a variable use is its last use (use_count will be 1 after decrement)
+    fn is_last_use(&mut self, name: &str) -> bool {
+        if let Some(count) = self.use_counts.get_mut(name) {
+            if *count > 0 {
+                *count -= 1;
+                return *count == 0;
+            }
+        }
+        false
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CompileError {
@@ -40,6 +229,10 @@ struct Codegen {
     /// Variables currently wrapped in Rc<RefCell<Value>> for mutable capture in closures
     /// These need special handling: reads via .borrow().clone(), writes via *var.borrow_mut()
     refcell_wrapped_vars: std::collections::HashSet<String>,
+    /// Usage analyzer for move/clone optimization
+    usage_analyzer: Option<UsageAnalyzer>,
+    /// Type context for tracking variable types (for static typing)
+    type_context: TypeContext,
 }
 
 impl Codegen {
@@ -53,6 +246,8 @@ impl Codegen {
             outer_params_stack: Vec::new(),
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
+            usage_analyzer: None,
+            type_context: TypeContext::new(),
         }
     }
 
@@ -112,6 +307,31 @@ impl Codegen {
                 | Expr::TypeOf { .. }
                 | Expr::TemplateLiteral { .. }
         )
+    }
+
+    /// Check if we should clone this expression, taking into account last-use optimization.
+    /// If this is a simple variable identifier at its last use, we can move instead of clone.
+    fn should_clone(&mut self, expr: &Expr) -> bool {
+        if !Self::needs_clone(expr) {
+            return false;
+        }
+        
+        // Check for last-use optimization on simple identifiers
+        if let Expr::Ident { name, .. } = expr {
+            // Don't optimize RefCell-wrapped vars (they're borrowed, not owned)
+            if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                return true;
+            }
+            
+            // Check if this is the last use
+            if let Some(ref mut analyzer) = self.usage_analyzer {
+                if analyzer.is_last_use(name.as_ref()) {
+                    return false; // Can move instead of clone!
+                }
+            }
+        }
+        
+        true
     }
 
     /// Generate code for a numeric binary operation that returns Number.
@@ -379,6 +599,11 @@ impl Codegen {
             self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", escaped));
         }
 
+        // Initialize usage analyzer for move/clone optimization
+        let mut analyzer = UsageAnalyzer::new();
+        analyzer.analyze_statements(&program.statements);
+        self.usage_analyzer = Some(analyzer);
+
         for stmt in &program.statements {
             self.emit_statement(stmt)?;
         }
@@ -409,17 +634,48 @@ impl Codegen {
                 self.indent -= 1;
                 self.writeln("}");
             }
-            Statement::VarDecl { name, mutable, init, .. } => {
-                let (expr_str, clone_needed) = match init.as_ref() {
-                    Some(e) => (self.emit_expr(e)?, Self::needs_clone(e)),
-                    None => ("Value::Null".to_string(), false),
-                };
+            Statement::VarDecl { name, mutable, type_ann, init, .. } => {
+                // Determine the Rust type from annotation
+                let rust_type = type_ann
+                    .as_ref()
+                    .map(RustType::from_annotation)
+                    .unwrap_or(RustType::Value);
+                
+                // DEBUG: Write type info to file
+                std::fs::write("/tmp/tish_debug.log", format!("VarDecl: {} type_ann={:?} rust_type={:?} is_native={}\n", 
+                    name, type_ann, rust_type, rust_type.is_native())).ok();
+                
+                // Track the variable type
+                self.type_context.define(name.as_ref(), rust_type.clone());
+                
                 let mutability = if *mutable { "let mut" } else { "let" };
-                if clone_needed {
-                    self.writeln(&format!("{} {} = ({}).clone();", mutability, Self::escape_ident(name.as_ref()), expr_str));
+                let escaped_name = Self::escape_ident(name.as_ref());
+                
+                if rust_type.is_native() {
+                    // Generate native typed variable
+                    let type_str = rust_type.to_rust_type_str();
+                    let expr_str = match init.as_ref() {
+                        Some(e) => self.emit_native_expr(e, &rust_type)?,
+                        None => rust_type.default_value(),
+                    };
+                    self.writeln(&format!("{} {}: {} = {};", mutability, escaped_name, type_str, expr_str));
                 } else {
-                    self.writeln(&format!("{} {} = {};", mutability, Self::escape_ident(name.as_ref()), expr_str));
+                    // Original Value-based codegen
+                    let (expr_str, clone_needed) = match init.as_ref() {
+                        Some(e) => {
+                            let s = self.emit_expr(e)?;
+                            let needs = self.should_clone(e);
+                            (s, needs)
+                        }
+                        None => ("Value::Null".to_string(), false),
+                    };
+                    if clone_needed {
+                        self.writeln(&format!("{} {} = ({}).clone();", mutability, escaped_name, expr_str));
+                    } else {
+                        self.writeln(&format!("{} {} = {};", mutability, escaped_name, expr_str));
+                    }
                 }
+                
                 if let Some(scope) = self.outer_vars_stack.last_mut() {
                     scope.push(name.to_string());
                 }
@@ -807,7 +1063,11 @@ impl Codegen {
                 match arg {
                     CallArg::Expr(e) => {
                         let val = self.emit_expr(e)?;
-                        parts.push(format!("_args.push({}.clone());", val));
+                        if self.should_clone(e) {
+                            parts.push(format!("_args.push({}.clone());", val));
+                        } else {
+                            parts.push(format!("_args.push({});", val));
+                        }
                     }
                     CallArg::Spread(e) => {
                         let val = self.emit_expr(e)?;
@@ -817,15 +1077,20 @@ impl Codegen {
             }
             Ok(format!("{{ let mut _args: Vec<Value> = Vec::new(); {} _args }}", parts.join(" ")))
         } else {
-            let exprs: Result<Vec<_>, _> = args.iter().map(|a| {
-                if let CallArg::Expr(e) = a {
-                    self.emit_expr(e)
+            let mut emitted = Vec::new();
+            for arg in args {
+                if let CallArg::Expr(e) = arg {
+                    let val = self.emit_expr(e)?;
+                    if self.should_clone(e) {
+                        emitted.push(format!("{}.clone()", val));
+                    } else {
+                        emitted.push(val);
+                    }
                 } else {
-                    Err(CompileError { message: "Unexpected spread".to_string() })
+                    return Err(CompileError { message: "Unexpected spread".to_string() });
                 }
-            }).collect();
-            let exprs = exprs?;
-            Ok(format!("vec![{}]", exprs.iter().map(|a| format!("{}.clone()", a)).collect::<Vec<_>>().join(", ")))
+            }
+            Ok(format!("vec![{}]", emitted.join(", ")))
         }
     }
 
@@ -900,7 +1165,14 @@ impl Codegen {
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     format!("{}.borrow().clone()", escaped)
                 } else {
-                    escaped.into_owned()
+                    // Check if this is a typed variable that needs conversion to Value
+                    let var_type = self.type_context.get_type(name.as_ref());
+                    if var_type.is_native() {
+                        // Convert native type to Value for compatibility with existing code
+                        var_type.to_value_expr(&escaped)
+                    } else {
+                        escaped.into_owned()
+                    }
                 }
             }
             Expr::Binary { left, op, right, .. } => {
@@ -1312,7 +1584,11 @@ impl Codegen {
                         match elem {
                             ArrayElement::Expr(e) => {
                                 let val = self.emit_expr(e)?;
-                                parts.push(format!("_arr.push(({}).clone());", val));
+                                if self.should_clone(e) {
+                                    parts.push(format!("_arr.push(({}).clone());", val));
+                                } else {
+                                    parts.push(format!("_arr.push({});", val));
+                                }
                             }
                             ArrayElement::Spread(e) => {
                                 let val = self.emit_expr(e)?;
@@ -1322,14 +1598,19 @@ impl Codegen {
                     }
                     format!("{{ let mut _arr: Vec<Value> = Vec::new(); {} Value::Array(Rc::new(RefCell::new(_arr))) }}", parts.join(" "))
                 } else {
-                    let els: Result<Vec<_>, _> = elements.iter().map(|e| {
-                        if let ArrayElement::Expr(expr) = e {
-                            self.emit_expr(expr).map(|v| format!("({}).clone()", v))
+                    let mut els = Vec::new();
+                    for elem in elements {
+                        if let ArrayElement::Expr(expr) = elem {
+                            let v = self.emit_expr(expr)?;
+                            if self.should_clone(expr) {
+                                els.push(format!("({}).clone()", v));
+                            } else {
+                                els.push(v);
+                            }
                         } else {
-                            Err(CompileError { message: "Unexpected spread".to_string() })
+                            return Err(CompileError { message: "Unexpected spread".to_string() });
                         }
-                    }).collect();
-                    let els = els?;
+                    }
                     format!(
                         "Value::Array(Rc::new(RefCell::new(vec![{}])))",
                         els.join(", ")
@@ -1344,7 +1625,11 @@ impl Codegen {
                         match prop {
                             ObjectProp::KeyValue(k, v) => {
                                 let val = self.emit_expr(v)?;
-                                parts.push(format!("_obj.insert(Arc::from({:?}), ({}).clone());", k.as_ref(), val));
+                                if self.should_clone(v) {
+                                    parts.push(format!("_obj.insert(Arc::from({:?}), ({}).clone());", k.as_ref(), val));
+                                } else {
+                                    parts.push(format!("_obj.insert(Arc::from({:?}), {});", k.as_ref(), val));
+                                }
                             }
                             ObjectProp::Spread(e) => {
                                 let val = self.emit_expr(e)?;
@@ -1358,7 +1643,11 @@ impl Codegen {
                     for prop in props {
                         if let ObjectProp::KeyValue(k, v) = prop {
                             let val = self.emit_expr(v)?;
-                            parts.push(format!("(Arc::from({:?}), ({}).clone())", k.as_ref(), val));
+                            if self.should_clone(v) {
+                                parts.push(format!("(Arc::from({:?}), ({}).clone())", k.as_ref(), val));
+                            } else {
+                                parts.push(format!("(Arc::from({:?}), {})", k.as_ref(), val));
+                            }
                         }
                     }
                     format!(
@@ -1370,10 +1659,19 @@ impl Codegen {
             Expr::Assign { name, value, .. } => {
                 let val = self.emit_expr(value)?;
                 let escaped = Self::escape_ident(name.as_ref());
+                let needs_outer_clone = self.should_clone(value);
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, escaped)
+                    if needs_outer_clone {
+                        format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, escaped)
+                    } else {
+                        format!("{{ let _v = {}; *{}.borrow_mut() = _v.clone(); _v }}", val, escaped)
+                    }
                 } else {
-                    format!("{{ let _v = ({}).clone(); {} = _v.clone(); _v }}", val, escaped)
+                    if needs_outer_clone {
+                        format!("{{ let _v = ({}).clone(); {} = _v.clone(); _v }}", val, escaped)
+                    } else {
+                        format!("{{ let _v = {}; {} = _v.clone(); _v }}", val, escaped)
+                    }
                 }
             }
             Expr::TypeOf { operand, .. } => {
@@ -1724,6 +2022,61 @@ impl Codegen {
         code.push('}');
 
         Ok(code)
+    }
+
+    /// Emit an expression as a native Rust type (not wrapped in Value).
+    /// Falls back to emit_expr + conversion if the expression cannot be directly
+    /// emitted as the target type.
+    fn emit_native_expr(&mut self, expr: &Expr, target_type: &RustType) -> Result<String, CompileError> {
+        // Try to emit literals directly as native types
+        if let Expr::Literal { value, .. } = expr {
+            match (target_type, value) {
+                (RustType::F64, Literal::Number(n)) => {
+                    return Ok(format!("{}_f64", n));
+                }
+                (RustType::String, Literal::String(s)) => {
+                    return Ok(format!("{:?}.to_string()", s.as_ref()));
+                }
+                (RustType::Bool, Literal::Bool(b)) => {
+                    return Ok(format!("{}", b));
+                }
+                (RustType::Unit, Literal::Null) => {
+                    return Ok("()".to_string());
+                }
+                _ => {}
+            }
+        }
+        
+        // Try to emit array literals directly as Vec<T>
+        if let (RustType::Vec(inner_type), Expr::Array { elements, .. }) = (target_type, expr) {
+            let mut items = Vec::new();
+            for elem in elements {
+                match elem {
+                    ArrayElement::Expr(e) => {
+                        let item = self.emit_native_expr(e, inner_type)?;
+                        items.push(item);
+                    }
+                    ArrayElement::Spread(_) => {
+                        // Spread not supported in native arrays, fall back
+                        let value_expr = self.emit_expr(expr)?;
+                        return Ok(target_type.from_value_expr(&value_expr));
+                    }
+                }
+            }
+            return Ok(format!("vec![{}]", items.join(", ")));
+        }
+        
+        // Check if the identifier is already of the target type
+        if let Expr::Ident { name, .. } = expr {
+            let var_type = self.type_context.get_type(name.as_ref());
+            if &var_type == target_type {
+                return Ok(Self::escape_ident(name.as_ref()).into_owned());
+            }
+        }
+        
+        // Fall back to emit_expr + conversion
+        let value_expr = self.emit_expr(expr)?;
+        Ok(target_type.from_value_expr(&value_expr))
     }
 
     fn emit_binop(

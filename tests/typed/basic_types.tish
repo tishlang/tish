@@ -1,0 +1,17 @@
+// Basic typed variables test
+
+let x: number = 42;
+let name: string = "hello";
+let flag: boolean = true;
+
+// Typed array
+let nums: number[] = [1, 2, 3];
+
+// Mixed: untyped variable (falls back to Value)
+let dynamic = "anything";
+
+console.log("x =", x);
+console.log("name =", name);
+console.log("flag =", flag);
+console.log("nums =", nums);
+console.log("dynamic =", dynamic);
