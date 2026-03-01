@@ -9,7 +9,7 @@ Minimal, TS/JS-compatible language. Runs via interpreter or compiles to native. 
 let name = "World"
 console.log(`Hello, ${name}!`)
 
-fun add(a, b) = a + b
+fn add(a, b) = a + b
 console.log(`1 + 2 = ${add(1, 2)}`)
 ```
 
@@ -112,7 +112,7 @@ JavaScript equivalents in `tests/core/*.js`. Compare Tish vs Node.js/Bun:
 ## Features
 
 - **Variables**: `let` (mutable), `const` (immutable)
-- **Functions**: `fun name(a, b) { ... }` or `fun name(a) = expr`
+- **Functions**: `fn name(a, b) { ... }` or `fn name(a) = expr`
 - **Arrow functions**: `x => x * 2`, `(a, b) => a + b`
 - **Template literals**: `` `Hello, ${name}!` ``
 - **Control flow**: `if/else`, `while`, `for`, `for..of`, `switch`

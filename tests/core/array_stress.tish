@@ -126,7 +126,7 @@ console.log("filter-map-reduce x50: " + (end - start) + "ms");
 console.log("");
 console.log("--- Sorting ---");
 
-fun shuffle(arr) {
+fn shuffle(arr) {
     let result = [...arr];
     for (let i = result.length - 1; i > 0; i--) {
         let j = Math.floor(Math.random() * (i + 1));

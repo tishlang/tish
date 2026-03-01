@@ -3,14 +3,14 @@
 console.log("=== Default parameter tests ===");
 
 // Basic default parameter
-fun greet(name = "World") {
+fn greet(name = "World") {
     return "Hello, " + name;
 }
 console.log(greet() === "Hello, World");
 console.log(greet("Alice") === "Hello, Alice");
 
 // Multiple defaults
-fun calc(a, b = 10, c = 20) {
+fn calc(a, b = 10, c = 20) {
     return a + b + c;
 }
 console.log(calc(1) === 31);
@@ -18,7 +18,7 @@ console.log(calc(1, 2) === 23);
 console.log(calc(1, 2, 3) === 6);
 
 // Default with literal expression
-fun createPoint(x = 0, y = 0) {
+fn createPoint(x = 0, y = 0) {
     return { x: x, y: y };
 }
 let p1 = createPoint();
@@ -39,14 +39,14 @@ console.log(multiply(5) === 5);
 console.log(multiply(5, 3) === 15);
 
 // Default object
-fun config(opts = {}) {
+fn config(opts = {}) {
     return opts.debug;
 }
 console.log(config() === null);
 console.log(config({ debug: true }) === true);
 
 // Default array
-fun first(arr = []) {
+fn first(arr = []) {
     return arr.length > 0 ? arr[0] : null;
 }
 console.log(first() === null);

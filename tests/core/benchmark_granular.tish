@@ -73,7 +73,7 @@ for (let i = 0; i < iterations; i++) {
 end = Date.now();
 console.log("Arrow fn with args: " + (end - start) + "ms");
 
-fun namedFunc(n) {
+fn namedFunc(n) {
     return n + 1;
 }
 start = Date.now();
@@ -87,8 +87,8 @@ console.log("Named fn call: " + (end - start) + "ms");
 console.log("");
 console.log("--- Nested Functions ---");
 
-fun outerWithHelper(n) {
-    fun helper(x) {
+fn outerWithHelper(n) {
+    fn helper(x) {
         return x * 2 + n;
     }
     return helper(n) + helper(n + 1);
@@ -100,9 +100,9 @@ for (let i = 0; i < iterations; i++) {
 end = Date.now();
 console.log("Nested fn call: " + (end - start) + "ms");
 
-fun deepNested(a) {
-    fun level2(b) {
-        fun level3(c) {
+fn deepNested(a) {
+    fn level2(b) {
+        fn level3(c) {
             return a + b + c;
         }
         return level3(3);

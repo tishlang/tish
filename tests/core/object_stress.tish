@@ -323,7 +323,7 @@ console.log("for-of Object.entries x2000: " + (end - start) + "ms");
 console.log("");
 console.log("--- Factory Patterns ---");
 
-fun createUser(id, name) {
+fn createUser(id, name) {
     return { id: id, name: name, active: true, createdAt: Date.now() };
 }
 start = Date.now();
@@ -333,7 +333,7 @@ for (let i = 0; i < 3000; i++) {
 end = Date.now();
 console.log("Factory function x3000: " + (end - start) + "ms");
 
-fun createWithValue(val) {
+fn createWithValue(val) {
     return { value: val, doubled: val * 2 };
 }
 start = Date.now();

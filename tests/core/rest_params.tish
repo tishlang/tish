@@ -1,5 +1,5 @@
 // MVP test: rest parameters
-fun sum(...args) {
+fn sum(...args) {
   let total = 0
   for (let x of args)
     total = total + x
@@ -8,7 +8,7 @@ fun sum(...args) {
 console.log(sum(1, 2, 3))
 console.log(sum(10, 20))
 
-fun greet(first, ...rest) {
+fn greet(first, ...rest) {
   return first + ":" + rest.length
 }
 console.log(greet("a", "b", "c"))

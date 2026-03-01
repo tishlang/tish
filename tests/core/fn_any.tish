@@ -1,11 +1,11 @@
-// MVP test: fun and let only - no function/let
-fun double(x) = x * 2
-fun add(a, b) = a + b
+// MVP test: fn and let only - no function/let
+fn double(x) = x * 2
+fn add(a, b) = a + b
 let a = 10
 let b = 20
 console.log("double", a, "=", double(a))
 console.log("add", a, b, "=", add(a, b))
-fun greet(name) {
+fn greet(name) {
   console.log("Hello,", name)
   return null
 }

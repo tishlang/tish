@@ -34,7 +34,7 @@ let person = { name: "Alice", age: 25 }
 console.log(`Person: ${person.name}, ${person.age}`)
 
 // Function call in interpolation
-fun double(x) { return x * 2 }
+fn double(x) { return x * 2 }
 console.log(`Double 5: ${double(5)}`)
 
 // Ternary in interpolation

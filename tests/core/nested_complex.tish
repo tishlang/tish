@@ -99,8 +99,8 @@ console.log("Loop scoped:", loopScoped)
 // === NESTED FUNCTIONS ===
 
 // Simple nested function
-fun outerFunc(n) {
-    fun inner(m) {
+fn outerFunc(n) {
+    fn inner(m) {
         return m * 2
     }
     return inner(n) + n
@@ -108,8 +108,8 @@ fun outerFunc(n) {
 console.log("Nested func:", outerFunc(5))
 
 // Nested function accessing outer scope (called within parent)
-fun computeWithHelper(base, multiplier) {
-    fun helper(x) {
+fn computeWithHelper(base, multiplier) {
+    fn helper(x) {
         return base + (x * multiplier)
     }
     let r1 = helper(1)
@@ -120,10 +120,10 @@ fun computeWithHelper(base, multiplier) {
 console.log("Helper result:", computeWithHelper(10, 5))
 
 // Multiple levels of nested functions
-fun level1(a) {
-    fun level2(b) {
-        fun level3(c) {
-            fun level4(d) {
+fn level1(a) {
+    fn level2(b) {
+        fn level3(c) {
+            fn level4(d) {
                 return a + b + c + d
             }
             return level4(4)
@@ -135,8 +135,8 @@ fun level1(a) {
 console.log("4 level nesting:", level1(1))
 
 // Recursive nested function
-fun fibonacci(n) {
-    fun fib(a, b, remaining) {
+fn fibonacci(n) {
+    fn fib(a, b, remaining) {
         if (remaining === 0) {
             return a
         }
@@ -147,12 +147,12 @@ fun fibonacci(n) {
 console.log("Fib 10:", fibonacci(10))
 
 // Mutually referencing nested functions
-fun isEvenOdd(n) {
-    fun isEven(x) {
+fn isEvenOdd(n) {
+    fn isEven(x) {
         if (x === 0) return true
         return isOdd(x - 1)
     }
-    fun isOdd(x) {
+    fn isOdd(x) {
         if (x === 0) return false
         return isEven(x - 1)
     }
@@ -164,7 +164,7 @@ console.log("Is 7 even?", isEvenOdd(7))
 // === COMBINED: LOOPS + SCOPES + FUNCTIONS ===
 
 // Function with nested loops and scopes
-fun processMatrix(mat) {
+fn processMatrix(mat) {
     let total = 0
     for (let row of mat) {
         let rowSum = 0
@@ -180,8 +180,8 @@ fun processMatrix(mat) {
 console.log("Process matrix:", processMatrix([[1, 2, 3], [4, 5, 6], [7, 8, 9]]))
 
 // Function with nested helper called in loop
-fun sumWithTransform(arr, offset) {
-    fun transform(val) {
+fn sumWithTransform(arr, offset) {
+    fn transform(val) {
         return val * 2 + offset
     }
     let total = 0
@@ -193,10 +193,10 @@ fun sumWithTransform(arr, offset) {
 console.log("Transform sum:", sumWithTransform([1, 2, 3, 4, 5], 10))
 
 // Complex accumulator with nested everything
-fun complexAccumulator(data) {
+fn complexAccumulator(data) {
     let result = 0
     
-    fun processItem(item) {
+    fn processItem(item) {
         let itemResult = 0
         if (typeof item === "number") {
             return item
@@ -221,7 +221,7 @@ fun complexAccumulator(data) {
 console.log("Complex accum:", complexAccumulator([1, [2, 3], [[4, 5], 6], 7]))
 
 // Nested conditionals with scopes
-fun nestedConditional(x) {
+fn nestedConditional(x) {
     let result = "none"
     if (x > 0) {
         let sign = "positive"
@@ -251,7 +251,7 @@ console.log("Cond 150:", nestedConditional(150))
 console.log("Cond -5:", nestedConditional(-5))
 
 // Performance stress: deeply nested computation
-fun deepCompute(depth, value) {
+fn deepCompute(depth, value) {
     if (depth === 0) {
         return value
     }

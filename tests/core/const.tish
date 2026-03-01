@@ -35,7 +35,7 @@ mutable = 2
 console.log("mutable:", mutable)
 
 // const function (function declarations are mutable by default)
-fun greet(name) {
+fn greet(name) {
   return "Hello, " + name
 }
 console.log(greet("World"))

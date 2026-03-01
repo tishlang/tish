@@ -62,7 +62,7 @@ console.log(srcObj.foo === "bar");
 
 console.log("=== Function call spread tests ===");
 
-fun sum3(a, b, c) {
+fn sum3(a, b, c) {
     return a + b + c;
 }
 
@@ -71,7 +71,7 @@ let result = sum3(...nums);
 console.log(result === 6);
 
 // Mixed args and spread
-fun add4(a, b, c, d) {
+fn add4(a, b, c, d) {
     return a + b + c + d;
 }
 let pair = [2, 3];

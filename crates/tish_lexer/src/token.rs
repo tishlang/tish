@@ -30,7 +30,7 @@ pub enum TokenKind {
 
     // Identifiers and keywords
     Ident,
-    Fun,
+    Fn,
     Let,
     Const,
     If,
@@ -113,7 +113,7 @@ pub enum TokenKind {
 impl TokenKind {
     pub fn keyword_or_ident(s: &str) -> Self {
         match s {
-            "fun" | "function" => TokenKind::Fun,
+            "fn" | "function" => TokenKind::Fn,
             "let" => TokenKind::Let,
             "const" => TokenKind::Const,
             "if" => TokenKind::If,

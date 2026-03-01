@@ -2,7 +2,7 @@
 // Run with: cargo run --release -- run tests/modules/http_server.tish
 // Then visit: http://localhost:3000/
 
-fun handleRequest(req) {
+fn handleRequest(req) {
     console.log("Request:", req.method, req.path)
     
     if (req.path === "/") {

@@ -42,11 +42,11 @@ let people = [
     { name: "Bob", age: 30 },
     { name: "Charlie", age: 20 }
 ]
-fun getName(p) { return p.name }
+fn getName(p) { return p.name }
 let names = people.map(getName)
 console.log("names:", names.join(","))
 
 // Sort simulation with find
-fun isOldest(p) { return p.age === 30 }
+fn isOldest(p) { return p.age === 30 }
 let oldest = people.find(isOldest)
 console.log("oldest:", oldest.name)

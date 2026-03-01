@@ -49,7 +49,7 @@ items[0].name = "updated"
 console.log(items[0].name)
 
 // Function returning object, then mutate
-fun makeObj() {
+fn makeObj() {
     return { val: 0 }
 }
 let result = makeObj()

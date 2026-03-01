@@ -53,13 +53,13 @@ let dynamicKey = "x"
 console.log(pt[dynamicKey])
 
 // Objects as function parameters
-fun getX(obj) = obj.x
-fun getY(obj) = obj.y
+fn getX(obj) = obj.x
+fn getY(obj) = obj.y
 console.log(getX(pt))
 console.log(getY(pt))
 
 // Functions returning objects
-fun makePoint(x, y) {
+fn makePoint(x, y) {
   return { x: x, y: y }
 }
 let p = makePoint(100, 200)

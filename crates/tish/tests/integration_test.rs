@@ -82,7 +82,7 @@ fn test_mvp_programs_interpreter_vs_native() {
         "optional_braces_braced.tish",
         "tab_indent.tish",
         "space_indent.tish",
-        "fun_any.tish",
+        "fn_any.tish",
         "strict_equality.tish",
         // Extended features
         "arrays.tish",

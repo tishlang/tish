@@ -14,7 +14,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 | §8 Executable code | Follow | Lexical envs, execution context. Omit Realms, RunJobs. |
 | §9 Ordinary/exotic objects | Simplify | Ordinary only; no Proxy |
 | §10 Source code | Follow | + indent/tab normalization |
-| §11 Lexical grammar | Follow | + `fun`/`any`, optional braces |
+| §11 Lexical grammar | Follow | + `fn`/`function`, optional braces |
 | §12–15 Expressions, Statements | Follow subset | No `this`, `with`, `class` |
 | §16 Errors | Follow | throw, try/catch |
 | §17 Literals | Follow | number, string, boolean, null, [], {}. Omit template/BigInt. |
@@ -31,7 +31,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **block-scope** — Follow
 - **comments** — Follow
 - **computed-property-names** — Follow (MemberProp::Expr)
-- **keywords** — + `fun`, `any`
+- **keywords** — + `fn`/`function`, `let`/`const`
 - **source-text** — + tab/space normalization
 - **arguments-object** — Omit
 - **eval-code** — Omit
@@ -42,7 +42,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 
 - **addition** — Follow (numeric; string concat for strings)
 - **array** — Follow
-- **arrow-function** — as `fun`
+- **arrow-function** — as `fn`
 - **assignment** — Follow (`x = expr`)
 - **call** — Follow
 - **coalesce** — Follow (`??`)
@@ -69,7 +69,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **for** — Follow (C-style)
 - **if, return, while** — Follow
 - **variable** — as `any`
-- **function** — as `fun`
+- **function** — as `fn` or `function`
 - **class, debugger, with** — Omit
 - **throw, try** — Follow
 - **switch, do-while** — Follow
@@ -91,7 +91,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 
 ## Where Tish Differs from JavaScript
 
-1. **`fun` / `any`** — Replaces `function` / `let`.
+1. **`fn` / `function`** — Both supported for function declarations.
 2. **Optional braces** — Indentation can define blocks; no Python-style mixing errors.
 3. **Tab/space agnostic** — Both normalized; no “war.”
 4. **No `this`** — Use explicit parameters.

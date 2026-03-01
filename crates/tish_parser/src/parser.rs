@@ -121,7 +121,7 @@ impl<'a> Parser<'a> {
             TokenKind::LBrace | TokenKind::Indent => self.parse_block()?,
             TokenKind::Let => self.parse_var_decl(true)?,
             TokenKind::Const => self.parse_var_decl(false)?,
-            TokenKind::Fun => self.parse_fun_decl()?,
+            TokenKind::Fn => self.parse_fun_decl()?,
             TokenKind::If => self.parse_if()?,
             TokenKind::While => self.parse_while()?,
             TokenKind::For => self.parse_for()?,
@@ -443,7 +443,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_fun_decl(&mut self) -> Result<Statement, String> {
-        let span_start = self.expect(TokenKind::Fun)?.span.start;
+        let span_start = self.expect(TokenKind::Fn)?.span.start;
         let name = self
             .expect(TokenKind::Ident)?
             .literal

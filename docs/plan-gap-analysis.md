@@ -27,7 +27,7 @@ const y = 10    // immutable binding (error on reassignment)
 |---------|--------|
 | Numbers, strings, booleans, null | ✓ |
 | `any x = expr` (block-scoped) | ✓ |
-| `fun name(a, b) { }` and `fun name(a) = expr` | ✓ |
+| `fn name(a, b) { }` and `fn name(a) = expr` | ✓ |
 | if/else, while, for C-style | ✓ |
 | `for (any x of arr)` | ✓ |
 | Nested blocks and loops | ✓ |
@@ -72,7 +72,7 @@ const y = 10    // immutable binding (error on reassignment)
 | Variable scopes | scopes.tish | scopes.js |
 | Optional braces | optional_braces.tish, optional_braces_braced.tish | ✓ |
 | Tab vs space | tab_indent.tish, space_indent.tish | ✓ |
-| fun and any | fun_any.tish | fun_any.js |
+| fn and let/const | fn_any.tish | fn_any.js |
 | Strict equality | strict_equality.tish | strict_equality.js |
 | **Objects (comprehensive)** | objects.tish, objects_perf.tish | objects.js, objects_perf.js |
 | **Compound assignment** | compound_assign.tish | compound_assign.js |
@@ -329,7 +329,7 @@ let x: number = 42
 const name: string = "hello"
 let nums: number[] = [1, 2, 3]
 
-fun add(a: number, b: number): number {
+fn add(a: number, b: number): number {
     return a + b
 }
 

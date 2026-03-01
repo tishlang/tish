@@ -3,13 +3,13 @@
 let nums = [1, 2, 3, 4, 5]
 
 // Define callback functions
-fun double(x) { return x * 2 }
-fun isEven(x) { return x % 2 === 0 }
-fun add(acc, x) { return acc + x }
-fun gtThree(x) { return x > 3 }
-fun gtZero(x) { return x > 0 }
-fun isThree(x) { return x === 3 }
-fun ltThree(x) { return x < 3 }
+fn double(x) { return x * 2 }
+fn isEven(x) { return x % 2 === 0 }
+fn add(acc, x) { return acc + x }
+fn gtThree(x) { return x > 3 }
+fn gtZero(x) { return x > 0 }
+fn isThree(x) { return x === 3 }
+fn ltThree(x) { return x < 3 }
 
 // map
 let doubled = nums.map(double)
@@ -24,7 +24,7 @@ let sum = nums.reduce(add, 0)
 console.log("reduce:", sum)
 
 // reduce without initial value
-fun multiply(acc, x) { return acc * x }
+fn multiply(acc, x) { return acc * x }
 let product = nums.reduce(multiply)
 console.log("reduce (no init):", product)
 
@@ -33,7 +33,7 @@ let found = nums.find(gtThree)
 console.log("find:", found)
 
 // find returns null when not found
-fun gtHundred(x) { return x > 100 }
+fn gtHundred(x) { return x > 100 }
 let notFound = nums.find(gtHundred)
 console.log("find (not found):", notFound)
 
@@ -55,7 +55,7 @@ console.log("every (> 3):", nums.every(gtThree))
 
 // forEach
 let total = 0
-fun addToTotal(x) { total = total + x }
+fn addToTotal(x) { total = total + x }
 nums.forEach(addToTotal)
 console.log("forEach total:", total)
 

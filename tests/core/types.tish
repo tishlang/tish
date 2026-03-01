@@ -11,12 +11,12 @@ let nums: number[] = [1, 2, 3]
 let strs: string[] = ["a", "b", "c"]
 
 // Function with typed parameters and return type
-fun add(a: number, b: number): number {
+fn add(a: number, b: number): number {
     return a + b
 }
 
 // Function returning void
-fun greet(msg: string): void {
+fn greet(msg: string): void {
     console.log(msg)
 }
 
@@ -39,7 +39,7 @@ let value: number | string = 42
 console.log(value)
 
 // Function with rest params typed
-fun sum(...args: number[]): number {
+fn sum(...args: number[]): number {
     let total: number = 0
     for (let n of args) {
         total = total + n

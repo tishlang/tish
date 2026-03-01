@@ -68,7 +68,7 @@ console.log("right-left:", tree.right.left.val)
 console.log("right-right:", tree.right.right.val)
 
 // Mlet small object creations
-fun makeRecord(id, name, active) {
+fn makeRecord(id, name, active) {
   return { id: id, name: name, active: active }
 }
 
