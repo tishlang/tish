@@ -278,6 +278,11 @@ pub fn is_nan(args: &[Value]) -> Value {
     Value::Bool(args.first().is_none_or(|v| matches!(v, Value::Number(n) if n.is_nan()) || !matches!(v, Value::Number(_))))
 }
 
+pub fn boolean(args: &[Value]) -> Value {
+    let v = args.first().unwrap_or(&Value::Null);
+    Value::Bool(v.is_truthy())
+}
+
 pub fn decode_uri(args: &[Value]) -> Value {
     let s = args.first().map(Value::to_display_string).unwrap_or_default();
     Value::String(percent_decode(&s).unwrap_or(s).into())

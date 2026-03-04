@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tish_ast::{BinOp, CompoundOp, Expr, Literal, MemberProp, Span, Statement, UnaryOp};
+use tish_ast::{BinOp, CompoundOp, Expr, Literal, LogicalAssignOp, MemberProp, Span, Statement, UnaryOp};
 
 use crate::value::Value;
 
@@ -89,6 +89,7 @@ impl Evaluator {
             s.set("parseFloat".into(), Value::Native(natives::parse_float), true);
             s.set("decodeURI".into(), Value::Native(natives::decode_uri), true);
             s.set("encodeURI".into(), Value::Native(natives::encode_uri), true);
+            s.set("Boolean".into(), Value::Native(natives::boolean_native), true);
             s.set("isFinite".into(), Value::Native(natives::is_finite), true);
             s.set("isNaN".into(), Value::Native(natives::is_nan), true);
             s.set("Infinity".into(), Value::Number(f64::INFINITY), true);
@@ -1342,6 +1343,40 @@ impl Evaluator {
                     Ok(false) => Err(EvalError::Error(format!("Undefined variable: {}", name))),
                     Err(e) => Err(EvalError::Error(e)),
                 }
+            }
+            Expr::LogicalAssign { name, op, value, .. } => {
+                let current = self.scope.borrow().get(name.as_ref())
+                    .ok_or_else(|| EvalError::Error(format!("Undefined variable: {}", name)))?;
+                let result = match op {
+                    LogicalAssignOp::AndAnd => {
+                        if current.is_truthy() {
+                            let rhs = self.eval_expr(value)?;
+                            let _ = self.scope.borrow_mut().assign(name.as_ref(), rhs.clone());
+                            rhs
+                        } else {
+                            current.clone()
+                        }
+                    }
+                    LogicalAssignOp::OrOr => {
+                        if !current.is_truthy() {
+                            let rhs = self.eval_expr(value)?;
+                            let _ = self.scope.borrow_mut().assign(name.as_ref(), rhs.clone());
+                            rhs
+                        } else {
+                            current.clone()
+                        }
+                    }
+                    LogicalAssignOp::Nullish => {
+                        if matches!(current, Value::Null) {
+                            let rhs = self.eval_expr(value)?;
+                            let _ = self.scope.borrow_mut().assign(name.as_ref(), rhs.clone());
+                            rhs
+                        } else {
+                            current.clone()
+                        }
+                    }
+                };
+                Ok(result)
             }
             Expr::MemberAssign { object, prop, value, .. } => {
                 let obj_val = self.eval_expr(object)?;

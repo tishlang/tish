@@ -89,6 +89,11 @@ pub fn is_nan(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Bool(b))
 }
 
+pub fn boolean_native(args: &[Value]) -> Result<Value, String> {
+    let v = args.first().unwrap_or(&Value::Null);
+    Ok(Value::Bool(v.is_truthy()))
+}
+
 pub fn decode_uri(args: &[Value]) -> Result<Value, String> {
     let s = args.first().map(|v| v.to_string()).unwrap_or_default();
     Ok(Value::String(tish_core::percent_decode(&s).unwrap_or(s).into()))

@@ -1,9 +1,30 @@
-// HTTP Hello - Placeholder example
-// Note: HTTP serve() not yet implemented in tish runtime
+// HTTP Hello - Simple HTTP server example
 
-let appName = "http-hello"
-let version = "1.0.0"
+fn handleRequest(req) {
+    console.log("Request:", req.method, req.path)
+    
+    if (req.path === "/health") {
+        return { status: 200, body: "OK" }
+    }
+    
+    if (req.path === "/") {
+        let deploymentId = "DEPLOYMENT_ID" in process.env ? process.env.DEPLOYMENT_ID : ""
+        return {
+            status: 200,
+            headers: { contentType: "application/json" },
+            body: JSON.stringify({
+                message: "Hello from Tish HTTP Server test 8!",
+                deployment_id: deploymentId
+            })
+        }
+    }
+    
+    return {
+        status: 404,
+        body: "Not Found: " + req.path
+    }
+}
 
-console.log(`Starting ${appName} v${version}`)
-console.log("HTTP server functionality coming soon!")
-console.log("For now, this is a placeholder deployment.")
+let port = "PORT" in process.env ? parseInt(process.env.PORT) : 8080
+console.log(`Starting http-hello on port ${port}...`)
+serve(port, handleRequest)

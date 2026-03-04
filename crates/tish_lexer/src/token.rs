@@ -68,6 +68,9 @@ pub enum TokenKind {
 
     // Operators
     Assign,
+    AndAndAssign,
+    OrOrAssign,
+    NullishAssign,
     PlusAssign,
     MinusAssign,
     StarAssign,

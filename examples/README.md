@@ -14,17 +14,27 @@ Ready-to-deploy example applications for the Tish Platform.
 
 ## Prerequisites
 
-1. **Tish CLI** - Install the Tish compiler/interpreter:
-   ```bash
-   cargo build --release -p tish
-   ```
+1. **Tish** – compiler/runtime (this repo). Build for the platform build service: `cargo build --release -p tish`
+2. **Tish Dev CLI** – deploy from the **tish-dev** repo via `cargo run -p tish-cli --` (no install).
+3. **Tish Platform** – running locally, e.g. `just run-all` in tish-platform. Config must point at this tish repo: `tish_compiler_path` and `tish_workspace_path` in platform’s `config/default.toml`.
 
-2. **Tish Dev CLI** - Install the deployment CLI:
-   ```bash
-   cargo install --path ../tish-dev/crates/tish-cli
-   ```
+## Deploy examples (tish-dev CLI, no install)
 
-3. **Tish Platform** - A running instance of tish-platform
+Deploy code from this repo’s examples using the tish-dev CLI run from source. Do **not** install tish-cli; run it with `cargo run -p tish-cli --manifest-path <tish-dev>/Cargo.toml --`.
+
+1. **Start platform** (in tish-platform): `just run-all`. Set `tish_compiler_path` and `tish_workspace_path` in `config/default.toml` to this tish repo.
+
+2. **Build tish** (in this repo): `cargo build --release -p tish`.
+
+3. **Deploy an example** – from this repo, in the example directory (tish and tish-dev siblings):
+   ```bash
+   cd examples/http-hello
+   cargo run -p tish-cli --manifest-path ../../tish-dev/Cargo.toml -- login
+   cargo run -p tish-cli --manifest-path ../../tish-dev/Cargo.toml -- projects create http-hello
+   cargo run -p tish-cli --manifest-path ../../tish-dev/Cargo.toml -- link
+   cargo run -p tish-cli --manifest-path ../../tish-dev/Cargo.toml -- deploy --wait
+   ```
+   For another example, use its name (e.g. `echo-server`, `counter-api`) and `cd` to that example dir before `link` and `deploy`. API URL defaults to `http://localhost:47080`; use `TISH_API_URL` or `--api-url` to override. If you have an API key: `-- login --with-key YOUR_KEY`.
 
 ## Quick Start
 
@@ -46,32 +56,17 @@ tish compile src/main.tish -o server --features http
 
 ### Deploy to Tish Platform
 
-1. **Authenticate** with the platform:
-   ```bash
-   tish-cli login
-   ```
+Use the **tish-dev** CLI from source (no install). From an example directory, prefix every command with:
 
-2. **Create a project** on the platform:
-   ```bash
-   cd examples/http-hello
-   tish-cli projects create http-hello
-   ```
+`cargo run -p tish-cli --manifest-path ../../tish-dev/Cargo.toml --`
 
-3. **Link** your local directory to the project:
-   ```bash
-   tish-cli link
-   ```
+1. **Authenticate**: `... -- login` (or `... -- login --with-key YOUR_KEY`)
+2. **Create project**: `... -- projects create http-hello` (use the example name)
+3. **Link**: `... -- link`
+4. **Deploy**: `... -- deploy --wait`
+5. **Logs**: `... -- status`, `... -- logs <task-id>`
 
-4. **Deploy** the application:
-   ```bash
-   tish-cli deploy --wait
-   ```
-
-5. **View logs** (optional):
-   ```bash
-   tish-cli status
-   tish-cli logs <task-id>
-   ```
+See **Deploy examples (tish-dev CLI, no install)** above for the full sequence.
 
 ## Project Structure
 
@@ -128,31 +123,34 @@ networking:
 
 By default, Tish runs in **secure mode** with no features enabled.
 
-## CLI Commands Reference
+## CLI Commands Reference (tish-dev, no install)
+
+Run from an example dir: `cargo run -p tish-cli --manifest-path ../../tish-dev/Cargo.toml -- <command>`
 
 ```bash
 # Authentication
-tish-cli login              # Browser-based login
-tish-cli logout             # Clear credentials
-tish-cli whoami             # Show current user
+-- login                    # Browser-based login
+-- login --with-key KEY     # Use API key
+-- logout                   # Clear credentials
+-- whoami                   # Show current user
 
 # Projects
-tish-cli projects list      # List all projects
-tish-cli projects create    # Create new project
-tish-cli projects delete    # Delete a project
+-- projects list            # List all projects
+-- projects create NAME     # Create new project
+-- projects delete NAME     # Delete a project
 
 # Deployment
-tish-cli link               # Link directory to project
-tish-cli deploy             # Deploy application
-tish-cli deploy --wait      # Deploy and wait for completion
-tish-cli deploy --prod      # Production deployment
+-- link                     # Link directory to project
+-- deploy                   # Deploy application
+-- deploy --wait            # Deploy and wait for completion
+-- deploy --prod            # Production deployment
 
 # Monitoring
-tish-cli status             # Show deployment status
-tish-cli logs <task-id>     # View task logs
+-- status                   # Show deployment status
+-- logs <task-id>           # View task logs
 
 # Environment Variables
-tish-cli env list           # List env vars
-tish-cli env add KEY=value  # Add env var
-tish-cli env rm KEY         # Remove env var
+-- env list                 # List env vars
+-- env add KEY=value        # Add env var
+-- env rm KEY               # Remove env var
 ```

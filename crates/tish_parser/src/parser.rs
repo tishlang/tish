@@ -53,8 +53,8 @@ macro_rules! binary_multi_op {
 
 use tish_ast::{
     ArrowBody, ArrayElement, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
-    DestructProp, Expr, Literal, MemberProp, ObjectProp, Program, Span, Statement, TypeAnnotation,
-    TypedParam, UnaryOp,
+    DestructProp, Expr, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement,
+    TypeAnnotation, TypedParam, UnaryOp,
 };
 use tish_lexer::{Token, TokenKind};
 
@@ -848,6 +848,30 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // Check for logical assignment (&&=, ||=, ??=)
+        let logical_op = match self.peek_kind() {
+            Some(TokenKind::AndAndAssign) => Some(LogicalAssignOp::AndAnd),
+            Some(TokenKind::OrOrAssign) => Some(LogicalAssignOp::OrOr),
+            Some(TokenKind::NullishAssign) => Some(LogicalAssignOp::Nullish),
+            _ => None,
+        };
+
+        if let Some(op) = logical_op {
+            if let Expr::Ident { name, span } = &left {
+                let name = Arc::clone(name);
+                let start = span.start;
+                self.advance(); // consume the logical assign operator
+                let value = self.parse_assign()?;
+                let end = value.span().end;
+                return Ok(Expr::LogicalAssign {
+                    name,
+                    op,
+                    value: Box::new(value),
+                    span: Span { start, end },
+                });
+            }
+        }
+
         Ok(left)
     }
 
@@ -1338,6 +1362,7 @@ impl ExprSpan for Expr {
             Expr::PrefixInc { span, .. } => *span,
             Expr::PrefixDec { span, .. } => *span,
             Expr::CompoundAssign { span, .. } => *span,
+            Expr::LogicalAssign { span, .. } => *span,
             Expr::MemberAssign { span, .. } => *span,
             Expr::IndexAssign { span, .. } => *span,
             Expr::ArrowFunction { span, .. } => *span,

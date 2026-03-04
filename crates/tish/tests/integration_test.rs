@@ -106,6 +106,18 @@ fn test_mvp_programs_interpreter_vs_native() {
         "json.tish",
         "uri.tish",
         "in_op.tish",
+        // Additional parity tests
+        "arrow_functions.tish",
+        "template_literals.tish",
+        "compound_assign.tish",
+        "mutation.tish",
+        "string_methods.tish",
+        "array_methods.tish",
+        "object_methods.tish",
+        // higher_order_methods.tish - excluded: closure mutates captured var, needs RefCell in codegen
+        // destructuring.tish - excluded: destructured vars not in scope outside if-let block
+        "logical_assign.tish",
+        "spread.tish",
     ];
     for name in test_files {
         let path = core_dir.join(name);

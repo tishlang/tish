@@ -341,16 +341,25 @@ impl<'a> Lexer<'a> {
                 else { TokenKind::Percent }
             }
             '&' => {
-                if self.peek() == Some('&') { self.advance(); TokenKind::And }
-                else { TokenKind::BitAnd }
+                if self.peek() == Some('&') {
+                    self.advance();
+                    if self.peek() == Some('=') { self.advance(); TokenKind::AndAndAssign }
+                    else { TokenKind::And }
+                } else { TokenKind::BitAnd }
             }
             '|' => {
-                if self.peek() == Some('|') { self.advance(); TokenKind::Or }
-                else { TokenKind::BitOr }
+                if self.peek() == Some('|') {
+                    self.advance();
+                    if self.peek() == Some('=') { self.advance(); TokenKind::OrOrAssign }
+                    else { TokenKind::Or }
+                } else { TokenKind::BitOr }
             }
             '?' => {
-                if self.peek() == Some('?') { self.advance(); TokenKind::NullishCoalesce }
-                else if self.peek() == Some('.') { self.advance(); TokenKind::OptionalChain }
+                if self.peek() == Some('?') {
+                    self.advance();
+                    if self.peek() == Some('=') { self.advance(); TokenKind::NullishAssign }
+                    else { TokenKind::NullishCoalesce }
+                } else if self.peek() == Some('.') { self.advance(); TokenKind::OptionalChain }
                 else { TokenKind::Question }
             }
             ':' => TokenKind::Colon,

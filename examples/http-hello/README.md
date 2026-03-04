@@ -36,3 +36,17 @@ The deployment includes:
 - 2 replicas for high availability
 - Rolling deployment strategy
 - Health check on `/health` endpoint
+
+### Environment Variables
+
+Add env vars in `tish.yaml` under `deploy.env`:
+
+```yaml
+deploy:
+  replicas: 2
+  strategy: rolling
+  env:
+    LOG_LEVEL: info
+```
+
+Or set app-level vars with `tish-cli env add KEY VALUE`. Each process also receives `DEPLOYMENT_ID` and `TASK_ID` from the platform.

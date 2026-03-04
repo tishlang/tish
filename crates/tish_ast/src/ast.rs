@@ -246,6 +246,12 @@ pub enum Expr {
         value: Box<Expr>,
         span: Span,
     },
+    LogicalAssign {
+        name: Arc<str>,
+        op: LogicalAssignOp,
+        value: Box<Expr>,
+        span: Span,
+    },
     /// Property assignment: obj.prop = value
     MemberAssign {
         object: Box<Expr>,
@@ -272,6 +278,37 @@ pub enum Expr {
         exprs: Vec<Expr>,          // Interpolated expressions (n)
         span: Span,
     },
+}
+
+impl Expr {
+    /// Return the source span for this expression.
+    pub fn span(&self) -> Span {
+        match self {
+            Expr::Literal { span, .. } => *span,
+            Expr::Ident { span, .. } => *span,
+            Expr::Binary { span, .. } => *span,
+            Expr::Unary { span, .. } => *span,
+            Expr::Call { span, .. } => *span,
+            Expr::Member { span, .. } => *span,
+            Expr::Index { span, .. } => *span,
+            Expr::Conditional { span, .. } => *span,
+            Expr::NullishCoalesce { span, .. } => *span,
+            Expr::Array { span, .. } => *span,
+            Expr::Object { span, .. } => *span,
+            Expr::Assign { span, .. } => *span,
+            Expr::TypeOf { span, .. } => *span,
+            Expr::PostfixInc { span, .. } => *span,
+            Expr::PostfixDec { span, .. } => *span,
+            Expr::PrefixInc { span, .. } => *span,
+            Expr::PrefixDec { span, .. } => *span,
+            Expr::CompoundAssign { span, .. } => *span,
+            Expr::LogicalAssign { span, .. } => *span,
+            Expr::MemberAssign { span, .. } => *span,
+            Expr::IndexAssign { span, .. } => *span,
+            Expr::ArrowFunction { span, .. } => *span,
+            Expr::TemplateLiteral { span, .. } => *span,
+        }
+    }
 }
 
 /// Body of an arrow function: either an expression or a block
@@ -309,6 +346,13 @@ pub enum CompoundOp {
     Mul,  // *=
     Div,  // /=
     Mod,  // %=
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicalAssignOp {
+    AndAnd,  // &&=
+    OrOr,    // ||=
+    Nullish, // ??=
 }
 
 #[derive(Debug, Clone, PartialEq)]

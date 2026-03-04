@@ -149,7 +149,13 @@ fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
     let source =
         fs::read_to_string(input_path).map_err(|e| format!("Cannot read {}: {}", input_path, e))?;
     let program = tish_parser::parse(&source)?;
-    let rust_code = tish_compile::compile(&program).map_err(|e| e.to_string())?;
+    let rust_code = tish_compile::compile(&program).map_err(|e| {
+        if let Some(ref span) = e.span {
+            format!("{}:{}:{}: {}", input_path, span.start.0, span.start.1, e.message)
+        } else {
+            format!("{}: {}", input_path, e.message)
+        }
+    })?;
 
     let out_name = Path::new(output_path)
         .file_stem()

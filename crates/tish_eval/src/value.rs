@@ -1,4 +1,9 @@
 //! Runtime values for the Tish interpreter.
+//!
+//! This module defines the interpreter's `Value` type, which includes variants
+//! like `Function`, `Native`, and `Serve` that hold AST or interpreter-specific
+//! data. The compiled runtime uses `tish_core::Value` instead, which has a
+//! different shape (no AST-carrying variants). The split is intentional.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

@@ -1,8 +1,7 @@
 //! Shared builtin implementations for Tish.
 //!
-//! This crate provides shared implementations for builtin functions
-//! that are used by both the interpreter (tish_eval) and the compiled
-//! runtime (tish_runtime).
+//! Used by the compiled runtime (tish_runtime). The interpreter (tish_eval)
+//! implements builtins inline due to different Value and native signatures.
 
 pub mod array;
 pub mod string;

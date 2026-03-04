@@ -26,4 +26,4 @@ tish_parser = { path = "../tish_parser" }
 tish_eval = { path = "../tish_eval" }
 tish_compile = { path = "../tish_compile" }
 tish_runtime = { path = "../tish_runtime" }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4.5.60", features = ["derive"] }

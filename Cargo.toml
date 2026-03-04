@@ -12,8 +12,6 @@ members = [
 ]
 resolver = "2"
 
-[workspace.dependencies]
-
 [profile.release]
 lto = "thin"
 codegen-units = 1

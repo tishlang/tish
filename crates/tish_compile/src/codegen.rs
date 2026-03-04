@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use tish_ast::{ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr, Literal, MemberProp, ObjectProp, Program, Statement, UnaryOp};
+use tish_ast::{ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp};
 use crate::types::{RustType, TypeContext};
 
 /// Tracks variable usage for move/clone optimization.
@@ -166,6 +166,10 @@ impl UsageAnalyzer {
                 *self.use_counts.entry(name.to_string()).or_insert(0) += 1;
                 self.analyze_expr(value);
             }
+            Expr::LogicalAssign { value, name, .. } => {
+                *self.use_counts.entry(name.to_string()).or_insert(0) += 1;
+                self.analyze_expr(value);
+            }
             Expr::PostfixInc { name, .. } | Expr::PostfixDec { name, .. } | Expr::PrefixInc { name, .. } | Expr::PrefixDec { name, .. } => {
                 *self.use_counts.entry(name.to_string()).or_insert(0) += 1;
             }
@@ -196,11 +200,22 @@ impl UsageAnalyzer {
 #[derive(Debug, Clone)]
 pub struct CompileError {
     pub message: String,
+    pub span: Option<Span>,
+}
+
+impl CompileError {
+    fn new(msg: impl Into<String>, span: Option<Span>) -> Self {
+        Self { message: msg.into(), span }
+    }
 }
 
 impl std::fmt::Display for CompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
+        if let Some(ref span) = self.span {
+            write!(f, "{}:{}: {}", span.start.0, span.start.1, self.message)
+        } else {
+            write!(f, "{}", self.message)
+        }
     }
 }
 
@@ -442,7 +457,7 @@ impl Codegen {
         self.write("use std::collections::HashMap;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tish_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, TishError, Value};\n");
+        self.write("use tish_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, TishError, Value};\n");
         #[cfg(feature = "process")]
         self.write("use tish_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd};\n");
         #[cfg(feature = "http")]
@@ -475,6 +490,7 @@ impl Codegen {
         self.writeln("(Arc::from(\"error\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_error(args); Value::Null }))),");
         self.indent -= 1;
         self.writeln("]))));");
+        self.writeln("let Boolean = Value::Function(Rc::new(|args: &[Value]| tish_boolean(args)));");
         self.writeln("let parseInt = Value::Function(Rc::new(|args: &[Value]| tish_parse_int(args)));");
         self.writeln("let parseFloat = Value::Function(Rc::new(|args: &[Value]| tish_parse_float(args)));");
         self.writeln("let decodeURI = Value::Function(Rc::new(|args: &[Value]| tish_decode_uri(args)));");
@@ -640,11 +656,7 @@ impl Codegen {
                     .as_ref()
                     .map(RustType::from_annotation)
                     .unwrap_or(RustType::Value);
-                
-                // DEBUG: Write type info to file
-                std::fs::write("/tmp/tish_debug.log", format!("VarDecl: {} type_ann={:?} rust_type={:?} is_native={}\n", 
-                    name, type_ann, rust_type, rust_type.is_native())).ok();
-                
+
                 // Track the variable type
                 self.type_context.define(name.as_ref(), rust_type.clone());
                 
@@ -680,13 +692,13 @@ impl Codegen {
                     scope.push(name.to_string());
                 }
             }
-            Statement::VarDeclDestructure { pattern, mutable, init, .. } => {
+            Statement::VarDeclDestructure { pattern, mutable, init, span, .. } => {
                 let expr = self.emit_expr(init)?;
                 let mutability = if *mutable { "let mut" } else { "let" };
                 let clone_suffix = if Self::needs_clone(init) { ".clone()" } else { "" };
                 self.writeln(&format!("{{ let _destruct_val = ({}){};", expr, clone_suffix));
                 self.indent += 1;
-                self.emit_destruct_bindings(pattern, "_destruct_val", mutability)?;
+                self.emit_destruct_bindings(pattern, "_destruct_val", mutability, *span)?;
                 self.indent -= 1;
                 self.writeln("}");
             }
@@ -977,8 +989,8 @@ impl Codegen {
                     let param_escaped = Self::escape_ident(outer_param);
                     self.writeln(&format!("let {} = {}.clone();", param_escaped, param_escaped));
                 }
-                // Only clone builtins that are actually referenced
-                for builtin in &["console", "Math", "JSON", "Date"] {
+                // Only clone builtins that are actually referenced (clone so outer scope can still use them, e.g. process for PORT before serve)
+                for builtin in &["Boolean", "console", "Math", "JSON", "Date", "process"] {
                     if referenced.contains(*builtin) {
                         self.writeln(&format!("let {} = {}.clone();", builtin, builtin));
                     }
@@ -1087,14 +1099,17 @@ impl Codegen {
                         emitted.push(val);
                     }
                 } else {
-                    return Err(CompileError { message: "Unexpected spread".to_string() });
+                    if let CallArg::Spread(e) = arg {
+                        return Err(CompileError::new("Unexpected spread", Some(e.span())));
+                    }
+                    unreachable!("else branch only reached for Spread");
                 }
             }
             Ok(format!("vec![{}]", emitted.join(", ")))
         }
     }
 
-    fn emit_destruct_bindings(&mut self, pattern: &DestructPattern, value_expr: &str, mutability: &str) -> Result<(), CompileError> {
+    fn emit_destruct_bindings(&mut self, pattern: &DestructPattern, value_expr: &str, mutability: &str, span: Span) -> Result<(), CompileError> {
         match pattern {
             DestructPattern::Array(elements) => {
                 self.writeln(&format!("if let Value::Array(ref _arr) = {} {{", value_expr));
@@ -1111,7 +1126,7 @@ impl Codegen {
                                 let nested_var = format!("_nested_{}", i);
                                 self.writeln(&format!("let {} = _arr_borrow.get({}).cloned().unwrap_or(Value::Null);", 
                                     nested_var, i));
-                                self.emit_destruct_bindings(nested, &nested_var, mutability)?;
+                                self.emit_destruct_bindings(nested, &nested_var, mutability, span)?;
                             }
                             DestructElement::Rest(name) => {
                                 self.writeln(&format!("{} {} = Value::Array(Rc::new(RefCell::new(_arr_borrow.iter().skip({}).cloned().collect())));", 
@@ -1138,10 +1153,10 @@ impl Codegen {
                             let nested_var = format!("_nested_{}", key);
                             self.writeln(&format!("let {} = _obj_borrow.get({:?}).cloned().unwrap_or(Value::Null);", 
                                 nested_var, key));
-                            self.emit_destruct_bindings(nested, &nested_var, mutability)?;
+                            self.emit_destruct_bindings(nested, &nested_var, mutability, span)?;
                         }
                         DestructElement::Rest(_) => {
-                            return Err(CompileError { message: "Rest in object destructuring not supported".to_string() });
+                            return Err(CompileError::new("Rest in object destructuring not supported", Some(span)));
                         }
                     }
                 }
@@ -1175,10 +1190,10 @@ impl Codegen {
                     }
                 }
             }
-            Expr::Binary { left, op, right, .. } => {
+            Expr::Binary { left, op, right, span, .. } => {
                 let l = self.emit_expr(left)?;
                 let r = self.emit_expr(right)?;
-                self.emit_binop(&l, *op, &r)?
+                self.emit_binop(&l, *op, &r, *span)?
             }
             Expr::Unary { op, operand, .. } => {
                 let o = self.emit_expr(operand)?;
@@ -1608,7 +1623,10 @@ impl Codegen {
                                 els.push(v);
                             }
                         } else {
-                            return Err(CompileError { message: "Unexpected spread".to_string() });
+                            if let ArrayElement::Spread(e) = elem {
+                                return Err(CompileError::new("Unexpected spread", Some(e.span())));
+                            }
+                            unreachable!("else only for Spread");
                         }
                     }
                     format!(
@@ -1711,6 +1729,49 @@ impl Codegen {
                     )
                 }
             }
+            Expr::LogicalAssign { name, op, value, .. } => {
+                let val = self.emit_expr(value)?;
+                let n = Self::escape_ident(name.as_ref()).into_owned();
+                let is_refcell = self.refcell_wrapped_vars.contains(name.as_ref());
+                let (cond, assign_and_return, else_expr) = if is_refcell {
+                    match op {
+                        LogicalAssignOp::AndAnd => (
+                            format!("{}.borrow().is_truthy()", n),
+                            format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, n),
+                            format!("{}.borrow().clone()", n),
+                        ),
+                        LogicalAssignOp::OrOr => (
+                            format!("!{}.borrow().is_truthy()", n),
+                            format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, n),
+                            format!("{}.borrow().clone()", n),
+                        ),
+                        LogicalAssignOp::Nullish => (
+                            format!("matches!(*{}.borrow(), Value::Null)", n),
+                            format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, n),
+                            format!("{}.borrow().clone()", n),
+                        ),
+                    }
+                } else {
+                    match op {
+                        LogicalAssignOp::AndAnd => (
+                            format!("{}.is_truthy()", n),
+                            format!("{{ let _v = ({}).clone(); {} = _v.clone(); _v }}", val, n),
+                            format!("{}.clone()", n),
+                        ),
+                        LogicalAssignOp::OrOr => (
+                            format!("!{}.is_truthy()", n),
+                            format!("{{ let _v = ({}).clone(); {} = _v.clone(); _v }}", val, n),
+                            format!("{}.clone()", n),
+                        ),
+                        LogicalAssignOp::Nullish => (
+                            format!("matches!({}, Value::Null)", n),
+                            format!("{{ let _v = ({}).clone(); {} = _v.clone(); _v }}", val, n),
+                            format!("{}.clone()", n),
+                        ),
+                    }
+                };
+                format!("{{ if {} {{ {} }} else {{ {} }} }}", cond, assign_and_return, else_expr)
+            }
             Expr::MemberAssign { object, prop, value, .. } => {
                 let obj = self.emit_expr(object)?;
                 let val = self.emit_expr(value)?;
@@ -1809,6 +1870,10 @@ impl Codegen {
                 idents.insert(name.to_string());
             }
             Expr::CompoundAssign { name, value, .. } => {
+                idents.insert(name.to_string());
+                Self::collect_expr_idents(value, idents);
+            }
+            Expr::LogicalAssign { name, value, .. } => {
                 idents.insert(name.to_string());
                 Self::collect_expr_idents(value, idents);
             }
@@ -1935,8 +2000,8 @@ impl Codegen {
             let var_escaped = Self::escape_ident(outer_var);
             code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", var_escaped, var_escaped));
         }
-        // Only clone builtins that are actually referenced
-        for builtin in &["console", "Math", "JSON", "Date"] {
+        // Only clone builtins that are actually referenced (clone so outer scope can still use, e.g. process for PORT)
+        for builtin in &["console", "Math", "JSON", "Date", "process"] {
             if referenced.contains(*builtin) {
                 code.push_str(&format!("    let {} = {}.clone();\n", builtin, builtin));
             }
@@ -2084,6 +2149,7 @@ impl Codegen {
         l: &str,
         op: BinOp,
         r: &str,
+        span: Span,
     ) -> Result<String, CompileError> {
         Ok(match op {
             BinOp::Add => format!(
@@ -2118,9 +2184,7 @@ impl Codegen {
             BinOp::Shr => Self::emit_bitwise_binop(l, r, ">>"),
             BinOp::In => format!("tish_in_operator(&{}, &{})", l, r),
             BinOp::Eq | BinOp::Ne => {
-                return Err(CompileError {
-                    message: "Loose equality not supported".to_string(),
-                })
+                return Err(CompileError::new("Loose equality not supported", Some(span)))
             }
         })
     }
