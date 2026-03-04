@@ -16,12 +16,16 @@ A basic HTTP server demonstrating the `serve()` function with simple routing.
 
 ## Local Development
 
+Run without installing tish (from this directory; tish repo is `../..`):
+
 ```bash
-# Run with interpreter (requires --features http)
-tish run src/main.tish --features http
+# Run with interpreter (requires http feature)
+cargo run -p tish --manifest-path ../../Cargo.toml --release --features http -- run src/main.tish --features http
 
 # Then visit: http://localhost:3000/
 ```
+
+Or with tish installed: `tish run src/main.tish --features http`
 
 ## Deploy to Tish Platform
 

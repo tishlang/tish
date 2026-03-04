@@ -47,13 +47,17 @@ curl -X POST http://localhost:3000/counter/visitors/reset
 
 ## Local Development
 
+Run without installing tish (from this directory; tish repo is `../..`):
+
 ```bash
 # Run with interpreter
-tish run src/main.tish --features http
+cargo run -p tish --manifest-path ../../Cargo.toml --release --features http -- run src/main.tish --features http
 
 # Test incrementing
 curl -X POST http://localhost:3000/counter/test/increment
 ```
+
+Or with tish installed: `tish run src/main.tish --features http`
 
 ## Deploy to Tish Platform
 

@@ -33,15 +33,19 @@ curl -X POST -d 'Hello!' http://localhost:3000/mirror
 
 ## Local Development
 
+Run without installing tish (from this directory; tish repo is `../..`):
+
 ```bash
 # Run with interpreter
-tish run src/main.tish --features http
+cargo run -p tish --manifest-path ../../Cargo.toml --release --features http -- run src/main.tish --features http
 
 # Test with curl
 curl -X POST -H "Content-Type: application/json" \
   -d '{"message": "Hello Tish!"}' \
   http://localhost:3000/echo
 ```
+
+Or with tish installed: `tish run src/main.tish --features http`
 
 ## Deploy to Tish Platform
 

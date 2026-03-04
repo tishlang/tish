@@ -14,14 +14,18 @@ None (runs in secure mode).
 
 ## Local Development
 
+Run without installing tish (from this directory; tish repo is `../..`):
+
 ```bash
 # Run with interpreter
-tish run src/main.tish
+cargo run -p tish --manifest-path ../../Cargo.toml --release -- run src/main.tish
 
 # Compile and run
-tish compile src/main.tish -o hello
+cargo run -p tish --manifest-path ../../Cargo.toml --release --features full -- compile src/main.tish -o hello
 ./hello
 ```
+
+Or with tish installed: `tish run src/main.tish` and `tish compile src/main.tish -o hello`
 
 ## Deploy to Tish Platform
 

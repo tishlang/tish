@@ -33,12 +33,16 @@ curl http://localhost:3000/users/1
 
 ## Local Development
 
+Run without installing tish (from this directory; tish repo is `../..`):
+
 ```bash
 # Run with interpreter
-tish run src/main.tish --features http
+cargo run -p tish --manifest-path ../../Cargo.toml --release --features http -- run src/main.tish --features http
 
 # Then test: curl http://localhost:3000/users
 ```
+
+Or with tish installed: `tish run src/main.tish --features http`
 
 ## Deploy to Tish Platform
 
