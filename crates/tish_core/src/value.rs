@@ -12,6 +12,16 @@ use fancy_regex::Regex;
 /// Returns Value directly (not Result) for simplicity and backward compatibility.
 pub type NativeFn = Rc<dyn Fn(&[Value]) -> Value>;
 
+/// Trait for opaque Rust types exposed to Tish (e.g. Polars DataFrame).
+/// Implementors provide method dispatch so Tish can call methods on the value.
+pub trait TishOpaque: Send + Sync {
+    /// Display name for the type (e.g. "DataFrame").
+    fn type_name(&self) -> &'static str;
+
+    /// Get a method by name. Returns a native function if the method exists.
+    fn get_method(&self, name: &str) -> Option<NativeFn>;
+}
+
 /// Trait for Promise-like values that can be awaited (block until settled).
 /// Implemented by the runtime for native compile; interpreter uses its own Promise.
 pub trait TishPromise: Send + Sync {
@@ -143,6 +153,8 @@ pub enum Value {
     RegExp(Rc<RefCell<TishRegExp>>),
     /// Promise (for native compile). Interpreter uses tish_eval::Value::Promise.
     Promise(Arc<dyn TishPromise>),
+    /// Opaque handle to a native Rust type (e.g. Polars DataFrame).
+    Opaque(Arc<dyn TishOpaque>),
 }
 
 impl std::fmt::Debug for Value {
@@ -158,6 +170,7 @@ impl std::fmt::Debug for Value {
             #[cfg(feature = "regex")]
             Value::RegExp(re) => write!(f, "RegExp(/{}/{})", re.borrow().source, re.borrow().flags_string()),
             Value::Promise(_) => write!(f, "Promise"),
+            Value::Opaque(o) => write!(f, "{}(opaque)", o.type_name()),
         }
     }
 }
@@ -194,6 +207,7 @@ impl Value {
             }
             Value::Function(_) => "[Function]".to_string(),
             Value::Promise(_) => "[object Promise]".to_string(),
+            Value::Opaque(o) => format!("[object {}]", o.type_name()),
             #[cfg(feature = "regex")]
             Value::RegExp(re) => {
                 let re = re.borrow();
@@ -232,6 +246,7 @@ impl Value {
             #[cfg(feature = "regex")]
             (Value::RegExp(a), Value::RegExp(b)) => Rc::ptr_eq(a, b),
             (Value::Promise(a), Value::Promise(b)) => Arc::ptr_eq(a, b),
+            (Value::Opaque(a), Value::Opaque(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }

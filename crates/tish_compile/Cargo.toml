@@ -10,6 +10,7 @@ http = []
 fs = []
 process = []
 regex = []
+polars = []
 
 [dependencies]
 tish_ast = { path = "../tish_ast" }

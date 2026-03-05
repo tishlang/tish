@@ -18,6 +18,7 @@ http = ["tish_eval/http", "tish_runtime/http", "tish_compile/http"]
 fs = ["tish_eval/fs", "tish_runtime/fs", "tish_compile/fs"]
 process = ["tish_eval/process", "tish_runtime/process", "tish_compile/process"]
 regex = ["tish_eval/regex", "tish_runtime/regex", "tish_compile/regex"]
+polars = ["tish_runtime/polars", "tish_compile/polars"]
 
 [dependencies]
 tish_lexer = { path = "../tish_lexer" }

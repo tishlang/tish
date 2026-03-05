@@ -187,6 +187,20 @@ impl Evaluator {
         Self { scope }
     }
 
+    /// Create an evaluator with extra native modules (e.g. Polars) registered.
+    pub fn with_modules(modules: &[&dyn crate::TishNativeModule]) -> Self {
+        let eval = Self::new();
+        {
+            let mut s = eval.scope.borrow_mut();
+            for module in modules {
+                for (name, value) in module.register() {
+                    s.set(name, value, true);
+                }
+            }
+        }
+        eval
+    }
+
     pub fn eval_program(&mut self, program: &tish_ast::Program) -> Result<Value, String> {
         let mut last = Value::Null;
         for stmt in &program.statements {
@@ -1314,6 +1328,8 @@ impl Evaluator {
                     Value::Promise(_) => "object".into(),
                     #[cfg(feature = "regex")]
                     Value::RegExp(_) => "object".into(),
+                    Value::Opaque(_) => "object".into(),
+                    Value::OpaqueMethod(_, _) => "function".into(),
                 }))
             }
             Expr::PostfixInc { name, .. } => {
@@ -1868,6 +1884,16 @@ impl Evaluator {
             }
             #[cfg(feature = "http")]
             Value::TimerBuiltin(name) => self.run_timer_builtin(name.as_ref(), args),
+            Value::OpaqueMethod(opaque, method_name) => {
+                let method = opaque.get_method(method_name.as_ref()).ok_or_else(|| {
+                    EvalError::Error(format!("Method {} not found on {}", method_name, opaque.type_name()))
+                })?;
+                let core_args: Result<Vec<tish_core::Value>, String> =
+                    args.iter().map(crate::value_convert::eval_to_core).collect();
+                let core_args = core_args.map_err(EvalError::Error)?;
+                let result = method(&core_args);
+                Ok(crate::value_convert::core_to_eval(result))
+            }
             Value::Function { params, defaults, rest_param, body } => {
                 let scope = Scope::child(Rc::clone(&self.scope));
                 {
@@ -2261,6 +2287,13 @@ impl Evaluator {
                 "race" => Ok(Value::Native(Self::promise_race)),
                 _ => Ok(Value::Null),
             },
+            Value::Opaque(o) => {
+                if o.get_method(key).is_some() {
+                    Ok(Value::OpaqueMethod(Arc::clone(o), Arc::from(key)))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
             #[cfg(feature = "regex")]
             Value::RegExp(re) => {
                 let re = re.borrow();
@@ -2541,6 +2574,7 @@ impl Evaluator {
             | Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => "null".to_string(),
             #[cfg(feature = "regex")]
             Value::RegExp(_) => "null".to_string(),
+            Value::Opaque(_) | Value::OpaqueMethod(_, _) => "null".to_string(),
         }
     }
 

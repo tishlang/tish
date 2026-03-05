@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use tish_ast::{ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp};
 use crate::types::{RustType, TypeContext};
 
@@ -325,7 +326,11 @@ fn program_uses_async(program: &Program) -> bool {
 }
 
 pub fn compile(program: &Program) -> Result<String, CompileError> {
-    let mut g = Codegen::new();
+    compile_with_project_root(program, None)
+}
+
+pub fn compile_with_project_root(program: &Program, project_root: Option<&Path>) -> Result<String, CompileError> {
+    let mut g = Codegen::new(project_root);
     g.emit_program(program)?;
     Ok(g.output)
 }
@@ -335,6 +340,7 @@ struct Codegen {
     indent: usize,
     loop_label_index: usize,
     is_async: bool,
+    project_root: Option<std::path::PathBuf>,
     /// Stack: true = async Rust context (run body), false = sync closure (Tish fn body)
     async_context_stack: Vec<bool>,
     loop_stack: Vec<(String, Option<String>)>, // (break_label, continue_update) for innermost loop
@@ -357,12 +363,13 @@ struct Codegen {
 }
 
 impl Codegen {
-    fn new() -> Self {
+    fn new(project_root: Option<&Path>) -> Self {
         Self {
             output: String::new(),
             indent: 0,
             loop_label_index: 0,
             is_async: false,
+            project_root: project_root.map(|p| p.to_path_buf()),
             async_context_stack: Vec::new(),
             loop_stack: Vec::new(),
             function_scope_stack: vec![Vec::new()], // Start with global scope
@@ -753,6 +760,11 @@ impl Codegen {
             self.writeln("let RegExp = Value::Function(Rc::new(|args: &[Value]| regexp_new(args)));");
         }
 
+        #[cfg(feature = "polars")]
+        {
+            self.writeln("let Polars = tish_runtime::polars_object();");
+        }
+
         // Pre-scan for top-level function declarations and create cells (for mutual recursion)
         let top_level_funcs = self.prescan_function_decls(&program.statements);
         *self.function_scope_stack.last_mut().unwrap() = top_level_funcs.clone();
@@ -1127,7 +1139,7 @@ impl Codegen {
                     .iter()
                     .flat_map(|v| v.iter().cloned())
                     .filter(|name| referenced.contains(name) && !param_names.contains(name) && !local_var_names.contains(name))
-                    .filter(|name| !["Boolean", "console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp"].contains(&name.as_str()))
+                    .filter(|name| !["Boolean", "console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp", "Polars"].contains(&name.as_str()))
                     .collect();
 
                 // Rebind outer vars to Rc<RefCell<>> BEFORE the closure block so the rest of the scope sees the cell
@@ -1167,7 +1179,7 @@ impl Codegen {
                     self.writeln(&format!("let {} = {}.clone();", param_escaped, param_escaped));
                 }
                 // Only clone builtins that are actually referenced (clone so outer scope can still use them, e.g. process for PORT before serve)
-                for builtin in &["Boolean", "console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp"] {
+                for builtin in &["Boolean", "console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp", "Polars"] {
                     if referenced.contains(*builtin) {
                         self.writeln(&format!("let {} = {}.clone();", builtin, builtin));
                     }
@@ -1397,6 +1409,42 @@ impl Codegen {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                // Compile-time embed: Polars.read_csv("<literal path>") when file exists
+                #[cfg(feature = "polars")]
+                if let (Some(ref root), Some(CallArg::Expr(first_arg))) =
+                    (self.project_root.as_ref(), args.first())
+                {
+                    if let Expr::Member {
+                        object,
+                        prop: MemberProp::Name(ref method_name),
+                        ..
+                    } = callee.as_ref()
+                    {
+                        if method_name.as_ref() == "read_csv"
+                            && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Polars")
+                        {
+                            if let Expr::Literal {
+                                value: Literal::String(ref path),
+                                ..
+                            } = first_arg
+                            {
+                                let path_str = path.as_ref();
+                                let normalized = path_str.trim_start_matches("./");
+                                let full_path = root.join(normalized);
+                                if full_path.exists() {
+                                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                                        let escaped = format!("{:?}", content);
+                                        return Ok(format!(
+                                            "tish_runtime::polars_read_csv_from_string({})",
+                                            escaped
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Check for built-in method calls on arrays/strings
                 if let Expr::Member { object, prop: MemberProp::Name(method_name), .. } = callee.as_ref() {
                     let obj_expr = self.emit_expr(object)?;
@@ -1696,7 +1744,7 @@ impl Codegen {
                 if has_spread {
                     let args_code = self.emit_call_args(args)?;
                     return Ok(format!(
-                        "{{ let _callee = &{}; let _spread_args = {}; match _callee {{ Value::Function(cb) => cb(&_spread_args), _ => panic!(\"Not a function\") }} }}",
+                        "{{ let _callee = &{}; let _spread_args = {}; match _callee {{ Value::Function(cb) => cb(&_spread_args), other => panic!(\"Not a function: tried to call {{:?}} as a function (e.g. method on Null when read failed)\", other) }} }}",
                         callee_expr, args_code
                     ));
                 }
@@ -1711,7 +1759,7 @@ impl Codegen {
                 format!(
                     "({{\n\
                      {}    let _callee = &{};\n\
-                     {}    match _callee {{ Value::Function(cb) => cb(&[{}]), _ => panic!(\"Not a function\") }}\n\
+                     {}    match _callee {{ Value::Function(cb) => cb(&[{}]), other => panic!(\"Not a function: tried to call {{:?}} as a function (e.g. method on Null when read failed)\", other) }}\n\
                      {}}})",
                     "    ".repeat(self.indent),
                     callee_expr,
@@ -2303,7 +2351,7 @@ impl Codegen {
             code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", var_escaped, var_escaped));
         }
         // Only clone builtins that are actually referenced (clone so outer scope can still use, e.g. process for PORT)
-        for builtin in &["console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp"] {
+        for builtin in &["console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp", "Polars"] {
             if referenced.contains(*builtin) {
                 code.push_str(&format!("    let {} = {}.clone();\n", builtin, builtin));
             }

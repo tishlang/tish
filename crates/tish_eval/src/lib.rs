@@ -3,6 +3,7 @@
 mod eval;
 #[cfg(feature = "http")]
 mod http;
+mod value_convert;
 #[cfg(feature = "http")]
 mod promise;
 #[cfg(feature = "http")]
@@ -14,6 +15,13 @@ mod value;
 
 pub use eval::Evaluator;
 pub use value::Value;
+
+/// Trait for pluggable native modules (e.g. Polars). Implement to register
+/// globals with the interpreter. Return a map of (global_name, Value).
+pub trait TishNativeModule: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn register(&self) -> std::collections::HashMap<std::sync::Arc<str>, Value>;
+}
 #[cfg(feature = "regex")]
 pub use regex::TishRegExp;
 

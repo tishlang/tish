@@ -149,7 +149,14 @@ fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
     let source =
         fs::read_to_string(input_path).map_err(|e| format!("Cannot read {}: {}", input_path, e))?;
     let program = tish_parser::parse(&source)?;
-    let rust_code = tish_compile::compile(&program).map_err(|e| {
+    let project_root = Path::new(input_path).parent().map(|p| {
+        if p.file_name().and_then(|n| n.to_str()) == Some("src") {
+            p.parent().unwrap_or(p)
+        } else {
+            p
+        }
+    });
+    let rust_code = tish_compile::compile_with_project_root(&program, project_root).map_err(|e| {
         if let Some(ref span) = e.span {
             format!("{}:{}:{}: {}", input_path, span.start.0, span.start.1, e.message)
         } else {
@@ -180,6 +187,8 @@ fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
     features.push("process");
     #[cfg(feature = "regex")]
     features.push("regex");
+    #[cfg(feature = "polars")]
+    features.push("polars");
     let features_str = if features.is_empty() {
         String::new()
     } else {

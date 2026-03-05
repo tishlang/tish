@@ -2,6 +2,7 @@
 members = [
     "crates/tish_core",
     "crates/tish_builtins",
+    "crates/tish_bind",
     "crates/tish_lexer",
     "crates/tish_ast",
     "crates/tish_parser",
@@ -9,6 +10,7 @@ members = [
     "crates/tish_runtime",
     "crates/tish_compile",
     "crates/tish",
+    "crates/tish_polars",
 ]
 resolver = "2"
 

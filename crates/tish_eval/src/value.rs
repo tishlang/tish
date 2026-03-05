@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use tish_ast::{Expr, Statement};
+use tish_core::TishOpaque;
 
 #[cfg(feature = "http")]
 pub use crate::promise::PromiseResolver;
@@ -57,6 +58,10 @@ pub enum Value {
     /// Timer builtins: setTimeout, setInterval. Need evaluator for callback.
     #[cfg(feature = "http")]
     TimerBuiltin(std::sync::Arc<str>),
+    /// Opaque handle to a native Rust type (e.g. Polars DataFrame).
+    Opaque(Arc<dyn TishOpaque>),
+    /// Bound method on an opaque value (opaque, method_name). Callable.
+    OpaqueMethod(Arc<dyn TishOpaque>, Arc<str>),
 }
 
 impl std::fmt::Debug for Value {
@@ -82,6 +87,8 @@ impl std::fmt::Debug for Value {
             Value::PromiseConstructor => write!(f, "[Function: Promise]"),
             #[cfg(feature = "http")]
             Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => write!(f, "[Function]"),
+            Value::Opaque(o) => write!(f, "{}(opaque)", o.type_name()),
+            Value::OpaqueMethod(_, _) => write!(f, "[Function]"),
         }
     }
 }
@@ -132,6 +139,8 @@ impl std::fmt::Display for Value {
             Value::PromiseConstructor => write!(f, "function Promise() {{ [native code] }}"),
             #[cfg(feature = "http")]
             Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => write!(f, "[Function]"),
+            Value::Opaque(o) => write!(f, "[object {}]", o.type_name()),
+            Value::OpaqueMethod(_, _) => write!(f, "[Function]"),
         }
     }
 }
@@ -161,6 +170,8 @@ impl Value {
             (Value::Null, Value::Null) => true,
             (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
             (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
+            (Value::Opaque(a), Value::Opaque(b)) => Arc::ptr_eq(a, b),
+            (Value::OpaqueMethod(a, ak), Value::OpaqueMethod(b, bk)) => Arc::ptr_eq(a, b) && ak == bk,
             _ => false,
         }
     }
