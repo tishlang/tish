@@ -156,7 +156,6 @@ pub fn string_replace(input: &str, search: &Value, replace: &Value) -> Value {
     match search {
         Value::RegExp(re) => {
             let re = re.borrow();
-
             if re.flags.global {
                 match re.regex.replace_all(input, replacement.as_str()) {
                     std::borrow::Cow::Borrowed(s) => Value::String(s.into()),
@@ -174,6 +173,52 @@ pub fn string_replace(input: &str, search: &Value, replace: &Value) -> Value {
         }
         _ => Value::String(input.into()),
     }
+}
+
+/// Replace regex matches using a callback. Callback receives (match, g1, g2, ..., index, fullString).
+pub fn string_replace_regex_with_fn<F>(
+    input: &str,
+    re: &TishRegExp,
+    invoke: &mut F,
+) -> Result<Value, String>
+where
+    F: FnMut(&[Value]) -> Result<String, String>,
+{
+    let limit = if re.flags.global { usize::MAX } else { 1 };
+    let mut result = String::new();
+    let mut last_end: usize = 0;
+    let mut count = 0usize;
+
+    for cap_result in re.regex.captures_iter(input) {
+        if count >= limit {
+            break;
+        }
+        let caps = cap_result.map_err(|e| format!("Regex error: {}", e))?;
+        let full = caps.get(0).unwrap();
+        let match_str = full.as_str();
+        let byte_start = full.start();
+        let char_index = input[..byte_start].chars().count();
+
+        let mut args = vec![Value::String(match_str.into())];
+        for i in 1..caps.len() {
+            let val = match caps.get(i) {
+                Some(m) => Value::String(m.as_str().into()),
+                None => Value::Null,
+            };
+            args.push(val);
+        }
+        args.push(Value::Number(char_index as f64));
+        args.push(Value::String(input.into()));
+
+        let repl = invoke(&args)?;
+        result.push_str(&input[last_end..byte_start]);
+        result.push_str(&repl);
+        last_end = full.end();
+        count += 1;
+    }
+
+    result.push_str(&input[last_end..]);
+    Ok(Value::String(result.into()))
 }
 
 /// String.prototype.search(regexp) - returns index of first match or -1

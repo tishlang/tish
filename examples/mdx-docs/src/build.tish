@@ -41,15 +41,7 @@ fn replaceBold(html) {
 }
 
 fn replaceInlineCode(html) {
-    let re = RegExp("`([^`\\n]+)`", "")
-    let m = re.exec(html)
-    while (m !== null) {
-        let idx = m["index"]
-        let replacement = "<code>" + escapeHtml(m[1]) + "</code>"
-        html = html.slice(0, idx) + replacement + html.slice(idx + m[0].length)
-        m = re.exec(html)
-    }
-    return html
+    return html.replace(RegExp("`([^`\\n]+)`", "g"), (match, code) => "<code>" + escapeHtml(code) + "</code>")
 }
 
 fn processInline(line) {

@@ -398,6 +398,11 @@ impl Codegen {
 
     /// Escape Rust reserved keywords by prefixing with r#
     fn escape_ident(name: &str) -> Cow<'_, str> {
+        // Rust standard library macros that conflict with variable names
+        const RUST_MACROS: &[&str] = &["line", "column", "file", "module_path", "stringify", "concat"];
+        if RUST_MACROS.contains(&name) {
+            return Cow::Owned(format!("r#{}", name));
+        }
         const RUST_KEYWORDS: &[&str] = &[
             "as", "async", "await", "break", "const", "continue", "crate", "dyn",
             "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in",
@@ -502,7 +507,7 @@ impl Codegen {
     fn emit_numeric_cmp(l: &str, r: &str, op: &str) -> String {
         format!(
             "Value::Bool({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
-             let Value::Number(b) = &({}) else {{ panic!() }}; a {} b }})",
+             let Value::Number(b) = &({}) else {{ panic!() }}; *a {} *b }})",
             l, r, op
         )
     }
@@ -578,6 +583,8 @@ impl Codegen {
         }
         #[cfg(feature = "fs")]
         self.write("use tish_runtime::{read_file as tish_read_file, write_file as tish_write_file, file_exists as tish_file_exists, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
+        #[cfg(feature = "regex")]
+        self.write("use tish_runtime::regexp_new;\n");
         self.write("\n");
 
         if self.is_async {
@@ -741,6 +748,11 @@ impl Codegen {
             self.writeln("let mkdir = Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)));");
         }
 
+        #[cfg(feature = "regex")]
+        {
+            self.writeln("let RegExp = Value::Function(Rc::new(|args: &[Value]| regexp_new(args)));");
+        }
+
         // Pre-scan for top-level function declarations and create cells (for mutual recursion)
         let top_level_funcs = self.prescan_function_decls(&program.statements);
         *self.function_scope_stack.last_mut().unwrap() = top_level_funcs.clone();
@@ -776,6 +788,7 @@ impl Codegen {
                 self.writeln("{");
                 self.indent += 1;
                 self.type_context.push_scope();
+                self.outer_vars_stack.push(Vec::new());
                 // Pre-scan for function declarations and create cells (for mutual recursion)
                 let func_names = self.prescan_function_decls(statements);
                 self.function_scope_stack.push(func_names.clone());
@@ -788,6 +801,7 @@ impl Codegen {
                     self.emit_statement(s)?;
                 }
                 self.function_scope_stack.pop(); // Exit scope
+                self.outer_vars_stack.pop(); // Exit variable scope
                 self.type_context.pop_scope();
                 self.indent -= 1;
                 self.writeln("}");
@@ -1106,11 +1120,14 @@ impl Codegen {
                     .filter(|name| referenced.contains(name) && !param_names.contains(name))
                     .collect();
                 // Collect outer variables (from outer_vars_stack) - wrap in RefCell for mutable capture
+                // Exclude params and variables declared in this function's body (locals)
+                let mut local_var_names = HashSet::new();
+                Self::collect_local_var_names(body, &mut local_var_names);
                 let outer_vars: Vec<String> = self.outer_vars_stack
                     .iter()
                     .flat_map(|v| v.iter().cloned())
-                    .filter(|name| referenced.contains(name) && !param_names.contains(name))
-                    .filter(|name| !["Boolean", "console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise"].contains(&name.as_str()))
+                    .filter(|name| referenced.contains(name) && !param_names.contains(name) && !local_var_names.contains(name))
+                    .filter(|name| !["Boolean", "console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp"].contains(&name.as_str()))
                     .collect();
 
                 // Rebind outer vars to Rc<RefCell<>> BEFORE the closure block so the rest of the scope sees the cell
@@ -1150,7 +1167,7 @@ impl Codegen {
                     self.writeln(&format!("let {} = {}.clone();", param_escaped, param_escaped));
                 }
                 // Only clone builtins that are actually referenced (clone so outer scope can still use them, e.g. process for PORT before serve)
-                for builtin in &["Boolean", "console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise"] {
+                for builtin in &["Boolean", "console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp"] {
                     if referenced.contains(*builtin) {
                         self.writeln(&format!("let {} = {}.clone();", builtin, builtin));
                     }
@@ -1170,7 +1187,7 @@ impl Codegen {
                 let current_param_names: Vec<String> = params.iter().map(|p| p.name.to_string()).collect();
                 for (i, p) in params.iter().enumerate() {
                     self.writeln(&format!(
-                        "let {} = args.get({}).cloned().unwrap_or(Value::Null);",
+                        "let mut {} = args.get({}).cloned().unwrap_or(Value::Null);",
                         Self::escape_ident(p.name.as_ref()),
                         i
                     ));
@@ -1513,6 +1530,13 @@ impl Codegen {
                                 obj_expr, search, replacement
                             ));
                         }
+                        "match" if cfg!(feature = "regex") => {
+                            let regexp = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tish_runtime::string_match_regex(&{}, &{})",
+                                obj_expr, regexp
+                            ));
+                        }
                         "charAt" => {
                             let idx = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             return Ok(format!(
@@ -1672,7 +1696,7 @@ impl Codegen {
                 if has_spread {
                     let args_code = self.emit_call_args(args)?;
                     return Ok(format!(
-                        "{{ let f = &{}; let _spread_args = {}; match f {{ Value::Function(cb) => cb(&_spread_args), _ => panic!(\"Not a function\") }} }}",
+                        "{{ let _callee = &{}; let _spread_args = {}; match _callee {{ Value::Function(cb) => cb(&_spread_args), _ => panic!(\"Not a function\") }} }}",
                         callee_expr, args_code
                     ));
                 }
@@ -1686,8 +1710,8 @@ impl Codegen {
                     .join(", ");
                 format!(
                     "({{\n\
-                     {}    let f = &{};\n\
-                     {}    match f {{ Value::Function(cb) => cb(&[{}]), _ => panic!(\"Not a function\") }}\n\
+                     {}    let _callee = &{};\n\
+                     {}    match _callee {{ Value::Function(cb) => cb(&[{}]), _ => panic!(\"Not a function\") }}\n\
                      {}}})",
                     "    ".repeat(self.indent),
                     callee_expr,
@@ -2120,6 +2144,66 @@ impl Codegen {
         }
     }
     
+    /// Collect variable names declared in a statement (VarDecl, Destructure, For init).
+    fn collect_local_var_names(stmt: &Statement, names: &mut HashSet<String>) {
+        match stmt {
+            Statement::VarDecl { name, .. } => { names.insert(name.to_string()); }
+            Statement::VarDeclDestructure { pattern, .. } => {
+                Self::collect_destruct_names(pattern, names);
+            }
+            Statement::Block { statements, .. } => {
+                for s in statements { Self::collect_local_var_names(s, names); }
+            }
+            Statement::If { then_branch, else_branch, .. } => {
+                Self::collect_local_var_names(then_branch, names);
+                if let Some(eb) = else_branch { Self::collect_local_var_names(eb, names); }
+            }
+            Statement::For { init, body, .. } => {
+                if let Some(i) = init { Self::collect_local_var_names(i, names); }
+                Self::collect_local_var_names(body, names);
+            }
+            Statement::ForOf { body, .. } => Self::collect_local_var_names(body, names),
+            Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+                Self::collect_local_var_names(body, names);
+            }
+            Statement::Switch { cases, default_body, .. } => {
+                for (_, stmts) in cases {
+                    for s in stmts { Self::collect_local_var_names(s, names); }
+                }
+                if let Some(stmts) = default_body {
+                    for s in stmts { Self::collect_local_var_names(s, names); }
+                }
+            }
+            Statement::Try { body, catch_body, finally_body, .. } => {
+                Self::collect_local_var_names(body, names);
+                if let Some(c) = catch_body { Self::collect_local_var_names(c, names); }
+                if let Some(f) = finally_body { Self::collect_local_var_names(f, names); }
+            }
+            Statement::FunDecl { body, .. } => Self::collect_local_var_names(body, names),
+            _ => {}
+        }
+    }
+
+    fn collect_destruct_names(pattern: &DestructPattern, names: &mut HashSet<String>) {
+        match pattern {
+            DestructPattern::Array(elements) => {
+                for el in elements {
+                    if let Some(DestructElement::Ident(n)) = el { names.insert(n.to_string()); }
+                    if let Some(DestructElement::Pattern(p)) = el { Self::collect_destruct_names(p, names); }
+                }
+            }
+            DestructPattern::Object(props) => {
+                for prop in props {
+                    match &prop.value {
+                        DestructElement::Ident(n) => { names.insert(n.to_string()); }
+                        DestructElement::Pattern(p) => Self::collect_destruct_names(p, names),
+                        DestructElement::Rest(n) => { names.insert(n.to_string()); }
+                    }
+                }
+            }
+        }
+    }
+
     fn collect_stmt_idents(stmt: &Statement, idents: &mut HashSet<String>) {
         match stmt {
             Statement::ExprStmt { expr, .. } => Self::collect_expr_idents(expr, idents),
@@ -2187,6 +2271,13 @@ impl Codegen {
         // Exclude the arrow's own parameters - they're not outer captures
         let param_names: HashSet<String> = params.iter().map(|p| p.name.to_string()).collect();
 
+        // Exclude variables declared inside the arrow body (locals)
+        let mut local_var_names = HashSet::new();
+        match body {
+            ArrowBody::Expr(_) => {}
+            ArrowBody::Block(stmt) => Self::collect_local_var_names(stmt, &mut local_var_names),
+        }
+
         // Collect outer parameters that need to be captured
         let outer_params: Vec<String> = self.outer_params_stack
             .iter()
@@ -2198,7 +2289,7 @@ impl Codegen {
         let outer_vars: Vec<String> = self.outer_vars_stack
             .iter()
             .flat_map(|v| v.iter().cloned())
-            .filter(|name| referenced.contains(name) && !param_names.contains(name))
+            .filter(|name| referenced.contains(name) && !param_names.contains(name) && !local_var_names.contains(name))
             .collect();
 
         // Wrap outer captures in Rc<RefCell<>> so they can be mutated inside the closure
@@ -2212,7 +2303,7 @@ impl Codegen {
             code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", var_escaped, var_escaped));
         }
         // Only clone builtins that are actually referenced (clone so outer scope can still use, e.g. process for PORT)
-        for builtin in &["console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise"] {
+        for builtin in &["console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp"] {
             if referenced.contains(*builtin) {
                 code.push_str(&format!("    let {} = {}.clone();\n", builtin, builtin));
             }
@@ -2367,7 +2458,7 @@ impl Codegen {
                 "{{ match (&{}, &{}) {{
                     (Value::Number(a), Value::Number(b)) => Value::Number(a + b),
                     (Value::String(a), Value::String(b)) => Value::String(format!(\"{{}}{{}}\", a, b).into()),
-                    (a, b) => Value::String(format!(\"{{}}{{}}\", a.to_display_string(), b.to_display_string()).into()),
+                    (a, b) => Value::String(format!(\"{{}}{{}}\", (a as &Value).to_display_string(), (b as &Value).to_display_string()).into()),
                 }} }}",
                 l, r
             ),

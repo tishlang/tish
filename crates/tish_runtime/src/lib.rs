@@ -90,7 +90,13 @@ pub fn string_substring(s: &Value, start: &Value, end: &Value) -> Value { string
 pub fn string_split(s: &Value, sep: &Value) -> Value { string_split_impl(s, sep) }
 pub fn string_starts_with(s: &Value, search: &Value) -> Value { string_starts_with_impl(s, search) }
 pub fn string_ends_with(s: &Value, search: &Value) -> Value { string_ends_with_impl(s, search) }
-pub fn string_replace(s: &Value, search: &Value, replacement: &Value) -> Value { string_replace_impl(s, search, replacement) }
+pub fn string_replace(s: &Value, search: &Value, replacement: &Value) -> Value {
+    #[cfg(feature = "regex")]
+    if matches!(search, Value::RegExp(_)) {
+        return string_replace_regex_or_callback(s, search, replacement);
+    }
+    string_replace_impl(s, search, replacement)
+}
 pub fn string_replace_all(s: &Value, search: &Value, replacement: &Value) -> Value { string_replace_all_impl(s, search, replacement) }
 pub fn string_char_at(s: &Value, idx: &Value) -> Value { string_char_at_impl(s, idx) }
 pub fn string_char_code_at(s: &Value, idx: &Value) -> Value { string_char_code_at_impl(s, idx) }
@@ -458,6 +464,23 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
         Value::String(s) => {
             if key == "length" {
                 Value::Number(s.chars().count() as f64)
+            } else {
+                Value::Null
+            }
+        }
+        #[cfg(feature = "regex")]
+        Value::RegExp(re) => {
+            let re = Rc::clone(re);
+            if key == "exec" {
+                Value::Function(Rc::new(move |args: &[Value]| {
+                    let input = args.first().unwrap_or(&Value::Null);
+                    regexp_exec(&Value::RegExp(Rc::clone(&re)), input)
+                }))
+            } else if key == "test" {
+                Value::Function(Rc::new(move |args: &[Value]| {
+                    let input = args.first().unwrap_or(&Value::Null);
+                    regexp_test(&Value::RegExp(Rc::clone(&re)), input)
+                }))
             } else {
                 Value::Null
             }
@@ -871,34 +894,69 @@ pub fn string_match_regex(s: &Value, regexp: &Value) -> Value {
 }
 
 #[cfg(feature = "regex")]
-pub fn string_replace_regex(s: &Value, search: &Value, replacement: &Value) -> Value {
+fn string_replace_regex_or_callback(s: &Value, search: &Value, replacement: &Value) -> Value {
     let input = match s {
         Value::String(s) => s.as_ref(),
         _ => return s.clone(),
     };
-    
-    let replacement_str = replacement.to_display_string();
 
-    match search {
-        Value::RegExp(re) => {
-            let re = re.borrow();
-            
-            if re.flags.global {
-                match re.regex.replace_all(input, replacement_str.as_str()) {
-                    std::borrow::Cow::Borrowed(s) => Value::String(s.into()),
-                    std::borrow::Cow::Owned(s) => Value::String(s.into()),
-                }
-            } else {
-                match re.regex.replace(input, replacement_str.as_str()) {
-                    std::borrow::Cow::Borrowed(s) => Value::String(s.into()),
-                    std::borrow::Cow::Owned(s) => Value::String(s.into()),
-                }
+    let Value::RegExp(re) = search else {
+        return s.clone();
+    };
+    let re_guard = re.borrow();
+
+    if let Value::Function(cb) = replacement {
+        let limit = if re_guard.flags.global { usize::MAX } else { 1 };
+        let mut result = String::new();
+        let mut last_end: usize = 0;
+        let mut count = 0usize;
+
+        for cap_result in re_guard.regex.captures_iter(input) {
+            if count >= limit {
+                break;
+            }
+            let Ok(caps) = cap_result else {
+                break;
+            };
+            let full = caps.get(0).unwrap();
+            let match_str = full.as_str();
+            let byte_start = full.start();
+            let char_index = input[..byte_start].chars().count();
+
+            let mut args = vec![Value::String(match_str.into())];
+            for i in 1..caps.len() {
+                let val = match caps.get(i) {
+                    Some(m) => Value::String(m.as_str().into()),
+                    None => Value::Null,
+                };
+                args.push(val);
+            }
+            args.push(Value::Number(char_index as f64));
+            args.push(Value::String(input.into()));
+
+            let repl_val = cb(&args);
+            let repl_str = repl_val.to_display_string();
+            result.push_str(&input[last_end..byte_start]);
+            result.push_str(&repl_str);
+            last_end = full.end();
+            count += 1;
+        }
+
+        result.push_str(&input[last_end..]);
+        Value::String(result.into())
+    } else {
+        let replacement_str = replacement.to_display_string();
+        if re_guard.flags.global {
+            match re_guard.regex.replace_all(input, replacement_str.as_str()) {
+                std::borrow::Cow::Borrowed(x) => Value::String(x.into()),
+                std::borrow::Cow::Owned(x) => Value::String(x.into()),
+            }
+        } else {
+            match re_guard.regex.replace(input, replacement_str.as_str()) {
+                std::borrow::Cow::Borrowed(x) => Value::String(x.into()),
+                std::borrow::Cow::Owned(x) => Value::String(x.into()),
             }
         }
-        Value::String(pattern) => {
-            Value::String(input.replacen(pattern.as_ref(), &replacement_str, 1).into())
-        }
-        _ => Value::String(input.into()),
     }
 }
 

@@ -1032,7 +1032,30 @@ impl Evaluator {
                             "replace" => {
                                 #[cfg(feature = "regex")]
                                 if let (Some(search), Some(replace)) = (arg_vals.first(), arg_vals.get(1)) {
-                                    return Ok(crate::regex::string_replace(s, search, replace));
+                                    let is_fn = matches!(replace, Value::Function { .. } | Value::Native(_));
+                                    if matches!(search, Value::RegExp(_)) && is_fn {
+                                        let re = match search {
+                                            Value::RegExp(r) => r.clone(),
+                                            _ => unreachable!(),
+                                        };
+                                        let re_guard = re.borrow();
+                                        let replace_fn = replace.clone();
+                                        let input_str = s.as_ref();
+                                        let mut invoke = |args: &[Value]| {
+                                            self.call_func(&replace_fn, args)
+                                                .map(|v| v.to_string())
+                                                .map_err(|e: EvalError| e.to_string())
+                                        };
+                                        match crate::regex::string_replace_regex_with_fn(
+                                            input_str,
+                                            &re_guard,
+                                            &mut invoke,
+                                        ) {
+                                            Ok(v) => return Ok(v),
+                                            Err(_) => return Ok(Value::String(Arc::clone(s))),
+                                        }
+                                    }
+                                    return Ok(crate::regex::string_replace(s.as_ref(), search, replace));
                                 }
                                 #[cfg(not(feature = "regex"))]
                                 {

@@ -22,3 +22,8 @@ if (m !== null) {
   console.log(m[2])      // xyz
   console.log(m["index"]) // 3 (character position)
 }
+
+// 4. String.replace with function replacer
+let text = "hello 123 world 456"
+let result = text.replace(RegExp("(\\d+)", "g"), (match, g1) => "[" + g1 + "]")
+console.log(result)  // hello [123] world [456]
