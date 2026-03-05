@@ -68,6 +68,7 @@ pub fn json_stringify(value: &Value) -> String {
             result
         }
         Value::Function(_) => "null".to_string(),
+        Value::Promise(_) => "null".to_string(),
         #[cfg(feature = "regex")]
         Value::RegExp(_) => "null".to_string(),
     }

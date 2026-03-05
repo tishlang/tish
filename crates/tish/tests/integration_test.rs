@@ -149,6 +149,25 @@ fn test_promise_and_settimeout() {
     }
 }
 
+/// Combined validation: async/await + Promise + setTimeout + multiple HTTP requests.
+#[test]
+#[cfg(feature = "http")]
+fn test_async_promise_settimeout_combined() {
+    let path = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("async_promise_settimeout.tish");
+    if path.exists() {
+        let source = std::fs::read_to_string(&path).unwrap();
+        let result = tish_eval::run(&source);
+        assert!(
+            result.is_ok(),
+            "Failed to run async_promise_settimeout: {:?}",
+            result.err()
+        );
+    }
+}
+
 /// Full stack: lex + parse each .tish file and assert no parse error.
 #[test]
 fn test_full_stack_parse() {
@@ -240,7 +259,8 @@ fn test_mvp_programs_interpreter_vs_native() {
         "string_methods.tish",
         "array_methods.tish",
         "object_methods.tish",
-        // higher_order_methods.tish - excluded: closure mutates captured var, needs RefCell in codegen
+        "types.tish", // type annotations - now supported in codegen
+        // higher_order_methods.tish - addToTotal RefCell fix works but reduce (no init) panics in native
         // destructuring.tish - excluded: destructured vars not in scope outside if-let block
         "logical_assign.tish",
         "spread.tish",

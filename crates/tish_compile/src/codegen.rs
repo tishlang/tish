@@ -572,7 +572,7 @@ impl Codegen {
         self.write("use tish_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd};\n");
         #[cfg(feature = "http")]
         if self.is_async {
-            self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_fetch_async as tish_http_fetch_async, http_fetch_all_async as tish_http_fetch_all_async, http_await_fetch as tish_http_await_fetch, http_await_fetch_all as tish_http_await_fetch_all, http_serve as tish_http_serve};\n");
+            self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_fetch_async as tish_http_fetch_async, http_fetch_all_async as tish_http_fetch_all_async, http_await_fetch as tish_http_await_fetch, http_await_fetch_all as tish_http_await_fetch_all, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, promise_object as tish_promise_object, fetch_async_promise as tish_fetch_async_promise, await_promise as tish_await_promise};\n");
         } else {
             self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_serve as tish_http_serve};\n");
         }
@@ -709,8 +709,11 @@ impl Codegen {
             self.writeln("let fetch = Value::Function(Rc::new(|args: &[Value]| tish_http_fetch(args)));");
             self.writeln("let fetchAll = Value::Function(Rc::new(|args: &[Value]| tish_http_fetch_all(args)));");
             if self.is_async {
-                self.writeln("let fetchAsync = Value::Function(Rc::new(|_args: &[Value]| panic!(\"fetchAsync must be used with await\")));");
+                self.writeln("let fetchAsync = Value::Function(Rc::new(|args: &[Value]| tish_fetch_async_promise(args.to_vec())));");
                 self.writeln("let fetchAllAsync = Value::Function(Rc::new(|_args: &[Value]| panic!(\"fetchAllAsync must be used with await\")));");
+                self.writeln("let setTimeout = Value::Function(Rc::new(|args: &[Value]| tish_timer_set_timeout(args)));");
+                self.writeln("let clearTimeout = Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_timeout(args)));");
+                self.writeln("let Promise = tish_promise_object();");
             }
             self.writeln("let serve = Value::Function(Rc::new(|args: &[Value]| {");
             self.indent += 1;
@@ -772,6 +775,7 @@ impl Codegen {
             Statement::Block { statements, .. } => {
                 self.writeln("{");
                 self.indent += 1;
+                self.type_context.push_scope();
                 // Pre-scan for function declarations and create cells (for mutual recursion)
                 let func_names = self.prescan_function_decls(statements);
                 self.function_scope_stack.push(func_names.clone());
@@ -784,6 +788,7 @@ impl Codegen {
                     self.emit_statement(s)?;
                 }
                 self.function_scope_stack.pop(); // Exit scope
+                self.type_context.pop_scope();
                 self.indent -= 1;
                 self.writeln("}");
             }
@@ -1100,16 +1105,34 @@ impl Codegen {
                     .flat_map(|p| p.iter().cloned())
                     .filter(|name| referenced.contains(name) && !param_names.contains(name))
                     .collect();
-                
+                // Collect outer variables (from outer_vars_stack) - wrap in RefCell for mutable capture
+                let outer_vars: Vec<String> = self.outer_vars_stack
+                    .iter()
+                    .flat_map(|v| v.iter().cloned())
+                    .filter(|name| referenced.contains(name) && !param_names.contains(name))
+                    .filter(|name| !["Boolean", "console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise"].contains(&name.as_str()))
+                    .collect();
+
+                // Rebind outer vars to Rc<RefCell<>> BEFORE the closure block so the rest of the scope sees the cell
+                for outer_var in &outer_vars {
+                    let var_escaped = Self::escape_ident(outer_var);
+                    self.writeln(&format!("let {} = std::rc::Rc::new(RefCell::new({}.clone()));", var_escaped, var_escaped));
+                    self.refcell_wrapped_vars.insert(outer_var.clone());
+                }
+
                 self.writeln(&format!("let {} = {{", name_str));
                 self.indent += 1;
+                // Clone Rc for outer vars so closure can capture without moving (outer scope keeps its copy)
+                for outer_var in &outer_vars {
+                    let var_escaped = Self::escape_ident(outer_var);
+                    self.writeln(&format!("let {} = {}.clone();", var_escaped, var_escaped));
+                }
                 // Clone the cell so the closure can reference the function recursively
-                // Only clone if the function references itself (recursion)
                 let needs_self_ref = referenced.contains(name_raw);
                 if needs_self_ref {
                     self.writeln(&format!("let {}_ref = {}_cell.clone();", name_str, name_str));
                 }
-                // Clone sibling function cells for mutual recursion - only those actually referenced
+                // Clone sibling function cells for mutual recursion
                 let sibling_fns: Vec<String> = self.function_scope_stack
                     .last()
                     .map(|scope| scope.iter()
@@ -1127,7 +1150,7 @@ impl Codegen {
                     self.writeln(&format!("let {} = {}.clone();", param_escaped, param_escaped));
                 }
                 // Only clone builtins that are actually referenced (clone so outer scope can still use them, e.g. process for PORT before serve)
-                for builtin in &["Boolean", "console", "Math", "JSON", "Date", "process"] {
+                for builtin in &["Boolean", "console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise"] {
                     if referenced.contains(*builtin) {
                         self.writeln(&format!("let {} = {}.clone();", builtin, builtin));
                     }
@@ -1827,10 +1850,17 @@ impl Codegen {
                         format!("{{ let _v = {}; *{}.borrow_mut() = _v.clone(); _v }}", val, escaped)
                     }
                 } else {
-                    if needs_outer_clone {
-                        format!("{{ let _v = ({}).clone(); {} = _v.clone(); _v }}", val, escaped)
+                    // Use type_context: typed vars need from_value_expr; Value needs .clone() (we return _v)
+                    let rust_type = self.type_context.get_type(name.as_ref());
+                    let assign_rhs = if matches!(rust_type, RustType::Value) {
+                        "_v.clone()".to_string()
                     } else {
-                        format!("{{ let _v = {}; {} = _v.clone(); _v }}", val, escaped)
+                        rust_type.from_value_expr("_v")
+                    };
+                    if needs_outer_clone {
+                        format!("{{ let _v = ({}).clone(); {} = {}; _v }}", val, escaped, assign_rhs)
+                    } else {
+                        format!("{{ let _v = {}; {} = {}; _v }}", val, escaped, assign_rhs)
                     }
                 }
             }
@@ -1857,15 +1887,15 @@ impl Codegen {
                                     }
                                 }
                                 _ => {
-                                    // Tish async functions (e.g. fetchUrl) compile to sync closures;
-                                    // just emit the call, no .await
-                                    return Ok(self.emit_expr(operand)?);
+                                    let o = self.emit_expr(operand)?;
+                                    return Ok(format!("tish_await_promise({})", o));
                                 }
                             });
                         }
                     }
-                    // await Call with non-Ident callee: emit as sync call
-                    return Ok(self.emit_expr(operand)?);
+                    // await Call with non-Ident callee, or await Promise value: wrap in await_promise
+                    let o = self.emit_expr(operand)?;
+                    return Ok(format!("tish_await_promise({})", o));
                 }
                 // Fallback: emit operand as sync call (no real .await in our model)
                 let o = self.emit_expr(operand)?;
@@ -2181,7 +2211,7 @@ impl Codegen {
             code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", var_escaped, var_escaped));
         }
         // Only clone builtins that are actually referenced (clone so outer scope can still use, e.g. process for PORT)
-        for builtin in &["console", "Math", "JSON", "Date", "process"] {
+        for builtin in &["console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise"] {
             if referenced.contains(*builtin) {
                 code.push_str(&format!("    let {} = {}.clone();\n", builtin, builtin));
             }

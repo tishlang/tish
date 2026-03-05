@@ -12,6 +12,12 @@ use fancy_regex::Regex;
 /// Returns Value directly (not Result) for simplicity and backward compatibility.
 pub type NativeFn = Rc<dyn Fn(&[Value]) -> Value>;
 
+/// Trait for Promise-like values that can be awaited (block until settled).
+/// Implemented by the runtime for native compile; interpreter uses its own Promise.
+pub trait TishPromise: Send + Sync {
+    fn block_until_settled(&self) -> std::result::Result<Value, Value>;
+}
+
 /// JavaScript RegExp flags
 #[cfg(feature = "regex")]
 #[derive(Debug, Clone, Default)]
@@ -135,6 +141,8 @@ pub enum Value {
     Function(NativeFn),
     #[cfg(feature = "regex")]
     RegExp(Rc<RefCell<TishRegExp>>),
+    /// Promise (for native compile). Interpreter uses tish_eval::Value::Promise.
+    Promise(Arc<dyn TishPromise>),
 }
 
 impl std::fmt::Debug for Value {
@@ -149,6 +157,7 @@ impl std::fmt::Debug for Value {
             Value::Function(_) => write!(f, "Function"),
             #[cfg(feature = "regex")]
             Value::RegExp(re) => write!(f, "RegExp(/{}/{})", re.borrow().source, re.borrow().flags_string()),
+            Value::Promise(_) => write!(f, "Promise"),
         }
     }
 }
@@ -184,6 +193,7 @@ impl Value {
                 format!("{{{}}}", inner.join(", "))
             }
             Value::Function(_) => "[Function]".to_string(),
+            Value::Promise(_) => "[object Promise]".to_string(),
             #[cfg(feature = "regex")]
             Value::RegExp(re) => {
                 let re = re.borrow();
@@ -221,6 +231,7 @@ impl Value {
             (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
             #[cfg(feature = "regex")]
             (Value::RegExp(a), Value::RegExp(b)) => Rc::ptr_eq(a, b),
+            (Value::Promise(a), Value::Promise(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }

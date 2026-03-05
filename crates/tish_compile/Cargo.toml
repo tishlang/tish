@@ -13,3 +13,6 @@ regex = []
 
 [dependencies]
 tish_ast = { path = "../tish_ast" }
+
+[dev-dependencies]
+tish_parser = { path = "../tish_parser" }

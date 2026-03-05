@@ -1455,6 +1455,7 @@ name = "tish_compile"
 version = "0.1.0"
 dependencies = [
  "tish_ast",
+ "tish_parser",
 ]
 
 [[package]]

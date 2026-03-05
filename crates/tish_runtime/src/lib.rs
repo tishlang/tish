@@ -641,6 +641,15 @@ pub fn object_from_entries(args: &[Value]) -> Value {
 mod http;
 
 #[cfg(feature = "http")]
+mod timers;
+
+#[cfg(feature = "http")]
+mod promise;
+
+#[cfg(feature = "http")]
+mod native_promise;
+
+#[cfg(feature = "http")]
 pub use http::{
     fetch as http_fetch,
     fetch_all as http_fetch_all,
@@ -650,6 +659,15 @@ pub use http::{
     fetch_all_async as http_fetch_all_async,
     serve as http_serve,
 };
+
+#[cfg(feature = "http")]
+pub use timers::{set_timeout as timer_set_timeout, clear_timeout as timer_clear_timeout};
+
+#[cfg(feature = "http")]
+pub use promise::promise_object;
+
+#[cfg(feature = "http")]
+pub use native_promise::{fetch_async_promise, await_promise};
 
 // RegExp Support
 #[cfg(feature = "regex")]

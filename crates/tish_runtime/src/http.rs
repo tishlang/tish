@@ -10,7 +10,7 @@ use tish_core::Value;
 use tokio::runtime::Runtime;
 
 thread_local! {
-    static RUNTIME: Runtime = tokio::runtime::Builder::new_multi_thread()
+    pub(crate) static RUNTIME: Runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
         .build()
@@ -165,6 +165,65 @@ async fn fetch_one_async_owned(url: String, options: Option<Value>) -> Result<Va
     Ok(build_response_object(status, ok, &response_headers, body_text))
 }
 
+
+/// Primitive fetch result (all Send) for use with native Promise.
+pub struct FetchResultPrimitive {
+    pub status: f64,
+    pub ok: bool,
+    pub body: String,
+    pub headers: Vec<(String, String)>,
+}
+
+pub fn extract_method_from_value(options: Option<&Value>) -> String {
+    extract_method(options)
+}
+
+pub fn extract_headers_from_value(options: Option<&Value>) -> Vec<(String, String)> {
+    extract_headers(options)
+}
+
+pub fn extract_body_from_value(options: Option<&Value>) -> Option<String> {
+    extract_body(options)
+}
+
+/// Fetch with primitive args - returns Send result for use in spawned tasks.
+pub async fn fetch_one_async_primitive(
+    url: &str,
+    method: &str,
+    headers: &[(String, String)],
+    body: Option<String>,
+) -> Result<FetchResultPrimitive, String> {
+    let client = reqwest::Client::new();
+    let mut req = match method {
+        "POST" => client.post(url),
+        "PUT" => client.put(url),
+        "DELETE" => client.delete(url),
+        "PATCH" => client.patch(url),
+        "HEAD" => client.head(url),
+        _ => client.get(url),
+    };
+    for (k, v) in headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    if let Some(b) = body {
+        req = req.body(b);
+    }
+    let response = req.send().await.map_err(|e| e.to_string())?;
+    let status = response.status().as_u16() as f64;
+    let ok = response.status().is_success();
+    let response_headers = response.headers().clone();
+    let body_text = response.text().await.map_err(|e| e.to_string())?;
+    let headers_vec: Vec<(String, String)> = response_headers
+        .iter()
+        .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+        .collect();
+    Ok(FetchResultPrimitive {
+        status,
+        ok,
+        body: body_text,
+        headers: headers_vec,
+    })
+}
 
 fn extract_method(options: Option<&Value>) -> String {
     options
