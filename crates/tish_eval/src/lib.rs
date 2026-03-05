@@ -20,5 +20,8 @@ pub use regex::TishRegExp;
 pub fn run(source: &str) -> Result<Value, String> {
     let program = tish_parser::parse(source)?;
     let mut eval = Evaluator::new();
-    eval.eval_program(&program)
+    let result = eval.eval_program(&program)?;
+    #[cfg(feature = "http")]
+    eval.run_timer_phase()?;
+    Ok(result)
 }

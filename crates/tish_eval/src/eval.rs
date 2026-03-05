@@ -2002,39 +2002,71 @@ impl Evaluator {
     fn run_timer_builtin(&self, name: &str, args: &[Value]) -> Result<Value, EvalError> {
         let callback = args
             .first()
-            .ok_or_else(|| EvalError::Error(format!("{} requires a callback", name)))?;
+            .ok_or_else(|| EvalError::Error(format!("{} requires a callback", name)))?
+            .clone();
         let delay_ms = args
             .get(1)
             .and_then(|v| v.as_number())
             .unwrap_or(0.0)
             .max(0.0) as u64;
         let extra_args: Vec<Value> = args.iter().skip(2).cloned().collect();
-        let id = crate::timers::next_timer_id();
 
-        match name {
-            "setTimeout" => {
-                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                self.call_func(callback, &extra_args)?;
-                Ok(Value::Number(id as f64))
+        let id = match name {
+            "setTimeout" => crate::timers::setTimeout(callback, extra_args, delay_ms),
+            "setInterval" => crate::timers::setInterval(callback, extra_args, delay_ms),
+            _ => return Err(EvalError::Error(format!("Unknown timer: {}", name))),
+        };
+        Ok(Value::Number(id as f64))
+    }
+
+    #[cfg(feature = "http")]
+    fn clear_timeout_native(args: &[Value]) -> Result<Value, String> {
+        if let Some(Value::Number(n)) = args.first() {
+            crate::timers::clearTimer(*n as u64);
+        }
+        Ok(Value::Null)
+    }
+
+    #[cfg(feature = "http")]
+    fn clear_interval_native(args: &[Value]) -> Result<Value, String> {
+        if let Some(Value::Number(n)) = args.first() {
+            crate::timers::clearTimer(*n as u64);
+        }
+        Ok(Value::Null)
+    }
+
+    /// Run all due timer callbacks. Called after the script completes so setTimeout/setInterval
+    /// callbacks run without blocking the main script. Loops until no timers are due.
+    #[cfg(feature = "http")]
+    pub fn run_timer_phase(&mut self) -> Result<(), String> {
+        const MAX_ITERATIONS: u32 = 1_000_000; // avoid infinite loop if setInterval never cleared
+        let mut iterations = 0;
+        while crate::timers::has_pending_timers() && iterations < MAX_ITERATIONS {
+            iterations += 1;
+            let due = crate::timers::take_due_timers();
+            if due.is_empty() {
+                // None due yet; sleep until next timer
+                let next = crate::timers::next_due_instant();
+                if let Some(instant) = next {
+                    let now = std::time::Instant::now();
+                    if instant > now {
+                        std::thread::sleep(instant.duration_since(now));
+                    }
+                }
+                continue;
             }
-            "setInterval" => {
-                loop {
-                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                    self.call_func(callback, &extra_args)?;
+            for (id, callback, args, interval_ms) in due {
+                self.call_func(&callback, &args).map_err(|e| match e {
+                    EvalError::Error(s) => s,
+                    EvalError::Throw(v) => v.to_string(),
+                    _ => "timer callback error".to_string(),
+                })?;
+                if interval_ms > 0 {
+                    crate::timers::re_register_interval(id, callback, args, interval_ms);
                 }
             }
-            _ => Err(EvalError::Error(format!("Unknown timer: {}", name))),
         }
-    }
-
-    #[cfg(feature = "http")]
-    fn clear_timeout_native(_args: &[Value]) -> Result<Value, String> {
-        Ok(Value::Null)
-    }
-
-    #[cfg(feature = "http")]
-    fn clear_interval_native(_args: &[Value]) -> Result<Value, String> {
-        Ok(Value::Null)
+        Ok(())
     }
 
     #[cfg(feature = "http")]
