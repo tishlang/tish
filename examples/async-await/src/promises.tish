@@ -1,0 +1,20 @@
+// Promises and async/await example
+// Run: cargo run -p tish --features http -- run examples/async-await/src/promises.tish
+
+console.log("Promise basics:")
+
+let p = Promise((resolve, reject) => {
+  resolve(42)
+})
+let v = await p
+console.log("awaited Promise:", v)
+
+console.log("Promise.resolve + .then:")
+let doubled = await Promise.resolve(10).then(x => x * 2)
+console.log("10 * 2 =", doubled)
+
+console.log("fetchAsync returns Promise:")
+let r = await fetchAsync("https://httpbin.org/get")
+console.log("fetch status:", r.status)
+
+console.log("Done")

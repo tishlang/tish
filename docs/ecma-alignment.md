@@ -22,7 +22,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 | §19 Fundamental | Follow | Object, Function, Error. Symbol Omit. |
 | §20–21 Numbers, Math, String | Follow subset | BigInt, Date, RegExp Omit or optional |
 | §22–24 Array | Follow (simplify) | TypedArray, Map, Set, JSON Omit or optional |
-| §25 Control abstraction | Simplify | Iteration follow; async/await Follow (simplify); Generator, Promise Omit in MVP |
+| §25 Control abstraction | Simplify | Iteration follow; async/await Follow (simplify); Generator Omit; Promise Follow (ECMA-262 §27.2) |
 | §26 Reflection | Omit | Proxy, Reflect |
 | Annex B, D | Omit | Legacy escapes, `__proto__`, etc. |
 
@@ -55,7 +55,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **strict-equals** — Follow (`===`, `!==`)
 - **increment/decrement** — Follow (postfix `++`, `--` on identifiers)
 - **typeof** — Follow
-- **async, await** — Follow (simplify); use `fetchAsync`/`fetchAllAsync` with await
+- **async, await** — Follow (simplify); `await` works on any Promise (fetchAsync, fetchAllAsync, Promise)
 - **generators, yield** — Omit
 - **class, new, super, this** — Omit
 - **delete, in, instanceof** — Omit or Simplify
@@ -87,7 +87,8 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **parseInt, parseFloat, isFinite, isNaN** — Follow
 - **decodeURI, encodeURI** — Follow
 - **ArrayBuffer, BigInt, Date, Map, Set** — Omit or optional
-- **Promise, Proxy, Reflect, Symbol** — Omit
+- **Promise** — Follow (§27.2): `Promise(executor)`, `.then`, `.catch`, `.finally`, `Promise.resolve`, `Promise.reject`, `Promise.all`, `Promise.race`. Host APIs: `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`.
+- **Proxy, Reflect, Symbol** — Omit
 - **RegExp** — Omit or optional
 
 ## Where Tish Differs from JavaScript

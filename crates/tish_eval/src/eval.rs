@@ -168,6 +168,11 @@ impl Evaluator {
                 s.set("fetchAsync".into(), Value::Native(Self::fetch_async_native), true);
                 s.set("fetchAllAsync".into(), Value::Native(Self::fetch_all_async_native), true);
                 s.set("serve".into(), Value::Serve, true);
+                s.set("Promise".into(), Value::PromiseConstructor, true);
+                s.set("setTimeout".into(), Value::TimerBuiltin(Arc::from("setTimeout")), true);
+                s.set("setInterval".into(), Value::TimerBuiltin(Arc::from("setInterval")), true);
+                s.set("clearTimeout".into(), Value::Native(Self::clear_timeout_native), true);
+                s.set("clearInterval".into(), Value::Native(Self::clear_interval_native), true);
             }
 
             #[cfg(feature = "fs")]
@@ -1270,7 +1275,10 @@ impl Evaluator {
                     Value::Object(_) => "object".into(),
                     Value::Function { .. } | Value::Native(_) => "function".into(),
                     #[cfg(feature = "http")]
-                    Value::Serve => "function".into(),
+                    Value::Serve | Value::PromiseResolver(_) | Value::PromiseConstructor
+                    | Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => "function".into(),
+                    #[cfg(feature = "http")]
+                    Value::Promise(_) => "object".into(),
                     #[cfg(feature = "regex")]
                     Value::RegExp(_) => "object".into(),
                 }))
@@ -1761,9 +1769,72 @@ impl Evaluator {
                 native_fn(args).map_err(EvalError::Error)
             }
             #[cfg(feature = "http")]
+            Value::PromiseResolver(r) => {
+                let value = args.first().cloned().unwrap_or(Value::Null);
+                let (val, is_fulfilled, reactions) =
+                    crate::promise::settle_promise(r, value, r.is_resolve)
+                        .map_err(EvalError::Error)?;
+                for reaction in reactions {
+                    match reaction {
+                        crate::promise::Reaction::Then(on_fulfilled, on_rejected, ref resolve, ref reject) => {
+                            let handler_result = if is_fulfilled {
+                                if let Some(ref h) = on_fulfilled {
+                                    self.call_func(h, &[val.clone()])
+                                } else {
+                                    Ok(val.clone())
+                                }
+                            } else {
+                                if let Some(ref h) = on_rejected {
+                                    self.call_func(h, &[val.clone()])
+                                } else {
+                                    Err(EvalError::Throw(val.clone()))
+                                }
+                            };
+                            match handler_result {
+                                Ok(v) => {
+                                    crate::promise::settle_promise(&resolve, v, true)
+                                        .map_err(EvalError::Error)?;
+                                }
+                                Err(EvalError::Throw(v)) => {
+                                    crate::promise::settle_promise(&reject, v, false)
+                                        .map_err(EvalError::Error)?;
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        crate::promise::Reaction::Finally(on_finally, ref resolve, ref reject) => {
+                            let _ = self.call_func(&on_finally, &[]);
+                            if is_fulfilled {
+                                crate::promise::settle_promise(&resolve, val.clone(), true)
+                                    .map_err(EvalError::Error)?;
+                            } else {
+                                crate::promise::settle_promise(&reject, val.clone(), false)
+                                    .map_err(EvalError::Error)?;
+                            }
+                        }
+                    }
+                }
+                Ok(Value::Null)
+            }
+            #[cfg(feature = "http")]
+            Value::PromiseConstructor => {
+                let executor = args.first().ok_or_else(|| {
+                    EvalError::Error("Promise requires an executor function".to_string())
+                })?;
+                let (promise, resolve, reject) = crate::promise::create_promise();
+                self.call_func(executor, &[resolve, reject])?;
+                Ok(promise)
+            }
+            #[cfg(feature = "http")]
             Value::Serve => self.run_http_server(args),
             #[cfg(feature = "regex")]
             Value::RegExp(_) => Err(EvalError::Error("RegExp is not callable".to_string())),
+            #[cfg(feature = "http")]
+            Value::BoundPromiseMethod(promise_ref, method) => {
+                self.run_promise_method(promise_ref, method.as_ref(), args)
+            }
+            #[cfg(feature = "http")]
+            Value::TimerBuiltin(name) => self.run_timer_builtin(name.as_ref(), args),
             Value::Function { params, defaults, rest_param, body } => {
                 let scope = Scope::child(Rc::clone(&self.scope));
                 {
@@ -1801,6 +1872,169 @@ impl Evaluator {
             }
             _ => Err(EvalError::Error("Not a function".to_string())),
         }
+    }
+
+    #[cfg(feature = "http")]
+    fn run_promise_method(
+        &self,
+        promise_ref: &crate::promise::PromiseRef,
+        method: &str,
+        args: &[Value],
+    ) -> Result<Value, EvalError> {
+        match method {
+            "then" => self.run_promise_then_core(
+                promise_ref,
+                args.get(0).cloned(),
+                args.get(1).cloned(),
+            ),
+            "catch" => self.run_promise_then_core(promise_ref, None, args.get(0).cloned()),
+            "finally" => self.run_promise_finally(promise_ref, args.get(0).cloned()),
+            _ => Err(EvalError::Error(format!("Unknown promise method: {}", method))),
+        }
+    }
+
+    #[cfg(feature = "http")]
+    fn run_promise_finally(
+        &self,
+        promise_ref: &crate::promise::PromiseRef,
+        on_finally: Option<Value>,
+    ) -> Result<Value, EvalError> {
+        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+        let (resolve, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+        let state = &promise_ref.state;
+        {
+            let s = state.borrow();
+            match &*s {
+                crate::promise::PromiseState::Fulfilled(v) => {
+                    let v = v.clone();
+                    drop(s);
+                    if let Some(ref f) = on_finally {
+                        let _ = self.call_func(f, &[]);
+                    }
+                    crate::promise::settle_promise(&resolve, v, true).map_err(EvalError::Error)?;
+                }
+                crate::promise::PromiseState::Rejected(v) => {
+                    let v = v.clone();
+                    drop(s);
+                    if let Some(ref f) = on_finally {
+                        let _ = self.call_func(f, &[]);
+                    }
+                    crate::promise::settle_promise(&reject, v, false).map_err(EvalError::Error)?;
+                }
+                crate::promise::PromiseState::Pending { .. } => {
+                    let reaction = if let Some(ref f) = on_finally {
+                        crate::promise::Reaction::Finally(f.clone(), resolve, reject)
+                    } else {
+                        crate::promise::Reaction::Then(None, None, resolve, reject)
+                    };
+                    crate::promise::add_reaction(state, reaction);
+                }
+            }
+        }
+        Ok(promise)
+    }
+
+    #[cfg(feature = "http")]
+    fn run_promise_then_core(
+        &self,
+        promise_ref: &crate::promise::PromiseRef,
+        on_fulfilled: Option<Value>,
+        on_rejected: Option<Value>,
+    ) -> Result<Value, EvalError> {
+        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+        let (resolve, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+        let state = &promise_ref.state;
+        {
+            let s = state.borrow();
+            match &*s {
+                crate::promise::PromiseState::Fulfilled(v) => {
+                    let v = v.clone();
+                    drop(s);
+                    let result = if let Some(ref h) = on_fulfilled {
+                        self.call_func(h, &[v])
+                    } else {
+                        Ok(v)
+                    };
+                    match result {
+                        Ok(val) => {
+                            crate::promise::settle_promise(&resolve, val, true)
+                                .map_err(EvalError::Error)?;
+                        }
+                        Err(EvalError::Throw(val)) => {
+                            crate::promise::settle_promise(&reject, val, false)
+                                .map_err(EvalError::Error)?;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                crate::promise::PromiseState::Rejected(v) => {
+                    let v = v.clone();
+                    drop(s);
+                    let result = if let Some(ref h) = on_rejected {
+                        self.call_func(h, &[v.clone()])
+                    } else {
+                        Err(EvalError::Throw(v))
+                    };
+                    match result {
+                        Ok(val) => {
+                            crate::promise::settle_promise(&resolve, val, true)
+                                .map_err(EvalError::Error)?;
+                        }
+                        Err(EvalError::Throw(val)) => {
+                            crate::promise::settle_promise(&reject, val, false)
+                                .map_err(EvalError::Error)?;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                crate::promise::PromiseState::Pending { .. } => {
+                    crate::promise::add_reaction(
+                        state,
+                        crate::promise::Reaction::Then(on_fulfilled, on_rejected, resolve.clone(), reject.clone()),
+                    );
+                }
+            }
+        }
+        Ok(promise)
+    }
+
+    #[cfg(feature = "http")]
+    fn run_timer_builtin(&self, name: &str, args: &[Value]) -> Result<Value, EvalError> {
+        let callback = args
+            .first()
+            .ok_or_else(|| EvalError::Error(format!("{} requires a callback", name)))?;
+        let delay_ms = args
+            .get(1)
+            .and_then(|v| v.as_number())
+            .unwrap_or(0.0)
+            .max(0.0) as u64;
+        let extra_args: Vec<Value> = args.iter().skip(2).cloned().collect();
+        let id = crate::timers::next_timer_id();
+
+        match name {
+            "setTimeout" => {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                self.call_func(callback, &extra_args)?;
+                Ok(Value::Number(id as f64))
+            }
+            "setInterval" => {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    self.call_func(callback, &extra_args)?;
+                }
+            }
+            _ => Err(EvalError::Error(format!("Unknown timer: {}", name))),
+        }
+    }
+
+    #[cfg(feature = "http")]
+    fn clear_timeout_native(_args: &[Value]) -> Result<Value, String> {
+        Ok(Value::Null)
+    }
+
+    #[cfg(feature = "http")]
+    fn clear_interval_native(_args: &[Value]) -> Result<Value, String> {
+        Ok(Value::Null)
     }
 
     #[cfg(feature = "http")]
@@ -1938,6 +2172,30 @@ impl Evaluator {
                     Ok(Value::Null)
                 }
             }
+            #[cfg(feature = "http")]
+            Value::Promise(promise_ref) => match key {
+                "then" => Ok(Value::BoundPromiseMethod(
+                    promise_ref.clone(),
+                    Arc::from("then"),
+                )),
+                "catch" => Ok(Value::BoundPromiseMethod(
+                    promise_ref.clone(),
+                    Arc::from("catch"),
+                )),
+                "finally" => Ok(Value::BoundPromiseMethod(
+                    promise_ref.clone(),
+                    Arc::from("finally"),
+                )),
+                _ => Ok(Value::Null),
+            },
+            #[cfg(feature = "http")]
+            Value::PromiseConstructor => match key {
+                "resolve" => Ok(Value::Native(Self::promise_resolve)),
+                "reject" => Ok(Value::Native(Self::promise_reject)),
+                "all" => Ok(Value::Native(Self::promise_all)),
+                "race" => Ok(Value::Native(Self::promise_race)),
+                _ => Ok(Value::Null),
+            },
             #[cfg(feature = "regex")]
             Value::RegExp(re) => {
                 let re = re.borrow();
@@ -1974,6 +2232,14 @@ impl Evaluator {
                     _ => return Ok(Value::Null),
                 };
                 Ok(map.borrow().get(&key).cloned().unwrap_or(Value::Null))
+            }
+            #[cfg(feature = "http")]
+            Value::Promise(_) => {
+                let key = match index {
+                    Value::String(s) => s.as_ref(),
+                    _ => return Ok(Value::Null),
+                };
+                self.get_prop(obj, key)
             }
             _ => Ok(Value::Null),
         }
@@ -2206,7 +2472,8 @@ impl Evaluator {
             }
             Value::Function { .. } | Value::Native(_) => "null".to_string(),
             #[cfg(feature = "http")]
-            Value::Serve => "null".to_string(),
+            Value::Serve | Value::Promise(_) | Value::PromiseResolver(_) | Value::PromiseConstructor
+            | Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => "null".to_string(),
             #[cfg(feature = "regex")]
             Value::RegExp(_) => "null".to_string(),
         }
@@ -2296,6 +2563,90 @@ impl Evaluator {
     }
 
     #[cfg(feature = "http")]
+    fn promise_resolve(args: &[Value]) -> Result<Value, String> {
+        let x = args.first().cloned().unwrap_or(Value::Null);
+        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+        let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+        crate::promise::settle_promise(&resolve, x, true).map_err(|e| e)?;
+        Ok(promise)
+    }
+
+    #[cfg(feature = "http")]
+    fn promise_reject(args: &[Value]) -> Result<Value, String> {
+        let r = args.first().cloned().unwrap_or(Value::Null);
+        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+        let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+        crate::promise::settle_promise(&reject, r, false).map_err(|e| e)?;
+        Ok(promise)
+    }
+
+    #[cfg(feature = "http")]
+    fn promise_all(args: &[Value]) -> Result<Value, String> {
+        let iterable = args
+            .first()
+            .ok_or_else(|| "Promise.all requires an iterable".to_string())?;
+        let values: Vec<Value> = match iterable {
+            Value::Array(arr) => arr.borrow().clone(),
+            Value::String(s) => s.chars().map(|c| Value::String(c.to_string().into())).collect(),
+            _ => return Err("Promise.all requires array or iterable".to_string()),
+        };
+        let mut results = Vec::with_capacity(values.len());
+        for v in values {
+            if let Value::Promise(ref p) = v {
+                match crate::promise::block_until_settled(p) {
+                    crate::promise::PromiseAwaitResult::Fulfilled(x) => results.push(x),
+                    crate::promise::PromiseAwaitResult::Rejected(x) => {
+                        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+                        let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+                        let _ = crate::promise::settle_promise(&reject, x, false);
+                        return Ok(promise);
+                    }
+                    crate::promise::PromiseAwaitResult::Error(e) => return Err(e),
+                }
+            } else {
+                results.push(v);
+            }
+        }
+        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+        let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+        let arr = Value::Array(Rc::new(RefCell::new(results)));
+        crate::promise::settle_promise(&resolve, arr, true).map_err(|e| e)?;
+        Ok(promise)
+    }
+
+    #[cfg(feature = "http")]
+    fn promise_race(args: &[Value]) -> Result<Value, String> {
+        let iterable = args
+            .first()
+            .ok_or_else(|| "Promise.race requires an iterable".to_string())?;
+        let values: Vec<Value> = match iterable {
+            Value::Array(arr) => arr.borrow().clone(),
+            Value::String(s) => s.chars().map(|c| Value::String(c.to_string().into())).collect(),
+            _ => return Err("Promise.race requires array or iterable".to_string()),
+        };
+        for v in values {
+            if let Value::Promise(ref p) = v {
+                match crate::promise::block_until_settled(p) {
+                    crate::promise::PromiseAwaitResult::Fulfilled(x) => {
+                        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+                        let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+                        crate::promise::settle_promise(&resolve, x, true).map_err(|e| e)?;
+                        return Ok(promise);
+                    }
+                    crate::promise::PromiseAwaitResult::Rejected(x) => {
+                        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+                        let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+                        crate::promise::settle_promise(&reject, x, false).map_err(|e| e)?;
+                        return Ok(promise);
+                    }
+                    crate::promise::PromiseAwaitResult::Error(e) => return Err(e),
+                }
+            }
+        }
+        Err("Promise.race requires at least one promise".to_string())
+    }
+
+    #[cfg(feature = "http")]
     fn fetch_native(args: &[Value]) -> Result<Value, String> {
         crate::http::fetch(args)
     }
@@ -2306,62 +2657,54 @@ impl Evaluator {
     }
 
     #[cfg(feature = "http")]
-    fn fetch_async_native(_args: &[Value]) -> Result<Value, String> {
-        Err("fetchAsync must be used with await".to_string())
+    fn fetch_async_native(args: &[Value]) -> Result<Value, String> {
+        let url = args
+            .first()
+            .map(|v| v.to_string())
+            .ok_or_else(|| "fetchAsync requires a URL".to_string())?;
+        let options = args.get(1).cloned();
+        let result =
+            crate::http::RUNTIME.with(|rt| rt.block_on(crate::http::fetch_async(&url, options.as_ref())));
+        match result {
+            Ok(v) => Self::promise_resolve(&[v]),
+            Err(e) => Self::promise_reject(&[Value::String(e.into())]),
+        }
     }
 
     #[cfg(feature = "http")]
-    fn fetch_all_async_native(_args: &[Value]) -> Result<Value, String> {
-        Err("fetchAllAsync must be used with await".to_string())
+    fn fetch_all_async_native(args: &[Value]) -> Result<Value, String> {
+        let requests = args
+            .first()
+            .and_then(|v| {
+                if let Value::Array(arr) = v {
+                    Some(arr.borrow().clone())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| "fetchAllAsync requires an array of requests".to_string())?;
+        let result = crate::http::RUNTIME.with(|rt| {
+            rt.block_on(crate::http::fetch_all_async(requests))
+        });
+        match result {
+            Ok(v) => Self::promise_resolve(&[v]),
+            Err(e) => Self::promise_reject(&[Value::String(e.into())]),
+        }
     }
 
     #[cfg(feature = "http")]
     fn eval_await(&self, operand: &Expr) -> Result<Value, EvalError> {
-        if let Expr::Call { callee, args, .. } = operand {
-            let name = match callee.as_ref() {
-                Expr::Ident { name, .. } => name.as_ref(),
-                _ => {
-                    return Err(EvalError::Error(
-                        "await only supports fetchAsync and fetchAllAsync".to_string(),
-                    ));
-                }
-            };
-            let arg_vals = self.eval_call_args(args)?;
-            let result = match name.as_ref() {
-                "fetchAsync" => {
-                    let url = arg_vals
-                        .first()
-                        .map(|v| v.to_string())
-                        .ok_or_else(|| EvalError::Error("fetchAsync requires a URL".to_string()))?;
-                    let options = arg_vals.get(1).cloned();
-                    crate::http::RUNTIME.with(|rt| {
-                        rt.block_on(crate::http::fetch_async(&url, options.as_ref()))
-                    })
-                }
-                "fetchAllAsync" => {
-                    let requests = arg_vals
-                        .first()
-                        .and_then(|v| {
-                            if let Value::Array(arr) = v {
-                                Some(arr.borrow().clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .ok_or_else(|| {
-                            EvalError::Error("fetchAllAsync requires an array of requests".to_string())
-                        })?;
-                    crate::http::RUNTIME.with(|rt| rt.block_on(crate::http::fetch_all_async(requests)))
-                }
-                _ => {
-                    // await fn() - evaluate the call (fn may use await internally)
-                    return self.eval_expr(operand);
-                }
-            };
-            result.map_err(EvalError::Error)
+        let val = self.eval_expr(operand)?;
+        if let Value::Promise(ref p) = val {
+            match crate::promise::block_until_settled(p) {
+                crate::promise::PromiseAwaitResult::Fulfilled(v) => Ok(v),
+                crate::promise::PromiseAwaitResult::Rejected(v) => Err(EvalError::Throw(v)),
+                crate::promise::PromiseAwaitResult::Error(e) => Err(EvalError::Error(e)),
+            }
         } else {
-            // await <non-call> - evaluate the operand (e.g. await variable holding a promise)
-            self.eval_expr(operand)
+            Err(EvalError::Error(
+                "await requires a Promise (use fetchAsync, fetchAllAsync, or Promise)".to_string(),
+            ))
         }
     }
 

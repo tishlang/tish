@@ -130,6 +130,25 @@ fn test_async_await_run() {
     }
 }
 
+/// Run Promise and setTimeout module tests (require http feature).
+#[test]
+#[cfg(feature = "http")]
+fn test_promise_and_settimeout() {
+    for name in ["promise", "settimeout"] {
+        let path = workspace_root().join("tests").join("modules").join(format!("{}.tish", name));
+        if path.exists() {
+            let source = std::fs::read_to_string(&path).unwrap();
+            let result = tish_eval::run(&source);
+            assert!(
+                result.is_ok(),
+                "Failed to run {}: {:?}",
+                path.display(),
+                result.err()
+            );
+        }
+    }
+}
+
 /// Full stack: lex + parse each .tish file and assert no parse error.
 #[test]
 fn test_full_stack_parse() {

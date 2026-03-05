@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use tish_ast::{Expr, Statement};
 
+#[cfg(feature = "http")]
+pub use crate::promise::PromiseResolver;
 #[cfg(feature = "regex")]
 pub use crate::regex::TishRegExp;
 
@@ -40,6 +42,21 @@ pub enum Value {
     Serve,
     #[cfg(feature = "regex")]
     RegExp(Rc<RefCell<TishRegExp>>),
+    /// Promise (ECMA-262 §27.2). Requires http feature for tokio.
+    #[cfg(feature = "http")]
+    Promise(crate::promise::PromiseRef),
+    /// Internal: resolve/reject functions passed to executor. Not user-facing.
+    #[cfg(feature = "http")]
+    PromiseResolver(PromiseResolver),
+    /// Promise constructor: Promise(executor). Requires special call handling.
+    #[cfg(feature = "http")]
+    PromiseConstructor,
+    /// Bound promise method: promise.then/catch/finally - captures the promise for the call.
+    #[cfg(feature = "http")]
+    BoundPromiseMethod(crate::promise::PromiseRef, std::sync::Arc<str>),
+    /// Timer builtins: setTimeout, setInterval. Need evaluator for callback.
+    #[cfg(feature = "http")]
+    TimerBuiltin(std::sync::Arc<str>),
 }
 
 impl std::fmt::Debug for Value {
@@ -57,6 +74,14 @@ impl std::fmt::Debug for Value {
             Value::Serve => write!(f, "Serve"),
             #[cfg(feature = "regex")]
             Value::RegExp(re) => write!(f, "RegExp(/{}/{})", re.borrow().source, re.borrow().flags_string()),
+            #[cfg(feature = "http")]
+            Value::Promise(_) => write!(f, "Promise"),
+            #[cfg(feature = "http")]
+            Value::PromiseResolver(_) => write!(f, "[PromiseResolver]"),
+            #[cfg(feature = "http")]
+            Value::PromiseConstructor => write!(f, "[Function: Promise]"),
+            #[cfg(feature = "http")]
+            Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => write!(f, "[Function]"),
         }
     }
 }
@@ -99,6 +124,14 @@ impl std::fmt::Display for Value {
                 let re = re.borrow();
                 write!(f, "/{}/{}", re.source, re.flags_string())
             }
+            #[cfg(feature = "http")]
+            Value::Promise(_) => write!(f, "[Promise]"),
+            #[cfg(feature = "http")]
+            Value::PromiseResolver(_) => write!(f, "[Function]"),
+            #[cfg(feature = "http")]
+            Value::PromiseConstructor => write!(f, "function Promise() {{ [native code] }}"),
+            #[cfg(feature = "http")]
+            Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => write!(f, "[Function]"),
         }
     }
 }
