@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 thread_local! {
-    static RUNTIME: Runtime = tokio::runtime::Builder::new_multi_thread()
+    pub(crate) static RUNTIME: Runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
         .build()
@@ -40,7 +40,8 @@ pub fn fetch_all(args: &[Value]) -> Result<Value, String> {
     RUNTIME.with(|rt| rt.block_on(fetch_all_async(requests)))
 }
 
-async fn fetch_async(url: &str, options: Option<&Value>) -> Result<Value, String> {
+/// Async fetch - returns a Future. Use with await in Tish.
+pub async fn fetch_async(url: &str, options: Option<&Value>) -> Result<Value, String> {
     fetch_async_owned(url.to_string(), options.cloned()).await
 }
 
@@ -79,7 +80,8 @@ async fn fetch_async_owned(url: String, options: Option<Value>) -> Result<Value,
     Ok(build_response_object(status, ok, &response_headers, body_text))
 }
 
-async fn fetch_all_async(requests: Vec<Value>) -> Result<Value, String> {
+/// Async fetchAll - returns a Future. Use with await in Tish.
+pub async fn fetch_all_async(requests: Vec<Value>) -> Result<Value, String> {
     let mut futures = Vec::new();
 
     for req in requests {

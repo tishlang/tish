@@ -58,6 +58,12 @@ Blocks: `{ stmt; stmt }` or indentation (Indent/Dedent tokens).
 ```tish
 fn name(a, b) { return a + b }
 fn double(x) = x * 2   // single-expression, implicit return
+
+// Async functions (use with await)
+async fn fetchData(url) {
+    let res = await fetchAsync(url)
+    return res.ok ? res.body : null
+}
 ```
 
 ### Builtins

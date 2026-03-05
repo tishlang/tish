@@ -182,6 +182,7 @@ impl UsageAnalyzer {
                 self.analyze_expr(index);
                 self.analyze_expr(value);
             }
+            Expr::Await { operand, .. } => self.analyze_expr(operand),
         }
     }
 
@@ -221,6 +222,108 @@ impl std::fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
+fn program_uses_async(program: &Program) -> bool {
+    use tish_ast::Statement;
+    fn stmt_has_async(s: &Statement) -> bool {
+        match s {
+            Statement::FunDecl { async_, .. } if *async_ => true,
+            Statement::Block { statements, .. } => statements.iter().any(stmt_has_async),
+            Statement::If { then_branch, else_branch, .. } => {
+                stmt_has_async(then_branch) || else_branch.as_ref().map_or(false, |s| stmt_has_async(s.as_ref()))
+            }
+            Statement::While { body, .. } | Statement::For { body, .. } | Statement::ForOf { body, .. }
+            | Statement::DoWhile { body, .. } => stmt_has_async(body),
+            Statement::Switch { cases, default_body, .. } => {
+                cases.iter().any(|(_, stmts)| stmts.iter().any(stmt_has_async))
+                    || default_body.as_ref().map_or(false, |stmts| stmts.iter().any(stmt_has_async))
+            }
+            Statement::Try { body, catch_body, finally_body, .. } => {
+                stmt_has_async(body)
+                    || catch_body.as_ref().map_or(false, |s| stmt_has_async(s.as_ref()))
+                    || finally_body.as_ref().map_or(false, |s| stmt_has_async(s.as_ref()))
+            }
+            _ => false,
+        }
+    }
+    fn expr_has_await(e: &Expr) -> bool {
+        match e {
+            Expr::Await { .. } => true,
+            Expr::Binary { left, right, .. } => expr_has_await(left) || expr_has_await(right),
+            Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } => expr_has_await(operand),
+            Expr::Call { callee, args, .. } => {
+                expr_has_await(callee) || args.iter().any(|a| match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => expr_has_await(e),
+                })
+            }
+            Expr::Member { object, prop, .. } => {
+                expr_has_await(object)
+                    || if let MemberProp::Expr(e) = prop {
+                        expr_has_await(e)
+                    } else {
+                        false
+                    }
+            }
+            Expr::Index { object, index, .. } => expr_has_await(object) || expr_has_await(index),
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                expr_has_await(cond) || expr_has_await(then_branch) || expr_has_await(else_branch)
+            }
+            Expr::NullishCoalesce { left, right, .. } => expr_has_await(left) || expr_has_await(right),
+            Expr::Array { elements, .. } => elements.iter().any(|el| match el {
+                ArrayElement::Expr(e) | ArrayElement::Spread(e) => expr_has_await(e),
+            }),
+            Expr::Object { props, .. } => props.iter().any(|p| match p {
+                ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => expr_has_await(e),
+            }),
+            Expr::Assign { value, .. } | Expr::CompoundAssign { value, .. } | Expr::LogicalAssign { value, .. }
+            | Expr::MemberAssign { value, .. } | Expr::IndexAssign { value, .. } => expr_has_await(value),
+            Expr::ArrowFunction { body, .. } => match body {
+                ArrowBody::Expr(e) => expr_has_await(e),
+                ArrowBody::Block(s) => stmt_has_async(s),
+            },
+            Expr::TemplateLiteral { exprs, .. } => exprs.iter().any(expr_has_await),
+            _ => false,
+        }
+    }
+    fn stmt_has_await(s: &Statement) -> bool {
+        match s {
+            Statement::Block { statements, .. } => statements.iter().any(stmt_has_await),
+            Statement::VarDecl { init, .. } => init.as_ref().map_or(false, expr_has_await),
+            Statement::VarDeclDestructure { init, .. } => expr_has_await(init),
+            Statement::ExprStmt { expr, .. } => expr_has_await(expr),
+            Statement::If { cond, then_branch, else_branch, .. } => {
+                expr_has_await(cond) || stmt_has_await(then_branch)
+                    || else_branch.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
+            }
+            Statement::While { cond, body, .. } => expr_has_await(cond) || stmt_has_await(body),
+            Statement::For { init, cond, update, body, .. } => {
+                init.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
+                    || cond.as_ref().map_or(false, expr_has_await)
+                    || update.as_ref().map_or(false, expr_has_await)
+                    || stmt_has_await(body)
+            }
+            Statement::ForOf { iterable, body, .. } => expr_has_await(iterable) || stmt_has_await(body),
+            Statement::Return { value, .. } => value.as_ref().map_or(false, expr_has_await),
+            Statement::FunDecl { body, .. } => stmt_has_await(body),
+            Statement::Switch { expr, cases, default_body, .. } => {
+                expr_has_await(expr)
+                    || cases.iter().any(|(c, stmts)| {
+                        c.as_ref().map_or(false, expr_has_await) || stmts.iter().any(stmt_has_await)
+                    })
+                    || default_body.as_ref().map_or(false, |stmts| stmts.iter().any(stmt_has_await))
+            }
+            Statement::DoWhile { body, cond, .. } => stmt_has_await(body) || expr_has_await(cond),
+            Statement::Throw { value, .. } => expr_has_await(value),
+            Statement::Try { body, catch_body, finally_body, .. } => {
+                stmt_has_await(body)
+                    || catch_body.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
+                    || finally_body.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
+            }
+            _ => false,
+        }
+    }
+    program.statements.iter().any(|s| stmt_has_async(s) || stmt_has_await(s))
+}
+
 pub fn compile(program: &Program) -> Result<String, CompileError> {
     let mut g = Codegen::new();
     g.emit_program(program)?;
@@ -231,6 +334,9 @@ struct Codegen {
     output: String,
     indent: usize,
     loop_label_index: usize,
+    is_async: bool,
+    /// Stack: true = async Rust context (run body), false = sync closure (Tish fn body)
+    async_context_stack: Vec<bool>,
     loop_stack: Vec<(String, Option<String>)>, // (break_label, continue_update) for innermost loop
     /// Stack of scopes, each containing function names declared in that scope
     /// Used to capture sibling functions for mutual recursion
@@ -256,6 +362,8 @@ impl Codegen {
             output: String::new(),
             indent: 0,
             loop_label_index: 0,
+            is_async: false,
+            async_context_stack: Vec::new(),
             loop_stack: Vec::new(),
             function_scope_stack: vec![Vec::new()], // Start with global scope
             outer_params_stack: Vec::new(),
@@ -316,6 +424,7 @@ impl Codegen {
                 | Expr::Array { .. }
                 | Expr::Object { .. }
                 | Expr::Call { .. }
+                | Expr::Await { .. }
                 | Expr::ArrowFunction { .. }
                 | Expr::Binary { .. }
                 | Expr::Unary { .. }
@@ -452,6 +561,7 @@ impl Codegen {
     }
 
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
+        self.is_async = program_uses_async(program);
         self.write("#![allow(unused, non_snake_case)]\n\n");
         self.write("use std::cell::RefCell;\n");
         self.write("use std::collections::HashMap;\n");
@@ -461,14 +571,27 @@ impl Codegen {
         #[cfg(feature = "process")]
         self.write("use tish_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd};\n");
         #[cfg(feature = "http")]
-        self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_serve as tish_http_serve};\n");
+        if self.is_async {
+            self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_fetch_async as tish_http_fetch_async, http_fetch_all_async as tish_http_fetch_all_async, http_await_fetch as tish_http_await_fetch, http_await_fetch_all as tish_http_await_fetch_all, http_serve as tish_http_serve};\n");
+        } else {
+            self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_serve as tish_http_serve};\n");
+        }
         #[cfg(feature = "fs")]
         self.write("use tish_runtime::{read_file as tish_read_file, write_file as tish_write_file, file_exists as tish_file_exists, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
         self.write("\n");
 
-        self.writeln("fn main() {");
+        if self.is_async {
+            self.writeln("#[tokio::main]");
+            self.writeln("async fn main() {");
+        } else {
+            self.writeln("fn main() {");
+        }
         self.indent += 1;
-        self.writeln("if let Err(e) = run() {");
+        if self.is_async {
+            self.writeln("if let Err(e) = run().await {");
+        } else {
+            self.writeln("if let Err(e) = run() {");
+        }
         self.indent += 1;
         self.writeln("eprintln!(\"Error: {}\", e);");
         self.writeln("std::process::exit(1);");
@@ -477,7 +600,11 @@ impl Codegen {
         self.indent -= 1;
         self.writeln("}");
         self.writeln("");
-        self.writeln("fn run() -> Result<(), Box<dyn std::error::Error>> {");
+        if self.is_async {
+            self.writeln("async fn run() -> Result<(), Box<dyn std::error::Error>> {");
+        } else {
+            self.writeln("fn run() -> Result<(), Box<dyn std::error::Error>> {");
+        }
         self.indent += 1;
 
         // Initialize builtins
@@ -581,6 +708,10 @@ impl Codegen {
         {
             self.writeln("let fetch = Value::Function(Rc::new(|args: &[Value]| tish_http_fetch(args)));");
             self.writeln("let fetchAll = Value::Function(Rc::new(|args: &[Value]| tish_http_fetch_all(args)));");
+            if self.is_async {
+                self.writeln("let fetchAsync = Value::Function(Rc::new(|_args: &[Value]| panic!(\"fetchAsync must be used with await\")));");
+                self.writeln("let fetchAllAsync = Value::Function(Rc::new(|_args: &[Value]| panic!(\"fetchAllAsync must be used with await\")));");
+            }
             self.writeln("let serve = Value::Function(Rc::new(|args: &[Value]| {");
             self.indent += 1;
             self.writeln("let port = args.first().cloned().unwrap_or(Value::Null);");
@@ -620,8 +751,14 @@ impl Codegen {
         analyzer.analyze_statements(&program.statements);
         self.usage_analyzer = Some(analyzer);
 
+        if self.is_async {
+            self.async_context_stack.push(true); // run() body is async Rust context
+        }
         for stmt in &program.statements {
             self.emit_statement(stmt)?;
+        }
+        if self.is_async {
+            self.async_context_stack.pop();
         }
 
         self.writeln("Ok(())");
@@ -1026,6 +1163,9 @@ impl Codegen {
                 // Push current params to stack for nested functions
                 self.outer_params_stack.push(current_param_names);
                 
+                // Function bodies are sync closures (even Tish async fn) - use block_on for await
+                self.async_context_stack.push(false);
+                
                 // Pre-scan body for nested functions (handles function body as Block)
                 if let Statement::Block { statements, .. } = body.as_ref() {
                     let nested_func_names = self.prescan_function_decls(statements);
@@ -1044,6 +1184,8 @@ impl Codegen {
                     self.emit_statement(body)?;
                     self.function_scope_stack.pop();
                 }
+                
+                self.async_context_stack.pop();
                 
                 // Pop params stack
                 self.outer_params_stack.pop();
@@ -1692,6 +1834,43 @@ impl Codegen {
                     }
                 }
             }
+            Expr::Await { operand, .. } => {
+                #[cfg(feature = "http")]
+                if self.is_async {
+                    let in_async = self.async_context_stack.last().copied().unwrap_or(false);
+                    if let Expr::Call { callee, args, .. } = operand.as_ref() {
+                        if let Expr::Ident { name, .. } = callee.as_ref() {
+                            let args_code = self.emit_call_args(args)?;
+                            return Ok(match name.as_ref() {
+                                "fetchAsync" => {
+                                    if in_async {
+                                        format!("tish_http_fetch_async({}).await", args_code)
+                                    } else {
+                                        format!("tish_http_await_fetch({})", args_code)
+                                    }
+                                }
+                                "fetchAllAsync" => {
+                                    if in_async {
+                                        format!("tish_http_fetch_all_async({}).await", args_code)
+                                    } else {
+                                        format!("tish_http_await_fetch_all({})", args_code)
+                                    }
+                                }
+                                _ => {
+                                    // Tish async functions (e.g. fetchUrl) compile to sync closures;
+                                    // just emit the call, no .await
+                                    return Ok(self.emit_expr(operand)?);
+                                }
+                            });
+                        }
+                    }
+                    // await Call with non-Ident callee: emit as sync call
+                    return Ok(self.emit_expr(operand)?);
+                }
+                // Fallback: emit operand as sync call (no real .await in our model)
+                let o = self.emit_expr(operand)?;
+                format!("({})", o)
+            }
             Expr::TypeOf { operand, .. } => {
                 let o = self.emit_expr(operand)?;
                 format!(
@@ -1902,6 +2081,7 @@ impl Codegen {
                 Self::collect_expr_idents(right, idents);
             }
             Expr::TypeOf { operand, .. } => Self::collect_expr_idents(operand, idents),
+            Expr::Await { operand, .. } => Self::collect_expr_idents(operand, idents),
             Expr::TemplateLiteral { exprs, .. } => {
                 for e in exprs { Self::collect_expr_idents(e, idents); }
             }

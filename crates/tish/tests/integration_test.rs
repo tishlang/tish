@@ -23,6 +23,63 @@ fn tish_bin() -> PathBuf {
     target_dir().join("debug").join("tish")
 }
 
+/// Parse async-await example (validates async fn parsing).
+#[test]
+fn test_async_await_parse() {
+    let path = workspace_root().join("examples").join("async-await").join("src").join("main.tish");
+    if path.exists() {
+        let source = std::fs::read_to_string(&path).unwrap();
+        let result = tish_parser::parse(&source);
+        assert!(result.is_ok(), "Parse failed for {}: {:?}", path.display(), result.err());
+    }
+}
+
+/// Invoke tish binary to compile async-await and run compiled output (validates non-blocking pipeline).
+#[test]
+#[cfg(feature = "http")]
+fn test_async_await_compile_via_binary() {
+    let bin = target_dir().join("debug").join("tish");
+    let path = workspace_root().join("examples").join("async-await").join("src").join("main.tish");
+    if path.exists() && bin.exists() {
+        let out = std::env::temp_dir().join("tish_async_test_out");
+        let compile_result = Command::new(&bin)
+            .args(["compile", path.to_string_lossy().as_ref(), "-o", out.to_string_lossy().as_ref()])
+            .current_dir(workspace_root())
+            .output();
+        let compile_out = compile_result.expect("run tish compile");
+        assert!(
+            compile_out.status.success(),
+            "tish compile failed: {}",
+            String::from_utf8_lossy(&compile_out.stderr)
+        );
+        // Run compiled binary to validate non-blocking fetchAllAsync executes correctly
+        let run_result = Command::new(&out)
+            .current_dir(workspace_root())
+            .output();
+        let run_out = run_result.expect("run compiled async binary");
+        assert!(
+            run_out.status.success(),
+            "compiled async binary failed: {}",
+            String::from_utf8_lossy(&run_out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&run_out.stdout);
+        assert!(stdout.contains("Fetching"), "expected output to mention fetching");
+        assert!(stdout.contains("Done"), "expected output to contain Done");
+    }
+}
+
+/// Run async-await example via tish_eval (same path as `tish run`).
+#[test]
+#[cfg(feature = "http")]
+fn test_async_await_run() {
+    let path = workspace_root().join("examples").join("async-await").join("src").join("main.tish");
+    if path.exists() {
+        let source = std::fs::read_to_string(&path).unwrap();
+        let result = tish_eval::run(&source);
+        assert!(result.is_ok(), "Run failed for {}: {:?}", path.display(), result.err());
+    }
+}
+
 /// Full stack: lex + parse each .tish file and assert no parse error.
 #[test]
 fn test_full_stack_parse() {

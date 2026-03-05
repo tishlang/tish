@@ -121,7 +121,11 @@ impl<'a> Parser<'a> {
             TokenKind::LBrace | TokenKind::Indent => self.parse_block()?,
             TokenKind::Let => self.parse_var_decl(true)?,
             TokenKind::Const => self.parse_var_decl(false)?,
-            TokenKind::Fn => self.parse_fun_decl()?,
+            TokenKind::Async => {
+                self.advance(); // consume 'async'
+                self.parse_fun_decl(true)? // parse_fun_decl expects 'fn' next
+            }
+            TokenKind::Fn => self.parse_fun_decl(false)?,
             TokenKind::If => self.parse_if()?,
             TokenKind::While => self.parse_while()?,
             TokenKind::For => self.parse_for()?,
@@ -442,7 +446,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_fun_decl(&mut self) -> Result<Statement, String> {
+    fn parse_fun_decl(&mut self, async_: bool) -> Result<Statement, String> {
         let span_start = self.expect(TokenKind::Fn)?.span.start;
         let name = self
             .expect(TokenKind::Ident)?
@@ -523,6 +527,7 @@ impl<'a> Parser<'a> {
         };
 
         Ok(Statement::FunDecl {
+            async_,
             name,
             params,
             rest_param,
@@ -984,6 +989,16 @@ impl<'a> Parser<'a> {
                     },
                 });
             }
+            Some(TokenKind::Await) => {
+                let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
+                self.advance();
+                let operand = self.parse_unary()?;
+                let end = operand.span().end;
+                return Ok(Expr::Await {
+                    operand: Box::new(operand),
+                    span: Span { start: span_start, end },
+                });
+            }
             _ => return self.parse_postfix(),
         };
         let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
@@ -1367,6 +1382,7 @@ impl ExprSpan for Expr {
             Expr::IndexAssign { span, .. } => *span,
             Expr::ArrowFunction { span, .. } => *span,
             Expr::TemplateLiteral { span, .. } => *span,
+            Expr::Await { span, .. } => *span,
         }
     }
 }

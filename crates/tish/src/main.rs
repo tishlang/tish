@@ -186,6 +186,13 @@ fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
         format!(", features = {:?}", features)
     };
 
+    let needs_tokio = rust_code.contains("#[tokio::main]");
+    let tokio_dep = if needs_tokio {
+        "\ntokio = { version = \"1\", features = [\"rt-multi-thread\", \"macros\"] }\n"
+    } else {
+        ""
+    };
+
     let cargo_toml = format!(
         r#"[package]
 name = "tish_output"
@@ -197,9 +204,9 @@ name = "{}"
 path = "src/main.rs"
 
 [dependencies]
-tish_runtime = {{ path = {:?}{} }}
+tish_runtime = {{ path = {:?}{} }}{}
 "#,
-        out_name, runtime_path, features_str
+        out_name, runtime_path, features_str, tokio_dep
     );
 
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)

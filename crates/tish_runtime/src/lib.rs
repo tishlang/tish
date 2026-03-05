@@ -641,7 +641,15 @@ pub fn object_from_entries(args: &[Value]) -> Value {
 mod http;
 
 #[cfg(feature = "http")]
-pub use http::{fetch as http_fetch, fetch_all as http_fetch_all, serve as http_serve};
+pub use http::{
+    fetch as http_fetch,
+    fetch_all as http_fetch_all,
+    await_fetch as http_await_fetch,
+    await_fetch_all as http_await_fetch_all,
+    fetch_async as http_fetch_async,
+    fetch_all_async as http_fetch_all_async,
+    serve as http_serve,
+};
 
 // RegExp Support
 #[cfg(feature = "regex")]

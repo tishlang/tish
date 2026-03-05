@@ -52,6 +52,8 @@ pub enum TokenKind {
     Void,
     Of,
     In,
+    Async,
+    Await,
 
     // Punctuation
     LParen,
@@ -141,6 +143,8 @@ impl TokenKind {
             "void" => TokenKind::Void,
             "of" => TokenKind::Of,
             "in" => TokenKind::In,
+            "async" => TokenKind::Async,
+            "await" => TokenKind::Await,
             _ => TokenKind::Ident,
         }
     }

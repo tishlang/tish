@@ -25,7 +25,79 @@ pub fn fetch(args: &[Value]) -> Value {
     }
 }
 
-/// Perform multiple HTTP fetches in parallel
+/// Block-on wrapper for await fetchAsync in compiled Tish
+pub fn await_fetch(args: Vec<Value>) -> Value {
+    RUNTIME.with(|rt| rt.block_on(fetch_async(args)))
+}
+
+/// Block-on wrapper for await fetchAllAsync in compiled Tish
+pub fn await_fetch_all(args: Vec<Value>) -> Value {
+    RUNTIME.with(|rt| rt.block_on(fetch_all_async(args)))
+}
+
+/// Async HTTP fetch - returns a Future for use with await in async Tish code.
+/// Returns Value (maps Err to error response object for compiled code convenience).
+pub async fn fetch_async(args: Vec<Value>) -> Value {
+    match fetch_async_result(args).await {
+        Ok(v) => v,
+        Err(e) => build_error_response(&e),
+    }
+}
+
+async fn fetch_async_result(args: Vec<Value>) -> Result<Value, String> {
+    let url = match args.first() {
+        Some(Value::String(s)) => s.to_string(),
+        Some(v) => v.to_display_string(),
+        None => return Err("fetchAsync requires a URL".to_string()),
+    };
+    let options = args.get(1).cloned();
+    fetch_one_async_owned(url, options).await
+}
+
+/// Async fetchAll - returns a Future for use with await in async Tish code.
+/// Returns Value (maps Err to error response for consistency).
+pub async fn fetch_all_async(args: Vec<Value>) -> Value {
+    match fetch_all_async_result(args).await {
+        Ok(v) => v,
+        Err(e) => build_error_response(&e),
+    }
+}
+
+async fn fetch_all_async_result(args: Vec<Value>) -> Result<Value, String> {
+    let requests = match args.first() {
+        Some(Value::Array(arr)) => arr.borrow().clone(),
+        _ => return Err("fetchAllAsync requires an array of request objects".to_string()),
+    };
+    fetch_all_async_inner(requests).await
+}
+
+
+async fn fetch_all_async_inner(requests: Vec<Value>) -> Result<Value, String> {
+    let mut futures = Vec::new();
+    for req in requests {
+        let (url, options) = match &req {
+            Value::String(s) => (s.to_string(), None),
+            Value::Object(obj) => {
+                let obj_ref = obj.borrow();
+                let url = obj_ref
+                    .get(&Arc::from("url"))
+                    .map(|v| v.to_display_string())
+                    .ok_or("Each request object must have a 'url' property")?;
+                (url, Some(req.clone()))
+            }
+            _ => return Err("Each request must be a string URL or request object".to_string()),
+        };
+        futures.push(fetch_one_async_owned(url, options));
+    }
+    let results = futures::future::join_all(futures).await;
+    let response_values: Vec<Value> = results
+        .into_iter()
+        .map(|r| r.unwrap_or_else(|e| build_error_response(&e)))
+        .collect();
+    Ok(Value::Array(Rc::new(RefCell::new(response_values))))
+}
+
+/// Perform multiple HTTP fetches in parallel (sync)
 pub fn fetch_all(args: &[Value]) -> Value {
     match fetch_all_impl(args) {
         Ok(v) => v,
@@ -42,7 +114,7 @@ fn fetch_impl(args: &[Value]) -> Result<Value, String> {
 
     let options = args.get(1).cloned();
 
-    RUNTIME.with(|rt| rt.block_on(fetch_async(&url, options.as_ref())))
+    RUNTIME.with(|rt| rt.block_on(fetch_one_async(&url, options.as_ref())))
 }
 
 fn fetch_all_impl(args: &[Value]) -> Result<Value, String> {
@@ -51,14 +123,14 @@ fn fetch_all_impl(args: &[Value]) -> Result<Value, String> {
         _ => return Err("fetchAll requires an array of request objects".to_string()),
     };
 
-    RUNTIME.with(|rt| rt.block_on(fetch_all_async(requests)))
+    RUNTIME.with(|rt| rt.block_on(fetch_all_async_inner(requests)))
 }
 
-async fn fetch_async(url: &str, options: Option<&Value>) -> Result<Value, String> {
-    fetch_async_owned(url.to_string(), options.cloned()).await
+async fn fetch_one_async(url: &str, options: Option<&Value>) -> Result<Value, String> {
+    fetch_one_async_owned(url.to_string(), options.cloned()).await
 }
 
-async fn fetch_async_owned(url: String, options: Option<Value>) -> Result<Value, String> {
+async fn fetch_one_async_owned(url: String, options: Option<Value>) -> Result<Value, String> {
     let client = reqwest::Client::new();
 
     let method = extract_method(options.as_ref());
@@ -93,38 +165,6 @@ async fn fetch_async_owned(url: String, options: Option<Value>) -> Result<Value,
     Ok(build_response_object(status, ok, &response_headers, body_text))
 }
 
-async fn fetch_all_async(requests: Vec<Value>) -> Result<Value, String> {
-    let mut futures = Vec::new();
-
-    for req in requests {
-        let (url, options) = match &req {
-            Value::String(s) => (s.to_string(), None),
-            Value::Object(obj) => {
-                let obj_ref = obj.borrow();
-                let url = obj_ref
-                    .get(&Arc::from("url"))
-                    .map(|v| v.to_display_string())
-                    .ok_or("Each request object must have a 'url' property")?;
-                (url, Some(req.clone()))
-            }
-            _ => return Err("Each request must be a string URL or request object".to_string()),
-        };
-
-        futures.push(fetch_async_owned(url, options));
-    }
-
-    let results = futures::future::join_all(futures).await;
-
-    let response_values: Vec<Value> = results
-        .into_iter()
-        .map(|r| match r {
-            Ok(v) => v,
-            Err(e) => build_error_response(&e),
-        })
-        .collect();
-
-    Ok(Value::Array(Rc::new(RefCell::new(response_values))))
-}
 
 fn extract_method(options: Option<&Value>) -> String {
     options

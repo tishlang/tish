@@ -113,6 +113,7 @@ JavaScript equivalents in `tests/core/*.js`. Compare Tish vs Node.js/Bun:
 
 - **Variables**: `let` (mutable), `const` (immutable)
 - **Functions**: `fn name(a, b) { ... }` or `fn name(a) = expr`
+- **Async/await**: `async fn` and `await` with `fetchAsync`/`fetchAllAsync`
 - **Arrow functions**: `x => x * 2`, `(a, b) => a + b`
 - **Template literals**: `` `Hello, ${name}!` ``
 - **Control flow**: `if/else`, `while`, `for`, `for..of`, `switch`

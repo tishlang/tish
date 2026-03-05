@@ -165,6 +165,8 @@ impl Evaluator {
             {
                 s.set("fetch".into(), Value::Native(Self::fetch_native), true);
                 s.set("fetchAll".into(), Value::Native(Self::fetch_all_native), true);
+                s.set("fetchAsync".into(), Value::Native(Self::fetch_async_native), true);
+                s.set("fetchAllAsync".into(), Value::Native(Self::fetch_all_async_native), true);
                 s.set("serve".into(), Value::Serve, true);
             }
 
@@ -1256,6 +1258,7 @@ impl Evaluator {
                     Err(e) => Err(EvalError::Error(e)),
                 }
             }
+            Expr::Await { operand, .. } => self.eval_await(operand),
             Expr::TypeOf { operand, .. } => {
                 let v = self.eval_expr(operand)?;
                 Ok(Value::String(match &v {
@@ -2300,6 +2303,73 @@ impl Evaluator {
     #[cfg(feature = "http")]
     fn fetch_all_native(args: &[Value]) -> Result<Value, String> {
         crate::http::fetch_all(args)
+    }
+
+    #[cfg(feature = "http")]
+    fn fetch_async_native(_args: &[Value]) -> Result<Value, String> {
+        Err("fetchAsync must be used with await".to_string())
+    }
+
+    #[cfg(feature = "http")]
+    fn fetch_all_async_native(_args: &[Value]) -> Result<Value, String> {
+        Err("fetchAllAsync must be used with await".to_string())
+    }
+
+    #[cfg(feature = "http")]
+    fn eval_await(&self, operand: &Expr) -> Result<Value, EvalError> {
+        if let Expr::Call { callee, args, .. } = operand {
+            let name = match callee.as_ref() {
+                Expr::Ident { name, .. } => name.as_ref(),
+                _ => {
+                    return Err(EvalError::Error(
+                        "await only supports fetchAsync and fetchAllAsync".to_string(),
+                    ));
+                }
+            };
+            let arg_vals = self.eval_call_args(args)?;
+            let result = match name.as_ref() {
+                "fetchAsync" => {
+                    let url = arg_vals
+                        .first()
+                        .map(|v| v.to_string())
+                        .ok_or_else(|| EvalError::Error("fetchAsync requires a URL".to_string()))?;
+                    let options = arg_vals.get(1).cloned();
+                    crate::http::RUNTIME.with(|rt| {
+                        rt.block_on(crate::http::fetch_async(&url, options.as_ref()))
+                    })
+                }
+                "fetchAllAsync" => {
+                    let requests = arg_vals
+                        .first()
+                        .and_then(|v| {
+                            if let Value::Array(arr) = v {
+                                Some(arr.borrow().clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .ok_or_else(|| {
+                            EvalError::Error("fetchAllAsync requires an array of requests".to_string())
+                        })?;
+                    crate::http::RUNTIME.with(|rt| rt.block_on(crate::http::fetch_all_async(requests)))
+                }
+                _ => {
+                    // await fn() - evaluate the call (fn may use await internally)
+                    return self.eval_expr(operand);
+                }
+            };
+            result.map_err(EvalError::Error)
+        } else {
+            // await <non-call> - evaluate the operand (e.g. await variable holding a promise)
+            self.eval_expr(operand)
+        }
+    }
+
+    #[cfg(not(feature = "http"))]
+    fn eval_await(&self, _operand: &Expr) -> Result<Value, EvalError> {
+        Err(EvalError::Error(
+            "await requires the http feature (fetchAsync, fetchAllAsync)".to_string(),
+        ))
     }
 
 }

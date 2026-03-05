@@ -127,6 +127,7 @@ pub enum Statement {
         span: Span,
     },
     FunDecl {
+        async_: bool,
         name: Arc<str>,
         params: Vec<TypedParam>,
         rest_param: Option<TypedParam>,
@@ -278,6 +279,11 @@ pub enum Expr {
         exprs: Vec<Expr>,          // Interpolated expressions (n)
         span: Span,
     },
+    /// Await expression: await operand
+    Await {
+        operand: Box<Expr>,
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -307,6 +313,7 @@ impl Expr {
             Expr::IndexAssign { span, .. } => *span,
             Expr::ArrowFunction { span, .. } => *span,
             Expr::TemplateLiteral { span, .. } => *span,
+            Expr::Await { span, .. } => *span,
         }
     }
 }

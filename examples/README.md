@@ -11,6 +11,7 @@ Ready-to-deploy example applications for the Tish Platform.
 | [json-api](json-api/) | REST API with JSON responses | `http` |
 | [echo-server](echo-server/) | Echoes request details back | `http` |
 | [counter-api](counter-api/) | Stateful counter service | `http` |
+| [async-await](async-await/) | Async/await with fetchAsync | `http` |
 
 ## Prerequisites
 

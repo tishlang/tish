@@ -1,0 +1,7 @@
+name: async-await
+
+build:
+  source: ./src/main.tish
+  features:
+    - http
+    - process
