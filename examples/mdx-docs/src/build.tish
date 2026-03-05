@@ -40,34 +40,16 @@ fn replaceBold(html) {
     return html
 }
 
-fn replaceInlineCode(s) {
-    let result = ""
-    let i = 0
-    while (i < s.length) {
-        let c = s.charAt(i)
-        if (c === "`") {
-            let code = ""
-            let j = i + 1
-            while (j < s.length) {
-                let d = s.charAt(j)
-                if (d === "`") {
-                    result = result + "<code>" + escapeHtml(code) + "</code>"
-                    i = j + 1
-                    break
-                }
-                code = code + d
-                j = j + 1
-            }
-            if (j >= s.length) {
-                result = result + "`"
-                i = i + 1
-            }
-        } else {
-            result = result + c
-            i = i + 1
-        }
+fn replaceInlineCode(html) {
+    let re = RegExp("`([^`\\n]+)`", "")
+    let m = re.exec(html)
+    while (m !== null) {
+        let idx = m["index"]
+        let replacement = "<code>" + escapeHtml(m[1]) + "</code>"
+        html = html.slice(0, idx) + replacement + html.slice(idx + m[0].length)
+        m = re.exec(html)
     }
-    return result
+    return html
 }
 
 fn processInline(line) {

@@ -3,14 +3,15 @@
 //! Re-exports core types from tish_core and provides interpreter-specific functionality.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 pub use tish_core::{RegExpFlags, TishRegExp};
 
 use crate::value::Value;
 
-/// RegExp.prototype.exec(string) - returns match array or null
-/// This is interpreter-specific because it returns the interpreter's Value type.
+/// RegExp.prototype.exec(string) - returns match object (array-like with index) or null
 pub fn regexp_exec(re: &mut TishRegExp, input: &str) -> Value {
     let start = if re.flags.global || re.flags.sticky {
         re.last_index
@@ -38,35 +39,32 @@ pub fn regexp_exec(re: &mut TishRegExp, input: &str) -> Value {
                 return Value::Null;
             }
 
-            let mut result = Vec::with_capacity(caps.len());
+            let match_byte_start = byte_start + full_match.start();
+            let match_char_index = input[..match_byte_start].chars().count();
 
-            result.push(Value::String(full_match.as_str().into()));
-
+            let mut obj: HashMap<Arc<str>, Value> = HashMap::new();
+            obj.insert(Arc::from("0"), Value::String(full_match.as_str().into()));
             for i in 1..caps.len() {
-                match caps.get(i) {
-                    Some(m) => result.push(Value::String(m.as_str().into())),
-                    None => result.push(Value::Null),
-                }
+                let val = match caps.get(i) {
+                    Some(m) => Value::String(m.as_str().into()),
+                    None => Value::Null,
+                };
+                obj.insert(Arc::from(i.to_string().as_str()), val);
             }
+            obj.insert(Arc::from("index"), Value::Number(match_char_index as f64));
 
             if re.flags.global || re.flags.sticky {
                 let match_end_chars = input[..byte_start + full_match.end()].chars().count();
-                if full_match.start() == full_match.end() {
-                    re.last_index = match_end_chars + 1;
+                re.last_index = if full_match.start() == full_match.end() {
+                    match_end_chars + 1
                 } else {
-                    re.last_index = match_end_chars;
-                }
+                    match_end_chars
+                };
             }
 
-            Value::Array(Rc::new(RefCell::new(result)))
+            Value::Object(Rc::new(RefCell::new(obj)))
         }
-        Ok(None) => {
-            if re.flags.global || re.flags.sticky {
-                re.last_index = 0;
-            }
-            Value::Null
-        }
-        Err(_) => {
+        Ok(None) | Err(_) => {
             if re.flags.global || re.flags.sticky {
                 re.last_index = 0;
             }

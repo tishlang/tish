@@ -1417,9 +1417,10 @@ impl Codegen {
                         }
                         "indexOf" => {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let from = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tish_runtime::array_index_of(&_obj, &{}), Value::String(_) => tish_runtime::string_index_of(&_obj, &{}), _ => Value::Number(-1.0) }} }}",
-                                obj_expr, search, search
+                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tish_runtime::array_index_of(&_obj, &{}), Value::String(_) => tish_runtime::string_index_of(&_obj, &{}, &{}), _ => Value::Number(-1.0) }} }}",
+                                obj_expr, search, search, from
                             ));
                         }
                         "includes" => {

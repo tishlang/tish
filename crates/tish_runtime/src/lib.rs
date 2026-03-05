@@ -81,7 +81,9 @@ pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
     }
 }
 
-pub fn string_index_of(s: &Value, search: &Value) -> Value { string_index_of_impl(s, search) }
+pub fn string_index_of(s: &Value, search: &Value, from: &Value) -> Value {
+    string_index_of_impl(s, search, Some(from))
+}
 pub fn string_includes(s: &Value, search: &Value) -> Value { string_includes_impl(s, search) }
 pub fn string_slice(s: &Value, start: &Value, end: &Value) -> Value { string_slice_impl(s, start, end) }
 pub fn string_substring(s: &Value, start: &Value, end: &Value) -> Value { string_substring_impl(s, start, end) }
@@ -718,11 +720,19 @@ pub fn regexp_exec(re: &Value, input: &Value) -> Value {
 
 #[cfg(feature = "regex")]
 fn regexp_exec_impl(re: &mut tish_core::TishRegExp, input: &str) -> Value {
-    let start = if re.flags.global || re.flags.sticky { re.last_index } else { 0 };
+    use std::collections::HashMap;
+
+    let start = if re.flags.global || re.flags.sticky {
+        re.last_index
+    } else {
+        0
+    };
 
     let char_count = input.chars().count();
     if start > char_count {
-        if re.flags.global || re.flags.sticky { re.last_index = 0; }
+        if re.flags.global || re.flags.sticky {
+            re.last_index = 0;
+        }
         return Value::Null;
     }
 
@@ -732,35 +742,41 @@ fn regexp_exec_impl(re: &mut tish_core::TishRegExp, input: &str) -> Value {
     match re.regex.captures(search_str) {
         Ok(Some(caps)) => {
             let full_match = caps.get(0).unwrap();
-            
+
             if re.flags.sticky && full_match.start() != 0 {
                 re.last_index = 0;
                 return Value::Null;
             }
 
-            let mut result = Vec::new();
-            result.push(Value::String(full_match.as_str().into()));
-            
+            let match_byte_start = byte_start + full_match.start();
+            let match_char_index = input[..match_byte_start].chars().count();
+
+            let mut obj: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+            obj.insert(Arc::from("0"), Value::String(full_match.as_str().into()));
             for i in 1..caps.len() {
-                match caps.get(i) {
-                    Some(m) => result.push(Value::String(m.as_str().into())),
-                    None => result.push(Value::Null),
-                }
+                let val = match caps.get(i) {
+                    Some(m) => Value::String(m.as_str().into()),
+                    None => Value::Null,
+                };
+                obj.insert(Arc::from(i.to_string().as_str()), val);
             }
+            obj.insert(Arc::from("index"), Value::Number(match_char_index as f64));
 
             if re.flags.global || re.flags.sticky {
                 let match_end_chars = input[..byte_start + full_match.end()].chars().count();
-                if full_match.start() == full_match.end() {
-                    re.last_index = match_end_chars + 1;
+                re.last_index = if full_match.start() == full_match.end() {
+                    match_end_chars + 1
                 } else {
-                    re.last_index = match_end_chars;
-                }
+                    match_end_chars
+                };
             }
 
-            Value::Array(Rc::new(RefCell::new(result)))
+            Value::Object(Rc::new(RefCell::new(obj)))
         }
         Ok(None) | Err(_) => {
-            if re.flags.global || re.flags.sticky { re.last_index = 0; }
+            if re.flags.global || re.flags.sticky {
+                re.last_index = 0;
+            }
             Value::Null
         }
     }

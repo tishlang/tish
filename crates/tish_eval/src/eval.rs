@@ -924,9 +924,19 @@ impl Evaluator {
                                     Some(Value::String(ss)) => ss.as_ref(),
                                     _ => return Ok(Value::Number(-1.0)),
                                 };
-                                return Ok(Value::Number(
-                                    s.find(search).map(|i| i as f64).unwrap_or(-1.0)
-                                ));
+                                let from_char = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) if *n >= 0.0 => {
+                                        (*n as usize).min(s.chars().count())
+                                    }
+                                    _ => 0,
+                                };
+                                let byte_start: usize = s.chars().take(from_char).map(|c| c.len_utf8()).sum();
+                                let found = s[byte_start..].find(search).map(|byte_pos| {
+                                    let char_idx = from_char
+                                        + s[byte_start..][..byte_pos].chars().count();
+                                    char_idx as f64
+                                });
+                                return Ok(Value::Number(found.unwrap_or(-1.0)));
                             }
                             "includes" => {
                                 let search = match arg_vals.first() {

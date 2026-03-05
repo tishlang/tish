@@ -138,6 +138,18 @@ const y = 10    // immutable binding (error on reassignment)
 
 ---
 
+## Implementation gaps (JS compatibility)
+
+Gaps discovered when porting JS patterns (e.g. mdx-docs). See [tish-docs JS Compatibility Gaps](https://github.com/.../tish-docs/blob/main/src/content/docs/resources/js-compatibility-gaps.mdx) and [TODO-GAPS.md](https://github.com/.../tish-docs/blob/main/TODO-GAPS.md).
+
+| Gap | Impact | Resolution task |
+|-----|--------|-----------------|
+| `String.indexOf` no `fromIndex` | Can't search from offset | Add optional 2nd param |
+| `indexOf` returns byte offset; `slice`/`length` use char indices | Corrupt output with UTF-8 multi-byte (em dash, etc.) | Unify index semantics (char-based) |
+| `RegExp.exec()` no `index` property | Can't get match start for replacement | Add `index` to exec result |
+
+---
+
 ## Semantic differences from JavaScript
 
 | Behavior | JavaScript | Tish | Rationale |

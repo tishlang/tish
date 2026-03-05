@@ -1,0 +1,24 @@
+// Tests for resolved JS compatibility gaps (indexOf fromIndex, char indices, exec index)
+
+// 1. indexOf with fromIndex
+let s = "hello world"
+console.log(s.indexOf("o"))       // 4
+console.log(s.indexOf("o", 5))    // 7
+console.log(s.indexOf("x", 0))    // -1
+
+// 2. indexOf + slice with UTF-8 multi-byte (em dash)
+let text = "— each `.mdx` file"
+let i = text.indexOf("`")
+let j = text.indexOf("`", i + 1)
+let code = text.slice(i + 1, j)
+console.log(code)   // .mdx (was corrupted before fix)
+
+// 3. RegExp exec index property
+let re = RegExp("(\\d+)(\\w+)")
+let m = re.exec("abc123xyz")
+if (m !== null) {
+  console.log(m[0])      // 123xyz
+  console.log(m[1])      // 123
+  console.log(m[2])      // xyz
+  console.log(m["index"]) // 3 (character position)
+}
