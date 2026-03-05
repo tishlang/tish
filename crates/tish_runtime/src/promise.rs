@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use tish_core::{Value, TishPromise};
+use tish_core::Value;
 
 /// Promise.resolve(value) - returns the value (immediate resolve).
 pub fn promise_resolve(args: &[Value]) -> Value {
@@ -26,7 +26,7 @@ pub fn promise_all(args: &[Value]) -> Value {
                 .iter()
                 .map(|v| {
                     if let Value::Promise(p) = v {
-                        match p.block_until_settled() {
+                        match tish_core::TishPromise::block_until_settled(p.as_ref()) {
                             Ok(val) => val,
                             Err(rejection) => rejection,
                         }

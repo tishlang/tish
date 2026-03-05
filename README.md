@@ -124,3 +124,6 @@ JavaScript equivalents in `tests/core/*.js`. Compare Tish vs Node.js/Bun:
 - **String methods**: `slice`, `split`, `trim`, `toUpperCase`, `includes`, etc.
 
 See `docs/plan-gap-analysis.md` for full feature list and JS compatibility.
+
+
+TISH_API_URL=http://localhost:47080 cargo run -p tish-cli --manifest-path ../../../tish-dev/Cargo.toml -- deploy --wait

@@ -6,3 +6,7 @@ tish_hello
 *.swo
 .DS_Store
 target/*
+
+
+dist/
+debug_out.txt

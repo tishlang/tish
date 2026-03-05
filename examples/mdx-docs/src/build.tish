@@ -1,0 +1,163 @@
+// MDX build script - pre-renders content/*.mdx to dist/ at build time
+// Run: tish run src/build.tish --features fs,regex
+
+fn escapeHtml(s) {
+    let r = s
+    r = r.replaceAll("&", "&amp;")
+    r = r.replaceAll("<", "&lt;")
+    r = r.replaceAll(">", "&gt;")
+    r = r.replaceAll('"', "&quot;")
+    return r
+}
+
+fn parseFrontmatter(lines) {
+    let meta = {}
+    for (let i = 0; i < lines.length; i = i + 1) {
+        let line = lines[i].trim()
+        if (line === "") { continue }
+        let colon = line.indexOf(":")
+        if (colon > 0) {
+            let key = line.slice(0, colon).trim()
+            let val = line.slice(colon + 1).trim()
+            if (val.startsWith('"') && val.endsWith('"')) {
+                val = val.slice(1, val.length - 1)
+            }
+            meta[key] = val
+        }
+    }
+    return meta
+}
+
+fn replaceBold(html) {
+    let re = RegExp("\\*\\*([^*]+)\\*\\*", "")
+    let m = re.exec(html)
+    while (m !== null) {
+        let idx = html.indexOf(m[0])
+        let replacement = "<strong>" + escapeHtml(m[1]) + "</strong>"
+        html = html.slice(0, idx) + replacement + html.slice(idx + m[0].length)
+        m = re.exec(html)
+    }
+    return html
+}
+
+fn replaceInlineCode(html) {
+    let re = RegExp("`([^`]+)`", "")
+    let m = re.exec(html)
+    while (m !== null) {
+        let idx = html.indexOf(m[0])
+        let replacement = "<code>" + escapeHtml(m[1]) + "</code>"
+        html = html.slice(0, idx) + replacement + html.slice(idx + m[0].length)
+        m = re.exec(html)
+    }
+    return html
+}
+
+fn mdToHtml(body) {
+    let codeBlocks = []
+    let codeBlockRe = RegExp("```[\\s\\S]*?```", "g")
+    let blocks = body.match(codeBlockRe)
+    let html = body
+    if (blocks !== null) {
+        for (let i = 0; i < blocks.length; i = i + 1) {
+            let block = blocks[i]
+            let code = block.slice(3, block.length - 3).trim()
+            let escaped = escapeHtml(code)
+            let placeholder = "___CODE_" + i + "___"
+            codeBlocks.push("<pre><code>" + escaped + "</code></pre>")
+            html = html.replace(block, placeholder)
+        }
+    }
+
+    html = replaceBold(html)
+    html = replaceInlineCode(html)
+
+    let lines = html.split("\n")
+    let result = []
+    let paragraphBuf = ""
+
+    fn flushParagraph(buf, res) {
+        if (buf !== "") {
+            res.push("<p>" + buf + "</p>")
+        }
+        return ""
+    }
+
+    for (let i = 0; i < lines.length; i = i + 1) {
+        let line = lines[i]
+        if (line.startsWith("### ")) {
+            paragraphBuf = flushParagraph(paragraphBuf, result)
+            result.push("<h3>" + escapeHtml(line.slice(4)) + "</h3>")
+        } else if (line.startsWith("## ")) {
+            paragraphBuf = flushParagraph(paragraphBuf, result)
+            result.push("<h2>" + escapeHtml(line.slice(3)) + "</h2>")
+        } else if (line.startsWith("# ")) {
+            paragraphBuf = flushParagraph(paragraphBuf, result)
+            result.push("<h1>" + escapeHtml(line.slice(2)) + "</h1>")
+        } else if (line.trim() === "") {
+            paragraphBuf = flushParagraph(paragraphBuf, result)
+        } else if (line.startsWith("___CODE_") && line.endsWith("___")) {
+            paragraphBuf = flushParagraph(paragraphBuf, result)
+            result.push(line)
+        } else {
+            if (paragraphBuf !== "") { paragraphBuf = paragraphBuf + " " }
+            paragraphBuf = paragraphBuf + line
+        }
+    }
+    paragraphBuf = flushParagraph(paragraphBuf, result)
+
+    html = result.join("\n")
+
+    for (let j = 0; j < codeBlocks.length; j = j + 1) {
+        html = html.replace("___CODE_" + j + "___", codeBlocks[j])
+    }
+
+    return html
+}
+
+fn layout(meta, body) {
+    let title = "title" in meta ? escapeHtml(meta["title"]) : "Docs"
+    let description = "description" in meta ? escapeHtml(meta["description"]) : ""
+    let descMeta = description !== "" ? '  <meta name="description" content="' + description + '">' : ""
+    return '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>' + title + '</title>\n' + descMeta + '\n  <link rel="stylesheet" href="/styles.css">\n</head>\n<body class="min-h-screen bg-gray-50 text-gray-900 p-8">\n<main class="max-w-2xl mx-auto prose">\n' + body + '\n</main>\n</body>\n</html>'
+}
+
+// Main build
+mkdir("dist", true)
+
+let files = readDir("content")
+let count = 0
+
+for (let i = 0; i < files.length; i = i + 1) {
+    let f = files[i]
+    if (!f.endsWith(".mdx")) { continue }
+
+    let name = f.slice(0, f.length - 4)
+    let route = name === "index" ? "" : name
+    let raw = readFile("content/" + f)
+
+    let frontmatter = {}
+    let body = raw
+
+    let parts = raw.split("---")
+    if (parts.length >= 3) {
+        let fmLines = parts[1].trim().split("\n")
+        frontmatter = parseFrontmatter(fmLines)
+        body = parts.slice(2).join("---").trim()
+    } else if (parts.length === 2) {
+        body = parts[1].trim()
+    }
+
+    let htmlBody = mdToHtml(body)
+    let html = layout(frontmatter, htmlBody)
+
+    let outPath = route === "" ? "dist/index.html" : "dist/" + route + ".html"
+    writeFile(outPath, html)
+    count = count + 1
+    console.log("Built: " + outPath)
+}
+
+// Write minimal styles (Tailwind-like utilities)
+let css = "* { box-sizing: border-box; }\nbody { margin: 0; font-family: system-ui, sans-serif; line-height: 1.6; }\n.min-h-screen { min-height: 100vh; }\n.bg-gray-50 { background-color: #f9fafb; }\n.text-gray-900 { color: #111827; }\n.p-8 { padding: 2rem; }\n.max-w-2xl { max-width: 42rem; margin-left: auto; margin-right: auto; }\n.prose h1 { font-size: 2rem; font-weight: 700; margin: 1.5rem 0 1rem; }\n.prose h2 { font-size: 1.5rem; font-weight: 600; margin: 1.5rem 0 0.75rem; }\n.prose h3 { font-size: 1.25rem; font-weight: 600; margin: 1.25rem 0 0.5rem; }\n.prose p { margin: 0.75rem 0; }\n.prose pre { background: #1f2937; color: #f9fafb; padding: 1rem; border-radius: 0.375rem; overflow-x: auto; }\n.prose code { background: #e5e7eb; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.875em; }\n.prose pre code { background: none; padding: 0; }\n.prose strong { font-weight: 600; }\n"
+writeFile("dist/styles.css", css)
+
+console.log("Build complete: " + count + " pages, styles.css")

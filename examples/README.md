@@ -12,6 +12,7 @@ Ready-to-deploy example applications for the Tish Platform.
 | [echo-server](echo-server/) | Echoes request details back | `http` |
 | [counter-api](counter-api/) | Stateful counter service | `http` |
 | [async-await](async-await/) | Async/await with fetchAsync | `http` |
+| [mdx-docs](mdx-docs/) | Static docs: MDX, file-based routing, pre-rendered | `http`, `fs` |
 
 ## Prerequisites
 

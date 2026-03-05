@@ -1,0 +1,71 @@
+// MDX Docs - HTTP server serving pre-rendered static files from dist/
+// Run build.tish first, then: tish run src/main.tish --features http,fs
+
+fn reqPathToFilePath(reqPathStr) {
+    let step1 = reqPathStr.startsWith("/") ? reqPathStr.slice(1) : reqPathStr
+    let step2 = step1.endsWith(".html") ? step1.slice(0, step1.length - 5) : step1
+    let step3 = step2 === "" ? "index" : step2
+    return "dist/" + step3 + ".html"
+}
+
+fn makeHeaders(contentType, extra) {
+    let h = {}
+    h["Content-Type"] = contentType
+    if (extra) {
+        h["X-Content-Type-Options"] = "nosniff"
+        h["Cache-Control"] = "public, max-age=3600"
+    }
+    return h
+}
+
+fn htmlResponse(body) {
+    return {
+        status: 200,
+        headers: makeHeaders("text/html; charset=utf-8", true),
+        body: body
+    }
+}
+
+fn cssResponse(body) {
+    return {
+        status: 200,
+        headers: makeHeaders("text/css; charset=utf-8", true),
+        body: body
+    }
+}
+
+fn handleRequest(req) {
+    console.log("Request:", req.method, req.path)
+
+    if (req.path === "/health") {
+        return {
+            status: 200,
+            headers: makeHeaders("text/plain; charset=utf-8", false),
+            body: "OK"
+        }
+    }
+
+    if (req.path === "/" || req.path === "/index" || req.path === "/index.html") {
+        return htmlResponse(readFile("dist/index.html"))
+    }
+
+    if (req.path === "/styles.css") {
+        return cssResponse(readFile("dist/styles.css"))
+    }
+
+    // File-based routing: /about or /about.html -> dist/about.html
+    if (fileExists(reqPathToFilePath(req.path))) {
+        return htmlResponse(readFile(reqPathToFilePath(req.path)))
+    }
+
+    return {
+        status: 404,
+        headers: makeHeaders("text/plain; charset=utf-8", false),
+        body: "Not found: " + req.path
+    }
+}
+
+let port = "PORT" in process.env ? parseInt(process.env.PORT) : 3000
+console.log("Starting MDX Docs server on port " + port + "...")
+console.log("Serving pre-rendered files from dist/")
+serve(port, handleRequest)

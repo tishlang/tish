@@ -1,0 +1,40 @@
+---
+title: Getting Started
+description: How to run and build the MDX docs example
+---
+
+# Getting Started
+
+## Prerequisites
+
+- Tish compiler/runtime (from the tish repo)
+- Build with `--features fs,regex` for the build script
+- Build with `--features http,fs` for the server
+
+## Build
+
+Pre-render MDX content to static HTML:
+
+```bash
+cd examples/mdx-docs
+tish run src/build.tish --features fs,regex
+```
+
+This reads `content/*.mdx`, parses frontmatter and markdown, and writes to `dist/`.
+
+## Run
+
+Start the HTTP server:
+
+```bash
+tish run src/main.tish --features http,fs
+```
+
+Or compile to native:
+
+```bash
+tish compile src/main.tish -o mdx-docs --features http,fs
+./mdx-docs
+```
+
+Then open `http://localhost:3000`.
