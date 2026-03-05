@@ -40,16 +40,39 @@ fn replaceBold(html) {
     return html
 }
 
-fn replaceInlineCode(html) {
-    let re = RegExp("`([^`]+)`", "")
-    let m = re.exec(html)
-    while (m !== null) {
-        let idx = html.indexOf(m[0])
-        let replacement = "<code>" + escapeHtml(m[1]) + "</code>"
-        html = html.slice(0, idx) + replacement + html.slice(idx + m[0].length)
-        m = re.exec(html)
+fn replaceInlineCode(s) {
+    let result = ""
+    let i = 0
+    while (i < s.length) {
+        let c = s.charAt(i)
+        if (c === "`") {
+            let code = ""
+            let j = i + 1
+            while (j < s.length) {
+                let d = s.charAt(j)
+                if (d === "`") {
+                    result = result + "<code>" + escapeHtml(code) + "</code>"
+                    i = j + 1
+                    break
+                }
+                code = code + d
+                j = j + 1
+            }
+            if (j >= s.length) {
+                result = result + "`"
+                i = i + 1
+            }
+        } else {
+            result = result + c
+            i = i + 1
+        }
     }
-    return html
+    return result
+}
+
+fn processInline(line) {
+    let r = replaceBold(line)
+    return replaceInlineCode(r)
 }
 
 fn mdToHtml(body) {
@@ -68,12 +91,10 @@ fn mdToHtml(body) {
         }
     }
 
-    html = replaceBold(html)
-    html = replaceInlineCode(html)
-
     let lines = html.split("\n")
     let result = []
     let paragraphBuf = ""
+    let listBuf = []
 
     fn flushParagraph(buf, res) {
         if (buf !== "") {
@@ -82,28 +103,48 @@ fn mdToHtml(body) {
         return ""
     }
 
+    fn flushList(items, res) {
+        if (items.length === 0) { return }
+        res.push("<ul>")
+        for (let k = 0; k < items.length; k = k + 1) {
+            res.push("<li>" + items[k] + "</li>")
+        }
+        res.push("</ul>")
+    }
+
     for (let i = 0; i < lines.length; i = i + 1) {
         let line = lines[i]
         if (line.startsWith("### ")) {
             paragraphBuf = flushParagraph(paragraphBuf, result)
+            if (listBuf.length > 0) { flushList(listBuf, result); listBuf = [] }
             result.push("<h3>" + escapeHtml(line.slice(4)) + "</h3>")
         } else if (line.startsWith("## ")) {
             paragraphBuf = flushParagraph(paragraphBuf, result)
+            if (listBuf.length > 0) { flushList(listBuf, result); listBuf = [] }
             result.push("<h2>" + escapeHtml(line.slice(3)) + "</h2>")
         } else if (line.startsWith("# ")) {
             paragraphBuf = flushParagraph(paragraphBuf, result)
+            if (listBuf.length > 0) { flushList(listBuf, result); listBuf = [] }
             result.push("<h1>" + escapeHtml(line.slice(2)) + "</h1>")
         } else if (line.trim() === "") {
             paragraphBuf = flushParagraph(paragraphBuf, result)
+            if (listBuf.length > 0) { flushList(listBuf, result); listBuf = [] }
         } else if (line.startsWith("___CODE_") && line.endsWith("___")) {
             paragraphBuf = flushParagraph(paragraphBuf, result)
+            if (listBuf.length > 0) { flushList(listBuf, result); listBuf = [] }
             result.push(line)
+        } else if (line.startsWith("- ")) {
+            paragraphBuf = flushParagraph(paragraphBuf, result)
+            let content = processInline(line.slice(2))
+            listBuf.push(content)
         } else {
+            if (listBuf.length > 0) { flushList(listBuf, result); listBuf = [] }
             if (paragraphBuf !== "") { paragraphBuf = paragraphBuf + " " }
-            paragraphBuf = paragraphBuf + line
+            paragraphBuf = paragraphBuf + processInline(line)
         }
     }
     paragraphBuf = flushParagraph(paragraphBuf, result)
+    if (listBuf.length > 0) { flushList(listBuf, result) }
 
     html = result.join("\n")
 
@@ -157,7 +198,7 @@ for (let i = 0; i < files.length; i = i + 1) {
 }
 
 // Write minimal styles (Tailwind-like utilities)
-let css = "* { box-sizing: border-box; }\nbody { margin: 0; font-family: system-ui, sans-serif; line-height: 1.6; }\n.min-h-screen { min-height: 100vh; }\n.bg-gray-50 { background-color: #f9fafb; }\n.text-gray-900 { color: #111827; }\n.p-8 { padding: 2rem; }\n.max-w-2xl { max-width: 42rem; margin-left: auto; margin-right: auto; }\n.prose h1 { font-size: 2rem; font-weight: 700; margin: 1.5rem 0 1rem; }\n.prose h2 { font-size: 1.5rem; font-weight: 600; margin: 1.5rem 0 0.75rem; }\n.prose h3 { font-size: 1.25rem; font-weight: 600; margin: 1.25rem 0 0.5rem; }\n.prose p { margin: 0.75rem 0; }\n.prose pre { background: #1f2937; color: #f9fafb; padding: 1rem; border-radius: 0.375rem; overflow-x: auto; }\n.prose code { background: #e5e7eb; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.875em; }\n.prose pre code { background: none; padding: 0; }\n.prose strong { font-weight: 600; }\n"
+let css = "* { box-sizing: border-box; }\nbody { margin: 0; font-family: system-ui, sans-serif; line-height: 1.6; }\n.min-h-screen { min-height: 100vh; }\n.bg-gray-50 { background-color: #f9fafb; }\n.text-gray-900 { color: #111827; }\n.p-8 { padding: 2rem; }\n.max-w-2xl { max-width: 42rem; margin-left: auto; margin-right: auto; }\n.prose h1 { font-size: 2rem; font-weight: 700; margin: 1.5rem 0 1rem; }\n.prose h2 { font-size: 1.5rem; font-weight: 600; margin: 1.5rem 0 0.75rem; }\n.prose h3 { font-size: 1.25rem; font-weight: 600; margin: 1.25rem 0 0.5rem; }\n.prose p { margin: 0.75rem 0; }\n.prose ul { margin: 0.75rem 0; padding-left: 1.5rem; list-style: disc; }\n.prose li { margin: 0.25rem 0; }\n.prose pre { background: #1f2937; color: #f9fafb; padding: 1rem; border-radius: 0.375rem; overflow-x: auto; }\n.prose code { background: #e5e7eb; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.875em; }\n.prose pre code { background: none; padding: 0; }\n.prose strong { font-weight: 600; }\n"
 writeFile("dist/styles.css", css)
 
 console.log("Build complete: " + count + " pages, styles.css")

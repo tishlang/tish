@@ -5,6 +5,7 @@ build:
   features:
     - http
     - fs
+    - process
 
 deploy:
   replicas: 1
