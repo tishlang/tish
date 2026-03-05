@@ -68,6 +68,56 @@ fn test_async_await_compile_via_binary() {
     }
 }
 
+/// DEFINITIVE VALIDATION: Parallel fetches must be faster than sequential.
+/// Uses httpbin.org/delay/1 (1s each). 3 parallel ≈ 1s, 3 sequential ≈ 3s.
+#[test]
+#[cfg(feature = "http")]
+fn test_async_parallel_vs_sequential_timing() {
+    let bin = target_dir().join("debug").join("tish");
+    let parallel_src = workspace_root().join("examples").join("async-await").join("src").join("parallel.tish");
+    let sequential_src = workspace_root().join("examples").join("async-await").join("src").join("sequential.tish");
+    if !parallel_src.exists() || !sequential_src.exists() || !bin.exists() {
+        return;
+    }
+    let out_parallel = std::env::temp_dir().join("tish_parallel_timing");
+    let out_sequential = std::env::temp_dir().join("tish_sequential_timing");
+
+    // Compile both
+    let compile_par = Command::new(&bin)
+        .args(["compile", parallel_src.to_string_lossy().as_ref(), "-o", out_parallel.to_string_lossy().as_ref()])
+        .current_dir(workspace_root())
+        .output();
+    assert!(compile_par.as_ref().unwrap().status.success(), "compile parallel: {}", String::from_utf8_lossy(&compile_par.as_ref().unwrap().stderr));
+
+    let compile_seq = Command::new(&bin)
+        .args(["compile", sequential_src.to_string_lossy().as_ref(), "-o", out_sequential.to_string_lossy().as_ref()])
+        .current_dir(workspace_root())
+        .output();
+    assert!(compile_seq.as_ref().unwrap().status.success(), "compile sequential: {}", String::from_utf8_lossy(&compile_seq.as_ref().unwrap().stderr));
+
+    // Run parallel and time
+    let t_parallel = std::time::Instant::now();
+    let run_par = Command::new(&out_parallel).current_dir(workspace_root()).output();
+    let elapsed_parallel = t_parallel.elapsed();
+    assert!(run_par.as_ref().unwrap().status.success(), "run parallel: {}", String::from_utf8_lossy(&run_par.as_ref().unwrap().stderr));
+
+    // Run sequential and time
+    let t_sequential = std::time::Instant::now();
+    let run_seq = Command::new(&out_sequential).current_dir(workspace_root()).output();
+    let elapsed_sequential = t_sequential.elapsed();
+    assert!(run_seq.as_ref().unwrap().status.success(), "run sequential: {}", String::from_utf8_lossy(&run_seq.as_ref().unwrap().stderr));
+
+    // PARALLEL MUST BE FASTER: parallel < sequential * 0.6 (parallel ~1s, sequential ~3s)
+    let parallel_secs = elapsed_parallel.as_secs_f64();
+    let sequential_secs = elapsed_sequential.as_secs_f64();
+    assert!(
+        parallel_secs < sequential_secs * 0.6,
+        "Async NOT validated: parallel took {:.2}s but sequential took {:.2}s. Parallel must be < 60% of sequential to prove non-blocking.",
+        parallel_secs,
+        sequential_secs
+    );
+}
+
 /// Run async-await example via tish_eval (same path as `tish run`).
 #[test]
 #[cfg(feature = "http")]

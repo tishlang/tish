@@ -1,0 +1,11 @@
+// Sequential: await fetchAsync in a loop - each blocks until done
+// Each httpbin.org/delay/1 waits 1 second. 3 sequential = ~3s total.
+let urls = [
+    "https://httpbin.org/delay/1",
+    "https://httpbin.org/delay/1",
+    "https://httpbin.org/delay/1"
+]
+for (let url of urls) {
+    await fetchAsync(url)
+}
+console.log("Sequential done")
