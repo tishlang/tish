@@ -235,12 +235,24 @@ tish_runtime = {{ path = {:?}{} }}{}
     fs::write(build_dir.join("src/main.rs"), rust_code)
         .map_err(|e| format!("Cannot write main.rs: {}", e))?;
 
-    let target_dir = build_dir.join("target");
+    // Use workspace target dir when possible for cache reuse (avoids slow "Updating crates.io index")
+    let workspace_target = Path::new(&runtime_path)
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|ws| ws.join("target"));
+    let (target_dir, binary_dir) = if let Some(ref wt) = workspace_target.filter(|p| p.exists()) {
+        (wt.clone(), wt.join("release"))
+    } else {
+        let td = build_dir.join("target");
+        (td.clone(), td.join("release"))
+    };
+
     let status = Command::new("cargo")
         .args(["build", "--release", "--target-dir"])
         .arg(&target_dir)
         .current_dir(&build_dir)
-        .env_remove("CARGO_TARGET_DIR") // use our explicit target-dir
+        .env_remove("CARGO_TARGET_DIR")
+        .env("CARGO_TERM_PROGRESS", "always") // Ensure progress is streamed (avoids "stuck" appearance)
         .status()
         .map_err(|e| format!("Failed to run cargo: {}", e))?;
 
@@ -248,14 +260,8 @@ tish_runtime = {{ path = {:?}{} }}{}
         return Err("Compilation failed".to_string());
     }
 
-    let binary_no_ext = build_dir
-        .join("target")
-        .join("release")
-        .join(out_name);
-    let binary_exe = build_dir
-        .join("target")
-        .join("release")
-        .join(format!("{}.exe", out_name));
+    let binary_no_ext = binary_dir.join(out_name);
+    let binary_exe = binary_dir.join(format!("{}.exe", out_name));
     let binary = if binary_no_ext.exists() {
         binary_no_ext
     } else if binary_exe.exists() {
