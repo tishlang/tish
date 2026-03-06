@@ -383,10 +383,23 @@ pub fn value_to_response(value: &Value) -> (u16, Vec<(String, String)>, String) 
                 })
                 .unwrap_or(default_status);
 
+            let has_error = obj_ref.contains_key(&Arc::from("error"));
             let body = obj_ref
                 .get(&Arc::from("body"))
                 .map(|v| v.to_display_string())
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    // When body is missing but error is present (e.g. from make_error_value),
+                    // use the error value so it's visible in the response.
+                    obj_ref
+                        .get(&Arc::from("error"))
+                        .map(|v| v.to_display_string())
+                        .unwrap_or_default()
+                });
+            let status = if has_error && status == default_status {
+                500u16
+            } else {
+                status
+            };
 
             let headers = obj_ref
                 .get(&Arc::from("headers"))
