@@ -53,8 +53,8 @@ macro_rules! binary_multi_op {
 
 use tish_ast::{
     ArrowBody, ArrayElement, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
-    DestructProp, Expr, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement,
-    TypeAnnotation, TypedParam, UnaryOp,
+    DestructProp, ExportDeclaration, Expr, ImportSpecifier, Literal, LogicalAssignOp, MemberProp,
+    ObjectProp, Program, Span, Statement, TypeAnnotation, TypedParam, UnaryOp,
 };
 use tish_lexer::{Token, TokenKind};
 
@@ -154,6 +154,8 @@ impl<'a> Parser<'a> {
                     },
                 }
             }
+            TokenKind::Import => self.parse_import()?,
+            TokenKind::Export => self.parse_export()?,
             _ => {
                 let expr = self.parse_expr()?;
                 let span_end = expr.span().end;
@@ -768,6 +770,105 @@ impl<'a> Parser<'a> {
             catch_param,
             catch_body,
             finally_body,
+            span: self.span_end(span_start),
+        })
+    }
+
+    fn parse_import(&mut self) -> Result<Statement, String> {
+        let span_start = self.expect(TokenKind::Import)?.span.start;
+        let specifiers = if matches!(self.peek_kind(), Some(TokenKind::LBrace)) {
+            // Named: import { a, b as c } from "..."
+            self.advance();
+            let mut specs = Vec::new();
+            while !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
+                let name = self
+                    .expect(TokenKind::Ident)?
+                    .literal
+                    .clone()
+                    .ok_or("Expected identifier in import")?;
+                let alias = if matches!(self.peek_kind(), Some(TokenKind::Ident))
+                    && self.peek().and_then(|t| t.literal.as_deref()) == Some("as")
+                {
+                    self.advance(); // consume 'as'
+                    Some(
+                        self.expect(TokenKind::Ident)?
+                            .literal
+                            .clone()
+                            .ok_or("Expected alias after 'as'")?,
+                    )
+                } else {
+                    None
+                };
+                specs.push(ImportSpecifier::Named { name, alias });
+                if !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
+                    self.expect(TokenKind::Comma)?;
+                }
+            }
+            self.expect(TokenKind::RBrace)?;
+            specs
+        } else if matches!(self.peek_kind(), Some(TokenKind::Star)) {
+            // Namespace: import * as M from "..."
+            self.advance();
+            let as_tok = self.expect(TokenKind::Ident)?;
+            if as_tok.literal.as_deref() != Some("as") {
+                return Err("Expected 'as' after '*' in namespace import".to_string());
+            }
+            let alias = self
+                .expect(TokenKind::Ident)?
+                .literal
+                .clone()
+                .ok_or("Expected identifier after 'as'")?;
+            vec![ImportSpecifier::Namespace(alias)]
+        } else if matches!(self.peek_kind(), Some(TokenKind::Ident)) {
+            // Default: import X from "..."
+            let name = self
+                .expect(TokenKind::Ident)?
+                .literal
+                .clone()
+                .ok_or("Expected identifier")?;
+            vec![ImportSpecifier::Default(name)]
+        } else {
+            return Err("Expected { }, * as name, or default import".to_string());
+        };
+        let from_tok = self.expect(TokenKind::Ident)?;
+        if from_tok.literal.as_deref() != Some("from") {
+            return Err("Expected 'from' in import statement".to_string());
+        }
+        let from = self
+            .expect(TokenKind::String)?
+            .literal
+            .clone()
+            .ok_or("Expected string path in import")?;
+        Ok(Statement::Import {
+            specifiers,
+            from,
+            span: self.span_end(span_start),
+        })
+    }
+
+    fn parse_export(&mut self) -> Result<Statement, String> {
+        let span_start = self.expect(TokenKind::Export)?.span.start;
+        let declaration = if matches!(self.peek_kind(), Some(TokenKind::Default)) {
+            self.advance();
+            let expr = self.parse_expr()?;
+            ExportDeclaration::Default(expr)
+        } else if matches!(self.peek_kind(), Some(TokenKind::Const)) {
+            ExportDeclaration::Named(Box::new(self.parse_var_decl(false)?))
+        } else if matches!(self.peek_kind(), Some(TokenKind::Let)) {
+            ExportDeclaration::Named(Box::new(self.parse_var_decl(true)?))
+        } else if matches!(self.peek_kind(), Some(TokenKind::Async))
+            || matches!(self.peek_kind(), Some(TokenKind::Fn))
+        {
+            let async_ = matches!(self.peek_kind(), Some(TokenKind::Async));
+            if async_ {
+                self.advance();
+            }
+            ExportDeclaration::Named(Box::new(self.parse_fun_decl(async_)?))
+        } else {
+            return Err("Expected 'default', 'const', 'let', or 'fn' after export".to_string());
+        };
+        Ok(Statement::Export {
+            declaration: Box::new(declaration),
             span: self.span_end(span_start),
         })
     }

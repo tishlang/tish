@@ -63,6 +63,26 @@ pub struct DestructProp {
     pub value: DestructElement,
 }
 
+/// Import specifier: named (a, b: c), namespace (* as M), or default (X)
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportSpecifier {
+    /// Named: { foo } or { foo as bar }
+    Named { name: Arc<str>, alias: Option<Arc<str>> },
+    /// Namespace: * as M
+    Namespace(Arc<str>),
+    /// Default: import X from "..."
+    Default(Arc<str>),
+}
+
+/// Export declaration: named (const/let/fn) or default
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExportDeclaration {
+    /// export const x = 1 / export let x / export fn f() {}
+    Named(Box<Statement>),
+    /// export default expr
+    Default(Expr),
+}
+
 #[derive(Debug, Clone)]
 pub struct Program {
     pub statements: Vec<Statement>,
@@ -155,6 +175,15 @@ pub enum Statement {
         catch_param: Option<Arc<str>>,
         catch_body: Option<Box<Statement>>,
         finally_body: Option<Box<Statement>>,
+        span: Span,
+    },
+    Import {
+        specifiers: Vec<ImportSpecifier>,
+        from: Arc<str>,
+        span: Span,
+    },
+    Export {
+        declaration: Box<ExportDeclaration>,
         span: Span,
     },
 }

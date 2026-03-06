@@ -54,6 +54,8 @@ pub enum TokenKind {
     In,
     Async,
     Await,
+    Import,
+    Export,
 
     // Punctuation
     LParen,
@@ -145,6 +147,8 @@ impl TokenKind {
             "in" => TokenKind::In,
             "async" => TokenKind::Async,
             "await" => TokenKind::Await,
+            "import" => TokenKind::Import,
+            "export" => TokenKind::Export,
             _ => TokenKind::Ident,
         }
     }

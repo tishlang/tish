@@ -4,10 +4,11 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tish_ast::{BinOp, CompoundOp, Expr, Literal, LogicalAssignOp, MemberProp, Span, Statement, UnaryOp};
+use tish_ast::{BinOp, CompoundOp, ExportDeclaration, Expr, ImportSpecifier, Literal, LogicalAssignOp, MemberProp, Span, Statement, UnaryOp};
 
 use crate::value::Value;
 
@@ -68,13 +69,17 @@ impl Scope {
 
 pub struct Evaluator {
     scope: Rc<std::cell::RefCell<Scope>>,
+    /// Cache of evaluated modules: canonical path -> exports object
+    module_cache: Rc<RefCell<HashMap<PathBuf, Value>>>,
+    /// Directory of the file currently being evaluated (for resolving relative imports)
+    current_dir: RefCell<Option<PathBuf>>,
 }
 
 impl Evaluator {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         use crate::natives;
-        
+
         let scope = Scope::new();
         {
             let mut s = scope.borrow_mut();
@@ -184,7 +189,11 @@ impl Evaluator {
                 s.set("mkdir".into(), Value::Native(natives::mkdir), true);
             }
         }
-        Self { scope }
+        Self {
+            scope,
+            module_cache: Rc::new(RefCell::new(HashMap::new())),
+            current_dir: RefCell::new(None),
+        }
     }
 
     /// Create an evaluator with extra native modules (e.g. Polars) registered.
@@ -199,6 +208,10 @@ impl Evaluator {
             }
         }
         eval
+    }
+
+    pub fn set_current_dir(&self, dir: Option<&Path>) {
+        *self.current_dir.borrow_mut() = dir.map(PathBuf::from);
     }
 
     pub fn eval_program(&mut self, program: &tish_ast::Program) -> Result<Value, String> {
@@ -465,7 +478,128 @@ impl Evaluator {
                 
                 result
             }
+            Statement::Import { specifiers, from, .. } => {
+                let exports_val = self.load_module(from)?;
+                let exports = match &exports_val {
+                    Value::Object(m) => m.borrow().clone(),
+                    _ => return Err(EvalError::Error("Module exports must be object".to_string())),
+                };
+                let mut scope = self.scope.borrow_mut();
+                for spec in specifiers {
+                    match spec {
+                        ImportSpecifier::Named { name, alias } => {
+                            let v = exports.get(name.as_ref()).ok_or_else(|| {
+                                EvalError::Error(format!("Module does not export '{}'", name))
+                            })?;
+                            let bind = alias.as_deref().unwrap_or(name.as_ref());
+                            scope.set(Arc::from(bind), v.clone(), false);
+                        }
+                        ImportSpecifier::Namespace(ns) => {
+                            scope.set(Arc::clone(ns), exports_val.clone(), false);
+                        }
+                        ImportSpecifier::Default(bind) => {
+                            let v = exports.get("default").ok_or_else(|| {
+                                EvalError::Error("Module does not have default export".to_string())
+                            })?;
+                            scope.set(Arc::clone(bind), v.clone(), false);
+                        }
+                    }
+                }
+                Ok(Value::Null)
+            }
+            Statement::Export { declaration, .. } => {
+                match declaration.as_ref() {
+                    ExportDeclaration::Named(s) => {
+                        let _ = self.eval_statement(s);
+                    }
+                    ExportDeclaration::Default(e) => {
+                        let v = self.eval_expr(e)?;
+                        self.scope.borrow_mut().set(Arc::from("default"), v, false);
+                    }
+                }
+                Ok(Value::Null)
+            }
         }
+    }
+
+    /// Load and evaluate a module, returning its exports object. Uses cache.
+    fn load_module(&mut self, from: &str) -> Result<Value, EvalError> {
+        let dir = self.current_dir.borrow().clone().ok_or_else(|| {
+            EvalError::Error("Cannot resolve imports: no current file directory (use run_file)".to_string())
+        })?;
+        let path = Self::resolve_import_path(from, &dir)?;
+        let path = path.canonicalize().map_err(|e| {
+            EvalError::Error(format!("Cannot resolve import '{}': {}", from, e))
+        })?;
+        {
+            let cache = self.module_cache.borrow();
+            if let Some(m) = cache.get(&path) {
+                return Ok(m.clone());
+            }
+        }
+        let source = std::fs::read_to_string(&path).map_err(|e| {
+            EvalError::Error(format!("Cannot read {}: {}", path.display(), e))
+        })?;
+        let program = tish_parser::parse(&source).map_err(|e| {
+            EvalError::Error(format!("Parse error in {}: {}", path.display(), e))
+        })?;
+        let module_scope = Scope::child(Rc::clone(&self.scope));
+        let prev_scope = std::mem::replace(&mut self.scope, Rc::clone(&module_scope));
+        let parent_dir = self.current_dir.borrow().clone();
+        let module_dir = path.parent().map(PathBuf::from);
+        *self.current_dir.borrow_mut() = module_dir;
+        let mut export_names: Vec<String> = Vec::new();
+        for stmt in &program.statements {
+            if let Statement::Export { declaration, .. } = stmt {
+                match declaration.as_ref() {
+                    ExportDeclaration::Named(s) => {
+                        let _ = self.eval_statement(s);
+                        if let Statement::VarDecl { name, .. } | Statement::FunDecl { name, .. } = s.as_ref() {
+                            export_names.push(name.to_string());
+                        }
+                    }
+                    ExportDeclaration::Default(e) => {
+                        let v = self.eval_expr(e)?;
+                        self.scope.borrow_mut().set(Arc::from("default"), v, false);
+                        export_names.push("default".to_string());
+                    }
+                }
+            } else {
+                let _ = self.eval_statement(stmt);
+            }
+        }
+        let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
+        for name in export_names {
+            if let Some(v) = module_scope.borrow().get(&name) {
+                exports.insert(Arc::from(name.as_str()), v);
+            }
+        }
+        *self.current_dir.borrow_mut() = parent_dir;
+        self.scope = prev_scope;
+        let exports_val = Value::Object(Rc::new(RefCell::new(exports)));
+        self.module_cache.borrow_mut().insert(path, exports_val.clone());
+        Ok(exports_val)
+    }
+
+    fn resolve_import_path(from: &str, dir: &Path) -> Result<PathBuf, EvalError> {
+        if !from.starts_with("./") && !from.starts_with("../") {
+            return Err(EvalError::Error(format!(
+                "Only relative imports supported (./ or ../), got: {}",
+                from
+            )));
+        }
+        let base = dir.join(from);
+        let path = if base.extension().is_none() {
+            let with_ext = base.with_extension("tish");
+            if with_ext.exists() {
+                with_ext
+            } else {
+                base
+            }
+        } else {
+            base
+        };
+        Ok(path)
     }
 
     fn eval_expr(&self, expr: &Expr) -> Result<Value, EvalError> {
@@ -1721,7 +1855,11 @@ impl Evaluator {
                 }
             }
         }
-        let mut eval = Evaluator { scope: Rc::clone(scope) };
+        let mut eval = Evaluator {
+            scope: Rc::clone(scope),
+            module_cache: Rc::clone(&self.module_cache),
+            current_dir: RefCell::new(self.current_dir.borrow().clone()),
+        };
         match eval.eval_statement(body) {
             Ok(v) => Ok(v),
             Err(EvalError::Return(v)) => Ok(v),
@@ -1919,7 +2057,11 @@ impl Evaluator {
                         s.set(Arc::clone(rest_name), Value::Array(Rc::new(RefCell::new(rest_vals))), true);
                     }
                 }
-                let mut eval = Evaluator { scope };
+                let mut eval = Evaluator {
+                    scope,
+                    module_cache: Rc::clone(&self.module_cache),
+                    current_dir: RefCell::new(self.current_dir.borrow().clone()),
+                };
                 match eval.eval_statement(body) {
                     Ok(v) => Ok(v),
                     Err(EvalError::Return(v)) => Ok(v),

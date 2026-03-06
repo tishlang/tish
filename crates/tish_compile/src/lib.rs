@@ -3,9 +3,10 @@
 //! Emits Rust source that links to tish_runtime.
 
 mod codegen;
+mod resolve;
 mod types;
 
-pub use codegen::{compile, compile_with_features, compile_with_project_root};
+pub use codegen::{compile, compile_project, compile_with_features, compile_with_project_root};
 pub use codegen::CompileError;
 pub use types::{RustType, TypeContext};
 

@@ -1,0 +1,8 @@
+name: modules-example
+
+deploy:
+  replicas: 1
+
+resources:
+  cpu: 50m
+  memory: 64Mi

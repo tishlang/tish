@@ -33,3 +33,18 @@ pub fn run(source: &str) -> Result<Value, String> {
     eval.run_timer_phase()?;
     Ok(result)
 }
+
+/// Run a Tish file with import/export support. Resolves relative imports from the file's directory.
+pub fn run_file(path: &std::path::Path, project_root: Option<&std::path::Path>) -> Result<Value, String> {
+    let path = path
+        .canonicalize()
+        .map_err(|e| format!("Cannot canonicalize {}: {}", path.display(), e))?;
+    let source = std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {}: {}", path.display(), e))?;
+    let program = tish_parser::parse(&source)?;
+    let mut eval = Evaluator::new();
+    eval.set_current_dir(path.parent());
+    let result = eval.eval_program(&program)?;
+    #[cfg(feature = "http")]
+    eval.run_timer_phase()?;
+    Ok(result)
+}

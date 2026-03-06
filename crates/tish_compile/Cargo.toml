@@ -14,6 +14,6 @@ polars = []
 
 [dependencies]
 tish_ast = { path = "../tish_ast" }
+tish_parser = { path = "../tish_parser" }
 
 [dev-dependencies]
-tish_parser = { path = "../tish_parser" }

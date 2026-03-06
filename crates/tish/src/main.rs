@@ -60,8 +60,15 @@ fn main() {
 }
 
 fn run_file(path: &str) -> Result<(), String> {
-    let source = fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
-    let value = tish_eval::run(&source)?;
+    let path = Path::new(path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", path, e))?;
+    let project_root = path.parent().and_then(|p| {
+        if p.file_name().and_then(|n| n.to_str()) == Some("src") {
+            p.parent()
+        } else {
+            Some(p)
+        }
+    });
+    let value = tish_eval::run_file(&path, project_root)?;
     if !matches!(value, tish_eval::Value::Null) {
         println!("{}", value);
     }
@@ -149,10 +156,8 @@ fn find_runtime_path() -> Result<String, String> {
 
 #[allow(clippy::vec_init_then_push)]
 fn compile_file(input_path: &str, output_path: &str, cli_features: &[String]) -> Result<(), String> {
-    let source =
-        fs::read_to_string(input_path).map_err(|e| format!("Cannot read {}: {}", input_path, e))?;
-    let program = tish_parser::parse(&source)?;
-    let project_root = Path::new(input_path).parent().map(|p| {
+    let input_path = Path::new(input_path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", input_path, e))?;
+    let project_root = input_path.parent().map(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
             p.parent().unwrap_or(p)
         } else {
@@ -175,11 +180,11 @@ fn compile_file(input_path: &str, output_path: &str, cli_features: &[String]) ->
     } else {
         cli_features.to_vec()
     };
-    let rust_code = tish_compile::compile_with_features(&program, project_root, &features).map_err(|e| {
+    let rust_code = tish_compile::compile_project(&input_path, project_root, &features).map_err(|e| {
         if let Some(ref span) = e.span {
-            format!("{}:{}:{}: {}", input_path, span.start.0, span.start.1, e.message)
+            format!("{}:{}:{}: {}", input_path.display(), span.start.0, span.start.1, e.message)
         } else {
-            format!("{}: {}", input_path, e.message)
+            format!("{}: {}", input_path.display(), e.message)
         }
     })?;
 

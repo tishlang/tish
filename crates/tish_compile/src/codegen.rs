@@ -94,6 +94,9 @@ impl UsageAnalyzer {
                 self.analyze_statement(body);
             }
             Statement::Break { .. } | Statement::Continue { .. } => {}
+            Statement::Import { .. } | Statement::Export { .. } => {
+                // Import/Export should be resolved by merge_modules before compilation
+            }
         }
     }
 
@@ -319,6 +322,7 @@ fn program_uses_async(program: &Program) -> bool {
                     || catch_body.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
                     || finally_body.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
             }
+            Statement::Import { .. } | Statement::Export { .. } => false,
             _ => false,
         }
     }
@@ -331,6 +335,22 @@ pub fn compile(program: &Program) -> Result<String, CompileError> {
 
 pub fn compile_with_project_root(program: &Program, project_root: Option<&Path>) -> Result<String, CompileError> {
     compile_with_features(program, project_root, &[])
+}
+
+/// Compile a project from its entry path. Resolves imports, merges modules, then compiles.
+pub fn compile_project(
+    entry_path: &Path,
+    project_root: Option<&Path>,
+    features: &[String],
+) -> Result<String, CompileError> {
+    use crate::resolve;
+    let modules = resolve::resolve_project(entry_path, project_root)
+        .map_err(|e| CompileError { message: e, span: None })?;
+    resolve::detect_cycles(&modules)
+        .map_err(|e| CompileError { message: e, span: None })?;
+    let program = resolve::merge_modules(modules)
+        .map_err(|e| CompileError { message: e, span: None })?;
+    compile_with_features(&program, project_root, features)
 }
 
 /// Compile with explicit feature flags. When features are provided, codegen uses them
@@ -1048,6 +1068,12 @@ impl Codegen {
                 } else {
                     self.writeln("continue;");
                 }
+            }
+            Statement::Import { .. } | Statement::Export { .. } => {
+                return Err(CompileError {
+                    message: "Import/Export should be resolved before compilation (use compile_project for multi-file projects)".to_string(),
+                    span: None,
+                });
             }
             Statement::Switch { expr, cases, default_body, .. } => {
                 let e = self.emit_expr(expr)?;
@@ -2342,7 +2368,7 @@ impl Codegen {
                 }
             }
             Statement::FunDecl { body, .. } => Self::collect_stmt_idents(body, idents),
-            Statement::Break { .. } | Statement::Continue { .. } => {}
+            Statement::Break { .. } | Statement::Continue { .. } | Statement::Import { .. } | Statement::Export { .. } => {}
         }
     }
 
