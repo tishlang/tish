@@ -1,0 +1,8 @@
+{
+  "name": "http-hello",
+  "version": "0.1.0",
+  "tish": {
+    "source": "./src/main.tish",
+    "features": ["http", "process"]
+  }
+}

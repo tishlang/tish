@@ -330,7 +330,17 @@ pub fn compile(program: &Program) -> Result<String, CompileError> {
 }
 
 pub fn compile_with_project_root(program: &Program, project_root: Option<&Path>) -> Result<String, CompileError> {
-    let mut g = Codegen::new(project_root);
+    compile_with_features(program, project_root, &[])
+}
+
+/// Compile with explicit feature flags. When features are provided, codegen uses them
+/// to emit builtins (process, serve, etc.) regardless of tish_compile's #[cfg] build.
+pub fn compile_with_features(
+    program: &Program,
+    project_root: Option<&Path>,
+    features: &[String],
+) -> Result<String, CompileError> {
+    let mut g = Codegen::new(project_root, features);
     g.emit_program(program)?;
     Ok(g.output)
 }
@@ -341,6 +351,8 @@ struct Codegen {
     loop_label_index: usize,
     is_async: bool,
     project_root: Option<std::path::PathBuf>,
+    /// Requested features (http, process, fs, regex, polars). When non-empty, used instead of #[cfg].
+    features: std::collections::HashSet<String>,
     /// Stack: true = async Rust context (run body), false = sync closure (Tish fn body)
     async_context_stack: Vec<bool>,
     loop_stack: Vec<(String, Option<String>)>, // (break_label, continue_update) for innermost loop
@@ -363,13 +375,15 @@ struct Codegen {
 }
 
 impl Codegen {
-    fn new(project_root: Option<&Path>) -> Self {
+    fn new(project_root: Option<&Path>, features: &[String]) -> Self {
+        let features: std::collections::HashSet<String> = features.iter().cloned().collect();
         Self {
             output: String::new(),
             indent: 0,
             loop_label_index: 0,
             is_async: false,
             project_root: project_root.map(|p| p.to_path_buf()),
+            features,
             async_context_stack: Vec::new(),
             loop_stack: Vec::new(),
             function_scope_stack: vec![Vec::new()], // Start with global scope
@@ -378,6 +392,34 @@ impl Codegen {
             refcell_wrapped_vars: std::collections::HashSet::new(),
             usage_analyzer: None,
             type_context: TypeContext::new(),
+        }
+    }
+
+    fn has_feature(&self, name: &str) -> bool {
+        if self.features.is_empty() {
+            #[cfg(feature = "process")]
+            if name == "process" {
+                return true;
+            }
+            #[cfg(feature = "http")]
+            if name == "http" {
+                return true;
+            }
+            #[cfg(feature = "fs")]
+            if name == "fs" {
+                return true;
+            }
+            #[cfg(feature = "regex")]
+            if name == "regex" {
+                return true;
+            }
+            #[cfg(feature = "polars")]
+            if name == "polars" {
+                return true;
+            }
+            false
+        } else {
+            self.features.contains(name)
         }
     }
 
@@ -580,18 +622,22 @@ impl Codegen {
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
         self.write("use tish_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, TishError, Value};\n");
-        #[cfg(feature = "process")]
-        self.write("use tish_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd};\n");
-        #[cfg(feature = "http")]
-        if self.is_async {
-            self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_fetch_async as tish_http_fetch_async, http_fetch_all_async as tish_http_fetch_all_async, http_await_fetch as tish_http_await_fetch, http_await_fetch_all as tish_http_await_fetch_all, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, promise_object as tish_promise_object, fetch_async_promise as tish_fetch_async_promise, await_promise as tish_await_promise};\n");
-        } else {
-            self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_serve as tish_http_serve};\n");
+        if self.has_feature("process") {
+            self.write("use tish_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd};\n");
         }
-        #[cfg(feature = "fs")]
-        self.write("use tish_runtime::{read_file as tish_read_file, write_file as tish_write_file, file_exists as tish_file_exists, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
-        #[cfg(feature = "regex")]
-        self.write("use tish_runtime::regexp_new;\n");
+        if self.has_feature("http") {
+            if self.is_async {
+                self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_fetch_async as tish_http_fetch_async, http_fetch_all_async as tish_http_fetch_all_async, http_await_fetch as tish_http_await_fetch, http_await_fetch_all as tish_http_await_fetch_all, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, promise_object as tish_promise_object, fetch_async_promise as tish_fetch_async_promise, await_promise as tish_await_promise};\n");
+            } else {
+                self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_serve as tish_http_serve};\n");
+            }
+        }
+        if self.has_feature("fs") {
+            self.write("use tish_runtime::{read_file as tish_read_file, write_file as tish_write_file, file_exists as tish_file_exists, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
+        }
+        if self.has_feature("regex") {
+            self.write("use tish_runtime::regexp_new;\n");
+        }
         self.write("\n");
 
         if self.is_async {
@@ -697,8 +743,7 @@ impl Codegen {
         self.indent -= 1;
         self.writeln("]))));");
 
-        #[cfg(feature = "process")]
-        {
+        if self.has_feature("process") {
             self.writeln("let process = Value::Object(Rc::new(RefCell::new({");
             self.indent += 1;
             self.writeln("let mut p = HashMap::new();");
@@ -718,8 +763,7 @@ impl Codegen {
             self.writeln("})));");
         }
 
-        #[cfg(feature = "http")]
-        {
+        if self.has_feature("http") {
             self.writeln("let fetch = Value::Function(Rc::new(|args: &[Value]| tish_http_fetch(args)));");
             self.writeln("let fetchAll = Value::Function(Rc::new(|args: &[Value]| tish_http_fetch_all(args)));");
             if self.is_async {
@@ -746,8 +790,7 @@ impl Codegen {
             self.writeln("}));");
         }
 
-        #[cfg(feature = "fs")]
-        {
+        if self.has_feature("fs") {
             self.writeln("let readFile = Value::Function(Rc::new(|args: &[Value]| tish_read_file(args)));");
             self.writeln("let writeFile = Value::Function(Rc::new(|args: &[Value]| tish_write_file(args)));");
             self.writeln("let fileExists = Value::Function(Rc::new(|args: &[Value]| tish_file_exists(args)));");
@@ -755,13 +798,11 @@ impl Codegen {
             self.writeln("let mkdir = Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)));");
         }
 
-        #[cfg(feature = "regex")]
-        {
+        if self.has_feature("regex") {
             self.writeln("let RegExp = Value::Function(Rc::new(|args: &[Value]| regexp_new(args)));");
         }
 
-        #[cfg(feature = "polars")]
-        {
+        if self.has_feature("polars") {
             self.writeln("let Polars = tish_runtime::polars_object();");
         }
 

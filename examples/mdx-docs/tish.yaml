@@ -1,12 +1,5 @@
 name: mdx-docs
 
-build:
-  source: ./src/main.tish
-  features:
-    - http
-    - fs
-    - process
-
 deploy:
   replicas: 1
   strategy: rolling

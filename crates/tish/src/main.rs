@@ -30,6 +30,9 @@ enum Commands {
         file: String,
         #[arg(short, long, default_value = "tish_out")]
         output: String,
+        /// Enable feature (http, fs, process, regex, polars). Can be repeated.
+        #[arg(long = "feature", action = clap::ArgAction::Append)]
+        features: Vec<String>,
     },
     /// Parse and dump AST
     #[command(name = "dump-ast")]
@@ -45,7 +48,7 @@ fn main() {
     let result = match cli.command {
         Some(Commands::Run { file }) => run_file(&file),
         Some(Commands::Repl) => run_repl(),
-        Some(Commands::Compile { file, output }) => compile_file(&file, &output),
+        Some(Commands::Compile { file, output, features }) => compile_file(&file, &output, &features),
         Some(Commands::DumpAst { file }) => dump_ast(&file),
         None => run_repl(), // No args = REPL
     };
@@ -145,7 +148,7 @@ fn find_runtime_path() -> Result<String, String> {
 }
 
 #[allow(clippy::vec_init_then_push)]
-fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
+fn compile_file(input_path: &str, output_path: &str, cli_features: &[String]) -> Result<(), String> {
     let source =
         fs::read_to_string(input_path).map_err(|e| format!("Cannot read {}: {}", input_path, e))?;
     let program = tish_parser::parse(&source)?;
@@ -156,7 +159,23 @@ fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
             p
         }
     });
-    let rust_code = tish_compile::compile_with_project_root(&program, project_root).map_err(|e| {
+    let features: Vec<String> = if cli_features.is_empty() {
+        let mut f = Vec::new();
+        #[cfg(feature = "http")]
+        f.push("http".to_string());
+        #[cfg(feature = "fs")]
+        f.push("fs".to_string());
+        #[cfg(feature = "process")]
+        f.push("process".to_string());
+        #[cfg(feature = "regex")]
+        f.push("regex".to_string());
+        #[cfg(feature = "polars")]
+        f.push("polars".to_string());
+        f
+    } else {
+        cli_features.to_vec()
+    };
+    let rust_code = tish_compile::compile_with_features(&program, project_root, &features).map_err(|e| {
         if let Some(ref span) = e.span {
             format!("{}:{}:{}: {}", input_path, span.start.0, span.start.1, e.message)
         } else {
@@ -177,18 +196,6 @@ fn compile_file(input_path: &str, output_path: &str) -> Result<(), String> {
     let runtime_path = find_runtime_path()
         .map_err(|e| format!("Cannot resolve tish_runtime path: {}", e))?;
 
-    #[allow(unused_mut)]
-    let mut features: Vec<&str> = Vec::new();
-    #[cfg(feature = "http")]
-    features.push("http");
-    #[cfg(feature = "fs")]
-    features.push("fs");
-    #[cfg(feature = "process")]
-    features.push("process");
-    #[cfg(feature = "regex")]
-    features.push("regex");
-    #[cfg(feature = "polars")]
-    features.push("polars");
     let features_str = if features.is_empty() {
         String::new()
     } else {

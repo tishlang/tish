@@ -1,7 +1,4 @@
 name: hello-world
 
-build:
-  source: ./src/main.tish
-
 deploy:
   replicas: 1

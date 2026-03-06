@@ -5,7 +5,7 @@
 mod codegen;
 mod types;
 
-pub use codegen::{compile, compile_with_project_root};
+pub use codegen::{compile, compile_with_features, compile_with_project_root};
 pub use codegen::CompileError;
 pub use types::{RustType, TypeContext};
 

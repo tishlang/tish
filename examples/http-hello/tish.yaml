@@ -1,22 +1,10 @@
 name: http-hello
 
-build:
-  source: ./src/main.tish
-  features:
-    - http
-    - process
-
 deploy:
   replicas: 2
   strategy: rolling
-  # Environment variables (merged with app-level vars; DEPLOYMENT_ID and TASK_ID are injected automatically)
-  # env:
-  #   LOG_LEVEL: info
-  #   CUSTOM_VAR: value
 
 networking:
-  # port is optional - platform assigns internally when omitted
-  # port: 8080
   protocol: http
   health_check:
     path: /health

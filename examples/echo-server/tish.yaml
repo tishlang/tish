@@ -1,10 +1,5 @@
 name: echo-server
 
-build:
-  source: ./src/main.tish
-  features:
-    - http
-
 deploy:
   replicas: 1
   strategy: rolling
