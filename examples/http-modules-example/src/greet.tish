@@ -1,3 +1,3 @@
 export fn greet(name) {
-  return "Hello, " + name
+  return "sup, " + name
 }

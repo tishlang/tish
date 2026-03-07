@@ -13,7 +13,7 @@ fn handleRequest(req) {
             status: 200,
             headers: { contentType: "application/json" },
             body: JSON.stringify({
-                message: "Hello from Tish HTTP Server test 9!",
+                message: "Hello from Tish HTTP Server test 10!",
                 deployment_id: deploymentId
             })
         }
