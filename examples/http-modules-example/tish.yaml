@@ -3,6 +3,7 @@ name: http-modules-example
 deploy:
   replicas: 1
   strategy: rolling
+  max_runtime_secs: 10 
 
 resources:
   cpu: 50m
