@@ -152,9 +152,10 @@ impl Evaluator {
 
             #[cfg(feature = "process")]
             {
-                let mut process = HashMap::with_capacity(4);
+                let mut process = HashMap::with_capacity(5);
                 process.insert("exit".into(), Value::Native(natives::process_exit));
                 process.insert("cwd".into(), Value::Native(natives::process_cwd));
+                process.insert("exec".into(), Value::Native(natives::process_exec));
                 let argv: Vec<Value> = std::env::args()
                     .map(|s| Value::String(s.into()))
                     .collect();

@@ -390,6 +390,19 @@ pub fn process_cwd(_args: &[Value]) -> Value {
     Value::String(cwd.into())
 }
 
+#[cfg(feature = "process")]
+pub fn process_exec(args: &[Value]) -> Value {
+    use std::process::Command;
+    let cmd = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+    if cmd.is_empty() {
+        return Value::Number(0.0);
+    }
+    match Command::new("sh").arg("-c").arg(&cmd).status() {
+        Ok(status) => Value::Number(status.code().unwrap_or(1) as f64),
+        Err(_) => Value::Number(1.0),
+    }
+}
+
 #[cfg(feature = "fs")]
 pub fn read_file(args: &[Value]) -> Value {
     let path = args.first().map(|v| v.to_display_string()).unwrap_or_default();

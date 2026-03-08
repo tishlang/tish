@@ -32,6 +32,13 @@ struct Codegen {
     in_async: bool,
 }
 
+fn stmt_terminates_switch(stmt: Option<&Statement>) -> bool {
+    match stmt {
+        Some(Statement::Break { .. }) | Some(Statement::Return { .. }) | Some(Statement::Throw { .. }) => true,
+        _ => false,
+    }
+}
+
 impl Codegen {
     fn new() -> Self {
         Self {
@@ -245,11 +252,18 @@ impl Codegen {
                     for s in stmts {
                         self.emit_statement(s)?;
                     }
+                    // Tish has no fall-through; add break unless case ends with break/return/throw
+                    if !stmt_terminates_switch(stmts.last()) {
+                        self.writeln("break;");
+                    }
                 }
                 if let Some(stmts) = default_body {
                     self.writeln("default:");
                     for s in stmts {
                         self.emit_statement(s)?;
+                    }
+                    if !stmt_terminates_switch(stmts.last()) {
+                        self.writeln("break;");
                     }
                 }
                 self.indent -= 1;
@@ -402,7 +416,8 @@ impl Codegen {
                     BinOp::Shl => "<<",
                     BinOp::Shr => ">>",
                     BinOp::In => {
-                        return Ok(format!("({}).includes({})", r, l));
+                        // key in object (property/index existence check)
+                        return Ok(format!("({} in {})", l, r));
                     }
                 };
                 format!("({} {} {})", l, op_str, r)
@@ -414,7 +429,7 @@ impl Codegen {
                     UnaryOp::Neg => format!("(-{})", o),
                     UnaryOp::Pos => format!("(+{})", o),
                     UnaryOp::BitNot => format!("(~{})", o),
-                    UnaryOp::Void => format!("(void {})", o),
+                    UnaryOp::Void => format!("((void {}), null)", o), // Tish void returns null, not undefined
                 }
             }
             Expr::Call { callee, args, .. } => {
@@ -422,7 +437,8 @@ impl Codegen {
                 let arg_strs: Result<Vec<_>, _> =
                     args.iter().map(|a| self.emit_call_arg(a)).collect();
                 let arg_strs = arg_strs?.join(", ");
-                format!("{}({})", c, arg_strs)
+                // Tish uses null for undefined (e.g. empty array pop/shift)
+                format!("({}({}) ?? null)", c, arg_strs)
             }
             Expr::Member {
                 object,
@@ -431,7 +447,7 @@ impl Codegen {
                 ..
             } => {
                 let obj = self.emit_expr(object)?;
-                match prop {
+                let expr = match prop {
                     MemberProp::Name(p) => {
                         if p.parse::<u32>().is_ok() || !p.chars().all(|c| c.is_alphanumeric() || c == '_') {
                             format!("{}[{}]", obj, format!("{:?}", p.as_ref()))
@@ -444,6 +460,12 @@ impl Codegen {
                         let idx = self.emit_expr(e)?;
                         format!("{}[{}]", obj, idx)
                     }
+                };
+                // Tish uses null where JS uses undefined for optional chaining short-circuit only
+                if *optional {
+                    format!("({} ?? null)", expr)
+                } else {
+                    expr
                 }
             }
             Expr::Index {
@@ -455,7 +477,9 @@ impl Codegen {
                 let obj = self.emit_expr(object)?;
                 let idx = self.emit_expr(index)?;
                 let sep = if *optional { "?." } else { "" };
-                format!("{}{}[{}]", obj, sep, idx)
+                let expr = format!("{}{}[{}]", obj, sep, idx);
+                // Tish uses null for array holes / missing indices (JS returns undefined)
+                format!("({} ?? null)", expr)
             }
             Expr::Conditional {
                 cond,
