@@ -3326,6 +3326,7 @@ dependencies = [
  "clap",
  "tish_ast",
  "tish_compile",
+ "tish_compile_js",
  "tish_eval",
  "tish_lexer",
  "tish_parser",
@@ -3362,6 +3363,14 @@ dependencies = [
 
 [[package]]
 name = "tish_compile"
+version = "0.1.0"
+dependencies = [
+ "tish_ast",
+ "tish_parser",
+]
+
+[[package]]
+name = "tish_compile_js"
 version = "0.1.0"
 dependencies = [
  "tish_ast",

@@ -24,13 +24,16 @@ enum Commands {
     },
     /// Interactive REPL
     Repl,
-    /// Compile to native binary
+    /// Compile to native binary or JavaScript
     Compile {
         #[arg(required = true)]
         file: String,
         #[arg(short, long, default_value = "tish_out")]
         output: String,
-        /// Enable feature (http, fs, process, regex, polars). Can be repeated.
+        /// Target: native (default) or js
+        #[arg(long, default_value = "native")]
+        target: String,
+        /// Enable feature (http, fs, process, regex, polars). For native target only. Can be repeated.
         #[arg(long = "feature", action = clap::ArgAction::Append)]
         features: Vec<String>,
     },
@@ -48,7 +51,9 @@ fn main() {
     let result = match cli.command {
         Some(Commands::Run { file }) => run_file(&file),
         Some(Commands::Repl) => run_repl(),
-        Some(Commands::Compile { file, output, features }) => compile_file(&file, &output, &features),
+        Some(Commands::Compile { file, output, target, features }) => {
+            compile_file(&file, &output, &target, &features)
+        }
         Some(Commands::DumpAst { file }) => dump_ast(&file),
         None => run_repl(), // No args = REPL
     };
@@ -109,6 +114,35 @@ fn run_repl() -> Result<(), String> {
     Ok(())
 }
 
+fn compile_to_js(input_path: &Path, output_path: &str) -> Result<(), String> {
+    let project_root = input_path.parent().and_then(|p| {
+        if p.file_name().and_then(|n| n.to_str()) == Some("src") {
+            p.parent()
+        } else {
+            Some(p)
+        }
+    });
+    let js = tish_compile_js::compile_project(input_path, project_root)
+        .map_err(|e| format!("{}", e))?;
+
+    let out_path = Path::new(output_path);
+    let out_path = if out_path.extension().is_none()
+        || out_path.extension() == Some(std::ffi::OsStr::new(""))
+    {
+        out_path.with_extension("js")
+    } else {
+        out_path.to_path_buf()
+    };
+
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Cannot create output directory {}: {}", parent.display(), e))?;
+    }
+    fs::write(&out_path, js).map_err(|e| format!("Cannot write {}: {}", out_path.display(), e))?;
+    println!("Built: {}", out_path.display());
+    Ok(())
+}
+
 /// Find the tish_runtime crate path using multiple strategies
 fn find_runtime_path() -> Result<String, String> {
     // Strategy 1: CARGO_MANIFEST_DIR (works during cargo run/build)
@@ -155,8 +189,22 @@ fn find_runtime_path() -> Result<String, String> {
 }
 
 #[allow(clippy::vec_init_then_push)]
-fn compile_file(input_path: &str, output_path: &str, cli_features: &[String]) -> Result<(), String> {
-    let input_path = Path::new(input_path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", input_path, e))?;
+fn compile_file(
+    input_path: &str,
+    output_path: &str,
+    target: &str,
+    cli_features: &[String],
+) -> Result<(), String> {
+    let input_path =
+        Path::new(input_path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", input_path, e))?;
+
+    if target == "js" {
+        return compile_to_js(&input_path, output_path);
+    }
+
+    if target != "native" {
+        return Err(format!("Unknown target: {}. Use 'native' or 'js'.", target));
+    }
     let project_root = input_path.parent().map(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
             p.parent().unwrap_or(p)

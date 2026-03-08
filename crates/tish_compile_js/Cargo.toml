@@ -1,0 +1,12 @@
+[package]
+name = "tish_compile_js"
+version = "0.1.0"
+edition = "2021"
+description = "Tish to JavaScript transpiler backend"
+
+[features]
+default = []
+
+[dependencies]
+tish_ast = { path = "../tish_ast" }
+tish_parser = { path = "../tish_parser" }
