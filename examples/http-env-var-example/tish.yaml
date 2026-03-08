@@ -1,0 +1,12 @@
+name: http-env-var-example
+
+deploy:
+  replicas: 2
+  strategy: rolling
+
+networking:
+  protocol: http
+  health_check:
+    path: /health
+    interval: 10s
+    timeout: 5s
