@@ -1011,23 +1011,3 @@ pub fn string_search_regex(s: &Value, regexp: &Value) -> Value {
     }
 }
 
-/// Read CSV from embedded string (for compile-time inlined data).
-#[cfg(feature = "polars")]
-pub fn polars_read_csv_from_string(csv_content: &str) -> Value {
-    tish_polars::polars_read_csv_from_string_runtime(csv_content)
-}
-
-/// Polars object for compiled output when polars feature is enabled.
-#[cfg(feature = "polars")]
-pub fn polars_object() -> Value {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use std::rc::Rc;
-    use std::sync::Arc;
-    let mut polars = HashMap::new();
-    polars.insert(
-        Arc::from("read_csv"),
-        Value::Function(Rc::new(tish_polars::polars_read_csv_runtime)),
-    );
-    Value::Object(Rc::new(RefCell::new(polars)))
-}

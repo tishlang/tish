@@ -10,7 +10,6 @@ http = ["tokio", "reqwest", "futures", "tiny_http", "tish_core/regex"]
 fs = []
 process = []
 regex = ["tish_core/regex"]
-polars = ["tish-polars"]
 
 [dependencies]
 tish_core = { path = "../tish_core" }
@@ -19,4 +18,3 @@ tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "time", "
 reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json"], optional = true }
 futures = { version = "0.3.32", optional = true }
 tiny_http = { version = "0.12.0", optional = true }
-tish-polars = { path = "../tish_polars", optional = true }

@@ -1,5 +1,7 @@
 //! Module resolver: resolves relative imports, builds dependency graph.
 //! Adapted from tish_compile::resolve for JS output.
+//! Native imports (tish:*, @scope/pkg) are emitted as VarDecl with NativeModuleLoad;
+//! JS emit will error (native modules are Rust-only).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -71,6 +73,9 @@ fn load_module_recursive(
     let dir = canonical.parent().unwrap_or(Path::new("."));
     for stmt in &program.statements {
         if let Statement::Import { from, .. } = stmt {
+            if is_native_import(from) {
+                continue;
+            }
             let dep_path = resolve_import_path(from, dir, project_root)?;
             if !path_to_module.contains_key(&dep_path) {
                 load_module_recursive(
@@ -89,14 +94,24 @@ fn load_module_recursive(
     Ok(())
 }
 
+fn is_native_import(spec: &str) -> bool {
+    spec.starts_with("tish:") || spec.starts_with('@')
+}
+
 fn resolve_import_path(
     spec: &str,
     from_dir: &Path,
     _project_root: &Path,
 ) -> Result<PathBuf, String> {
+    if is_native_import(spec) {
+        return Err(format!(
+            "resolve_import_path called for native import (use merge_modules): {}",
+            spec
+        ));
+    }
     if !spec.starts_with("./") && !spec.starts_with("../") {
         return Err(format!(
-            "Only relative imports are supported (./ or ../). Got: {}",
+            "Only relative imports (./, ../) or native (tish:*, @scope/pkg) are supported. Got: {}",
             spec
         ));
     }
@@ -158,6 +173,40 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
         for stmt in &module.program.statements {
             match stmt {
                 Statement::Import { specifiers, from, span } => {
+                    if is_native_import(from) {
+                        for spec in specifiers {
+                            match spec {
+                                ImportSpecifier::Named { name, alias } => {
+                                    let bind = alias.as_deref().unwrap_or(name.as_ref());
+                                    statements.push(Statement::VarDecl {
+                                        name: Arc::from(bind),
+                                        mutable: false,
+                                        type_ann: None,
+                                        init: Some(Expr::NativeModuleLoad {
+                                            spec: from.clone(),
+                                            export_name: name.clone(),
+                                            span: *span,
+                                        }),
+                                        span: *span,
+                                    });
+                                }
+                                ImportSpecifier::Namespace(ns) => {
+                                    return Err(format!(
+                                        "Namespace import (* as {}) not supported for native module '{}'",
+                                        ns.as_ref(),
+                                        from.as_ref()
+                                    ));
+                                }
+                                ImportSpecifier::Default(_) => {
+                                    return Err(format!(
+                                        "Default import not supported for native module '{}'",
+                                        from.as_ref()
+                                    ));
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     let dep_path = resolve_import_path(from, dir, Path::new("."))?;
                     let dep_path = dep_path.canonicalize().unwrap_or_else(|_| dep_path);
                     let dep_idx = *path_to_idx

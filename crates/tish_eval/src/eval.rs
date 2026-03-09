@@ -1449,6 +1449,9 @@ impl Evaluator {
             Expr::JsxElement { .. } | Expr::JsxFragment { .. } => Err(EvalError::Error(
                 "JSX is not supported in the interpreter. Use 'tish compile --target js' to compile to JavaScript.".to_string(),
             )),
+            Expr::NativeModuleLoad { spec, .. } => Err(EvalError::Error(
+                format!("Native module imports ({}) are only supported when compiling to Rust. Use 'tish compile'.", spec.as_ref()),
+            )),
             Expr::TypeOf { operand, .. } => {
                 let v = self.eval_expr(operand)?;
                 Ok(Value::String(match &v {

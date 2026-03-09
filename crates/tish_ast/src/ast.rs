@@ -325,6 +325,12 @@ pub enum Expr {
         children: Vec<JsxChild>,
         span: Span,
     },
+    /// Native module load: import { x } from 'tish:egui' → loads from tish_runtime
+    NativeModuleLoad {
+        spec: Arc<str>,
+        export_name: Arc<str>,
+        span: Span,
+    },
 }
 
 /// JSX attribute/prop
@@ -389,6 +395,7 @@ impl Expr {
             Expr::Await { span, .. } => *span,
             Expr::JsxElement { span, .. } => *span,
             Expr::JsxFragment { span, .. } => *span,
+            Expr::NativeModuleLoad { span, .. } => *span,
         }
     }
 }

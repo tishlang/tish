@@ -2794,7 +2794,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3119,7 +3119,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.52.0",
  "windows-sys 0.59.0",
 ]
 
@@ -3365,6 +3364,7 @@ dependencies = [
 name = "tish_compile"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "tish_ast",
  "tish_parser",
 ]
@@ -3417,7 +3417,6 @@ dependencies = [
  "futures",
  "reqwest 0.13.2",
  "tiny_http",
- "tish-polars",
  "tish_builtins",
  "tish_core",
  "tokio",

@@ -1,9 +1,140 @@
 //! Module resolver: resolves relative imports, builds dependency graph, detects cycles.
+//! Supports native imports: tish:egui, tish:polars, @scope/pkg (via package.json).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tish_ast::{ExportDeclaration, Expr, ImportSpecifier, Program, Statement};
+
+/// Resolved native module: crate path and init expression.
+#[derive(Debug, Clone)]
+pub struct ResolvedNativeModule {
+    pub spec: String,
+    /// Cargo package name (e.g. tish-egui) for [dependencies]
+    pub package_name: String,
+    /// Rust crate name with underscores (e.g. tish_egui) for use in generated code
+    pub crate_name: String,
+    pub crate_path: PathBuf,
+    pub export_fn: String,
+}
+
+/// Resolve all native imports in a merged program via package.json lookup.
+pub fn resolve_native_modules(program: &Program, project_root: &Path) -> Result<Vec<ResolvedNativeModule>, String> {
+    let root_canon = project_root
+        .canonicalize()
+        .map_err(|e| format!("Cannot canonicalize project root: {}", e))?;
+    let mut seen = HashSet::new();
+    let mut modules = Vec::new();
+    for stmt in &program.statements {
+        if let Statement::VarDecl { init: Some(init), .. } = stmt {
+            if let Expr::NativeModuleLoad { spec, .. } = init {
+                let s = spec.as_ref();
+                if !seen.insert(s.to_string()) {
+                    continue;
+                }
+                let m = resolve_native_module(s, &root_canon)?;
+                modules.push(m);
+            }
+        }
+    }
+    Ok(modules)
+}
+
+fn resolve_native_module(spec: &str, project_root: &Path) -> Result<ResolvedNativeModule, String> {
+    let package_name = if spec.starts_with("tish:") {
+        format!("tish-{}", spec.strip_prefix("tish:").unwrap_or(spec))
+    } else if spec.starts_with('@') {
+        spec.to_string()
+    } else {
+        return Err(format!("Unsupported native import spec: {}", spec));
+    };
+    let pkg_dir = find_package_dir(&package_name, project_root)?;
+    let pkg_json = pkg_dir.join("package.json");
+    let content = std::fs::read_to_string(&pkg_json)
+        .map_err(|e| format!("Cannot read {}: {}", pkg_json.display(), e))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("Invalid JSON in {}: {}", pkg_json.display(), e))?;
+    let tish = json
+        .get("tish")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| format!("Package {} has no \"tish\" config in package.json", package_name))?;
+    if !tish.get("module").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err(format!("Package {} is not a Tish native module (tish.module must be true)", package_name));
+    }
+    let raw_crate = tish
+        .get("crate")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&package_name)
+        .to_string();
+    let module_part = spec.strip_prefix("tish:").unwrap_or(spec);
+    let export_fn = tish
+        .get("export")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| format!("{}_object", str::replace(module_part, "-", "_")));
+    let crate_path = pkg_dir.canonicalize().unwrap_or(pkg_dir);
+    Ok(ResolvedNativeModule {
+        spec: spec.to_string(),
+        package_name: raw_crate.clone(),
+        crate_name: raw_crate.replace('-', "_"),
+        crate_path,
+        export_fn,
+    })
+}
+
+fn find_package_dir(package_name: &str, project_root: &Path) -> Result<PathBuf, String> {
+    let mut search = project_root.to_path_buf();
+    loop {
+        let node_mod = search.join("node_modules").join(package_name);
+        if node_mod.join("package.json").exists() {
+            if read_package_name(&node_mod.join("package.json")) == Some(package_name.to_string()) {
+                return Ok(node_mod);
+            }
+        }
+        let sibling = search.join(package_name);
+        if sibling.join("package.json").exists() {
+            if read_package_name(&sibling.join("package.json")) == Some(package_name.to_string()) {
+                return Ok(sibling);
+            }
+        }
+        if search.join("package.json").exists() {
+            if read_package_name(&search.join("package.json")) == Some(package_name.to_string()) {
+                return Ok(search);
+            }
+        }
+        if let Some(parent) = search.parent() {
+            search = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+    Err(format!(
+        "Native module {} not found. Add it as a dependency or place it in node_modules/ or as a sibling directory.",
+        package_name
+    ))
+}
+
+fn read_package_name(pkg_path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(pkg_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    json.get("name").and_then(|v| v.as_str()).map(String::from)
+}
+
+/// Extract Cargo feature names from native imports in a merged program.
+/// Used to enable tish_runtime features based on `import { x } from 'tish:egui'` etc.
+pub fn extract_native_import_features(program: &Program) -> Vec<String> {
+    let mut features = std::collections::HashSet::new();
+    for stmt in &program.statements {
+        if let Statement::VarDecl { init: Some(init), .. } = stmt {
+            if let Expr::NativeModuleLoad { spec, .. } = init {
+                if let Some(f) = native_spec_to_feature(spec.as_ref()) {
+                    features.insert(f);
+                }
+            }
+        }
+    }
+    features.into_iter().collect()
+}
 
 /// A resolved module: path and its parsed program.
 #[derive(Debug, Clone)]
@@ -68,10 +199,13 @@ fn load_module_recursive(
     let program = tish_parser::parse(&source)
         .map_err(|e| format!("Parse error in {}: {}", canonical.display(), e))?;
 
-    // Collect imports and load dependencies first
+    // Collect imports and load dependencies first (skip native imports)
     let dir = canonical.parent().unwrap_or(Path::new("."));
     for stmt in &program.statements {
         if let Statement::Import { from, .. } = stmt {
+            if is_native_import(from) {
+                continue; // Native imports don't load files
+            }
             let dep_path = resolve_import_path(from, dir, project_root)?;
             if !path_to_module.contains_key(&dep_path) {
                 load_module_recursive(
@@ -90,15 +224,37 @@ fn load_module_recursive(
     Ok(())
 }
 
+/// Returns true for native module imports that don't resolve to files.
+/// - tish:egui, tish:polars, etc.
+/// - @scope/package (npm-style)
+pub fn is_native_import(spec: &str) -> bool {
+    spec.starts_with("tish:") || spec.starts_with('@')
+}
+
+/// Map native spec to Cargo feature name for built-in tish:* modules.
+pub fn native_spec_to_feature(spec: &str) -> Option<String> {
+    if spec.starts_with("tish:") {
+        Some(spec.strip_prefix("tish:").unwrap_or(spec).to_string())
+    } else {
+        None
+    }
+}
+
 /// Resolve an import specifier (e.g. "./foo.tish", "../lib/utils") to an absolute path.
 fn resolve_import_path(
     spec: &str,
     from_dir: &Path,
     _project_root: &Path,
 ) -> Result<PathBuf, String> {
+    if is_native_import(spec) {
+        return Err(format!(
+            "resolve_import_path called for native import (use merge_modules native branch): {}",
+            spec
+        ));
+    }
     if !spec.starts_with("./") && !spec.starts_with("../") {
         return Err(format!(
-            "Only relative imports are supported (./ or ../). Got: {}",
+            "Only relative imports (./, ../) or native imports (tish:*, @scope/pkg) are supported. Got: {}",
             spec
         ));
     }
@@ -165,6 +321,9 @@ fn has_cycle_from(
 ) -> Result<bool, String> {
     for stmt in &program.statements {
         if let Statement::Import { from, .. } = stmt {
+            if is_native_import(from) {
+                continue;
+            }
             let dep_path = resolve_import_path(from, from_dir, Path::new("."))?;
             if let Some(&dep_idx) = path_to_idx.get(&dep_path) {
                 if stack.contains(&dep_idx) {
@@ -235,6 +394,43 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
         for stmt in &module.program.statements {
             match stmt {
                 Statement::Import { specifiers, from, span } => {
+                    if is_native_import(from) {
+                        // Emit VarDecl with NativeModuleLoad for each specifier
+                        for spec in specifiers {
+                            match spec {
+                                ImportSpecifier::Named { name, alias } => {
+                                    let bind = alias.as_deref().unwrap_or(name.as_ref());
+                                    let init = Expr::NativeModuleLoad {
+                                        spec: from.clone(),
+                                        export_name: name.clone(),
+                                        span: *span,
+                                    };
+                                    statements.push(Statement::VarDecl {
+                                        name: Arc::from(bind),
+                                        mutable: false,
+                                        type_ann: None,
+                                        init: Some(init),
+                                        span: *span,
+                                    });
+                                }
+                                ImportSpecifier::Namespace(ns) => {
+                                    return Err(format!(
+                                        "Namespace import (* as {}) not supported for native module '{}'",
+                                        ns.as_ref(),
+                                        from.as_ref()
+                                    ));
+                                }
+                                ImportSpecifier::Default(bind) => {
+                                    return Err(format!(
+                                        "Default import not supported for native module '{}'. Use named import, e.g. import {{ egui }} from '{}'",
+                                        from.as_ref(),
+                                        from.as_ref()
+                                    ));
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     let dep_path = resolve_import_path(from, dir, Path::new("."))?;
                     let dep_path = dep_path
                         .canonicalize()

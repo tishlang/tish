@@ -691,6 +691,14 @@ function __h(tag, props, ...children) {
                 let children_str = children_strs?.join(", ");
                 format!("__h(__Fragment, null, {})", children_str)
             }
+            Expr::NativeModuleLoad { spec, .. } => {
+                return Err(CompileError {
+                    message: format!(
+                        "Native module imports ({}) are only supported when compiling to Rust. Omit --target js.",
+                        spec.as_ref()
+                    ),
+                });
+            }
         })
     }
 

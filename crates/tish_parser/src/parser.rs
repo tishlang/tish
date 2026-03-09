@@ -1666,6 +1666,7 @@ impl ExprSpan for Expr {
             Expr::Await { span, .. } => *span,
             Expr::JsxElement { span, .. } => *span,
             Expr::JsxFragment { span, .. } => *span,
+            Expr::NativeModuleLoad { span, .. } => *span,
         }
     }
 }

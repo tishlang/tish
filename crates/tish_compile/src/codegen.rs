@@ -207,6 +207,7 @@ impl UsageAnalyzer {
                     }
                 }
             }
+            Expr::NativeModuleLoad { .. } => {}
         }
     }
 
@@ -367,19 +368,41 @@ pub fn compile_with_project_root(program: &Program, project_root: Option<&Path>)
 }
 
 /// Compile a project from its entry path. Resolves imports, merges modules, then compiles.
+/// Features are derived from native imports (e.g. import { egui } from 'tish:egui') and merged
+/// with any explicitly passed features. Returns only the Rust code (backward compatible).
 pub fn compile_project(
     entry_path: &Path,
     project_root: Option<&Path>,
     features: &[String],
 ) -> Result<String, CompileError> {
+    let (rust, _) = compile_project_full(entry_path, project_root, features)?;
+    Ok(rust)
+}
+
+/// Compile a project and return Rust code plus resolved native modules for Cargo.toml generation.
+pub fn compile_project_full(
+    entry_path: &Path,
+    project_root: Option<&Path>,
+    features: &[String],
+) -> Result<(String, Vec<crate::resolve::ResolvedNativeModule>), CompileError> {
     use crate::resolve;
+    let root = project_root.unwrap_or_else(|| entry_path.parent().unwrap_or(Path::new(".")));
     let modules = resolve::resolve_project(entry_path, project_root)
         .map_err(|e| CompileError { message: e, span: None })?;
     resolve::detect_cycles(&modules)
         .map_err(|e| CompileError { message: e, span: None })?;
     let program = resolve::merge_modules(modules)
         .map_err(|e| CompileError { message: e, span: None })?;
-    compile_with_features(&program, project_root, features)
+    let native_modules = resolve::resolve_native_modules(&program, root)
+        .map_err(|e| CompileError { message: e, span: None })?;
+    let mut all_features: Vec<String> = features.to_vec();
+    for f in resolve::extract_native_import_features(&program) {
+        if !all_features.contains(&f) {
+            all_features.push(f);
+        }
+    }
+    let rust = compile_with_native_modules(&program, project_root, &all_features, &native_modules)?;
+    Ok((rust, native_modules))
 }
 
 /// Compile with explicit feature flags. When features are provided, codegen uses them
@@ -389,7 +412,21 @@ pub fn compile_with_features(
     project_root: Option<&Path>,
     features: &[String],
 ) -> Result<String, CompileError> {
-    let mut g = Codegen::new(project_root, features);
+    compile_with_native_modules(program, project_root, features, &[])
+}
+
+/// Compile with resolved native modules. Native imports emit calls to the module crates directly.
+pub fn compile_with_native_modules(
+    program: &Program,
+    project_root: Option<&Path>,
+    features: &[String],
+    native_modules: &[crate::resolve::ResolvedNativeModule],
+) -> Result<String, CompileError> {
+    let map: std::collections::HashMap<String, (String, String)> = native_modules
+        .iter()
+        .map(|m| (m.spec.clone(), (m.crate_name.clone(), m.export_fn.clone())))
+        .collect();
+    let mut g = Codegen::new_with_native_modules(project_root, features, map);
     g.emit_program(program)?;
     Ok(g.output)
 }
@@ -402,6 +439,8 @@ struct Codegen {
     project_root: Option<std::path::PathBuf>,
     /// Requested features (http, process, fs, regex, polars). When non-empty, used instead of #[cfg].
     features: std::collections::HashSet<String>,
+    /// spec -> (crate_name, export_fn) for native modules resolved via package.json
+    native_module_map: std::collections::HashMap<String, (String, String)>,
     /// Stack: true = async Rust context (run body), false = sync closure (Tish fn body)
     async_context_stack: Vec<bool>,
     loop_stack: Vec<(String, Option<String>)>, // (break_label, continue_update) for innermost loop
@@ -425,6 +464,14 @@ struct Codegen {
 
 impl Codegen {
     fn new(project_root: Option<&Path>, features: &[String]) -> Self {
+        Self::new_with_native_modules(project_root, features, std::collections::HashMap::new())
+    }
+
+    fn new_with_native_modules(
+        project_root: Option<&Path>,
+        features: &[String],
+        native_module_map: std::collections::HashMap<String, (String, String)>,
+    ) -> Self {
         let features: std::collections::HashSet<String> = features.iter().cloned().collect();
         Self {
             output: String::new(),
@@ -433,6 +480,7 @@ impl Codegen {
             is_async: false,
             project_root: project_root.map(|p| p.to_path_buf()),
             features,
+            native_module_map,
             async_context_stack: Vec::new(),
             loop_stack: Vec::new(),
             function_scope_stack: vec![Vec::new()], // Start with global scope
@@ -442,6 +490,13 @@ impl Codegen {
             usage_analyzer: None,
             type_context: TypeContext::new(),
         }
+    }
+
+    /// Map native module spec to Rust init expression using resolved package.json modules.
+    fn native_module_rust_init(&self, spec: &str) -> Option<String> {
+        self.native_module_map
+            .get(spec)
+            .map(|(crate_name, export_fn)| format!("{}::{}()", crate_name, export_fn))
     }
 
     fn has_feature(&self, name: &str) -> bool {
@@ -460,10 +515,6 @@ impl Codegen {
             }
             #[cfg(feature = "regex")]
             if name == "regex" {
-                return true;
-            }
-            #[cfg(feature = "polars")]
-            if name == "polars" {
                 return true;
             }
             false
@@ -535,6 +586,7 @@ impl Codegen {
                 | Expr::TemplateLiteral { .. }
                 | Expr::JsxElement { .. }
                 | Expr::JsxFragment { .. }
+                | Expr::NativeModuleLoad { .. }
         )
     }
 
@@ -583,7 +635,7 @@ impl Codegen {
         if is_prefix {
             if is_wrapped {
                 format!(
-                    "{{ *{n}.borrow_mut() = Value::Number(match &*{n}.borrow() {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); {n}.borrow().clone() }}"
+                    "{{ *{n}.borrow_mut() = Value::Number(match &*{n}.borrow() {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); (*{n}.borrow()).clone() }}"
                 )
             } else {
                 format!(
@@ -593,7 +645,7 @@ impl Codegen {
         } else {
             if is_wrapped {
                 format!(
-                    "{{ let _v = {n}.borrow().clone(); *{n}.borrow_mut() = Value::Number(match &_v {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); _v }}"
+                    "{{ let _v = (*{n}.borrow()).clone(); *{n}.borrow_mut() = Value::Number(match &_v {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); _v }}"
                 )
             } else {
                 format!(
@@ -854,9 +906,7 @@ impl Codegen {
             self.writeln("let RegExp = Value::Function(Rc::new(|args: &[Value]| regexp_new(args)));");
         }
 
-        if self.has_feature("polars") {
-            self.writeln("let Polars = tish_runtime::polars_object();");
-        }
+        // Polars, Egui etc. are emitted via VarDecl from import { X } from 'tish:...'
 
         // Pre-scan for top-level function declarations and create cells (for mutual recursion)
         let top_level_funcs = self.prescan_function_decls(&program.statements);
@@ -1287,12 +1337,12 @@ impl Codegen {
                 self.indent += 1;
                 // Make the function available by its name inside the closure (only if recursive)
                 if needs_self_ref {
-                    self.writeln(&format!("let {} = {}_ref.borrow().clone();", name_str, name_str));
+                    self.writeln(&format!("let {} = (*{}_ref.borrow()).clone();", name_str, name_str));
                 }
                 // Make sibling functions available for mutual recursion
                 for sibling in &sibling_fns {
                     let sibling_escaped = Self::escape_ident(sibling);
-                    self.writeln(&format!("let {} = {}_ref.borrow().clone();", sibling_escaped, sibling_escaped));
+                    self.writeln(&format!("let {} = (*{}_ref.borrow()).clone();", sibling_escaped, sibling_escaped));
                 }
                 // Extract just the parameter names (type annotations are parsed but not used in codegen yet)
                 let current_param_names: Vec<String> = params.iter().map(|p| p.name.to_string()).collect();
@@ -1471,7 +1521,7 @@ impl Codegen {
             Expr::Ident { name, .. } => {
                 let escaped = Self::escape_ident(name.as_ref());
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    format!("{}.borrow().clone()", escaped)
+                    format!("(*{}.borrow()).clone()", escaped)
                 } else {
                     // Check if this is a typed variable that needs conversion to Value
                     let var_type = self.type_context.get_type(name.as_ref());
@@ -1509,34 +1559,35 @@ impl Codegen {
             }
             Expr::Call { callee, args, .. } => {
                 // Compile-time embed: Polars.read_csv("<literal path>") when file exists
-                #[cfg(feature = "polars")]
-                if let (Some(ref root), Some(CallArg::Expr(first_arg))) =
-                    (self.project_root.as_ref(), args.first())
-                {
-                    if let Expr::Member {
-                        object,
-                        prop: MemberProp::Name(ref method_name),
-                        ..
-                    } = callee.as_ref()
+                if let Some((crate_name, _)) = self.native_module_map.get("tish:polars") {
+                    if let (Some(ref root), Some(CallArg::Expr(first_arg))) =
+                        (self.project_root.as_ref(), args.first())
                     {
-                        if method_name.as_ref() == "read_csv"
-                            && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Polars")
+                        if let Expr::Member {
+                            object,
+                            prop: MemberProp::Name(ref method_name),
+                            ..
+                        } = callee.as_ref()
                         {
-                            if let Expr::Literal {
-                                value: Literal::String(ref path),
-                                ..
-                            } = first_arg
+                            if method_name.as_ref() == "read_csv"
+                                && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Polars")
                             {
-                                let path_str = path.as_ref();
-                                let normalized = path_str.trim_start_matches("./");
-                                let full_path = root.join(normalized);
-                                if full_path.exists() {
-                                    if let Ok(content) = std::fs::read_to_string(&full_path) {
-                                        let escaped = format!("{:?}", content);
-                                        return Ok(format!(
-                                            "tish_runtime::polars_read_csv_from_string({})",
-                                            escaped
-                                        ));
+                                if let Expr::Literal {
+                                    value: Literal::String(ref path),
+                                    ..
+                                } = first_arg
+                                {
+                                    let path_str = path.as_ref();
+                                    let normalized = path_str.trim_start_matches("./");
+                                    let full_path = root.join(normalized);
+                                    if full_path.exists() {
+                                        if let Ok(content) = std::fs::read_to_string(&full_path) {
+                                            let escaped = format!("{:?}", content);
+                                            return Ok(format!(
+                                                "{}::polars_read_csv_from_string_runtime({})",
+                                                crate_name, escaped
+                                            ));
+                                        }
                                     }
                                 }
                             }
@@ -2100,7 +2151,7 @@ impl Codegen {
                 };
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     format!(
-                        "{{ let _rhs = ({}).clone(); *{}.borrow_mut() = tish_runtime::ops::{}(&{}.borrow(), &_rhs)?; {}.borrow().clone() }}",
+                        "{{ let _rhs = ({}).clone(); *{}.borrow_mut() = tish_runtime::ops::{}(&*{}.borrow(), &_rhs)?; (*{}.borrow()).clone() }}",
                         val, n, op_fn, n, n
                     )
                 } else {
@@ -2119,17 +2170,17 @@ impl Codegen {
                         LogicalAssignOp::AndAnd => (
                             format!("{}.borrow().is_truthy()", n),
                             format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, n),
-                            format!("{}.borrow().clone()", n),
+                            format!("(*{}.borrow()).clone()", n),
                         ),
                         LogicalAssignOp::OrOr => (
                             format!("!{}.borrow().is_truthy()", n),
                             format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, n),
-                            format!("{}.borrow().clone()", n),
+                            format!("(*{}.borrow()).clone()", n),
                         ),
                         LogicalAssignOp::Nullish => (
                             format!("matches!(*{}.borrow(), Value::Null)", n),
                             format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, n),
-                            format!("{}.borrow().clone()", n),
+                            format!("(*{}.borrow()).clone()", n),
                         ),
                     }
                 } else {
@@ -2193,6 +2244,16 @@ impl Codegen {
             }
             Expr::JsxElement { .. } | Expr::JsxFragment { .. } => {
                 return Err(CompileError { message: "JSX is only supported when compiling to JavaScript (tish compile --target js).".to_string(), span: None });
+            }
+            Expr::NativeModuleLoad { spec, .. } => {
+                self.native_module_rust_init(spec.as_ref())
+                    .ok_or_else(|| CompileError {
+                        message: format!(
+                            "Native module '{}' not found. Add it as a dependency and ensure package.json has tish.module.",
+                            spec.as_ref()
+                        ),
+                        span: None,
+                    })?
             }
         })
     }
@@ -2310,6 +2371,7 @@ impl Codegen {
                     }
                 }
             }
+            Expr::NativeModuleLoad { .. } => {}
             Expr::Literal { .. } => {}
         }
     }
@@ -2462,15 +2524,27 @@ impl Codegen {
             .filter(|name| referenced.contains(name) && !param_names.contains(name) && !local_var_names.contains(name))
             .collect();
 
+        // Track which vars are already RefCell-wrapped (from outer closure) to avoid double-wrapping
+        let already_wrapped = self.refcell_wrapped_vars.clone();
+
         // Wrap outer captures in Rc<RefCell<>> so they can be mutated inside the closure
         // This is necessary because Fn closures (required for Rc<dyn Fn>) can't mutate captures
+        // If already wrapped by outer closure, just clone the Rc
         for outer_param in &outer_params {
             let param_escaped = Self::escape_ident(outer_param);
-            code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", param_escaped, param_escaped));
+            if already_wrapped.contains(outer_param) {
+                code.push_str(&format!("    let {} = {}.clone();\n", param_escaped, param_escaped));
+            } else {
+                code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", param_escaped, param_escaped));
+            }
         }
         for outer_var in &outer_vars {
             let var_escaped = Self::escape_ident(outer_var);
-            code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", var_escaped, var_escaped));
+            if already_wrapped.contains(outer_var) {
+                code.push_str(&format!("    let {} = {}.clone();\n", var_escaped, var_escaped));
+            } else {
+                code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", var_escaped, var_escaped));
+            }
         }
         // Only clone builtins that are actually referenced (clone so outer scope can still use, e.g. process for PORT)
         for builtin in &["console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp", "Polars"] {
@@ -2497,7 +2571,7 @@ impl Codegen {
         // Make captured functions available
         for func_name in &referenced_funcs {
             let escaped = Self::escape_ident(func_name);
-            code.push_str(&format!("        let {} = {}_ref.borrow().clone();\n", escaped, escaped));
+            code.push_str(&format!("        let {} = (*{}_ref.borrow()).clone();\n", escaped, escaped));
         }
 
         // Extract parameters from args

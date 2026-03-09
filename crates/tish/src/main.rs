@@ -33,7 +33,7 @@ enum Commands {
         /// Target: native (default) or js
         #[arg(long, default_value = "native")]
         target: String,
-        /// Enable feature (http, fs, process, regex, polars). For native target only. Can be repeated.
+        /// Enable feature (http, fs, process, regex, polars, egui). For native target only. Can be repeated.
         #[arg(long = "feature", action = clap::ArgAction::Append)]
         features: Vec<String>,
     },
@@ -222,19 +222,25 @@ fn compile_file(
         f.push("process".to_string());
         #[cfg(feature = "regex")]
         f.push("regex".to_string());
-        #[cfg(feature = "polars")]
-        f.push("polars".to_string());
         f
     } else {
         cli_features.to_vec()
     };
-    let rust_code = tish_compile::compile_project(&input_path, project_root, &features).map_err(|e| {
+    let (rust_code, native_modules) = tish_compile::compile_project_full(&input_path, project_root, &features).map_err(|e| {
         if let Some(ref span) = e.span {
             format!("{}:{}:{}: {}", input_path.display(), span.start.0, span.start.1, e.message)
         } else {
             format!("{}: {}", input_path.display(), e.message)
         }
     })?;
+
+    let native_deps: String = native_modules
+        .iter()
+        .map(|m| {
+            let path = m.crate_path.display().to_string().replace('\\', "/");
+            format!("{} = {{ path = {:?} }}\n", m.package_name, path)
+        })
+        .collect();
 
     let out_name = Path::new(output_path)
         .file_stem()
@@ -249,10 +255,15 @@ fn compile_file(
     let runtime_path = find_runtime_path()
         .map_err(|e| format!("Cannot resolve tish_runtime path: {}", e))?;
 
-    let features_str = if features.is_empty() {
+    let runtime_features: Vec<&str> = features
+        .iter()
+        .filter(|f| ["http", "fs", "process", "regex"].contains(&f.as_str()))
+        .map(|s| s.as_str())
+        .collect();
+    let features_str = if runtime_features.is_empty() {
         String::new()
     } else {
-        format!(", features = {:?}", features)
+        format!(", features = {:?}", runtime_features)
     };
 
     let needs_tokio = rust_code.contains("#[tokio::main]");
@@ -273,9 +284,10 @@ name = "{}"
 path = "src/main.rs"
 
 [dependencies]
-tish_runtime = {{ path = {:?}{} }}{}
+tish_runtime = {{ path = {:?}{} }}{}{}
 "#,
-        out_name, runtime_path, features_str, tokio_dep
+        out_name, runtime_path, features_str, tokio_dep,
+        if native_deps.is_empty() { String::new() } else { format!("\n{}", native_deps) }
     );
 
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)

@@ -6,8 +6,9 @@ mod codegen;
 mod resolve;
 mod types;
 
-pub use codegen::{compile, compile_project, compile_with_features, compile_with_project_root};
+pub use codegen::{compile, compile_project, compile_project_full, compile_with_features, compile_with_project_root};
 pub use codegen::CompileError;
+pub use resolve::ResolvedNativeModule;
 pub use types::{RustType, TypeContext};
 
 #[cfg(test)]
