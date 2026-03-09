@@ -1,14 +1,14 @@
 # Third-Party Native Modules for Tish
 
-This document specifies the formal requirements for third-party native modules (e.g. `tish-polars`) that extend Tish with Rust-based capabilities.
+This document specifies the formal requirements for third-party native modules (e.g. `tish-polars`, `tish-egui`) that extend Tish with Rust-based capabilities.
 
 ## Overview
 
 Third-party modules integrate with Tish via:
 
 - **Interpreter:** `TishNativeModule` trait; globals registered at startup
-- **Compiled:** Optional `tish_runtime` feature; codegen in `tish_compile`
-- **Package:** npm `package.json` with `dependencies`; `tish-*` convention
+- **Compiled:** Import-driven; `import { Egui } from 'tish:egui'` resolves the package and adds it as a Cargo dependency. No `tish_runtime` glue.
+- **Package:** npm `package.json` with `tish.module`, `tish.crate`, `tish.export`; resolved from `node_modules` or workspace layout
 
 ## 1. Trait Contract
 
@@ -68,10 +68,10 @@ Third-party `tish_eval` features must match what the module uses:
 
 For compiled output support:
 
-1. Add `tish-<name>` as optional dep in `tish_runtime` under feature `<name>`.
-2. Add feature `<name>` to `tish_compile` and `tish` CLI.
-3. Add codegen in `tish_compile` for the module's globals.
-4. Add runtime glue in `tish_runtime` (e.g. `polars_object()`, `polars_read_csv_*`).
+1. Implement an export function (e.g. `egui_object()`) that returns `tish_core::Value` (a module object built with `tish_core::tish_module!` or manually).
+2. Add `package.json` with `tish.module: true`, `tish.crate`, `tish.export` (the Rust function name).
+3. Tish resolves `tish:egui` etc. via package lookup, generates `Cargo.toml` with the module crate as a dependency, and emits calls like `tish_egui::egui_object()`.
+4. No changes to `tish_runtime` or `tish_compile` — modules are fully external.
 
 ## 4. Package Layout (Standalone)
 
@@ -100,14 +100,14 @@ tish-polars/
   "tish": {
     "module": true,
     "crate": "tish-polars",
-    "feature": "polars"
+    "export": "polars_object"
   }
 }
 ```
 
 - `tish.module: true` — Identifies this package as a tish native module.
-- `tish.crate` — Cargo crate name.
-- `tish.feature` — Cargo feature to enable in `tish_runtime`.
+- `tish.crate` — Cargo crate name (used for the generated Cargo dependency).
+- `tish.export` — Rust function name that returns the module `Value` (e.g. `polars_object`). Default: `{module}_object` (e.g. `egui` → `egui_object`).
 
 ## 5. Security and Stability
 
