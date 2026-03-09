@@ -133,16 +133,9 @@ pub fn polars_read_csv(args: &[EvalValue]) -> Result<EvalValue, String> {
 
 /// Polars object for compiled Tish output.
 pub fn polars_object() -> Value {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use std::rc::Rc;
-    use std::sync::Arc;
-    let mut polars = HashMap::new();
-    polars.insert(
-        Arc::from("read_csv"),
-        Value::Function(Rc::new(polars_read_csv_runtime)),
-    );
-    Value::Object(Rc::new(RefCell::new(polars)))
+    tish_core::tish_module! {
+        "read_csv" => polars_read_csv_runtime,
+    }
 }
 
 /// Polars native module for Tish.
