@@ -11,7 +11,6 @@ members = [
     "crates/tish_compile",
     "crates/tish_compile_js",
     "crates/tish",
-    "crates/tish_polars",
 ]
 resolver = "2"
 

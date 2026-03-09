@@ -2698,18 +2698,11 @@ impl Codegen {
         span: Span,
     ) -> Result<String, CompileError> {
         Ok(match op {
-            BinOp::Add => format!(
-                "{{ match (&{}, &{}) {{
-                    (Value::Number(a), Value::Number(b)) => Value::Number(a + b),
-                    (Value::String(a), Value::String(b)) => Value::String(format!(\"{{}}{{}}\", a, b).into()),
-                    (a, b) => Value::String(format!(\"{{}}{{}}\", (a as &Value).to_display_string(), (b as &Value).to_display_string()).into()),
-                }} }}",
-                l, r
-            ),
-            BinOp::Sub => Self::emit_numeric_binop(l, r, "-"),
-            BinOp::Mul => Self::emit_numeric_binop(l, r, "*"),
-            BinOp::Div => Self::emit_numeric_binop(l, r, "/"),
-            BinOp::Mod => Self::emit_numeric_binop(l, r, "%"),
+            BinOp::Add => format!("tish_runtime::ops::add(&{}, &{})?", l, r),
+            BinOp::Sub => format!("tish_runtime::ops::sub(&{}, &{})?", l, r),
+            BinOp::Mul => format!("tish_runtime::ops::mul(&{}, &{})?", l, r),
+            BinOp::Div => format!("tish_runtime::ops::div(&{}, &{})?", l, r),
+            BinOp::Mod => format!("tish_runtime::ops::modulo(&{}, &{})?", l, r),
             BinOp::Pow => format!(
                 "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
                  let Value::Number(b) = &({}) else {{ panic!() }}; a.powf(*b) }})",
