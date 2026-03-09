@@ -187,6 +187,26 @@ impl UsageAnalyzer {
                 self.analyze_expr(value);
             }
             Expr::Await { operand, .. } => self.analyze_expr(operand),
+            Expr::JsxElement { props, children, .. } => {
+                for p in props {
+                    match p {
+                        tish_ast::JsxProp::Attr { value: tish_ast::JsxAttrValue::Expr(e), .. } | tish_ast::JsxProp::Spread(e) => self.analyze_expr(e),
+                        _ => {}
+                    }
+                }
+                for c in children {
+                    if let tish_ast::JsxChild::Expr(e) = c {
+                        self.analyze_expr(e);
+                    }
+                }
+            }
+            Expr::JsxFragment { children, .. } => {
+                for c in children {
+                    if let tish_ast::JsxChild::Expr(e) = c {
+                        self.analyze_expr(e);
+                    }
+                }
+            }
         }
     }
 
@@ -285,6 +305,15 @@ fn program_uses_async(program: &Program) -> bool {
                 ArrowBody::Block(s) => stmt_has_async(s),
             },
             Expr::TemplateLiteral { exprs, .. } => exprs.iter().any(expr_has_await),
+            Expr::JsxElement { props, children, .. } => {
+                props.iter().any(|p| match p {
+                    tish_ast::JsxProp::Attr { value: tish_ast::JsxAttrValue::Expr(e), .. } | tish_ast::JsxProp::Spread(e) => expr_has_await(e),
+                    _ => false,
+                }) || children.iter().any(|c| matches!(c, tish_ast::JsxChild::Expr(e) if expr_has_await(e)))
+            }
+            Expr::JsxFragment { children, .. } => {
+                children.iter().any(|c| matches!(c, tish_ast::JsxChild::Expr(e) if expr_has_await(e)))
+            }
             _ => false,
         }
     }
@@ -504,6 +533,8 @@ impl Codegen {
                 | Expr::Unary { .. }
                 | Expr::TypeOf { .. }
                 | Expr::TemplateLiteral { .. }
+                | Expr::JsxElement { .. }
+                | Expr::JsxFragment { .. }
         )
     }
 
@@ -2160,6 +2191,9 @@ impl Codegen {
                 }
                 format!("Value::String([{}].concat().into())", parts.join(", "))
             }
+            Expr::JsxElement { .. } | Expr::JsxFragment { .. } => {
+                return Err(CompileError { message: "JSX is only supported when compiling to JavaScript (tish compile --target js).".to_string(), span: None });
+            }
         })
     }
     
@@ -2255,6 +2289,26 @@ impl Codegen {
             Expr::Await { operand, .. } => Self::collect_expr_idents(operand, idents),
             Expr::TemplateLiteral { exprs, .. } => {
                 for e in exprs { Self::collect_expr_idents(e, idents); }
+            }
+            Expr::JsxElement { props, children, .. } => {
+                for p in props {
+                    match p {
+                        tish_ast::JsxProp::Attr { value: tish_ast::JsxAttrValue::Expr(e), .. } | tish_ast::JsxProp::Spread(e) => Self::collect_expr_idents(e, idents),
+                        _ => {}
+                    }
+                }
+                for c in children {
+                    if let tish_ast::JsxChild::Expr(e) = c {
+                        Self::collect_expr_idents(e, idents);
+                    }
+                }
+            }
+            Expr::JsxFragment { children, .. } => {
+                for c in children {
+                    if let tish_ast::JsxChild::Expr(e) = c {
+                        Self::collect_expr_idents(e, idents);
+                    }
+                }
             }
             Expr::Literal { .. } => {}
         }

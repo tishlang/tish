@@ -1,0 +1,41 @@
+// Compile with: tish compile --target js src/App.tish -o dist/App
+// Stateful form with useState and hooks - vanilla DOM, no 3rd party libs
+
+import { useState, createRoot } from './hooks.tish'
+
+fn TextInput(label, name) {
+  return <div class="field">
+    <label>{label}</label>
+    <input type="text" name={name} class="input" />
+  </div>
+}
+
+fn App() {
+  let [submittedData, setSubmittedData] = useState(null)
+
+  fn handleSubmit(e) {
+    e.preventDefault()
+    let form = e.target
+    setSubmittedData({ name: form.name.value, email: form.email.value })
+  }
+
+  if (submittedData) {
+    return <div class="p-4 rounded border">
+      <h1>{"Thanks for submitting!"}</h1>
+      <p>{"Name: " + submittedData.name}</p>
+      <p>{"Email: " + submittedData.email}</p>
+      <button onclick={() => setSubmittedData(null)} class="btn">{"Submit again"}</button>
+    </div>
+  }
+
+  return <div class="p-4 rounded border">
+    <h1>{"Sign up"}</h1>
+    <form onsubmit={handleSubmit}>
+      {TextInput("Name", "name")}
+      {TextInput("Email", "email")}
+      <button type="submit" class="btn">{"Submit"}</button>
+    </form>
+  </div>
+}
+
+createRoot(document.getElementById("root")).render(App)

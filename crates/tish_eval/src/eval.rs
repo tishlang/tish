@@ -1446,6 +1446,9 @@ impl Evaluator {
                 }
             }
             Expr::Await { operand, .. } => self.eval_await(operand),
+            Expr::JsxElement { .. } | Expr::JsxFragment { .. } => Err(EvalError::Error(
+                "JSX is not supported in the interpreter. Use 'tish compile --target js' to compile to JavaScript.".to_string(),
+            )),
             Expr::TypeOf { operand, .. } => {
                 let v = self.eval_expr(operand)?;
                 Ok(Value::String(match &v {

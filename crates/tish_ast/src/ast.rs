@@ -313,6 +313,50 @@ pub enum Expr {
         operand: Box<Expr>,
         span: Span,
     },
+    /// JSX element: <Tag props>children</Tag>
+    JsxElement {
+        tag: Arc<str>,
+        props: Vec<JsxProp>,
+        children: Vec<JsxChild>,
+        span: Span,
+    },
+    /// JSX fragment: <>children</>
+    JsxFragment {
+        children: Vec<JsxChild>,
+        span: Span,
+    },
+}
+
+/// JSX attribute/prop
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsxProp {
+    /// name="value" or name={expr} or name (boolean shorthand)
+    Attr {
+        name: Arc<str>,
+        value: JsxAttrValue,
+    },
+    /// {...expr}
+    Spread(Expr),
+}
+
+/// JSX attribute value
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsxAttrValue {
+    /// "literal string"
+    String(Arc<str>),
+    /// {expr}
+    Expr(Expr),
+    /// name without value (e.g. disabled) = true
+    ImplicitTrue,
+}
+
+/// JSX child node
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsxChild {
+    /// Text content
+    Text(Arc<str>),
+    /// {expr} or nested element
+    Expr(Expr),
 }
 
 impl Expr {
@@ -343,6 +387,8 @@ impl Expr {
             Expr::ArrowFunction { span, .. } => *span,
             Expr::TemplateLiteral { span, .. } => *span,
             Expr::Await { span, .. } => *span,
+            Expr::JsxElement { span, .. } => *span,
+            Expr::JsxFragment { span, .. } => *span,
         }
     }
 }
