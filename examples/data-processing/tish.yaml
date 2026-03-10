@@ -1,0 +1,4 @@
+name: data-processing
+
+deploy:
+  replicas: 1

@@ -642,15 +642,6 @@ impl Codegen {
         }
     }
 
-    /// Generate code for a numeric comparison that returns Bool.
-    fn emit_numeric_cmp(l: &str, r: &str, op: &str) -> String {
-        format!(
-            "Value::Bool({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
-             let Value::Number(b) = &({}) else {{ panic!() }}; *a {} *b }})",
-            l, r, op
-        )
-    }
-
     /// Generate code for a bitwise binary operation.
     fn emit_bitwise_binop(l: &str, r: &str, op: &str) -> String {
         format!(
@@ -1759,6 +1750,14 @@ impl Codegen {
                                 obj_expr, target_len, pad
                             ));
                         }
+                        // Number methods
+                        "toFixed" => {
+                            let digits = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            return Ok(format!(
+                                "tish_runtime::number_to_fixed(&{}, &{})",
+                                obj_expr, digits
+                            ));
+                        }
                         // Higher-order array methods
                         "map" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
@@ -2697,10 +2696,10 @@ impl Codegen {
             ),
             BinOp::StrictEq => format!("Value::Bool({}.strict_eq(&{}))", l, r),
             BinOp::StrictNe => format!("Value::Bool(!{}.strict_eq(&{}))", l, r),
-            BinOp::Lt => Self::emit_numeric_cmp(l, r, "<"),
-            BinOp::Le => Self::emit_numeric_cmp(l, r, "<="),
-            BinOp::Gt => Self::emit_numeric_cmp(l, r, ">"),
-            BinOp::Ge => Self::emit_numeric_cmp(l, r, ">="),
+            BinOp::Lt => format!("tish_runtime::ops::lt(&{}, &{})", l, r),
+            BinOp::Le => format!("tish_runtime::ops::le(&{}, &{})", l, r),
+            BinOp::Gt => format!("tish_runtime::ops::gt(&{}, &{})", l, r),
+            BinOp::Ge => format!("tish_runtime::ops::ge(&{}, &{})", l, r),
             BinOp::And => format!("Value::Bool({}.is_truthy() && {}.is_truthy())", l, r),
             BinOp::Or => format!("Value::Bool({}.is_truthy() || {}.is_truthy())", l, r),
             BinOp::BitAnd => Self::emit_bitwise_binop(l, r, "&"),

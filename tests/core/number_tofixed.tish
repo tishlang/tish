@@ -1,0 +1,23 @@
+// Number.prototype.toFixed(digits) tests
+console.log("=== Number.toFixed tests ===");
+
+// Basic usage
+let n = 3.14159
+console.log(n.toFixed(2) === "3.14")
+console.log(n.toFixed(0) === "3")
+console.log(n.toFixed(5) === "3.14159")
+
+// Integer
+let i = 42
+console.log(i.toFixed(2) === "42.00")
+
+// Zero args (default 0)
+console.log((1.5).toFixed() === "2")
+
+// Zero
+console.log((0).toFixed(2) === "0.00")
+
+// Negative
+console.log((-1.234).toFixed(2) === "-1.23")
+
+console.log("=== All toFixed tests passed ===");

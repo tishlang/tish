@@ -1311,6 +1311,26 @@ impl Evaluator {
                         }
                     }
 
+                    // Number methods
+                    if let Value::Number(n) = &obj {
+                        match method_name.as_ref() {
+                            "toFixed" => {
+                                let digits = arg_vals
+                                    .first()
+                                    .and_then(|v| match v {
+                                        Value::Number(d) => Some(*d as i32),
+                                        _ => None,
+                                    })
+                                    .unwrap_or(0)
+                                    .max(0)
+                                    .min(20); // ECMA-262: 0–20
+                                let formatted = format!("{:.*}", digits as usize, n);
+                                return Ok(Value::String(formatted.into()));
+                            }
+                            _ => {}
+                        }
+                    }
+
                     // RegExp methods
                     #[cfg(feature = "regex")]
                     if let Value::RegExp(re) = &obj {
