@@ -11,8 +11,8 @@ macro_rules! binary_single_op {
             while matches!(self.peek_kind(), Some(TokenKind::$token)) {
                 self.advance();
                 let right = self.$next()?;
-                let start = left.span().start;
-                let end = right.span().end;
+                let start = expr_span(&left).start;
+                let end = expr_span(&right).end;
                 left = Expr::Binary {
                     left: Box::new(left),
                     op: $op,
@@ -37,8 +37,8 @@ macro_rules! binary_multi_op {
                 };
                 self.advance();
                 let right = self.$next()?;
-                let start = left.span().start;
-                let end = right.span().end;
+                let start = expr_span(&left).start;
+                let end = expr_span(&right).end;
                 left = Expr::Binary {
                     left: Box::new(left),
                     op,
@@ -1632,9 +1632,14 @@ impl<'a> Parser<'a> {
     }
 }
 
-// Helper to get span from Expr
+// Helper to get span from Expr. Uses trait so ExprSpan is referenced.
 trait ExprSpan {
     fn span(&self) -> Span;
+}
+
+#[inline(always)]
+fn expr_span(e: &impl ExprSpan) -> Span {
+    e.span()
 }
 
 impl ExprSpan for Expr {

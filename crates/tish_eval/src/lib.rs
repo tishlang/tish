@@ -42,7 +42,7 @@ pub fn run_file(path: &std::path::Path, project_root: Option<&std::path::Path>) 
     let source = std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {}: {}", path.display(), e))?;
     let program = tish_parser::parse(&source)?;
     let mut eval = Evaluator::new();
-    eval.set_current_dir(path.parent());
+    eval.set_current_dir(project_root.or(path.parent()));
     let result = eval.eval_program(&program)?;
     #[cfg(feature = "http")]
     eval.run_timer_phase()?;

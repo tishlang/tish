@@ -292,7 +292,6 @@ pub fn detect_cycles(modules: &[ResolvedModule]) -> Result<(), String> {
         let dir = module.path.parent().unwrap_or(Path::new("."));
         let mut stack = vec![idx];
         if has_cycle_from(
-            idx,
             dir,
             &module.program,
             &path_to_idx,
@@ -311,7 +310,6 @@ pub fn detect_cycles(modules: &[ResolvedModule]) -> Result<(), String> {
 }
 
 fn has_cycle_from(
-    from_idx: usize,
     from_dir: &Path,
     program: &Program,
     path_to_idx: &HashMap<PathBuf, usize>,
@@ -336,7 +334,6 @@ fn has_cycle_from(
                     let dep = &modules[dep_idx];
                     let dep_dir = dep.path.parent().unwrap_or(Path::new("."));
                     if has_cycle_from(
-                        dep_idx,
                         dep_dir,
                         &dep.program,
                         path_to_idx,
@@ -422,7 +419,8 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
                                 }
                                 ImportSpecifier::Default(bind) => {
                                     return Err(format!(
-                                        "Default import not supported for native module '{}'. Use named import, e.g. import {{ egui }} from '{}'",
+                                        "Default import '{}' not supported for native module '{}'. Use named import, e.g. import {{ egui }} from '{}'",
+                                        bind.as_ref(),
                                         from.as_ref(),
                                         from.as_ref()
                                     ));
@@ -505,7 +503,7 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
                 }
                 Statement::Export { declaration, .. } => {
                     match declaration.as_ref() {
-                        ExportDeclaration::Named(s) => statements.push((*s.clone())),
+                        ExportDeclaration::Named(s) => statements.push(*s.clone()),
                         ExportDeclaration::Default(e) => {
                             let default_name = format!("__default_{}", idx);
                             statements.push(Statement::VarDecl {

@@ -463,10 +463,6 @@ struct Codegen {
 }
 
 impl Codegen {
-    fn new(project_root: Option<&Path>, features: &[String]) -> Self {
-        Self::new_with_native_modules(project_root, features, std::collections::HashMap::new())
-    }
-
     fn new_with_native_modules(
         project_root: Option<&Path>,
         features: &[String],
@@ -613,15 +609,6 @@ impl Codegen {
         }
         
         true
-    }
-
-    /// Generate code for a numeric binary operation that returns Number.
-    fn emit_numeric_binop(l: &str, r: &str, op: &str) -> String {
-        format!(
-            "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
-             let Value::Number(b) = &({}) else {{ panic!() }}; a {} b }})",
-            l, r, op
-        )
     }
 
     /// Generate code for increment/decrement operations.
