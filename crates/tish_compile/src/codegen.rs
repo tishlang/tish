@@ -2698,11 +2698,11 @@ impl Codegen {
         span: Span,
     ) -> Result<String, CompileError> {
         Ok(match op {
-            BinOp::Add => format!("tish_runtime::ops::add(&{}, &{})?", l, r),
-            BinOp::Sub => format!("tish_runtime::ops::sub(&{}, &{})?", l, r),
-            BinOp::Mul => format!("tish_runtime::ops::mul(&{}, &{})?", l, r),
-            BinOp::Div => format!("tish_runtime::ops::div(&{}, &{})?", l, r),
-            BinOp::Mod => format!("tish_runtime::ops::modulo(&{}, &{})?", l, r),
+            BinOp::Add => format!("tish_runtime::ops::add(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Sub => format!("tish_runtime::ops::sub(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Mul => format!("tish_runtime::ops::mul(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Div => format!("tish_runtime::ops::div(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Mod => format!("tish_runtime::ops::modulo(&{}, &{}).unwrap_or(Value::Null)", l, r),
             BinOp::Pow => format!(
                 "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
                  let Value::Number(b) = &({}) else {{ panic!() }}; a.powf(*b) }})",
