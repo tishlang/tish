@@ -1,0 +1,14 @@
+[package]
+name = "tish_vm"
+version = "0.1.0"
+edition = "2021"
+description = "Bytecode VM for Tish"
+
+[features]
+default = []
+regex = ["tish_core/regex"]
+
+[dependencies]
+tish_bytecode = { path = "../tish_bytecode" }
+tish_core = { path = "../tish_core" }
+rand = "0.8"

@@ -1,0 +1,13 @@
+[package]
+name = "tish_cranelift_runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Runtime for Cranelift-compiled Tish bytecode"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+tish_bytecode = { path = "../tish_bytecode" }
+tish_vm = { path = "../tish_vm" }
+tish_core = { path = "../tish_core" }

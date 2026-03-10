@@ -274,7 +274,7 @@ fn test_mvp_programs_interpreter_vs_native() {
             let path_str = path.to_string_lossy();
 
             let interp_out = Command::new(&bin)
-                .args(["run", &path_str])
+                .args(["run", &path_str, "--backend", "interp"])
                 .current_dir(workspace_root())
                 .output()
                 .expect("run tish interpreter");
@@ -390,7 +390,7 @@ fn test_mvp_programs_interpreter_vs_js() {
 
         // Run interpreter
         let interp_out = Command::new(&bin)
-            .args(["run", path_str.as_ref()])
+            .args(["run", path_str.as_ref(), "--backend", "interp"])
             .current_dir(workspace_root())
             .output()
             .expect("run tish interpreter");

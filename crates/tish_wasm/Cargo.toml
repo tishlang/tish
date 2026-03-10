@@ -1,0 +1,11 @@
+[package]
+name = "tish_wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WASM backend for Tish (bytecode -> WebAssembly)"
+
+[dependencies]
+tish_ast = { path = "../tish_ast" }
+tish_bytecode = { path = "../tish_bytecode" }
+tish_compile = { path = "../tish_compile" }
+# Future: wasm-encoder or walrus for WASM emission

@@ -3,7 +3,6 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
-use std::process::Command;
 
 use clap::{Parser, Subcommand};
 
@@ -21,18 +20,28 @@ enum Commands {
     Run {
         #[arg(required = true)]
         file: String,
+        /// Backend: vm (default) or interp (tree-walk interpreter)
+        #[arg(long, default_value = "vm")]
+        backend: String,
     },
     /// Interactive REPL
-    Repl,
+    Repl {
+        /// Backend: vm (default) or interp (tree-walk interpreter)
+        #[arg(long, default_value = "vm")]
+        backend: String,
+    },
     /// Compile to native binary or JavaScript
     Compile {
         #[arg(required = true)]
         file: String,
         #[arg(short, long, default_value = "tish_out")]
         output: String,
-        /// Target: native (default) or js
+        /// Target: native (default), js, or wasm
         #[arg(long, default_value = "native")]
         target: String,
+        /// Native backend: rust (default, full Rust ecosystem) or cranelift (faster, no native imports)
+        #[arg(long, default_value = "rust")]
+        native_backend: String,
         /// Enable feature (http, fs, process, regex, polars, egui). For native target only. Can be repeated.
         #[arg(long = "feature", action = clap::ArgAction::Append)]
         features: Vec<String>,
@@ -49,13 +58,13 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Some(Commands::Run { file }) => run_file(&file),
-        Some(Commands::Repl) => run_repl(),
-        Some(Commands::Compile { file, output, target, features }) => {
-            compile_file(&file, &output, &target, &features)
+        Some(Commands::Run { file, backend }) => run_file(&file, &backend),
+        Some(Commands::Repl { backend }) => run_repl(&backend),
+        Some(Commands::Compile { file, output, target, native_backend, features }) => {
+            compile_file(&file, &output, &target, &native_backend, &features)
         }
         Some(Commands::DumpAst { file }) => dump_ast(&file),
-        None => run_repl(), // No args = REPL
+        None => run_repl("vm"), // No args = REPL
     };
 
     if let Err(e) = result {
@@ -64,7 +73,7 @@ fn main() {
     }
 }
 
-fn run_file(path: &str) -> Result<(), String> {
+fn run_file(path: &str, backend: &str) -> Result<(), String> {
     let path = Path::new(path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", path, e))?;
     let project_root = path.parent().and_then(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
@@ -73,18 +82,64 @@ fn run_file(path: &str) -> Result<(), String> {
             Some(p)
         }
     });
-    let value = tish_eval::run_file(&path, project_root)?;
-    if !matches!(value, tish_eval::Value::Null) {
-        println!("{}", value);
+
+    if backend == "interp" {
+        let value = tish_eval::run_file(&path, project_root)?;
+        if !matches!(value, tish_eval::Value::Null) {
+            println!("{}", value);
+        }
+        return Ok(());
+    }
+
+    // VM backend: resolve, merge, compile, run
+    let modules = tish_compile::resolve_project(&path, project_root)?;
+    tish_compile::detect_cycles(&modules)?;
+    let program = tish_compile::merge_modules(modules)?;
+    let chunk = tish_bytecode::compile(&program).map_err(|e| e.to_string())?;
+    let value = tish_vm::run(&chunk)?;
+    if !matches!(value, tish_core::Value::Null) {
+        println!("{}", value.to_display_string());
     }
     Ok(())
 }
 
-fn run_repl() -> Result<(), String> {
+fn run_repl(backend: &str) -> Result<(), String> {
     println!("Tish REPL (Ctrl-D to exit)");
     let mut buffer = String::new();
-    let mut eval = tish_eval::Evaluator::new();
 
+    if backend == "interp" {
+        let mut eval = tish_eval::Evaluator::new();
+        loop {
+            print!("> ");
+            io::stdout().flush().map_err(|e| e.to_string())?;
+            buffer.clear();
+            if io::stdin().read_line(&mut buffer).map_err(|e| e.to_string())? == 0 {
+                break;
+            }
+            let line = buffer.trim_end();
+            if line.is_empty() {
+                continue;
+            }
+            match tish_parser::parse(line) {
+                Ok(program) => {
+                    for stmt in &program.statements {
+                        if let Ok(v) = eval.eval_program(&tish_ast::Program {
+                            statements: vec![stmt.clone()],
+                        }) {
+                            if !matches!(v, tish_eval::Value::Null) {
+                                println!("{}", v);
+                            }
+                        }
+                    }
+                }
+                Err(e) => eprintln!("Parse error: {}", e),
+            }
+        }
+        return Ok(());
+    }
+
+    // VM backend
+    let mut vm = tish_vm::Vm::new();
     loop {
         print!("> ");
         io::stdout().flush().map_err(|e| e.to_string())?;
@@ -99,12 +154,18 @@ fn run_repl() -> Result<(), String> {
         match tish_parser::parse(line) {
             Ok(program) => {
                 for stmt in &program.statements {
-                    if let Ok(v) = eval.eval_program(&tish_ast::Program {
+                    let prog = tish_ast::Program {
                         statements: vec![stmt.clone()],
-                    }) {
-                        if !matches!(v, tish_eval::Value::Null) {
-                            println!("{}", v);
+                    };
+                    match tish_bytecode::compile(&prog) {
+                        Ok(chunk) => {
+                            if let Ok(v) = vm.run(&chunk) {
+                                if !matches!(v, tish_core::Value::Null) {
+                                    println!("{}", v.to_display_string());
+                                }
+                            }
                         }
+                        Err(e) => eprintln!("Compile error: {}", e),
                     }
                 }
             }
@@ -144,6 +205,7 @@ fn compile_to_js(input_path: &Path, output_path: &str) -> Result<(), String> {
 }
 
 /// Find the tish_runtime crate path using multiple strategies
+#[allow(dead_code)]
 fn find_runtime_path() -> Result<String, String> {
     // Strategy 1: CARGO_MANIFEST_DIR (works during cargo run/build)
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
@@ -193,6 +255,7 @@ fn compile_file(
     input_path: &str,
     output_path: &str,
     target: &str,
+    native_backend: &str,
     cli_features: &[String],
 ) -> Result<(), String> {
     let input_path =
@@ -202,9 +265,22 @@ fn compile_file(
         return compile_to_js(&input_path, output_path);
     }
 
-    if target != "native" {
-        return Err(format!("Unknown target: {}. Use 'native' or 'js'.", target));
+    if target == "wasm" {
+        let project_root = input_path.parent().and_then(|p| {
+            if p.file_name().and_then(|n| n.to_str()) == Some("src") {
+                p.parent()
+            } else {
+                Some(p)
+            }
+        });
+        return tish_wasm::compile_to_wasm(&input_path, project_root, Path::new(output_path))
+            .map_err(|e| e.to_string());
     }
+
+    if target != "native" {
+        return Err(format!("Unknown target: {}. Use 'native', 'js', or 'wasm'.", target));
+    }
+    // Use tish_native backend (currently delegates to Rust codegen + cargo)
     let project_root = input_path.parent().map(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
             p.parent().unwrap_or(p)
@@ -226,123 +302,19 @@ fn compile_file(
     } else {
         cli_features.to_vec()
     };
-    let (rust_code, native_modules) = tish_compile::compile_project_full(&input_path, project_root, &features).map_err(|e| {
-        if let Some(ref span) = e.span {
-            format!("{}:{}:{}: {}", input_path.display(), span.start.0, span.start.1, e.message)
-        } else {
-            format!("{}: {}", input_path.display(), e.message)
-        }
-    })?;
-
-    let native_deps: String = native_modules
-        .iter()
-        .map(|m| {
-            let path = m.crate_path.display().to_string().replace('\\', "/");
-            format!("{} = {{ path = {:?} }}\n", m.package_name, path)
-        })
-        .collect();
+    tish_native::compile_to_native(&input_path, project_root, Path::new(output_path), &features, native_backend)
+        .map_err(|e| e.to_string())?;
 
     let out_name = Path::new(output_path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("tish_out");
-    let build_dir = std::env::temp_dir().join(format!("tish_build_{}_{}", out_name, std::process::id()));
-
-    fs::create_dir_all(&build_dir).map_err(|e| format!("Cannot create build dir: {}", e))?;
-    fs::create_dir_all(build_dir.join("src")).map_err(|e| format!("Cannot create src: {}", e))?;
-
-    // Path to tish_runtime: try multiple strategies to locate it
-    let runtime_path = find_runtime_path()
-        .map_err(|e| format!("Cannot resolve tish_runtime path: {}", e))?;
-
-    let runtime_features: Vec<&str> = features
-        .iter()
-        .filter(|f| ["http", "fs", "process", "regex"].contains(&f.as_str()))
-        .map(|s| s.as_str())
-        .collect();
-    let features_str = if runtime_features.is_empty() {
-        String::new()
-    } else {
-        format!(", features = {:?}", runtime_features)
-    };
-
-    let needs_tokio = rust_code.contains("#[tokio::main]");
-    let tokio_dep = if needs_tokio {
-        "\ntokio = { version = \"1\", features = [\"rt-multi-thread\", \"macros\"] }\n"
-    } else {
-        ""
-    };
-
-    let cargo_toml = format!(
-        r#"[package]
-name = "tish_output"
-version = "0.1.0"
-edition = "2021"
-
-[[bin]]
-name = "{}"
-path = "src/main.rs"
-
-[dependencies]
-tish_runtime = {{ path = {:?}{} }}{}{}
-"#,
-        out_name, runtime_path, features_str, tokio_dep,
-        if native_deps.is_empty() { String::new() } else { format!("\n{}", native_deps) }
-    );
-
-    fs::write(build_dir.join("Cargo.toml"), cargo_toml)
-        .map_err(|e| format!("Cannot write Cargo.toml: {}", e))?;
-    fs::write(build_dir.join("src/main.rs"), rust_code)
-        .map_err(|e| format!("Cannot write main.rs: {}", e))?;
-
-    // Use workspace target dir when possible for cache reuse (avoids slow "Updating crates.io index")
-    let workspace_target = Path::new(&runtime_path)
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|ws| ws.join("target"));
-    let (target_dir, binary_dir) = if let Some(ref wt) = workspace_target.filter(|p| p.exists()) {
-        (wt.clone(), wt.join("release"))
-    } else {
-        let td = build_dir.join("target");
-        (td.clone(), td.join("release"))
-    };
-
-    let status = Command::new("cargo")
-        .args(["build", "--release", "--target-dir"])
-        .arg(&target_dir)
-        .current_dir(&build_dir)
-        .env_remove("CARGO_TARGET_DIR")
-        .env("CARGO_TERM_PROGRESS", "always") // Ensure progress is streamed (avoids "stuck" appearance)
-        .status()
-        .map_err(|e| format!("Failed to run cargo: {}", e))?;
-
-    if !status.success() {
-        return Err("Compilation failed".to_string());
-    }
-
-    let binary_no_ext = binary_dir.join(out_name);
-    let binary_exe = binary_dir.join(format!("{}.exe", out_name));
-    let binary = if binary_no_ext.exists() {
-        binary_no_ext
-    } else if binary_exe.exists() {
-        binary_exe
-    } else {
-        return Err(format!(
-            "Binary not found at {} or {}",
-            binary_no_ext.display(),
-            binary_exe.display()
-        ));
-    };
-    let target = if output_path.ends_with('/') || Path::new(output_path).is_dir() {
+    let built_path = if output_path.ends_with('/') || Path::new(output_path).is_dir() {
         Path::new(output_path).join(out_name)
     } else {
         Path::new(output_path).to_path_buf()
     };
-
-    fs::copy(&binary, &target)
-        .map_err(|e| format!("Cannot copy {} to {}: {}", binary.display(), target.display(), e))?;
-
-    println!("Built: {}", target.display());
+    println!("Built: {}", built_path.display());
     Ok(())
 }
 

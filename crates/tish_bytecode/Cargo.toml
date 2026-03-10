@@ -1,0 +1,9 @@
+[package]
+name = "tish_bytecode"
+version = "0.1.0"
+edition = "2021"
+description = "Bytecode compiler for Tish (AST → bytecode)"
+
+[dependencies]
+tish_ast = { path = "../tish_ast" }
+tish_core = { path = "../tish_core" }

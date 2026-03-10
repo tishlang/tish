@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "crates/tish_cranelift",
+    "crates/tish_cranelift_runtime",
     "crates/tish_core",
     "crates/tish_builtins",
     "crates/tish_bind",
@@ -10,6 +12,10 @@ members = [
     "crates/tish_runtime",
     "crates/tish_compile",
     "crates/tish_compile_js",
+    "crates/tish_bytecode",
+    "crates/tish_vm",
+    "crates/tish_native",
+    "crates/tish_wasm",
     "crates/tish",
 ]
 resolver = "2"

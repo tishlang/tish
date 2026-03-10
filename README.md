@@ -44,6 +44,18 @@ Best for: distribution, performance, deploying without Tish installed.
 
 The compiled binary is **fully standalone** — no Tish or Rust runtime needed to run it.
 
+### Native backend options
+
+| Backend | Flag | Use when |
+|---------|------|----------|
+| **rust** | `--native-backend rust` (default) | Full Rust ecosystem; supports native imports (`tish:*`, `@scope/pkg`) |
+| **cranelift** | `--native-backend cranelift` | Pure Tish only; faster build, no cargo; errors if native imports present |
+
+```bash
+tish compile hello.tish -o hello                    # default: rust backend
+tish compile hello.tish -o hello --native-backend cranelift   # cranelift (pure Tish only)
+```
+
 ## Installing Tish
 
 ```bash

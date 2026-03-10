@@ -1,0 +1,11 @@
+[package]
+name = "tish_native"
+version = "0.1.0"
+edition = "2021"
+description = "Native code generation backend for Tish (Cranelift / direct compile)"
+
+[dependencies]
+tish_ast = { path = "../tish_ast" }
+tish_bytecode = { path = "../tish_bytecode" }
+tish_compile = { path = "../tish_compile" }
+tish_cranelift = { path = "../tish_cranelift" }
