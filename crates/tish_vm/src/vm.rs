@@ -8,9 +8,36 @@ use std::sync::Arc;
 use tish_bytecode::{Chunk, Constant, Opcode};
 use tish_core::Value;
 
+/// Console output: println! on native, web_sys::console on wasm
+#[cfg(not(feature = "wasm"))]
+fn vm_log(s: &str) {
+    println!("{}", s);
+}
+#[cfg(not(feature = "wasm"))]
+fn vm_log_err(s: &str) {
+    eprintln!("{}", s);
+}
+#[cfg(feature = "wasm")]
+fn vm_log(s: &str) {
+    #[wasm_bindgen::prelude::wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = console)]
+        fn log(s: &str);
+    }
+    log(s);
+}
+#[cfg(feature = "wasm")]
+fn vm_log_err(s: &str) {
+    #[wasm_bindgen::prelude::wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = console)]
+        fn error(s: &str);
+    }
+    error(s);
+}
+
 /// Initialize default globals (console, Math, JSON, etc.)
 fn init_globals() -> HashMap<Arc<str>, Value> {
-    use tish_core::Value::*;
     let mut g = HashMap::new();
 
     let mut console = HashMap::new();
@@ -18,7 +45,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
         "log".into(),
         Value::Function(Rc::new(|args: &[Value]| {
             let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            println!("{}", s.join(" "));
+            vm_log(&s.join(" "));
             Value::Null
         })),
     );
@@ -26,7 +53,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
         "info".into(),
         Value::Function(Rc::new(|args: &[Value]| {
             let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            println!("{}", s.join(" "));
+            vm_log(&s.join(" "));
             Value::Null
         })),
     );
@@ -34,7 +61,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
         "warn".into(),
         Value::Function(Rc::new(|args: &[Value]| {
             let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            eprintln!("{}", s.join(" "));
+            vm_log_err(&s.join(" "));
             Value::Null
         })),
     );
@@ -42,7 +69,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
         "error".into(),
         Value::Function(Rc::new(|args: &[Value]| {
             let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            eprintln!("{}", s.join(" "));
+            vm_log_err(&s.join(" "));
             Value::Null
         })),
     );

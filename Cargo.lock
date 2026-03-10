@@ -1854,18 +1854,29 @@ dependencies = [
 name = "tish_vm"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.17",
  "rand 0.8.5",
  "tish_bytecode",
  "tish_core",
+ "wasm-bindgen",
 ]
 
 [[package]]
 name = "tish_wasm"
 version = "0.1.0"
 dependencies = [
- "tish_ast",
+ "base64",
  "tish_bytecode",
  "tish_compile",
+]
+
+[[package]]
+name = "tish_wasm_runtime"
+version = "0.1.0"
+dependencies = [
+ "tish_bytecode",
+ "tish_vm",
+ "wasm-bindgen",
 ]
 
 [[package]]

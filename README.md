@@ -56,6 +56,21 @@ tish compile hello.tish -o hello                    # default: rust backend
 tish compile hello.tish -o hello --native-backend cranelift   # cranelift (pure Tish only)
 ```
 
+### WebAssembly (browser)
+
+Compile to real `.wasm` for the browser:
+
+```bash
+tish compile hello.tish -o app --target wasm
+# Produces: app_bg.wasm, app.js, app.html
+```
+
+**Requirements**: `rustup target add wasm32-unknown-unknown`, `cargo install wasm-bindgen-cli`
+
+Open `app.html` via a local server (CORS): `python3 -m http.server` then visit the URL.
+
+For JavaScript transpilation (no WASM), use `--target js` instead.
+
 ## Installing Tish
 
 ```bash

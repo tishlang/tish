@@ -2,6 +2,7 @@
 members = [
     "crates/tish_cranelift",
     "crates/tish_cranelift_runtime",
+    "crates/tish_wasm_runtime",
     "crates/tish_core",
     "crates/tish_builtins",
     "crates/tish_bind",
