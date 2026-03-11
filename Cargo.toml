@@ -18,6 +18,7 @@ members = [
     "crates/tish_native",
     "crates/tish_wasm",
     "crates/tish",
+    "crates/js_to_tish",
 ]
 resolver = "2"
 

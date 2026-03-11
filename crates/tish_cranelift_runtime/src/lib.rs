@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use tish_bytecode::{Chunk, Constant};
+use tish_bytecode::{Chunk, Constant, NO_REST_PARAM};
 use tish_vm::Vm;
 
 /// Serialization format:
@@ -122,5 +122,6 @@ fn deserialize_chunk(mut data: &[u8]) -> Result<Chunk, String> {
         constants,
         names,
         nested: vec![], // Nested chunks not yet supported in serialization
+        rest_param_index: NO_REST_PARAM,
     })
 }

@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tish_bytecode::{Chunk, Constant, Opcode};
+use tish_builtins::array as arr_builtins;
+use tish_bytecode::{Chunk, Constant, Opcode, NO_REST_PARAM};
 use tish_core::Value;
 
 /// Console output: println! on native, web_sys::console on wasm
@@ -114,6 +115,20 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     math.insert(
         "random".into(),
         Value::Function(Rc::new(|_| Value::Number(rand::random::<f64>()))),
+    );
+    math.insert(
+        "min".into(),
+        Value::Function(Rc::new(|args: &[Value]| {
+            let nums: Vec<f64> = args.iter().filter_map(|v| v.as_number()).collect();
+            Value::Number(nums.into_iter().fold(f64::NAN, |a, b| a.min(b)))
+        })),
+    );
+    math.insert(
+        "max".into(),
+        Value::Function(Rc::new(|args: &[Value]| {
+            let nums: Vec<f64> = args.iter().filter_map(|v| v.as_number()).collect();
+            Value::Number(nums.into_iter().fold(f64::NAN, |a, b| a.max(b)))
+        })),
     );
     math.insert("PI".into(), Value::Number(std::f64::consts::PI));
     math.insert("E".into(), Value::Number(std::f64::consts::E));
@@ -232,9 +247,26 @@ impl Vm {
 
         let mut ip = 0;
         let mut local_scope = HashMap::new();
-        for (i, name) in chunk.names.iter().take(args.len()).enumerate() {
-            if let Some(v) = args.get(i) {
-                local_scope.insert(Arc::clone(name), v.clone());
+        let mut try_handlers: Vec<(usize, usize)> = vec![];
+        if chunk.rest_param_index != NO_REST_PARAM {
+            let ri = chunk.rest_param_index as usize;
+            for (i, name) in chunk.names.iter().enumerate() {
+                if i < ri {
+                    let v = args.get(i).cloned().unwrap_or(Value::Null);
+                    local_scope.insert(Arc::clone(name), v);
+                } else if i == ri {
+                    let rest_arr: Vec<Value> = args.iter().skip(ri).cloned().collect();
+                    local_scope.insert(
+                        Arc::clone(name),
+                        Value::Array(Rc::new(RefCell::new(rest_arr))),
+                    );
+                }
+            }
+        } else {
+            for (i, name) in chunk.names.iter().enumerate() {
+                if let Some(v) = args.get(i) {
+                    local_scope.insert(Arc::clone(name), v.clone());
+                }
             }
         }
 
@@ -374,6 +406,37 @@ impl Vm {
                         }
                     }
                 }
+                Opcode::CallSpread => {
+                    let args_array = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow in CallSpread".to_string())?;
+                    let callee = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow: no callee in CallSpread".to_string())?;
+                    let args: Vec<Value> = match &args_array {
+                        Value::Array(a) => a.borrow().clone(),
+                        _ => {
+                            return Err(format!(
+                                "CallSpread: args must be array, got {}",
+                                args_array.to_display_string()
+                            ));
+                        }
+                    };
+                    match &callee {
+                        Value::Function(f) => {
+                            let result = f(&args);
+                            self.stack.push(result);
+                        }
+                        _ => {
+                            return Err(format!(
+                                "Call of non-function: {}",
+                                type_name(&callee)
+                            ));
+                        }
+                    }
+                }
                 Opcode::Return => {
                     let v = self.stack.pop().unwrap_or(Value::Null);
                     return Ok(v);
@@ -397,8 +460,7 @@ impl Vm {
                     ip = ip.saturating_sub(dist);
                 }
                 Opcode::BinOp => {
-                    let op = code[ip];
-                    ip += 1;
+                    let op = Self::read_u16(code, &mut ip) as u8;
                     let r = self
                         .stack
                         .pop()
@@ -411,8 +473,7 @@ impl Vm {
                     self.stack.push(result);
                 }
                 Opcode::UnaryOp => {
-                    let op = code[ip];
-                    ip += 1;
+                    let op = Self::read_u16(code, &mut ip) as u8;
                     let o = self
                         .stack
                         .pop()
@@ -506,6 +567,89 @@ impl Vm {
                     self.stack
                         .push(Value::Object(Rc::new(RefCell::new(map))));
                 }
+                Opcode::EnterTry => {
+                    let offset = Self::read_u16(code, &mut ip) as usize;
+                    let catch_ip = ip + offset;
+                    try_handlers.push((catch_ip, self.stack.len()));
+                }
+                Opcode::ExitTry => {
+                    try_handlers.pop();
+                }
+                Opcode::ConcatArray => {
+                    let right = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let left = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let (mut a, b) = (
+                        match &left {
+                            Value::Array(arr) => arr.borrow().clone(),
+                            _ => {
+                                return Err(format!(
+                                    "ConcatArray: left must be array, got {}",
+                                    left.to_display_string()
+                                ));
+                            }
+                        },
+                        match &right {
+                            Value::Array(arr) => arr.borrow().clone(),
+                            _ => {
+                                return Err(format!(
+                                    "ConcatArray: right must be array, got {}",
+                                    right.to_display_string()
+                                ));
+                            }
+                        },
+                    );
+                    a.extend(b);
+                    self.stack.push(Value::Array(Rc::new(RefCell::new(a))));
+                }
+                Opcode::MergeObject => {
+                    let right = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let left = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let mut merged: HashMap<Arc<str>, Value> = HashMap::new();
+                    if let Value::Object(l) = &left {
+                        merged.extend(l.borrow().iter().map(|(k, v)| (Arc::clone(k), v.clone())));
+                    } else {
+                        return Err(format!(
+                            "MergeObject: left must be object, got {}",
+                            left.to_display_string()
+                        ));
+                    }
+                    if let Value::Object(r) = &right {
+                        for (k, v) in r.borrow().iter() {
+                            merged.insert(Arc::clone(k), v.clone());
+                        }
+                    } else {
+                        return Err(format!(
+                            "MergeObject: right must be object, got {}",
+                            right.to_display_string()
+                        ));
+                    }
+                    self.stack
+                        .push(Value::Object(Rc::new(RefCell::new(merged))));
+                }
+                Opcode::Throw => {
+                    let v = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let (catch_ip, stack_len) = try_handlers
+                        .pop()
+                        .ok_or_else(|| format!("Uncaught throw: {}", v.to_display_string()))?;
+                    self.stack.truncate(stack_len);
+                    self.stack.push(v);
+                    ip = catch_ip;
+                }
                 Opcode::Closure | Opcode::PopN | Opcode::LoadThis => {
                     return Err(format!("Unhandled opcode: {:?}", opcode));
                 }
@@ -574,9 +718,97 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             })
         }
         Value::Array(a) => {
-            let arr = a.borrow();
-            let idx: usize = key.as_ref().parse().unwrap_or(0);
-            arr.get(idx).cloned().ok_or_else(|| "Index out of bounds".to_string())
+            let key_s = key.as_ref();
+            if let Ok(idx) = key_s.parse::<usize>() {
+                let arr = a.borrow();
+                return arr.get(idx).cloned().ok_or_else(|| "Index out of bounds".to_string());
+            }
+            if key_s == "length" {
+                return Ok(Value::Number(a.borrow().len() as f64));
+            }
+            let a_clone = Rc::clone(a);
+            let method: Rc<dyn Fn(&[Value]) -> Value> = match key_s {
+                "push" => Rc::new(move |args: &[Value]| arr_builtins::push(&Value::Array(Rc::clone(&a_clone)), args)),
+                "pop" => Rc::new(move |_args: &[Value]| arr_builtins::pop(&Value::Array(Rc::clone(&a_clone)))),
+                "shift" => Rc::new(move |_args: &[Value]| arr_builtins::shift(&Value::Array(Rc::clone(&a_clone)))),
+                "unshift" => Rc::new(move |args: &[Value]| arr_builtins::unshift(&Value::Array(Rc::clone(&a_clone)), args)),
+                "reverse" => Rc::new(move |_args: &[Value]| arr_builtins::reverse(&Value::Array(Rc::clone(&a_clone)))),
+                "slice" => Rc::new(move |args: &[Value]| {
+                    let start = args.get(0).unwrap_or(&Value::Null);
+                    let end = args.get(1).unwrap_or(&Value::Null);
+                    arr_builtins::slice(&Value::Array(Rc::clone(&a_clone)), start, end)
+                }),
+                "concat" => Rc::new(move |args: &[Value]| arr_builtins::concat(&Value::Array(Rc::clone(&a_clone)), args)),
+                "join" => Rc::new(move |args: &[Value]| {
+                    let sep = args.get(0).unwrap_or(&Value::Null);
+                    arr_builtins::join(&Value::Array(Rc::clone(&a_clone)), sep)
+                }),
+                "indexOf" => Rc::new(move |args: &[Value]| {
+                    let search = args.get(0).unwrap_or(&Value::Null);
+                    arr_builtins::index_of(&Value::Array(Rc::clone(&a_clone)), search)
+                }),
+                "includes" => Rc::new(move |args: &[Value]| {
+                    let search = args.get(0).unwrap_or(&Value::Null);
+                    arr_builtins::includes(&Value::Array(Rc::clone(&a_clone)), search)
+                }),
+                "map" => Rc::new(move |args: &[Value]| {
+                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    arr_builtins::map(&Value::Array(Rc::clone(&a_clone)), &cb)
+                }),
+                "filter" => Rc::new(move |args: &[Value]| {
+                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    arr_builtins::filter(&Value::Array(Rc::clone(&a_clone)), &cb)
+                }),
+                "reduce" => Rc::new(move |args: &[Value]| {
+                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let init = args.get(1).cloned().unwrap_or(Value::Null);
+                    arr_builtins::reduce(&Value::Array(Rc::clone(&a_clone)), &cb, &init)
+                }),
+                "forEach" => Rc::new(move |args: &[Value]| {
+                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    arr_builtins::for_each(&Value::Array(Rc::clone(&a_clone)), &cb)
+                }),
+                "find" => Rc::new(move |args: &[Value]| {
+                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    arr_builtins::find(&Value::Array(Rc::clone(&a_clone)), &cb)
+                }),
+                "findIndex" => Rc::new(move |args: &[Value]| {
+                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    arr_builtins::find_index(&Value::Array(Rc::clone(&a_clone)), &cb)
+                }),
+                "some" => Rc::new(move |args: &[Value]| {
+                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    arr_builtins::some(&Value::Array(Rc::clone(&a_clone)), &cb)
+                }),
+                "every" => Rc::new(move |args: &[Value]| {
+                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    arr_builtins::every(&Value::Array(Rc::clone(&a_clone)), &cb)
+                }),
+                "flat" => Rc::new(move |args: &[Value]| {
+                    let depth = args.get(0).unwrap_or(&Value::Number(1.0));
+                    arr_builtins::flat(&Value::Array(Rc::clone(&a_clone)), depth)
+                }),
+                "flatMap" => Rc::new(move |args: &[Value]| {
+                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    arr_builtins::flat_map(&Value::Array(Rc::clone(&a_clone)), &cb)
+                }),
+                "sort" => Rc::new(move |args: &[Value]| {
+                    let cmp = args.get(0);
+                    if let Some(Value::Function(_)) = cmp {
+                        arr_builtins::sort_with_comparator(&Value::Array(Rc::clone(&a_clone)), cmp.unwrap())
+                    } else {
+                        arr_builtins::sort_default(&Value::Array(Rc::clone(&a_clone)))
+                    }
+                }),
+                "splice" => Rc::new(move |args: &[Value]| {
+                    let start = args.get(0).unwrap_or(&Value::Null);
+                    let delete_count = args.get(1).map(|v| v as &Value);
+                    let items: Vec<Value> = args.get(2..).unwrap_or(&[]).to_vec();
+                    arr_builtins::splice(&Value::Array(Rc::clone(&a_clone)), start, delete_count, &items)
+                }),
+                _ => return Err(format!("Property '{}' not found", key)),
+            };
+            Ok(Value::Function(method))
         }
         _ => Err(format!("Cannot read property of {}", type_name(obj))),
     }

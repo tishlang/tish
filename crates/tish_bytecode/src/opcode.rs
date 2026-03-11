@@ -52,6 +52,18 @@ pub enum Opcode {
     PopN = 22,
     /// Load `this` or receiver (for method calls)
     LoadThis = 23,
+    /// Throw: pop value, unwind to catch handler, push value, jump
+    Throw = 24,
+    /// EnterTry: push handler (catch offset u16). Catch offset = bytes from end of this insn.
+    EnterTry = 25,
+    /// ExitTry: pop try handler
+    ExitTry = 26,
+    /// Concat arrays: pop right, pop left, push left.concat(right). For spread.
+    ConcatArray = 27,
+    /// Merge objects: pop right, pop left, push Object.assign({}, left, right). For object spread.
+    MergeObject = 28,
+    /// Call with spread: pop args array, pop callee, call callee(...args).
+    CallSpread = 29,
 }
 
 impl Opcode {
@@ -81,6 +93,12 @@ impl Opcode {
             21 => Some(Opcode::Closure),
             22 => Some(Opcode::PopN),
             23 => Some(Opcode::LoadThis),
+            24 => Some(Opcode::Throw),
+            25 => Some(Opcode::EnterTry),
+            26 => Some(Opcode::ExitTry),
+            27 => Some(Opcode::ConcatArray),
+            28 => Some(Opcode::MergeObject),
+            29 => Some(Opcode::CallSpread),
             _ => None,
         }
     }

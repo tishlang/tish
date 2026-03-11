@@ -46,6 +46,7 @@ pub fn serialize(chunk: &Chunk) -> Vec<u8> {
         out.extend_from_slice(&(nested_bytes.len() as u64).to_le_bytes());
         out.extend_from_slice(&nested_bytes);
     }
+    out.extend_from_slice(&chunk.rest_param_index.to_le_bytes());
     out
 }
 
@@ -136,10 +137,18 @@ pub fn deserialize(mut data: &[u8]) -> Result<Chunk, String> {
         nested.push(deserialize(nested_data)?);
     }
 
+    let rest_param_index = if data.len() >= 2 {
+        let (r_bytes, _) = data.split_at(2);
+        u16::from_le_bytes(r_bytes.try_into().unwrap())
+    } else {
+        super::NO_REST_PARAM
+    };
+
     Ok(Chunk {
         code,
         constants,
         names,
         nested,
+        rest_param_index,
     })
 }

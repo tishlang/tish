@@ -30,6 +30,7 @@ impl Constant {
     }
 }
 
+
 /// A bytecode chunk: instructions and associated data.
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -41,6 +42,8 @@ pub struct Chunk {
     pub names: Vec<Arc<str>>,
     /// Nested chunks (for function bodies)
     pub nested: Vec<Chunk>,
+    /// Index into names for rest param, or NO_REST_PARAM if none.
+    pub rest_param_index: u16,
 }
 
 impl Chunk {
@@ -50,6 +53,7 @@ impl Chunk {
             constants: Vec::new(),
             names: Vec::new(),
             nested: Vec::new(),
+            rest_param_index: super::NO_REST_PARAM,
         }
     }
 
