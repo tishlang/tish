@@ -88,6 +88,8 @@ pub fn compile_to_wasm(
             "--target",
             "wasm32-unknown-unknown",
             "--release",
+            "--features",
+            "browser",
         ])
         .status()
         .map_err(|e| WasmError {
@@ -170,6 +172,161 @@ run(chunk);
         stem,
         html_path.display(),
         html_path.display()
+    );
+    Ok(())
+}
+
+/// Compile a Tish project for Wasmtime/WASI.
+///
+/// Produces a single `{output}.wasm` with embedded bytecode. Run with:
+/// `wasmtime {output}.wasm`
+///
+/// Requires: `rustup target add wasm32-wasip1`
+pub fn compile_to_wasi(
+    entry_path: &Path,
+    project_root: Option<&Path>,
+    output_path: &Path,
+) -> Result<(), WasmError> {
+    let modules = resolve_project(entry_path, project_root).map_err(|e| WasmError {
+        message: e.to_string(),
+    })?;
+    detect_cycles(&modules).map_err(|e| WasmError {
+        message: e.to_string(),
+    })?;
+    let program = merge_modules(modules).map_err(|e| WasmError {
+        message: e.to_string(),
+    })?;
+    let chunk = tish_bytecode::compile(&program).map_err(|e| WasmError {
+        message: e.to_string(),
+    })?;
+
+    let chunk_bytes = serialize(&chunk);
+
+    let stem = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("main");
+    let out_dir = output_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let out_dir_abs = out_dir
+        .canonicalize()
+        .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(out_dir)))
+        .map_err(|e| WasmError {
+            message: format!("Cannot resolve output dir: {}", e),
+        })?;
+
+    std::fs::create_dir_all(&out_dir_abs).map_err(|e| WasmError {
+        message: format!("Cannot create output directory: {}", e),
+    })?;
+
+    let workspace_root = find_workspace_root().ok_or_else(|| WasmError {
+        message: "Cannot find workspace root (run from crate root)".to_string(),
+    })?;
+
+    // Create generated project: wasi_build/{stem}/
+    let build_dir = out_dir_abs.join("wasi_build").join(stem);
+    std::fs::create_dir_all(build_dir.join("src")).map_err(|e| WasmError {
+        message: format!("Cannot create build dir: {}", e),
+    })?;
+
+    // Write chunk.bin
+    std::fs::write(build_dir.join("chunk.bin"), &chunk_bytes).map_err(|e| WasmError {
+        message: format!("Cannot write chunk: {}", e),
+    })?;
+
+    // Cargo.toml - path to tish_wasm_runtime from build_dir
+    let runtime_path = workspace_root
+        .join("crates")
+        .join("tish_wasm_runtime");
+    let runtime_path_str = runtime_path
+        .canonicalize()
+        .unwrap_or(runtime_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let cargo_toml = format!(
+        r#"[package]
+name = "tish_wasi_{stem}"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "tish_wasi_{stem}"
+path = "src/main.rs"
+
+[dependencies]
+tish_wasm_runtime = {{ path = "{runtime_path_str}" }}
+"#,
+        stem = stem,
+        runtime_path_str = runtime_path_str
+    );
+    std::fs::write(build_dir.join("Cargo.toml"), cargo_toml).map_err(|e| WasmError {
+        message: format!("Cannot write Cargo.toml: {}", e),
+    })?;
+
+    // main.rs
+    let main_rs = r#"
+fn main() {
+    let chunk = include_bytes!("../chunk.bin");
+    if let Err(e) = tish_wasm_runtime::run_wasi(chunk) {
+        eprintln!("Runtime error: {}", e);
+        std::process::exit(1);
+    }
+}
+"#;
+    std::fs::write(build_dir.join("src").join("main.rs"), main_rs).map_err(|e| WasmError {
+        message: format!("Cannot write main.rs: {}", e),
+    })?;
+
+    // Build - use explicit target-dir so we know where the artifact is
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let bin_name = format!("tish_wasi_{}", stem);
+    let target_dir = build_dir.join("target");
+    let build_status = Command::new(&cargo)
+        .current_dir(&build_dir)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .args([
+            "build",
+            "--target",
+            "wasm32-wasip1",
+            "--release",
+        ])
+        .status()
+        .map_err(|e| WasmError {
+            message: format!("Failed to run cargo: {}", e),
+        })?;
+
+    if !build_status.success() {
+        return Err(WasmError {
+            message: "Failed to build WASI binary. Run: rustup target add wasm32-wasip1"
+                .to_string(),
+        });
+    }
+
+    let wasm_artifact = target_dir
+        .join("wasm32-wasip1")
+        .join("release")
+        .join(format!("{}.wasm", bin_name));
+
+    if !wasm_artifact.exists() {
+        return Err(WasmError {
+            message: format!("WASI artifact not found: {}", wasm_artifact.display()),
+        });
+    }
+
+    let final_wasm = out_dir_abs.join(format!("{}.wasm", stem));
+    std::fs::copy(&wasm_artifact, &final_wasm).map_err(|e| WasmError {
+        message: format!("Cannot copy wasm: {}", e),
+    })?;
+
+    println!(
+        "Built: {} (run with: wasmtime {})",
+        final_wasm.display(),
+        final_wasm.display()
     );
     Ok(())
 }

@@ -2,12 +2,16 @@
 name = "tish_wasm_runtime"
 version = "0.1.0"
 edition = "2021"
-description = "Tish VM compiled to WebAssembly for browser execution"
+description = "Tish VM compiled to WebAssembly (browser + Wasmtime/WASI)"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# For wasm32-unknown-unknown (browser): wasm-bindgen, console output
+browser = ["dep:wasm-bindgen", "tish_vm/wasm"]
 
 [dependencies]
 tish_bytecode = { path = "../tish_bytecode" }
-tish_vm = { path = "../tish_vm", features = ["wasm"] }
-wasm-bindgen = "0.2"
+tish_vm = { path = "../tish_vm" }
+wasm-bindgen = { version = "0.2", optional = true }

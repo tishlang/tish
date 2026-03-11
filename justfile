@@ -84,6 +84,16 @@ compile INPUT OUTPUT:
 compile-secure INPUT OUTPUT:
     cargo run --release --no-default-features -- compile {{INPUT}} -o {{OUTPUT}}
 
+# Compile to WebAssembly (browser) - produces .wasm, .js, .html
+# Requires: rustup target add wasm32-unknown-unknown, cargo install wasm-bindgen-cli
+compile-wasm INPUT OUTPUT:
+    cargo run --release -- compile {{INPUT}} -o {{OUTPUT}} --target wasm
+
+# Compile to WebAssembly (Wasmtime/WASI) - single .wasm, run with: wasmtime OUTPUT.wasm
+# Requires: rustup target add wasm32-wasip1, wasmtime (curl -sSf https://wasmtime.dev/install.sh | bash)
+compile-wasi INPUT OUTPUT:
+    cargo run --release -- compile {{INPUT}} -o {{OUTPUT}} --target wasi
+
 # Compile with specific features
 # Usage: just compile-with "http fs" hello.tish hello
 compile-with FEATURES INPUT OUTPUT:

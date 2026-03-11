@@ -71,6 +71,18 @@ Open `app.html` via a local server (CORS): `python3 -m http.server` then visit t
 
 For JavaScript transpilation (no WASM), use `--target js` instead.
 
+### WebAssembly (Wasmtime/WASI)
+
+Compile to a single `.wasm` for [Wasmtime](https://wasmtime.dev) or any WASI runtime:
+
+```bash
+tish compile hello.tish -o app --target wasi
+wasmtime app.wasm
+# Hello, World!
+```
+
+**Requirements**: `rustup target add wasm32-wasip1`, [install Wasmtime](https://wasmtime.dev/)
+
 ## Installing Tish
 
 ```bash
@@ -92,6 +104,10 @@ just run run hello.tish
 # Compile to native binary
 just compile hello.tish hello
 ./hello
+
+# Compile to WebAssembly (Wasmtime)
+just compile-wasi hello.tish hello
+wasmtime hello.wasm
 
 # Run in secure mode (no network/fs/process access)
 just run-secure run hello.tish

@@ -36,7 +36,7 @@ enum Commands {
         file: String,
         #[arg(short, long, default_value = "tish_out")]
         output: String,
-        /// Target: native (default), js, or wasm
+        /// Target: native (default), js, wasm, or wasi
         #[arg(long, default_value = "native")]
         target: String,
         /// Native backend: rust (default, full Rust ecosystem) or cranelift (faster, no native imports)
@@ -277,8 +277,23 @@ fn compile_file(
             .map_err(|e| e.to_string());
     }
 
+    if target == "wasi" {
+        let project_root = input_path.parent().and_then(|p| {
+            if p.file_name().and_then(|n| n.to_str()) == Some("src") {
+                p.parent()
+            } else {
+                Some(p)
+            }
+        });
+        return tish_wasm::compile_to_wasi(&input_path, project_root, Path::new(output_path))
+            .map_err(|e| e.to_string());
+    }
+
     if target != "native" {
-        return Err(format!("Unknown target: {}. Use 'native', 'js', or 'wasm'.", target));
+        return Err(format!(
+            "Unknown target: {}. Use 'native', 'js', 'wasm', or 'wasi'.",
+            target
+        ));
     }
     // Use tish_native backend (currently delegates to Rust codegen + cargo)
     let project_root = input_path.parent().map(|p| {
