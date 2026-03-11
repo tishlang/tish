@@ -35,4 +35,36 @@ fn sum(...args: number[]): number {
         let rust = compile(&program).unwrap();
         assert!(rust.contains("match &_v { Value::Number(n) => *n"), "expected typed assign conversion");
     }
+
+    #[test]
+    fn loop_var_decl_clone_outer_var() {
+        let src = r#"
+let outerVar = 42
+for (let i = 0; i < 5; i = i + 1) {
+    let x = outerVar
+}
+"#;
+        let program = parse(src).unwrap();
+        let rust = compile(&program).unwrap();
+        assert!(
+            rust.contains("(outerVar).clone()"),
+            "expected outerVar to be cloned in loop body"
+        );
+    }
+
+    #[test]
+    fn loop_var_decl_clone_via_project_full() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let bench = manifest.join("../../tests/core/benchmark_granular.tish").canonicalize().unwrap();
+        // Use same default features as tish CLI (http, fs, process, regex)
+        let features = ["http", "fs", "process", "regex"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let (rust, _) = compile_project_full(&bench, bench.parent(), &features).unwrap();
+        assert!(
+            rust.contains("(outerVar).clone()"),
+            "expected outerVar to be cloned in benchmark_granular loop"
+        );
+    }
 }

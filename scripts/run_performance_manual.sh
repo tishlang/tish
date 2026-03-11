@@ -65,10 +65,9 @@ run_with_timeout() {
 tish_bin="$target_dir/$profile/tish"
 rel_flag=""
 [[ "$profile" == "release" ]] && rel_flag="--release"
-if [[ ! -x "$tish_bin" ]]; then
-  echo "Building tish ($profile)..."
-  cargo build -p tish $rel_flag --target-dir "$target_dir" -q 2>/dev/null || true
-fi
+# Always build tish so we use latest codegen (cargo skips if unchanged)
+echo "Building tish ($profile)..."
+cargo build -p tish $rel_flag --target-dir "$target_dir" -q 2>/dev/null || true
 if [[ ! -x "$tish_bin" ]]; then
   tish_bin="cargo run -p tish $rel_flag --target-dir $target_dir -q --"
 fi
@@ -193,6 +192,10 @@ for f in "$perf_dir"/*.js; do
   [[ -f "$tish_file" ]] || continue
   count=$((count + 1))
 
+  native_bin="$compile_dir/${base}_native"
+  cranelift_bin="$compile_dir/${base}_cranelift"
+  wasi_bin="$compile_dir/${base}_wasi.wasm"
+
   if ! $summary_only; then
     echo "─────────────────────────────────────────"
     echo "▶ $base"
@@ -202,17 +205,50 @@ for f in "$perf_dir"/*.js; do
     echo "Tish (run):"
     run_with_timeout $tish_bin run "$tish_file" 2>&1 || true
     echo ""
-    echo "Node:"
+
+    echo "Tish (rust):"
+    if [[ -x "$native_bin" ]]; then
+      run_with_timeout "$native_bin" 2>&1 || true
+    else
+      echo "(not built)"
+    fi
+    echo ""
+
+    echo "Tish (cranelift):"
+    if [[ -x "$cranelift_bin" ]]; then
+      run_with_timeout "$cranelift_bin" 2>&1 || true
+    else
+      echo "(not built)"
+    fi
+    echo ""
+
+    echo "Tish (wasi):"
+    if $has_wasmtime && [[ -f "$wasi_bin" ]]; then
+      run_with_timeout wasmtime "$wasi_bin" 2>&1 || true
+    else
+      echo "(not built or wasmtime not found)"
+    fi
+    echo ""
+
+    echo "Node.js:"
     "$node_cmd" "$f" 2>&1 || true
     echo ""
+
     if $has_bun; then
       echo "Bun:"
       "$bun_cmd" "$f" 2>&1 || true
       echo ""
     fi
+
     if $has_deno; then
       echo "Deno:"
       "$deno_cmd" run --allow-all "$f" 2>&1 || true
+      echo ""
+    fi
+
+    if $has_qjs; then
+      echo "QuickJS:"
+      "$qjs_cmd" "$f" 2>&1 || true
       echo ""
     fi
   else
@@ -230,10 +266,6 @@ for f in "$perf_dir"/*.js; do
   bun_times=()
   deno_times=()
   qjs_times=()
-
-  native_bin="$compile_dir/${base}_native"
-  cranelift_bin="$compile_dir/${base}_cranelift"
-  wasi_bin="$compile_dir/${base}_wasi.wasm"
 
   # Warmup runs (discard - warms disk cache and JIT; use timeout to avoid hangs)
   run_with_timeout $tish_bin run "$tish_file" >/dev/null 2>&1 || true
