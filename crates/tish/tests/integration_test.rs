@@ -168,6 +168,37 @@ fn test_async_promise_settimeout_combined() {
     }
 }
 
+/// VM run with Date global (resolve+merge+bytecode+run pipeline).
+#[test]
+fn test_vm_date_now() {
+    let path = workspace_root().join("tests").join("core").join("date.tish");
+    if !path.exists() {
+        return;
+    }
+    // Library path
+    let modules = tish_compile::resolve_project(&path, path.parent()).expect("resolve");
+    tish_compile::detect_cycles(&modules).expect("cycles");
+    let program = tish_compile::merge_modules(modules).expect("merge");
+    let chunk = tish_bytecode::compile(&program).expect("compile");
+    let result = tish_vm::run(&chunk);
+    assert!(result.is_ok(), "VM run (library) failed: {:?}", result.err());
+    // Binary path - same flow as `tish run <file>`
+    let bin = target_dir().join("debug").join("tish");
+    if bin.exists() {
+        let out = Command::new(&bin)
+            .args(["run", path.to_string_lossy().as_ref()])
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish binary");
+        assert!(
+            out.status.success(),
+            "tish run failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 /// Full stack: lex + parse each .tish file and assert no parse error.
 #[test]
 fn test_full_stack_parse() {

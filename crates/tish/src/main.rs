@@ -83,18 +83,24 @@ fn run_file(path: &str, backend: &str) -> Result<(), String> {
         }
     });
 
+    let program = if path.extension().map(|e| e == "js") == Some(true) {
+        let source = fs::read_to_string(&path).map_err(|e| format!("{}", e))?;
+        js_to_tish::convert(&source).map_err(|e| format!("{}", e))?
+    } else {
+        let modules = tish_compile::resolve_project(&path, project_root)?;
+        tish_compile::detect_cycles(&modules)?;
+        tish_compile::merge_modules(modules)?
+    };
+
     if backend == "interp" {
-        let value = tish_eval::run_file(&path, project_root)?;
+        let mut eval = tish_eval::Evaluator::new();
+        let value = eval.eval_program(&program)?;
         if !matches!(value, tish_eval::Value::Null) {
             println!("{}", value);
         }
         return Ok(());
     }
 
-    // VM backend: resolve, merge, compile, run
-    let modules = tish_compile::resolve_project(&path, project_root)?;
-    tish_compile::detect_cycles(&modules)?;
-    let program = tish_compile::merge_modules(modules)?;
     let chunk = tish_bytecode::compile(&program).map_err(|e| e.to_string())?;
     let value = tish_vm::run(&chunk)?;
     if !matches!(value, tish_core::Value::Null) {
@@ -183,8 +189,14 @@ fn compile_to_js(input_path: &Path, output_path: &str) -> Result<(), String> {
             Some(p)
         }
     });
-    let js = tish_compile_js::compile_project(input_path, project_root)
-        .map_err(|e| format!("{}", e))?;
+    let js = if input_path.extension().map(|e| e == "js") == Some(true) {
+        let source = fs::read_to_string(input_path).map_err(|e| format!("{}", e))?;
+        let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
+        tish_compile_js::compile(&program).map_err(|e| format!("{}", e))?
+    } else {
+        tish_compile_js::compile_project(input_path, project_root)
+            .map_err(|e| format!("{}", e))?
+    };
 
     let out_path = Path::new(output_path);
     let out_path = if out_path.extension().is_none()
@@ -261,8 +273,16 @@ fn compile_file(
     let input_path =
         Path::new(input_path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", input_path, e))?;
 
+    let is_js = input_path.extension().map(|e| e == "js") == Some(true);
+
     if target == "js" {
         return compile_to_js(&input_path, output_path);
+    }
+
+    if target == "wasm" && is_js {
+        let source = fs::read_to_string(&input_path).map_err(|e| format!("{}", e))?;
+        let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
+        return tish_wasm::compile_program_to_wasm(&program, Path::new(output_path)).map_err(|e| format!("{}", e));
     }
 
     if target == "wasm" {
@@ -295,7 +315,7 @@ fn compile_file(
             target
         ));
     }
-    // Use tish_native backend (currently delegates to Rust codegen + cargo)
+
     let project_root = input_path.parent().map(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
             p.parent().unwrap_or(p)
@@ -317,8 +337,16 @@ fn compile_file(
     } else {
         cli_features.to_vec()
     };
-    tish_native::compile_to_native(&input_path, project_root, Path::new(output_path), &features, native_backend)
-        .map_err(|e| e.to_string())?;
+
+    if is_js {
+        let source = fs::read_to_string(&input_path).map_err(|e| format!("{}", e))?;
+        let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
+        tish_native::compile_program_to_native(&program, project_root.as_deref(), Path::new(output_path), &features, native_backend)
+            .map_err(|e| e.to_string())?;
+    } else {
+        tish_native::compile_to_native(&input_path, project_root.as_deref(), Path::new(output_path), &features, native_backend)
+            .map_err(|e| e.to_string())?;
+    }
 
     let out_name = Path::new(output_path)
         .file_stem()

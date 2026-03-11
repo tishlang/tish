@@ -2168,6 +2168,7 @@ name = "tish"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "js_to_tish",
  "tish_ast",
  "tish_bytecode",
  "tish_compile",
@@ -2325,6 +2326,7 @@ name = "tish_wasm"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "tish_ast",
  "tish_bytecode",
  "tish_compile",
 ]

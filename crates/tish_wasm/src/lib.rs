@@ -8,7 +8,8 @@ use std::process::Command;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
-use tish_bytecode::serialize;
+use tish_ast::Program;
+use tish_bytecode::{serialize, Chunk};
 use tish_compile::{detect_cycles, merge_modules, resolve_project};
 
 /// Error from WASM compilation.
@@ -24,6 +25,102 @@ impl std::fmt::Display for WasmError {
 }
 
 impl std::error::Error for WasmError {}
+
+/// Compile a single Program (e.g. from js_to_tish) for WebAssembly.
+pub fn compile_program_to_wasm(program: &Program, output_path: &Path) -> Result<(), WasmError> {
+    let chunk = tish_bytecode::compile(program).map_err(|e| WasmError {
+        message: e.to_string(),
+    })?;
+    emit_wasm_from_chunk(&chunk, output_path)
+}
+
+fn emit_wasm_from_chunk(chunk: &Chunk, output_path: &Path) -> Result<(), WasmError> {
+    let chunk_bytes = serialize(chunk);
+    let chunk_b64 = BASE64.encode(&chunk_bytes);
+    let stem = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("main");
+    let out_dir = output_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let out_dir_abs = out_dir
+        .canonicalize()
+        .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(out_dir)))
+        .map_err(|e| WasmError {
+            message: format!("Cannot resolve output dir: {}", e),
+        })?;
+    std::fs::create_dir_all(&out_dir_abs).map_err(|e| WasmError {
+        message: format!("Cannot create output directory: {}", e),
+    })?;
+    let workspace_root = find_workspace_root().ok_or_else(|| WasmError {
+        message: "Cannot find workspace root (run from crate root)".to_string(),
+    })?;
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let build_status = Command::new(&cargo)
+        .current_dir(&workspace_root)
+        .args([
+            "build", "-p", "tish_wasm_runtime",
+            "--target", "wasm32-unknown-unknown",
+            "--release", "--features", "browser",
+        ])
+        .status()
+        .map_err(|e| WasmError { message: format!("Failed to run cargo: {}", e) })?;
+    if !build_status.success() {
+        return Err(WasmError {
+            message: "Failed to build wasm runtime. Run: rustup target add wasm32-unknown-unknown"
+                .to_string(),
+        });
+    }
+    let wasm_artifact = workspace_root
+        .join("target/wasm32-unknown-unknown/release/tish_wasm_runtime.wasm");
+    if !wasm_artifact.exists() {
+        return Err(WasmError {
+            message: format!("Wasm artifact not found: {}", wasm_artifact.display()),
+        });
+    }
+    let wasm_bindgen = std::env::var("WASM_BINDGEN").unwrap_or_else(|_| "wasm-bindgen".to_string());
+    let out_name = stem.to_string();
+    let bindgen_status = Command::new(&wasm_bindgen)
+        .args([
+            "--target", "web",
+            "--out-dir", out_dir_abs.to_str().unwrap(),
+            "--out-name", &out_name,
+            wasm_artifact.to_str().unwrap(),
+        ])
+        .status()
+        .map_err(|e| WasmError {
+            message: format!("Failed to run wasm-bindgen: {}. Install with: cargo install wasm-bindgen-cli", e),
+        })?;
+    if !bindgen_status.success() {
+        return Err(WasmError { message: "wasm-bindgen failed".to_string() });
+    }
+    let js_name = format!("{}.js", stem);
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>{}</title></head>
+<body>
+<script type="module">
+const CHUNK_B64 = "{}";
+const chunk = Uint8Array.from(atob(CHUNK_B64), c => c.charCodeAt(0));
+import init, {{ run }} from './{}';
+await init();
+run(chunk);
+</script>
+</body>
+</html>
+"#,
+        stem, chunk_b64, js_name
+    );
+    let html_path = out_dir_abs.join(format!("{}.html", stem));
+    std::fs::write(&html_path, html).map_err(|e| WasmError {
+        message: format!("Cannot write {}: {}", html_path.display(), e),
+    })?;
+    println!("Built: {}_bg.wasm, {}.js, {}", stem, stem, html_path.display());
+    Ok(())
+}
 
 /// Compile a Tish project for WebAssembly.
 ///
@@ -50,130 +147,7 @@ pub fn compile_to_wasm(
     let chunk = tish_bytecode::compile(&program).map_err(|e| WasmError {
         message: e.to_string(),
     })?;
-
-    let chunk_bytes = serialize(&chunk);
-    let chunk_b64 = BASE64.encode(&chunk_bytes);
-
-    let stem = output_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("main");
-    let out_dir = output_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let out_dir_abs = out_dir
-        .canonicalize()
-        .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(out_dir)))
-        .map_err(|e| WasmError {
-            message: format!("Cannot resolve output dir: {}", e),
-        })?;
-
-    std::fs::create_dir_all(&out_dir_abs).map_err(|e| WasmError {
-        message: format!("Cannot create output directory: {}", e),
-    })?;
-
-    // Build wasm runtime
-    let workspace_root = find_workspace_root().ok_or_else(|| WasmError {
-        message: "Cannot find workspace root (run from crate root)".to_string(),
-    })?;
-
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let build_status = Command::new(&cargo)
-        .current_dir(&workspace_root)
-        .args([
-            "build",
-            "-p",
-            "tish_wasm_runtime",
-            "--target",
-            "wasm32-unknown-unknown",
-            "--release",
-            "--features",
-            "browser",
-        ])
-        .status()
-        .map_err(|e| WasmError {
-            message: format!("Failed to run cargo: {}", e),
-        })?;
-
-    if !build_status.success() {
-        return Err(WasmError {
-            message: "Failed to build wasm runtime. Run: rustup target add wasm32-unknown-unknown"
-                .to_string(),
-        });
-    }
-
-    let wasm_artifact = workspace_root
-        .join("target/wasm32-unknown-unknown/release/tish_wasm_runtime.wasm");
-
-    if !wasm_artifact.exists() {
-        return Err(WasmError {
-            message: format!("Wasm artifact not found: {}", wasm_artifact.display()),
-        });
-    }
-
-    // Run wasm-bindgen to generate JS glue
-    let wasm_bindgen = std::env::var("WASM_BINDGEN").unwrap_or_else(|_| "wasm-bindgen".to_string());
-    let out_name = stem.to_string();
-    let bindgen_status = Command::new(&wasm_bindgen)
-        .args([
-            "--target",
-            "web",
-            "--out-dir",
-            out_dir_abs.to_str().unwrap(),
-            "--out-name",
-            &out_name,
-            wasm_artifact.to_str().unwrap(),
-        ])
-        .status()
-        .map_err(|e| WasmError {
-            message: format!(
-                "Failed to run wasm-bindgen: {}. Install with: cargo install wasm-bindgen-cli",
-                e
-            ),
-        })?;
-
-    if !bindgen_status.success() {
-        return Err(WasmError {
-            message: "wasm-bindgen failed".to_string(),
-        });
-    }
-
-    // Generate HTML loader with embedded chunk
-    let js_name = format!("{}.js", stem);
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>{}</title></head>
-<body>
-<script type="module">
-const CHUNK_B64 = "{}";
-const chunk = Uint8Array.from(atob(CHUNK_B64), c => c.charCodeAt(0));
-import init, {{ run }} from './{}';
-await init();
-run(chunk);
-</script>
-</body>
-</html>
-"#,
-        stem,
-        chunk_b64,
-        js_name
-    );
-
-    let html_path = out_dir_abs.join(format!("{}.html", stem));
-    std::fs::write(&html_path, html).map_err(|e| WasmError {
-        message: format!("Cannot write {}: {}", html_path.display(), e),
-    })?;
-
-    println!(
-        "Built: {}_bg.wasm, {}.js, {} (open {} in a browser; use a local server for CORS)",
-        stem,
-        stem,
-        html_path.display(),
-        html_path.display()
-    );
-    Ok(())
+    emit_wasm_from_chunk(&chunk, output_path)
 }
 
 /// Compile a Tish project for Wasmtime/WASI.

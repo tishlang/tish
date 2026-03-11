@@ -182,6 +182,62 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
         })),
     );
 
+    // Date - at minimum Date.now() for timing
+    let mut date = HashMap::new();
+    date.insert(
+        "now".into(),
+        Value::Function(Rc::new(|_args: &[Value]| {
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as f64;
+            Value::Number(ms)
+        })),
+    );
+    g.insert("Date".into(), Value::Object(Rc::new(RefCell::new(date))));
+
+    // Object.assign(target, ...sources) - mutates target, returns target
+    // Object.fromEntries(iterable) - [[k,v],...] -> object
+    let mut object_methods = HashMap::new();
+    object_methods.insert(
+        "assign".into(),
+        Value::Function(Rc::new(|args: &[Value]| {
+            let target = args.first();
+            let Some(Value::Object(t)) = target else {
+                return Value::Null;
+            };
+            for src in args.iter().skip(1) {
+                if let Value::Object(s) = src {
+                    for (k, v) in s.borrow().iter() {
+                        t.borrow_mut().insert(Arc::clone(k), v.clone());
+                    }
+                }
+            }
+            target.cloned().unwrap_or(Value::Null)
+        })),
+    );
+    object_methods.insert(
+        "fromEntries".into(),
+        Value::Function(Rc::new(|args: &[Value]| {
+            let iter = args.first();
+            let Some(Value::Array(arr)) = iter else {
+                return Value::Object(Rc::new(RefCell::new(HashMap::new())));
+            };
+            let mut map = HashMap::new();
+            for pair in arr.borrow().iter() {
+                if let Value::Array(p) = pair {
+                    let kv: Vec<_> = p.borrow().iter().cloned().collect();
+                    if kv.len() >= 2 {
+                        let k = kv[0].to_display_string().into();
+                        map.insert(k, kv[1].clone());
+                    }
+                }
+            }
+            Value::Object(Rc::new(RefCell::new(map)))
+        })),
+    );
+    g.insert("Object".into(), Value::Object(Rc::new(RefCell::new(object_methods))));
+
     g
 }
 

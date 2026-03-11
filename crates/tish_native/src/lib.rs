@@ -13,6 +13,7 @@
 mod build;
 
 use std::path::Path;
+use tish_ast::Program;
 
 /// Error from native compilation.
 #[derive(Debug)]
@@ -91,6 +92,64 @@ pub fn compile_to_native(
             tish_cranelift::compile_chunk_to_native(&chunk, output_path).map_err(|e| NativeError {
                 message: e.to_string(),
             })
+        }
+    }
+}
+
+/// Compile a single Program (e.g. from js_to_tish) to native.
+pub fn compile_program_to_native(
+    program: &Program,
+    project_root: Option<&Path>,
+    output_path: &Path,
+    features: &[String],
+    native_backend: &str,
+) -> Result<(), NativeError> {
+    let backend = match native_backend {
+        "rust" => Backend::Rust,
+        "cranelift" => Backend::Cranelift,
+        _ => {
+            return Err(NativeError {
+                message: format!(
+                    "Invalid native backend '{}'. Use 'rust' or 'cranelift'.",
+                    native_backend
+                ),
+            });
+        }
+    };
+
+    match backend {
+        Backend::Rust => {
+            let root = project_root.unwrap_or_else(|| Path::new("."));
+            let native_modules = tish_compile::resolve_native_modules(program, root)
+                .map_err(|e| NativeError { message: e })?;
+            let mut all_features = features.to_vec();
+            for f in tish_compile::extract_native_import_features(program) {
+                if !all_features.contains(&f) {
+                    all_features.push(f);
+                }
+            }
+            let rust_code = tish_compile::compile_with_native_modules(
+                program,
+                project_root,
+                &all_features,
+                &native_modules,
+            )
+            .map_err(|e| NativeError {
+                message: e.message,
+            })?;
+            crate::build::build_via_cargo(&rust_code, native_modules, output_path, &all_features)
+                .map_err(|e| NativeError { message: e })
+        }
+        Backend::Cranelift => {
+            if tish_compile::has_native_imports(program) {
+                return Err(NativeError {
+                    message: "Cranelift backend does not support native imports.".to_string(),
+                });
+            }
+            let chunk =
+                tish_bytecode::compile(program).map_err(|e| NativeError { message: e.to_string() })?;
+            tish_cranelift::compile_chunk_to_native(&chunk, output_path)
+                .map_err(|e| NativeError { message: e.to_string() })
         }
     }
 }
