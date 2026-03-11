@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use tish_builtins::array as arr_builtins;
+use tish_builtins::math as math_builtins;
 use tish_bytecode::{Chunk, Constant, Opcode, NO_REST_PARAM};
 use tish_core::Value;
 
@@ -42,6 +43,13 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     let mut g = HashMap::new();
 
     let mut console = HashMap::new();
+    console.insert(
+        "debug".into(),
+        Value::Function(Rc::new(|args: &[Value]| {
+            tish_runtime::console_debug(args);
+            Value::Null
+        })),
+    );
     console.insert(
         "log".into(),
         Value::Function(Rc::new(|args: &[Value]| {
@@ -130,6 +138,14 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
             Value::Number(nums.into_iter().fold(f64::NAN, |a, b| a.max(b)))
         })),
     );
+    math.insert("pow".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::pow(args))));
+    math.insert("sin".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::sin(args))));
+    math.insert("cos".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::cos(args))));
+    math.insert("tan".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::tan(args))));
+    math.insert("log".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::log(args))));
+    math.insert("exp".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::exp(args))));
+    math.insert("sign".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::sign(args))));
+    math.insert("trunc".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::trunc(args))));
     math.insert("PI".into(), Value::Number(std::f64::consts::PI));
     math.insert("E".into(), Value::Number(std::f64::consts::E));
     g.insert("Math".into(), Value::Object(Rc::new(RefCell::new(math))));
@@ -172,6 +188,11 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
             let s = args.first().map(|v| v.to_display_string()).unwrap_or_default();
         Value::Number(s.trim().parse().unwrap_or(f64::NAN))
     })));
+    g.insert("encodeURI".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::encode_uri(args))));
+    g.insert("decodeURI".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::decode_uri(args))));
+    g.insert("Boolean".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::boolean(args))));
+    g.insert("isFinite".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::is_finite(args))));
+    g.insert("isNaN".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::is_nan(args))));
     g.insert("Infinity".into(), Value::Number(f64::INFINITY));
     g.insert("NaN".into(), Value::Number(f64::NAN));
     g.insert(
@@ -236,7 +257,26 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
             Value::Object(Rc::new(RefCell::new(map)))
         })),
     );
+    object_methods.insert("keys".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::object_keys(args))));
+    object_methods.insert("values".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::object_values(args))));
+    object_methods.insert("entries".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::object_entries(args))));
     g.insert("Object".into(), Value::Object(Rc::new(RefCell::new(object_methods))));
+
+    // Array.isArray
+    let mut array_static = HashMap::new();
+    array_static.insert(
+        "isArray".into(),
+        Value::Function(Rc::new(|args: &[Value]| tish_runtime::array_is_array(args))),
+    );
+    g.insert("Array".into(), Value::Object(Rc::new(RefCell::new(array_static))));
+
+    // String.fromCharCode
+    let mut string_static = HashMap::new();
+    string_static.insert(
+        "fromCharCode".into(),
+        Value::Function(Rc::new(|args: &[Value]| tish_runtime::string_from_char_code(args))),
+    );
+    g.insert("String".into(), Value::Object(Rc::new(RefCell::new(string_static))));
 
     g
 }
