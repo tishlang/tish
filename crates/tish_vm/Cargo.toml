@@ -1,0 +1,24 @@
+[package]
+name = "tish_vm"
+version = "0.1.0"
+edition = "2021"
+description = "Bytecode VM for Tish"
+
+[features]
+default = []
+regex = ["tish_core/regex"]
+# For wasm32 target: use web_sys console for output
+wasm = ["dep:wasm-bindgen"]
+
+[dependencies]
+tish_builtins = { path = "../tish_builtins" }
+tish_bytecode = { path = "../tish_bytecode" }
+tish_core = { path = "../tish_core" }
+rand = "0.8"
+wasm-bindgen = { version = "0.2", optional = true }
+
+[dev-dependencies]
+tish_parser = { path = "../tish_parser" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

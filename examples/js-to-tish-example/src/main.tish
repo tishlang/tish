@@ -1,0 +1,24 @@
+// js_to_tish Demo - Tish code that mirrors JavaScript conversion target
+// js_to_tish converts vanilla JS to Tish AST. This file showcases the overlapping
+// subset: let/const, fn, arrow functions, for/for-of, objects, arrays, etc.
+// Run: tish run examples/js-to-tish-example/src/main.tish
+
+let scores = [85, 92, 78, 95, 88, 72]
+let threshold = 80
+
+fn aboveThreshold(n) {
+  return n >= threshold
+}
+
+let passed = scores.filter((s) => s >= threshold)
+let count = passed.length
+
+console.log(`Scores: ${scores.join(", ")}`)
+console.log(`Passed (>= ${threshold}): ${count} - ${passed.join(", ")}`)
+
+let sum = 0
+for (let s of scores) {
+  sum = sum + s
+}
+let avg = sum / scores.length
+console.log("Average:", avg)

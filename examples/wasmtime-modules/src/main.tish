@@ -1,0 +1,4 @@
+import { add, double } from "./math.tish"
+import { greet } from "./greet.tish"
+console.log(greet("World"))
+console.log("add(1,2) =", add(1, 2), "double(10) =", double(10))

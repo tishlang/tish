@@ -600,6 +600,12 @@ impl Codegen {
                 return true;
             }
             
+            // Inside a loop, any variable used in an init (e.g. "let x = outerVar") must be cloned:
+            // the loop body runs multiple times, so we cannot move on the first iteration.
+            if !self.loop_stack.is_empty() {
+                return true;
+            }
+            
             // Check if this is the last use
             if let Some(ref mut analyzer) = self.usage_analyzer {
                 if analyzer.is_last_use(name.as_ref()) {
@@ -899,6 +905,12 @@ impl Codegen {
         analyzer.analyze_statements(&program.statements);
         self.usage_analyzer = Some(analyzer);
 
+        // Prepass: vars mutated by nested closures must be RefCell from the start (top-level)
+        let top_level_mutated = Self::collect_vars_mutated_by_nested_closures(&program.statements);
+        for v in &top_level_mutated {
+            self.refcell_wrapped_vars.insert(v.clone());
+        }
+
         if self.is_async {
             self.async_context_stack.push(true); // run() body is async Rust context
         }
@@ -922,6 +934,11 @@ impl Codegen {
                 self.indent += 1;
                 self.type_context.push_scope();
                 self.outer_vars_stack.push(Vec::new());
+                // Prepass: vars that must be RefCell because nested closures capture and mutate them
+                let vars_mutated_by_nested = Self::collect_vars_mutated_by_nested_closures(statements);
+                for v in &vars_mutated_by_nested {
+                    self.refcell_wrapped_vars.insert(v.clone());
+                }
                 // Pre-scan for function declarations and create cells (for mutual recursion)
                 let func_names = self.prescan_function_decls(statements);
                 self.function_scope_stack.push(func_names.clone());
@@ -935,6 +952,9 @@ impl Codegen {
                 }
                 self.function_scope_stack.pop(); // Exit scope
                 self.outer_vars_stack.pop(); // Exit variable scope
+                for v in &vars_mutated_by_nested {
+                    self.refcell_wrapped_vars.remove(v);
+                }
                 self.type_context.pop_scope();
                 self.indent -= 1;
                 self.writeln("}");
@@ -965,12 +985,23 @@ impl Codegen {
                     let (expr_str, clone_needed) = match init.as_ref() {
                         Some(e) => {
                             let s = self.emit_expr(e)?;
-                            let needs = self.should_clone(e);
+                            // Variable refs (Ident) in init must always clone: they may be used
+                            // multiple times (e.g. in a loop body) and we cannot move.
+                            let needs = matches!(e, Expr::Ident { .. })
+                                || self.should_clone(e);
                             (s, needs)
                         }
                         None => ("Value::Null".to_string(), false),
                     };
-                    if clone_needed {
+                    // Vars that are mutated by nested closures must be RefCell from the start
+                    if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                        let init_val = if clone_needed {
+                            format!("({}).clone()", expr_str)
+                        } else {
+                            format!("{}", expr_str)
+                        };
+                        self.writeln(&format!("let {} = std::rc::Rc::new(RefCell::new({}));", escaped_name, init_val));
+                    } else if clone_needed {
                         self.writeln(&format!("{} {} = ({}).clone();", mutability, escaped_name, expr_str));
                     } else {
                         self.writeln(&format!("{} {} = {};", mutability, escaped_name, expr_str));
@@ -1269,19 +1300,38 @@ impl Codegen {
                     .filter(|name| !["Boolean", "console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp", "Polars"].contains(&name.as_str()))
                     .collect();
 
-                // Rebind outer vars to Rc<RefCell<>> BEFORE the closure block so the rest of the scope sees the cell
+                // Outer vars that are assigned in the body need RefCell (capture cell, add to refcell_wrapped_vars).
+                // Read-only outer vars get a Value binding to avoid nested_complex param-shadow issues.
+                let mut assigned_in_body = HashSet::new();
+                Self::collect_assigned_idents_in_stmt(body, &mut assigned_in_body);
+                let mutable_outer_vars: Vec<String> = outer_vars
+                    .iter()
+                    .filter(|v| assigned_in_body.contains(*v))
+                    .cloned()
+                    .collect();
+                let read_only_outer_vars: Vec<String> = outer_vars
+                    .iter()
+                    .filter(|v| !assigned_in_body.contains(*v))
+                    .cloned()
+                    .collect();
+
+                // Rebind outer vars to Rc<RefCell<>> with _cell suffix.
+                // If outer scope already has the var as RefCell, just clone it.
                 for outer_var in &outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
-                    self.writeln(&format!("let {} = std::rc::Rc::new(RefCell::new({}.clone()));", var_escaped, var_escaped));
-                    self.refcell_wrapped_vars.insert(outer_var.clone());
+                    if self.refcell_wrapped_vars.contains(outer_var) {
+                        self.writeln(&format!("let {}_cell = {}.clone();", var_escaped, var_escaped));
+                    } else {
+                        self.writeln(&format!("let {}_cell = std::rc::Rc::new(RefCell::new({}.clone()));", var_escaped, var_escaped));
+                    }
                 }
 
                 self.writeln(&format!("let {} = {{", name_str));
                 self.indent += 1;
-                // Clone Rc for outer vars so closure can capture without moving (outer scope keeps its copy)
+                // Clone RefCell for outer vars so closure can capture
                 for outer_var in &outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
-                    self.writeln(&format!("let {} = {}.clone();", var_escaped, var_escaped));
+                    self.writeln(&format!("let {}_cell = {}_cell.clone();", var_escaped, var_escaped));
                 }
                 // Clone the cell so the closure can reference the function recursively
                 let needs_self_ref = referenced.contains(name_raw);
@@ -1313,6 +1363,16 @@ impl Codegen {
                 }
                 self.writeln("Value::Function(Rc::new(move |args: &[Value]| {");
                 self.indent += 1;
+                // Mutable outer vars: capture the RefCell so assignments use borrow_mut
+                for outer_var in &mutable_outer_vars {
+                    let var_escaped = Self::escape_ident(outer_var);
+                    self.writeln(&format!("let {} = {}_cell.clone();", var_escaped, var_escaped));
+                }
+                // Read-only outer vars: Value binding from borrow (avoids param-shadow issues)
+                for outer_var in &read_only_outer_vars {
+                    let var_escaped = Self::escape_ident(outer_var);
+                    self.writeln(&format!("let {} = (*{}_cell.borrow()).clone();", var_escaped, var_escaped));
+                }
                 // Make the function available by its name inside the closure (only if recursive)
                 if needs_self_ref {
                     self.writeln(&format!("let {} = (*{}_ref.borrow()).clone();", name_str, name_str));
@@ -1344,6 +1404,12 @@ impl Codegen {
                 
                 // Function bodies are sync closures (even Tish async fn) - use block_on for await
                 self.async_context_stack.push(false);
+
+                // Mutable outer vars must be in refcell_wrapped_vars so Assign/CompoundAssign emit borrow_mut
+                let saved_refcell = self.refcell_wrapped_vars.clone();
+                for v in &mutable_outer_vars {
+                    self.refcell_wrapped_vars.insert(v.clone());
+                }
                 
                 // Pre-scan body for nested functions (handles function body as Block)
                 if let Statement::Block { statements, .. } = body.as_ref() {
@@ -1365,6 +1431,9 @@ impl Codegen {
                 }
                 
                 self.async_context_stack.pop();
+
+                // Restore refcell_wrapped_vars (remove mutable outer vars we added)
+                self.refcell_wrapped_vars = saved_refcell;
                 
                 // Pop params stack
                 self.outer_params_stack.pop();
@@ -2362,6 +2431,450 @@ impl Codegen {
         }
     }
     
+    /// Collect variable names that are assigned to in a statement/body (target of =, +=, ++, etc).
+    fn collect_assigned_idents_in_stmt(stmt: &Statement, names: &mut HashSet<String>) {
+        match stmt {
+            Statement::ExprStmt { expr, .. } => Self::collect_assigned_idents_in_expr(expr, names),
+            Statement::VarDecl { .. } | Statement::VarDeclDestructure { .. } => {}
+            Statement::Block { statements, .. } => {
+                for s in statements {
+                    Self::collect_assigned_idents_in_stmt(s, names);
+                }
+            }
+            Statement::If { cond, then_branch, else_branch, .. } => {
+                Self::collect_assigned_idents_in_expr(cond, names);
+                Self::collect_assigned_idents_in_stmt(then_branch, names);
+                if let Some(eb) = else_branch {
+                    Self::collect_assigned_idents_in_stmt(eb, names);
+                }
+            }
+            Statement::For { init, cond, update, body, .. } => {
+                if let Some(i) = init {
+                    Self::collect_assigned_idents_in_stmt(i, names);
+                }
+                if let Some(c) = cond {
+                    Self::collect_assigned_idents_in_expr(c, names);
+                }
+                if let Some(u) = update {
+                    Self::collect_assigned_idents_in_expr(u, names);
+                }
+                Self::collect_assigned_idents_in_stmt(body, names);
+            }
+            Statement::ForOf { iterable, body, .. } => {
+                Self::collect_assigned_idents_in_expr(iterable, names);
+                Self::collect_assigned_idents_in_stmt(body, names);
+            }
+            Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
+                Self::collect_assigned_idents_in_expr(cond, names);
+                Self::collect_assigned_idents_in_stmt(body, names);
+            }
+            Statement::Switch { expr, cases, default_body, .. } => {
+                Self::collect_assigned_idents_in_expr(expr, names);
+                for (case_expr, stmts) in cases {
+                    if let Some(e) = case_expr {
+                        Self::collect_assigned_idents_in_expr(e, names);
+                    }
+                    for s in stmts {
+                        Self::collect_assigned_idents_in_stmt(s, names);
+                    }
+                }
+                if let Some(stmts) = default_body {
+                    for s in stmts {
+                        Self::collect_assigned_idents_in_stmt(s, names);
+                    }
+                }
+            }
+            Statement::Try { body, catch_body, finally_body, .. } => {
+                Self::collect_assigned_idents_in_stmt(body, names);
+                if let Some(c) = catch_body {
+                    Self::collect_assigned_idents_in_stmt(c, names);
+                }
+                if let Some(f) = finally_body {
+                    Self::collect_assigned_idents_in_stmt(f, names);
+                }
+            }
+            Statement::FunDecl { body, .. } => Self::collect_assigned_idents_in_stmt(body, names),
+            Statement::Return { value, .. } => {
+                if let Some(e) = value {
+                    Self::collect_assigned_idents_in_expr(e, names);
+                }
+            }
+            Statement::Throw { value, .. } => Self::collect_assigned_idents_in_expr(value, names),
+            Statement::Break { .. } | Statement::Continue { .. } | Statement::Import { .. } | Statement::Export { .. } => {}
+        }
+    }
+
+    fn collect_assigned_idents_in_expr(expr: &Expr, names: &mut HashSet<String>) {
+        match expr {
+            Expr::Assign { name, value, .. } => {
+                names.insert(name.to_string());
+                Self::collect_assigned_idents_in_expr(value, names);
+            }
+            Expr::CompoundAssign { name, value, .. } => {
+                names.insert(name.to_string());
+                Self::collect_assigned_idents_in_expr(value, names);
+            }
+            Expr::LogicalAssign { name, value, .. } => {
+                names.insert(name.to_string());
+                Self::collect_assigned_idents_in_expr(value, names);
+            }
+            Expr::PostfixInc { name, .. } | Expr::PostfixDec { name, .. }
+            | Expr::PrefixInc { name, .. } | Expr::PrefixDec { name, .. } => {
+                names.insert(name.to_string());
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                Self::collect_assigned_idents_in_expr(object, names);
+                Self::collect_assigned_idents_in_expr(value, names);
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                Self::collect_assigned_idents_in_expr(object, names);
+                Self::collect_assigned_idents_in_expr(index, names);
+                Self::collect_assigned_idents_in_expr(value, names);
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::collect_assigned_idents_in_expr(left, names);
+                Self::collect_assigned_idents_in_expr(right, names);
+            }
+            Expr::Unary { operand, .. } => Self::collect_assigned_idents_in_expr(operand, names),
+            Expr::Call { callee, args, .. } => {
+                Self::collect_assigned_idents_in_expr(callee, names);
+                for arg in args {
+                    match arg {
+                        CallArg::Expr(e) | CallArg::Spread(e) => {
+                            Self::collect_assigned_idents_in_expr(e, names);
+                        }
+                    }
+                }
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::collect_assigned_idents_in_expr(object, names);
+                if let MemberProp::Expr(e) = prop {
+                    Self::collect_assigned_idents_in_expr(e, names);
+                }
+            }
+            Expr::Index { object, index, .. } => {
+                Self::collect_assigned_idents_in_expr(object, names);
+                Self::collect_assigned_idents_in_expr(index, names);
+            }
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                Self::collect_assigned_idents_in_expr(cond, names);
+                Self::collect_assigned_idents_in_expr(then_branch, names);
+                Self::collect_assigned_idents_in_expr(else_branch, names);
+            }
+            Expr::ArrowFunction { body, .. } => {
+                match body {
+                    ArrowBody::Expr(e) => Self::collect_assigned_idents_in_expr(e, names),
+                    ArrowBody::Block(s) => Self::collect_assigned_idents_in_stmt(s, names),
+                }
+            }
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(e) | ArrayElement::Spread(e) => {
+                            Self::collect_assigned_idents_in_expr(e, names);
+                        }
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for prop in props {
+                    match prop {
+                        ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => {
+                            Self::collect_assigned_idents_in_expr(e, names);
+                        }
+                    }
+                }
+            }
+            Expr::NullishCoalesce { left, right, .. } => {
+                Self::collect_assigned_idents_in_expr(left, names);
+                Self::collect_assigned_idents_in_expr(right, names);
+            }
+            Expr::TemplateLiteral { exprs, .. } => {
+                for e in exprs {
+                    Self::collect_assigned_idents_in_expr(e, names);
+                }
+            }
+            Expr::JsxElement { props, children, .. } => {
+                for p in props {
+                    match p {
+                        tish_ast::JsxProp::Attr {
+                            value: tish_ast::JsxAttrValue::Expr(e),
+                            ..
+                        }
+                        | tish_ast::JsxProp::Spread(e) => {
+                            Self::collect_assigned_idents_in_expr(e, names);
+                        }
+                        _ => {}
+                    }
+                }
+                for c in children {
+                    if let tish_ast::JsxChild::Expr(e) = c {
+                        Self::collect_assigned_idents_in_expr(e, names);
+                    }
+                }
+            }
+            Expr::JsxFragment { children, .. } => {
+                for c in children {
+                    if let tish_ast::JsxChild::Expr(e) = c {
+                        Self::collect_assigned_idents_in_expr(e, names);
+                    }
+                }
+            }
+            Expr::Ident { .. }
+            | Expr::Literal { .. }
+            | Expr::TypeOf { .. }
+            | Expr::Await { .. }
+            | Expr::NativeModuleLoad { .. } => {}
+        }
+    }
+
+    /// Collect vars declared in the given statements (top-level only, no recursion into blocks).
+    fn collect_block_var_names(statements: &[Statement], names: &mut HashSet<String>) {
+        for s in statements {
+            match s {
+                Statement::VarDecl { name, .. } => {
+                    names.insert(name.to_string());
+                }
+                Statement::VarDeclDestructure { pattern, .. } => {
+                    Self::collect_destruct_names(pattern, names);
+                }
+                Statement::For { init, .. } => {
+                    if let Some(i) = init {
+                        if let Statement::VarDecl { name, .. } = i.as_ref() {
+                            names.insert(name.to_string());
+                        }
+                        if let Statement::VarDeclDestructure { pattern, .. } = i.as_ref() {
+                            Self::collect_destruct_names(pattern, names);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Collect variable names that are both captured and mutated by a closure body.
+    /// block_vars: vars declared in the enclosing block (candidates for mutation).
+    fn collect_mutated_captures_from_closure(
+        params: &[tish_ast::TypedParam],
+        body: &Statement,
+        block_vars: &HashSet<String>,
+        result: &mut HashSet<String>,
+    ) {
+        let param_names: HashSet<String> = params.iter().map(|p| p.name.to_string()).collect();
+        let mut local_var_names = HashSet::new();
+        Self::collect_local_var_names(body, &mut local_var_names);
+        let mut referenced = HashSet::new();
+        Self::collect_stmt_idents(body, &mut referenced);
+        let mut assigned = HashSet::new();
+        Self::collect_assigned_idents_in_stmt(body, &mut assigned);
+        let outer_captured: HashSet<String> = referenced
+            .difference(&param_names)
+            .cloned()
+            .collect::<HashSet<_>>()
+            .difference(&local_var_names)
+            .cloned()
+            .collect();
+        for v in outer_captured.intersection(&assigned) {
+            if block_vars.contains(v) {
+                result.insert(v.clone());
+            }
+        }
+        // Recurse into nested fns
+        Self::collect_mutated_captures_from_statements(body, block_vars, result);
+    }
+
+    fn collect_mutated_captures_from_arrow(
+        params: &[tish_ast::TypedParam],
+        body: &ArrowBody,
+        block_vars: &HashSet<String>,
+        result: &mut HashSet<String>,
+    ) {
+        let param_names: HashSet<String> = params.iter().map(|p| p.name.to_string()).collect();
+        let mut local_var_names = HashSet::new();
+        match body {
+            ArrowBody::Expr(_) => {}
+            ArrowBody::Block(s) => Self::collect_local_var_names(s, &mut local_var_names),
+        }
+        let mut referenced = HashSet::new();
+        match body {
+            ArrowBody::Expr(e) => Self::collect_expr_idents(e, &mut referenced),
+            ArrowBody::Block(s) => Self::collect_stmt_idents(s, &mut referenced),
+        }
+        let mut assigned = HashSet::new();
+        match body {
+            ArrowBody::Expr(e) => Self::collect_assigned_idents_in_expr(e, &mut assigned),
+            ArrowBody::Block(s) => Self::collect_assigned_idents_in_stmt(s, &mut assigned),
+        }
+        let outer_captured: HashSet<String> = referenced
+            .difference(&param_names)
+            .cloned()
+            .collect::<HashSet<_>>()
+            .difference(&local_var_names)
+            .cloned()
+            .collect();
+        for v in outer_captured.intersection(&assigned) {
+            if block_vars.contains(v) {
+                result.insert(v.clone());
+            }
+        }
+        match body {
+            ArrowBody::Expr(e) => Self::collect_mutated_captures_from_expr(e, block_vars, result),
+            ArrowBody::Block(s) => Self::collect_mutated_captures_from_statements(s, block_vars, result),
+        }
+    }
+
+    fn collect_mutated_captures_from_expr(expr: &Expr, block_vars: &HashSet<String>, result: &mut HashSet<String>) {
+        match expr {
+            Expr::ArrowFunction { params, body, .. } => {
+                Self::collect_mutated_captures_from_arrow(params, body, block_vars, result);
+            }
+            Expr::Call { callee, args, .. } => {
+                Self::collect_mutated_captures_from_expr(callee, block_vars, result);
+                for arg in args {
+                    match arg {
+                        CallArg::Expr(e) | CallArg::Spread(e) => {
+                            Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                        }
+                    }
+                }
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::collect_mutated_captures_from_expr(object, block_vars, result);
+                if let MemberProp::Expr(e) = prop {
+                    Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                }
+            }
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                Self::collect_mutated_captures_from_expr(cond, block_vars, result);
+                Self::collect_mutated_captures_from_expr(then_branch, block_vars, result);
+                Self::collect_mutated_captures_from_expr(else_branch, block_vars, result);
+            }
+            Expr::Binary { left, right, .. }
+            | Expr::NullishCoalesce { left, right, .. } => {
+                Self::collect_mutated_captures_from_expr(left, block_vars, result);
+                Self::collect_mutated_captures_from_expr(right, block_vars, result);
+            }
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(e) | ArrayElement::Spread(e) => {
+                            Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                        }
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for prop in props {
+                    match prop {
+                        ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => {
+                            Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_mutated_captures_from_statements(
+        stmt: &Statement,
+        block_vars: &HashSet<String>,
+        result: &mut HashSet<String>,
+    ) {
+        match stmt {
+            Statement::FunDecl { params, body, .. } => {
+                Self::collect_mutated_captures_from_closure(params, body, block_vars, result);
+            }
+            Statement::ExprStmt { expr, .. } => {
+                Self::collect_mutated_captures_from_expr(expr, block_vars, result);
+            }
+            Statement::Block { statements, .. } => {
+                for s in statements {
+                    Self::collect_mutated_captures_from_statements(s, block_vars, result);
+                }
+            }
+            Statement::If { cond, then_branch, else_branch, .. } => {
+                Self::collect_mutated_captures_from_expr(cond, block_vars, result);
+                Self::collect_mutated_captures_from_statements(then_branch, block_vars, result);
+                if let Some(eb) = else_branch {
+                    Self::collect_mutated_captures_from_statements(eb, block_vars, result);
+                }
+            }
+            Statement::For { init, cond, update, body, .. } => {
+                if let Some(i) = init {
+                    Self::collect_mutated_captures_from_statements(i, block_vars, result);
+                }
+                if let Some(c) = cond {
+                    Self::collect_mutated_captures_from_expr(c, block_vars, result);
+                }
+                if let Some(u) = update {
+                    Self::collect_mutated_captures_from_expr(u, block_vars, result);
+                }
+                Self::collect_mutated_captures_from_statements(body, block_vars, result);
+            }
+            Statement::ForOf { iterable, body, .. } => {
+                Self::collect_mutated_captures_from_expr(iterable, block_vars, result);
+                Self::collect_mutated_captures_from_statements(body, block_vars, result);
+            }
+            Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
+                Self::collect_mutated_captures_from_expr(cond, block_vars, result);
+                Self::collect_mutated_captures_from_statements(body, block_vars, result);
+            }
+            Statement::Switch { expr, cases, default_body, .. } => {
+                Self::collect_mutated_captures_from_expr(expr, block_vars, result);
+                for (ce, stmts) in cases {
+                    if let Some(e) = ce {
+                        Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                    }
+                    for s in stmts {
+                        Self::collect_mutated_captures_from_statements(s, block_vars, result);
+                    }
+                }
+                if let Some(stmts) = default_body {
+                    for s in stmts {
+                        Self::collect_mutated_captures_from_statements(s, block_vars, result);
+                    }
+                }
+            }
+            Statement::Try { body, catch_body, finally_body, .. } => {
+                Self::collect_mutated_captures_from_statements(body, block_vars, result);
+                if let Some(c) = catch_body {
+                    Self::collect_mutated_captures_from_statements(c, block_vars, result);
+                }
+                if let Some(f) = finally_body {
+                    Self::collect_mutated_captures_from_statements(f, block_vars, result);
+                }
+            }
+            Statement::VarDecl { init, .. } => {
+                if let Some(e) = init {
+                    Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                }
+            }
+            Statement::VarDeclDestructure { init, .. } => {
+                Self::collect_mutated_captures_from_expr(init, block_vars, result);
+            }
+            Statement::Return { value, .. } => {
+                if let Some(e) = value {
+                    Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                }
+            }
+            Statement::Throw { value, .. } => Self::collect_mutated_captures_from_expr(value, block_vars, result),
+            _ => {}
+        }
+    }
+
+    /// For a block, return var names that must be RefCell (captured and mutated by nested closures).
+    fn collect_vars_mutated_by_nested_closures(statements: &[Statement]) -> HashSet<String> {
+        let mut block_vars = HashSet::new();
+        Self::collect_block_var_names(statements, &mut block_vars);
+        let mut result = HashSet::new();
+        for s in statements {
+            Self::collect_mutated_captures_from_statements(s, &block_vars, &mut result);
+        }
+        result
+    }
+
     /// Collect variable names declared in a statement (VarDecl, Destructure, For init).
     fn collect_local_var_names(stmt: &Statement, names: &mut HashSet<String>) {
         match stmt {
@@ -2510,26 +3023,35 @@ impl Codegen {
             .filter(|name| referenced.contains(name) && !param_names.contains(name) && !local_var_names.contains(name))
             .collect();
 
+        // Outer vars that are assigned in the body need RefCell; read-only get Value binding
+        let mut assigned_in_body = HashSet::new();
+        match body {
+            ArrowBody::Expr(e) => Self::collect_assigned_idents_in_expr(e, &mut assigned_in_body),
+            ArrowBody::Block(s) => Self::collect_assigned_idents_in_stmt(s, &mut assigned_in_body),
+        }
+        let mutable_outer_vars: Vec<String> = outer_vars.iter().filter(|v| assigned_in_body.contains(*v)).cloned().collect();
+        let read_only_outer_vars: Vec<String> = outer_vars.iter().filter(|v| !assigned_in_body.contains(*v)).cloned().collect();
+
         // Track which vars are already RefCell-wrapped (from outer closure) to avoid double-wrapping
         let already_wrapped = self.refcell_wrapped_vars.clone();
 
-        // Wrap outer captures in Rc<RefCell<>> so they can be mutated inside the closure
-        // This is necessary because Fn closures (required for Rc<dyn Fn>) can't mutate captures
-        // If already wrapped by outer closure, just clone the Rc
+        // Wrap outer captures in Rc<RefCell<>> and use _ref suffix
         for outer_param in &outer_params {
             let param_escaped = Self::escape_ident(outer_param);
+            let ref_name = format!("{}_ref", param_escaped);
             if already_wrapped.contains(outer_param) {
-                code.push_str(&format!("    let {} = {}.clone();\n", param_escaped, param_escaped));
+                code.push_str(&format!("    let {} = {}.clone();\n", ref_name, param_escaped));
             } else {
-                code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", param_escaped, param_escaped));
+                code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", ref_name, param_escaped));
             }
         }
         for outer_var in &outer_vars {
             let var_escaped = Self::escape_ident(outer_var);
+            let ref_name = format!("{}_ref", var_escaped);
             if already_wrapped.contains(outer_var) {
-                code.push_str(&format!("    let {} = {}.clone();\n", var_escaped, var_escaped));
+                code.push_str(&format!("    let {} = {}.clone();\n", ref_name, var_escaped));
             } else {
-                code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", var_escaped, var_escaped));
+                code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", ref_name, var_escaped));
             }
         }
         // Only clone builtins that are actually referenced (clone so outer scope can still use, e.g. process for PORT)
@@ -2554,6 +3076,22 @@ impl Codegen {
 
         code.push_str("    Value::Function(Rc::new(move |args: &[Value]| {\n");
 
+        // Make captured outer params available as plain Values (from _ref RefCells)
+        for outer_param in &outer_params {
+            let param_escaped = Self::escape_ident(outer_param);
+            code.push_str(&format!("        let {} = (*{}_ref.borrow()).clone();\n", param_escaped, param_escaped));
+        }
+        // Mutable outer vars: capture RefCell so assignments use borrow_mut
+        for outer_var in &mutable_outer_vars {
+            let var_escaped = Self::escape_ident(outer_var);
+            code.push_str(&format!("        let {} = {}_ref.clone();\n", var_escaped, var_escaped));
+        }
+        // Read-only outer vars: Value binding from borrow
+        for outer_var in &read_only_outer_vars {
+            let var_escaped = Self::escape_ident(outer_var);
+            code.push_str(&format!("        let {} = (*{}_ref.borrow()).clone();\n", var_escaped, var_escaped));
+        }
+
         // Make captured functions available
         for func_name in &referenced_funcs {
             let escaped = Self::escape_ident(func_name);
@@ -2574,14 +3112,11 @@ impl Codegen {
         self.outer_params_stack.push(current_param_names);
         // Push empty scope for variables declared inside this arrow function
         self.outer_vars_stack.push(Vec::new());
-        
-        // Track outer params and vars as RefCell-wrapped for proper read/write handling
-        let saved_refcell_vars = std::mem::take(&mut self.refcell_wrapped_vars);
-        for outer_param in &outer_params {
-            self.refcell_wrapped_vars.insert(outer_param.clone());
-        }
-        for outer_var in &outer_vars {
-            self.refcell_wrapped_vars.insert(outer_var.clone());
+
+        // Mutable outer vars need to be in refcell_wrapped_vars so Assign/CompoundAssign emit borrow_mut
+        let saved_refcell_vars = self.refcell_wrapped_vars.clone();
+        for v in &mutable_outer_vars {
+            self.refcell_wrapped_vars.insert(v.clone());
         }
 
         // Emit body based on type

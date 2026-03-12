@@ -44,6 +44,45 @@ Best for: distribution, performance, deploying without Tish installed.
 
 The compiled binary is **fully standalone** — no Tish or Rust runtime needed to run it.
 
+### Native backend options
+
+| Backend | Flag | Use when |
+|---------|------|----------|
+| **rust** | `--native-backend rust` (default) | Full Rust ecosystem; supports native imports (`tish:*`, `@scope/pkg`) |
+| **cranelift** | `--native-backend cranelift` | Pure Tish only; faster build, no cargo; errors if native imports present |
+
+```bash
+tish compile hello.tish -o hello                    # default: rust backend
+tish compile hello.tish -o hello --native-backend cranelift   # cranelift (pure Tish only)
+```
+
+### WebAssembly (browser)
+
+Compile to real `.wasm` for the browser:
+
+```bash
+tish compile hello.tish -o app --target wasm
+# Produces: app_bg.wasm, app.js, app.html
+```
+
+**Requirements**: `rustup target add wasm32-unknown-unknown`, `cargo install wasm-bindgen-cli`
+
+Open `app.html` via a local server (CORS): `python3 -m http.server` then visit the URL.
+
+For JavaScript transpilation (no WASM), use `--target js` instead.
+
+### WebAssembly (Wasmtime/WASI)
+
+Compile to a single `.wasm` for [Wasmtime](https://wasmtime.dev) or any WASI runtime:
+
+```bash
+tish compile hello.tish -o app --target wasi
+wasmtime app.wasm
+# Hello, World!
+```
+
+**Requirements**: `rustup target add wasm32-wasip1`, [install Wasmtime](https://wasmtime.dev/)
+
 ## Installing Tish
 
 ```bash
@@ -65,6 +104,10 @@ just run run hello.tish
 # Compile to native binary
 just compile hello.tish hello
 ./hello
+
+# Compile to WebAssembly (Wasmtime)
+just compile-wasi hello.tish hello
+wasmtime hello.wasm
 
 # Run in secure mode (no network/fs/process access)
 just run-secure run hello.tish
@@ -126,4 +169,4 @@ JavaScript equivalents in `tests/core/*.js`. Compare Tish vs Node.js/Bun:
 See `docs/plan-gap-analysis.md` for full feature list and JS compatibility.
 
 
-TISH_API_URL=http://localhost:47080 cargo run -p tish-cli --manifest-path ../../../tish-dev/Cargo.toml -- deploy --wait
+ZECTRE_API_URL=http://localhost:47080 cargo run -p zectre-cli --manifest-path ../../../zectre-cli/Cargo.toml -- deploy --wait

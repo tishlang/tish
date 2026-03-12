@@ -223,11 +223,23 @@ pub mod ops {
     }
 }
 
+use tish_builtins::globals::{
+    array_is_array as builtins_array_is_array,
+    boolean as builtins_boolean,
+    decode_uri as builtins_decode_uri,
+    encode_uri as builtins_encode_uri,
+    is_finite as builtins_is_finite,
+    is_nan as builtins_is_nan,
+    object_assign as builtins_object_assign,
+    object_entries as builtins_object_entries,
+    object_from_entries as builtins_object_from_entries,
+    object_keys as builtins_object_keys,
+    object_values as builtins_object_values,
+    string_from_char_code as builtins_string_from_char_code,
+};
 use tish_core::{
     json_parse as core_json_parse,
     json_stringify as core_json_stringify,
-    percent_decode,
-    percent_encode,
 };
 
 /// Error type for Tish throw/catch.
@@ -338,26 +350,23 @@ pub fn parse_float(args: &[Value]) -> Value {
 }
 
 pub fn is_finite(args: &[Value]) -> Value {
-    Value::Bool(args.first().is_some_and(|v| matches!(v, Value::Number(n) if n.is_finite())))
+    builtins_is_finite(args)
 }
 
 pub fn is_nan(args: &[Value]) -> Value {
-    Value::Bool(args.first().is_none_or(|v| matches!(v, Value::Number(n) if n.is_nan()) || !matches!(v, Value::Number(_))))
+    builtins_is_nan(args)
 }
 
 pub fn boolean(args: &[Value]) -> Value {
-    let v = args.first().unwrap_or(&Value::Null);
-    Value::Bool(v.is_truthy())
+    builtins_boolean(args)
 }
 
 pub fn decode_uri(args: &[Value]) -> Value {
-    let s = args.first().map(Value::to_display_string).unwrap_or_default();
-    Value::String(percent_decode(&s).unwrap_or(s).into())
+    builtins_decode_uri(args)
 }
 
 pub fn encode_uri(args: &[Value]) -> Value {
-    let s = args.first().map(Value::to_display_string).unwrap_or_default();
-    Value::String(percent_encode(&s).into())
+    builtins_encode_uri(args)
 }
 
 // Math functions - use tish_builtins::math
@@ -421,15 +430,11 @@ pub fn date_now(_args: &[Value]) -> Value {
 }
 
 pub fn array_is_array(args: &[Value]) -> Value {
-    Value::Bool(matches!(args.first(), Some(Value::Array(_))))
+    builtins_array_is_array(args)
 }
 
 pub fn string_from_char_code(args: &[Value]) -> Value {
-    let s: String = args.iter().filter_map(|v| match v {
-        Value::Number(n) => char::from_u32(*n as u32),
-        _ => None,
-    }).collect();
-    Value::String(s.into())
+    builtins_string_from_char_code(args)
 }
 
 #[cfg(feature = "process")]
@@ -650,95 +655,25 @@ pub fn in_operator(key: &Value, obj: &Value) -> Value {
     Value::Bool(result)
 }
 
-// Object functions
+// Object functions - delegate to tish_builtins::globals
 pub fn object_assign(args: &[Value]) -> Value {
-    let target = match args.first() {
-        Some(Value::Object(obj)) => obj,
-        _ => return Value::Null,
-    };
-    
-    let additional_capacity: usize = args.iter().skip(1).map(|source| {
-        if let Value::Object(src) = source { src.borrow().len() } else { 0 }
-    }).sum();
-    
-    let mut target_mut = target.borrow_mut();
-    target_mut.reserve(additional_capacity);
-    
-    for source in args.iter().skip(1) {
-        if let Value::Object(src) = source {
-            let src_borrow = src.borrow();
-            for (k, v) in src_borrow.iter() {
-                target_mut.insert(Arc::clone(k), v.clone());
-            }
-        }
-    }
-    drop(target_mut);
-    Value::Object(Rc::clone(target))
+    builtins_object_assign(args)
 }
 
 pub fn object_keys(args: &[Value]) -> Value {
-    if let Some(Value::Object(obj)) = args.first() {
-        let obj_borrow = obj.borrow();
-        let keys: Vec<Value> = obj_borrow.keys()
-            .map(|k| Value::String(Arc::clone(k)))
-            .collect();
-        Value::Array(Rc::new(RefCell::new(keys)))
-    } else {
-        Value::Array(Rc::new(RefCell::new(Vec::new())))
-    }
+    builtins_object_keys(args)
 }
 
 pub fn object_values(args: &[Value]) -> Value {
-    if let Some(Value::Object(obj)) = args.first() {
-        let obj_borrow = obj.borrow();
-        let values: Vec<Value> = obj_borrow.values().cloned().collect();
-        Value::Array(Rc::new(RefCell::new(values)))
-    } else {
-        Value::Array(Rc::new(RefCell::new(Vec::new())))
-    }
+    builtins_object_values(args)
 }
 
 pub fn object_entries(args: &[Value]) -> Value {
-    if let Some(Value::Object(obj)) = args.first() {
-        let obj_borrow = obj.borrow();
-        let entries: Vec<Value> = obj_borrow.iter()
-            .map(|(k, v)| {
-                Value::Array(Rc::new(RefCell::new(vec![
-                    Value::String(Arc::clone(k)),
-                    v.clone(),
-                ])))
-            })
-            .collect();
-        Value::Array(Rc::new(RefCell::new(entries)))
-    } else {
-        Value::Array(Rc::new(RefCell::new(Vec::new())))
-    }
+    builtins_object_entries(args)
 }
 
 pub fn object_from_entries(args: &[Value]) -> Value {
-    use std::collections::HashMap;
-    
-    if let Some(Value::Array(entries)) = args.first() {
-        let entries_borrow = entries.borrow();
-        let mut obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(entries_borrow.len());
-        
-        for entry in entries_borrow.iter() {
-            if let Value::Array(pair) = entry {
-                let pair_borrow = pair.borrow();
-                if pair_borrow.len() >= 2 {
-                    let key: Arc<str> = match &pair_borrow[0] {
-                        Value::String(s) => Arc::clone(s),
-                        v => v.to_display_string().into(),
-                    };
-                    obj.insert(key, pair_borrow[1].clone());
-                }
-            }
-        }
-        
-        Value::Object(Rc::new(RefCell::new(obj)))
-    } else {
-        Value::Object(Rc::new(RefCell::new(std::collections::HashMap::new())))
-    }
+    builtins_object_from_entries(args)
 }
 
 // HTTP Support

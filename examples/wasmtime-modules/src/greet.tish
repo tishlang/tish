@@ -1,0 +1,2 @@
+export fn greet(name) { return "Hello, " + name }
+console.log("greet module ready")
