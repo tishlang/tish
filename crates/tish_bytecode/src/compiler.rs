@@ -773,17 +773,19 @@ impl<'a> Compiler<'a> {
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(idx);
                 } else {
-                    self.compile_expr(&exprs[0])?;
-                    for (i, q) in quasis.iter().enumerate().skip(1) {
-                        let s = q.to_string();
-                        let idx = self.constant_idx(Constant::String(Arc::from(s)));
-                        self.emit(Opcode::LoadConst);
-                        self.chunk.write_u16(idx);
+                    // Interleave quasis and exprs: quasi[0] + expr[0] + quasi[1] + expr[1] + ... + quasi[n]
+                    let first = quasis[0].to_string();
+                    let idx = self.constant_idx(Constant::String(Arc::from(first)));
+                    self.emit(Opcode::LoadConst);
+                    self.chunk.write_u16(idx);
+                    for (i, expr) in exprs.iter().enumerate() {
+                        self.compile_expr(expr)?;
                         self.emit_u8(Opcode::BinOp, 0); // Add (string concat)
-                        if i < exprs.len() {
-                            self.compile_expr(&exprs[i])?;
-                            self.emit_u8(Opcode::BinOp, 0); // Add
-                        }
+                        let quasi_s = quasis[i + 1].to_string();
+                        let qidx = self.constant_idx(Constant::String(Arc::from(quasi_s)));
+                        self.emit(Opcode::LoadConst);
+                        self.chunk.write_u16(qidx);
+                        self.emit_u8(Opcode::BinOp, 0); // Add
                     }
                 }
             }
