@@ -104,10 +104,24 @@ pub fn string_repeat(s: &Value, count: &Value) -> Value { string_repeat_impl(s, 
 pub fn string_pad_start(s: &Value, target_len: &Value, pad: &Value) -> Value { string_pad_start_impl(s, target_len, pad) }
 pub fn string_pad_end(s: &Value, target_len: &Value, pad: &Value) -> Value { string_pad_end_impl(s, target_len, pad) }
 
+/// Number.prototype.toFixed(digits) - format number with fixed decimal places (0-20)
+pub fn number_to_fixed(n: &Value, digits: &Value) -> Value {
+    let num = match n {
+        Value::Number(x) => *x,
+        _ => f64::NAN,
+    };
+    let d = match digits {
+        Value::Number(x) => (*x as i32).max(0).min(20),
+        _ => 0,
+    };
+    Value::String(format!("{:.*}", d as usize, num).into())
+}
+
 /// Operators module for compound assignment operations
 pub mod ops {
     use tish_core::Value;
 
+    #[inline]
     pub fn add(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
@@ -135,6 +149,7 @@ pub mod ops {
         }
     }
 
+    #[inline]
     pub fn sub(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a - b)),
@@ -142,6 +157,7 @@ pub mod ops {
         }
     }
 
+    #[inline]
     pub fn mul(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a * b)),
@@ -149,6 +165,7 @@ pub mod ops {
         }
     }
 
+    #[inline]
     pub fn div(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a / b)),
@@ -156,6 +173,48 @@ pub mod ops {
         }
     }
 
+    /// Compare two values for <. Supports number vs number and string vs string.
+    #[inline]
+    pub fn lt(left: &Value, right: &Value) -> Value {
+        let b = match (left, right) {
+            (Value::Number(a), Value::Number(b)) => a < b,
+            (Value::String(a), Value::String(b)) => a.as_ref() < b.as_ref(),
+            _ => false,
+        };
+        Value::Bool(b)
+    }
+
+    #[inline]
+    pub fn le(left: &Value, right: &Value) -> Value {
+        let b = match (left, right) {
+            (Value::Number(a), Value::Number(b)) => a <= b,
+            (Value::String(a), Value::String(b)) => a.as_ref() <= b.as_ref(),
+            _ => false,
+        };
+        Value::Bool(b)
+    }
+
+    #[inline]
+    pub fn gt(left: &Value, right: &Value) -> Value {
+        let b = match (left, right) {
+            (Value::Number(a), Value::Number(b)) => a > b,
+            (Value::String(a), Value::String(b)) => a.as_ref() > b.as_ref(),
+            _ => false,
+        };
+        Value::Bool(b)
+    }
+
+    #[inline]
+    pub fn ge(left: &Value, right: &Value) -> Value {
+        let b = match (left, right) {
+            (Value::Number(a), Value::Number(b)) => a >= b,
+            (Value::String(a), Value::String(b)) => a.as_ref() >= b.as_ref(),
+            _ => false,
+        };
+        Value::Bool(b)
+    }
+
+    #[inline]
     pub fn modulo(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a % b)),
@@ -390,6 +449,19 @@ pub fn process_cwd(_args: &[Value]) -> Value {
     Value::String(cwd.into())
 }
 
+#[cfg(feature = "process")]
+pub fn process_exec(args: &[Value]) -> Value {
+    use std::process::Command;
+    let cmd = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+    if cmd.is_empty() {
+        return Value::Number(0.0);
+    }
+    match Command::new("sh").arg("-c").arg(&cmd).status() {
+        Ok(status) => Value::Number(status.code().unwrap_or(1) as f64),
+        Err(_) => Value::Number(1.0),
+    }
+}
+
 #[cfg(feature = "fs")]
 pub fn read_file(args: &[Value]) -> Value {
     let path = args.first().map(|v| v.to_display_string()).unwrap_or_default();
@@ -445,6 +517,7 @@ use std::sync::Arc;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+#[inline]
 pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
     let key = key.as_ref();
     match obj {
@@ -493,6 +566,7 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
     }
 }
 
+#[inline]
 pub fn get_index(obj: &Value, index: &Value) -> Value {
     match obj {
         Value::Array(arr) => {
@@ -514,6 +588,7 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
     }
 }
 
+#[inline]
 pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
     match obj {
         Value::Object(map) => {
@@ -524,6 +599,7 @@ pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
     }
 }
 
+#[inline]
 pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
     match obj {
         Value::Array(arr) => {
@@ -998,23 +1074,3 @@ pub fn string_search_regex(s: &Value, regexp: &Value) -> Value {
     }
 }
 
-/// Read CSV from embedded string (for compile-time inlined data).
-#[cfg(feature = "polars")]
-pub fn polars_read_csv_from_string(csv_content: &str) -> Value {
-    tish_polars::polars_read_csv_from_string_runtime(csv_content)
-}
-
-/// Polars object for compiled output when polars feature is enabled.
-#[cfg(feature = "polars")]
-pub fn polars_object() -> Value {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use std::rc::Rc;
-    use std::sync::Arc;
-    let mut polars = HashMap::new();
-    polars.insert(
-        Arc::from("read_csv"),
-        Value::Function(Rc::new(tish_polars::polars_read_csv_runtime)),
-    );
-    Value::Object(Rc::new(RefCell::new(polars)))
-}

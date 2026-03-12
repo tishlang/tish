@@ -223,6 +223,22 @@ pub fn process_cwd(_args: &[Value]) -> Result<Value, String> {
     Ok(Value::String(cwd.into()))
 }
 
+#[cfg(feature = "process")]
+pub fn process_exec(args: &[Value]) -> Result<Value, String> {
+    use std::process::Command;
+    let cmd = args.first().map(|v| v.to_string()).unwrap_or_default();
+    if cmd.is_empty() {
+        return Ok(Value::Number(0.0));
+    }
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&cmd)
+        .output()
+        .map_err(|e| format!("exec failed: {}", e))?;
+    let code = output.status.code().unwrap_or(1);
+    Ok(Value::Number(code as f64))
+}
+
 #[cfg(feature = "fs")]
 pub fn read_file(args: &[Value]) -> Result<Value, String> {
     let path = args.first().map(|v| v.to_string()).unwrap_or_default();

@@ -11,8 +11,8 @@ macro_rules! binary_single_op {
             while matches!(self.peek_kind(), Some(TokenKind::$token)) {
                 self.advance();
                 let right = self.$next()?;
-                let start = left.span().start;
-                let end = right.span().end;
+                let start = expr_span(&left).start;
+                let end = expr_span(&right).end;
                 left = Expr::Binary {
                     left: Box::new(left),
                     op: $op,
@@ -37,8 +37,8 @@ macro_rules! binary_multi_op {
                 };
                 self.advance();
                 let right = self.$next()?;
-                let start = left.span().start;
-                let end = right.span().end;
+                let start = expr_span(&left).start;
+                let end = expr_span(&right).end;
                 left = Expr::Binary {
                     left: Box::new(left),
                     op,
@@ -53,8 +53,9 @@ macro_rules! binary_multi_op {
 
 use tish_ast::{
     ArrowBody, ArrayElement, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
-    DestructProp, ExportDeclaration, Expr, ImportSpecifier, Literal, LogicalAssignOp, MemberProp,
-    ObjectProp, Program, Span, Statement, TypeAnnotation, TypedParam, UnaryOp,
+    DestructProp, ExportDeclaration, Expr, ImportSpecifier, JsxAttrValue, JsxChild, JsxProp,
+    Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, TypeAnnotation,
+    TypedParam, UnaryOp,
 };
 use tish_lexer::{Token, TokenKind};
 
@@ -1283,6 +1284,14 @@ impl<'a> Parser<'a> {
                     },
                 })
             }
+            TokenKind::Lt => {
+                // JSX: <Tag or <>
+                match self.peek_kind() {
+                    Some(TokenKind::Ident) => self.parse_jsx_element(span.start),
+                    Some(TokenKind::Gt) => self.parse_jsx_fragment(span.start),
+                    _ => Err(format!("Invalid JSX: expected tag name or <> after <, got {:?}", self.peek_kind())),
+                }
+            }
             TokenKind::LBrace => {
                 let mut props = Vec::new();
                 while !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
@@ -1450,11 +1459,187 @@ impl<'a> Parser<'a> {
             (1, 1)
         }
     }
+
+    /// Parse JSX element: <Tag props>children</Tag> or <Tag props />
+    /// Caller has already consumed <.
+    fn parse_jsx_element(&mut self, start: (usize, usize)) -> Result<Expr, String> {
+        let tag_tok = self.expect(TokenKind::Ident)?;
+        let tag = tag_tok.literal.clone().ok_or("Expected tag name")?;
+
+        let mut props = Vec::new();
+        loop {
+            match self.peek_kind() {
+                Some(TokenKind::Slash) => {
+                    // Self-closing: />
+                    self.advance();
+                    self.expect(TokenKind::Gt)?;
+                    let end = self.previous_span_end();
+                    return Ok(Expr::JsxElement {
+                        tag,
+                        props,
+                        children: vec![],
+                        span: Span { start, end },
+                    });
+                }
+                Some(TokenKind::Gt) => break,
+                Some(TokenKind::Spread) => {
+                    self.advance(); // ...
+                    let expr = self.parse_expr()?;
+                    self.expect(TokenKind::RBrace)?; // }
+                    props.push(JsxProp::Spread(expr));
+                }
+                Some(TokenKind::Ident) => {
+                    let name_tok = self.advance().unwrap();
+                    let name = name_tok.literal.clone().ok_or("Expected attr name")?;
+                    if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
+                        self.advance(); // =
+                        let value = if matches!(self.peek_kind(), Some(TokenKind::LBrace)) {
+                            self.advance(); // {
+                            let expr = self.parse_expr()?;
+                            self.expect(TokenKind::RBrace)?; // }
+                            JsxAttrValue::Expr(expr)
+                        } else {
+                            let s = self.expect(TokenKind::String)?.literal.clone().ok_or("Expected string")?;
+                            JsxAttrValue::String(s)
+                        };
+                        props.push(JsxProp::Attr { name, value });
+                    } else {
+                        props.push(JsxProp::Attr {
+                            name,
+                            value: JsxAttrValue::ImplicitTrue,
+                        });
+                    }
+                }
+                _ => return Err(format!("Unexpected token in JSX props: {:?}", self.peek_kind())),
+            }
+        }
+        self.advance(); // consume >
+
+        let children = self.parse_jsx_children(&tag)?;
+        let end = self.previous_span_end();
+        Ok(Expr::JsxElement {
+            tag,
+            props,
+            children,
+            span: Span { start, end },
+        })
+    }
+
+    /// Parse JSX children until </Tag> or </>
+    fn parse_jsx_children(&mut self, close_tag: &str) -> Result<Vec<JsxChild>, String> {
+        let mut children = Vec::new();
+        loop {
+            match self.peek_kind() {
+                None => return Err("Unexpected EOF in JSX".to_string()),
+                Some(TokenKind::Lt) => {
+                    let next = self.tokens.get(self.pos + 1);
+                    if let Some(t) = next {
+                        if t.kind == TokenKind::Slash {
+                            // </ closing tag
+                            self.advance(); // <
+                            self.advance(); // /
+                            let name = self.expect(TokenKind::Ident)?.literal.clone().ok_or("Expected tag name")?;
+                            if name.as_ref() != close_tag {
+                                return Err(format!("Mismatched JSX tag: expected </{}> got </{}>", close_tag, name));
+                            }
+                            self.expect(TokenKind::Gt)?; // >
+                            return Ok(children);
+                        }
+                        if t.kind == TokenKind::Gt {
+                            return Err("Unexpected <> in JSX children".to_string());
+                        }
+                    }
+                    // <Tag - nested element
+                    let nested_start = self.peek().unwrap().span.start;
+                    self.advance(); // <
+                    let elem = self.parse_jsx_element(nested_start)?;
+                    children.push(JsxChild::Expr(elem));
+                }
+                Some(TokenKind::LBrace) => {
+                    self.advance(); // {
+                    let expr = self.parse_expr()?;
+                    self.expect(TokenKind::RBrace)?; // }
+                    children.push(JsxChild::Expr(expr));
+                }
+                Some(TokenKind::String) => {
+                    let t = self.advance().unwrap();
+                    let s = t.literal.clone().unwrap_or_default();
+                    if !s.is_empty() {
+                        children.push(JsxChild::Text(s));
+                    }
+                }
+                Some(TokenKind::Ident) => {
+                    // Bare identifiers in JSX are text (e.g. "hello" in <div>hello</div>)
+                    let t = self.advance().unwrap();
+                    let s = t.literal.clone().unwrap_or_default();
+                    if !s.is_empty() {
+                        children.push(JsxChild::Text(s));
+                    }
+                }
+                _ => {
+                    return Err(format!("Unexpected token in JSX children: {:?}", self.peek_kind()));
+                }
+            }
+        }
+    }
+
+    fn parse_jsx_fragment(&mut self, start: (usize, usize)) -> Result<Expr, String> {
+        self.advance(); // consume >
+        let mut children = Vec::new();
+        loop {
+            match self.peek_kind() {
+                None => return Err("Unexpected EOF in JSX fragment".to_string()),
+                Some(TokenKind::Lt) => {
+                    let next = self.tokens.get(self.pos + 1);
+                    if let Some(t) = next {
+                        if t.kind == TokenKind::Slash {
+                            // </
+                            let next2 = self.tokens.get(self.pos + 2);
+                            if let Some(t2) = next2 {
+                                if t2.kind == TokenKind::Gt {
+                                    // </>
+                                    self.advance();
+                                    self.advance();
+                                    self.advance();
+                                    let end = self.previous_span_end();
+                                    return Ok(Expr::JsxFragment { children, span: Span { start, end } });
+                                }
+                            }
+                            return Err("Expected </> to close fragment".to_string());
+                        }
+                    }
+                    let nested_start = self.peek().unwrap().span.start;
+                    self.advance(); // <
+                    let elem = self.parse_jsx_element(nested_start)?;
+                    children.push(JsxChild::Expr(elem));
+                }
+                Some(TokenKind::LBrace) => {
+                    self.advance();
+                    let expr = self.parse_expr()?;
+                    self.expect(TokenKind::RBrace)?;
+                    children.push(JsxChild::Expr(expr));
+                }
+                Some(TokenKind::String) => {
+                    let t = self.advance().unwrap();
+                    let s = t.literal.clone().unwrap_or_default();
+                    if !s.is_empty() {
+                        children.push(JsxChild::Text(s));
+                    }
+                }
+                _ => return Err(format!("Unexpected token in JSX fragment: {:?}", self.peek_kind())),
+            }
+        }
+    }
 }
 
-// Helper to get span from Expr
+// Helper to get span from Expr. Uses trait so ExprSpan is referenced.
 trait ExprSpan {
     fn span(&self) -> Span;
+}
+
+#[inline(always)]
+fn expr_span(e: &impl ExprSpan) -> Span {
+    e.span()
 }
 
 impl ExprSpan for Expr {
@@ -1484,6 +1669,9 @@ impl ExprSpan for Expr {
             Expr::ArrowFunction { span, .. } => *span,
             Expr::TemplateLiteral { span, .. } => *span,
             Expr::Await { span, .. } => *span,
+            Expr::JsxElement { span, .. } => *span,
+            Expr::JsxFragment { span, .. } => *span,
+            Expr::NativeModuleLoad { span, .. } => *span,
         }
     }
 }

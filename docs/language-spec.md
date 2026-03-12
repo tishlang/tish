@@ -90,6 +90,9 @@ Log level controlled via `TISH_LOG_LEVEL` environment variable:
 **Math**:
 - `Math.abs(x)`, `Math.sqrt(x)`, `Math.min(a, b, ...)`, `Math.max(a, b, ...)`, `Math.floor(x)`, `Math.ceil(x)`, `Math.round(x)`
 
+**Number**:
+- `n.toFixed(digits?)` — format number with fixed decimal places (0–20), returns string
+
 **JSON**:
 - `JSON.parse(s)`, `JSON.stringify(v)`
 

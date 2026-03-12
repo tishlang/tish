@@ -97,6 +97,14 @@ test-secure:
 test:
     cargo test --features full
 
+# Install tish CLI (secure mode - no dangerous features)
+install:
+    cargo install --path crates/tish --no-default-features
+
+# Install tish CLI with all features
+install-full:
+    cargo install --path crates/tish --features full
+
 # Check compilation for all feature combinations
 check-all:
     @echo "Checking secure mode (no features)..."

@@ -3,9 +3,10 @@
 //! This crate provides the unified Value type and utilities used by both
 //! the interpreter (tish_eval) and compiled runtime (tish_runtime).
 
-mod value;
 mod json;
+mod macros;
 mod uri;
+mod value;
 
 pub use value::*;
 pub use json::{json_parse, json_stringify};

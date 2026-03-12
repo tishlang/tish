@@ -152,9 +152,10 @@ impl Evaluator {
 
             #[cfg(feature = "process")]
             {
-                let mut process = HashMap::with_capacity(4);
+                let mut process = HashMap::with_capacity(5);
                 process.insert("exit".into(), Value::Native(natives::process_exit));
                 process.insert("cwd".into(), Value::Native(natives::process_cwd));
+                process.insert("exec".into(), Value::Native(natives::process_exec));
                 let argv: Vec<Value> = std::env::args()
                     .map(|s| Value::String(s.into()))
                     .collect();
@@ -1310,6 +1311,26 @@ impl Evaluator {
                         }
                     }
 
+                    // Number methods
+                    if let Value::Number(n) = &obj {
+                        match method_name.as_ref() {
+                            "toFixed" => {
+                                let digits = arg_vals
+                                    .first()
+                                    .and_then(|v| match v {
+                                        Value::Number(d) => Some(*d as i32),
+                                        _ => None,
+                                    })
+                                    .unwrap_or(0)
+                                    .max(0)
+                                    .min(20); // ECMA-262: 0–20
+                                let formatted = format!("{:.*}", digits as usize, n);
+                                return Ok(Value::String(formatted.into()));
+                            }
+                            _ => {}
+                        }
+                    }
+
                     // RegExp methods
                     #[cfg(feature = "regex")]
                     if let Value::RegExp(re) = &obj {
@@ -1445,6 +1466,12 @@ impl Evaluator {
                 }
             }
             Expr::Await { operand, .. } => self.eval_await(operand),
+            Expr::JsxElement { .. } | Expr::JsxFragment { .. } => Err(EvalError::Error(
+                "JSX is not supported in the interpreter. Use 'tish compile --target js' to compile to JavaScript.".to_string(),
+            )),
+            Expr::NativeModuleLoad { spec, .. } => Err(EvalError::Error(
+                format!("Native module imports ({}) are only supported when compiling to Rust. Use 'tish compile'.", spec.as_ref()),
+            )),
             Expr::TypeOf { operand, .. } => {
                 let v = self.eval_expr(operand)?;
                 Ok(Value::String(match &v {

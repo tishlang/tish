@@ -1,0 +1,104 @@
+// Data Processing Example - Sales Order Report
+// Demonstrates: data manipulation, array sorting, modification, nested loops
+
+// Sample orders with nested line items
+let orders = [
+  {
+    id: 1,
+    customer: "Acme Corp",
+    date: "2025-03-05",
+    items: [
+      { name: "Widget A", price: 10.50, qty: 3 },
+      { name: "Widget B", price: 25.00, qty: 1 },
+      { name: "Widget C", price: 5.00, qty: 10 }
+    ]
+  },
+  {
+    id: 2,
+    customer: "Globex Inc",
+    date: "2025-03-01",
+    items: [
+      { name: "Gadget X", price: 99.99, qty: 2 },
+      { name: "Gadget Y", price: 49.50, qty: 4 }
+    ]
+  },
+  {
+    id: 3,
+    customer: "Initech",
+    date: "2025-03-03",
+    items: [
+      { name: "Part Alpha", price: 15.00, qty: 5 },
+      { name: "Part Beta", price: 7.50, qty: 20 }
+    ]
+  }
+]
+
+console.log("=== Sales Order Report ===")
+console.log("")
+
+// --- SORTING ---
+// Sort orders by date (ISO format compares correctly as strings)
+orders.sort((a, b) => {
+  if (a.date < b.date) return -1
+  if (a.date > b.date) return 1
+  return 0
+})
+
+// Sort line items by price within each order
+for (let order of orders) {
+  order.items.sort((a, b) => a.price - b.price)
+}
+
+// --- MODIFICATION ---
+// Update quantity of first item in first order (splice replace)
+let firstOrder = orders[0]
+let firstItem = firstOrder.items[0]
+firstOrder.items.splice(0, 1, { name: firstItem.name, price: firstItem.price, qty: 5 })
+
+// Add a new item to second order (push)
+orders[1].items.push({ name: "Gadget Z", price: 199.00, qty: 1 })
+
+console.log("Orders (sorted by date, items by price)")
+console.log("")
+
+// --- NESTED LOOPS ---
+// Outer: orders; Inner: items - compute per-order totals
+let grandTotal = 0
+for (let order of orders) {
+  let orderTotal = 0
+  let itemCount = 0
+  for (let item of order.items) {
+    let lineTotal = item.price * item.qty
+    orderTotal = orderTotal + lineTotal
+    itemCount = itemCount + item.qty
+  }
+  grandTotal = grandTotal + orderTotal
+  console.log(`Order #${order.id} | ${order.customer} | ${order.date}`)
+  console.log(`  Items: ${itemCount} | Total: $${orderTotal.toFixed(2)}`)
+  for (let item of order.items) {
+    console.log(`    - ${item.name}: ${item.qty} x $${item.price} = $${(item.price * item.qty).toFixed(2)}`)
+  }
+  console.log("")
+}
+
+console.log("=== Grand Total: $" + grandTotal.toFixed(2) + " ===")
+console.log("")
+
+// --- HIGHER-ORDER METHODS ---
+// Filter orders over $100, map to customer names, reduce to count
+fn orderTotal(items) {
+  let sum = 0
+  for (let item of items) {
+    sum = sum + item.price * item.qty
+  }
+  return sum
+}
+
+let bigOrders = orders.filter((o) => orderTotal(o.items) > 100)
+let customerNames = bigOrders.map((o) => o.customer)
+let bigOrderCount = bigOrders.reduce((acc, o) => acc + 1, 0)
+
+console.log(`Orders over $100: ${bigOrderCount}`)
+console.log("Customers:", customerNames.join(", "))
+console.log("")
+console.log("Report complete.")

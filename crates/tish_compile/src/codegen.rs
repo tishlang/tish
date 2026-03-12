@@ -187,6 +187,27 @@ impl UsageAnalyzer {
                 self.analyze_expr(value);
             }
             Expr::Await { operand, .. } => self.analyze_expr(operand),
+            Expr::JsxElement { props, children, .. } => {
+                for p in props {
+                    match p {
+                        tish_ast::JsxProp::Attr { value: tish_ast::JsxAttrValue::Expr(e), .. } | tish_ast::JsxProp::Spread(e) => self.analyze_expr(e),
+                        _ => {}
+                    }
+                }
+                for c in children {
+                    if let tish_ast::JsxChild::Expr(e) = c {
+                        self.analyze_expr(e);
+                    }
+                }
+            }
+            Expr::JsxFragment { children, .. } => {
+                for c in children {
+                    if let tish_ast::JsxChild::Expr(e) = c {
+                        self.analyze_expr(e);
+                    }
+                }
+            }
+            Expr::NativeModuleLoad { .. } => {}
         }
     }
 
@@ -285,6 +306,15 @@ fn program_uses_async(program: &Program) -> bool {
                 ArrowBody::Block(s) => stmt_has_async(s),
             },
             Expr::TemplateLiteral { exprs, .. } => exprs.iter().any(expr_has_await),
+            Expr::JsxElement { props, children, .. } => {
+                props.iter().any(|p| match p {
+                    tish_ast::JsxProp::Attr { value: tish_ast::JsxAttrValue::Expr(e), .. } | tish_ast::JsxProp::Spread(e) => expr_has_await(e),
+                    _ => false,
+                }) || children.iter().any(|c| matches!(c, tish_ast::JsxChild::Expr(e) if expr_has_await(e)))
+            }
+            Expr::JsxFragment { children, .. } => {
+                children.iter().any(|c| matches!(c, tish_ast::JsxChild::Expr(e) if expr_has_await(e)))
+            }
             _ => false,
         }
     }
@@ -338,19 +368,41 @@ pub fn compile_with_project_root(program: &Program, project_root: Option<&Path>)
 }
 
 /// Compile a project from its entry path. Resolves imports, merges modules, then compiles.
+/// Features are derived from native imports (e.g. import { egui } from 'tish:egui') and merged
+/// with any explicitly passed features. Returns only the Rust code (backward compatible).
 pub fn compile_project(
     entry_path: &Path,
     project_root: Option<&Path>,
     features: &[String],
 ) -> Result<String, CompileError> {
+    let (rust, _) = compile_project_full(entry_path, project_root, features)?;
+    Ok(rust)
+}
+
+/// Compile a project and return Rust code plus resolved native modules for Cargo.toml generation.
+pub fn compile_project_full(
+    entry_path: &Path,
+    project_root: Option<&Path>,
+    features: &[String],
+) -> Result<(String, Vec<crate::resolve::ResolvedNativeModule>), CompileError> {
     use crate::resolve;
+    let root = project_root.unwrap_or_else(|| entry_path.parent().unwrap_or(Path::new(".")));
     let modules = resolve::resolve_project(entry_path, project_root)
         .map_err(|e| CompileError { message: e, span: None })?;
     resolve::detect_cycles(&modules)
         .map_err(|e| CompileError { message: e, span: None })?;
     let program = resolve::merge_modules(modules)
         .map_err(|e| CompileError { message: e, span: None })?;
-    compile_with_features(&program, project_root, features)
+    let native_modules = resolve::resolve_native_modules(&program, root)
+        .map_err(|e| CompileError { message: e, span: None })?;
+    let mut all_features: Vec<String> = features.to_vec();
+    for f in resolve::extract_native_import_features(&program) {
+        if !all_features.contains(&f) {
+            all_features.push(f);
+        }
+    }
+    let rust = compile_with_native_modules(&program, project_root, &all_features, &native_modules)?;
+    Ok((rust, native_modules))
 }
 
 /// Compile with explicit feature flags. When features are provided, codegen uses them
@@ -360,7 +412,21 @@ pub fn compile_with_features(
     project_root: Option<&Path>,
     features: &[String],
 ) -> Result<String, CompileError> {
-    let mut g = Codegen::new(project_root, features);
+    compile_with_native_modules(program, project_root, features, &[])
+}
+
+/// Compile with resolved native modules. Native imports emit calls to the module crates directly.
+pub fn compile_with_native_modules(
+    program: &Program,
+    project_root: Option<&Path>,
+    features: &[String],
+    native_modules: &[crate::resolve::ResolvedNativeModule],
+) -> Result<String, CompileError> {
+    let map: std::collections::HashMap<String, (String, String)> = native_modules
+        .iter()
+        .map(|m| (m.spec.clone(), (m.crate_name.clone(), m.export_fn.clone())))
+        .collect();
+    let mut g = Codegen::new_with_native_modules(project_root, features, map);
     g.emit_program(program)?;
     Ok(g.output)
 }
@@ -373,6 +439,8 @@ struct Codegen {
     project_root: Option<std::path::PathBuf>,
     /// Requested features (http, process, fs, regex, polars). When non-empty, used instead of #[cfg].
     features: std::collections::HashSet<String>,
+    /// spec -> (crate_name, export_fn) for native modules resolved via package.json
+    native_module_map: std::collections::HashMap<String, (String, String)>,
     /// Stack: true = async Rust context (run body), false = sync closure (Tish fn body)
     async_context_stack: Vec<bool>,
     loop_stack: Vec<(String, Option<String>)>, // (break_label, continue_update) for innermost loop
@@ -395,7 +463,11 @@ struct Codegen {
 }
 
 impl Codegen {
-    fn new(project_root: Option<&Path>, features: &[String]) -> Self {
+    fn new_with_native_modules(
+        project_root: Option<&Path>,
+        features: &[String],
+        native_module_map: std::collections::HashMap<String, (String, String)>,
+    ) -> Self {
         let features: std::collections::HashSet<String> = features.iter().cloned().collect();
         Self {
             output: String::new(),
@@ -404,6 +476,7 @@ impl Codegen {
             is_async: false,
             project_root: project_root.map(|p| p.to_path_buf()),
             features,
+            native_module_map,
             async_context_stack: Vec::new(),
             loop_stack: Vec::new(),
             function_scope_stack: vec![Vec::new()], // Start with global scope
@@ -413,6 +486,13 @@ impl Codegen {
             usage_analyzer: None,
             type_context: TypeContext::new(),
         }
+    }
+
+    /// Map native module spec to Rust init expression using resolved package.json modules.
+    fn native_module_rust_init(&self, spec: &str) -> Option<String> {
+        self.native_module_map
+            .get(spec)
+            .map(|(crate_name, export_fn)| format!("{}::{}()", crate_name, export_fn))
     }
 
     fn has_feature(&self, name: &str) -> bool {
@@ -431,10 +511,6 @@ impl Codegen {
             }
             #[cfg(feature = "regex")]
             if name == "regex" {
-                return true;
-            }
-            #[cfg(feature = "polars")]
-            if name == "polars" {
                 return true;
             }
             false
@@ -504,6 +580,9 @@ impl Codegen {
                 | Expr::Unary { .. }
                 | Expr::TypeOf { .. }
                 | Expr::TemplateLiteral { .. }
+                | Expr::JsxElement { .. }
+                | Expr::JsxFragment { .. }
+                | Expr::NativeModuleLoad { .. }
         )
     }
 
@@ -532,15 +611,6 @@ impl Codegen {
         true
     }
 
-    /// Generate code for a numeric binary operation that returns Number.
-    fn emit_numeric_binop(l: &str, r: &str, op: &str) -> String {
-        format!(
-            "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
-             let Value::Number(b) = &({}) else {{ panic!() }}; a {} b }})",
-            l, r, op
-        )
-    }
-
     /// Generate code for increment/decrement operations.
     /// `is_prefix`: true for ++x/--x, false for x++/x--
     /// `delta`: "+1.0" or "-1.0"
@@ -552,7 +622,7 @@ impl Codegen {
         if is_prefix {
             if is_wrapped {
                 format!(
-                    "{{ *{n}.borrow_mut() = Value::Number(match &*{n}.borrow() {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); {n}.borrow().clone() }}"
+                    "{{ *{n}.borrow_mut() = Value::Number(match &*{n}.borrow() {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); (*{n}.borrow()).clone() }}"
                 )
             } else {
                 format!(
@@ -562,7 +632,7 @@ impl Codegen {
         } else {
             if is_wrapped {
                 format!(
-                    "{{ let _v = {n}.borrow().clone(); *{n}.borrow_mut() = Value::Number(match &_v {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); _v }}"
+                    "{{ let _v = (*{n}.borrow()).clone(); *{n}.borrow_mut() = Value::Number(match &_v {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); _v }}"
                 )
             } else {
                 format!(
@@ -570,15 +640,6 @@ impl Codegen {
                 )
             }
         }
-    }
-
-    /// Generate code for a numeric comparison that returns Bool.
-    fn emit_numeric_cmp(l: &str, r: &str, op: &str) -> String {
-        format!(
-            "Value::Bool({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
-             let Value::Number(b) = &({}) else {{ panic!() }}; *a {} *b }})",
-            l, r, op
-        )
     }
 
     /// Generate code for a bitwise binary operation.
@@ -643,7 +704,7 @@ impl Codegen {
         self.write("use std::sync::Arc;\n");
         self.write("use tish_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, TishError, Value};\n");
         if self.has_feature("process") {
-            self.write("use tish_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd};\n");
+            self.write("use tish_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd, process_exec as tish_process_exec};\n");
         }
         if self.has_feature("http") {
             if self.is_async {
@@ -769,6 +830,7 @@ impl Codegen {
             self.writeln("let mut p = HashMap::new();");
             self.writeln("p.insert(Arc::from(\"exit\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args))));");
             self.writeln("p.insert(Arc::from(\"cwd\"), Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args))));");
+            self.writeln("p.insert(Arc::from(\"exec\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args))));");
             self.writeln("let argv: Vec<Value> = std::env::args().map(|s| Value::String(s.into())).collect();");
             self.writeln("p.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(argv))));");
             self.writeln("let mut env_obj = HashMap::new();");
@@ -822,9 +884,7 @@ impl Codegen {
             self.writeln("let RegExp = Value::Function(Rc::new(|args: &[Value]| regexp_new(args)));");
         }
 
-        if self.has_feature("polars") {
-            self.writeln("let Polars = tish_runtime::polars_object();");
-        }
+        // Polars, Egui etc. are emitted via VarDecl from import { X } from 'tish:...'
 
         // Pre-scan for top-level function declarations and create cells (for mutual recursion)
         let top_level_funcs = self.prescan_function_decls(&program.statements);
@@ -1255,12 +1315,12 @@ impl Codegen {
                 self.indent += 1;
                 // Make the function available by its name inside the closure (only if recursive)
                 if needs_self_ref {
-                    self.writeln(&format!("let {} = {}_ref.borrow().clone();", name_str, name_str));
+                    self.writeln(&format!("let {} = (*{}_ref.borrow()).clone();", name_str, name_str));
                 }
                 // Make sibling functions available for mutual recursion
                 for sibling in &sibling_fns {
                     let sibling_escaped = Self::escape_ident(sibling);
-                    self.writeln(&format!("let {} = {}_ref.borrow().clone();", sibling_escaped, sibling_escaped));
+                    self.writeln(&format!("let {} = (*{}_ref.borrow()).clone();", sibling_escaped, sibling_escaped));
                 }
                 // Extract just the parameter names (type annotations are parsed but not used in codegen yet)
                 let current_param_names: Vec<String> = params.iter().map(|p| p.name.to_string()).collect();
@@ -1439,7 +1499,7 @@ impl Codegen {
             Expr::Ident { name, .. } => {
                 let escaped = Self::escape_ident(name.as_ref());
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    format!("{}.borrow().clone()", escaped)
+                    format!("(*{}.borrow()).clone()", escaped)
                 } else {
                     // Check if this is a typed variable that needs conversion to Value
                     let var_type = self.type_context.get_type(name.as_ref());
@@ -1477,34 +1537,35 @@ impl Codegen {
             }
             Expr::Call { callee, args, .. } => {
                 // Compile-time embed: Polars.read_csv("<literal path>") when file exists
-                #[cfg(feature = "polars")]
-                if let (Some(ref root), Some(CallArg::Expr(first_arg))) =
-                    (self.project_root.as_ref(), args.first())
-                {
-                    if let Expr::Member {
-                        object,
-                        prop: MemberProp::Name(ref method_name),
-                        ..
-                    } = callee.as_ref()
+                if let Some((crate_name, _)) = self.native_module_map.get("tish:polars") {
+                    if let (Some(ref root), Some(CallArg::Expr(first_arg))) =
+                        (self.project_root.as_ref(), args.first())
                     {
-                        if method_name.as_ref() == "read_csv"
-                            && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Polars")
+                        if let Expr::Member {
+                            object,
+                            prop: MemberProp::Name(ref method_name),
+                            ..
+                        } = callee.as_ref()
                         {
-                            if let Expr::Literal {
-                                value: Literal::String(ref path),
-                                ..
-                            } = first_arg
+                            if method_name.as_ref() == "read_csv"
+                                && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Polars")
                             {
-                                let path_str = path.as_ref();
-                                let normalized = path_str.trim_start_matches("./");
-                                let full_path = root.join(normalized);
-                                if full_path.exists() {
-                                    if let Ok(content) = std::fs::read_to_string(&full_path) {
-                                        let escaped = format!("{:?}", content);
-                                        return Ok(format!(
-                                            "tish_runtime::polars_read_csv_from_string({})",
-                                            escaped
-                                        ));
+                                if let Expr::Literal {
+                                    value: Literal::String(ref path),
+                                    ..
+                                } = first_arg
+                                {
+                                    let path_str = path.as_ref();
+                                    let normalized = path_str.trim_start_matches("./");
+                                    let full_path = root.join(normalized);
+                                    if full_path.exists() {
+                                        if let Ok(content) = std::fs::read_to_string(&full_path) {
+                                            let escaped = format!("{:?}", content);
+                                            return Ok(format!(
+                                                "{}::polars_read_csv_from_string_runtime({})",
+                                                crate_name, escaped
+                                            ));
+                                        }
                                     }
                                 }
                             }
@@ -1687,6 +1748,14 @@ impl Codegen {
                             return Ok(format!(
                                 "tish_runtime::string_pad_end(&{}, &{}, &{})",
                                 obj_expr, target_len, pad
+                            ));
+                        }
+                        // Number methods
+                        "toFixed" => {
+                            let digits = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            return Ok(format!(
+                                "tish_runtime::number_to_fixed(&{}, &{})",
+                                obj_expr, digits
                             ));
                         }
                         // Higher-order array methods
@@ -2068,7 +2137,7 @@ impl Codegen {
                 };
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     format!(
-                        "{{ let _rhs = ({}).clone(); *{}.borrow_mut() = tish_runtime::ops::{}(&{}.borrow(), &_rhs)?; {}.borrow().clone() }}",
+                        "{{ let _rhs = ({}).clone(); *{}.borrow_mut() = tish_runtime::ops::{}(&*{}.borrow(), &_rhs)?; (*{}.borrow()).clone() }}",
                         val, n, op_fn, n, n
                     )
                 } else {
@@ -2087,17 +2156,17 @@ impl Codegen {
                         LogicalAssignOp::AndAnd => (
                             format!("{}.borrow().is_truthy()", n),
                             format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, n),
-                            format!("{}.borrow().clone()", n),
+                            format!("(*{}.borrow()).clone()", n),
                         ),
                         LogicalAssignOp::OrOr => (
                             format!("!{}.borrow().is_truthy()", n),
                             format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, n),
-                            format!("{}.borrow().clone()", n),
+                            format!("(*{}.borrow()).clone()", n),
                         ),
                         LogicalAssignOp::Nullish => (
                             format!("matches!(*{}.borrow(), Value::Null)", n),
                             format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, n),
-                            format!("{}.borrow().clone()", n),
+                            format!("(*{}.borrow()).clone()", n),
                         ),
                     }
                 } else {
@@ -2158,6 +2227,19 @@ impl Codegen {
                     }
                 }
                 format!("Value::String([{}].concat().into())", parts.join(", "))
+            }
+            Expr::JsxElement { .. } | Expr::JsxFragment { .. } => {
+                return Err(CompileError { message: "JSX is only supported when compiling to JavaScript (tish compile --target js).".to_string(), span: None });
+            }
+            Expr::NativeModuleLoad { spec, .. } => {
+                self.native_module_rust_init(spec.as_ref())
+                    .ok_or_else(|| CompileError {
+                        message: format!(
+                            "Native module '{}' not found. Add it as a dependency and ensure package.json has tish.module.",
+                            spec.as_ref()
+                        ),
+                        span: None,
+                    })?
             }
         })
     }
@@ -2255,6 +2337,27 @@ impl Codegen {
             Expr::TemplateLiteral { exprs, .. } => {
                 for e in exprs { Self::collect_expr_idents(e, idents); }
             }
+            Expr::JsxElement { props, children, .. } => {
+                for p in props {
+                    match p {
+                        tish_ast::JsxProp::Attr { value: tish_ast::JsxAttrValue::Expr(e), .. } | tish_ast::JsxProp::Spread(e) => Self::collect_expr_idents(e, idents),
+                        _ => {}
+                    }
+                }
+                for c in children {
+                    if let tish_ast::JsxChild::Expr(e) = c {
+                        Self::collect_expr_idents(e, idents);
+                    }
+                }
+            }
+            Expr::JsxFragment { children, .. } => {
+                for c in children {
+                    if let tish_ast::JsxChild::Expr(e) = c {
+                        Self::collect_expr_idents(e, idents);
+                    }
+                }
+            }
+            Expr::NativeModuleLoad { .. } => {}
             Expr::Literal { .. } => {}
         }
     }
@@ -2407,15 +2510,27 @@ impl Codegen {
             .filter(|name| referenced.contains(name) && !param_names.contains(name) && !local_var_names.contains(name))
             .collect();
 
+        // Track which vars are already RefCell-wrapped (from outer closure) to avoid double-wrapping
+        let already_wrapped = self.refcell_wrapped_vars.clone();
+
         // Wrap outer captures in Rc<RefCell<>> so they can be mutated inside the closure
         // This is necessary because Fn closures (required for Rc<dyn Fn>) can't mutate captures
+        // If already wrapped by outer closure, just clone the Rc
         for outer_param in &outer_params {
             let param_escaped = Self::escape_ident(outer_param);
-            code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", param_escaped, param_escaped));
+            if already_wrapped.contains(outer_param) {
+                code.push_str(&format!("    let {} = {}.clone();\n", param_escaped, param_escaped));
+            } else {
+                code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", param_escaped, param_escaped));
+            }
         }
         for outer_var in &outer_vars {
             let var_escaped = Self::escape_ident(outer_var);
-            code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", var_escaped, var_escaped));
+            if already_wrapped.contains(outer_var) {
+                code.push_str(&format!("    let {} = {}.clone();\n", var_escaped, var_escaped));
+            } else {
+                code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", var_escaped, var_escaped));
+            }
         }
         // Only clone builtins that are actually referenced (clone so outer scope can still use, e.g. process for PORT)
         for builtin in &["console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp", "Polars"] {
@@ -2442,7 +2557,7 @@ impl Codegen {
         // Make captured functions available
         for func_name in &referenced_funcs {
             let escaped = Self::escape_ident(func_name);
-            code.push_str(&format!("        let {} = {}_ref.borrow().clone();\n", escaped, escaped));
+            code.push_str(&format!("        let {} = (*{}_ref.borrow()).clone();\n", escaped, escaped));
         }
 
         // Extract parameters from args
@@ -2569,18 +2684,11 @@ impl Codegen {
         span: Span,
     ) -> Result<String, CompileError> {
         Ok(match op {
-            BinOp::Add => format!(
-                "{{ match (&{}, &{}) {{
-                    (Value::Number(a), Value::Number(b)) => Value::Number(a + b),
-                    (Value::String(a), Value::String(b)) => Value::String(format!(\"{{}}{{}}\", a, b).into()),
-                    (a, b) => Value::String(format!(\"{{}}{{}}\", (a as &Value).to_display_string(), (b as &Value).to_display_string()).into()),
-                }} }}",
-                l, r
-            ),
-            BinOp::Sub => Self::emit_numeric_binop(l, r, "-"),
-            BinOp::Mul => Self::emit_numeric_binop(l, r, "*"),
-            BinOp::Div => Self::emit_numeric_binop(l, r, "/"),
-            BinOp::Mod => Self::emit_numeric_binop(l, r, "%"),
+            BinOp::Add => format!("tish_runtime::ops::add(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Sub => format!("tish_runtime::ops::sub(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Mul => format!("tish_runtime::ops::mul(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Div => format!("tish_runtime::ops::div(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Mod => format!("tish_runtime::ops::modulo(&{}, &{}).unwrap_or(Value::Null)", l, r),
             BinOp::Pow => format!(
                 "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
                  let Value::Number(b) = &({}) else {{ panic!() }}; a.powf(*b) }})",
@@ -2588,10 +2696,10 @@ impl Codegen {
             ),
             BinOp::StrictEq => format!("Value::Bool({}.strict_eq(&{}))", l, r),
             BinOp::StrictNe => format!("Value::Bool(!{}.strict_eq(&{}))", l, r),
-            BinOp::Lt => Self::emit_numeric_cmp(l, r, "<"),
-            BinOp::Le => Self::emit_numeric_cmp(l, r, "<="),
-            BinOp::Gt => Self::emit_numeric_cmp(l, r, ">"),
-            BinOp::Ge => Self::emit_numeric_cmp(l, r, ">="),
+            BinOp::Lt => format!("tish_runtime::ops::lt(&{}, &{})", l, r),
+            BinOp::Le => format!("tish_runtime::ops::le(&{}, &{})", l, r),
+            BinOp::Gt => format!("tish_runtime::ops::gt(&{}, &{})", l, r),
+            BinOp::Ge => format!("tish_runtime::ops::ge(&{}, &{})", l, r),
             BinOp::And => format!("Value::Bool({}.is_truthy() && {}.is_truthy())", l, r),
             BinOp::Or => format!("Value::Bool({}.is_truthy() || {}.is_truthy())", l, r),
             BinOp::BitAnd => Self::emit_bitwise_binop(l, r, "&"),

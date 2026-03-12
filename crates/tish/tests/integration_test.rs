@@ -317,3 +317,138 @@ fn test_mvp_programs_interpreter_vs_native() {
     }
 }
 
+/// Full stack: compile each .tish file to JS, run with Node, and compare output to interpreter.
+#[test]
+fn test_mvp_programs_interpreter_vs_js() {
+    // Skip if Node.js is not available
+    let node_available = Command::new("node")
+        .args(["--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !node_available {
+        eprintln!("Skipping test_mvp_programs_interpreter_vs_js: Node.js not found");
+        return;
+    }
+
+    let core_dir = core_dir();
+    let bin = tish_bin();
+    assert!(
+        bin.exists(),
+        "tish binary not found at {}. Run `cargo build -p tish` first.",
+        bin.display()
+    );
+
+    let test_files = [
+        "nested_loops.tish",
+        "scopes.tish",
+        "optional_braces.tish",
+        "optional_braces_braced.tish",
+        "tab_indent.tish",
+        "space_indent.tish",
+        "fn_any.tish",
+        "strict_equality.tish",
+        "arrays.tish",
+        "break_continue.tish",
+        "length.tish",
+        "objects.tish",
+        "conditional.tish",
+        "switch.tish",
+        "do_while.tish",
+        "typeof.tish",
+        "inc_dec.tish",
+        "try_catch.tish",
+        "builtins.tish",
+        "exponentiation.tish",
+        "for_of.tish",
+        "bitwise.tish",
+        "math.tish",
+        "optional_chaining.tish",
+        "void.tish",
+        "rest_params.tish",
+        "json.tish",
+        "uri.tish",
+        "in_op.tish",
+        "arrow_functions.tish",
+        "template_literals.tish",
+        "compound_assign.tish",
+        "mutation.tish",
+        "string_methods.tish",
+        "array_methods.tish",
+        "object_methods.tish",
+        "types.tish",
+        "logical_assign.tish",
+        "spread.tish",
+    ];
+
+    for name in test_files {
+        let path = core_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let path_str = path.to_string_lossy();
+
+        // Run interpreter
+        let interp_out = Command::new(&bin)
+            .args(["run", path_str.as_ref()])
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish interpreter");
+        assert!(
+            interp_out.status.success(),
+            "Interpreter failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&interp_out.stderr)
+        );
+
+        // Compile to JS
+        let out_js = std::env::temp_dir()
+            .join(format!("tish_js_test_{}.js", path.file_stem().unwrap().to_string_lossy()));
+        let compile_out = Command::new(&bin)
+            .args([
+                "compile",
+                path_str.as_ref(),
+                "--target",
+                "js",
+                "-o",
+                out_js.to_string_lossy().as_ref(),
+            ])
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish compile --target js");
+        assert!(
+            compile_out.status.success(),
+            "JS compile failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&compile_out.stderr)
+        );
+
+        // Run with Node
+        let node_out = Command::new("node")
+            .arg(&out_js)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run node");
+        let _ = std::fs::remove_file(&out_js);
+
+        if !node_out.status.success() {
+            panic!(
+                "Node failed for {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&node_out.stderr)
+            );
+        }
+
+        let interp_stdout = String::from_utf8_lossy(&interp_out.stdout);
+        let node_stdout = String::from_utf8_lossy(&node_out.stdout);
+        assert_eq!(
+            interp_stdout,
+            node_stdout,
+            "Interpreter vs JS output mismatch for {}:\n--- interpreter ---\n{}--- node ---\n{}",
+            path.display(),
+            interp_stdout,
+            node_stdout
+        );
+    }
+}
+

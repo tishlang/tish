@@ -1,0 +1,10 @@
+{
+  "name": "tishx-example",
+  "version": "0.1.0",
+  "scripts": {
+    "build": "tish compile --target js src/App.tish -o dist/App"
+  },
+  "tish": {
+    "source": "./src/App.tish"
+  }
+}
