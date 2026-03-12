@@ -2,6 +2,9 @@
 # Compare stdout of tests/core programs across runtimes. Fails if any runtime
 # output differs from the reference. Use to find VM/Cranelift/WASI/Node parity gaps.
 #
+# By default, JS runtimes (node, bun, deno) output is normalized: "undefined" -> "null"
+# for comparison, since Tish uses null where JavaScript uses undefined.
+#
 # Usage: ./scripts/run_parity_compare.sh [OPTIONS]
 #
 # Options:
@@ -105,6 +108,11 @@ run_and_capture() {
   fi
 }
 
+# Normalize JS output: undefined -> null (Tish has no undefined, uses null)
+normalize_js_output() {
+  printf '%s' "$1" | sed 's/undefined/null/g'
+}
+
 # Build tish
 if [[ ! -x "$tish_bin" ]]; then
   echo "Building tish ($profile)..."
@@ -136,7 +144,7 @@ for f in "$core_dir"/*.tish; do
       ref_out=$(run_and_capture $tish_bin run "$f" --backend interp || true)
       ;;
     node)
-      ref_out=$(run_and_capture "$node_cmd" "$js_file" || true)
+      ref_out=$(normalize_js_output "$(run_and_capture "$node_cmd" "$js_file" || true)")
       ;;
     rust)
       rust_bin="$cache_dir/${base}_native"
@@ -225,7 +233,7 @@ for f in "$core_dir"/*.tish; do
 
   # Compare: node
   if want_runtime node && [[ "$reference" != "node" ]]; then
-    out=$(run_and_capture "$node_cmd" "$js_file" || true)
+    out=$(normalize_js_output "$(run_and_capture "$node_cmd" "$js_file" || true)")
     if [[ "$out" != "$ref_out" ]]; then
       any_fail=true
       failures+=("node")
@@ -234,7 +242,7 @@ for f in "$core_dir"/*.tish; do
 
   # Compare: bun
   if want_runtime bun && $has_bun; then
-    out=$(run_and_capture "$bun_cmd" "$js_file" || true)
+    out=$(normalize_js_output "$(run_and_capture "$bun_cmd" "$js_file" || true)")
     if [[ "$out" != "$ref_out" ]]; then
       any_fail=true
       failures+=("bun")
@@ -243,7 +251,7 @@ for f in "$core_dir"/*.tish; do
 
   # Compare: deno
   if want_runtime deno && $has_deno; then
-    out=$(run_and_capture "$deno_cmd" run --allow-all "$js_file" || true)
+    out=$(normalize_js_output "$(run_and_capture "$deno_cmd" run --allow-all "$js_file" || true)")
     if [[ "$out" != "$ref_out" ]]; then
       any_fail=true
       failures+=("deno")
