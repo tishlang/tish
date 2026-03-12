@@ -69,16 +69,39 @@ cache_dir="$target_dir/parity-cache-$profile"
 mkdir -p "$cache_dir"
 
 run_with_timeout() {
-  if [[ $run_timeout -gt 0 ]]; then
-    if command -v timeout &>/dev/null; then
-      timeout "$run_timeout" "$@" 2>/dev/null || true
-    elif command -v perl &>/dev/null; then
-      perl -e 'alarm shift; exec @ARGV' "$run_timeout" "$@" 2>/dev/null || true
+  if $verbose; then
+    if [[ $run_timeout -gt 0 ]]; then
+      if command -v timeout &>/dev/null; then
+        timeout "$run_timeout" "$@" || true
+      elif command -v perl &>/dev/null; then
+        perl -e 'alarm shift; exec @ARGV' "$run_timeout" "$@" || true
+      else
+        "$@" || true
+      fi
+    else
+      "$@" || true
+    fi
+  else
+    if [[ $run_timeout -gt 0 ]]; then
+      if command -v timeout &>/dev/null; then
+        timeout "$run_timeout" "$@" 2>/dev/null || true
+      elif command -v perl &>/dev/null; then
+        perl -e 'alarm shift; exec @ARGV' "$run_timeout" "$@" 2>/dev/null || true
+      else
+        "$@" 2>/dev/null || true
+      fi
     else
       "$@" 2>/dev/null || true
     fi
+  fi
+}
+
+# Capture stdout; when verbose, stderr is left visible (no 2>/dev/null)
+run_and_capture() {
+  if $verbose; then
+    run_with_timeout "$@"
   else
-    "$@" 2>/dev/null || true
+    run_with_timeout "$@" 2>/dev/null
   fi
 }
 
@@ -110,17 +133,17 @@ for f in "$core_dir"/*.tish; do
   ref_out=""
   case "$reference" in
     interp)
-      ref_out=$(run_with_timeout $tish_bin run "$f" --backend interp 2>/dev/null || true)
+      ref_out=$(run_and_capture $tish_bin run "$f" --backend interp || true)
       ;;
     node)
-      ref_out=$(run_with_timeout "$node_cmd" "$js_file" 2>/dev/null || true)
+      ref_out=$(run_and_capture "$node_cmd" "$js_file" || true)
       ;;
     rust)
       rust_bin="$cache_dir/${base}_native"
       if ! $no_compile; then
         $tish_bin compile "$f" -o "$rust_bin" --native-backend rust >/dev/null 2>&1 || true
       fi
-      [[ -x "$rust_bin" ]] && ref_out=$(run_with_timeout "$rust_bin" 2>/dev/null || true)
+      [[ -x "$rust_bin" ]] && ref_out=$(run_and_capture "$rust_bin" || true)
       ;;
     *) echo "Unknown reference: $reference"; exit 1 ;;
   esac
@@ -130,7 +153,7 @@ for f in "$core_dir"/*.tish; do
 
   # Compare: interp (unless reference)
   if want_runtime interp && [[ "$reference" != "interp" ]]; then
-    out=$(run_with_timeout $tish_bin run "$f" --backend interp 2>/dev/null || true)
+    out=$(run_and_capture $tish_bin run "$f" --backend interp || true)
     if [[ "$out" != "$ref_out" ]]; then
       any_fail=true
       failures+=("interp")
@@ -139,7 +162,7 @@ for f in "$core_dir"/*.tish; do
 
   # Compare: vm
   if want_runtime vm; then
-    out=$(run_with_timeout $tish_bin run "$f" --backend vm 2>/dev/null || true)
+    out=$(run_and_capture $tish_bin run "$f" --backend vm || true)
     if [[ "$out" != "$ref_out" ]]; then
       any_fail=true
       failures+=("vm")
@@ -153,7 +176,7 @@ for f in "$core_dir"/*.tish; do
       $tish_bin compile "$f" -o "$rust_bin" --native-backend rust >/dev/null 2>&1 || true
     fi
     if [[ -x "$rust_bin" ]]; then
-      out=$(run_with_timeout "$rust_bin" 2>/dev/null || true)
+      out=$(run_and_capture "$rust_bin" || true)
       if [[ "$out" != "$ref_out" ]]; then
         any_fail=true
         failures+=("rust")
@@ -171,7 +194,7 @@ for f in "$core_dir"/*.tish; do
       $tish_bin compile "$f" -o "$cl_bin" --native-backend cranelift >/dev/null 2>&1 || true
     fi
     if [[ -x "$cl_bin" ]]; then
-      out=$(run_with_timeout "$cl_bin" 2>/dev/null || true)
+      out=$(run_and_capture "$cl_bin" || true)
       if [[ "$out" != "$ref_out" ]]; then
         any_fail=true
         failures+=("cranelift")
@@ -189,7 +212,7 @@ for f in "$core_dir"/*.tish; do
       $tish_bin compile "$f" -o "$cache_dir/${base}_wasi" --target wasi >/dev/null 2>&1 || true
     fi
     if [[ -f "$wasi_bin" ]]; then
-      out=$(run_with_timeout wasmtime "$wasi_bin" 2>/dev/null || true)
+      out=$(run_and_capture wasmtime "$wasi_bin" || true)
       if [[ "$out" != "$ref_out" ]]; then
         any_fail=true
         failures+=("wasi")
@@ -202,7 +225,7 @@ for f in "$core_dir"/*.tish; do
 
   # Compare: node
   if want_runtime node && [[ "$reference" != "node" ]]; then
-    out=$(run_with_timeout "$node_cmd" "$js_file" 2>/dev/null || true)
+    out=$(run_and_capture "$node_cmd" "$js_file" || true)
     if [[ "$out" != "$ref_out" ]]; then
       any_fail=true
       failures+=("node")
@@ -211,7 +234,7 @@ for f in "$core_dir"/*.tish; do
 
   # Compare: bun
   if want_runtime bun && $has_bun; then
-    out=$(run_with_timeout "$bun_cmd" "$js_file" 2>/dev/null || true)
+    out=$(run_and_capture "$bun_cmd" "$js_file" || true)
     if [[ "$out" != "$ref_out" ]]; then
       any_fail=true
       failures+=("bun")
@@ -220,7 +243,7 @@ for f in "$core_dir"/*.tish; do
 
   # Compare: deno
   if want_runtime deno && $has_deno; then
-    out=$(run_with_timeout "$deno_cmd" run --allow-all "$js_file" 2>/dev/null || true)
+    out=$(run_and_capture "$deno_cmd" run --allow-all "$js_file" || true)
     if [[ "$out" != "$ref_out" ]]; then
       any_fail=true
       failures+=("deno")
@@ -233,12 +256,12 @@ for f in "$core_dir"/*.tish; do
       echo "  Reference ($reference) stdout:"
       echo "$ref_out" | sed 's/^/    /'
       for r in "${failures[@]}"; do
-        echo "  Runtime $r output:"
+        echo "  Runtime $r output (stderr shown if verbose):"
         case "$r" in
-          vm) run_with_timeout $tish_bin run "$f" --backend vm 2>/dev/null | sed 's/^/    /' || true ;;
-          cranelift) [[ -x "$cache_dir/${base}_cranelift" ]] && run_with_timeout "$cache_dir/${base}_cranelift" 2>/dev/null | sed 's/^/    /' || true ;;
-          wasi) [[ -f "$cache_dir/${base}_wasi.wasm" ]] && run_with_timeout wasmtime "$cache_dir/${base}_wasi.wasm" 2>/dev/null | sed 's/^/    /' || true ;;
-          node) run_with_timeout "$node_cmd" "$js_file" 2>/dev/null | sed 's/^/    /' || true ;;
+          vm) run_with_timeout $tish_bin run "$f" --backend vm | sed 's/^/    /' || true ;;
+          cranelift) [[ -x "$cache_dir/${base}_cranelift" ]] && run_with_timeout "$cache_dir/${base}_cranelift" | sed 's/^/    /' || true ;;
+          wasi) [[ -f "$cache_dir/${base}_wasi.wasm" ]] && run_with_timeout wasmtime "$cache_dir/${base}_wasi.wasm" | sed 's/^/    /' || true ;;
+          node) run_with_timeout "$node_cmd" "$js_file" | sed 's/^/    /' || true ;;
           *) ;;
         esac
       done
