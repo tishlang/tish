@@ -215,8 +215,17 @@ pub fn filter(arr: &Value, callback: &Value) -> Value {
 pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
-        let mut acc = initial.clone();
-        for (i, v) in arr_borrow.iter().enumerate() {
+        let len = arr_borrow.len();
+        let (start_idx, mut acc) = if matches!(initial, Value::Null)
+            && !arr_borrow.is_empty()
+        {
+            // No initial value: use first element as acc, start from index 1
+            (1, arr_borrow[0].clone())
+        } else {
+            (0, initial.clone())
+        };
+        for i in start_idx..len {
+            let v = arr_borrow[i].clone();
             acc = cb(&[acc, v.clone(), Value::Number(i as f64)]);
         }
         acc
