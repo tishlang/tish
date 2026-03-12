@@ -14,16 +14,17 @@ console.log("values count:", vals.length);
 let entries = Object.entries(obj);
 console.log("entries count:", entries.length);
 
-// Iterate with forEach over entries
+// Iterate with forEach over entries (sort for deterministic order)
+let sortedEntries = Object.entries(obj).sort((a, b) => a[0].localeCompare(b[0]));
 function printEntry(entry) {
     console.log("  key:", entry[0], "val:", entry[1]);
 }
 console.log("entries:");
-Object.entries(obj).forEach(printEntry);
+sortedEntries.forEach(printEntry);
 
 // Use with map
 function getKey(entry) { return entry[0]; }
-let keyNames = Object.entries(obj).map(getKey);
+let keyNames = Object.entries(obj).map(getKey).sort();
 console.log("mapped keys:", keyNames.join(","));
 
 // Empty object
