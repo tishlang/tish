@@ -320,6 +320,7 @@ impl<'a> Compiler<'a> {
                 for p in &param_names {
                     inner.add_name(Arc::clone(p));
                 }
+                inner.param_count = param_names.len() as u16;
                 let mut inner_comp = Compiler::new(&mut inner);
                 inner_comp.scope = vec![param_names
                     .iter()
@@ -743,6 +744,7 @@ impl<'a> Compiler<'a> {
                 for p in &param_names {
                     inner.add_name(Arc::clone(p));
                 }
+                inner.param_count = param_names.len() as u16;
                 let mut inner_comp = Compiler::new(&mut inner);
                 inner_comp.scope = vec![param_names
                     .iter()

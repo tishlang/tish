@@ -270,9 +270,14 @@ fn type_name(v: &Value) -> &'static str {
     }
 }
 
+/// Shared scope for closure capture (parent frame's locals).
+type ScopeMap = Rc<RefCell<HashMap<Arc<str>, Value>>>;
+
 pub struct Vm {
     stack: Vec<Value>,
     scope: HashMap<Arc<str>, Value>,
+    /// Enclosing scope for closures (captured parent frame locals).
+    enclosing: Option<ScopeMap>,
     globals: Rc<RefCell<HashMap<Arc<str>, Value>>>,
 }
 
@@ -281,6 +286,7 @@ impl Vm {
         Self {
             stack: Vec::new(),
             scope: HashMap::new(),
+            enclosing: None,
             globals: Rc::new(RefCell::new(init_globals())),
         }
     }
@@ -315,29 +321,33 @@ impl Vm {
         let names = &chunk.names;
 
         let mut ip = 0;
-        let mut local_scope = HashMap::new();
-        let mut try_handlers: Vec<(usize, usize)> = vec![];
-        if chunk.rest_param_index != NO_REST_PARAM {
-            let ri = chunk.rest_param_index as usize;
-            for (i, name) in chunk.names.iter().enumerate() {
-                if i < ri {
-                    let v = args.get(i).cloned().unwrap_or(Value::Null);
-                    local_scope.insert(Arc::clone(name), v);
-                } else if i == ri {
-                    let rest_arr: Vec<Value> = args.iter().skip(ri).cloned().collect();
-                    local_scope.insert(
-                        Arc::clone(name),
-                        Value::Array(Rc::new(RefCell::new(rest_arr))),
-                    );
+        let local_scope: ScopeMap = Rc::new(RefCell::new(HashMap::new()));
+        {
+            let mut ls = local_scope.borrow_mut();
+            let param_count = chunk.param_count as usize;
+            if chunk.rest_param_index != NO_REST_PARAM {
+                let ri = chunk.rest_param_index as usize;
+                for (i, name) in chunk.names.iter().take(param_count).enumerate() {
+                    if i < ri {
+                        let v = args.get(i).cloned().unwrap_or(Value::Null);
+                        ls.insert(Arc::clone(name), v);
+                    } else if i == ri {
+                        let rest_arr: Vec<Value> = args.iter().skip(ri).cloned().collect();
+                        ls.insert(
+                            Arc::clone(name),
+                            Value::Array(Rc::new(RefCell::new(rest_arr))),
+                        );
+                    }
                 }
-            }
-        } else {
-            for (i, name) in chunk.names.iter().enumerate() {
-                if let Some(v) = args.get(i) {
-                    local_scope.insert(Arc::clone(name), v.clone());
+            } else {
+                for (i, name) in chunk.names.iter().take(param_count).enumerate() {
+                    if let Some(v) = args.get(i) {
+                        ls.insert(Arc::clone(name), v.clone());
+                    }
                 }
             }
         }
+        let mut try_handlers: Vec<(usize, usize)> = vec![];
 
         loop {
             if ip >= code.len() {
@@ -365,10 +375,12 @@ impl Vm {
                                 .ok_or_else(|| "Nested chunk index out of bounds".to_string())?;
                             let inner_clone = inner.clone();
                             let globals = Rc::clone(&self.globals);
+                            let enclosing = Some(Rc::clone(&local_scope));
                             Value::Function(Rc::new(move |args: &[Value]| {
                                 let mut vm = Vm {
                                     stack: Vec::new(),
                                     scope: HashMap::new(),
+                                    enclosing: enclosing.clone(),
                                     globals: Rc::clone(&globals),
                                 };
                                 vm.run_chunk(&inner_clone, &inner_clone.nested, args)
@@ -384,8 +396,14 @@ impl Vm {
                         .get(idx as usize)
                         .ok_or_else(|| format!("Name index out of bounds: {}", idx))?;
                     let v = local_scope
+                        .borrow()
                         .get(name.as_ref())
                         .cloned()
+                        .or_else(|| {
+                            self.enclosing
+                                .as_ref()
+                                .and_then(|e| e.borrow().get(name.as_ref()).cloned())
+                        })
                         .or_else(|| self.scope.get(name.as_ref()).cloned())
                         .or_else(|| self.globals.borrow().get(name.as_ref()).cloned())
                         .ok_or_else(|| format!("Undefined variable: {}", name))?;
@@ -400,14 +418,26 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    if local_scope.contains_key(name.as_ref()) {
-                        local_scope.insert(Arc::clone(name), v);
+                    // Update innermost scope that has the variable (matches interpreter Scope.assign)
+                    if local_scope.borrow().contains_key(name.as_ref()) {
+                        local_scope.borrow_mut().insert(Arc::clone(name), v);
+                    } else if self
+                        .enclosing
+                        .as_ref()
+                        .map(|e| e.borrow().contains_key(name.as_ref()))
+                        .unwrap_or(false)
+                    {
+                        let en = self.enclosing.as_ref().unwrap();
+                        en.borrow_mut().insert(Arc::clone(name), v);
                     } else if self.scope.contains_key(name.as_ref()) {
                         self.scope.insert(Arc::clone(name), v);
-                    } else {
+                    } else if self.globals.borrow().contains_key(name.as_ref()) {
                         self.globals
                             .borrow_mut()
                             .insert(Arc::clone(name), v);
+                    } else {
+                        // New variable: store in current frame so closures can capture via enclosing
+                        local_scope.borrow_mut().insert(Arc::clone(name), v);
                     }
                 }
                 Opcode::LoadGlobal => {

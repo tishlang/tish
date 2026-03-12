@@ -38,12 +38,14 @@ pub struct Chunk {
     pub code: Vec<u8>,
     /// Constants (literals, nested function indices)
     pub constants: Vec<Constant>,
-    /// Variable/property names (strings)
+    /// Variable/property names (strings). First `param_count` are parameter names.
     pub names: Vec<Arc<str>>,
     /// Nested chunks (for function bodies)
     pub nested: Vec<Chunk>,
     /// Index into names for rest param, or NO_REST_PARAM if none.
     pub rest_param_index: u16,
+    /// Number of leading names that are parameters (for proper closure arg binding).
+    pub param_count: u16,
 }
 
 impl Chunk {
@@ -54,6 +56,7 @@ impl Chunk {
             names: Vec::new(),
             nested: Vec::new(),
             rest_param_index: super::NO_REST_PARAM,
+            param_count: 0,
         }
     }
 
