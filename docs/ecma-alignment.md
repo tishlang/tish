@@ -7,7 +7,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 | Clause | Decision | Notes |
 |--------|----------|-------|
 | §5 Notational | Follow | |
-| §6 Types | Follow | Undefined→Null, Boolean, Number, String, Object. No Symbol/BigInt in MVP. |
+| §6 Types | Follow | Undefined→Null; `typeof null` is `"null"`. Boolean, Number, String, Object. No Symbol/BigInt in MVP. |
 | §7 Type conversion | Simplify | ToBoolean, ToNumber, ToString only as needed. No loose equality. |
 | §7.2 Testing | Follow | Strict Equality only |
 | §7.3 Operations on objects | Simplify | GetV, HasProperty, Call, CreateDataProperty. No Construct/private in MVP. |
@@ -54,7 +54,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **object** — Follow (plain `{}`)
 - **strict-equals** — Follow (`===`, `!==`)
 - **increment/decrement** — Follow (postfix `++`, `--` on identifiers)
-- **typeof** — Follow
+- **typeof** — Follow; `typeof null` returns `"null"` (not `"object"`) since Tish has no undefined
 - **async, await** — Follow (simplify); `await` works on any Promise (fetchAsync, fetchAllAsync, Promise)
 - **generators, yield** — Omit
 - **class, new, super, this** — Omit

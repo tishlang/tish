@@ -47,7 +47,7 @@ Tish is a minimal, TS/JS-compatible language designed for both interpretation an
 - `switch (expr) { case val: stmt... default: stmt }`
 - `break`, `continue`, `return expr`
 - `throw expr` / `try stmt catch (e) stmt`
-- `typeof expr` — returns `"number"`, `"string"`, `"boolean"`, `"object"`, `"function"`
+- `typeof expr` — returns `"number"`, `"string"`, `"boolean"`, `"null"`, `"object"`, `"function"` (Tish returns `"null"` for null; JS returns `"object"`)
 - `void expr` — evaluates expr, returns `null` (Tish uses null instead of JS undefined)
 - Postfix `++` / `--` on identifiers
 

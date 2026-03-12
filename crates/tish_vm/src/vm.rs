@@ -259,7 +259,7 @@ fn type_name(v: &Value) -> &'static str {
         Value::Number(_) => "number",
         Value::String(_) => "string",
         Value::Bool(_) => "boolean",
-        Value::Null => "object",
+        Value::Null => "null",
         Value::Array(_) => "object",
         Value::Object(_) => "object",
         Value::Function(_) => "function",
