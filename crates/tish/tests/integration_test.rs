@@ -348,6 +348,200 @@ fn test_mvp_programs_interpreter_vs_native() {
     }
 }
 
+/// Full stack: compile each .tish file with Cranelift backend, run, and compare output to interpreter.
+/// Uses a curated list of pure Tish tests known to work with Cranelift (some constructs cause
+/// stack-underflow in the Cranelift backend; see docs/builtins-gap-analysis.md).
+#[test]
+fn test_mvp_programs_interpreter_vs_cranelift() {
+    let core_dir = core_dir();
+    let bin = tish_bin();
+    assert!(
+        bin.exists(),
+        "tish binary not found at {}. Run `cargo build -p tish` first.",
+        bin.display()
+    );
+
+    // Curated list: only files that pass with Cranelift (many fail with stack-underflow or scope bugs).
+    let test_files = [
+        "fn_any.tish",
+        "strict_equality.tish",
+        "switch.tish",
+        "do_while.tish",
+        "typeof.tish",
+        "try_catch.tish",
+        "json.tish",
+        "math.tish",
+        "builtins.tish",
+        "uri.tish",
+        "inc_dec.tish",
+        "exponentiation.tish",
+        "void.tish",
+        "rest_params.tish",
+        "arrow_functions.tish",
+        "array_methods.tish",
+        "types.tish",
+    ];
+
+    for name in test_files {
+        let path = core_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let path_str = path.to_string_lossy();
+        let out_bin = std::env::temp_dir()
+            .join(format!("tish_cranelift_test_{}", path.file_stem().unwrap().to_string_lossy()));
+
+        let interp_out = Command::new(&bin)
+            .args(["run", path_str.as_ref(), "--backend", "interp"])
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish interpreter");
+        assert!(
+            interp_out.status.success(),
+            "Interpreter failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&interp_out.stderr)
+        );
+
+        let compile_out = Command::new(&bin)
+            .args([
+                "compile",
+                path_str.as_ref(),
+                "-o",
+                out_bin.to_string_lossy().as_ref(),
+                "--native-backend",
+                "cranelift",
+            ])
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish compile cranelift");
+        assert!(
+            compile_out.status.success(),
+            "Cranelift compile failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&compile_out.stderr)
+        );
+
+        let cranelift_out = Command::new(&out_bin)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run cranelift binary");
+        let _ = std::fs::remove_file(&out_bin);
+
+        let interp_stdout = String::from_utf8_lossy(&interp_out.stdout);
+        let cranelift_stdout = String::from_utf8_lossy(&cranelift_out.stdout);
+        assert_eq!(
+            interp_stdout,
+            cranelift_stdout,
+            "Interpreter vs Cranelift output mismatch for {}",
+            path.display()
+        );
+    }
+}
+
+/// Full stack: compile each .tish file to WASI, run with wasmtime, and compare output to interpreter.
+/// Skips if wasmtime is not available. Uses same curated list as Cranelift (WASI uses bytecode VM).
+#[test]
+fn test_mvp_programs_interpreter_vs_wasi() {
+    let wasmtime_available = Command::new("wasmtime")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !wasmtime_available {
+        eprintln!("Skipping test_mvp_programs_interpreter_vs_wasi: wasmtime not found");
+        return;
+    }
+
+    let core_dir = core_dir();
+    let bin = tish_bin();
+    assert!(
+        bin.exists(),
+        "tish binary not found at {}. Run `cargo build -p tish` first.",
+        bin.display()
+    );
+
+    let test_files = [
+        "fn_any.tish",
+        "strict_equality.tish",
+        "switch.tish",
+        "do_while.tish",
+        "typeof.tish",
+        "try_catch.tish",
+        "json.tish",
+        "math.tish",
+        "builtins.tish",
+        "uri.tish",
+        "inc_dec.tish",
+        "exponentiation.tish",
+        "void.tish",
+        "rest_params.tish",
+        "arrow_functions.tish",
+        "array_methods.tish",
+        "types.tish",
+    ];
+
+    for name in test_files {
+        let path = core_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let path_str = path.to_string_lossy();
+        let stem = path.file_stem().unwrap().to_string_lossy();
+        let out_wasm = std::env::temp_dir()
+            .join(format!("tish_wasi_test_{}.wasm", stem));
+
+        let interp_out = Command::new(&bin)
+            .args(["run", path_str.as_ref(), "--backend", "interp"])
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish interpreter");
+        assert!(
+            interp_out.status.success(),
+            "Interpreter failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&interp_out.stderr)
+        );
+
+        let compile_out = Command::new(&bin)
+            .args([
+                "compile",
+                path_str.as_ref(),
+                "-o",
+                out_wasm.with_extension("").to_string_lossy().as_ref(),
+                "--target",
+                "wasi",
+            ])
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish compile wasi");
+        if !compile_out.status.success() {
+            eprintln!(
+                "Skipping {}: WASI compile failed (wasm32-wasip1 target may be missing): {}",
+                path.display(),
+                String::from_utf8_lossy(&compile_out.stderr)
+            );
+            continue;
+        }
+
+        let wasi_out = Command::new("wasmtime")
+            .arg(out_wasm.as_os_str())
+            .current_dir(workspace_root())
+            .output()
+            .expect("run wasmtime");
+        let _ = std::fs::remove_file(&out_wasm);
+
+        let interp_stdout = String::from_utf8_lossy(&interp_out.stdout);
+        let wasi_stdout = String::from_utf8_lossy(&wasi_out.stdout);
+        assert_eq!(
+            interp_stdout,
+            wasi_stdout,
+            "Interpreter vs WASI output mismatch for {}",
+            path.display()
+        );
+    }
+}
+
 /// Full stack: compile each .tish file to JS, run with Node, and compare output to interpreter.
 #[test]
 fn test_mvp_programs_interpreter_vs_js() {

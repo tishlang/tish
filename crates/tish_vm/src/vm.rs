@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use tish_builtins::array as arr_builtins;
+use tish_builtins::globals as globals_builtins;
 use tish_builtins::math as math_builtins;
 use tish_bytecode::{Chunk, Constant, Opcode, NO_REST_PARAM};
 use tish_core::Value;
@@ -46,7 +47,8 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     console.insert(
         "debug".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            tish_runtime::console_debug(args);
+            let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
+            vm_log(&s.join(" "));
             Value::Null
         })),
     );
@@ -188,11 +190,11 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
             let s = args.first().map(|v| v.to_display_string()).unwrap_or_default();
         Value::Number(s.trim().parse().unwrap_or(f64::NAN))
     })));
-    g.insert("encodeURI".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::encode_uri(args))));
-    g.insert("decodeURI".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::decode_uri(args))));
-    g.insert("Boolean".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::boolean(args))));
-    g.insert("isFinite".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::is_finite(args))));
-    g.insert("isNaN".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::is_nan(args))));
+    g.insert("encodeURI".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::encode_uri(args))));
+    g.insert("decodeURI".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::decode_uri(args))));
+    g.insert("Boolean".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::boolean(args))));
+    g.insert("isFinite".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::is_finite(args))));
+    g.insert("isNaN".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::is_nan(args))));
     g.insert("Infinity".into(), Value::Number(f64::INFINITY));
     g.insert("NaN".into(), Value::Number(f64::NAN));
     g.insert(
@@ -217,56 +219,26 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     );
     g.insert("Date".into(), Value::Object(Rc::new(RefCell::new(date))));
 
-    // Object.assign(target, ...sources) - mutates target, returns target
-    // Object.fromEntries(iterable) - [[k,v],...] -> object
+    // Object methods - delegate to tish_builtins::globals
     let mut object_methods = HashMap::new();
     object_methods.insert(
         "assign".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
-            let target = args.first();
-            let Some(Value::Object(t)) = target else {
-                return Value::Null;
-            };
-            for src in args.iter().skip(1) {
-                if let Value::Object(s) = src {
-                    for (k, v) in s.borrow().iter() {
-                        t.borrow_mut().insert(Arc::clone(k), v.clone());
-                    }
-                }
-            }
-            target.cloned().unwrap_or(Value::Null)
-        })),
+        Value::Function(Rc::new(|args: &[Value]| globals_builtins::object_assign(args))),
     );
     object_methods.insert(
         "fromEntries".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
-            let iter = args.first();
-            let Some(Value::Array(arr)) = iter else {
-                return Value::Object(Rc::new(RefCell::new(HashMap::new())));
-            };
-            let mut map = HashMap::new();
-            for pair in arr.borrow().iter() {
-                if let Value::Array(p) = pair {
-                    let kv: Vec<_> = p.borrow().iter().cloned().collect();
-                    if kv.len() >= 2 {
-                        let k = kv[0].to_display_string().into();
-                        map.insert(k, kv[1].clone());
-                    }
-                }
-            }
-            Value::Object(Rc::new(RefCell::new(map)))
-        })),
+        Value::Function(Rc::new(|args: &[Value]| globals_builtins::object_from_entries(args))),
     );
-    object_methods.insert("keys".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::object_keys(args))));
-    object_methods.insert("values".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::object_values(args))));
-    object_methods.insert("entries".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::object_entries(args))));
+    object_methods.insert("keys".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::object_keys(args))));
+    object_methods.insert("values".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::object_values(args))));
+    object_methods.insert("entries".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::object_entries(args))));
     g.insert("Object".into(), Value::Object(Rc::new(RefCell::new(object_methods))));
 
     // Array.isArray
     let mut array_static = HashMap::new();
     array_static.insert(
         "isArray".into(),
-        Value::Function(Rc::new(|args: &[Value]| tish_runtime::array_is_array(args))),
+        Value::Function(Rc::new(|args: &[Value]| globals_builtins::array_is_array(args))),
     );
     g.insert("Array".into(), Value::Object(Rc::new(RefCell::new(array_static))));
 
@@ -274,7 +246,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     let mut string_static = HashMap::new();
     string_static.insert(
         "fromCharCode".into(),
-        Value::Function(Rc::new(|args: &[Value]| tish_runtime::string_from_char_code(args))),
+        Value::Function(Rc::new(|args: &[Value]| globals_builtins::string_from_char_code(args))),
     );
     g.insert("String".into(), Value::Object(Rc::new(RefCell::new(string_static))));
 

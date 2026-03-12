@@ -14,7 +14,6 @@ wasm = ["dep:wasm-bindgen"]
 tish_builtins = { path = "../tish_builtins" }
 tish_bytecode = { path = "../tish_bytecode" }
 tish_core = { path = "../tish_core" }
-tish_runtime = { path = "../tish_runtime" }
 rand = "0.8"
 wasm-bindgen = { version = "0.2", optional = true }
 

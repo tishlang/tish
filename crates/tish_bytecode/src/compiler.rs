@@ -145,11 +145,11 @@ impl<'a> Compiler<'a> {
             } => {
                 self.compile_expr(cond)?;
                 let jump_else = self.emit_jump(Opcode::JumpIfFalse);
-                self.emit(Opcode::Pop); // pop condition if we take then
+                // JumpIfFalse already pops the condition when taking then branch; only pop when we land at else
                 self.compile_statement(then_branch)?;
                 let jump_end = self.emit_jump(Opcode::Jump);
                 self.patch_jump(jump_else, self.chunk.code.len());
-                self.emit(Opcode::Pop); // pop condition if we took else
+                self.emit(Opcode::Pop); // pop condition when we took else (then-branch path already consumed it)
                 if let Some(else_s) = else_branch {
                     self.compile_statement(else_s)?;
                 }
@@ -163,13 +163,13 @@ impl<'a> Compiler<'a> {
                 });
                 self.compile_expr(cond)?;
                 let jump_out = self.emit_jump(Opcode::JumpIfFalse);
-                self.emit(Opcode::Pop);
+                // JumpIfFalse already pops condition when taking body
                 self.compile_statement(body)?;
                 let jump_back_dist = self.chunk.code.len() + 3 - start;
                 self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
                 let end = self.chunk.code.len();
                 self.patch_jump(jump_out, end);
-                self.emit(Opcode::Pop);
+                // condition already popped by JumpIfFalse when we jumped here
                 let info = self.loop_stack.pop().unwrap();
                 for p in info.break_patches {
                     self.patch_jump(p, end);
@@ -199,7 +199,7 @@ impl<'a> Compiler<'a> {
                     self.chunk.write_u16(idx);
                 }
                 let jump_out = self.emit_jump(Opcode::JumpIfFalse);
-                self.emit(Opcode::Pop);
+                // JumpIfFalse already pops condition when taking body
                 self.compile_statement(body)?;
                 let _continue_target = self.chunk.code.len(); // update runs here (used by continue)
                 if let Some(u) = update {
@@ -210,7 +210,7 @@ impl<'a> Compiler<'a> {
                 self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
                 let end = self.chunk.code.len();
                 self.patch_jump(jump_out, end);
-                self.emit(Opcode::Pop);
+                // condition already popped by JumpIfFalse when we jumped here
                 let info = self.loop_stack.pop().unwrap();
                 for p in info.break_patches {
                     self.patch_jump(p, end);
@@ -368,7 +368,7 @@ impl<'a> Compiler<'a> {
                         self.compile_expr(ce)?;
                         self.emit_u8(Opcode::BinOp, 8);
                         let jump_next = self.emit_jump(Opcode::JumpIfFalse);
-                        self.emit(Opcode::Pop);
+                        // JumpIfFalse already pops the match result when taking this case
                         self.compile_statement(&Statement::Block {
                             statements: case_body.clone(),
                             span: Span {
@@ -611,11 +611,11 @@ impl<'a> Compiler<'a> {
             } => {
                 self.compile_expr(cond)?;
                 let jump_else = self.emit_jump(Opcode::JumpIfFalse);
-                self.emit(Opcode::Pop);
+                // JumpIfFalse already pops condition when taking then
                 self.compile_expr(then_branch)?;
                 let jump_end = self.emit_jump(Opcode::Jump);
                 self.patch_jump(jump_else, self.chunk.code.len());
-                self.emit(Opcode::Pop);
+                self.emit(Opcode::Pop); // pop condition when we took else
                 self.compile_expr(else_branch)?;
                 self.patch_jump(jump_end, self.chunk.code.len());
             }

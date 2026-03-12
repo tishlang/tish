@@ -1,14 +1,24 @@
 #!/bin/bash
 # Run Tish and JS equivalents, show output and compare execution time.
-# Usage: ./scripts/run_performance_manual.sh [--release] [--summary-only] [--no-compile] [--limit N]
+# Usage: ./scripts/run_performance_manual.sh [--release] [--summary-only] [--no-compile] [--limit N] [--runtimes R,...]
 #   --release       use release build (recommended for fair Tish vs JS timing)
 #   --summary-only  skip individual test output, show only summary
 #   --no-compile    skip compilation, use cached binaries from previous runs
 #   --limit N       run only first N tests (default: all)
 #   --timeout SEC   timeout per tish run in seconds (default: 30, 0=no limit)
+#   --runtimes R,...  comma-separated list: run,rust,cranelift,wasi,node,bun,deno,qjs (default: all)
 
 set -e
 cd "$(dirname "$0")/.."
+
+# Check if a runtime is in the selected list (empty = all)
+want_runtime() {
+  local r="$1"
+  if [[ -z "$runtimes_filter" ]]; then
+    return 0
+  fi
+  [[ ",${runtimes_filter}," == *",${r},"* ]]
+}
 
 # Runtime detection
 node_cmd="${NODE:-node}"
@@ -34,6 +44,7 @@ summary_only=false
 no_compile=false
 limit=0
 run_timeout=30
+runtimes_filter=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -43,6 +54,7 @@ while [[ $# -gt 0 ]]; do
     --no-compile) no_compile=true; shift ;;
     --limit) limit="$2"; shift 2 ;;
     --timeout) run_timeout="$2"; shift 2 ;;
+    --runtimes) runtimes_filter="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -112,15 +124,18 @@ declare -a summary_ratio=()
 
 echo "=== Tish vs JavaScript Runtimes — Performance Comparison ==="
 echo "Profile: $profile"
+[[ -n "$runtimes_filter" ]] && echo "Runtimes: $runtimes_filter (use --runtimes run,rust,cranelift,wasi,node,bun,deno,qjs)"
 [[ $run_timeout -gt 0 ]] && echo "Tish run timeout: ${run_timeout}s (use --timeout 0 to disable)"
 echo ""
-echo "Detected runtimes:"
-echo "  Tish: runtime (interpreter), rust native, cranelift native, wasi (wasmtime)"
-echo "  Node.js: $("$node_cmd" --version 2>/dev/null || echo 'not found')"
-$has_bun && echo "  Bun: $("$bun_cmd" --version 2>/dev/null || echo 'unknown')"
-$has_deno && echo "  Deno: $("$deno_cmd" --version 2>/dev/null | head -1 || echo 'unknown')"
-$has_qjs && echo "  QuickJS: detected"
-$has_wasmtime && echo "  Wasmtime: $(wasmtime --version 2>/dev/null | head -1 || echo 'detected')" || echo "  Wasmtime: not found (skip WASI)"
+echo "Runtimes to test:"
+want_runtime run && echo "  run (tish interpreter)"
+want_runtime rust && echo "  rust (tish native)"
+want_runtime cranelift && echo "  cranelift (tish JIT)"
+want_runtime wasi && echo "  wasi (wasmtime)"
+want_runtime node && echo "  node"
+want_runtime bun && $has_bun && echo "  bun"
+want_runtime deno && $has_deno && echo "  deno"
+want_runtime qjs && $has_qjs && echo "  qjs"
 echo ""
 
 # Phase 1: Pre-compile all Tish binaries (rust native, cranelift, wasi)
@@ -147,32 +162,38 @@ else
 
     echo -n "  $base: "
     # Rust native (default backend)
-    if $tish_bin compile "$tish_file" -o "$compile_dir/${base}_native" --native-backend rust >/dev/null 2>&1; then
-      echo -n "rust "
-      rust_ok=$((rust_ok + 1))
-    else
-      echo -n "rust-skip "
-      rust_skip=$((rust_skip + 1))
+    if want_runtime rust; then
+      if $tish_bin compile "$tish_file" -o "$compile_dir/${base}_native" --native-backend rust >/dev/null 2>&1; then
+        echo -n "rust "
+        rust_ok=$((rust_ok + 1))
+      else
+        echo -n "rust-skip "
+        rust_skip=$((rust_skip + 1))
+      fi
     fi
     # Cranelift (pure Tish, no native imports)
-    if $tish_bin compile "$tish_file" -o "$compile_dir/${base}_cranelift" --native-backend cranelift >/dev/null 2>&1; then
-      echo -n "cranelift "
-      cranelift_ok=$((cranelift_ok + 1))
-    else
-      echo -n "cranelift-skip "
-      cranelift_skip=$((cranelift_skip + 1))
+    if want_runtime cranelift; then
+      if $tish_bin compile "$tish_file" -o "$compile_dir/${base}_cranelift" --native-backend cranelift >/dev/null 2>&1; then
+        echo -n "cranelift "
+        cranelift_ok=$((cranelift_ok + 1))
+      else
+        echo -n "cranelift-skip "
+        cranelift_skip=$((cranelift_skip + 1))
+      fi
     fi
     # WASI (for wasmtime)
-    if $has_wasmtime; then
-      if $tish_bin compile "$tish_file" -o "$compile_dir/${base}_wasi" --target wasi >/dev/null 2>&1; then
-        echo -n "wasi"
-        wasi_ok=$((wasi_ok + 1))
+    if want_runtime wasi; then
+      if $has_wasmtime; then
+        if $tish_bin compile "$tish_file" -o "$compile_dir/${base}_wasi" --target wasi >/dev/null 2>&1; then
+          echo -n "wasi"
+          wasi_ok=$((wasi_ok + 1))
+        else
+          echo -n "wasi-skip"
+          wasi_skip=$((wasi_skip + 1))
+        fi
       else
-        echo -n "wasi-skip"
-        wasi_skip=$((wasi_skip + 1))
+        echo -n "wasi-skip (no wasmtime)"
       fi
-    else
-      echo -n "wasi-skip (no wasmtime)"
     fi
     echo ""
   done
@@ -202,51 +223,61 @@ for f in "$perf_dir"/*.js; do
     echo "─────────────────────────────────────────"
 
     # Output (use timeout to avoid hangs on intensive tests)
-    echo "Tish (run):"
-    run_with_timeout $tish_bin run "$tish_file" 2>&1 || true
-    echo ""
-
-    echo "Tish (rust):"
-    if [[ -x "$native_bin" ]]; then
-      run_with_timeout "$native_bin" 2>&1 || true
-    else
-      echo "(not built)"
+    if want_runtime run; then
+      echo "Tish (run):"
+      run_with_timeout $tish_bin run "$tish_file" 2>&1 || true
+      echo ""
     fi
-    echo ""
 
-    echo "Tish (cranelift):"
-    if [[ -x "$cranelift_bin" ]]; then
-      run_with_timeout "$cranelift_bin" 2>&1 || true
-    else
-      echo "(not built)"
+    if want_runtime rust; then
+      echo "Tish (rust):"
+      if [[ -x "$native_bin" ]]; then
+        run_with_timeout "$native_bin" 2>&1 || true
+      else
+        echo "(not built)"
+      fi
+      echo ""
     fi
-    echo ""
 
-    echo "Tish (wasi):"
-    if $has_wasmtime && [[ -f "$wasi_bin" ]]; then
-      run_with_timeout wasmtime "$wasi_bin" 2>&1 || true
-    else
-      echo "(not built or wasmtime not found)"
+    if want_runtime cranelift; then
+      echo "Tish (cranelift):"
+      if [[ -x "$cranelift_bin" ]]; then
+        run_with_timeout "$cranelift_bin" 2>&1 || true
+      else
+        echo "(not built)"
+      fi
+      echo ""
     fi
-    echo ""
 
-    echo "Node.js:"
-    "$node_cmd" "$f" 2>&1 || true
-    echo ""
+    if want_runtime wasi; then
+      echo "Tish (wasi):"
+      if $has_wasmtime && [[ -f "$wasi_bin" ]]; then
+        run_with_timeout wasmtime "$wasi_bin" 2>&1 || true
+      else
+        echo "(not built or wasmtime not found)"
+      fi
+      echo ""
+    fi
 
-    if $has_bun; then
+    if want_runtime node; then
+      echo "Node.js:"
+      "$node_cmd" "$f" 2>&1 || true
+      echo ""
+    fi
+
+    if want_runtime bun && $has_bun; then
       echo "Bun:"
       "$bun_cmd" "$f" 2>&1 || true
       echo ""
     fi
 
-    if $has_deno; then
+    if want_runtime deno && $has_deno; then
       echo "Deno:"
       "$deno_cmd" run --allow-all "$f" 2>&1 || true
       echo ""
     fi
 
-    if $has_qjs; then
+    if want_runtime qjs && $has_qjs; then
       echo "QuickJS:"
       "$qjs_cmd" "$f" 2>&1 || true
       echo ""
@@ -268,26 +299,28 @@ for f in "$perf_dir"/*.js; do
   qjs_times=()
 
   # Warmup runs (discard - warms disk cache and JIT; use timeout to avoid hangs)
-  run_with_timeout $tish_bin run "$tish_file" >/dev/null 2>&1 || true
-  [[ -x "$native_bin" ]] && "$native_bin" >/dev/null 2>&1 || true
-  [[ -x "$cranelift_bin" ]] && "$cranelift_bin" >/dev/null 2>&1 || true
-  $has_wasmtime && [[ -f "$wasi_bin" ]] && wasmtime "$wasi_bin" >/dev/null 2>&1 || true
-  "$node_cmd" "$f" >/dev/null 2>&1 || true
-  $has_bun && "$bun_cmd" "$f" >/dev/null 2>&1 || true
-  $has_deno && "$deno_cmd" run --allow-all "$f" >/dev/null 2>&1 || true
-  $has_qjs && "$qjs_cmd" "$f" >/dev/null 2>&1 || true
+  want_runtime run && run_with_timeout $tish_bin run "$tish_file" >/dev/null 2>&1 || true
+  want_runtime rust && [[ -x "$native_bin" ]] && "$native_bin" >/dev/null 2>&1 || true
+  want_runtime cranelift && [[ -x "$cranelift_bin" ]] && "$cranelift_bin" >/dev/null 2>&1 || true
+  want_runtime wasi && $has_wasmtime && [[ -f "$wasi_bin" ]] && wasmtime "$wasi_bin" >/dev/null 2>&1 || true
+  want_runtime node && "$node_cmd" "$f" >/dev/null 2>&1 || true
+  want_runtime bun && $has_bun && "$bun_cmd" "$f" >/dev/null 2>&1 || true
+  want_runtime deno && $has_deno && "$deno_cmd" run --allow-all "$f" >/dev/null 2>&1 || true
+  want_runtime qjs && $has_qjs && "$qjs_cmd" "$f" >/dev/null 2>&1 || true
 
   # Tish interpreter (run) - use timeout to avoid hangs on intensive tests
-  for _ in $(seq 1 "$n"); do
-    t0=$(ms)
-    run_with_timeout $tish_bin run "$tish_file" >/dev/null 2>&1 || true
-    t1=$(ms)
-    tish_run_times+=($((t1 - t0)))
-  done
+  if want_runtime run; then
+    for _ in $(seq 1 "$n"); do
+      t0=$(ms)
+      run_with_timeout $tish_bin run "$tish_file" >/dev/null 2>&1 || true
+      t1=$(ms)
+      tish_run_times+=($((t1 - t0)))
+    done
+  fi
 
   # Tish rust native
   compile_ok=false
-  if [[ -x "$native_bin" ]]; then
+  if want_runtime rust && [[ -x "$native_bin" ]]; then
     compile_ok=true
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
@@ -299,7 +332,7 @@ for f in "$perf_dir"/*.js; do
 
   # Tish cranelift
   cranelift_ok=false
-  if [[ -x "$cranelift_bin" ]]; then
+  if want_runtime cranelift && [[ -x "$cranelift_bin" ]]; then
     cranelift_ok=true
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
@@ -311,7 +344,7 @@ for f in "$perf_dir"/*.js; do
 
   # Tish WASI (wasmtime)
   wasi_ok=false
-  if $has_wasmtime && [[ -f "$wasi_bin" ]]; then
+  if want_runtime wasi && $has_wasmtime && [[ -f "$wasi_bin" ]]; then
     wasi_ok=true
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
@@ -322,15 +355,17 @@ for f in "$perf_dir"/*.js; do
   fi
 
   # Node.js
-  for _ in $(seq 1 "$n"); do
-    t0=$(ms)
-    "$node_cmd" "$f" >/dev/null 2>&1 || true
-    t1=$(ms)
-    node_times+=($((t1 - t0)))
-  done
+  if want_runtime node; then
+    for _ in $(seq 1 "$n"); do
+      t0=$(ms)
+      "$node_cmd" "$f" >/dev/null 2>&1 || true
+      t1=$(ms)
+      node_times+=($((t1 - t0)))
+    done
+  fi
 
   # Bun
-  if $has_bun; then
+  if want_runtime bun && $has_bun; then
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
       "$bun_cmd" "$f" >/dev/null 2>&1 || true
@@ -340,7 +375,7 @@ for f in "$perf_dir"/*.js; do
   fi
 
   # Deno
-  if $has_deno; then
+  if want_runtime deno && $has_deno; then
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
       "$deno_cmd" run --allow-all "$f" >/dev/null 2>&1 || true
@@ -350,7 +385,7 @@ for f in "$perf_dir"/*.js; do
   fi
 
   # QuickJS
-  if $has_qjs; then
+  if want_runtime qjs && $has_qjs; then
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
       "$qjs_cmd" "$f" >/dev/null 2>&1 || true
@@ -421,15 +456,15 @@ for f in "$perf_dir"/*.js; do
 
   if ! $summary_only; then
     echo "Time (${n} runs avg):"
-    echo "  Tish (run):       ${tish_run_avg}ms"
-    $compile_ok && echo "  Tish (rust):      ${tish_native_avg}ms"
-    $cranelift_ok && echo "  Tish (cranelift): ${tish_cranelift_avg}ms"
-    $wasi_ok && echo "  Tish (wasi):      ${tish_wasi_avg}ms"
-    echo "  Node.js:          ${node_avg}ms"
-    $has_bun && echo "  Bun:             ${bun_avg}ms"
-    $has_deno && echo "  Deno:            ${deno_avg}ms"
-    $has_qjs && echo "  QuickJS:         ${qjs_avg}ms"
-    echo "  Tish(run)/Node ratio: ${ratio}%"
+    want_runtime run && echo "  Tish (run):       ${tish_run_avg}ms"
+    want_runtime rust && $compile_ok && echo "  Tish (rust):      ${tish_native_avg}ms"
+    want_runtime cranelift && $cranelift_ok && echo "  Tish (cranelift): ${tish_cranelift_avg}ms"
+    want_runtime wasi && $wasi_ok && echo "  Tish (wasi):      ${tish_wasi_avg}ms"
+    want_runtime node && echo "  Node.js:          ${node_avg}ms"
+    want_runtime bun && $has_bun && echo "  Bun:             ${bun_avg}ms"
+    want_runtime deno && $has_deno && echo "  Deno:            ${deno_avg}ms"
+    want_runtime qjs && $has_qjs && echo "  QuickJS:         ${qjs_avg}ms"
+    want_runtime node && echo "  Tish(run)/Node ratio: ${ratio}%"
     echo ""
   else
     echo " done (run: ${tish_run_avg}ms rust: ${tish_native_avg}ms cranelift: ${tish_cranelift_avg}ms wasi: ${tish_wasi_avg}ms ratio: ${ratio}%)"
@@ -451,35 +486,26 @@ for i in "${!summary_ratio[@]}"; do
 done
 IFS=$'\n' sorted_indices=($(sort -t: -k1 -nr <<<"${sorted_indices[*]}")); unset IFS
 
-# Build header dynamically based on available runtimes
-header="%-20s %8s %8s %8s %8s %8s"
-header_args=("Test" "run" "rust" "cranelift" "wasi" "Node")
+# Build header dynamically based on selected runtimes
+header="%-20s"
+header_args=("Test")
 divider="────────────────────"
-div_args=("──────" "──────" "──────" "──────" "──────")
-
-if $has_bun; then
-  header="$header %8s"
-  header_args+=("Bun")
-  div_args+=("──────")
-fi
-if $has_deno; then
-  header="$header %8s"
-  header_args+=("Deno")
-  div_args+=("──────")
-fi
-if $has_qjs; then
-  header="$header %8s"
-  header_args+=("QuickJS")
-  div_args+=("──────")
-fi
-header="$header %10s\n"
-header_args+=("run/Node%")
-div_args+=("──────────")
+div_args=()
+want_runtime run && { header="$header %8s"; header_args+=("run"); div_args+=("──────"); }
+want_runtime rust && { header="$header %8s"; header_args+=("rust"); div_args+=("──────"); }
+want_runtime cranelift && { header="$header %8s"; header_args+=("cranelift"); div_args+=("──────"); }
+want_runtime wasi && { header="$header %8s"; header_args+=("wasi"); div_args+=("──────"); }
+want_runtime node && { header="$header %8s"; header_args+=("Node"); div_args+=("──────"); }
+want_runtime bun && $has_bun && { header="$header %8s"; header_args+=("Bun"); div_args+=("──────"); }
+want_runtime deno && $has_deno && { header="$header %8s"; header_args+=("Deno"); div_args+=("──────"); }
+want_runtime qjs && $has_qjs && { header="$header %8s"; header_args+=("QuickJS"); div_args+=("──────"); }
+want_runtime run && want_runtime node && { header="$header %10s"; header_args+=("run/Node%"); div_args+=("──────────"); }
+header="$header\n"
 
 printf "$header" "${header_args[@]}"
 printf "%-20s" "$divider"
 for d in "${div_args[@]}"; do printf " %8s" "$d"; done
-echo ""
+printf "\n"
 
 # Print sorted results
 total_tish_run=0
@@ -535,33 +561,28 @@ for entry in "${sorted_indices[@]}"; do
   wasi_display="$tish_wasi"
   [[ $tish_wasi -eq 0 ]] && wasi_display="-"
 
-  # Build row dynamically
-  row="%-20s %8d %8s %8s %8s %8d"
-  row_args=("$name" "$tish_run" "$native_display" "$cranelift_display" "$wasi_display" "$node")
+  # Build row dynamically (same order as header)
+  row="%-20s"
+  row_args=("$name")
+  want_runtime run && { row="$row %8d"; row_args+=("$tish_run"); }
+  want_runtime rust && { row="$row %8s"; row_args+=("$native_display"); }
+  want_runtime cranelift && { row="$row %8s"; row_args+=("$cranelift_display"); }
+  want_runtime wasi && { row="$row %8s"; row_args+=("$wasi_display"); }
+  want_runtime node && { row="$row %8d"; row_args+=("$node"); }
+  want_runtime bun && $has_bun && { row="$row %8d"; row_args+=("$bun"); }
+  want_runtime deno && $has_deno && { row="$row %8d"; row_args+=("$deno"); }
+  want_runtime qjs && $has_qjs && { row="$row %8d"; row_args+=("$qjs"); }
+  want_runtime run && want_runtime node && { row="$row %9d%%"; row_args+=("$ratio"); }
+  row="$row\n"
 
-  if $has_bun; then
-    row="$row %8d"
-    row_args+=("$bun")
-  fi
-  if $has_deno; then
-    row="$row %8d"
-    row_args+=("$deno")
-  fi
-  if $has_qjs; then
-    row="$row %8d"
-    row_args+=("$qjs")
-  fi
-  row="$row %9d%%"
-  row_args+=("$ratio")
-
-  printf "${color}${row}${reset}\n" "${row_args[@]}"
+  printf "${color}${row}${reset}" "${row_args[@]}"
 done
 
 # Print totals
 echo ""
 printf "%-20s" "$divider"
 for d in "${div_args[@]}"; do printf " %8s" "$d"; done
-echo ""
+printf "\n"
 
 if [[ $total_node -gt 0 ]]; then
   total_ratio=$((total_tish_run * 100 / total_node))
@@ -576,25 +597,20 @@ cranelift_total_display="$total_tish_cranelift"
 wasi_total_display="$total_tish_wasi"
 [[ $total_tish_wasi -eq 0 ]] && wasi_total_display="-"
 
-row="%-20s %8d %8s %8s %8s %8d"
-row_args=("TOTAL" "$total_tish_run" "$native_total_display" "$cranelift_total_display" "$wasi_total_display" "$total_node")
+row="%-20s"
+row_args=("TOTAL")
+want_runtime run && { row="$row %8d"; row_args+=("$total_tish_run"); }
+want_runtime rust && { row="$row %8s"; row_args+=("$native_total_display"); }
+want_runtime cranelift && { row="$row %8s"; row_args+=("$cranelift_total_display"); }
+want_runtime wasi && { row="$row %8s"; row_args+=("$wasi_total_display"); }
+want_runtime node && { row="$row %8d"; row_args+=("$total_node"); }
+want_runtime bun && $has_bun && { row="$row %8d"; row_args+=("$total_bun"); }
+want_runtime deno && $has_deno && { row="$row %8d"; row_args+=("$total_deno"); }
+want_runtime qjs && $has_qjs && { row="$row %8d"; row_args+=("$total_qjs"); }
+want_runtime run && want_runtime node && { row="$row %9d%%"; row_args+=("$total_ratio"); }
+row="$row\n"
 
-if $has_bun; then
-  row="$row %8d"
-  row_args+=("$total_bun")
-fi
-if $has_deno; then
-  row="$row %8d"
-  row_args+=("$total_deno")
-fi
-if $has_qjs; then
-  row="$row %8d"
-  row_args+=("$total_qjs")
-fi
-row="$row %9d%%"
-row_args+=("$total_ratio")
-
-printf "$row\n" "${row_args[@]}"
+printf "$row" "${row_args[@]}"
 
 echo ""
 echo "Legend: Green = <150% | Yellow = 200-500% | Red = >500%"
