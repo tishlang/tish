@@ -783,10 +783,19 @@ fn eval_binop(op: u8, l: &Value, r: &Value) -> Result<Value, String> {
         19 => Ok(Number(((ln as i32) << (rn as i32)) as f64)), // Shl
         20 => Ok(Number(((ln as i32) >> (rn as i32)) as f64)), // Shr
         21 => {
-            // In: key in object
-            let key_s: Arc<str> = r.to_display_string().into();
-            Ok(Bool(match l {
+            // In: key in object (l=key, r=object)
+            let key_s: Arc<str> = l.to_display_string().into();
+            Ok(Bool(match r {
                 Value::Object(m) => m.borrow().contains_key(&key_s),
+                Value::Array(a) => {
+                    if key_s.as_ref() == "length" {
+                        true
+                    } else if let Ok(idx) = key_s.parse::<usize>() {
+                        idx < a.borrow().len()
+                    } else {
+                        false
+                    }
+                }
                 _ => false,
             }))
         }
@@ -1012,10 +1021,11 @@ fn set_member(obj: &Value, key: &Arc<str>, val: Value) -> Result<(), String> {
             let mut arr = a.borrow_mut();
             if idx < arr.len() {
                 arr[idx] = val;
-                Ok(())
             } else {
-                Err("Index out of bounds".to_string())
+                arr.resize(idx + 1, Value::Null);
+                arr[idx] = val;
             }
+            Ok(())
         }
         _ => Err(format!("Cannot set property of {}", type_name(obj))),
     }
