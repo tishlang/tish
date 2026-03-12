@@ -1,5 +1,7 @@
 # Tish
 
+> 🚧 Experimental 
+
 Minimal, TS/JS-compatible language. Runs via interpreter or compiles to native. See `docs/` for spec and ECMA alignment.
 
 ## Quick Example

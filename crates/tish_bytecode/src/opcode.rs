@@ -64,6 +64,8 @@ pub enum Opcode {
     MergeObject = 28,
     /// Call with spread: pop args array, pop callee, call callee(...args).
     CallSpread = 29,
+    /// Get property optional: like GetMember but returns Null if obj is null or prop missing.
+    GetMemberOptional = 30,
 }
 
 impl Opcode {
@@ -99,6 +101,7 @@ impl Opcode {
             27 => Some(Opcode::ConcatArray),
             28 => Some(Opcode::MergeObject),
             29 => Some(Opcode::CallSpread),
+            30 => Some(Opcode::GetMemberOptional),
             _ => None,
         }
     }

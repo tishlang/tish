@@ -27,7 +27,7 @@ impl std::error::Error for CompileError {}
 /// Loop boundary for break/continue.
 struct LoopInfo {
     break_patches: Vec<usize>,
-    continue_target: usize,
+    continue_patches: Vec<usize>,
 }
 
 /// Switch boundary: break exits the switch.
@@ -145,11 +145,9 @@ impl<'a> Compiler<'a> {
             } => {
                 self.compile_expr(cond)?;
                 let jump_else = self.emit_jump(Opcode::JumpIfFalse);
-                // JumpIfFalse already pops the condition when taking then branch; only pop when we land at else
                 self.compile_statement(then_branch)?;
                 let jump_end = self.emit_jump(Opcode::Jump);
                 self.patch_jump(jump_else, self.chunk.code.len());
-                self.emit(Opcode::Pop); // pop condition when we took else (then-branch path already consumed it)
                 if let Some(else_s) = else_branch {
                     self.compile_statement(else_s)?;
                 }
@@ -159,7 +157,7 @@ impl<'a> Compiler<'a> {
                 let start = self.chunk.code.len();
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
-                    continue_target: start,
+                    continue_patches: Vec::new(),
                 });
                 self.compile_expr(cond)?;
                 let jump_out = self.emit_jump(Opcode::JumpIfFalse);
@@ -169,8 +167,10 @@ impl<'a> Compiler<'a> {
                 self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
                 let end = self.chunk.code.len();
                 self.patch_jump(jump_out, end);
-                // condition already popped by JumpIfFalse when we jumped here
                 let info = self.loop_stack.pop().unwrap();
+                for p in info.continue_patches {
+                    self.patch_jump(p, start);
+                }
                 for p in info.break_patches {
                     self.patch_jump(p, end);
                 }
@@ -187,10 +187,6 @@ impl<'a> Compiler<'a> {
                     self.compile_statement(i)?;
                 }
                 let cond_start = self.chunk.code.len();
-                self.loop_stack.push(LoopInfo {
-                    break_patches: Vec::new(),
-                    continue_target: cond_start, // continue goes to condition
-                });
                 if let Some(c) = cond {
                     self.compile_expr(c)?;
                 } else {
@@ -199,19 +195,24 @@ impl<'a> Compiler<'a> {
                     self.chunk.write_u16(idx);
                 }
                 let jump_out = self.emit_jump(Opcode::JumpIfFalse);
-                // JumpIfFalse already pops condition when taking body
+                self.loop_stack.push(LoopInfo {
+                    break_patches: Vec::new(),
+                    continue_patches: Vec::new(),
+                });
                 self.compile_statement(body)?;
-                let _continue_target = self.chunk.code.len(); // update runs here (used by continue)
+                let update_start = self.chunk.code.len();
                 if let Some(u) = update {
                     self.compile_expr(u)?;
                     self.emit(Opcode::Pop);
+                }
+                let info = self.loop_stack.pop().unwrap();
+                for p in info.continue_patches {
+                    self.patch_jump(p, update_start);
                 }
                 let jump_back_dist = self.chunk.code.len() + 3 - cond_start;
                 self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
                 let end = self.chunk.code.len();
                 self.patch_jump(jump_out, end);
-                // condition already popped by JumpIfFalse when we jumped here
-                let info = self.loop_stack.pop().unwrap();
                 for p in info.break_patches {
                     self.patch_jump(p, end);
                 }
@@ -242,7 +243,7 @@ impl<'a> Compiler<'a> {
                 let loop_start = self.chunk.code.len();
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
-                    continue_target: loop_start,
+                    continue_patches: Vec::new(),
                 });
                 self.emit_u16(Opcode::LoadVar, arr_idx);
                 self.emit_u16(Opcode::LoadVar, i_idx);
@@ -265,6 +266,9 @@ impl<'a> Compiler<'a> {
                 let end = self.chunk.code.len();
                 self.patch_jump(jump_out, end);
                 let info = self.loop_stack.pop().unwrap();
+                for p in info.continue_patches {
+                    self.patch_jump(p, loop_start);
+                }
                 for p in info.break_patches {
                     self.patch_jump(p, end);
                 }
@@ -293,13 +297,10 @@ impl<'a> Compiler<'a> {
                 }
             }
             Statement::Continue { .. } => {
-                let info = self.loop_stack.last().ok_or_else(|| CompileError {
+                let pos = self.emit_jump(Opcode::Jump);
+                self.loop_stack.last_mut().ok_or_else(|| CompileError {
                     message: "continue not inside a loop".to_string(),
-                })?;
-                let continue_target = info.continue_target;
-                let here = self.chunk.code.len() + 3; // after JumpBack insn
-                let dist = here - continue_target;
-                self.emit_u16(Opcode::JumpBack, dist as u16);
+                })?.continue_patches.push(pos);
             }
             Statement::FunDecl {
                 name,
@@ -341,9 +342,10 @@ impl<'a> Compiler<'a> {
                 let start = self.chunk.code.len();
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
-                    continue_target: start,
+                    continue_patches: Vec::new(),
                 });
                 self.compile_statement(body)?;
+                let cond_start = self.chunk.code.len();
                 self.compile_expr(cond)?;
                 let jump_back = self.emit_jump(Opcode::JumpIfFalse);
                 let jump_back_dist = self.chunk.code.len() + 3 - start;
@@ -351,6 +353,9 @@ impl<'a> Compiler<'a> {
                 let end = self.chunk.code.len();
                 self.patch_jump(jump_back, end);
                 let info = self.loop_stack.pop().unwrap();
+                for p in info.continue_patches {
+                    self.patch_jump(p, cond_start);
+                }
                 for p in info.break_patches {
                     self.patch_jump(p, end);
                 }
@@ -498,7 +503,7 @@ impl<'a> Compiler<'a> {
                     let key_idx = self.constant_idx(Constant::String(Arc::clone(&prop.key)));
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(key_idx);
-                    self.emit(Opcode::GetMember);
+                    self.emit(Opcode::GetIndex); // GetIndex pops obj, index and uses get_member
                     match &prop.value {
                         DestructElement::Ident(name) => {
                             let idx = self.name_idx(name);
@@ -583,18 +588,45 @@ impl<'a> Compiler<'a> {
             Expr::Member {
                 object,
                 prop,
-                optional: _,
+                optional,
                 ..
             } => {
                 self.compile_expr(object)?;
-                match prop {
-                    MemberProp::Name(key) => {
-                        let idx = self.name_idx(key);
-                        self.emit_u16(Opcode::GetMember, idx);
+                if *optional {
+                    self.emit(Opcode::Dup);
+                    let null_idx = self.constant_idx(Constant::Null);
+                    self.emit(Opcode::LoadConst);
+                    self.chunk.write_u16(null_idx);
+                    self.emit_u8(Opcode::BinOp, 8);
+                    let jump_to_null = self.emit_jump(Opcode::JumpIfFalse);
+                    let jump_to_get = self.emit_jump(Opcode::Jump);
+                    self.patch_jump(jump_to_null, self.chunk.code.len());
+                    self.emit(Opcode::Pop);
+                    self.emit(Opcode::LoadConst);
+                    self.chunk.write_u16(null_idx);
+                    let jump_end = self.emit_jump(Opcode::Jump);
+                    self.patch_jump(jump_to_get, self.chunk.code.len());
+                    match prop {
+                        MemberProp::Name(key) => {
+                            let idx = self.name_idx(key);
+                            self.emit_u16(Opcode::GetMemberOptional, idx);
+                        }
+                        MemberProp::Expr(e) => {
+                            self.compile_expr(e)?;
+                            self.emit(Opcode::GetIndex);
+                        }
                     }
-                    MemberProp::Expr(e) => {
-                        self.compile_expr(e)?;
-                        self.emit(Opcode::GetIndex);
+                    self.patch_jump(jump_end, self.chunk.code.len());
+                } else {
+                    match prop {
+                        MemberProp::Name(key) => {
+                            let idx = self.name_idx(key);
+                            self.emit_u16(Opcode::GetMember, idx);
+                        }
+                        MemberProp::Expr(e) => {
+                            self.compile_expr(e)?;
+                            self.emit(Opcode::GetIndex);
+                        }
                     }
                 }
             }
@@ -611,11 +643,11 @@ impl<'a> Compiler<'a> {
             } => {
                 self.compile_expr(cond)?;
                 let jump_else = self.emit_jump(Opcode::JumpIfFalse);
-                // JumpIfFalse already pops condition when taking then
+                // JumpIfFalse pops condition when taking then; when taking else it also pops
                 self.compile_expr(then_branch)?;
                 let jump_end = self.emit_jump(Opcode::Jump);
                 self.patch_jump(jump_else, self.chunk.code.len());
-                self.emit(Opcode::Pop); // pop condition when we took else
+                // no Pop: condition was already popped by JumpIfFalse
                 self.compile_expr(else_branch)?;
                 self.patch_jump(jump_end, self.chunk.code.len());
             }
@@ -626,11 +658,12 @@ impl<'a> Compiler<'a> {
                 self.emit(Opcode::LoadConst);
                 self.chunk.write_u16(idx);
                 self.emit_u8(Opcode::BinOp, binop_to_u8(BinOp::StrictNe));
-                let jump_skip = self.emit_jump(Opcode::JumpIfFalse);
-                self.emit(Opcode::Pop); // pop left
+                let jump_to_right = self.emit_jump(Opcode::JumpIfFalse);
+                let jump_end = self.emit_jump(Opcode::Jump);
+                self.patch_jump(jump_to_right, self.chunk.code.len());
+                self.emit(Opcode::Pop);
                 self.compile_expr(right)?;
-                self.patch_jump(jump_skip, self.chunk.code.len());
-                self.emit(Opcode::Pop); // pop condition
+                self.patch_jump(jump_end, self.chunk.code.len());
             }
             Expr::Array { elements, .. } => {
                 let has_spread = elements.iter().any(|e| matches!(e, ArrayElement::Spread(_)));
@@ -805,16 +838,14 @@ impl<'a> Compiler<'a> {
             Expr::MemberAssign { object, prop, value, .. } => {
                 self.compile_expr(object)?;
                 self.compile_expr(value)?;
-                self.emit(Opcode::Dup); // assignment yields value
                 let idx = self.name_idx(prop);
-                self.emit_u16(Opcode::SetMember, idx);
+                self.emit_u16(Opcode::SetMember, idx); // SetMember pops obj, val and pushes val back
             }
             Expr::IndexAssign { object, index, value, .. } => {
                 self.compile_expr(object)?;
                 self.compile_expr(index)?;
                 self.compile_expr(value)?;
-                self.emit(Opcode::Dup); // assignment yields value
-                self.emit(Opcode::SetIndex);
+                self.emit(Opcode::SetIndex); // SetIndex pops obj, idx, val and pushes val back
             }
             Expr::LogicalAssign { .. }
             | Expr::Await { .. }

@@ -164,6 +164,29 @@ test262-filter-verbose PATTERN:
     ./scripts/run_test262.sh --verbose --filter "{{PATTERN}}"
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# PARITY COMPARE - Compare runtime outputs (interp vs vm, rust, cranelift, wasi, node)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Run tests/core .tish (and .js) across runtimes; fail if any output differs from reference.
+# Use to find VM/Cranelift/WASI/Node parity gaps (e.g. optional_chaining returns nothing on VM).
+#
+#   just parity                    # all runtimes, all tests
+#   just parity optional_chaining  # single test
+#   just parity-filter "optional"  # tests matching name
+
+parity:
+    ./scripts/run_parity_compare.sh
+
+parity FILTER:
+    ./scripts/run_parity_compare.sh --filter {{FILTER}}
+
+parity-verbose FILTER:
+    ./scripts/run_parity_compare.sh --filter {{FILTER}} --verbose
+
+parity-limit N:
+    ./scripts/run_parity_compare.sh --limit {{N}}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
 

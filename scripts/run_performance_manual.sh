@@ -7,6 +7,7 @@
 #   --limit N       run only first N tests (default: all)
 #   --timeout SEC   timeout per tish run in seconds (default: 30, 0=no limit)
 #   --runtimes R,...  comma-separated list: run,rust,cranelift,wasi,node,bun,deno,qjs (default: all)
+#   --verbose       show stderr (crash logs, runtime errors) instead of suppressing them
 
 set -e
 cd "$(dirname "$0")/.."
@@ -41,6 +42,7 @@ perf_dir="tests/core"
 target_dir="$(pwd)/target"
 profile="debug"
 summary_only=false
+verbose=false
 no_compile=false
 limit=0
 run_timeout=30
@@ -55,22 +57,32 @@ while [[ $# -gt 0 ]]; do
     --limit) limit="$2"; shift 2 ;;
     --timeout) run_timeout="$2"; shift 2 ;;
     --runtimes) runtimes_filter="$2"; shift 2 ;;
+    --verbose|-v) verbose=true; shift ;;
     *) shift ;;
   esac
 done
 
 # Timeout wrapper (avoids hanging on slow VM runs, e.g. array_methods_perf)
+# When verbose=true, stderr is shown (crash logs); otherwise suppressed.
 run_with_timeout() {
   if [[ $run_timeout -gt 0 ]]; then
     if command -v timeout &>/dev/null; then
-      timeout "$run_timeout" "$@" 2>/dev/null || true
+      if $verbose; then
+        timeout "$run_timeout" "$@" || true
+      else
+        timeout "$run_timeout" "$@" 2>/dev/null || true
+      fi
     elif command -v perl &>/dev/null; then
-      perl -e 'alarm shift; exec @ARGV' "$run_timeout" "$@" 2>/dev/null || true
+      if $verbose; then
+        perl -e 'alarm shift; exec @ARGV' "$run_timeout" "$@" || true
+      else
+        perl -e 'alarm shift; exec @ARGV' "$run_timeout" "$@" 2>/dev/null || true
+      fi
     else
-      "$@" 2>/dev/null || true
+      if $verbose; then "$@" || true; else "$@" 2>/dev/null || true; fi
     fi
   else
-    "$@" 2>/dev/null || true
+    if $verbose; then "$@" || true; else "$@" 2>/dev/null || true; fi
   fi
 }
 
@@ -125,6 +137,7 @@ declare -a summary_ratio=()
 echo "=== Tish vs JavaScript Runtimes — Performance Comparison ==="
 echo "Profile: $profile"
 [[ -n "$runtimes_filter" ]] && echo "Runtimes: $runtimes_filter (use --runtimes run,rust,cranelift,wasi,node,bun,deno,qjs)"
+$verbose && echo "Verbose: stderr (crash logs) will be shown"
 [[ $run_timeout -gt 0 ]] && echo "Tish run timeout: ${run_timeout}s (use --timeout 0 to disable)"
 echo ""
 echo "Runtimes to test:"

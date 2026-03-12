@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tish_builtins::array as arr_builtins;
 use tish_builtins::globals as globals_builtins;
 use tish_builtins::math as math_builtins;
+use tish_builtins::string as string_builtins;
 use tish_bytecode::{Chunk, Constant, Opcode, NO_REST_PARAM};
 use tish_core::Value;
 
@@ -475,14 +476,14 @@ impl Vm {
                     }
                 }
                 Opcode::CallSpread => {
-                    let args_array = self
-                        .stack
-                        .pop()
-                        .ok_or_else(|| "Stack underflow in CallSpread".to_string())?;
                     let callee = self
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow: no callee in CallSpread".to_string())?;
+                    let args_array = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow in CallSpread".to_string())?;
                     let args: Vec<Value> = match &args_array {
                         Value::Array(a) => a.borrow().clone(),
                         _ => {
@@ -561,6 +562,18 @@ impl Vm {
                     let v = get_member(&obj, key)?;
                     self.stack.push(v);
                 }
+                Opcode::GetMemberOptional => {
+                    let idx = Self::read_u16(code, &mut ip);
+                    let key = names
+                        .get(idx as usize)
+                        .ok_or_else(|| "Name index out of bounds".to_string())?;
+                    let obj = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let v = get_member(&obj, key).unwrap_or(Value::Null);
+                    self.stack.push(v);
+                }
                 Opcode::SetMember => {
                     let idx = Self::read_u16(code, &mut ip);
                     let key = names
@@ -574,7 +587,8 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    set_member(&obj, key, val)?;
+                    set_member(&obj, key, val.clone())?;
+                    self.stack.push(val); // assignment yields value
                 }
                 Opcode::GetIndex => {
                     let idx_val = self
@@ -601,7 +615,8 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    set_index(&obj, &idx_val, val)?;
+                    set_index(&obj, &idx_val, val.clone())?;
+                    self.stack.push(val); // assignment yields value
                 }
                 Opcode::NewArray => {
                     let n = Self::read_u16(code, &mut ip) as usize;
@@ -762,6 +777,19 @@ fn eval_binop(op: u8, l: &Value, r: &Value) -> Result<Value, String> {
         13 => Ok(Bool(ln >= rn)),
         14 => Ok(Bool(l.is_truthy() && r.is_truthy())),
         15 => Ok(Bool(l.is_truthy() || r.is_truthy())),
+        16 => Ok(Number((ln as i32 & rn as i32) as f64)), // BitAnd
+        17 => Ok(Number((ln as i32 | rn as i32) as f64)), // BitOr
+        18 => Ok(Number((ln as i32 ^ rn as i32) as f64)), // BitXor
+        19 => Ok(Number(((ln as i32) << (rn as i32)) as f64)), // Shl
+        20 => Ok(Number(((ln as i32) >> (rn as i32)) as f64)), // Shr
+        21 => {
+            // In: key in object
+            let key_s: Arc<str> = r.to_display_string().into();
+            Ok(Bool(match l {
+                Value::Object(m) => m.borrow().contains_key(&key_s),
+                _ => false,
+            }))
+        }
         _ => Err(format!("Unknown binop: {}", op)),
     }
 }
@@ -772,7 +800,8 @@ fn eval_unary(op: u8, o: &Value) -> Result<Value, String> {
         0 => Ok(Bool(!o.is_truthy())), // Not
         1 => Ok(Number(-o.as_number().unwrap_or(f64::NAN))), // Neg
         2 => Ok(Number(o.as_number().unwrap_or(f64::NAN))),  // Pos
-        3 | 4 => Ok(Null), // BitNot, Void
+        3 => Ok(Number(!(o.as_number().unwrap_or(0.0) as i32) as f64)), // BitNot
+        4 => Ok(Null), // Void
         _ => Err(format!("Unknown unary op: {}", op)),
     }
 }
@@ -873,6 +902,96 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     let delete_count = args.get(1).map(|v| v as &Value);
                     let items: Vec<Value> = args.get(2..).unwrap_or(&[]).to_vec();
                     arr_builtins::splice(&Value::Array(Rc::clone(&a_clone)), start, delete_count, &items)
+                }),
+                _ => return Err(format!("Property '{}' not found", key)),
+            };
+            Ok(Value::Function(method))
+        }
+        Value::String(s) => {
+            let key_s = key.as_ref();
+            if key_s == "length" {
+                return Ok(Value::Number(s.chars().count() as f64));
+            }
+            if let Ok(idx) = key_s.parse::<usize>() {
+                let c = s.chars().nth(idx);
+                return Ok(match c {
+                    Some(ch) => Value::String(format!("{}", ch).into()),
+                    None => Value::Null,
+                });
+            }
+            let s_clone = Arc::clone(s);
+            let method: Rc<dyn Fn(&[Value]) -> Value> = match key_s {
+                "indexOf" => Rc::new(move |args: &[Value]| {
+                    let search = args.get(0).unwrap_or(&Value::Null);
+                    let from = args.get(1);
+                    string_builtins::index_of(&Value::String(Arc::clone(&s_clone)), search, from)
+                }),
+                "includes" => Rc::new(move |args: &[Value]| {
+                    let search = args.get(0).unwrap_or(&Value::Null);
+                    string_builtins::includes(&Value::String(Arc::clone(&s_clone)), search)
+                }),
+                "slice" => Rc::new(move |args: &[Value]| {
+                    let start = args.get(0).unwrap_or(&Value::Null);
+                    let end = args.get(1).unwrap_or(&Value::Null);
+                    string_builtins::slice(&Value::String(Arc::clone(&s_clone)), start, end)
+                }),
+                "substring" => Rc::new(move |args: &[Value]| {
+                    let start = args.get(0).unwrap_or(&Value::Null);
+                    let end = args.get(1).unwrap_or(&Value::Null);
+                    string_builtins::substring(&Value::String(Arc::clone(&s_clone)), start, end)
+                }),
+                "split" => Rc::new(move |args: &[Value]| {
+                    let sep = args.get(0).unwrap_or(&Value::Null);
+                    string_builtins::split(&Value::String(Arc::clone(&s_clone)), sep)
+                }),
+                "trim" => Rc::new(move |_args: &[Value]| {
+                    string_builtins::trim(&Value::String(Arc::clone(&s_clone)))
+                }),
+                "toUpperCase" => Rc::new(move |_args: &[Value]| {
+                    string_builtins::to_upper_case(&Value::String(Arc::clone(&s_clone)))
+                }),
+                "toLowerCase" => Rc::new(move |_args: &[Value]| {
+                    string_builtins::to_lower_case(&Value::String(Arc::clone(&s_clone)))
+                }),
+                "startsWith" => Rc::new(move |args: &[Value]| {
+                    let search = args.get(0).unwrap_or(&Value::Null);
+                    string_builtins::starts_with(&Value::String(Arc::clone(&s_clone)), search)
+                }),
+                "endsWith" => Rc::new(move |args: &[Value]| {
+                    let search = args.get(0).unwrap_or(&Value::Null);
+                    string_builtins::ends_with(&Value::String(Arc::clone(&s_clone)), search)
+                }),
+                "replace" => Rc::new(move |args: &[Value]| {
+                    let search = args.get(0).unwrap_or(&Value::Null);
+                    let replacement = args.get(1).unwrap_or(&Value::Null);
+                    string_builtins::replace(&Value::String(Arc::clone(&s_clone)), search, replacement)
+                }),
+                "replaceAll" => Rc::new(move |args: &[Value]| {
+                    let search = args.get(0).unwrap_or(&Value::Null);
+                    let replacement = args.get(1).unwrap_or(&Value::Null);
+                    string_builtins::replace_all(&Value::String(Arc::clone(&s_clone)), search, replacement)
+                }),
+                "charAt" => Rc::new(move |args: &[Value]| {
+                    let idx = args.get(0).unwrap_or(&Value::Null);
+                    string_builtins::char_at(&Value::String(Arc::clone(&s_clone)), idx)
+                }),
+                "charCodeAt" => Rc::new(move |args: &[Value]| {
+                    let idx = args.get(0).unwrap_or(&Value::Null);
+                    string_builtins::char_code_at(&Value::String(Arc::clone(&s_clone)), idx)
+                }),
+                "repeat" => Rc::new(move |args: &[Value]| {
+                    let count = args.get(0).unwrap_or(&Value::Null);
+                    string_builtins::repeat(&Value::String(Arc::clone(&s_clone)), count)
+                }),
+                "padStart" => Rc::new(move |args: &[Value]| {
+                    let target = args.get(0).unwrap_or(&Value::Null);
+                    let pad = args.get(1).unwrap_or(&Value::Null);
+                    string_builtins::pad_start(&Value::String(Arc::clone(&s_clone)), target, pad)
+                }),
+                "padEnd" => Rc::new(move |args: &[Value]| {
+                    let target = args.get(0).unwrap_or(&Value::Null);
+                    let pad = args.get(1).unwrap_or(&Value::Null);
+                    string_builtins::pad_end(&Value::String(Arc::clone(&s_clone)), target, pad)
                 }),
                 _ => return Err(format!("Property '{}' not found", key)),
             };
