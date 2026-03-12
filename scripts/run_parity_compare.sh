@@ -108,9 +108,9 @@ run_and_capture() {
   fi
 }
 
-# Normalize JS output: undefined -> null (Tish has no undefined, uses null)
+# Normalize JS output: undefined -> null; typeof null "object" -> "null" (Tish semantics)
 normalize_js_output() {
-  printf '%s' "$1" | sed 's/undefined/null/g'
+  printf '%s' "$1" | sed 's/undefined/null/g' | sed '/^boolean$/{n;s/^object$/null/;}'
 }
 
 # Build tish
