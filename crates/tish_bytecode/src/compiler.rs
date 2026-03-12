@@ -600,8 +600,9 @@ impl<'a> Compiler<'a> {
                     self.chunk.write_u16(null_idx);
                     self.emit_u8(Opcode::BinOp, 8);
                     let jump_to_null = self.emit_jump(Opcode::JumpIfFalse);
+                    let jump_to_get_instr = self.chunk.code.len();
                     let jump_to_get = self.emit_jump(Opcode::Jump);
-                    self.patch_jump(jump_to_null, self.chunk.code.len());
+                    self.patch_jump(jump_to_null, jump_to_get_instr);
                     self.emit(Opcode::Pop);
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(null_idx);
