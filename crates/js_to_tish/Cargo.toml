@@ -1,0 +1,9 @@
+[package]
+name = "js_to_tish"
+version = "0.1.0"
+edition = "2021"
+description = "Vanilla JavaScript to Tish AST converter"
+
+[dependencies]
+oxc = { version = "0.117", features = ["semantic"] }
+tish_ast = { path = "../tish_ast" }

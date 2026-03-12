@@ -136,6 +136,20 @@ pub fn extract_native_import_features(program: &Program) -> Vec<String> {
     features.into_iter().collect()
 }
 
+/// Returns true if the merged program contains native imports (tish:*, @scope/pkg).
+pub fn has_native_imports(program: &Program) -> bool {
+    for stmt in &program.statements {
+        if let Statement::VarDecl {
+            init: Some(Expr::NativeModuleLoad { .. }),
+            ..
+        } = stmt
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// A resolved module: path and its parsed program.
 #[derive(Debug, Clone)]
 pub struct ResolvedModule {

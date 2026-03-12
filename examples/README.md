@@ -18,26 +18,26 @@ Ready-to-deploy example applications for the Tish Platform.
 ## Prerequisites
 
 1. **Tish** – compiler/runtime (this repo). Build for the platform build service: `cargo build --release -p tish`
-2. **Tish Dev CLI** – deploy from the **tish-dev** repo via `cargo run -p tish-cli --` (no install).
-3. **Tish Platform** – running locally, e.g. `just run-all` in tish-platform. Config must point at this tish repo: `tish_compiler_path` and `tish_workspace_path` in platform’s `config/default.toml`.
+2. **Zectre CLI** – deploy from the **zectre-cli** repo via `cargo run -p zectre-cli --` (no install).
+3. **Zectre Platform** – running locally, e.g. `just run-all` in zectre-platform. Config must point at this tish repo: `tish_compiler_path` and `tish_workspace_path` in platform’s `config/default.toml`.
 
-## Deploy examples (tish-dev CLI, no install)
+## Deploy examples (zectre CLI, no install)
 
-Deploy code from this repo’s examples using the tish-dev CLI run from source. Do **not** install tish-cli; run it with `cargo run -p tish-cli --manifest-path <tish-dev>/Cargo.toml --`.
+Deploy code from this repo’s examples using the zectre CLI run from source. Do **not** install zectre; run it with `cargo run -p zectre-cli --manifest-path <zectre-cli>/Cargo.toml --`.
 
-1. **Start platform** (in tish-platform): `just run-all`. Set `tish_compiler_path` and `tish_workspace_path` in `config/default.toml` to this tish repo.
+1. **Start platform** (in zectre-platform): `just run-all`. Set `tish_compiler_path` and `tish_workspace_path` in `config/default.toml` to this tish repo.
 
 2. **Build tish** (in this repo): `cargo build --release -p tish`.
 
-3. **Deploy an example** – from this repo, in the example directory (tish and tish-dev siblings):
+3. **Deploy an example** – from this repo, in the example directory (tish and zectre-cli siblings):
    ```bash
    cd examples/http-hello
-   cargo run -p tish-cli --manifest-path ../../tish-dev/Cargo.toml -- login
-   cargo run -p tish-cli --manifest-path ../../tish-dev/Cargo.toml -- projects create http-hello
-   cargo run -p tish-cli --manifest-path ../../tish-dev/Cargo.toml -- link
-   cargo run -p tish-cli --manifest-path ../../tish-dev/Cargo.toml -- deploy --wait
+   cargo run -p zectre-cli --manifest-path ../../zectre-cli/Cargo.toml -- login
+   cargo run -p zectre-cli --manifest-path ../../zectre-cli/Cargo.toml -- projects create http-hello
+   cargo run -p zectre-cli --manifest-path ../../zectre-cli/Cargo.toml -- link
+   cargo run -p zectre-cli --manifest-path ../../zectre-cli/Cargo.toml -- deploy --wait
    ```
-   For another example, use its name (e.g. `echo-server`, `counter-api`) and `cd` to that example dir before `link` and `deploy`. API URL defaults to `http://localhost:47080`; use `TISH_API_URL` or `--api-url` to override. If you have an API key: `-- login --with-key YOUR_KEY`.
+   For another example, use its name (e.g. `echo-server`, `counter-api`) and `cd` to that example dir before `link` and `deploy`. API URL defaults to `http://localhost:47080`; use `ZECTRE_API_URL` or `--api-url` to override. If you have an API key: `-- login --with-key YOUR_KEY`.
 
 ## Quick Start
 
@@ -69,7 +69,7 @@ Use the **tish-dev** CLI from source (no install). From an example directory, pr
 4. **Deploy**: `... -- deploy --wait`
 5. **Logs**: `... -- status`, `... -- logs <task-id>`
 
-See **Deploy examples (tish-dev CLI, no install)** above for the full sequence.
+See **Deploy examples (zectre CLI, no install)** above for the full sequence.
 
 ## Project Structure
 

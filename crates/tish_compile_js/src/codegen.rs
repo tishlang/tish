@@ -751,15 +751,16 @@ pub fn compile(program: &Program) -> Result<String, CompileError> {
 }
 
 /// Compile a project from entry path, resolving and merging modules.
+/// Uses shared resolve from tish_compile (same pipeline as native/WASM).
 pub fn compile_project(
     entry_path: &std::path::Path,
     project_root: Option<&std::path::Path>,
 ) -> Result<String, CompileError> {
-    use crate::resolve;
     use tish_ast::Statement;
-    let modules = resolve::resolve_project(entry_path, project_root)
+    let modules = tish_compile::resolve_project(entry_path, project_root)
         .map_err(|e| CompileError { message: e })?;
-    let program = resolve::merge_modules(modules).map_err(|e| CompileError { message: e })?;
+    tish_compile::detect_cycles(&modules).map_err(|e| CompileError { message: e })?;
+    let program = tish_compile::merge_modules(modules).map_err(|e| CompileError { message: e })?;
     let default_export = program.statements.iter().find_map(|s| {
         if let Statement::VarDecl { name, .. } = s {
             let n = name.as_ref();
