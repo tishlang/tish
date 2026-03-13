@@ -696,6 +696,12 @@ impl Evaluator {
                                 arr.borrow_mut().reverse();
                                 return Ok(obj.clone());
                             }
+                            "shuffle" => {
+                                let mut v = arr.borrow().clone();
+                                use rand::seq::SliceRandom;
+                                v.shuffle(&mut rand::rng());
+                                return Ok(Value::Array(Rc::new(RefCell::new(v))));
+                            }
                             "sort" => {
                                 let comparator = arg_vals.into_iter().next();
                                 let mut arr_mut = arr.borrow_mut();

@@ -110,6 +110,18 @@ pub fn reverse(arr: &Value) -> Value {
     }
 }
 
+/// Fisher-Yates shuffle. Returns a new shuffled array (does not mutate).
+pub fn shuffle(arr: &Value) -> Value {
+    if let Value::Array(arr) = arr {
+        let mut v = arr.borrow().clone();
+        use rand::seq::SliceRandom;
+        v.shuffle(&mut rand::rng());
+        Value::Array(Rc::new(RefCell::new(v)))
+    } else {
+        Value::Null
+    }
+}
+
 pub fn splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &[Value]) -> Value {
     if let Value::Array(arr) = arr {
         let mut arr_mut = arr.borrow_mut();
@@ -371,4 +383,22 @@ pub fn sort_numeric_asc(arr: &Value) -> Value {
 
 pub fn sort_numeric_desc(arr: &Value) -> Value {
     sort_by_impl(arr, |a, b| num_cmp(a, b, false))
+}
+
+/// Sort array of objects by numeric property: arr.sort((a,b)=>a.prop-b.prop)
+pub fn sort_by_property_numeric(arr: &Value, prop: &str, asc: bool) -> Value {
+    let prop_arc = std::sync::Arc::from(prop);
+    sort_by_impl(arr, move |a, b| {
+        let na = get_prop_number(a, &prop_arc);
+        let nb = get_prop_number(b, &prop_arc);
+        let cmp = na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal);
+        if asc { cmp } else { cmp.reverse() }
+    })
+}
+
+fn get_prop_number(v: &Value, prop: &std::sync::Arc<str>) -> f64 {
+    match v {
+        Value::Object(o) => o.borrow().get(prop.as_ref()).map(|v| v.as_number().unwrap_or(f64::NAN)).unwrap_or(f64::NAN),
+        _ => f64::NAN,
+    }
 }

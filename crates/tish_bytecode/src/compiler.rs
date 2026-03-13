@@ -90,6 +90,94 @@ impl<'a> Compiler<'a> {
         self.chunk.code[patch_pos + 1] = bytes[1];
     }
 
+    /// Detect property-based numeric sort: (a, b) => a.prop - b.prop or (a, b) => b.prop - a.prop.
+    /// Returns Some((prop_name, asc)) or None.
+    fn detect_property_sort_comparator(expr: &Expr) -> Option<(Arc<str>, bool)> {
+        if let Expr::ArrowFunction { params, body, .. } = expr {
+            if params.len() != 2 {
+                return None;
+            }
+            let param_a = params[0].name.as_ref();
+            let param_b = params[1].name.as_ref();
+            let body_expr = match body {
+                ArrowBody::Expr(e) => e.as_ref(),
+                ArrowBody::Block(stmt) => {
+                    if let Statement::ExprStmt { expr: e, .. } = stmt.as_ref() {
+                        e
+                    } else {
+                        return None;
+                    }
+                }
+            };
+            if let Expr::Binary {
+                left,
+                op: BinOp::Sub,
+                right,
+                ..
+            } = body_expr
+            {
+                if let (Expr::Member { object: lo, prop: MemberProp::Name(p), .. }, Expr::Member { object: ro, prop: MemberProp::Name(pr), .. }) =
+                    (left.as_ref(), right.as_ref())
+                {
+                    if p != pr {
+                        return None;
+                    }
+                    if let (Expr::Ident { name: ln, .. }, Expr::Ident { name: rn, .. }) =
+                        (lo.as_ref(), ro.as_ref())
+                    {
+                        if ln.as_ref() == param_a && rn.as_ref() == param_b {
+                            return Some((Arc::clone(p), true));
+                        }
+                        if ln.as_ref() == param_b && rn.as_ref() == param_a {
+                            return Some((Arc::clone(p), false));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect numeric sort comparator: (a, b) => a - b (asc) or (a, b) => b - a (desc).
+    fn detect_numeric_sort_comparator(expr: &Expr) -> Option<bool> {
+        if let Expr::ArrowFunction { params, body, .. } = expr {
+            if params.len() != 2 {
+                return None;
+            }
+            let param_a = params[0].name.as_ref();
+            let param_b = params[1].name.as_ref();
+            let body_expr = match body {
+                ArrowBody::Expr(e) => e.as_ref(),
+                ArrowBody::Block(stmt) => {
+                    if let Statement::ExprStmt { expr: e, .. } = stmt.as_ref() {
+                        e
+                    } else {
+                        return None;
+                    }
+                }
+            };
+            if let Expr::Binary {
+                left,
+                op: BinOp::Sub,
+                right,
+                ..
+            } = body_expr
+            {
+                if let (Expr::Ident { name: left_name, .. }, Expr::Ident { name: right_name, .. }) =
+                    (left.as_ref(), right.as_ref())
+                {
+                    if left_name.as_ref() == param_a && right_name.as_ref() == param_b {
+                        return Some(true);
+                    }
+                    if left_name.as_ref() == param_b && right_name.as_ref() == param_a {
+                        return Some(false);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn compile_program(&mut self, program: &Program) -> Result<(), CompileError> {
         for stmt in &program.statements {
             self.compile_statement(stmt)?;
@@ -557,6 +645,31 @@ impl<'a> Compiler<'a> {
                 self.emit_u8(Opcode::UnaryOp, unaryop_to_u8(*op));
             }
             Expr::Call { callee, args, .. } => {
+                // Fast path: arr.sort((a,b)=>a-b) or arr.sort((a,b)=>b-a) -> ArraySortNumeric
+                if !args.iter().any(|a| matches!(a, CallArg::Spread(_)))
+                    && args.len() == 1
+                    && matches!(args[0], CallArg::Expr(_))
+                {
+                    if let (Expr::Member { object, prop: MemberProp::Name(key), optional: false, .. }, CallArg::Expr(cmp_expr)) =
+                        (callee.as_ref(), &args[0])
+                    {
+                        if key.as_ref() == "sort" {
+                            if let Some(ascending) = Self::detect_numeric_sort_comparator(cmp_expr) {
+                                self.compile_expr(object)?;
+                                self.emit_u8(Opcode::ArraySortNumeric, if ascending { 0 } else { 1 });
+                                return Ok(());
+                            }
+                            if let Some((prop, ascending)) = Self::detect_property_sort_comparator(cmp_expr) {
+                                self.compile_expr(object)?;
+                                let prop_idx = self.constant_idx(Constant::String(prop));
+                                self.emit(Opcode::ArraySortByProperty);
+                                self.chunk.write_u16(prop_idx);
+                                self.chunk.write_u16(if ascending { 0 } else { 1 });
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
                 let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
                 if has_spread {
                     // Build args array [a, ...b, c], then callee, then CallSpread

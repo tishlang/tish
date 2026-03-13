@@ -71,32 +71,39 @@ tish_bin="$target_dir/$profile/tish"
 cache_dir="$target_dir/parity-cache-$profile"
 mkdir -p "$cache_dir"
 
+# Timeout wrapper: stop process after run_timeout seconds. Uses timeout/gtimeout, perl, or bash.
 run_with_timeout() {
-  if $verbose; then
-    if [[ $run_timeout -gt 0 ]]; then
-      if command -v timeout &>/dev/null; then
-        timeout "$run_timeout" "$@" || true
-      elif command -v perl &>/dev/null; then
-        perl -e 'alarm shift; exec @ARGV' "$run_timeout" "$@" || true
-      else
-        "$@" || true
-      fi
-    else
-      "$@" || true
-    fi
-  else
-    if [[ $run_timeout -gt 0 ]]; then
-      if command -v timeout &>/dev/null; then
-        timeout "$run_timeout" "$@" 2>/dev/null || true
-      elif command -v perl &>/dev/null; then
-        perl -e 'alarm shift; exec @ARGV' "$run_timeout" "$@" 2>/dev/null || true
-      else
-        "$@" 2>/dev/null || true
-      fi
-    else
-      "$@" 2>/dev/null || true
-    fi
+  if [[ $run_timeout -le 0 ]]; then
+    if $verbose; then "$@" || true; else "$@" 2>/dev/null || true; fi
+    return
   fi
+  if command -v timeout &>/dev/null; then
+    if $verbose; then timeout "$run_timeout" "$@" || true; else timeout "$run_timeout" "$@" 2>/dev/null || true; fi
+    return
+  fi
+  if command -v gtimeout &>/dev/null; then
+    if $verbose; then gtimeout "$run_timeout" "$@" || true; else gtimeout "$run_timeout" "$@" 2>/dev/null || true; fi
+    return
+  fi
+  if command -v perl &>/dev/null; then
+    if $verbose; then
+      perl -e '
+        my $t=shift; my $pid=fork; die "fork: $!" if !defined $pid;
+        if ($pid==0) { setpgrp(0,0) if defined &setpgrp; exec(@ARGV) or exit 127; }
+        $SIG{ALRM}=sub{ kill 9,-$pid; kill 9,$pid; waitpid $pid,0; exit 124 };
+        alarm $t; waitpid $pid,0; alarm 0; exit($?>>8)
+      ' "$run_timeout" "$@" || true
+    else
+      perl -e '
+        my $t=shift; my $pid=fork; die "fork: $!" if !defined $pid;
+        if ($pid==0) { setpgrp(0,0) if defined &setpgrp; exec(@ARGV) or exit 127; }
+        $SIG{ALRM}=sub{ kill 9,-$pid; kill 9,$pid; waitpid $pid,0; exit 124 };
+        alarm $t; waitpid $pid,0; alarm 0; exit($?>>8)
+      ' "$run_timeout" "$@" 2>/dev/null || true
+    fi
+    return
+  fi
+  ( set +e; set -m; if $verbose; then "$@" & else "$@" 2>/dev/null & fi; pid=$!; ( sleep $run_timeout; kill -TERM -$pid 2>/dev/null; sleep 2; kill -KILL -$pid 2>/dev/null ) & k=$!; wait $pid 2>/dev/null; kill $k 2>/dev/null; wait $k 2>/dev/null ) || true
 }
 
 # Capture stdout; when verbose, stderr is left visible (no 2>/dev/null)
@@ -111,6 +118,11 @@ run_and_capture() {
 # Normalize JS output: undefined -> null; typeof null "object" -> "null" (Tish semantics)
 normalize_js_output() {
   printf '%s' "$1" | sed 's/undefined/null/g' | sed '/^boolean$/{n;s/^object$/null/;}'
+}
+
+# Normalize timing output: " Xms" -> " 0ms" for parity (timing varies by runtime)
+normalize_timing() {
+  printf '%s' "$1" | sed 's/ [0-9][0-9]*ms/ 0ms/g'
 }
 
 # Build tish
@@ -156,13 +168,15 @@ for f in "$core_dir"/*.tish; do
     *) echo "Unknown reference: $reference"; exit 1 ;;
   esac
 
+  ref_normalized=$(normalize_timing "$ref_out")
+
   any_fail=false
   failures=()
 
   # Compare: interp (unless reference)
   if want_runtime interp && [[ "$reference" != "interp" ]]; then
-    out=$(run_and_capture $tish_bin run "$f" --backend interp || true)
-    if [[ "$out" != "$ref_out" ]]; then
+    out=$(normalize_timing "$(run_and_capture $tish_bin run "$f" --backend interp || true)")
+    if [[ "$out" != "$ref_normalized" ]]; then
       any_fail=true
       failures+=("interp")
     fi
@@ -170,8 +184,8 @@ for f in "$core_dir"/*.tish; do
 
   # Compare: vm
   if want_runtime vm; then
-    out=$(run_and_capture $tish_bin run "$f" --backend vm || true)
-    if [[ "$out" != "$ref_out" ]]; then
+    out=$(normalize_timing "$(run_and_capture $tish_bin run "$f" --backend vm || true)")
+    if [[ "$out" != "$ref_normalized" ]]; then
       any_fail=true
       failures+=("vm")
     fi
@@ -184,8 +198,8 @@ for f in "$core_dir"/*.tish; do
       $tish_bin compile "$f" -o "$rust_bin" --native-backend rust >/dev/null 2>&1 || true
     fi
     if [[ -x "$rust_bin" ]]; then
-      out=$(run_and_capture "$rust_bin" || true)
-      if [[ "$out" != "$ref_out" ]]; then
+      out=$(normalize_timing "$(run_and_capture "$rust_bin" || true)")
+      if [[ "$out" != "$ref_normalized" ]]; then
         any_fail=true
         failures+=("rust")
       fi
@@ -202,8 +216,8 @@ for f in "$core_dir"/*.tish; do
       $tish_bin compile "$f" -o "$cl_bin" --native-backend cranelift >/dev/null 2>&1 || true
     fi
     if [[ -x "$cl_bin" ]]; then
-      out=$(run_and_capture "$cl_bin" || true)
-      if [[ "$out" != "$ref_out" ]]; then
+      out=$(normalize_timing "$(run_and_capture "$cl_bin" || true)")
+      if [[ "$out" != "$ref_normalized" ]]; then
         any_fail=true
         failures+=("cranelift")
       fi
@@ -220,8 +234,8 @@ for f in "$core_dir"/*.tish; do
       $tish_bin compile "$f" -o "$cache_dir/${base}_wasi" --target wasi >/dev/null 2>&1 || true
     fi
     if [[ -f "$wasi_bin" ]]; then
-      out=$(run_and_capture wasmtime "$wasi_bin" || true)
-      if [[ "$out" != "$ref_out" ]]; then
+      out=$(normalize_timing "$(run_and_capture wasmtime "$wasi_bin" || true)")
+      if [[ "$out" != "$ref_normalized" ]]; then
         any_fail=true
         failures+=("wasi")
       fi
@@ -233,8 +247,8 @@ for f in "$core_dir"/*.tish; do
 
   # Compare: node
   if want_runtime node && [[ "$reference" != "node" ]]; then
-    out=$(normalize_js_output "$(run_and_capture "$node_cmd" "$js_file" || true)")
-    if [[ "$out" != "$ref_out" ]]; then
+    out=$(normalize_timing "$(normalize_js_output "$(run_and_capture "$node_cmd" "$js_file" || true)")")
+    if [[ "$out" != "$ref_normalized" ]]; then
       any_fail=true
       failures+=("node")
     fi
@@ -242,8 +256,8 @@ for f in "$core_dir"/*.tish; do
 
   # Compare: bun
   if want_runtime bun && $has_bun; then
-    out=$(normalize_js_output "$(run_and_capture "$bun_cmd" "$js_file" || true)")
-    if [[ "$out" != "$ref_out" ]]; then
+    out=$(normalize_timing "$(normalize_js_output "$(run_and_capture "$bun_cmd" "$js_file" || true)")")
+    if [[ "$out" != "$ref_normalized" ]]; then
       any_fail=true
       failures+=("bun")
     fi
@@ -251,8 +265,8 @@ for f in "$core_dir"/*.tish; do
 
   # Compare: deno
   if want_runtime deno && $has_deno; then
-    out=$(normalize_js_output "$(run_and_capture "$deno_cmd" run --allow-all "$js_file" || true)")
-    if [[ "$out" != "$ref_out" ]]; then
+    out=$(normalize_timing "$(normalize_js_output "$(run_and_capture "$deno_cmd" run --allow-all "$js_file" || true)")")
+    if [[ "$out" != "$ref_normalized" ]]; then
       any_fail=true
       failures+=("deno")
     fi

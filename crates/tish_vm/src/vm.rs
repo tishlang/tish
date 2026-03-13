@@ -751,6 +751,40 @@ impl Vm {
                     self.stack
                         .push(Value::Object(Rc::new(RefCell::new(merged))));
                 }
+                Opcode::ArraySortNumeric => {
+                    let operand = Self::read_u16(code, &mut ip);
+                    let asc = operand == 0;
+                    let arr = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let result = if asc {
+                        arr_builtins::sort_numeric_asc(&arr)
+                    } else {
+                        arr_builtins::sort_numeric_desc(&arr)
+                    };
+                    self.stack.push(result);
+                }
+                Opcode::ArraySortByProperty => {
+                    let prop_idx = Self::read_u16(code, &mut ip);
+                    let asc = Self::read_u16(code, &mut ip) == 0;
+                    let arr = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let prop = constants
+                        .get(prop_idx as usize)
+                        .and_then(|c| {
+                            if let Constant::String(s) = c {
+                                Some(s.as_ref())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or("");
+                    let result = arr_builtins::sort_by_property_numeric(&arr, prop, asc);
+                    self.stack.push(result);
+                }
                 Opcode::Throw => {
                     let v = self
                         .stack
@@ -869,6 +903,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "shift" => Rc::new(move |_args: &[Value]| arr_builtins::shift(&Value::Array(Rc::clone(&a_clone)))),
                 "unshift" => Rc::new(move |args: &[Value]| arr_builtins::unshift(&Value::Array(Rc::clone(&a_clone)), args)),
                 "reverse" => Rc::new(move |_args: &[Value]| arr_builtins::reverse(&Value::Array(Rc::clone(&a_clone)))),
+                "shuffle" => Rc::new(move |_args: &[Value]| arr_builtins::shuffle(&Value::Array(Rc::clone(&a_clone)))),
                 "slice" => Rc::new(move |args: &[Value]| {
                     let start = args.get(0).unwrap_or(&Value::Null);
                     let end = args.get(1).unwrap_or(&Value::Null);

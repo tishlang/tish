@@ -21,6 +21,7 @@ pub use tish_builtins::array::{
     includes as array_includes_impl,
     join as array_join_impl,
     reverse as array_reverse,
+    shuffle as array_shuffle,
     splice as array_splice_impl,
     slice as array_slice_impl,
     concat as array_concat_impl,

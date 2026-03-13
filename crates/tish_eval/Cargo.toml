@@ -13,6 +13,7 @@ regex = ["dep:fancy-regex", "tish_core/regex"]
 tokio = ["dep:tokio"]
 
 [dependencies]
+rand = "0.10.0"
 tish_ast = { path = "../tish_ast" }
 tish_parser = { path = "../tish_parser" }
 tish_core = { path = "../tish_core" }

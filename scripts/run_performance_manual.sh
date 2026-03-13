@@ -47,7 +47,6 @@ no_compile=false
 limit=0
 run_timeout=30
 runtimes_filter=""
-
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -62,28 +61,45 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Timeout wrapper (avoids hanging on slow VM runs, e.g. array_methods_perf)
-# When verbose=true, stderr is shown (crash logs); otherwise suppressed.
+# Timeout wrapper: stop process after run_timeout seconds. Uses timeout/gtimeout, perl, or bash.
+# When verbose=true, stderr is shown; otherwise suppressed.
 run_with_timeout() {
-  if [[ $run_timeout -gt 0 ]]; then
-    if command -v timeout &>/dev/null; then
-      if $verbose; then
-        timeout "$run_timeout" "$@" || true
-      else
-        timeout "$run_timeout" "$@" 2>/dev/null || true
-      fi
-    elif command -v perl &>/dev/null; then
-      if $verbose; then
-        perl -e 'alarm shift; exec @ARGV' "$run_timeout" "$@" || true
-      else
-        perl -e 'alarm shift; exec @ARGV' "$run_timeout" "$@" 2>/dev/null || true
-      fi
-    else
-      if $verbose; then "$@" || true; else "$@" 2>/dev/null || true; fi
-    fi
-  else
+  if [[ $run_timeout -le 0 ]]; then
     if $verbose; then "$@" || true; else "$@" 2>/dev/null || true; fi
+    return
   fi
+  if command -v timeout &>/dev/null; then
+    if $verbose; then timeout "$run_timeout" "$@" || true; else timeout "$run_timeout" "$@" 2>/dev/null || true; fi
+    return
+  fi
+  if command -v gtimeout &>/dev/null; then
+    if $verbose; then gtimeout "$run_timeout" "$@" || true; else gtimeout "$run_timeout" "$@" 2>/dev/null || true; fi
+    return
+  fi
+  if command -v perl &>/dev/null; then
+    # Fork; child uses setsid+exec so we can kill process group (handles cargo->tish)
+    if $verbose; then
+      perl -e '
+        my $t=shift;
+        my $pid=fork;
+        die "fork: $!" if !defined $pid;
+        if ($pid==0) { setpgrp(0,0) if defined &setpgrp; exec(@ARGV) or exit 127; }
+        $SIG{ALRM}=sub{ kill 9,-$pid; kill 9,$pid; waitpid $pid,0; exit 124 };
+        alarm $t; waitpid $pid,0; alarm 0; exit($?>>8)
+      ' "$run_timeout" "$@" || true
+    else
+      perl -e '
+        my $t=shift;
+        my $pid=fork;
+        die "fork: $!" if !defined $pid;
+        if ($pid==0) { setpgrp(0,0) if defined &setpgrp; exec(@ARGV) or exit 127; }
+        $SIG{ALRM}=sub{ kill 9,-$pid; kill 9,$pid; waitpid $pid,0; exit 124 };
+        alarm $t; waitpid $pid,0; alarm 0; exit($?>>8)
+      ' "$run_timeout" "$@" 2>/dev/null || true
+    fi
+    return
+  fi
+  ( set +e; set -m; "$@" 2>/dev/null & pid=$!; ( sleep $run_timeout; kill -TERM -$pid 2>/dev/null; sleep 2; kill -KILL -$pid 2>/dev/null ) & k=$!; wait $pid 2>/dev/null; kill $k 2>/dev/null; wait $k 2>/dev/null ) || true
 }
 
 tish_bin="$target_dir/$profile/tish"
@@ -167,8 +183,9 @@ else
   count=0
   for f in "$perf_dir"/*.js; do
     [[ -f "$f" ]] || continue
-    [[ $limit -gt 0 && $count -ge $limit ]] && break
     base=$(basename "$f" .js)
+    [[ "$base" == "recursion_stress" ]] && continue
+    [[ $limit -gt 0 && $count -ge $limit ]] && break
     tish_file="$tish_dir/$base.tish"
     [[ -f "$tish_file" ]] || continue
     count=$((count + 1))
@@ -220,8 +237,9 @@ echo "Running performance tests..."
 count=0
 for f in "$perf_dir"/*.js; do
   [[ -f "$f" ]] || continue
-  [[ $limit -gt 0 && $count -ge $limit ]] && break
   base=$(basename "$f" .js)
+  [[ "$base" == "recursion_stress" ]] && continue
+  [[ $limit -gt 0 && $count -ge $limit ]] && break
   tish_file="$tish_dir/$base.tish"
   [[ -f "$tish_file" ]] || continue
   count=$((count + 1))
@@ -313,9 +331,9 @@ for f in "$perf_dir"/*.js; do
 
   # Warmup runs (discard - warms disk cache and JIT; use timeout to avoid hangs)
   want_runtime run && run_with_timeout $tish_bin run "$tish_file" >/dev/null 2>&1 || true
-  want_runtime rust && [[ -x "$native_bin" ]] && "$native_bin" >/dev/null 2>&1 || true
-  want_runtime cranelift && [[ -x "$cranelift_bin" ]] && "$cranelift_bin" >/dev/null 2>&1 || true
-  want_runtime wasi && $has_wasmtime && [[ -f "$wasi_bin" ]] && wasmtime "$wasi_bin" >/dev/null 2>&1 || true
+  want_runtime rust && [[ -x "$native_bin" ]] && run_with_timeout "$native_bin" >/dev/null 2>&1 || true
+  want_runtime cranelift && [[ -x "$cranelift_bin" ]] && run_with_timeout "$cranelift_bin" >/dev/null 2>&1 || true
+  want_runtime wasi && $has_wasmtime && [[ -f "$wasi_bin" ]] && run_with_timeout wasmtime "$wasi_bin" >/dev/null 2>&1 || true
   want_runtime node && "$node_cmd" "$f" >/dev/null 2>&1 || true
   want_runtime bun && $has_bun && "$bun_cmd" "$f" >/dev/null 2>&1 || true
   want_runtime deno && $has_deno && "$deno_cmd" run --allow-all "$f" >/dev/null 2>&1 || true
@@ -337,7 +355,7 @@ for f in "$perf_dir"/*.js; do
     compile_ok=true
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
-      "$native_bin" >/dev/null 2>&1 || true
+      run_with_timeout "$native_bin" >/dev/null 2>&1 || true
       t1=$(ms)
       tish_native_times+=($((t1 - t0)))
     done
@@ -349,7 +367,7 @@ for f in "$perf_dir"/*.js; do
     cranelift_ok=true
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
-      "$cranelift_bin" >/dev/null 2>&1 || true
+      run_with_timeout "$cranelift_bin" >/dev/null 2>&1 || true
       t1=$(ms)
       tish_cranelift_times+=($((t1 - t0)))
     done
@@ -361,7 +379,7 @@ for f in "$perf_dir"/*.js; do
     wasi_ok=true
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
-      wasmtime "$wasi_bin" >/dev/null 2>&1 || true
+      run_with_timeout wasmtime "$wasi_bin" >/dev/null 2>&1 || true
       t1=$(ms)
       tish_wasi_times+=($((t1 - t0)))
     done

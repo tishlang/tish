@@ -2266,6 +2266,7 @@ version = "0.1.0"
 dependencies = [
  "fancy-regex",
  "futures",
+ "rand 0.10.0",
  "reqwest",
  "tiny_http",
  "tish_ast",

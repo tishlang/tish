@@ -1702,6 +1702,9 @@ impl Codegen {
                         "reverse" => {
                             return Ok(format!("tish_runtime::array_reverse(&{})", obj_expr));
                         }
+                        "shuffle" => {
+                            return Ok(format!("tish_runtime::array_shuffle(&{})", obj_expr));
+                        }
                         "slice" => {
                             let start = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let end = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());

@@ -66,6 +66,12 @@ pub enum Opcode {
     CallSpread = 29,
     /// Get property optional: like GetMember but returns Null if obj is null or prop missing.
     GetMemberOptional = 30,
+    /// Pop array, sort numerically in place (operand: u8 0=asc, 1=desc), push array.
+    /// Fast path for arr.sort((a,b)=>a-b) / arr.sort((a,b)=>b-a).
+    ArraySortNumeric = 31,
+    /// Pop array, sort by numeric property (operands: u16 prop_name_const_idx, u16 0=asc/1=desc).
+    /// Fast path for arr.sort((a,b)=>a.prop-b.prop).
+    ArraySortByProperty = 32,
 }
 
 impl Opcode {
@@ -102,6 +108,8 @@ impl Opcode {
             28 => Some(Opcode::MergeObject),
             29 => Some(Opcode::CallSpread),
             30 => Some(Opcode::GetMemberOptional),
+            31 => Some(Opcode::ArraySortNumeric),
+            32 => Some(Opcode::ArraySortByProperty),
             _ => None,
         }
     }
