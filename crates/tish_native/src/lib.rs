@@ -105,8 +105,11 @@ pub fn compile_to_native(
                     message: "LLVM backend does not support native imports.".to_string(),
                 });
             }
-            tish_llvm::compile_to_native(entry_path, project_root, output_path)
-                .map_err(|e| NativeError { message: e.to_string() })
+            let chunk = tish_bytecode::compile(&program).map_err(|e| NativeError {
+                message: e.to_string(),
+            })?;
+            tish_llvm::compile_chunk_to_native(&chunk, output_path)
+                .map_err(|e| NativeError { message: e.message })
         }
     }
 }
@@ -175,10 +178,11 @@ pub fn compile_program_to_native(
                     message: "LLVM backend does not support native imports.".to_string(),
                 });
             }
-            let root = project_root.unwrap_or_else(|| Path::new("."));
-            let entry = root.join("main.tish");
-            tish_llvm::compile_to_native(&entry, project_root, output_path)
-                .map_err(|e| NativeError { message: e.to_string() })
+            let program = tish_opt::optimize(program);
+            let chunk =
+                tish_bytecode::compile(&program).map_err(|e| NativeError { message: e.to_string() })?;
+            tish_llvm::compile_chunk_to_native(&chunk, output_path)
+                .map_err(|e| NativeError { message: e.message })
         }
     }
 }

@@ -1038,5 +1038,6 @@ pub fn compile(program: &Program) -> Result<Chunk, CompileError> {
     let mut chunk = Chunk::new();
     let mut compiler = Compiler::new(&mut chunk);
     compiler.compile_program(program)?;
+    crate::peephole::optimize(&mut chunk);
     Ok(chunk)
 }

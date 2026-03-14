@@ -1,0 +1,108 @@
+//! Peephole optimizations on bytecode (post-emission).
+//! B2 from optimization plan: jump chaining, etc.
+
+use crate::opcode::Opcode;
+use crate::Chunk;
+
+fn read_u16(code: &[u8], pos: usize) -> u16 {
+    if pos + 1 >= code.len() {
+        return 0;
+    }
+    let a = code[pos] as u16;
+    let b = code[pos + 1] as u16;
+    (a << 8) | b
+}
+
+fn write_u16(code: &mut [u8], pos: usize, v: u16) {
+    if pos + 1 < code.len() {
+        let bytes = v.to_be_bytes();
+        code[pos] = bytes[0];
+        code[pos + 1] = bytes[1];
+    }
+}
+
+/// Size of instruction at `ip` in bytes. Returns None if invalid/truncated.
+fn instruction_size(code: &[u8], ip: usize) -> Option<usize> {
+    if ip >= code.len() {
+        return None;
+    }
+    let op = code[ip];
+    let opcode = Opcode::from_u8(op)?;
+    let size = match opcode {
+        Opcode::Nop | Opcode::Pop | Opcode::Dup | Opcode::Return | Opcode::ExitTry => 1,
+        Opcode::ArraySortByProperty => 5,
+        _ => 3,
+    };
+    if ip + size > code.len() {
+        return None;
+    }
+    Some(size)
+}
+
+/// For a Jump or JumpIfFalse at `ip`, return the final target IP after following
+/// a chain of jumps (Jump -> Jump -> ... -> non-jump).
+fn final_jump_target(code: &[u8], jump_ip: usize) -> Option<usize> {
+    let mut ip = jump_ip;
+    let mut visited = 0u32;
+    const MAX_CHAIN: u32 = 1000;
+    loop {
+        if visited > MAX_CHAIN {
+            return None;
+        }
+        visited += 1;
+        let _ = instruction_size(code, ip)?;
+        let op = Opcode::from_u8(code[ip])?;
+        match op {
+            Opcode::Jump => {
+                let offset = read_u16(code, ip + 1) as usize;
+                ip = ip + 3 + offset;
+            }
+            Opcode::JumpIfFalse => {
+                let offset = read_u16(code, ip + 1) as usize;
+                ip = ip + 3 + offset;
+            }
+            _ => return Some(ip),
+        }
+    }
+}
+
+/// Apply jump chaining: if Jump/JumpIfFalse targets another jump, update to
+/// jump directly to the final target.
+fn chain_jumps(code: &mut [u8]) {
+    let mut ip = 0;
+    while ip < code.len() {
+        let op = match Opcode::from_u8(code[ip]) {
+            Some(o) => o,
+            None => {
+                ip += 1;
+                continue;
+            }
+        };
+        let size = match instruction_size(code, ip) {
+            Some(s) => s,
+            None => break,
+        };
+        match op {
+            Opcode::Jump | Opcode::JumpIfFalse => {
+                let current_offset = read_u16(code, ip + 1) as usize;
+                let current_target = ip + 3 + current_offset;
+                if let Some(final_target) = final_jump_target(code, ip) {
+                    if final_target != current_target {
+                        let new_offset = final_target.saturating_sub(ip + 3);
+                        write_u16(code, ip + 1, new_offset as u16);
+                    }
+                }
+            }
+            _ => {}
+        }
+        ip += size;
+    }
+}
+
+/// Run peephole optimizations on a chunk (and nested chunks).
+pub fn optimize(chunk: &mut Chunk) {
+    chain_jumps(&mut chunk.code);
+    for nested in &mut chunk.nested {
+        optimize(nested);
+    }
+}

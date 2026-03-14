@@ -277,6 +277,12 @@ fn optimize_expr(expr: &Expr) -> Expr {
                 }
             }
 
+            // A5: Algebraic simplification (x+0=x, x*1=x, etc.).
+            // Applied after constant folding so e.g. x*(1+0) → x*1 → x.
+            if let Some(simplified) = try_algebraic_simplify(*op, &opt_left, &opt_right, *span) {
+                return simplified;
+            }
+
             Expr::Binary {
                 left: Box::new(opt_left),
                 op: *op,
@@ -538,6 +544,102 @@ fn literal_as_number(lit: &Literal) -> f64 {
     }
 }
 
+/// Algebraic simplification: x+0→x, x*1→x, etc.
+/// Only applies when the literal is a clean 0 or 1 (no NaN/Inf).
+fn try_algebraic_simplify(
+    op: BinOp,
+    left: &Expr,
+    right: &Expr,
+    span: tish_ast::Span,
+) -> Option<Expr> {
+    use BinOp::*;
+    fn num_is_zero(n: f64) -> bool {
+        n == 0.0 && !n.is_nan() && n.is_finite()
+    }
+    fn num_is_one(n: f64) -> bool {
+        (n - 1.0).abs() < f64::EPSILON && !n.is_nan() && n.is_finite()
+    }
+
+    match op {
+        Add => {
+            if let Expr::Literal {
+                value: Literal::Number(r),
+                ..
+            } = right
+            {
+                if num_is_zero(*r) {
+                    return Some(left.clone());
+                }
+            }
+            if let Expr::Literal {
+                value: Literal::Number(l),
+                ..
+            } = left
+            {
+                if num_is_zero(*l) {
+                    return Some(right.clone());
+                }
+            }
+        }
+        Sub => {
+            if let Expr::Literal {
+                value: Literal::Number(r),
+                ..
+            } = right
+            {
+                if num_is_zero(*r) {
+                    return Some(left.clone());
+                }
+            }
+        }
+        Mul => {
+            if let Expr::Literal {
+                value: Literal::Number(r),
+                ..
+            } = right
+            {
+                if num_is_one(*r) {
+                    return Some(left.clone());
+                }
+                if num_is_zero(*r) {
+                    return Some(Expr::Literal {
+                        value: Literal::Number(0.0),
+                        span,
+                    });
+                }
+            }
+            if let Expr::Literal {
+                value: Literal::Number(l),
+                ..
+            } = left
+            {
+                if num_is_one(*l) {
+                    return Some(right.clone());
+                }
+                if num_is_zero(*l) {
+                    return Some(Expr::Literal {
+                        value: Literal::Number(0.0),
+                        span,
+                    });
+                }
+            }
+        }
+        Div => {
+            if let Expr::Literal {
+                value: Literal::Number(r),
+                ..
+            } = right
+            {
+                if num_is_one(*r) {
+                    return Some(left.clone());
+                }
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
 fn try_fold_binop(left: &Literal, op: BinOp, right: &Literal) -> Option<Literal> {
     use BinOp::*;
     let ln = literal_as_number(left);
@@ -644,6 +746,53 @@ mod tests {
             _ => panic!("expected single expr stmt"),
         };
         assert!(has_literal_number(expr, 1.0), "expected 1, got {:?}", expr);
+    }
+
+    #[test]
+    fn algebraic_simplify_x_plus_zero() {
+        // x + 0 → x (after constant fold, 0 is literal)
+        let program = program_from_source("x + 0");
+        let opt = optimize(&program);
+        let expr = match &opt.statements[..] {
+            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            _ => panic!("expected single expr stmt"),
+        };
+        assert!(
+            matches!(expr, Expr::Ident { name, .. } if name.as_ref() == "x"),
+            "expected Ident(x), got {:?}",
+            expr
+        );
+    }
+
+    #[test]
+    fn algebraic_simplify_x_times_one() {
+        let program = program_from_source("x * 1");
+        let opt = optimize(&program);
+        let expr = match &opt.statements[..] {
+            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            _ => panic!("expected single expr stmt"),
+        };
+        assert!(
+            matches!(expr, Expr::Ident { name, .. } if name.as_ref() == "x"),
+            "expected Ident(x), got {:?}",
+            expr
+        );
+    }
+
+    #[test]
+    fn algebraic_simplify_chain() {
+        // x * (1 + 0) → constant fold 1+0=1 → x*1 → x
+        let program = program_from_source("x * (1 + 0)");
+        let opt = optimize(&program);
+        let expr = match &opt.statements[..] {
+            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            _ => panic!("expected single expr stmt"),
+        };
+        assert!(
+            matches!(expr, Expr::Ident { name, .. } if name.as_ref() == "x"),
+            "expected Ident(x) after x*(1+0) → x*1 → x, got {:?}",
+            expr
+        );
     }
 }
 

@@ -4,6 +4,7 @@
 mod chunk;
 mod compiler;
 mod opcode;
+mod peephole;
 mod serialize;
 
 pub const NO_REST_PARAM: u16 = 0xFFFF;
