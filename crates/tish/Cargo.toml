@@ -28,6 +28,7 @@ tish_compile_js = { path = "../tish_compile_js" }
 tish_bytecode = { path = "../tish_bytecode" }
 tish_vm = { path = "../tish_vm" }
 tish_native = { path = "../tish_native" }
+tish_llvm = { path = "../tish_llvm" }
 tish_wasm = { path = "../tish_wasm" }
 tish_runtime = { path = "../tish_runtime" }
 tish_core = { path = "../tish_core" }

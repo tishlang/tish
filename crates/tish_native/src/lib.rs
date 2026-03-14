@@ -33,6 +33,7 @@ impl std::error::Error for NativeError {}
 ///
 /// - `native_backend == "rust"`: Full Rust codegen + cargo build (supports native imports).
 /// - `native_backend == "cranelift"`: Bytecode -> Cranelift -> native (pure Tish only).
+/// - `native_backend == "llvm"`: Experimental LLVM backend (not implemented yet).
 pub fn compile_to_native(
     entry_path: &Path,
     project_root: Option<&Path>,
@@ -43,10 +44,11 @@ pub fn compile_to_native(
     let backend = match native_backend {
         "rust" => Backend::Rust,
         "cranelift" => Backend::Cranelift,
+        "llvm" => Backend::Llvm,
         _ => {
             return Err(NativeError {
                 message: format!(
-                    "Invalid native backend '{}'. Use 'rust' or 'cranelift'.",
+                    "Invalid native backend '{}'. Use 'rust', 'cranelift', or 'llvm'.",
                     native_backend
                 ),
             });
@@ -93,6 +95,19 @@ pub fn compile_to_native(
                 message: e.to_string(),
             })
         }
+        Backend::Llvm => {
+            let modules = tish_compile::resolve_project(entry_path, project_root)
+                .map_err(|e| NativeError { message: e.to_string() })?;
+            tish_compile::detect_cycles(&modules).map_err(|e| NativeError { message: e.to_string() })?;
+            let program = tish_compile::merge_modules(modules).map_err(|e| NativeError { message: e.to_string() })?;
+            if tish_compile::has_native_imports(&program) {
+                return Err(NativeError {
+                    message: "LLVM backend does not support native imports.".to_string(),
+                });
+            }
+            tish_llvm::compile_to_native(entry_path, project_root, output_path)
+                .map_err(|e| NativeError { message: e.to_string() })
+        }
     }
 }
 
@@ -107,10 +122,11 @@ pub fn compile_program_to_native(
     let backend = match native_backend {
         "rust" => Backend::Rust,
         "cranelift" => Backend::Cranelift,
+        "llvm" => Backend::Llvm,
         _ => {
             return Err(NativeError {
                 message: format!(
-                    "Invalid native backend '{}'. Use 'rust' or 'cranelift'.",
+                    "Invalid native backend '{}'. Use 'rust', 'cranelift', or 'llvm'.",
                     native_backend
                 ),
             });
@@ -151,10 +167,22 @@ pub fn compile_program_to_native(
             tish_cranelift::compile_chunk_to_native(&chunk, output_path)
                 .map_err(|e| NativeError { message: e.to_string() })
         }
+        Backend::Llvm => {
+            if tish_compile::has_native_imports(program) {
+                return Err(NativeError {
+                    message: "LLVM backend does not support native imports.".to_string(),
+                });
+            }
+            let root = project_root.unwrap_or_else(|| Path::new("."));
+            let entry = root.join("main.tish");
+            tish_llvm::compile_to_native(&entry, project_root, output_path)
+                .map_err(|e| NativeError { message: e.to_string() })
+        }
     }
 }
 
 enum Backend {
     Rust,
     Cranelift,
+    Llvm,
 }

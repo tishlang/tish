@@ -26,6 +26,26 @@ impl std::fmt::Display for WasmError {
 
 impl std::error::Error for WasmError {}
 
+/// Resolve project, merge modules, and compile to bytecode chunk.
+/// Shared by compile_to_wasm and compile_to_wasi.
+fn resolve_and_compile_to_chunk(
+    entry_path: &Path,
+    project_root: Option<&Path>,
+) -> Result<Chunk, WasmError> {
+    let modules = resolve_project(entry_path, project_root).map_err(|e| WasmError {
+        message: e.to_string(),
+    })?;
+    detect_cycles(&modules).map_err(|e| WasmError {
+        message: e.to_string(),
+    })?;
+    let program = merge_modules(modules).map_err(|e| WasmError {
+        message: e.to_string(),
+    })?;
+    tish_bytecode::compile(&program).map_err(|e| WasmError {
+        message: e.to_string(),
+    })
+}
+
 /// Compile a single Program (e.g. from js_to_tish) for WebAssembly.
 pub fn compile_program_to_wasm(program: &Program, output_path: &Path) -> Result<(), WasmError> {
     let chunk = tish_bytecode::compile(program).map_err(|e| WasmError {
@@ -135,18 +155,7 @@ pub fn compile_to_wasm(
     project_root: Option<&Path>,
     output_path: &Path,
 ) -> Result<(), WasmError> {
-    let modules = resolve_project(entry_path, project_root).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-    detect_cycles(&modules).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-    let program = merge_modules(modules).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-    let chunk = tish_bytecode::compile(&program).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
+    let chunk = resolve_and_compile_to_chunk(entry_path, project_root)?;
     emit_wasm_from_chunk(&chunk, output_path)
 }
 
@@ -161,19 +170,7 @@ pub fn compile_to_wasi(
     project_root: Option<&Path>,
     output_path: &Path,
 ) -> Result<(), WasmError> {
-    let modules = resolve_project(entry_path, project_root).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-    detect_cycles(&modules).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-    let program = merge_modules(modules).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-    let chunk = tish_bytecode::compile(&program).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-
+    let chunk = resolve_and_compile_to_chunk(entry_path, project_root)?;
     let chunk_bytes = serialize(&chunk);
 
     let stem = output_path

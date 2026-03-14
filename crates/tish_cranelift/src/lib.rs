@@ -5,6 +5,8 @@
 mod link;
 mod lower;
 
+pub use link::link_to_binary;
+
 use std::path::Path;
 
 use tish_bytecode::Chunk;

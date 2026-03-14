@@ -3,7 +3,9 @@
 //! Re-exports core types from tish_core and provides console, Math,
 //! and other builtin functions for compiled Tish programs.
 
+use std::cell::RefCell;
 use std::fmt;
+use std::rc::Rc;
 use std::sync::OnceLock;
 use tish_builtins::helpers::extract_num;
 #[cfg(feature = "fs")]
@@ -503,8 +505,6 @@ pub fn mkdir(args: &[Value]) -> Value {
 }
 
 use std::sync::Arc;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 #[inline]
 pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {

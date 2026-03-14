@@ -39,7 +39,7 @@ enum Commands {
         /// Target: native (default), js, wasm, or wasi
         #[arg(long, default_value = "native")]
         target: String,
-        /// Native backend: rust (default, full Rust ecosystem) or cranelift (faster, no native imports)
+        /// Native backend: rust (default), cranelift, or llvm (experimental)
         #[arg(long, default_value = "rust")]
         native_backend: String,
         /// Enable feature (http, fs, process, regex, polars, egui). For native target only. Can be repeated.
@@ -278,6 +278,7 @@ fn compile_file(
         }
     });
     let features: Vec<String> = if cli_features.is_empty() {
+        #[allow(unused_mut)]
         let mut f = Vec::new();
         #[cfg(feature = "http")]
         f.push("http".to_string());

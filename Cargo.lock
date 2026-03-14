@@ -2176,6 +2176,7 @@ dependencies = [
  "tish_core",
  "tish_eval",
  "tish_lexer",
+ "tish_llvm",
  "tish_native",
  "tish_parser",
  "tish_runtime",
@@ -2287,6 +2288,12 @@ version = "0.1.0"
 [[package]]
 name = "tish_llvm"
 version = "0.1.0"
+dependencies = [
+ "tish_build_utils",
+ "tish_bytecode",
+ "tish_compile",
+ "tish_cranelift",
+]
 
 [[package]]
 name = "tish_native"
@@ -2297,6 +2304,7 @@ dependencies = [
  "tish_bytecode",
  "tish_compile",
  "tish_cranelift",
+ "tish_llvm",
 ]
 
 [[package]]

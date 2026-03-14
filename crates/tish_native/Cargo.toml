@@ -10,3 +10,4 @@ tish_ast = { path = "../tish_ast" }
 tish_bytecode = { path = "../tish_bytecode" }
 tish_compile = { path = "../tish_compile" }
 tish_cranelift = { path = "../tish_cranelift" }
+tish_llvm = { path = "../tish_llvm" }

@@ -248,6 +248,19 @@ TOTAL                    4390      514      817     2109     1379      646     1
 
 
 
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                           PERFORMANCE SUMMARY
+                                    (sorted by Tish(run)/Node ratio, slowest first)
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+Test                      run     rust cranelift     wasi     Node      Bun     Deno  QuickJS  run/Node%
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+array_stress             1405       27      186      563       42       24       36       67      3345%
+array_methods_perf         19        9       10       20       29       14       25        9        65%
+arrays                     10        9        9       15       29       13       25        7        34%
+array_methods              10        9        9       15       29       13       24        7        34%
+
+
 ./scripts/run_object_stress_profile.sh; \
 ./scripts/run_benchmark_granular_profile.sh; \
 

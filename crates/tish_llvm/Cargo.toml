@@ -2,8 +2,10 @@
 name = "tish_llvm"
 version = "0.1.0"
 edition = "2021"
-description = "Experimental LLVM backend for Tish (bytecode/AST → native via LLVM)"
+description = "LLVM backend for Tish (bytecode → native via clang/LLVM)"
 
-# Dependencies reserved for future LLVM implementation
-# [dependencies]
-# inkwell = "0.4"  # or llvm-sys + bindgen
+[dependencies]
+tish_bytecode = { path = "../tish_bytecode" }
+tish_compile = { path = "../tish_compile" }
+tish_cranelift = { path = "../tish_cranelift" }
+tish_build_utils = { path = "../tish_build_utils" }

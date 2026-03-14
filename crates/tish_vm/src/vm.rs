@@ -8,7 +8,6 @@ use std::sync::Arc;
 use tish_builtins::array as arr_builtins;
 use tish_builtins::globals as globals_builtins;
 use tish_builtins::math as math_builtins;
-use tish_builtins::string as string_builtins;
 use tish_bytecode::{Chunk, Constant, Opcode, NO_REST_PARAM};
 use tish_core::Value;
 
