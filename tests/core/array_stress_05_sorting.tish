@@ -1,0 +1,32 @@
+// Isolated: Sorting (reduced iters)
+console.log("--- array_stress_05: Sorting ---");
+fn shuffle(arr) {
+    let result = [...arr];
+    for (let ii = result.length - 1; ii > 0; ii--) {
+        let j = Math.floor(Math.random() * (ii + 1));
+        let temp = result[ii];
+        result[ii] = result[j];
+        result[j] = temp;
+    }
+    return result;
+}
+
+let arr100 = [];
+let arr1000 = [];
+for (let i = 0; i < 100; i++) { arr100.push(i); }
+for (let i = 0; i < 1000; i++) { arr1000.push(i); }
+
+let start = Date.now();
+for (let i = 0; i < 3; i++) {
+    let toSort = shuffle(arr100);
+    toSort.sort((a, b) => a - b);
+}
+console.log("sort 100 x3: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 2; i++) {
+    let toSort = shuffle(arr1000);
+    toSort.sort((a, b) => a - b);
+}
+console.log("sort 1000 x2: " + (Date.now() - start) + "ms");
+console.log("DONE 05");

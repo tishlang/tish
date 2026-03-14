@@ -1,0 +1,21 @@
+// Minimal repro for array.sort() + IndexAssign - verifies shuffle+sort works
+let a = [3, 1, 2];
+a.sort((x, y) => x - y);
+console.log(a[0] === 1 && a[1] === 2 && a[2] === 3 ? "pass" : "fail");
+
+// IndexAssign and shuffle
+fn shuffle(arr) {
+    let result = [...arr];
+    for (let i = result.length - 1; i > 0; i--) {
+        let j = Math.floor(Math.random() * (i + 1));
+        let temp = result[i];
+        result[i] = result[j];
+        result[j] = temp;
+    }
+    return result;
+}
+let arr = [];
+for (let k = 0; k < 10; k++) { arr.push(k); }
+let toSort = shuffle(arr);
+toSort.sort((a, b) => a - b);
+console.log("shuffle+sort pass");

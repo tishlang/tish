@@ -813,7 +813,7 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(object)?;
                 self.compile_expr(index)?;
                 self.compile_expr(value)?;
-                self.emit(Opcode::Dup); // assignment yields value
+                self.emit(Opcode::Dup); // leave copy for assignment expression result
                 self.emit(Opcode::SetIndex);
             }
             Expr::LogicalAssign { .. }

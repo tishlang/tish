@@ -589,6 +589,12 @@ impl Vm {
                     self.stack.push(v);
                 }
                 Opcode::SetIndex => {
+                    // Stack: [obj, idx, val, val] (Dup of val for expression result).
+                    // Pop val (dup), val, idx, obj; use (obj, idx, val) for set_index; leave val on stack.
+                    let dup_val = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
                     let val = self
                         .stack
                         .pop()
@@ -601,7 +607,8 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    set_index(&obj, &idx_val, val)?;
+                    set_index(&obj, &idx_val, val.clone())?;
+                    self.stack.push(dup_val); // assignment yields the assigned value
                 }
                 Opcode::NewArray => {
                     let n = Self::read_u16(code, &mut ip) as usize;
@@ -878,7 +885,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             };
             Ok(Value::Function(method))
         }
-        _ => Err(format!("Cannot read property of {}", type_name(obj))),
+        _ => Err(format!("Cannot read property '{}' of {}", key, type_name(obj))),
     }
 }
 

@@ -1,0 +1,19 @@
+// Isolated: Map/Filter/Reduce (reduced iters)
+console.log("--- array_stress_03: Map/Filter/Reduce ---");
+let arr100 = [];
+let arr1000 = [];
+for (let i = 0; i < 100; i++) { arr100.push(i); }
+for (let i = 0; i < 1000; i++) { arr1000.push(i); }
+
+let start = Date.now();
+for (let i = 0; i < 3; i++) { arr100.map(x => x * 2); }
+console.log("map x3: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 3; i++) { arr100.filter(x => x > 50); }
+console.log("filter x3: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 3; i++) { arr100.reduce((a, x) => a + x, 0); }
+console.log("reduce x3: " + (Date.now() - start) + "ms");
+console.log("DONE 03");

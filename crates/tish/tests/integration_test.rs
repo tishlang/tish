@@ -199,6 +199,54 @@ fn test_vm_date_now() {
     }
 }
 
+/// VM run with parse+compile only (no resolve/merge) - isolates bytecode IndexAssign.
+#[test]
+fn test_vm_index_assign_direct() {
+    let source = r#"let arr = [1, 2, 3]; arr[1] = 99; console.log(arr[1]);"#;
+    let program = tish_parser::parse(source).expect("parse");
+    let chunk = tish_bytecode::compile(&program).expect("compile");
+    let result = tish_vm::run(&chunk);
+    assert!(result.is_ok(), "VM IndexAssign failed: {:?}", result.err());
+}
+
+/// VM run via resolve+merge (same as tish run) - must also pass.
+#[test]
+fn test_vm_index_assign_via_resolve() {
+    let path = workspace_root().join("tests").join("core").join("array_sort_minimal.tish");
+    let modules = tish_compile::resolve_project(&path, path.parent()).expect("resolve");
+    tish_compile::detect_cycles(&modules).expect("cycles");
+    let program = tish_compile::merge_modules(modules).expect("merge");
+    let chunk = tish_bytecode::compile(&program).expect("compile");
+    let result = tish_vm::run(&chunk);
+    assert!(result.is_ok(), "VM IndexAssign via resolve failed: {:?}", result.err());
+}
+
+/// tish run binary must pass array_sort_minimal (ensures CLI works).
+#[test]
+fn test_tish_run_index_assign() {
+    let bin = tish_bin();
+    let path = workspace_root().join("tests").join("core").join("array_sort_minimal.tish");
+    if !bin.exists() {
+        eprintln!("Skipping: tish binary not built");
+        return;
+    }
+    let out = Command::new(&bin)
+        .args(["run", path.to_string_lossy().as_ref()])
+        .current_dir(workspace_root())
+        .output()
+        .expect("run tish");
+    assert!(
+        out.status.success(),
+        "tish run failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("pass"),
+        "Expected 'pass' in output"
+    );
+}
+
 /// Full stack: lex + parse each .tish file and assert no parse error.
 #[test]
 fn test_full_stack_parse() {

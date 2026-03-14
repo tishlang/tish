@@ -167,6 +167,10 @@ test262-filter-verbose PATTERN:
 # UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Profile array_stress sections (run each isolated test with timing to find slow parts)
+array-stress-profile:
+    ./scripts/run_array_stress_profile.sh
+
 # Show binary sizes for different builds
 sizes:
     @echo "Building secure binary..."
