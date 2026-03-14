@@ -10,7 +10,10 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 use tish_ast::Program;
 use tish_bytecode::{serialize, Chunk};
-use tish_compile::{detect_cycles, merge_modules, resolve_project};
+use tish_compile::{
+    detect_cycles, extract_native_import_features, has_external_native_imports, merge_modules,
+    resolve_project,
+};
 
 /// Error from WASM compilation.
 #[derive(Debug)]
@@ -27,12 +30,12 @@ impl std::fmt::Display for WasmError {
 impl std::error::Error for WasmError {}
 
 /// Resolve project, merge modules, and compile to bytecode chunk.
-/// Shared by compile_to_wasm and compile_to_wasi.
+/// Returns (Chunk, Program) so WASI can extract features for the runtime.
 fn resolve_and_compile_to_chunk(
     entry_path: &Path,
     project_root: Option<&Path>,
     optimize: bool,
-) -> Result<Chunk, WasmError> {
+) -> Result<(Chunk, Program), WasmError> {
     let modules = resolve_project(entry_path, project_root).map_err(|e| WasmError {
         message: e.to_string(),
     })?;
@@ -49,15 +52,16 @@ fn resolve_and_compile_to_chunk(
             prog
         }
     };
-    if optimize {
+    let chunk = if optimize {
         tish_bytecode::compile(&program).map_err(|e| WasmError {
             message: e.to_string(),
-        })
+        })?
     } else {
         tish_bytecode::compile_unoptimized(&program).map_err(|e| WasmError {
             message: e.to_string(),
-        })
-    }
+        })?
+    };
+    Ok((chunk, program))
 }
 
 /// Compile a single Program (e.g. from js_to_tish) for WebAssembly.
@@ -185,7 +189,7 @@ pub fn compile_to_wasm(
     output_path: &Path,
     optimize: bool,
 ) -> Result<(), WasmError> {
-    let chunk = resolve_and_compile_to_chunk(entry_path, project_root, optimize)?;
+    let (chunk, _) = resolve_and_compile_to_chunk(entry_path, project_root, optimize)?;
     emit_wasm_from_chunk(&chunk, output_path)
 }
 
@@ -201,7 +205,13 @@ pub fn compile_to_wasi(
     output_path: &Path,
     optimize: bool,
 ) -> Result<(), WasmError> {
-    let chunk = resolve_and_compile_to_chunk(entry_path, project_root, optimize)?;
+    let (chunk, program) = resolve_and_compile_to_chunk(entry_path, project_root, optimize)?;
+    if has_external_native_imports(&program) {
+        return Err(WasmError {
+            message: "WASI backend does not support external native imports (tish:egui, @scope/pkg). Built-in tish:fs, tish:http, tish:process are supported.".to_string(),
+        });
+    }
+    let wasi_features = extract_native_import_features(&program);
     let chunk_bytes = serialize(&chunk);
 
     let stem = output_path
@@ -248,6 +258,18 @@ pub fn compile_to_wasi(
         .to_string_lossy()
         .replace('\\', "/");
 
+    let features_str = if wasi_features.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ", features = [{}]",
+            wasi_features
+                .iter()
+                .map(|f| format!("{:?}", f))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     let cargo_toml = format!(
         r#"[package]
 name = "tish_wasi_{stem}"
@@ -261,10 +283,11 @@ name = "tish_wasi_{stem}"
 path = "src/main.rs"
 
 [dependencies]
-tish_wasm_runtime = {{ path = "{runtime_path_str}" }}
+tish_wasm_runtime = {{ path = "{runtime_path_str}"{features_str} }}
 "#,
         stem = stem,
-        runtime_path_str = runtime_path_str
+        runtime_path_str = runtime_path_str,
+        features_str = features_str
     );
     std::fs::write(build_dir.join("Cargo.toml"), cargo_toml).map_err(|e| WasmError {
         message: format!("Cannot write Cargo.toml: {}", e),

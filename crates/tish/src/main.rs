@@ -114,11 +114,7 @@ fn run_file(path: &str, backend: &str, no_optimize: bool) -> Result<(), String> 
         }
     };
 
-    // Native imports (tish:fs, tish:http, tish:process) require interpreter; VM doesn't support them yet
-    let use_interp = backend == "interp"
-        || (backend == "vm" && tish_compile::has_native_imports(&program));
-
-    if use_interp {
+    if backend == "interp" {
         let mut eval = tish_eval::Evaluator::new();
         let value = eval.eval_program(&program)?;
         if !matches!(value, tish_eval::Value::Null) {
@@ -127,6 +123,7 @@ fn run_file(path: &str, backend: &str, no_optimize: bool) -> Result<(), String> 
         return Ok(());
     }
 
+    // VM backend (bytecode) - supports native imports when built with fs/http/process features
     let chunk = if no_optimize {
         tish_bytecode::compile_unoptimized(&program).map_err(|e| e.to_string())?
     } else {

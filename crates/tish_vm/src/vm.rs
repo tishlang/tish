@@ -14,6 +14,77 @@ use tish_core::Value;
 
 type ArrayMethodFn = Rc<dyn Fn(&[Value]) -> Value>;
 
+/// Look up built-in module export for LoadNativeExport. Returns None if unknown or feature disabled.
+fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
+    #[cfg(feature = "fs")]
+    if spec == "tish:fs" {
+        return match export_name {
+            "readFile" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::read_file(args)))),
+            "writeFile" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::write_file(args)))),
+            "fileExists" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::file_exists(args)))),
+            "readDir" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::read_dir(args)))),
+            "mkdir" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::mkdir(args)))),
+            _ => None,
+        };
+    }
+    #[cfg(feature = "http")]
+    if spec == "tish:http" {
+        return match export_name {
+            "fetch" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::http_fetch(args)))),
+            "fetchAll" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::http_fetch_all(args)))),
+            "serve" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                let port = args.first().cloned().unwrap_or(Value::Null);
+                let handler = args.get(1).cloned().unwrap_or(Value::Null);
+                if let Value::Function(f) = handler {
+                    tish_runtime::http_serve(&[port], move |req_args| f(req_args))
+                } else {
+                    Value::Null
+                }
+            }))),
+            _ => None,
+        };
+    }
+    #[cfg(feature = "process")]
+    if spec == "tish:process" {
+        return match export_name {
+            "exit" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exit(args)))),
+            "cwd" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_cwd(args)))),
+            "exec" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exec(args)))),
+            "argv" => Some(Value::Array(Rc::new(RefCell::new(
+                std::env::args().map(|s| Value::String(s.into())).collect(),
+            )))),
+            "env" => Some(Value::Object(Rc::new(RefCell::new(
+                std::env::vars()
+                    .map(|(k, v)| (Arc::from(k.as_str()), Value::String(v.into())))
+                    .collect(),
+            )))),
+            "process" => {
+                let mut m = HashMap::new();
+                m.insert("exit".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exit(args))));
+                m.insert("cwd".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_cwd(args))));
+                m.insert("exec".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exec(args))));
+                m.insert(
+                    "argv".into(),
+                    Value::Array(Rc::new(RefCell::new(
+                        std::env::args().map(|s| Value::String(s.into())).collect(),
+                    ))),
+                );
+                m.insert(
+                    "env".into(),
+                    Value::Object(Rc::new(RefCell::new(
+                        std::env::vars()
+                            .map(|(k, v)| (Arc::from(k.as_str()), Value::String(v.into())))
+                            .collect(),
+                    ))),
+                );
+                Some(Value::Object(Rc::new(RefCell::new(m))))
+            }
+            _ => None,
+        };
+    }
+    None
+}
+
 /// Console output: println! on native, web_sys::console on wasm
 #[cfg(not(feature = "wasm"))]
 fn vm_log(s: &str) {
@@ -855,6 +926,29 @@ impl Vm {
                     self.stack.truncate(stack_len);
                     self.stack.push(v);
                     ip = catch_ip;
+                }
+                Opcode::LoadNativeExport => {
+                    let spec_idx = Self::read_u16(code, &mut ip);
+                    let export_idx = Self::read_u16(code, &mut ip);
+                    let spec = match constants.get(spec_idx as usize) {
+                        Some(Constant::String(s)) => s.as_ref(),
+                        _ => {
+                            return Err("LoadNativeExport: spec constant out of bounds or not string".to_string());
+                        }
+                    };
+                    let export_name = match constants.get(export_idx as usize) {
+                        Some(Constant::String(s)) => s.as_ref(),
+                        _ => {
+                            return Err("LoadNativeExport: export_name constant out of bounds or not string".to_string());
+                        }
+                    };
+                    let v = get_builtin_export(spec, export_name).ok_or_else(|| {
+                        format!(
+                            "Built-in module '{}' does not export '{}' or feature not enabled. Rebuild with --features fs, http, or process.",
+                            spec, export_name
+                        )
+                    })?;
+                    self.stack.push(v);
                 }
                 Opcode::Closure | Opcode::PopN | Opcode::LoadThis => {
                     return Err(format!("Unhandled opcode: {:?}", opcode));

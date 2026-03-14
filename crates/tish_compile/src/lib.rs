@@ -12,8 +12,9 @@ pub use codegen::{
 };
 pub use codegen::CompileError;
 pub use resolve::{
-    detect_cycles, extract_native_import_features, has_native_imports, is_builtin_native_spec,
-    merge_modules, resolve_native_modules, resolve_project, ResolvedNativeModule,
+    detect_cycles, extract_native_import_features, has_external_native_imports, has_native_imports,
+    is_builtin_native_spec, merge_modules, resolve_native_modules, resolve_project,
+    ResolvedNativeModule,
 };
 pub use types::{RustType, TypeContext};
 

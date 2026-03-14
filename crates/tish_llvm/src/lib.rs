@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 
 use tish_bytecode::{serialize, Chunk};
-use tish_compile::{detect_cycles, merge_modules, resolve_project};
+use tish_compile::{detect_cycles, extract_native_import_features, merge_modules, resolve_project};
 
 /// Compile a Tish program to a native binary via clang/LLVM.
 pub fn compile_to_native(
@@ -25,11 +25,17 @@ pub fn compile_to_native(
         message: e.to_string(),
     })?;
 
-    compile_chunk_to_native(&chunk, output_path)
+    let features = tish_compile::extract_native_import_features(&program);
+    compile_chunk_to_native(&chunk, output_path, &features)
 }
 
 /// Compile a bytecode chunk to a native binary.
-pub fn compile_chunk_to_native(chunk: &Chunk, output_path: &Path) -> Result<(), LlvmError> {
+/// `features` are passed to tish_cranelift_runtime (e.g. fs, process, http for built-in modules).
+pub fn compile_chunk_to_native(
+    chunk: &Chunk,
+    output_path: &Path,
+    features: &[String],
+) -> Result<(), LlvmError> {
     let chunk_bytes = serialize(chunk);
     let out_name = output_path
         .file_stem()
@@ -78,7 +84,7 @@ const uint64_t tish_chunk_len = sizeof(tish_chunk_data);
     let object_path_canonical = object_path.canonicalize().map_err(|e| LlvmError {
         message: format!("Cannot canonicalize object path: {}", e),
     })?;
-    tish_cranelift::link_to_binary(&object_path_canonical, output_path).map_err(|e| LlvmError {
+    tish_cranelift::link_to_binary(&object_path_canonical, output_path, features).map_err(|e| LlvmError {
         message: e.message,
     })?;
 

@@ -7,7 +7,11 @@ use std::path::Path;
 
 use crate::CraneliftError;
 
-pub fn link_to_binary(object_path: &Path, output_path: &Path) -> Result<(), CraneliftError> {
+pub fn link_to_binary(
+    object_path: &Path,
+    output_path: &Path,
+    features: &[String],
+) -> Result<(), CraneliftError> {
     let workspace_root = tish_build_utils::find_workspace_root().map_err(|e| CraneliftError {
         message: e,
     })?;
@@ -39,6 +43,18 @@ pub fn link_to_binary(object_path: &Path, output_path: &Path) -> Result<(), Cran
         .to_string()
         .replace('\\', "/");
 
+    let features_str = if features.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ", features = [{}]",
+            features
+                .iter()
+                .map(|f| format!("{:?}", f))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     let cargo_toml_fixed = format!(
         r#"[package]
 name = "tish_cranelift_out"
@@ -50,9 +66,9 @@ name = "{}"
 path = "src/main.rs"
 
 [dependencies]
-tish_cranelift_runtime = {{ path = {:?} }}
+tish_cranelift_runtime = {{ path = {:?}{} }}
 "#,
-        out_name, runtime_path
+        out_name, runtime_path, features_str
     );
 
     let main_rs = r#"

@@ -9,12 +9,17 @@ default = []
 regex = ["tish_core/regex"]
 # For wasm32 target: use web_sys console for output
 wasm = ["dep:wasm-bindgen"]
+# Built-in modules: fs, http, process (for bytecode LoadNativeExport)
+fs = ["tish_runtime/fs"]
+process = ["tish_runtime/process"]
+http = ["tish_runtime/http"]
 
 [dependencies]
 tish_ast = { path = "../tish_ast" }
 tish_builtins = { path = "../tish_builtins" }
 tish_bytecode = { path = "../tish_bytecode" }
 tish_core = { path = "../tish_core" }
+tish_runtime = { path = "../tish_runtime", optional = true }
 rand = "0.8"
 wasm-bindgen = { version = "0.2", optional = true }
 

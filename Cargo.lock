@@ -2344,6 +2344,7 @@ dependencies = [
  "tish_bytecode",
  "tish_core",
  "tish_parser",
+ "tish_runtime",
  "wasm-bindgen",
 ]
 

@@ -90,9 +90,9 @@ pub fn compile_to_native(
                 }
             };
 
-            if tish_compile::has_native_imports(&program) {
+            if tish_compile::has_external_native_imports(&program) {
                 return Err(NativeError {
-                    message: "Cranelift backend does not support native imports (tish:*, @scope/pkg). Use --native-backend rust.".to_string(),
+                    message: "Cranelift backend does not support external native imports (tish:egui, @scope/pkg). Built-in tish:fs, tish:http, tish:process are supported. Use --native-backend rust for external modules.".to_string(),
                 });
             }
 
@@ -106,9 +106,11 @@ pub fn compile_to_native(
                 })?
             };
 
-            tish_cranelift::compile_chunk_to_native(&chunk, output_path).map_err(|e| NativeError {
-                message: e.to_string(),
-            })
+            let cranelift_features = tish_compile::extract_native_import_features(&program);
+            tish_cranelift::compile_chunk_to_native(&chunk, output_path, &cranelift_features)
+                .map_err(|e| NativeError {
+                    message: e.to_string(),
+                })
         }
         Backend::Llvm => {
             let modules = tish_compile::resolve_project(entry_path, project_root)
@@ -124,9 +126,9 @@ pub fn compile_to_native(
                     prog
                 }
             };
-            if tish_compile::has_native_imports(&program) {
+            if tish_compile::has_external_native_imports(&program) {
                 return Err(NativeError {
-                    message: "LLVM backend does not support native imports.".to_string(),
+                    message: "LLVM backend does not support external native imports. Built-in tish:fs, tish:http, tish:process are supported.".to_string(),
                 });
             }
             let chunk = if optimize {
@@ -138,7 +140,8 @@ pub fn compile_to_native(
                     message: e.to_string(),
                 })?
             };
-            tish_llvm::compile_chunk_to_native(&chunk, output_path)
+            let llvm_features = tish_compile::extract_native_import_features(&program);
+            tish_llvm::compile_chunk_to_native(&chunk, output_path, &llvm_features)
                 .map_err(|e| NativeError { message: e.message })
         }
     }
@@ -193,9 +196,9 @@ pub fn compile_program_to_native(
                 .map_err(|e| NativeError { message: e })
         }
         Backend::Cranelift => {
-            if tish_compile::has_native_imports(program) {
+            if tish_compile::has_external_native_imports(program) {
                 return Err(NativeError {
-                    message: "Cranelift backend does not support native imports.".to_string(),
+                    message: "Cranelift backend does not support external native imports. Built-in tish:fs, tish:http, tish:process are supported.".to_string(),
                 });
             }
             let program = if optimize { tish_opt::optimize(program) } else { program.clone() };
@@ -204,13 +207,14 @@ pub fn compile_program_to_native(
             } else {
                 tish_bytecode::compile_unoptimized(&program).map_err(|e| NativeError { message: e.to_string() })?
             };
-            tish_cranelift::compile_chunk_to_native(&chunk, output_path)
+            let cranelift_features = tish_compile::extract_native_import_features(&program);
+            tish_cranelift::compile_chunk_to_native(&chunk, output_path, &cranelift_features)
                 .map_err(|e| NativeError { message: e.to_string() })
         }
         Backend::Llvm => {
-            if tish_compile::has_native_imports(program) {
+            if tish_compile::has_external_native_imports(program) {
                 return Err(NativeError {
-                    message: "LLVM backend does not support native imports.".to_string(),
+                    message: "LLVM backend does not support external native imports.".to_string(),
                 });
             }
             let program = if optimize { tish_opt::optimize(program) } else { program.clone() };
@@ -219,7 +223,8 @@ pub fn compile_program_to_native(
             } else {
                 tish_bytecode::compile_unoptimized(&program).map_err(|e| NativeError { message: e.to_string() })?
             };
-            tish_llvm::compile_chunk_to_native(&chunk, output_path)
+            let llvm_features = tish_compile::extract_native_import_features(&program);
+            tish_llvm::compile_chunk_to_native(&chunk, output_path, &llvm_features)
                 .map_err(|e| NativeError { message: e.message })
         }
     }

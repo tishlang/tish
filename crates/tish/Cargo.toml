@@ -14,9 +14,9 @@ default = []
 # Full: all capabilities enabled (for development/trusted environments)
 full = ["http", "fs", "process", "regex"]
 # Individual capability flags
-http = ["tish_eval/http", "tish_runtime/http", "tish_compile/http"]
-fs = ["tish_eval/fs", "tish_runtime/fs", "tish_compile/fs"]
-process = ["tish_eval/process", "tish_runtime/process", "tish_compile/process"]
+http = ["tish_eval/http", "tish_runtime/http", "tish_compile/http", "tish_vm/http"]
+fs = ["tish_eval/fs", "tish_runtime/fs", "tish_compile/fs", "tish_vm/fs"]
+process = ["tish_eval/process", "tish_runtime/process", "tish_compile/process", "tish_vm/process"]
 regex = ["tish_eval/regex", "tish_runtime/regex", "tish_compile/regex", "tish_vm/regex"]
 [dependencies]
 tish_lexer = { path = "../tish_lexer" }

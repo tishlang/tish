@@ -10,6 +10,10 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # For wasm32-unknown-unknown (browser): wasm-bindgen, console output
 browser = ["dep:wasm-bindgen", "tish_vm/wasm"]
+# Built-in modules for WASI (wasm32-wasip1): file I/O, process, http
+fs = ["tish_vm/fs"]
+process = ["tish_vm/process"]
+http = ["tish_vm/http"]
 
 [dependencies]
 tish_bytecode = { path = "../tish_bytecode" }

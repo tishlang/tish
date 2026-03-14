@@ -1111,11 +1111,17 @@ impl<'a> Compiler<'a> {
                 self.emit(Opcode::Dup); // leave copy for assignment expression result
                 self.emit(Opcode::SetIndex);
             }
+            Expr::NativeModuleLoad { spec, export_name, .. } => {
+                let spec_idx = self.constant_idx(Constant::String(Arc::clone(spec)));
+                let export_idx = self.constant_idx(Constant::String(Arc::clone(export_name)));
+                self.emit(Opcode::LoadNativeExport);
+                self.chunk.write_u16(spec_idx);
+                self.chunk.write_u16(export_idx);
+            }
             Expr::LogicalAssign { .. }
             | Expr::Await { .. }
             | Expr::JsxElement { .. }
-            | Expr::JsxFragment { .. }
-            | Expr::NativeModuleLoad { .. } => {
+            | Expr::JsxFragment { .. } => {
                 return Err(CompileError {
                     message: format!(
                         "Expression not yet supported in bytecode: {:?}",

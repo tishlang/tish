@@ -78,13 +78,15 @@ pub enum Opcode {
     ArrayMapBinOp = 34,
     /// arr.filter(x => x op const) or arr.filter(x => const op x). Operands: u8 binop, u16 const_idx, u8 param_left. Keeps elements where result is truthy.
     ArrayFilterBinOp = 35,
+    /// Load built-in module export. Operands: u16 spec_const_idx, u16 export_name_const_idx. Pushes Value.
+    LoadNativeExport = 36,
 }
 
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=35 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=36 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 35 {
+        if b <= 36 {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None
@@ -96,7 +98,8 @@ impl Opcode {
         let size = match self {
             Opcode::Nop | Opcode::Pop | Opcode::Dup | Opcode::Return | Opcode::ExitTry
             | Opcode::ArrayMapIdentity => 1,
-            Opcode::ArraySortByProperty | Opcode::ArrayMapBinOp | Opcode::ArrayFilterBinOp => 5,
+            Opcode::ArraySortByProperty | Opcode::ArrayMapBinOp | Opcode::ArrayFilterBinOp
+            | Opcode::LoadNativeExport => 5,
             _ => 3,
         };
         if ip + size > code.len() {

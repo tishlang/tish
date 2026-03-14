@@ -163,6 +163,23 @@ pub fn has_native_imports(program: &Program) -> bool {
     false
 }
 
+/// Returns true if the merged program contains external native imports (not built-in tish:fs/http/process).
+/// Cranelift/LLVM reject these; bytecode VM supports built-ins only.
+pub fn has_external_native_imports(program: &Program) -> bool {
+    for stmt in &program.statements {
+        if let Statement::VarDecl {
+            init: Some(Expr::NativeModuleLoad { spec, .. }),
+            ..
+        } = stmt
+        {
+            if !is_builtin_native_spec(spec.as_ref()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// A resolved module: path and its parsed program.
 #[derive(Debug, Clone)]
 pub struct ResolvedModule {
