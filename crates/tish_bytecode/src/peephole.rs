@@ -66,6 +66,42 @@ fn final_jump_target(code: &[u8], jump_ip: usize) -> Option<usize> {
     }
 }
 
+/// Replace instruction at [ip..ip+len) with Nops (preserves length, no offset updates).
+fn nop_out(code: &mut [u8], ip: usize, len: usize) {
+    for i in 0..len {
+        if ip + i < code.len() {
+            code[ip + i] = Opcode::Nop as u8;
+        }
+    }
+}
+
+/// Remove redundant LoadConst + Pop (load constant then discard = no-op).
+fn remove_loadconst_pop(code: &mut [u8]) {
+    let mut ip = 0;
+    while ip + 4 <= code.len() {
+        if Opcode::from_u8(code[ip]) == Some(Opcode::LoadConst)
+            && Opcode::from_u8(code[ip + 3]) == Some(Opcode::Pop)
+        {
+            nop_out(code, ip, 4);
+        }
+        ip += instruction_size(code, ip).unwrap_or(1);
+    }
+}
+
+/// Replace no-op jumps (Jump with offset 0) with Nops.
+fn remove_noop_jumps(code: &mut [u8]) {
+    let mut ip = 0;
+    while ip < code.len() {
+        if Opcode::from_u8(code[ip]) == Some(Opcode::Jump) {
+            let offset = read_u16(code, ip + 1);
+            if offset == 0 {
+                nop_out(code, ip, 3);
+            }
+        }
+        ip += instruction_size(code, ip).unwrap_or(1);
+    }
+}
+
 /// Apply jump chaining: if Jump/JumpIfFalse targets another jump, update to
 /// jump directly to the final target.
 fn chain_jumps(code: &mut [u8]) {
@@ -101,6 +137,8 @@ fn chain_jumps(code: &mut [u8]) {
 
 /// Run peephole optimizations on a chunk (and nested chunks).
 pub fn optimize(chunk: &mut Chunk) {
+    remove_loadconst_pop(&mut chunk.code);
+    remove_noop_jumps(&mut chunk.code);
     chain_jumps(&mut chunk.code);
     for nested in &mut chunk.nested {
         optimize(nested);
