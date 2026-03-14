@@ -254,18 +254,20 @@ fn program_uses_async(program: &Program) -> bool {
             Statement::FunDecl { async_, .. } if *async_ => true,
             Statement::Block { statements, .. } => statements.iter().any(stmt_has_async),
             Statement::If { then_branch, else_branch, .. } => {
-                stmt_has_async(then_branch) || else_branch.as_ref().map_or(false, |s| stmt_has_async(s.as_ref()))
+                stmt_has_async(then_branch) || else_branch.as_ref().is_some_and(|s| stmt_has_async(s.as_ref()))
             }
             Statement::While { body, .. } | Statement::For { body, .. } | Statement::ForOf { body, .. }
             | Statement::DoWhile { body, .. } => stmt_has_async(body),
             Statement::Switch { cases, default_body, .. } => {
                 cases.iter().any(|(_, stmts)| stmts.iter().any(stmt_has_async))
-                    || default_body.as_ref().map_or(false, |stmts| stmts.iter().any(stmt_has_async))
+                    || default_body
+                        .as_ref()
+                        .is_some_and(|stmts| stmts.iter().any(stmt_has_async))
             }
             Statement::Try { body, catch_body, finally_body, .. } => {
                 stmt_has_async(body)
-                    || catch_body.as_ref().map_or(false, |s| stmt_has_async(s.as_ref()))
-                    || finally_body.as_ref().map_or(false, |s| stmt_has_async(s.as_ref()))
+                    || catch_body.as_ref().is_some_and(|s| stmt_has_async(s.as_ref()))
+                    || finally_body.as_ref().is_some_and(|s| stmt_has_async(s.as_ref()))
             }
             _ => false,
         }
@@ -321,36 +323,38 @@ fn program_uses_async(program: &Program) -> bool {
     fn stmt_has_await(s: &Statement) -> bool {
         match s {
             Statement::Block { statements, .. } => statements.iter().any(stmt_has_await),
-            Statement::VarDecl { init, .. } => init.as_ref().map_or(false, expr_has_await),
+            Statement::VarDecl { init, .. } => init.as_ref().is_some_and(expr_has_await),
             Statement::VarDeclDestructure { init, .. } => expr_has_await(init),
             Statement::ExprStmt { expr, .. } => expr_has_await(expr),
             Statement::If { cond, then_branch, else_branch, .. } => {
                 expr_has_await(cond) || stmt_has_await(then_branch)
-                    || else_branch.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
+                    || else_branch.as_ref().is_some_and(|s| stmt_has_await(s.as_ref()))
             }
             Statement::While { cond, body, .. } => expr_has_await(cond) || stmt_has_await(body),
             Statement::For { init, cond, update, body, .. } => {
-                init.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
-                    || cond.as_ref().map_or(false, expr_has_await)
-                    || update.as_ref().map_or(false, expr_has_await)
+                init.as_ref().is_some_and(|s| stmt_has_await(s.as_ref()))
+                    || cond.as_ref().is_some_and(expr_has_await)
+                    || update.as_ref().is_some_and(expr_has_await)
                     || stmt_has_await(body)
             }
             Statement::ForOf { iterable, body, .. } => expr_has_await(iterable) || stmt_has_await(body),
-            Statement::Return { value, .. } => value.as_ref().map_or(false, expr_has_await),
+            Statement::Return { value, .. } => value.as_ref().is_some_and(expr_has_await),
             Statement::FunDecl { body, .. } => stmt_has_await(body),
             Statement::Switch { expr, cases, default_body, .. } => {
                 expr_has_await(expr)
                     || cases.iter().any(|(c, stmts)| {
-                        c.as_ref().map_or(false, expr_has_await) || stmts.iter().any(stmt_has_await)
+                        c.as_ref().is_some_and(expr_has_await) || stmts.iter().any(stmt_has_await)
                     })
-                    || default_body.as_ref().map_or(false, |stmts| stmts.iter().any(stmt_has_await))
+                    || default_body
+                        .as_ref()
+                        .is_some_and(|stmts| stmts.iter().any(stmt_has_await))
             }
             Statement::DoWhile { body, cond, .. } => stmt_has_await(body) || expr_has_await(cond),
             Statement::Throw { value, .. } => expr_has_await(value),
             Statement::Try { body, catch_body, finally_body, .. } => {
                 stmt_has_await(body)
-                    || catch_body.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
-                    || finally_body.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
+                    || catch_body.as_ref().is_some_and(|s| stmt_has_await(s.as_ref()))
+                    || finally_body.as_ref().is_some_and(|s| stmt_has_await(s.as_ref()))
             }
             Statement::Import { .. } | Statement::Export { .. } => false,
             _ => false,
@@ -375,7 +379,7 @@ pub fn compile_project(
     project_root: Option<&Path>,
     features: &[String],
 ) -> Result<String, CompileError> {
-    let (rust, _) = compile_project_full(entry_path, project_root, features)?;
+    let (rust, _) = compile_project_full(entry_path, project_root, features, true)?;
     Ok(rust)
 }
 
@@ -384,6 +388,7 @@ pub fn compile_project_full(
     entry_path: &Path,
     project_root: Option<&Path>,
     features: &[String],
+    optimize: bool,
 ) -> Result<(String, Vec<crate::resolve::ResolvedNativeModule>), CompileError> {
     use crate::resolve;
     let root = project_root.unwrap_or_else(|| entry_path.parent().unwrap_or(Path::new(".")));
@@ -391,17 +396,17 @@ pub fn compile_project_full(
         .map_err(|e| CompileError { message: e, span: None })?;
     resolve::detect_cycles(&modules)
         .map_err(|e| CompileError { message: e, span: None })?;
-    let program = tish_opt::optimize(&resolve::merge_modules(modules)
-        .map_err(|e| CompileError { message: e, span: None })?);
-    let native_modules = resolve::resolve_native_modules(&program, root)
+    let merged = resolve::merge_modules(modules)
+        .map_err(|e| CompileError { message: e, span: None })?;
+    let native_modules = resolve::resolve_native_modules(&merged, root)
         .map_err(|e| CompileError { message: e, span: None })?;
     let mut all_features: Vec<String> = features.to_vec();
-    for f in resolve::extract_native_import_features(&program) {
+    for f in resolve::extract_native_import_features(&merged) {
         if !all_features.contains(&f) {
             all_features.push(f);
         }
     }
-    let rust = compile_with_native_modules(&program, project_root, &all_features, &native_modules)?;
+    let rust = compile_with_native_modules(&merged, project_root, &all_features, &native_modules, optimize)?;
     Ok((rust, native_modules))
 }
 
@@ -412,7 +417,7 @@ pub fn compile_with_features(
     project_root: Option<&Path>,
     features: &[String],
 ) -> Result<String, CompileError> {
-    compile_with_native_modules(program, project_root, features, &[])
+    compile_with_native_modules(program, project_root, features, &[], true)
 }
 
 /// Compile with resolved native modules. Native imports emit calls to the module crates directly.
@@ -421,8 +426,9 @@ pub fn compile_with_native_modules(
     project_root: Option<&Path>,
     features: &[String],
     native_modules: &[crate::resolve::ResolvedNativeModule],
+    optimize: bool,
 ) -> Result<String, CompileError> {
-    let program = tish_opt::optimize(program);
+    let program = if optimize { tish_opt::optimize(program) } else { program.clone() };
     let map: std::collections::HashMap<String, (String, String)> = native_modules
         .iter()
         .map(|m| (m.spec.clone(), (m.crate_name.clone(), m.export_fn.clone())))
@@ -999,7 +1005,7 @@ impl Codegen {
                         let init_val = if clone_needed {
                             format!("({}).clone()", expr_str)
                         } else {
-                            format!("{}", expr_str)
+                            expr_str.to_string()
                         };
                         self.writeln(&format!("let {} = std::rc::Rc::new(RefCell::new({}));", escaped_name, init_val));
                     } else if clone_needed {
@@ -1608,7 +1614,7 @@ impl Codegen {
             Expr::Call { callee, args, .. } => {
                 // Compile-time embed: Polars.read_csv("<literal path>") when file exists
                 if let Some((crate_name, _)) = self.native_module_map.get("tish:polars") {
-                    if let (Some(ref root), Some(CallArg::Expr(first_arg))) =
+                    if let (Some(root), Some(CallArg::Expr(first_arg))) =
                         (self.project_root.as_ref(), args.first())
                     {
                         if let Expr::Member {
@@ -2642,16 +2648,18 @@ impl Codegen {
                 Statement::VarDeclDestructure { pattern, .. } => {
                     Self::collect_destruct_names(pattern, names);
                 }
-                Statement::For { init, .. } => {
-                    if let Some(i) = init {
-                        if let Statement::VarDecl { name, .. } = i.as_ref() {
-                            names.insert(name.to_string());
-                        }
-                        if let Statement::VarDeclDestructure { pattern, .. } = i.as_ref() {
-                            Self::collect_destruct_names(pattern, names);
-                        }
+                Statement::For {
+                    init: Some(i),
+                    ..
+                } => {
+                    if let Statement::VarDecl { name, .. } = i.as_ref() {
+                        names.insert(name.to_string());
+                    }
+                    if let Statement::VarDeclDestructure { pattern, .. } = i.as_ref() {
+                        Self::collect_destruct_names(pattern, names);
                     }
                 }
+                Statement::For { init: None, .. } => {}
                 _ => {}
             }
         }
@@ -2850,18 +2858,14 @@ impl Codegen {
                     Self::collect_mutated_captures_from_statements(f, block_vars, result);
                 }
             }
-            Statement::VarDecl { init, .. } => {
-                if let Some(e) = init {
-                    Self::collect_mutated_captures_from_expr(e, block_vars, result);
-                }
+            Statement::VarDecl { init: Some(e), .. } => {
+                Self::collect_mutated_captures_from_expr(e, block_vars, result);
             }
             Statement::VarDeclDestructure { init, .. } => {
                 Self::collect_mutated_captures_from_expr(init, block_vars, result);
             }
-            Statement::Return { value, .. } => {
-                if let Some(e) = value {
-                    Self::collect_mutated_captures_from_expr(e, block_vars, result);
-                }
+            Statement::Return { value: Some(e), .. } => {
+                Self::collect_mutated_captures_from_expr(e, block_vars, result);
             }
             Statement::Throw { value, .. } => Self::collect_mutated_captures_from_expr(value, block_vars, result),
             _ => {}

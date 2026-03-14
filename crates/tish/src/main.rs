@@ -9,43 +9,55 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "tish")]
 #[command(about = "Tish - minimal TS/JS-compatible language")]
+#[command(after_help = "To disable optimizations: TISH_NO_OPTIMIZE=1")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
+#[derive(Parser)]
+struct RunArgs {
+    #[arg(required = true)]
+    file: String,
+    #[arg(long, default_value = "vm")]
+    backend: String,
+    /// Disable AST and bytecode optimizations (for debugging)
+    #[arg(long)]
+    no_optimize: bool,
+}
+
+#[derive(Parser)]
+struct ReplArgs {
+    #[arg(long, default_value = "vm")]
+    backend: String,
+    #[arg(long)]
+    no_optimize: bool,
+}
+
+#[derive(Parser)]
+struct CompileArgs {
+    #[arg(required = true)]
+    file: String,
+    #[arg(short, long, default_value = "tish_out")]
+    output: String,
+    #[arg(long, default_value = "native")]
+    target: String,
+    #[arg(long, default_value = "rust")]
+    native_backend: String,
+    #[arg(long = "feature", action = clap::ArgAction::Append)]
+    features: Vec<String>,
+    #[arg(long)]
+    no_optimize: bool,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Run a Tish file (interpret)
-    Run {
-        #[arg(required = true)]
-        file: String,
-        /// Backend: vm (default) or interp (tree-walk interpreter)
-        #[arg(long, default_value = "vm")]
-        backend: String,
-    },
+    Run(RunArgs),
     /// Interactive REPL
-    Repl {
-        /// Backend: vm (default) or interp (tree-walk interpreter)
-        #[arg(long, default_value = "vm")]
-        backend: String,
-    },
+    Repl(ReplArgs),
     /// Compile to native binary or JavaScript
-    Compile {
-        #[arg(required = true)]
-        file: String,
-        #[arg(short, long, default_value = "tish_out")]
-        output: String,
-        /// Target: native (default), js, wasm, or wasi
-        #[arg(long, default_value = "native")]
-        target: String,
-        /// Native backend: rust (default), cranelift, or llvm (experimental)
-        #[arg(long, default_value = "rust")]
-        native_backend: String,
-        /// Enable feature (http, fs, process, regex, polars, egui). For native target only. Can be repeated.
-        #[arg(long = "feature", action = clap::ArgAction::Append)]
-        features: Vec<String>,
-    },
+    Compile(CompileArgs),
     /// Parse and dump AST
     #[command(name = "dump-ast")]
     DumpAst {
@@ -56,15 +68,15 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
-
+    let no_opt_env = std::env::var_os("TISH_NO_OPTIMIZE")
+        .map(|v| v == "1" || v == "true" || v == "yes")
+        .unwrap_or(false);
     let result = match cli.command {
-        Some(Commands::Run { file, backend }) => run_file(&file, &backend),
-        Some(Commands::Repl { backend }) => run_repl(&backend),
-        Some(Commands::Compile { file, output, target, native_backend, features }) => {
-            compile_file(&file, &output, &target, &native_backend, &features)
-        }
+        Some(Commands::Run(a)) => run_file(&a.file, &a.backend, a.no_optimize || no_opt_env),
+        Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env),
+        Some(Commands::Compile(a)) => compile_file(&a.file, &a.output, &a.target, &a.native_backend, &a.features, a.no_optimize || no_opt_env),
         Some(Commands::DumpAst { file }) => dump_ast(&file),
-        None => run_repl("vm"), // No args = REPL
+        None => run_repl("vm", false), // No args = REPL
     };
 
     if let Err(e) = result {
@@ -73,7 +85,7 @@ fn main() {
     }
 }
 
-fn run_file(path: &str, backend: &str) -> Result<(), String> {
+fn run_file(path: &str, backend: &str, no_optimize: bool) -> Result<(), String> {
     let path = Path::new(path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", path, e))?;
     let project_root = path.parent().and_then(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
@@ -84,12 +96,22 @@ fn run_file(path: &str, backend: &str) -> Result<(), String> {
     });
 
     let program = if path.extension().map(|e| e == "js") == Some(true) {
-        let source = fs::read_to_string(&path).map_err(|e| format!("{}", e))?;
-        tish_opt::optimize(&js_to_tish::convert(&source).map_err(|e| format!("{}", e))?)
+        let prog = js_to_tish::convert(&fs::read_to_string(&path).map_err(|e| format!("{}", e))?)
+            .map_err(|e| format!("{}", e))?;
+        if no_optimize {
+            prog
+        } else {
+            tish_opt::optimize(&prog)
+        }
     } else {
         let modules = tish_compile::resolve_project(&path, project_root)?;
         tish_compile::detect_cycles(&modules)?;
-        tish_opt::optimize(&tish_compile::merge_modules(modules)?)
+        let prog = tish_compile::merge_modules(modules)?;
+        if no_optimize {
+            prog
+        } else {
+            tish_opt::optimize(&prog)
+        }
     };
 
     if backend == "interp" {
@@ -101,7 +123,11 @@ fn run_file(path: &str, backend: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    let chunk = tish_bytecode::compile(&program).map_err(|e| e.to_string())?;
+    let chunk = if no_optimize {
+        tish_bytecode::compile_unoptimized(&program).map_err(|e| e.to_string())?
+    } else {
+        tish_bytecode::compile(&program).map_err(|e| e.to_string())?
+    };
     let value = tish_vm::run(&chunk)?;
     if !matches!(value, tish_core::Value::Null) {
         println!("{}", value.to_display_string());
@@ -109,7 +135,7 @@ fn run_file(path: &str, backend: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn run_repl(backend: &str) -> Result<(), String> {
+fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
     println!("Tish REPL (Ctrl-D to exit)");
     let mut buffer = String::new();
 
@@ -163,7 +189,12 @@ fn run_repl(backend: &str) -> Result<(), String> {
                     let prog = tish_ast::Program {
                         statements: vec![stmt.clone()],
                     };
-                    match tish_bytecode::compile(&prog) {
+                    let compile_fn = if no_optimize {
+                        tish_bytecode::compile_unoptimized
+                    } else {
+                        tish_bytecode::compile
+                    };
+                    match compile_fn(&prog) {
                         Ok(chunk) => {
                             if let Ok(v) = vm.run(&chunk) {
                                 if !matches!(v, tish_core::Value::Null) {
@@ -181,7 +212,7 @@ fn run_repl(backend: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn compile_to_js(input_path: &Path, output_path: &str) -> Result<(), String> {
+fn compile_to_js(input_path: &Path, output_path: &str, optimize: bool) -> Result<(), String> {
     let project_root = input_path.parent().and_then(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
             p.parent()
@@ -192,9 +223,9 @@ fn compile_to_js(input_path: &Path, output_path: &str) -> Result<(), String> {
     let js = if input_path.extension().map(|e| e == "js") == Some(true) {
         let source = fs::read_to_string(input_path).map_err(|e| format!("{}", e))?;
         let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        tish_compile_js::compile(&program).map_err(|e| format!("{}", e))?
+        tish_compile_js::compile(&program, optimize).map_err(|e| format!("{}", e))?
     } else {
-        tish_compile_js::compile_project(input_path, project_root)
+        tish_compile_js::compile_project(input_path, project_root, optimize)
             .map_err(|e| format!("{}", e))?
     };
 
@@ -223,20 +254,23 @@ fn compile_file(
     target: &str,
     native_backend: &str,
     cli_features: &[String],
+    no_optimize: bool,
 ) -> Result<(), String> {
+    let optimize = !no_optimize;
     let input_path =
         Path::new(input_path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", input_path, e))?;
 
     let is_js = input_path.extension().map(|e| e == "js") == Some(true);
 
     if target == "js" {
-        return compile_to_js(&input_path, output_path);
+        return compile_to_js(&input_path, output_path, optimize);
     }
 
     if target == "wasm" && is_js {
         let source = fs::read_to_string(&input_path).map_err(|e| format!("{}", e))?;
         let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        return tish_wasm::compile_program_to_wasm(&program, Path::new(output_path)).map_err(|e| format!("{}", e));
+        return tish_wasm::compile_program_to_wasm(&program, Path::new(output_path), optimize)
+            .map_err(|e| format!("{}", e));
     }
 
     if target == "wasm" {
@@ -247,7 +281,7 @@ fn compile_file(
                 Some(p)
             }
         });
-        return tish_wasm::compile_to_wasm(&input_path, project_root, Path::new(output_path))
+        return tish_wasm::compile_to_wasm(&input_path, project_root, Path::new(output_path), optimize)
             .map_err(|e| e.to_string());
     }
 
@@ -259,7 +293,7 @@ fn compile_file(
                 Some(p)
             }
         });
-        return tish_wasm::compile_to_wasi(&input_path, project_root, Path::new(output_path))
+        return tish_wasm::compile_to_wasi(&input_path, project_root, Path::new(output_path), optimize)
             .map_err(|e| e.to_string());
     }
 
@@ -296,11 +330,25 @@ fn compile_file(
     if is_js {
         let source = fs::read_to_string(&input_path).map_err(|e| format!("{}", e))?;
         let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        tish_native::compile_program_to_native(&program, project_root.as_deref(), Path::new(output_path), &features, native_backend)
-            .map_err(|e| e.to_string())?;
+        tish_native::compile_program_to_native(
+            &program,
+            project_root,
+            Path::new(output_path),
+            &features,
+            native_backend,
+            optimize,
+        )
+        .map_err(|e| e.to_string())?;
     } else {
-        tish_native::compile_to_native(&input_path, project_root.as_deref(), Path::new(output_path), &features, native_backend)
-            .map_err(|e| e.to_string())?;
+        tish_native::compile_to_native(
+            &input_path,
+            project_root,
+            Path::new(output_path),
+            &features,
+            native_backend,
+            optimize,
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     let out_name = Path::new(output_path)

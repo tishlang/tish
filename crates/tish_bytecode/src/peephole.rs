@@ -75,6 +75,19 @@ fn nop_out(code: &mut [u8], ip: usize, len: usize) {
     }
 }
 
+/// Remove redundant Dup + Pop (dup top then discard = no-op).
+fn remove_dup_pop(code: &mut [u8]) {
+    let mut ip = 0;
+    while ip + 2 <= code.len() {
+        if Opcode::from_u8(code[ip]) == Some(Opcode::Dup)
+            && Opcode::from_u8(code[ip + 1]) == Some(Opcode::Pop)
+        {
+            nop_out(code, ip, 2);
+        }
+        ip += instruction_size(code, ip).unwrap_or(1);
+    }
+}
+
 /// Remove redundant LoadConst + Pop (load constant then discard = no-op).
 fn remove_loadconst_pop(code: &mut [u8]) {
     let mut ip = 0;
@@ -138,6 +151,7 @@ fn chain_jumps(code: &mut [u8]) {
 /// Run peephole optimizations on a chunk (and nested chunks).
 pub fn optimize(chunk: &mut Chunk) {
     remove_loadconst_pop(&mut chunk.code);
+    remove_dup_pop(&mut chunk.code);
     remove_noop_jumps(&mut chunk.code);
     chain_jumps(&mut chunk.code);
     for nested in &mut chunk.nested {

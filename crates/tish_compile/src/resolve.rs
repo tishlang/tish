@@ -26,15 +26,17 @@ pub fn resolve_native_modules(program: &Program, project_root: &Path) -> Result<
     let mut seen = HashSet::new();
     let mut modules = Vec::new();
     for stmt in &program.statements {
-        if let Statement::VarDecl { init: Some(init), .. } = stmt {
-            if let Expr::NativeModuleLoad { spec, .. } = init {
-                let s = spec.as_ref();
+        if let Statement::VarDecl {
+            init: Some(Expr::NativeModuleLoad { spec, .. }),
+            ..
+        } = stmt
+        {
+            let s = spec.as_ref();
                 if !seen.insert(s.to_string()) {
                     continue;
                 }
-                let m = resolve_native_module(s, &root_canon)?;
-                modules.push(m);
-            }
+            let m = resolve_native_module(s, &root_canon)?;
+            modules.push(m);
         }
     }
     Ok(modules)
@@ -86,21 +88,21 @@ fn find_package_dir(package_name: &str, project_root: &Path) -> Result<PathBuf, 
     let mut search = project_root.to_path_buf();
     loop {
         let node_mod = search.join("node_modules").join(package_name);
-        if node_mod.join("package.json").exists() {
-            if read_package_name(&node_mod.join("package.json")) == Some(package_name.to_string()) {
-                return Ok(node_mod);
-            }
+        if node_mod.join("package.json").exists()
+            && read_package_name(&node_mod.join("package.json")) == Some(package_name.to_string())
+        {
+            return Ok(node_mod);
         }
         let sibling = search.join(package_name);
-        if sibling.join("package.json").exists() {
-            if read_package_name(&sibling.join("package.json")) == Some(package_name.to_string()) {
-                return Ok(sibling);
-            }
+        if sibling.join("package.json").exists()
+            && read_package_name(&sibling.join("package.json")) == Some(package_name.to_string())
+        {
+            return Ok(sibling);
         }
-        if search.join("package.json").exists() {
-            if read_package_name(&search.join("package.json")) == Some(package_name.to_string()) {
-                return Ok(search);
-            }
+        if search.join("package.json").exists()
+            && read_package_name(&search.join("package.json")) == Some(package_name.to_string())
+        {
+            return Ok(search);
         }
         if let Some(parent) = search.parent() {
             search = parent.to_path_buf();
@@ -125,11 +127,13 @@ fn read_package_name(pkg_path: &Path) -> Option<String> {
 pub fn extract_native_import_features(program: &Program) -> Vec<String> {
     let mut features = std::collections::HashSet::new();
     for stmt in &program.statements {
-        if let Statement::VarDecl { init: Some(init), .. } = stmt {
-            if let Expr::NativeModuleLoad { spec, .. } = init {
-                if let Some(f) = native_spec_to_feature(spec.as_ref()) {
-                    features.insert(f);
-                }
+        if let Statement::VarDecl {
+            init: Some(Expr::NativeModuleLoad { spec, .. }),
+            ..
+        } = stmt
+        {
+            if let Some(f) = native_spec_to_feature(spec.as_ref()) {
+                features.insert(f);
             }
         }
     }
@@ -446,7 +450,7 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
                     let dep_path = resolve_import_path(from, dir, Path::new("."))?;
                     let dep_path = dep_path
                         .canonicalize()
-                        .unwrap_or_else(|_| dep_path);
+                        .unwrap_or(dep_path);
                     let dep_idx = *path_to_idx
                         .get(&dep_path)
                         .ok_or_else(|| format!("Resolved import '{}' not in module list", from))?;

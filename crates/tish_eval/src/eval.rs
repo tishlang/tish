@@ -1319,21 +1319,17 @@ impl Evaluator {
 
                     // Number methods
                     if let Value::Number(n) = &obj {
-                        match method_name.as_ref() {
-                            "toFixed" => {
-                                let digits = arg_vals
-                                    .first()
-                                    .and_then(|v| match v {
-                                        Value::Number(d) => Some(*d as i32),
-                                        _ => None,
-                                    })
-                                    .unwrap_or(0)
-                                    .max(0)
-                                    .min(20); // ECMA-262: 0–20
-                                let formatted = format!("{:.*}", digits as usize, n);
-                                return Ok(Value::String(formatted.into()));
-                            }
-                            _ => {}
+                        if method_name.as_ref() == "toFixed" {
+                            let digits = arg_vals
+                                .first()
+                                .and_then(|v| match v {
+                                    Value::Number(d) => Some(*d as i32),
+                                    _ => None,
+                                })
+                                .unwrap_or(0)
+                                .clamp(0, 20); // ECMA-262: 0–20
+                            let formatted = format!("{:.*}", digits as usize, n);
+                            return Ok(Value::String(formatted.into()));
                         }
                     }
 
@@ -2012,11 +2008,11 @@ impl Evaluator {
                             };
                             match handler_result {
                                 Ok(v) => {
-                                    crate::promise::settle_promise(&resolve, v, true)
+                                    crate::promise::settle_promise(resolve, v, true)
                                         .map_err(EvalError::Error)?;
                                 }
                                 Err(EvalError::Throw(v)) => {
-                                    crate::promise::settle_promise(&reject, v, false)
+                                    crate::promise::settle_promise(reject, v, false)
                                         .map_err(EvalError::Error)?;
                                 }
                                 Err(e) => return Err(e),
@@ -2025,10 +2021,10 @@ impl Evaluator {
                         crate::promise::Reaction::Finally(on_finally, ref resolve, ref reject) => {
                             let _ = self.call_func(&on_finally, &[]);
                             if is_fulfilled {
-                                crate::promise::settle_promise(&resolve, val.clone(), true)
+                                crate::promise::settle_promise(resolve, val.clone(), true)
                                     .map_err(EvalError::Error)?;
                             } else {
-                                crate::promise::settle_promise(&reject, val.clone(), false)
+                                crate::promise::settle_promise(reject, val.clone(), false)
                                     .map_err(EvalError::Error)?;
                             }
                         }
@@ -2118,11 +2114,11 @@ impl Evaluator {
         match method {
             "then" => self.run_promise_then_core(
                 promise_ref,
-                args.get(0).cloned(),
+                args.first().cloned(),
                 args.get(1).cloned(),
             ),
-            "catch" => self.run_promise_then_core(promise_ref, None, args.get(0).cloned()),
-            "finally" => self.run_promise_finally(promise_ref, args.get(0).cloned()),
+            "catch" => self.run_promise_then_core(promise_ref, None, args.first().cloned()),
+            "finally" => self.run_promise_finally(promise_ref, args.first().cloned()),
             _ => Err(EvalError::Error(format!("Unknown promise method: {}", method))),
         }
     }
@@ -2841,7 +2837,7 @@ impl Evaluator {
         let x = args.first().cloned().unwrap_or(Value::Null);
         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
         let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
-        crate::promise::settle_promise(&resolve, x, true).map_err(|e| e)?;
+        crate::promise::settle_promise(&resolve, x, true)?;
         Ok(promise)
     }
 
@@ -2850,7 +2846,7 @@ impl Evaluator {
         let r = args.first().cloned().unwrap_or(Value::Null);
         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
         let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
-        crate::promise::settle_promise(&reject, r, false).map_err(|e| e)?;
+        crate::promise::settle_promise(&reject, r, false)?;
         Ok(promise)
     }
 
@@ -2884,7 +2880,7 @@ impl Evaluator {
         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
         let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
         let arr = Value::Array(Rc::new(RefCell::new(results)));
-        crate::promise::settle_promise(&resolve, arr, true).map_err(|e| e)?;
+        crate::promise::settle_promise(&resolve, arr, true)?;
         Ok(promise)
     }
 
@@ -2904,13 +2900,13 @@ impl Evaluator {
                     crate::promise::PromiseAwaitResult::Fulfilled(x) => {
                         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
                         let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
-                        crate::promise::settle_promise(&resolve, x, true).map_err(|e| e)?;
+                        crate::promise::settle_promise(&resolve, x, true)?;
                         return Ok(promise);
                     }
                     crate::promise::PromiseAwaitResult::Rejected(x) => {
                         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
                         let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
-                        crate::promise::settle_promise(&reject, x, false).map_err(|e| e)?;
+                        crate::promise::settle_promise(&reject, x, false)?;
                         return Ok(promise);
                     }
                     crate::promise::PromiseAwaitResult::Error(e) => return Err(e),

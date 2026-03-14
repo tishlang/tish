@@ -6,7 +6,6 @@ members = [
     "crates/tish_wasm_runtime",
     "crates/tish_core",
     "crates/tish_builtins",
-    "crates/tish_bind",
     "crates/tish_lexer",
     "crates/tish_ast",
     "crates/tish_parser",

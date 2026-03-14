@@ -866,11 +866,11 @@ impl<'a> Compiler<'a> {
                     .collect::<HashMap<_, _>>()];
                 match body {
                     ArrowBody::Expr(e) => {
-                        inner_comp.compile_expr(&e)?;
+                        inner_comp.compile_expr(e)?;
                         inner_comp.emit(Opcode::Return);
                     }
                     ArrowBody::Block(s) => {
-                        inner_comp.compile_statement(&s)?;
+                        inner_comp.compile_statement(s)?;
                         let idx = inner_comp.constant_idx(Constant::Null);
                         inner_comp.emit(Opcode::LoadConst);
                         inner_comp.chunk.write_u16(idx);
@@ -1033,11 +1033,22 @@ fn unaryop_to_u8(op: UnaryOp) -> u8 {
     }
 }
 
-/// Compile a Tish program to bytecode.
+/// Compile a Tish program to bytecode (with peephole optimizations).
 pub fn compile(program: &Program) -> Result<Chunk, CompileError> {
+    compile_internal(program, true)
+}
+
+/// Compile without peephole optimizations (for --no-optimize).
+pub fn compile_unoptimized(program: &Program) -> Result<Chunk, CompileError> {
+    compile_internal(program, false)
+}
+
+fn compile_internal(program: &Program, peephole: bool) -> Result<Chunk, CompileError> {
     let mut chunk = Chunk::new();
     let mut compiler = Compiler::new(&mut chunk);
     compiler.compile_program(program)?;
-    crate::peephole::optimize(&mut chunk);
+    if peephole {
+        crate::peephole::optimize(&mut chunk);
+    }
     Ok(chunk)
 }

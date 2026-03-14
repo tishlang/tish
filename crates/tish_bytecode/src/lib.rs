@@ -10,6 +10,6 @@ mod serialize;
 pub const NO_REST_PARAM: u16 = 0xFFFF;
 
 pub use chunk::{Chunk, Constant};
-pub use compiler::{compile, CompileError};
+pub use compiler::{compile, compile_unoptimized, CompileError};
 pub use opcode::Opcode;
 pub use serialize::{deserialize, serialize};

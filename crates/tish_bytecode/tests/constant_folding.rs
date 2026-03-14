@@ -33,6 +33,43 @@ fn constant_fold_binary_no_binop() {
     );
 }
 
+/// Peephole: Dup+Pop should be removed (replaced with Nop Nop).
+/// Compile a program that may emit Dup+Pop; verify it runs and chunk has no consecutive Dup,Pop.
+fn chunk_has_dup_pop_sequence(code: &[u8]) -> bool {
+    let dup = Opcode::Dup as u8;
+    let pop = Opcode::Pop as u8;
+    for i in 0..code.len().saturating_sub(1) {
+        if code[i] == dup && code[i + 1] == pop {
+            return true;
+        }
+    }
+    false
+}
+
+fn chunk_contains_dup_pop(chunk: &Chunk) -> bool {
+    if chunk_has_dup_pop_sequence(&chunk.code) {
+        return true;
+    }
+    for nested in &chunk.nested {
+        if chunk_contains_dup_pop(nested) {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn peephole_remove_dup_pop() {
+    let source = "let o = {a:1}; o?.a";
+    let program = parse(source).expect("parse");
+    let optimized = tish_opt::optimize(&program);
+    let chunk = compile(&optimized).expect("compile");
+    assert!(
+        !chunk_contains_dup_pop(&chunk),
+        "Peephole should remove Dup+Pop sequences"
+    );
+}
+
 /// -42 should fold to constant -42; no UnaryOp in bytecode.
 #[test]
 fn constant_fold_unary_no_unaryop() {

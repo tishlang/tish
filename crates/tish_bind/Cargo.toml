@@ -1,8 +1,0 @@
-[package]
-name = "tish_bind"
-version = "0.1.0"
-edition = "2021"
-description = "Trait and utilities for exposing native Rust modules to Tish"
-
-[dependencies]
-tish_core = { path = "../tish_core" }

@@ -114,7 +114,7 @@ pub fn number_to_fixed(n: &Value, digits: &Value) -> Value {
         _ => f64::NAN,
     };
     let d = match digits {
-        Value::Number(x) => (*x as i32).max(0).min(20),
+        Value::Number(x) => (*x as i32).clamp(0, 20),
         _ => 0,
     };
     Value::String(format!("{:.*}", d as usize, num).into())
@@ -908,9 +908,7 @@ fn string_replace_regex_or_callback(s: &Value, search: &Value, replacement: &Val
         let limit = if re_guard.flags.global { usize::MAX } else { 1 };
         let mut result = String::new();
         let mut last_end: usize = 0;
-        let mut count = 0usize;
-
-        for cap_result in re_guard.regex.captures_iter(input) {
+        for (count, cap_result) in re_guard.regex.captures_iter(input).enumerate() {
             if count >= limit {
                 break;
             }
@@ -938,7 +936,6 @@ fn string_replace_regex_or_callback(s: &Value, search: &Value, replacement: &Val
             result.push_str(&input[last_end..byte_start]);
             result.push_str(&repl_str);
             last_end = full.end();
-            count += 1;
         }
 
         result.push_str(&input[last_end..]);

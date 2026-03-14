@@ -31,6 +31,7 @@ impl std::error::Error for WasmError {}
 fn resolve_and_compile_to_chunk(
     entry_path: &Path,
     project_root: Option<&Path>,
+    optimize: bool,
 ) -> Result<Chunk, WasmError> {
     let modules = resolve_project(entry_path, project_root).map_err(|e| WasmError {
         message: e.to_string(),
@@ -38,20 +39,47 @@ fn resolve_and_compile_to_chunk(
     detect_cycles(&modules).map_err(|e| WasmError {
         message: e.to_string(),
     })?;
-    let program = tish_opt::optimize(&merge_modules(modules).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?);
-    tish_bytecode::compile(&program).map_err(|e| WasmError {
-        message: e.to_string(),
-    })
+    let program = {
+        let prog = merge_modules(modules).map_err(|e| WasmError {
+            message: e.to_string(),
+        })?;
+        if optimize {
+            tish_opt::optimize(&prog)
+        } else {
+            prog
+        }
+    };
+    if optimize {
+        tish_bytecode::compile(&program).map_err(|e| WasmError {
+            message: e.to_string(),
+        })
+    } else {
+        tish_bytecode::compile_unoptimized(&program).map_err(|e| WasmError {
+            message: e.to_string(),
+        })
+    }
 }
 
 /// Compile a single Program (e.g. from js_to_tish) for WebAssembly.
-pub fn compile_program_to_wasm(program: &Program, output_path: &Path) -> Result<(), WasmError> {
-    let program = tish_opt::optimize(program);
-    let chunk = tish_bytecode::compile(&program).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
+pub fn compile_program_to_wasm(
+    program: &Program,
+    output_path: &Path,
+    optimize: bool,
+) -> Result<(), WasmError> {
+    let program = if optimize {
+        tish_opt::optimize(program)
+    } else {
+        program.clone()
+    };
+    let chunk = if optimize {
+        tish_bytecode::compile(&program).map_err(|e| WasmError {
+            message: e.to_string(),
+        })?
+    } else {
+        tish_bytecode::compile_unoptimized(&program).map_err(|e| WasmError {
+            message: e.to_string(),
+        })?
+    };
     emit_wasm_from_chunk(&chunk, output_path)
 }
 
@@ -155,8 +183,9 @@ pub fn compile_to_wasm(
     entry_path: &Path,
     project_root: Option<&Path>,
     output_path: &Path,
+    optimize: bool,
 ) -> Result<(), WasmError> {
-    let chunk = resolve_and_compile_to_chunk(entry_path, project_root)?;
+    let chunk = resolve_and_compile_to_chunk(entry_path, project_root, optimize)?;
     emit_wasm_from_chunk(&chunk, output_path)
 }
 
@@ -170,8 +199,9 @@ pub fn compile_to_wasi(
     entry_path: &Path,
     project_root: Option<&Path>,
     output_path: &Path,
+    optimize: bool,
 ) -> Result<(), WasmError> {
-    let chunk = resolve_and_compile_to_chunk(entry_path, project_root)?;
+    let chunk = resolve_and_compile_to_chunk(entry_path, project_root, optimize)?;
     let chunk_bytes = serialize(&chunk);
 
     let stem = output_path

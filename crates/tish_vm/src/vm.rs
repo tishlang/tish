@@ -11,6 +11,8 @@ use tish_builtins::math as math_builtins;
 use tish_bytecode::{Chunk, Constant, Opcode, NO_REST_PARAM};
 use tish_core::Value;
 
+type ArrayMethodFn = Rc<dyn Fn(&[Value]) -> Value>;
+
 /// Console output: println! on native, web_sys::console on wasm
 #[cfg(not(feature = "wasm"))]
 fn vm_log(s: &str) {
@@ -319,6 +321,9 @@ impl Vm {
             }
             let op = code[ip];
             ip += 1;
+            if op == Opcode::Nop as u8 {
+                continue;
+            }
             let opcode = Opcode::from_u8(op).ok_or_else(|| format!("Unknown opcode: {}", op))?;
 
             match opcode {
@@ -867,7 +872,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 return Ok(Value::Number(a.borrow().len() as f64));
             }
             let a_clone = Rc::clone(a);
-            let method: Rc<dyn Fn(&[Value]) -> Value> = match key_s {
+            let method: ArrayMethodFn = match key_s {
                 "push" => Rc::new(move |args: &[Value]| arr_builtins::push(&Value::Array(Rc::clone(&a_clone)), args)),
                 "pop" => Rc::new(move |_args: &[Value]| arr_builtins::pop(&Value::Array(Rc::clone(&a_clone)))),
                 "shift" => Rc::new(move |_args: &[Value]| arr_builtins::shift(&Value::Array(Rc::clone(&a_clone)))),
@@ -875,66 +880,66 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "reverse" => Rc::new(move |_args: &[Value]| arr_builtins::reverse(&Value::Array(Rc::clone(&a_clone)))),
                 "shuffle" => Rc::new(move |_args: &[Value]| arr_builtins::shuffle(&Value::Array(Rc::clone(&a_clone)))),
                 "slice" => Rc::new(move |args: &[Value]| {
-                    let start = args.get(0).unwrap_or(&Value::Null);
+                    let start = args.first().unwrap_or(&Value::Null);
                     let end = args.get(1).unwrap_or(&Value::Null);
                     arr_builtins::slice(&Value::Array(Rc::clone(&a_clone)), start, end)
                 }),
                 "concat" => Rc::new(move |args: &[Value]| arr_builtins::concat(&Value::Array(Rc::clone(&a_clone)), args)),
                 "join" => Rc::new(move |args: &[Value]| {
-                    let sep = args.get(0).unwrap_or(&Value::Null);
+                    let sep = args.first().unwrap_or(&Value::Null);
                     arr_builtins::join(&Value::Array(Rc::clone(&a_clone)), sep)
                 }),
                 "indexOf" => Rc::new(move |args: &[Value]| {
-                    let search = args.get(0).unwrap_or(&Value::Null);
+                    let search = args.first().unwrap_or(&Value::Null);
                     arr_builtins::index_of(&Value::Array(Rc::clone(&a_clone)), search)
                 }),
                 "includes" => Rc::new(move |args: &[Value]| {
-                    let search = args.get(0).unwrap_or(&Value::Null);
+                    let search = args.first().unwrap_or(&Value::Null);
                     arr_builtins::includes(&Value::Array(Rc::clone(&a_clone)), search)
                 }),
                 "map" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::map(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "filter" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::filter(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "reduce" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     let init = args.get(1).cloned().unwrap_or(Value::Null);
                     arr_builtins::reduce(&Value::Array(Rc::clone(&a_clone)), &cb, &init)
                 }),
                 "forEach" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::for_each(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "find" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::find(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "findIndex" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::find_index(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "some" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::some(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "every" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::every(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "flat" => Rc::new(move |args: &[Value]| {
-                    let depth = args.get(0).unwrap_or(&Value::Number(1.0));
+                    let depth = args.first().unwrap_or(&Value::Number(1.0));
                     arr_builtins::flat(&Value::Array(Rc::clone(&a_clone)), depth)
                 }),
                 "flatMap" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::flat_map(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "sort" => Rc::new(move |args: &[Value]| {
-                    let cmp = args.get(0);
+                    let cmp = args.first();
                     if let Some(Value::Function(_)) = cmp {
                         arr_builtins::sort_with_comparator(&Value::Array(Rc::clone(&a_clone)), cmp.unwrap())
                     } else {
@@ -942,7 +947,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     }
                 }),
                 "splice" => Rc::new(move |args: &[Value]| {
-                    let start = args.get(0).unwrap_or(&Value::Null);
+                    let start = args.first().unwrap_or(&Value::Null);
                     let delete_count = args.get(1).map(|v| v as &Value);
                     let items: Vec<Value> = args.get(2..).unwrap_or(&[]).to_vec();
                     arr_builtins::splice(&Value::Array(Rc::clone(&a_clone)), start, delete_count, &items)

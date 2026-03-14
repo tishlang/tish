@@ -35,10 +35,10 @@ struct Codegen {
 }
 
 fn stmt_terminates_switch(stmt: Option<&Statement>) -> bool {
-    match stmt {
-        Some(Statement::Break { .. }) | Some(Statement::Return { .. }) | Some(Statement::Throw { .. }) => true,
-        _ => false,
-    }
+    matches!(
+        stmt,
+        Some(Statement::Break { .. }) | Some(Statement::Return { .. }) | Some(Statement::Throw { .. })
+    )
 }
 
 impl Codegen {
@@ -490,7 +490,7 @@ function __h(tag, props, ...children) {
                 let expr = match prop {
                     MemberProp::Name(p) => {
                         if p.parse::<u32>().is_ok() || !p.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                            format!("{}[{}]", obj, format!("{:?}", p.as_ref()))
+                            format!("{}[{:?}]", obj, p.as_ref())
                         } else {
                             let sep = if *optional { "?." } else { "." };
                             format!("{}{}{}", obj, sep, p.as_ref())
@@ -661,7 +661,7 @@ function __h(tag, props, ...children) {
                     }
                 }
                 s.push('`');
-                format!("{}", s)
+                s
             }
             Expr::Await { operand, .. } => {
                 let o = self.emit_expr(operand)?;
@@ -744,8 +744,12 @@ function __h(tag, props, ...children) {
 }
 
 /// Compile a single program (no imports) to JavaScript.
-pub fn compile(program: &Program) -> Result<String, CompileError> {
-    let program = tish_opt::optimize(program);
+pub fn compile(program: &Program, optimize: bool) -> Result<String, CompileError> {
+    let program = if optimize {
+        tish_opt::optimize(program)
+    } else {
+        program.clone()
+    };
     let mut g = Codegen::new();
     g.emit_program(&program)?;
     Ok(g.output)
@@ -756,12 +760,20 @@ pub fn compile(program: &Program) -> Result<String, CompileError> {
 pub fn compile_project(
     entry_path: &std::path::Path,
     project_root: Option<&std::path::Path>,
+    optimize: bool,
 ) -> Result<String, CompileError> {
     use tish_ast::Statement;
     let modules = tish_compile::resolve_project(entry_path, project_root)
         .map_err(|e| CompileError { message: e })?;
     tish_compile::detect_cycles(&modules).map_err(|e| CompileError { message: e })?;
-    let program = tish_opt::optimize(&tish_compile::merge_modules(modules).map_err(|e| CompileError { message: e })?);
+    let program = {
+        let prog = tish_compile::merge_modules(modules).map_err(|e| CompileError { message: e })?;
+        if optimize {
+            tish_opt::optimize(&prog)
+        } else {
+            prog
+        }
+    };
     let default_export = program.statements.iter().find_map(|s| {
         if let Statement::VarDecl { name, .. } = s {
             let n = name.as_ref();
@@ -774,7 +786,7 @@ pub fn compile_project(
             None
         }
     });
-    let mut js = compile(&program)?;
+    let mut js = compile(&program, optimize)?;
     if let Some(name) = default_export {
         js.push_str(&format!("\nexport default {};\n", name));
     }

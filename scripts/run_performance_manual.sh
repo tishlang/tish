@@ -7,19 +7,23 @@
 #   --limit N       run only first N tests (default: all)
 #   --filter NAME   run only tests whose name contains NAME (e.g. array_stress)
 #   --timeout SEC   timeout per tish run in seconds (default: 30, 0=no limit)
-#   --runtimes R,...  comma-separated list: run,rust,cranelift,llvm,wasi,node,bun,deno,qjs (default: all)
+#   --runtimes R,...  comma-separated list: vm,interp,rust,cranelift,llvm,wasi,node,bun,deno,qjs (default: all)
 #   --verbose       show stderr (crash logs, runtime errors) instead of suppressing them
 
 set -e
 cd "$(dirname "$0")/.."
 
 # Check if a runtime is in the selected list (empty = all)
+# "run" is shorthand for both vm and interp
 want_runtime() {
   local r="$1"
   if [[ -z "$runtimes_filter" ]]; then
     return 0
   fi
-  [[ ",${runtimes_filter}," == *",${r},"* ]]
+  [[ ",${runtimes_filter}," == *",${r},"* ]] && return 0
+  [[ "$r" == "vm" && ",${runtimes_filter}," == *",run,"* ]] && return 0
+  [[ "$r" == "interp" && ",${runtimes_filter}," == *",run,"* ]] && return 0
+  return 1
 }
 
 # Runtime detection
@@ -141,7 +145,8 @@ fi
 
 # Arrays to collect summary data
 declare -a summary_names=()
-declare -a summary_tish_run=()
+declare -a summary_tish_vm=()
+declare -a summary_tish_interp=()
 declare -a summary_tish_native=()
 declare -a summary_tish_cranelift=()
 declare -a summary_tish_llvm=()
@@ -156,12 +161,13 @@ declare -a summary_ratio=()
 
 echo "=== Tish vs JavaScript Runtimes — Performance Comparison ==="
 echo "Profile: $profile"
-[[ -n "$runtimes_filter" ]] && echo "Runtimes: $runtimes_filter (use --runtimes run,rust,cranelift,llvm,wasi,node,bun,deno,qjs)"
+[[ -n "$runtimes_filter" ]] && echo "Runtimes: $runtimes_filter (use --runtimes vm,interp,rust,cranelift,llvm,wasi,node,bun,deno,qjs)"
 $verbose && echo "Verbose: stderr (crash logs) will be shown"
 [[ $run_timeout -gt 0 ]] && echo "Tish run timeout: ${run_timeout}s (use --timeout 0 to disable)"
 echo ""
 echo "Runtimes to test:"
-want_runtime run && echo "  run (tish interpreter)"
+want_runtime vm && echo "  vm (tish run --backend vm)"
+want_runtime interp && echo "  interp (tish run --backend interp)"
 want_runtime rust && echo "  rust (tish native)"
 want_runtime cranelift && echo "  cranelift (tish JIT)"
 want_runtime llvm && echo "  llvm (tish native via clang)"
@@ -352,7 +358,8 @@ for f in "$perf_dir"/*.js; do
   # Timing (multiple runs to reduce noise; report average)
   #n=50
   n=5
-  tish_run_times=()
+  tish_vm_times=()
+  tish_interp_times=()
   tish_native_times=()
   tish_cranelift_times=()
   tish_llvm_times=()
@@ -363,7 +370,8 @@ for f in "$perf_dir"/*.js; do
   qjs_times=()
 
   # Warmup runs (discard - warms disk cache and JIT; use timeout to avoid hangs)
-  want_runtime run && run_with_timeout $tish_bin run "$tish_file" >/dev/null 2>&1 || true
+  want_runtime vm && run_with_timeout $tish_bin run "$tish_file" --backend vm >/dev/null 2>&1 || true
+  want_runtime interp && run_with_timeout $tish_bin run "$tish_file" --backend interp >/dev/null 2>&1 || true
   want_runtime rust && [[ -x "$native_bin" ]] && run_with_timeout "$native_bin" >/dev/null 2>&1 || true
   want_runtime cranelift && [[ -x "$cranelift_bin" ]] && run_with_timeout "$cranelift_bin" >/dev/null 2>&1 || true
   want_runtime llvm && [[ -x "$llvm_bin" ]] && run_with_timeout "$llvm_bin" >/dev/null 2>&1 || true
@@ -373,13 +381,23 @@ for f in "$perf_dir"/*.js; do
   want_runtime deno && $has_deno && "$deno_cmd" run --allow-all "$f" >/dev/null 2>&1 || true
   want_runtime qjs && $has_qjs && "$qjs_cmd" "$f" >/dev/null 2>&1 || true
 
-  # Tish interpreter (run) - use timeout to avoid hangs on intensive tests
-  if want_runtime run; then
+  # Tish VM (run --backend vm)
+  if want_runtime vm; then
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
-      run_with_timeout $tish_bin run "$tish_file" >/dev/null 2>&1 || true
+      run_with_timeout $tish_bin run "$tish_file" --backend vm >/dev/null 2>&1 || true
       t1=$(ms)
-      tish_run_times+=($((t1 - t0)))
+      tish_vm_times+=($((t1 - t0)))
+    done
+  fi
+
+  # Tish interpreter (run --backend interp)
+  if want_runtime interp; then
+    for _ in $(seq 1 "$n"); do
+      t0=$(ms)
+      run_with_timeout $tish_bin run "$tish_file" --backend interp >/dev/null 2>&1 || true
+      t1=$(ms)
+      tish_interp_times+=($((t1 - t0)))
     done
   fi
 
@@ -472,7 +490,8 @@ for f in "$perf_dir"/*.js; do
   fi
 
   # Calculate averages
-  tish_run_sum=0
+  tish_vm_sum=0
+  tish_interp_sum=0
   tish_native_sum=0
   tish_cranelift_sum=0
   tish_llvm_sum=0
@@ -482,14 +501,16 @@ for f in "$perf_dir"/*.js; do
   deno_sum=0
   qjs_sum=0
 
-  for t in "${tish_run_times[@]}"; do tish_run_sum=$((tish_run_sum + t)); done
+  for t in "${tish_vm_times[@]}"; do tish_vm_sum=$((tish_vm_sum + t)); done
+  for t in "${tish_interp_times[@]}"; do tish_interp_sum=$((tish_interp_sum + t)); done
   for t in "${tish_native_times[@]}"; do tish_native_sum=$((tish_native_sum + t)); done
   for t in "${tish_cranelift_times[@]}"; do tish_cranelift_sum=$((tish_cranelift_sum + t)); done
   for t in "${tish_llvm_times[@]}"; do tish_llvm_sum=$((tish_llvm_sum + t)); done
   for t in "${tish_wasi_times[@]}"; do tish_wasi_sum=$((tish_wasi_sum + t)); done
   for t in "${node_times[@]}"; do node_sum=$((node_sum + t)); done
 
-  tish_run_avg=$((tish_run_sum / n))
+  tish_vm_avg=$((tish_vm_sum / n))
+  tish_interp_avg=$((tish_interp_sum / n))
   tish_native_avg=0
   tish_cranelift_avg=0
   tish_llvm_avg=0
@@ -520,12 +541,13 @@ for f in "$perf_dir"/*.js; do
   fi
 
   if [[ $node_avg -gt 0 ]]; then
-    ratio=$((tish_run_avg * 100 / node_avg))
+    ratio=$((tish_vm_avg * 100 / node_avg))
   fi
 
   # Store results for summary
   summary_names+=("$base")
-  summary_tish_run+=("$tish_run_avg")
+  summary_tish_vm+=("$tish_vm_avg")
+  summary_tish_interp+=("$tish_interp_avg")
   summary_tish_native+=("$tish_native_avg")
   summary_tish_cranelift+=("$tish_cranelift_avg")
   summary_tish_llvm+=("$tish_llvm_avg")
@@ -538,7 +560,8 @@ for f in "$perf_dir"/*.js; do
 
   if ! $summary_only; then
     echo "Time (${n} runs avg):"
-    want_runtime run && echo "  Tish (run):       ${tish_run_avg}ms"
+    want_runtime vm && echo "  Tish (vm):        ${tish_vm_avg}ms"
+    want_runtime interp && echo "  Tish (interp):    ${tish_interp_avg}ms"
     want_runtime rust && $compile_ok && echo "  Tish (rust):      ${tish_native_avg}ms"
     want_runtime cranelift && $cranelift_ok && echo "  Tish (cranelift): ${tish_cranelift_avg}ms"
     want_runtime llvm && $llvm_ok && echo "  Tish (llvm):      ${tish_llvm_avg}ms"
@@ -547,18 +570,18 @@ for f in "$perf_dir"/*.js; do
     want_runtime bun && $has_bun && echo "  Bun:             ${bun_avg}ms"
     want_runtime deno && $has_deno && echo "  Deno:            ${deno_avg}ms"
     want_runtime qjs && $has_qjs && echo "  QuickJS:         ${qjs_avg}ms"
-    want_runtime node && echo "  Tish(run)/Node ratio: ${ratio}%"
+    want_runtime node && want_runtime vm && echo "  Tish(vm)/Node ratio: ${ratio}%"
     echo ""
   else
-    echo " done (run: ${tish_run_avg}ms rust: ${tish_native_avg}ms cranelift: ${tish_cranelift_avg}ms llvm: ${tish_llvm_avg}ms wasi: ${tish_wasi_avg}ms ratio: ${ratio}%)"
+    echo " done (vm: ${tish_vm_avg}ms interp: ${tish_interp_avg}ms rust: ${tish_native_avg}ms cranelift: ${tish_cranelift_avg}ms llvm: ${tish_llvm_avg}ms wasi: ${tish_wasi_avg}ms ratio: ${ratio}%)"
   fi
 done
 
-# Print summary sorted by Tish(run)/Node ratio (highest/slowest first)
+# Print summary sorted by Tish(vm)/Node ratio (highest/slowest first)
 echo ""
 echo "════════════════════════════════════════════════════════════════════════════════════════════════════════════════"
 echo "                                           PERFORMANCE SUMMARY"
-echo "                                    (sorted by Tish(run)/Node ratio, slowest first)"
+echo "                                    (sorted by Tish(vm)/Node ratio, slowest first)"
 echo "════════════════════════════════════════════════════════════════════════════════════════════════════════════════"
 echo ""
 
@@ -574,7 +597,8 @@ header="%-20s"
 header_args=("Test")
 divider="────────────────────"
 div_args=()
-want_runtime run && { header="$header %8s"; header_args+=("run"); div_args+=("──────"); }
+want_runtime vm && { header="$header %8s"; header_args+=("vm"); div_args+=("──────"); }
+want_runtime interp && { header="$header %8s"; header_args+=("interp"); div_args+=("──────"); }
 want_runtime rust && { header="$header %8s"; header_args+=("rust"); div_args+=("──────"); }
 want_runtime cranelift && { header="$header %8s"; header_args+=("cranelift"); div_args+=("──────"); }
 want_runtime llvm && { header="$header %8s"; header_args+=("llvm"); div_args+=("──────"); }
@@ -583,7 +607,7 @@ want_runtime node && { header="$header %8s"; header_args+=("Node"); div_args+=("
 want_runtime bun && $has_bun && { header="$header %8s"; header_args+=("Bun"); div_args+=("──────"); }
 want_runtime deno && $has_deno && { header="$header %8s"; header_args+=("Deno"); div_args+=("──────"); }
 want_runtime qjs && $has_qjs && { header="$header %8s"; header_args+=("QuickJS"); div_args+=("──────"); }
-want_runtime run && want_runtime node && { header="$header %10s"; header_args+=("run/Node%"); div_args+=("──────────"); }
+want_runtime vm && want_runtime node && { header="$header %10s"; header_args+=("vm/Node%"); div_args+=("──────────"); }
 header="$header\n"
 
 printf "$header" "${header_args[@]}"
@@ -592,7 +616,8 @@ for d in "${div_args[@]}"; do printf " %8s" "$d"; done
 printf "\n"
 
 # Print sorted results
-total_tish_run=0
+total_tish_vm=0
+total_tish_interp=0
 total_tish_native=0
 total_tish_cranelift=0
 total_tish_llvm=0
@@ -605,7 +630,8 @@ total_qjs=0
 for entry in "${sorted_indices[@]}"; do
   idx="${entry#*:}"
   name="${summary_names[$idx]}"
-  tish_run="${summary_tish_run[$idx]}"
+  tish_vm="${summary_tish_vm[$idx]}"
+  tish_interp="${summary_tish_interp[$idx]}"
   tish_native="${summary_tish_native[$idx]}"
   tish_cranelift="${summary_tish_cranelift[$idx]}"
   tish_llvm="${summary_tish_llvm[$idx]}"
@@ -616,7 +642,8 @@ for entry in "${sorted_indices[@]}"; do
   qjs="${summary_qjs[$idx]}"
   ratio="${summary_ratio[$idx]}"
 
-  total_tish_run=$((total_tish_run + tish_run))
+  total_tish_vm=$((total_tish_vm + tish_vm))
+  total_tish_interp=$((total_tish_interp + tish_interp))
   total_tish_native=$((total_tish_native + tish_native))
   total_tish_cranelift=$((total_tish_cranelift + tish_cranelift))
   total_tish_llvm=$((total_tish_llvm + tish_llvm))
@@ -653,7 +680,8 @@ for entry in "${sorted_indices[@]}"; do
   # Build row dynamically (same order as header)
   row="%-20s"
   row_args=("$name")
-  want_runtime run && { row="$row %8d"; row_args+=("$tish_run"); }
+  want_runtime vm && { row="$row %8d"; row_args+=("$tish_vm"); }
+  want_runtime interp && { row="$row %8d"; row_args+=("$tish_interp"); }
   want_runtime rust && { row="$row %8s"; row_args+=("$native_display"); }
   want_runtime cranelift && { row="$row %8s"; row_args+=("$cranelift_display"); }
   want_runtime llvm && { row="$row %8s"; row_args+=("$llvm_display"); }
@@ -662,7 +690,7 @@ for entry in "${sorted_indices[@]}"; do
   want_runtime bun && $has_bun && { row="$row %8d"; row_args+=("$bun"); }
   want_runtime deno && $has_deno && { row="$row %8d"; row_args+=("$deno"); }
   want_runtime qjs && $has_qjs && { row="$row %8d"; row_args+=("$qjs"); }
-  want_runtime run && want_runtime node && { row="$row %9d%%"; row_args+=("$ratio"); }
+  want_runtime vm && want_runtime node && { row="$row %9d%%"; row_args+=("$ratio"); }
   row="$row\n"
 
   printf "${color}${row}${reset}" "${row_args[@]}"
@@ -675,7 +703,7 @@ for d in "${div_args[@]}"; do printf " %8s" "$d"; done
 printf "\n"
 
 if [[ $total_node -gt 0 ]]; then
-  total_ratio=$((total_tish_run * 100 / total_node))
+  total_ratio=$((total_tish_vm * 100 / total_node))
 else
   total_ratio=0
 fi
@@ -691,7 +719,8 @@ wasi_total_display="$total_tish_wasi"
 
 row="%-20s"
 row_args=("TOTAL")
-want_runtime run && { row="$row %8d"; row_args+=("$total_tish_run"); }
+want_runtime vm && { row="$row %8d"; row_args+=("$total_tish_vm"); }
+want_runtime interp && { row="$row %8d"; row_args+=("$total_tish_interp"); }
 want_runtime rust && { row="$row %8s"; row_args+=("$native_total_display"); }
 want_runtime cranelift && { row="$row %8s"; row_args+=("$cranelift_total_display"); }
 want_runtime llvm && { row="$row %8s"; row_args+=("$llvm_total_display"); }
@@ -700,14 +729,14 @@ want_runtime node && { row="$row %8d"; row_args+=("$total_node"); }
 want_runtime bun && $has_bun && { row="$row %8d"; row_args+=("$total_bun"); }
 want_runtime deno && $has_deno && { row="$row %8d"; row_args+=("$total_deno"); }
 want_runtime qjs && $has_qjs && { row="$row %8d"; row_args+=("$total_qjs"); }
-want_runtime run && want_runtime node && { row="$row %9d%%"; row_args+=("$total_ratio"); }
+want_runtime vm && want_runtime node && { row="$row %9d%%"; row_args+=("$total_ratio"); }
 row="$row\n"
 
 printf "$row" "${row_args[@]}"
 
 echo ""
 echo "Legend: Green = <150% | Yellow = 200-500% | Red = >500%"
-echo "        run=interpreter | rust=native(rust) | cranelift=native(cranelift) | llvm=native(llvm) | wasi=wasmtime"
+echo "        vm=tish run --backend vm | interp=tish run --backend interp | rust=native(rust) | cranelift=native(cranelift) | llvm=native(llvm) | wasi=wasmtime"
 echo ""
 echo "─────────────────────────────────────────"
 echo "Done."

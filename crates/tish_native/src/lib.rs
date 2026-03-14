@@ -40,6 +40,7 @@ pub fn compile_to_native(
     output_path: &Path,
     features: &[String],
     native_backend: &str,
+    optimize: bool,
 ) -> Result<(), NativeError> {
     let backend = match native_backend {
         "rust" => Backend::Rust,
@@ -61,6 +62,7 @@ pub fn compile_to_native(
                 entry_path,
                 project_root,
                 features,
+                optimize,
             )
             .map_err(|e| NativeError {
                 message: e.to_string(),
@@ -77,9 +79,16 @@ pub fn compile_to_native(
             tish_compile::detect_cycles(&modules).map_err(|e| NativeError {
                 message: e.to_string(),
             })?;
-            let program = tish_opt::optimize(&tish_compile::merge_modules(modules).map_err(|e| NativeError {
-                message: e.to_string(),
-            })?);
+            let program = {
+                let prog = tish_compile::merge_modules(modules).map_err(|e| NativeError {
+                    message: e.to_string(),
+                })?;
+                if optimize {
+                    tish_opt::optimize(&prog)
+                } else {
+                    prog
+                }
+            };
 
             if tish_compile::has_native_imports(&program) {
                 return Err(NativeError {
@@ -87,9 +96,15 @@ pub fn compile_to_native(
                 });
             }
 
-            let chunk = tish_bytecode::compile(&program).map_err(|e| NativeError {
-                message: e.to_string(),
-            })?;
+            let chunk = if optimize {
+                tish_bytecode::compile(&program).map_err(|e| NativeError {
+                    message: e.to_string(),
+                })?
+            } else {
+                tish_bytecode::compile_unoptimized(&program).map_err(|e| NativeError {
+                    message: e.to_string(),
+                })?
+            };
 
             tish_cranelift::compile_chunk_to_native(&chunk, output_path).map_err(|e| NativeError {
                 message: e.to_string(),
@@ -99,15 +114,30 @@ pub fn compile_to_native(
             let modules = tish_compile::resolve_project(entry_path, project_root)
                 .map_err(|e| NativeError { message: e.to_string() })?;
             tish_compile::detect_cycles(&modules).map_err(|e| NativeError { message: e.to_string() })?;
-            let program = tish_opt::optimize(&tish_compile::merge_modules(modules).map_err(|e| NativeError { message: e.to_string() })?);
+            let program = {
+                let prog = tish_compile::merge_modules(modules).map_err(|e| NativeError {
+                    message: e.to_string(),
+                })?;
+                if optimize {
+                    tish_opt::optimize(&prog)
+                } else {
+                    prog
+                }
+            };
             if tish_compile::has_native_imports(&program) {
                 return Err(NativeError {
                     message: "LLVM backend does not support native imports.".to_string(),
                 });
             }
-            let chunk = tish_bytecode::compile(&program).map_err(|e| NativeError {
-                message: e.to_string(),
-            })?;
+            let chunk = if optimize {
+                tish_bytecode::compile(&program).map_err(|e| NativeError {
+                    message: e.to_string(),
+                })?
+            } else {
+                tish_bytecode::compile_unoptimized(&program).map_err(|e| NativeError {
+                    message: e.to_string(),
+                })?
+            };
             tish_llvm::compile_chunk_to_native(&chunk, output_path)
                 .map_err(|e| NativeError { message: e.message })
         }
@@ -121,6 +151,7 @@ pub fn compile_program_to_native(
     output_path: &Path,
     features: &[String],
     native_backend: &str,
+    optimize: bool,
 ) -> Result<(), NativeError> {
     let backend = match native_backend {
         "rust" => Backend::Rust,
@@ -138,7 +169,7 @@ pub fn compile_program_to_native(
 
     match backend {
         Backend::Rust => {
-            let program = tish_opt::optimize(program);
+            let program = if optimize { tish_opt::optimize(program) } else { program.clone() };
             let root = project_root.unwrap_or_else(|| Path::new("."));
             let native_modules = tish_compile::resolve_native_modules(&program, root)
                 .map_err(|e| NativeError { message: e })?;
@@ -153,6 +184,7 @@ pub fn compile_program_to_native(
                 project_root,
                 &all_features,
                 &native_modules,
+                optimize,
             )
             .map_err(|e| NativeError {
                 message: e.message,
@@ -166,9 +198,12 @@ pub fn compile_program_to_native(
                     message: "Cranelift backend does not support native imports.".to_string(),
                 });
             }
-            let program = tish_opt::optimize(program);
-            let chunk =
-                tish_bytecode::compile(&program).map_err(|e| NativeError { message: e.to_string() })?;
+            let program = if optimize { tish_opt::optimize(program) } else { program.clone() };
+            let chunk = if optimize {
+                tish_bytecode::compile(&program).map_err(|e| NativeError { message: e.to_string() })?
+            } else {
+                tish_bytecode::compile_unoptimized(&program).map_err(|e| NativeError { message: e.to_string() })?
+            };
             tish_cranelift::compile_chunk_to_native(&chunk, output_path)
                 .map_err(|e| NativeError { message: e.to_string() })
         }
@@ -178,9 +213,12 @@ pub fn compile_program_to_native(
                     message: "LLVM backend does not support native imports.".to_string(),
                 });
             }
-            let program = tish_opt::optimize(program);
-            let chunk =
-                tish_bytecode::compile(&program).map_err(|e| NativeError { message: e.to_string() })?;
+            let program = if optimize { tish_opt::optimize(program) } else { program.clone() };
+            let chunk = if optimize {
+                tish_bytecode::compile(&program).map_err(|e| NativeError { message: e.to_string() })?
+            } else {
+                tish_bytecode::compile_unoptimized(&program).map_err(|e| NativeError { message: e.to_string() })?
+            };
             tish_llvm::compile_chunk_to_native(&chunk, output_path)
                 .map_err(|e| NativeError { message: e.message })
         }

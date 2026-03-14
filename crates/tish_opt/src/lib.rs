@@ -13,7 +13,7 @@ pub fn optimize(program: &Program) -> Program {
         statements: program
             .statements
             .iter()
-            .map(|s| optimize_statement(s))
+            .map(optimize_statement)
             .collect(),
     }
 }
@@ -37,7 +37,7 @@ fn optimize_statement(stmt: &Statement) -> Statement {
             name: Arc::clone(name),
             mutable: *mutable,
             type_ann: type_ann.clone(),
-            init: init.as_ref().map(|e| optimize_expr(e)),
+            init: init.as_ref().map(optimize_expr),
             span: *span,
         },
         Statement::VarDeclDestructure {
@@ -96,8 +96,8 @@ fn optimize_statement(stmt: &Statement) -> Statement {
             span,
         } => Statement::For {
             init: init.as_ref().map(|i| Box::new(optimize_statement(i))),
-            cond: cond.as_ref().map(|c| optimize_expr(c)),
-            update: update.as_ref().map(|u| optimize_expr(u)),
+            cond: cond.as_ref().map(optimize_expr),
+            update: update.as_ref().map(optimize_expr),
             body: Box::new(optimize_statement(body)),
             span: *span,
         },
@@ -113,7 +113,7 @@ fn optimize_statement(stmt: &Statement) -> Statement {
             span: *span,
         },
         Statement::Return { value, span } => Statement::Return {
-            value: value.as_ref().map(|e| optimize_expr(e)),
+            value: value.as_ref().map(optimize_expr),
             span: *span,
         },
         Statement::Break { span } => Statement::Break { span: *span },
@@ -146,7 +146,7 @@ fn optimize_statement(stmt: &Statement) -> Statement {
                 .iter()
                 .map(|(ce, stmts)| {
                     (
-                        ce.as_ref().map(|e| optimize_expr(e)),
+                        ce.as_ref().map(optimize_expr),
                         optimize_block(stmts),
                     )
                 })
@@ -203,24 +203,21 @@ fn stmt_always_returns_or_throws(stmt: &Statement) -> bool {
     match stmt {
         Statement::Return { .. } | Statement::Throw { .. } => true,
         Statement::If {
-            cond,
+            cond: Expr::Literal { value, .. },
             then_branch,
             else_branch,
             ..
         } => {
-            if let Expr::Literal { value, .. } = cond {
-                let truthy = literal_is_truthy(value);
-                if truthy {
-                    stmt_always_returns_or_throws(then_branch)
-                } else if let Some(else_b) = else_branch {
-                    stmt_always_returns_or_throws(else_b)
-                } else {
-                    false
-                }
+            let truthy = literal_is_truthy(value);
+            if truthy {
+                stmt_always_returns_or_throws(then_branch)
+            } else if let Some(else_b) = else_branch {
+                stmt_always_returns_or_throws(else_b)
             } else {
                 false
             }
         }
+        Statement::If { .. } => false,
         _ => false,
     }
 }
@@ -377,11 +374,20 @@ fn optimize_expr(expr: &Expr) -> Expr {
             left,
             right,
             span,
-        } => Expr::NullishCoalesce {
-            left: Box::new(optimize_expr(left)),
-            right: Box::new(optimize_expr(right)),
-            span: *span,
-        },
+        } => {
+            let opt_left = optimize_expr(left);
+            if let Expr::Literal {
+                value: Literal::Null, ..
+            } = &opt_left
+            {
+                return optimize_expr(right);
+            }
+            Expr::NullishCoalesce {
+                left: Box::new(opt_left),
+                right: Box::new(optimize_expr(right)),
+                span: *span,
+            }
+        }
         Expr::Array { elements, span } => Expr::Array {
             elements: elements
                 .iter()
@@ -635,6 +641,35 @@ fn try_algebraic_simplify(
                 }
             }
         }
+        Pow => {
+            if let Expr::Literal {
+                value: Literal::Number(r),
+                ..
+            } = right
+            {
+                if num_is_one(*r) {
+                    return Some(left.clone());
+                }
+                if num_is_zero(*r) {
+                    return Some(Expr::Literal {
+                        value: Literal::Number(1.0),
+                        span,
+                    });
+                }
+            }
+            if let Expr::Literal {
+                value: Literal::Number(l),
+                ..
+            } = left
+            {
+                if num_is_one(*l) {
+                    return Some(Expr::Literal {
+                        value: Literal::Number(1.0),
+                        span,
+                    });
+                }
+            }
+        }
         _ => {}
     }
     None
@@ -791,6 +826,58 @@ mod tests {
         assert!(
             matches!(expr, Expr::Ident { name, .. } if name.as_ref() == "x"),
             "expected Ident(x) after x*(1+0) → x*1 → x, got {:?}",
+            expr
+        );
+    }
+
+    #[test]
+    fn algebraic_simplify_pow_one() {
+        let program = program_from_source("x ** 1");
+        let opt = optimize(&program);
+        let expr = match &opt.statements[..] {
+            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            _ => panic!("expected single expr stmt"),
+        };
+        assert!(
+            matches!(expr, Expr::Ident { name, .. } if name.as_ref() == "x"),
+            "expected Ident(x), got {:?}",
+            expr
+        );
+    }
+
+    #[test]
+    fn algebraic_simplify_pow_zero() {
+        let program = program_from_source("x ** 0");
+        let opt = optimize(&program);
+        let expr = match &opt.statements[..] {
+            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            _ => panic!("expected single expr stmt"),
+        };
+        assert!(has_literal_number(expr, 1.0), "expected 1, got {:?}", expr);
+    }
+
+    #[test]
+    fn algebraic_simplify_one_pow_x() {
+        let program = program_from_source("1 ** x");
+        let opt = optimize(&program);
+        let expr = match &opt.statements[..] {
+            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            _ => panic!("expected single expr stmt"),
+        };
+        assert!(has_literal_number(expr, 1.0), "expected 1, got {:?}", expr);
+    }
+
+    #[test]
+    fn nullish_coalesce_null_simplify() {
+        let program = program_from_source("null ?? x");
+        let opt = optimize(&program);
+        let expr = match &opt.statements[..] {
+            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            _ => panic!("expected single expr stmt"),
+        };
+        assert!(
+            matches!(expr, Expr::Ident { name, .. } if name.as_ref() == "x"),
+            "expected Ident(x), got {:?}",
             expr
         );
     }

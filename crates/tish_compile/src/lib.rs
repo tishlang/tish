@@ -61,7 +61,7 @@ for (let i = 0; i < 5; i = i + 1) {
             .into_iter()
             .map(String::from)
             .collect::<Vec<_>>();
-        let (rust, _) = compile_project_full(&bench, bench.parent(), &features).unwrap();
+        let (rust, _) = compile_project_full(&bench, bench.parent(), &features, true).unwrap();
         assert!(
             rust.contains("(outerVar).clone()"),
             "expected outerVar to be cloned in benchmark_granular loop"
