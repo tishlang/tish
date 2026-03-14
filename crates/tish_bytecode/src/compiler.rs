@@ -11,6 +11,24 @@ use tish_ast::{
 use crate::chunk::{Chunk, Constant};
 use crate::opcode::Opcode;
 
+enum SimpleMapResult {
+    Identity,
+    BinOp(BinOp, Constant, bool), // op, constant, param_on_left
+}
+
+fn literal_to_constant(expr: &Expr) -> Option<Constant> {
+    if let Expr::Literal { value, .. } = expr {
+        Some(match value {
+            Literal::Number(n) => Constant::Number(*n),
+            Literal::String(s) => Constant::String(Arc::clone(s)),
+            Literal::Bool(b) => Constant::Bool(*b),
+            Literal::Null => Constant::Null,
+        })
+    } else {
+        None
+    }
+}
+
 #[derive(Debug)]
 pub struct CompileError {
     pub message: String,
@@ -172,6 +190,101 @@ impl<'a> Compiler<'a> {
                     if left_name.as_ref() == param_b && right_name.as_ref() == param_a {
                         return Some(false);
                     }
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect simple map callback: x => x (identity) or x => x op const / x => const op x.
+    /// Returns SimpleMapResult for map optimization.
+    fn detect_simple_map_callback(expr: &Expr) -> Option<SimpleMapResult> {
+        let (params, body) = match expr {
+            Expr::ArrowFunction { params, body, .. } => (params, body),
+            _ => return None,
+        };
+        if params.len() != 1 {
+            return None;
+        }
+        let param_name = params[0].name.as_ref();
+        let expr_ref: &Expr = match body {
+            ArrowBody::Expr(e) => e.as_ref(),
+            ArrowBody::Block(stmt) => {
+                let s = stmt.as_ref();
+                if let Statement::Return { value: Some(ref e), .. } = s {
+                    e
+                } else if let Statement::ExprStmt { expr: ref e, .. } = s {
+                    e
+                } else {
+                    return None;
+                }
+            }
+        };
+        // Identity: x => x
+        if let Expr::Ident { name, .. } = expr_ref {
+            if name.as_ref() == param_name {
+                return Some(SimpleMapResult::Identity);
+            }
+        }
+        // Binary: x op const or const op x
+        if let Expr::Binary { left, op, right, .. } = expr_ref {
+            let left_is_param = matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
+            let right_is_param = matches!(right.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
+            let left_is_literal = matches!(left.as_ref(), Expr::Literal { .. });
+            let right_is_literal = matches!(right.as_ref(), Expr::Literal { .. });
+            if left_is_param && right_is_literal {
+                if let Some(c) = literal_to_constant(right.as_ref()) {
+                    return Some(SimpleMapResult::BinOp(*op, c, true));
+                }
+            }
+            if left_is_literal && right_is_param {
+                if let Some(c) = literal_to_constant(left.as_ref()) {
+                    return Some(SimpleMapResult::BinOp(*op, c, false));
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect simple filter callback: x => x op const or x => const op x (comparison that returns bool).
+    fn detect_simple_filter_callback(expr: &Expr) -> Option<(BinOp, Constant, bool)> {
+        let (params, body) = match expr {
+            Expr::ArrowFunction { params, body, .. } => (params, body),
+            _ => return None,
+        };
+        if params.len() != 1 {
+            return None;
+        }
+        let param_name = params[0].name.as_ref();
+        let expr_ref: &Expr = match body {
+            ArrowBody::Expr(e) => e.as_ref(),
+            ArrowBody::Block(stmt) => {
+                let s = stmt.as_ref();
+                if let Statement::Return { value: Some(ref e), .. } = s {
+                    e
+                } else if let Statement::ExprStmt { expr: ref e, .. } = s {
+                    e
+                } else {
+                    return None;
+                }
+            }
+        };
+        if let Expr::Binary { left, op, right, .. } = expr_ref {
+            if !matches!(op, BinOp::Eq | BinOp::Ne | BinOp::StrictEq | BinOp::StrictNe | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or) {
+                return None;
+            }
+            let left_is_param = matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
+            let right_is_param = matches!(right.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
+            let left_is_literal = matches!(left.as_ref(), Expr::Literal { .. });
+            let right_is_literal = matches!(right.as_ref(), Expr::Literal { .. });
+            if left_is_param && right_is_literal {
+                if let Some(c) = literal_to_constant(right.as_ref()) {
+                    return Some((*op, c, true));
+                }
+            }
+            if left_is_literal && right_is_param {
+                if let Some(c) = literal_to_constant(left.as_ref()) {
+                    return Some((*op, c, false));
                 }
             }
         }
@@ -665,6 +778,37 @@ impl<'a> Compiler<'a> {
                                 self.emit(Opcode::ArraySortByProperty);
                                 self.chunk.write_u16(prop_idx);
                                 self.chunk.write_u16(if ascending { 0 } else { 1 });
+                                return Ok(());
+                            }
+                        }
+                        if key.as_ref() == "map" {
+                            if let Some(simple) = Self::detect_simple_map_callback(cmp_expr) {
+                                self.compile_expr(object)?;
+                                match simple {
+                                    SimpleMapResult::Identity => {
+                                        self.emit(Opcode::ArrayMapIdentity);
+                                    }
+                                    SimpleMapResult::BinOp(op, c, param_left) => {
+                                        let const_idx = self.constant_idx(c);
+                                        self.emit(Opcode::ArrayMapBinOp);
+                                        self.chunk.write_u8(binop_to_u8(op));
+                                        self.chunk.write_u16(const_idx);
+                                        self.chunk.write_u8(if param_left { 0 } else { 1 });
+                                    }
+                                }
+                                return Ok(());
+                            }
+                        }
+                        if key.as_ref() == "filter" {
+                            if let Some((op, const_val, param_left)) =
+                                Self::detect_simple_filter_callback(cmp_expr)
+                            {
+                                self.compile_expr(object)?;
+                                let const_idx = self.constant_idx(const_val);
+                                self.emit(Opcode::ArrayFilterBinOp);
+                                self.chunk.write_u8(binop_to_u8(op));
+                                self.chunk.write_u16(const_idx);
+                                self.chunk.write_u8(if param_left { 0 } else { 1 });
                                 return Ok(());
                             }
                         }

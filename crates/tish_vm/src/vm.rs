@@ -760,6 +760,81 @@ impl Vm {
                     let result = arr_builtins::sort_by_property_numeric(&arr, prop, asc);
                     self.stack.push(result);
                 }
+                Opcode::ArrayMapIdentity => {
+                    let arr = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let result = match &arr {
+                        Value::Array(a) => {
+                            Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                        }
+                        _ => Value::Null,
+                    };
+                    self.stack.push(result);
+                }
+                Opcode::ArrayMapBinOp => {
+                    let binop = code[ip];
+                    ip += 1;
+                    let const_idx = Self::read_u16(code, &mut ip);
+                    let param_left = code[ip] == 0; // 0 = param on left (x op const), 1 = param on right (const op x)
+                    ip += 1;
+                    let arr = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let const_val = constants
+                        .get(const_idx as usize)
+                        .map(|c| c.to_value())
+                        .unwrap_or(Value::Null);
+                    let result = if let Value::Array(a) = &arr {
+                        let arr_borrow = a.borrow();
+                        let mapped: Vec<Value> = arr_borrow
+                            .iter()
+                            .map(|v| {
+                                let l: Value = if param_left { (*v).clone() } else { const_val.clone() };
+                                let r: Value = if param_left { const_val.clone() } else { (*v).clone() };
+                                eval_binop(binop, &l, &r).unwrap_or(Value::Null)
+                            })
+                            .collect();
+                        Value::Array(Rc::new(RefCell::new(mapped)))
+                    } else {
+                        Value::Null
+                    };
+                    self.stack.push(result);
+                }
+                Opcode::ArrayFilterBinOp => {
+                    let binop = code[ip];
+                    ip += 1;
+                    let const_idx = Self::read_u16(code, &mut ip);
+                    let param_left = code[ip] == 0; // 0 = param on left (x op const), 1 = param on right (const op x)
+                    ip += 1;
+                    let arr = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let const_val = constants
+                        .get(const_idx as usize)
+                        .map(|c| c.to_value())
+                        .unwrap_or(Value::Null);
+                    let result = if let Value::Array(a) = &arr {
+                        let arr_borrow = a.borrow();
+                        let filtered: Vec<Value> = arr_borrow
+                            .iter()
+                            .filter(|v| {
+                                let l: Value = if param_left { (*v).clone() } else { const_val.clone() };
+                                let r: Value = if param_left { const_val.clone() } else { (*v).clone() };
+                                let b = eval_binop(binop, &l, &r).unwrap_or(Value::Null);
+                                b.is_truthy()
+                            })
+                            .cloned()
+                            .collect();
+                        Value::Array(Rc::new(RefCell::new(filtered)))
+                    } else {
+                        Value::Null
+                    };
+                    self.stack.push(result);
+                }
                 Opcode::Throw => {
                     let v = self
                         .stack

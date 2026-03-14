@@ -72,6 +72,12 @@ pub enum Opcode {
     /// Pop array, sort by numeric property (operands: u16 prop_name_const_idx, u16 0=asc/1=desc).
     /// Fast path for arr.sort((a,b)=>a.prop-b.prop).
     ArraySortByProperty = 32,
+    /// arr.map(x => x) - identity, returns array clone.
+    ArrayMapIdentity = 33,
+    /// arr.map(x => x op const) or arr.map(x => const op x). Operands: u8 binop, u16 const_idx, u8 param_left (0=param on left e.g. x*2, 1=param on right e.g. 2*x).
+    ArrayMapBinOp = 34,
+    /// arr.filter(x => x op const) or arr.filter(x => const op x). Operands: u8 binop, u16 const_idx, u8 param_left. Keeps elements where result is truthy.
+    ArrayFilterBinOp = 35,
 }
 
 impl Opcode {
@@ -110,6 +116,9 @@ impl Opcode {
             30 => Some(Opcode::GetMemberOptional),
             31 => Some(Opcode::ArraySortNumeric),
             32 => Some(Opcode::ArraySortByProperty),
+            33 => Some(Opcode::ArrayMapIdentity),
+            34 => Some(Opcode::ArrayMapBinOp),
+            35 => Some(Opcode::ArrayFilterBinOp),
             _ => None,
         }
     }

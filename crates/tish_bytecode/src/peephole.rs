@@ -29,8 +29,10 @@ fn instruction_size(code: &[u8], ip: usize) -> Option<usize> {
     let op = code[ip];
     let opcode = Opcode::from_u8(op)?;
     let size = match opcode {
-        Opcode::Nop | Opcode::Pop | Opcode::Dup | Opcode::Return | Opcode::ExitTry => 1,
+        Opcode::Nop | Opcode::Pop | Opcode::Dup | Opcode::Return | Opcode::ExitTry
+        | Opcode::ArrayMapIdentity => 1,
         Opcode::ArraySortByProperty => 5,
+        Opcode::ArrayMapBinOp | Opcode::ArrayFilterBinOp => 5,
         _ => 3,
     };
     if ip + size > code.len() {

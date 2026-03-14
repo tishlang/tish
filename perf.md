@@ -394,6 +394,25 @@ Legend: Green = <150% | Yellow = 200-500% | Red = >500%
 
 
 
+Test                       vm   interp     rust cranelift     llvm     wasi     Node      Bun     Deno  QuickJS   vm/Node%
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+array_stress             1407      499       26      189      177      551       42       24       37       67      3350%
+array_methods_perf         19       17        9       10        9       20       29       14       24        9        65%
+array_methods              10       10        9        9        9       16       29       14       25        8        34%
+arrays                      9        9        8        9        9       16       30       14       25        7        30%
+
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+TOTAL                    1445      535       52      217      204      603      130       66      111       91      1111%
+
+
+--release
+Test                       vm   interp     rust cranelift     llvm     wasi     Node      Bun     Deno  QuickJS   vm/Node%
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+array_stress              169       69       26      195      187      552       41       23       37       67       412%
+array_methods_perf         10       11        9       10        9       20       29       13       24        9        34%
+array_methods               9        9        8        9        9       16       29       13       24        7        31%
+arrays                      9       10        9        9        9       15       30       13       24        7        30%
+
 
 ./scripts/run_object_stress_profile.sh; \
 ./scripts/run_benchmark_granular_profile.sh; \
