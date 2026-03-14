@@ -15,6 +15,8 @@ echo ""
 
 for f in "$core_dir"/*.tish; do
   [[ -f "$f" ]] || continue
+  # Skip full array_stress (slow); use array_stress_01..10 for section profiling
+  [[ "$(basename "$f")" == "array_stress.tish" ]] && continue
   name=$(basename "$f")
   echo "─────────────────────────────────────────"
   echo "▶ $name (interpreter)"

@@ -1,0 +1,23 @@
+// Isolated: Splice/Slice (reduced iters)
+console.log("--- array_stress_07: Splice/Slice ---");
+let arr100 = [];
+for (let i = 0; i < 100; i++) { arr100.push(i); }
+
+let start = Date.now();
+for (let i = 0; i < 10; i++) {
+    let copy = [...arr100];
+    copy.splice(50, 0, 999);
+}
+console.log("splice insert x10: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 10; i++) {
+    let copy = [...arr100];
+    copy.splice(50, 1);
+}
+console.log("splice delete x10: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 10; i++) { arr100.slice(25, 75); }
+console.log("slice x10: " + (Date.now() - start) + "ms");
+console.log("DONE 07");

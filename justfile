@@ -172,16 +172,23 @@ test262-filter-verbose PATTERN:
 #
 #   just parity                    # all runtimes, all tests
 #   just parity optional_chaining  # single test
-#   just parity-filter "optional"  # tests matching name
+#   just parity "optional"         # tests matching name
 
-parity:
-    ./scripts/run_parity_compare.sh
+parity filter="":
+    #!/usr/bin/env bash
+    if [[ -n "{{filter}}" ]]; then
+      ./scripts/run_parity_compare.sh --filter "{{filter}}"
+    else
+      ./scripts/run_parity_compare.sh
+    fi
 
-parity FILTER:
-    ./scripts/run_parity_compare.sh --filter {{FILTER}}
-
-parity-verbose FILTER:
-    ./scripts/run_parity_compare.sh --filter {{FILTER}} --verbose
+parity-verbose filter="":
+    #!/usr/bin/env bash
+    if [[ -n "{{filter}}" ]]; then
+      ./scripts/run_parity_compare.sh --filter "{{filter}}" --verbose
+    else
+      ./scripts/run_parity_compare.sh --verbose
+    fi
 
 parity-limit N:
     ./scripts/run_parity_compare.sh --limit {{N}}
@@ -189,6 +196,10 @@ parity-limit N:
 # ═══════════════════════════════════════════════════════════════════════════════
 # UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# Profile array_stress sections (run each isolated test with timing to find slow parts)
+array-stress-profile:
+    ./scripts/run_array_stress_profile.sh
 
 # Show binary sizes for different builds
 sizes:

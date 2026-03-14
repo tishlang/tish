@@ -1,0 +1,20 @@
+// Isolated: Array Iteration (needs arr1000)
+console.log("--- array_stress_02: Array Iteration ---");
+let arr1000 = [];
+for (let i = 0; i < 1000; i++) { arr1000.push(i); }
+
+let start = Date.now();
+let sum1 = 0;
+for (let i = 0; i < arr1000.length; i++) { sum1 = sum1 + arr1000[i]; }
+console.log("for-i: " + (Date.now() - start) + "ms sum=" + sum1);
+
+start = Date.now();
+let sum2 = 0;
+for (let item of arr1000) { sum2 = sum2 + item; }
+console.log("for-of: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+let sum3 = 0;
+arr1000.forEach(x => { sum3 = sum3 + x; });
+console.log("forEach: " + (Date.now() - start) + "ms");
+console.log("DONE 02");

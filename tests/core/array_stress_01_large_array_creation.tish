@@ -1,0 +1,17 @@
+// Isolated: Large Array Creation (reduced iters for profiling)
+console.log("--- array_stress_01: Large Array Creation ---");
+let start = Date.now();
+let arr100 = [];
+for (let i = 0; i < 100; i++) { arr100.push(i); }
+console.log("arr100: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+let arr1000 = [];
+for (let i = 0; i < 1000; i++) { arr1000.push(i); }
+console.log("arr1000: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+let arr5000 = [];
+for (let i = 0; i < 5000; i++) { arr5000.push(i); }
+console.log("arr5000: " + (Date.now() - start) + "ms");
+console.log("DONE 01");

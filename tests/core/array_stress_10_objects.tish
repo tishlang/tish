@@ -1,0 +1,23 @@
+// Isolated: Array of Objects (reduced iters)
+console.log("--- array_stress_10: Array of Objects ---");
+let users = [];
+for (let i = 0; i < 100; i++) {
+    users.push({ id: i, name: "user" + i, active: i % 3 === 0 });
+}
+
+let start = Date.now();
+for (let i = 0; i < 3; i++) { users.filter(u => u.active); }
+console.log("filter objects x3: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 3; i++) { users.map(u => u.name); }
+console.log("map to property x3: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 3; i++) { users.find(u => u.id === 50); }
+console.log("find by property x3: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 3; i++) { users.sort((a, b) => a.id - b.id); }
+console.log("sort by property x3: " + (Date.now() - start) + "ms");
+console.log("DONE 10");

@@ -1,0 +1,15 @@
+// Isolated: Concat/Spread (reduced iters)
+console.log("--- array_stress_08: Concat/Spread ---");
+let arr100 = [];
+for (let i = 0; i < 100; i++) { arr100.push(i); }
+let a50 = arr100.slice(0, 50);
+let b50 = arr100.slice(50, 100);
+
+let start = Date.now();
+for (let i = 0; i < 10; i++) { a50.concat(b50); }
+console.log("concat x10: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 10; i++) { [...a50, ...b50]; }
+console.log("spread x10: " + (Date.now() - start) + "ms");
+console.log("DONE 08");

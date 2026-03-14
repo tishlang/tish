@@ -963,7 +963,8 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(object)?;
                 self.compile_expr(index)?;
                 self.compile_expr(value)?;
-                self.emit(Opcode::SetIndex); // SetIndex pops obj, idx, val and pushes val back
+                self.emit(Opcode::Dup); // leave copy for assignment expression result
+                self.emit(Opcode::SetIndex);
             }
             Expr::LogicalAssign { .. }
             | Expr::Await { .. }

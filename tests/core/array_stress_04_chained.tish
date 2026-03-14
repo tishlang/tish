@@ -1,0 +1,15 @@
+// Isolated: Chained Operations (reduced iters)
+console.log("--- array_stress_04: Chained Operations ---");
+let arr100 = [];
+for (let i = 0; i < 100; i++) { arr100.push(i); }
+
+let start = Date.now();
+arr100.map(x => x * 2).filter(x => x > 50).map(x => x + 1);
+console.log("chain x1: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 3; i++) {
+    arr100.filter(x => x % 2 === 0).map(x => x * 3).reduce((a, x) => a + x, 0);
+}
+console.log("filter-map-reduce x3: " + (Date.now() - start) + "ms");
+console.log("DONE 04");

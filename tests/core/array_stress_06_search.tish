@@ -1,0 +1,25 @@
+// Isolated: Search Operations (reduced iters)
+console.log("--- array_stress_06: Search Operations ---");
+let arr1000 = [];
+for (let i = 0; i < 1000; i++) { arr1000.push(i); }
+
+let start = Date.now();
+for (let i = 0; i < 3; i++) { arr1000.find(x => x === 500); }
+console.log("find x3: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 3; i++) { arr1000.includes(500); }
+console.log("includes x3: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 3; i++) { arr1000.indexOf(500); }
+console.log("indexOf x3: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 3; i++) { arr1000.some(x => x > 500); }
+console.log("some x3: " + (Date.now() - start) + "ms");
+
+start = Date.now();
+for (let i = 0; i < 3; i++) { arr1000.every(x => x < 2000); }
+console.log("every x3: " + (Date.now() - start) + "ms");
+console.log("DONE 06");
