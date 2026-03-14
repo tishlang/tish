@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tish_ast::{ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp};
+use crate::resolve::is_builtin_native_spec;
 use crate::types::{RustType, TypeContext};
 
 /// Tracks variable usage for move/clone optimization.
@@ -496,10 +497,52 @@ impl Codegen {
     }
 
     /// Map native module spec to Rust init expression using resolved package.json modules.
-    fn native_module_rust_init(&self, spec: &str) -> Option<String> {
-        self.native_module_map
-            .get(spec)
-            .map(|(crate_name, export_fn)| format!("{}::{}()", crate_name, export_fn))
+    /// For built-in modules (tish:fs, tish:http, tish:process), use builtin_native_module_rust_init.
+    fn native_module_rust_init(&self, spec: &str, export_name: &str) -> Option<String> {
+        if is_builtin_native_spec(spec) {
+            return self.builtin_native_module_rust_init(spec, export_name);
+        }
+        self.native_module_map.get(spec).map(|(crate_name, export_fn)| {
+            format!("{}::{}()", crate_name, export_fn)
+        })
+    }
+
+    /// Rust init for built-in modules (tish:fs, tish:http, tish:process) - uses tish_runtime.
+    fn builtin_native_module_rust_init(&self, spec: &str, export_name: &str) -> Option<String> {
+        let init = match spec {
+            "tish:fs" if self.has_feature("fs") => match export_name {
+                    "readFile" => Some("Value::Function(Rc::new(|args: &[Value]| tish_read_file(args)))"),
+                    "writeFile" => Some("Value::Function(Rc::new(|args: &[Value]| tish_write_file(args)))"),
+                    "fileExists" => Some("Value::Function(Rc::new(|args: &[Value]| tish_file_exists(args)))"),
+                    "readDir" => Some("Value::Function(Rc::new(|args: &[Value]| tish_read_dir(args)))"),
+                    "mkdir" => Some("Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)))"),
+                    _ => None,
+                },
+            "tish:http" if self.has_feature("http") => match export_name {
+                    "fetch" => Some("Value::Function(Rc::new(|args: &[Value]| tish_http_fetch(args)))"),
+                    "fetchAll" => Some("Value::Function(Rc::new(|args: &[Value]| tish_http_fetch_all(args)))"),
+                    "fetchAsync" => Some("Value::Function(Rc::new(|args: &[Value]| tish_fetch_async_promise(args.to_vec())))"),
+                    "fetchAllAsync" => Some("Value::Function(Rc::new(|_args: &[Value]| panic!(\"fetchAllAsync must be used with await\")))"),
+                    "serve" => Some("Value::Function(Rc::new(|args: &[Value]| { let port = args.first().cloned().unwrap_or(Value::Null); let handler = args.get(1).cloned().unwrap_or(Value::Null); if let Value::Function(f) = handler { tish_http_serve(&[port], move |req_args| f(req_args)) } else { Value::Null } }))"),
+                    "Promise" => Some("tish_promise_object()"),
+                    "setTimeout" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_set_timeout(args)))"),
+                    "setInterval" => Some("Value::Function(Rc::new(|_args: &[Value]| panic!(\"setInterval not yet supported in native\")))"),
+                    "clearTimeout" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_timeout(args)))"),
+                    "clearInterval" => Some("Value::Function(Rc::new(|_args: &[Value]| Value::Null))"),
+                    _ => None,
+                },
+            "tish:process" if self.has_feature("process") => match export_name {
+                    "exit" => Some("Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args)))"),
+                    "cwd" => Some("Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args)))"),
+                    "exec" => Some("Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args)))"),
+                    "argv" => Some("Value::Array(Rc::new(RefCell::new(std::env::args().map(|s| Value::String(s.into())).collect())))"),
+                    "env" => Some("Value::Object(Rc::new(RefCell::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect())))"),
+                    "process" => Some("{ let mut m = HashMap::new(); m.insert(Arc::from(\"exit\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args)))); m.insert(Arc::from(\"cwd\"), Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args)))); m.insert(Arc::from(\"exec\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args)))); m.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(std::env::args().map(|s| Value::String(s.into())).collect())))); m.insert(Arc::from(\"env\"), Value::Object(Rc::new(RefCell::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect())))); Value::Object(Rc::new(RefCell::new(m))) }"),
+                    _ => None,
+                },
+            _ => return None,
+        };
+        init.map(String::from)
     }
 
     fn has_feature(&self, name: &str) -> bool {
@@ -2310,13 +2353,22 @@ impl Codegen {
             Expr::JsxElement { .. } | Expr::JsxFragment { .. } => {
                 return Err(CompileError { message: "JSX is only supported when compiling to JavaScript (tish compile --target js).".to_string(), span: None });
             }
-            Expr::NativeModuleLoad { spec, .. } => {
-                self.native_module_rust_init(spec.as_ref())
+            Expr::NativeModuleLoad { spec, export_name, .. } => {
+                self.native_module_rust_init(spec.as_ref(), export_name.as_ref())
                     .ok_or_else(|| CompileError {
-                        message: format!(
-                            "Native module '{}' not found. Add it as a dependency and ensure package.json has tish.module.",
-                            spec.as_ref()
-                        ),
+                        message: if crate::resolve::is_builtin_native_spec(spec.as_ref()) {
+                            format!(
+                                "Built-in module '{}' does not export '{}'. Add --feature {} when compiling.",
+                                spec.as_ref(),
+                                export_name.as_ref(),
+                                spec.as_ref().strip_prefix("tish:").unwrap_or(spec.as_ref())
+                            )
+                        } else {
+                            format!(
+                                "Native module '{}' not found. Add it as a dependency and ensure package.json has tish.module.",
+                                spec.as_ref()
+                            )
+                        },
                         span: None,
                     })?
             }

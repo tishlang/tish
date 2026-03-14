@@ -13,6 +13,7 @@ Ready-to-deploy example applications for the Tish Platform.
 | [counter-api](counter-api/) | Stateful counter service | `http` |
 | [async-await](async-await/) | Async/await with fetchAsync | `http` |
 | [mdx-docs](mdx-docs/) | Static docs: MDX, file-based routing, pre-rendered | `http`, `fs` |
+| [json-file-edit](json-file-edit/) | Read JSON file, decode, modify, write back | `fs` |
 | [tishx-example](tishx-example/) | Tish + JSX compiled to vanilla JavaScript (no 3rd party libs) | — |
 
 ## Prerequisites

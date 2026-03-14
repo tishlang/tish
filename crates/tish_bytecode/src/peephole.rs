@@ -26,19 +26,8 @@ fn instruction_size(code: &[u8], ip: usize) -> Option<usize> {
     if ip >= code.len() {
         return None;
     }
-    let op = code[ip];
-    let opcode = Opcode::from_u8(op)?;
-    let size = match opcode {
-        Opcode::Nop | Opcode::Pop | Opcode::Dup | Opcode::Return | Opcode::ExitTry
-        | Opcode::ArrayMapIdentity => 1,
-        Opcode::ArraySortByProperty => 5,
-        Opcode::ArrayMapBinOp | Opcode::ArrayFilterBinOp => 5,
-        _ => 3,
-    };
-    if ip + size > code.len() {
-        return None;
-    }
-    Some(size)
+    let opcode = Opcode::from_u8(code[ip])?;
+    opcode.instruction_size(code, ip)
 }
 
 /// For a Jump or JumpIfFalse at `ip`, return the final target IP after following

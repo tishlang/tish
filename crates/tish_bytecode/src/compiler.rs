@@ -4,11 +4,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tish_ast::{
-    ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr,
-    Literal, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp,
+    ArrayElement, ArrowBody, BinOp, CallArg, DestructElement, DestructPattern, Expr,
+    Literal, MemberProp, ObjectProp, Program, Span, Statement,
 };
 
 use crate::chunk::{Chunk, Constant};
+use crate::encoding::{binop_to_u8, compound_op_to_u8, unaryop_to_u8};
 use crate::opcode::Opcode;
 
 enum SimpleMapResult {
@@ -1124,56 +1125,6 @@ impl<'a> Compiler<'a> {
             }
         }
         Ok(())
-    }
-}
-
-fn binop_to_u8(op: BinOp) -> u8 {
-    use tish_ast::BinOp::*;
-    match op {
-        Add => 0,
-        Sub => 1,
-        Mul => 2,
-        Div => 3,
-        Mod => 4,
-        Pow => 5,
-        Eq => 6,
-        Ne => 7,
-        StrictEq => 8,
-        StrictNe => 9,
-        Lt => 10,
-        Le => 11,
-        Gt => 12,
-        Ge => 13,
-        And => 14,
-        Or => 15,
-        BitAnd => 16,
-        BitOr => 17,
-        BitXor => 18,
-        Shl => 19,
-        Shr => 20,
-        In => 21,
-    }
-}
-
-fn compound_op_to_u8(op: CompoundOp) -> u8 {
-    use tish_ast::CompoundOp::*;
-    match op {
-        Add => 0,
-        Sub => 1,
-        Mul => 2,
-        Div => 3,
-        Mod => 4,
-    }
-}
-
-fn unaryop_to_u8(op: UnaryOp) -> u8 {
-    use tish_ast::UnaryOp::*;
-    match op {
-        Not => 0,
-        Neg => 1,
-        Pos => 2,
-        BitNot => 3,
-        Void => 4,
     }
 }
 

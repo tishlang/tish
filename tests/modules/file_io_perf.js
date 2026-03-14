@@ -1,15 +1,22 @@
 // Performance test for File I/O operations
+// Compatible with Node.js and Bun (CommonJS)
+
+const fs = require("fs");
+const path = require("path");
 
 let testDir = "/tmp/tish_perf_" + Date.now();
 let iterations = 1000;
 
 // Setup
-mkdir(testDir);
+fs.mkdirSync(testDir, { recursive: true });
 
-// Write performance
+// Write performance (use writeFileSync - writeFile is async and needs callback)
 let startWrite = Date.now();
 for (let i = 0; i < iterations; i = i + 1) {
-    writeFile(testDir + "/file_" + i + ".txt", "content " + i);
+  fs.writeFileSync(
+    path.join(testDir, "file_" + i + ".txt"),
+    "content " + i
+  );
 }
 let writeTime = Date.now() - startWrite;
 console.log("writeFile x " + iterations + ": " + writeTime + "ms");
@@ -17,25 +24,31 @@ console.log("writeFile x " + iterations + ": " + writeTime + "ms");
 // Read performance
 let startRead = Date.now();
 for (let j = 0; j < iterations; j = j + 1) {
-    readFile(testDir + "/file_" + j + ".txt");
+  fs.readFileSync(path.join(testDir, "file_" + j + ".txt"));
 }
 let readTime = Date.now() - startRead;
 console.log("readFile x " + iterations + ": " + readTime + "ms");
 
-// fileExists performance
+// fileExists performance (Node uses fs.existsSync, not fs.fileExists)
 let startExists = Date.now();
 for (let k = 0; k < iterations; k = k + 1) {
-    fileExists(testDir + "/file_" + k + ".txt");
+  fs.existsSync(path.join(testDir, "file_" + k + ".txt"));
 }
 let existsTime = Date.now() - startExists;
 console.log("fileExists x " + iterations + ": " + existsTime + "ms");
 
-// readDir performance
+// readDir performance (Node uses fs.readdirSync, not fs.readDirSync)
 let startDir = Date.now();
 for (let l = 0; l < 100; l = l + 1) {
-    readDir(testDir);
+  fs.readdirSync(testDir);
 }
 let dirTime = Date.now() - startDir;
 console.log("readDir x 100: " + dirTime + "ms");
+
+// Cleanup
+for (let i = 0; i < iterations; i = i + 1) {
+  fs.unlinkSync(path.join(testDir, "file_" + i + ".txt"));
+}
+fs.rmdirSync(testDir);
 
 console.log("File I/O performance tests completed");

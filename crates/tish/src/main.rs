@@ -114,7 +114,11 @@ fn run_file(path: &str, backend: &str, no_optimize: bool) -> Result<(), String> 
         }
     };
 
-    if backend == "interp" {
+    // Native imports (tish:fs, tish:http, tish:process) require interpreter; VM doesn't support them yet
+    let use_interp = backend == "interp"
+        || (backend == "vm" && tish_compile::has_native_imports(&program));
+
+    if use_interp {
         let mut eval = tish_eval::Evaluator::new();
         let value = eval.eval_program(&program)?;
         if !matches!(value, tish_eval::Value::Null) {

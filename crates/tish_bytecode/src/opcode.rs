@@ -81,45 +81,27 @@ pub enum Opcode {
 }
 
 impl Opcode {
+    /// Decode byte to opcode. Safe for b in 0..=35 (matches #[repr(u8)] discriminants).
+    #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        match b {
-            0 => Some(Opcode::Nop),
-            1 => Some(Opcode::LoadConst),
-            2 => Some(Opcode::LoadVar),
-            3 => Some(Opcode::StoreVar),
-            4 => Some(Opcode::Pop),
-            5 => Some(Opcode::Dup),
-            6 => Some(Opcode::Call),
-            7 => Some(Opcode::Return),
-            8 => Some(Opcode::Jump),
-            9 => Some(Opcode::JumpIfFalse),
-            10 => Some(Opcode::JumpBack),
-            11 => Some(Opcode::BinOp),
-            12 => Some(Opcode::UnaryOp),
-            13 => Some(Opcode::GetMember),
-            14 => Some(Opcode::SetMember),
-            15 => Some(Opcode::GetIndex),
-            16 => Some(Opcode::SetIndex),
-            17 => Some(Opcode::NewArray),
-            18 => Some(Opcode::NewObject),
-            19 => Some(Opcode::LoadGlobal),
-            20 => Some(Opcode::StoreGlobal),
-            21 => Some(Opcode::Closure),
-            22 => Some(Opcode::PopN),
-            23 => Some(Opcode::LoadThis),
-            24 => Some(Opcode::Throw),
-            25 => Some(Opcode::EnterTry),
-            26 => Some(Opcode::ExitTry),
-            27 => Some(Opcode::ConcatArray),
-            28 => Some(Opcode::MergeObject),
-            29 => Some(Opcode::CallSpread),
-            30 => Some(Opcode::GetMemberOptional),
-            31 => Some(Opcode::ArraySortNumeric),
-            32 => Some(Opcode::ArraySortByProperty),
-            33 => Some(Opcode::ArrayMapIdentity),
-            34 => Some(Opcode::ArrayMapBinOp),
-            35 => Some(Opcode::ArrayFilterBinOp),
-            _ => None,
+        if b <= 35 {
+            Some(unsafe { std::mem::transmute(b) })
+        } else {
+            None
         }
+    }
+
+    /// Size in bytes of this instruction at `ip` (including operands). Returns None if truncated.
+    pub fn instruction_size(self, code: &[u8], ip: usize) -> Option<usize> {
+        let size = match self {
+            Opcode::Nop | Opcode::Pop | Opcode::Dup | Opcode::Return | Opcode::ExitTry
+            | Opcode::ArrayMapIdentity => 1,
+            Opcode::ArraySortByProperty | Opcode::ArrayMapBinOp | Opcode::ArrayFilterBinOp => 5,
+            _ => 3,
+        };
+        if ip + size > code.len() {
+            return None;
+        }
+        Some(size)
     }
 }

@@ -5,10 +5,11 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use tish_ast::{BinOp, UnaryOp};
 use tish_builtins::array as arr_builtins;
 use tish_builtins::globals as globals_builtins;
 use tish_builtins::math as math_builtins;
-use tish_bytecode::{Chunk, Constant, Opcode, NO_REST_PARAM};
+use tish_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
 use tish_core::Value;
 
 type ArrayMethodFn = Rc<dyn Fn(&[Value]) -> Value>;
@@ -528,7 +529,7 @@ impl Vm {
                     ip = ip.saturating_sub(dist);
                 }
                 Opcode::BinOp => {
-                    let op = Self::read_u16(code, &mut ip) as u8;
+                    let op_u8 = Self::read_u16(code, &mut ip) as u8;
                     let r = self
                         .stack
                         .pop()
@@ -537,15 +538,19 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
+                    let op = u8_to_binop(op_u8)
+                        .ok_or_else(|| format!("Unknown binop: {}", op_u8))?;
                     let result = eval_binop(op, &l, &r)?;
                     self.stack.push(result);
                 }
                 Opcode::UnaryOp => {
-                    let op = Self::read_u16(code, &mut ip) as u8;
+                    let op_u8 = Self::read_u16(code, &mut ip) as u8;
                     let o = self
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
+                    let op = u8_to_unaryop(op_u8)
+                        .ok_or_else(|| format!("Unknown unary op: {}", op_u8))?;
                     let result = eval_unary(op, &o)?;
                     self.stack.push(result);
                 }
@@ -774,11 +779,13 @@ impl Vm {
                     self.stack.push(result);
                 }
                 Opcode::ArrayMapBinOp => {
-                    let binop = code[ip];
+                    let binop_u8 = code[ip];
                     ip += 1;
                     let const_idx = Self::read_u16(code, &mut ip);
                     let param_left = code[ip] == 0; // 0 = param on left (x op const), 1 = param on right (const op x)
                     ip += 1;
+                    let binop = u8_to_binop(binop_u8)
+                        .ok_or_else(|| format!("Unknown binop in ArrayMapBinOp: {}", binop_u8))?;
                     let arr = self
                         .stack
                         .pop()
@@ -804,11 +811,13 @@ impl Vm {
                     self.stack.push(result);
                 }
                 Opcode::ArrayFilterBinOp => {
-                    let binop = code[ip];
+                    let binop_u8 = code[ip];
                     ip += 1;
                     let const_idx = Self::read_u16(code, &mut ip);
                     let param_left = code[ip] == 0; // 0 = param on left (x op const), 1 = param on right (const op x)
                     ip += 1;
+                    let binop = u8_to_binop(binop_u8)
+                        .ok_or_else(|| format!("Unknown binop in ArrayFilterBinOp: {}", binop_u8))?;
                     let arr = self
                         .stack
                         .pop()
@@ -863,41 +872,40 @@ impl Default for Vm {
     }
 }
 
-fn eval_binop(op: u8, l: &Value, r: &Value) -> Result<Value, String> {
+fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
+    use tish_ast::BinOp::*;
     use tish_core::Value::*;
     let ln = l.as_number().unwrap_or(f64::NAN);
     let rn = r.as_number().unwrap_or(f64::NAN);
     match op {
-        0 => {
-            // Add: string concat if either is string, else numeric
+        Add => {
             if matches!(l, Value::String(_)) || matches!(r, Value::String(_)) {
                 Ok(String(format!("{}{}", l.to_display_string(), r.to_display_string()).into()))
             } else {
                 Ok(Number(ln + rn))
             }
         }
-        1 => Ok(Number(ln - rn)),  // Sub
-        2 => Ok(Number(ln * rn)),
-        3 => Ok(Number(if rn == 0.0 { f64::NAN } else { ln / rn })),
-        4 => Ok(Number(if rn == 0.0 { f64::NAN } else { ln % rn })),
-        5 => Ok(Number(ln.powf(rn))),
-        6 => Ok(Bool(l.strict_eq(r))),  // Eq
-        7 => Ok(Bool(!l.strict_eq(r))),
-        8 => Ok(Bool(l.strict_eq(r))),
-        9 => Ok(Bool(!l.strict_eq(r))),
-        10 => Ok(Bool(ln < rn)),
-        11 => Ok(Bool(ln <= rn)),
-        12 => Ok(Bool(ln > rn)),
-        13 => Ok(Bool(ln >= rn)),
-        14 => Ok(Bool(l.is_truthy() && r.is_truthy())),
-        15 => Ok(Bool(l.is_truthy() || r.is_truthy())),
-        16 => Ok(Number((ln as i32 & rn as i32) as f64)), // BitAnd
-        17 => Ok(Number((ln as i32 | rn as i32) as f64)), // BitOr
-        18 => Ok(Number((ln as i32 ^ rn as i32) as f64)), // BitXor
-        19 => Ok(Number(((ln as i32) << (rn as i32)) as f64)), // Shl
-        20 => Ok(Number(((ln as i32) >> (rn as i32)) as f64)), // Shr
-        21 => {
-            // In: key in object (l=key, r=object)
+        Sub => Ok(Number(ln - rn)),
+        Mul => Ok(Number(ln * rn)),
+        Div => Ok(Number(if rn == 0.0 { f64::NAN } else { ln / rn })),
+        Mod => Ok(Number(if rn == 0.0 { f64::NAN } else { ln % rn })),
+        Pow => Ok(Number(ln.powf(rn))),
+        Eq => Ok(Bool(l.strict_eq(r))),
+        Ne => Ok(Bool(!l.strict_eq(r))),
+        StrictEq => Ok(Bool(l.strict_eq(r))),
+        StrictNe => Ok(Bool(!l.strict_eq(r))),
+        Lt => Ok(Bool(ln < rn)),
+        Le => Ok(Bool(ln <= rn)),
+        Gt => Ok(Bool(ln > rn)),
+        Ge => Ok(Bool(ln >= rn)),
+        And => Ok(Bool(l.is_truthy() && r.is_truthy())),
+        Or => Ok(Bool(l.is_truthy() || r.is_truthy())),
+        BitAnd => Ok(Number((ln as i32 & rn as i32) as f64)),
+        BitOr => Ok(Number((ln as i32 | rn as i32) as f64)),
+        BitXor => Ok(Number((ln as i32 ^ rn as i32) as f64)),
+        Shl => Ok(Number(((ln as i32) << (rn as i32)) as f64)),
+        Shr => Ok(Number(((ln as i32) >> (rn as i32)) as f64)),
+        In => {
             let key_s: Arc<str> = l.to_display_string().into();
             Ok(Bool(match r {
                 Value::Object(m) => m.borrow().contains_key(&key_s),
@@ -913,19 +921,18 @@ fn eval_binop(op: u8, l: &Value, r: &Value) -> Result<Value, String> {
                 _ => false,
             }))
         }
-        _ => Err(format!("Unknown binop: {}", op)),
     }
 }
 
-fn eval_unary(op: u8, o: &Value) -> Result<Value, String> {
+fn eval_unary(op: UnaryOp, o: &Value) -> Result<Value, String> {
+    use tish_ast::UnaryOp::*;
     use tish_core::Value::*;
     match op {
-        0 => Ok(Bool(!o.is_truthy())), // Not
-        1 => Ok(Number(-o.as_number().unwrap_or(f64::NAN))), // Neg
-        2 => Ok(Number(o.as_number().unwrap_or(f64::NAN))),  // Pos
-        3 => Ok(Number(!(o.as_number().unwrap_or(0.0) as i32) as f64)), // BitNot
-        4 => Ok(Null), // Void
-        _ => Err(format!("Unknown unary op: {}", op)),
+        Not => Ok(Bool(!o.is_truthy())),
+        Neg => Ok(Number(-o.as_number().unwrap_or(f64::NAN))),
+        Pos => Ok(Number(o.as_number().unwrap_or(f64::NAN))),
+        BitNot => Ok(Number(!(o.as_number().unwrap_or(0.0) as i32) as f64)),
+        Void => Ok(Null),
     }
 }
 

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use tish_ast::{BinOp, CompoundOp, ExportDeclaration, Expr, ImportSpecifier, Literal, LogicalAssignOp, MemberProp, Span, Statement, UnaryOp};
 
-use crate::value::Value;
+use crate::{natives, value::Value};
 
 struct Scope {
     vars: HashMap<Arc<str>, Value>,
@@ -150,45 +150,7 @@ impl Evaluator {
                 s.set("RegExp".into(), Value::Native(Self::regexp_constructor_native), true);
             }
 
-            #[cfg(feature = "process")]
-            {
-                let mut process = HashMap::with_capacity(5);
-                process.insert("exit".into(), Value::Native(natives::process_exit));
-                process.insert("cwd".into(), Value::Native(natives::process_cwd));
-                process.insert("exec".into(), Value::Native(natives::process_exec));
-                let argv: Vec<Value> = std::env::args()
-                    .map(|s| Value::String(s.into()))
-                    .collect();
-                process.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv))));
-                let env_obj: HashMap<Arc<str>, Value> = std::env::vars()
-                    .map(|(key, value)| (Arc::from(key.as_str()), Value::String(value.into())))
-                    .collect();
-                process.insert("env".into(), Value::Object(Rc::new(RefCell::new(env_obj))));
-                s.set("process".into(), Value::Object(Rc::new(RefCell::new(process))), true);
-            }
-
-            #[cfg(feature = "http")]
-            {
-                s.set("fetch".into(), Value::Native(Self::fetch_native), true);
-                s.set("fetchAll".into(), Value::Native(Self::fetch_all_native), true);
-                s.set("fetchAsync".into(), Value::Native(Self::fetch_async_native), true);
-                s.set("fetchAllAsync".into(), Value::Native(Self::fetch_all_async_native), true);
-                s.set("serve".into(), Value::Serve, true);
-                s.set("Promise".into(), Value::PromiseConstructor, true);
-                s.set("setTimeout".into(), Value::TimerBuiltin(Arc::from("setTimeout")), true);
-                s.set("setInterval".into(), Value::TimerBuiltin(Arc::from("setInterval")), true);
-                s.set("clearTimeout".into(), Value::Native(Self::clear_timeout_native), true);
-                s.set("clearInterval".into(), Value::Native(Self::clear_interval_native), true);
-            }
-
-            #[cfg(feature = "fs")]
-            {
-                s.set("readFile".into(), Value::Native(natives::read_file), true);
-                s.set("writeFile".into(), Value::Native(natives::write_file), true);
-                s.set("fileExists".into(), Value::Native(natives::file_exists), true);
-                s.set("readDir".into(), Value::Native(natives::read_dir), true);
-                s.set("mkdir".into(), Value::Native(natives::mkdir), true);
-            }
+            // fs, http, process: use import { x } from 'tish:fs' etc. No globals.
         }
         Self {
             scope,
@@ -525,6 +487,9 @@ impl Evaluator {
 
     /// Load and evaluate a module, returning its exports object. Uses cache.
     fn load_module(&mut self, from: &str) -> Result<Value, EvalError> {
+        if from.starts_with("tish:") {
+            return Self::load_builtin_module(from);
+        }
         let dir = self.current_dir.borrow().clone().ok_or_else(|| {
             EvalError::Error("Cannot resolve imports: no current file directory (use run_file)".to_string())
         })?;
@@ -601,6 +566,98 @@ impl Evaluator {
             base
         };
         Ok(path)
+    }
+
+    /// Load built-in module (tish:fs, tish:http, tish:process). Features auto-enabled when imported.
+    fn load_builtin_module(spec: &str) -> Result<Value, EvalError> {
+        let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
+        match spec {
+            "tish:fs" => {
+                #[cfg(feature = "fs")]
+                {
+                    exports.insert("readFile".into(), Value::Native(natives::read_file));
+                    exports.insert("writeFile".into(), Value::Native(natives::write_file));
+                    exports.insert("fileExists".into(), Value::Native(natives::file_exists));
+                    exports.insert("readDir".into(), Value::Native(natives::read_dir));
+                    exports.insert("mkdir".into(), Value::Native(natives::mkdir));
+                }
+                #[cfg(not(feature = "fs"))]
+                {
+                    return Err(EvalError::Error(
+                        "tish:fs requires the fs feature. Rebuild with: cargo build -p tish --features fs".into(),
+                    ));
+                }
+            }
+            "tish:http" => {
+                #[cfg(feature = "http")]
+                {
+                    exports.insert("fetch".into(), Value::Native(Self::fetch_native));
+                    exports.insert("fetchAll".into(), Value::Native(Self::fetch_all_native));
+                    exports.insert("fetchAsync".into(), Value::Native(Self::fetch_async_native));
+                    exports.insert("fetchAllAsync".into(), Value::Native(Self::fetch_all_async_native));
+                    exports.insert("serve".into(), Value::Serve);
+                    exports.insert("Promise".into(), Value::PromiseConstructor);
+                    exports.insert("setTimeout".into(), Value::TimerBuiltin(Arc::from("setTimeout")));
+                    exports.insert("setInterval".into(), Value::TimerBuiltin(Arc::from("setInterval")));
+                    exports.insert("clearTimeout".into(), Value::Native(Self::clear_timeout_native));
+                    exports.insert("clearInterval".into(), Value::Native(Self::clear_interval_native));
+                }
+                #[cfg(not(feature = "http"))]
+                {
+                    return Err(EvalError::Error(
+                        "tish:http requires the http feature. Rebuild with: cargo build -p tish --features http".into(),
+                    ));
+                }
+            }
+            "tish:process" => {
+                #[cfg(feature = "process")]
+                {
+                    exports.insert("exit".into(), Value::Native(natives::process_exit));
+                    exports.insert("cwd".into(), Value::Native(natives::process_cwd));
+                    exports.insert("exec".into(), Value::Native(natives::process_exec));
+                    let argv: Vec<Value> = std::env::args()
+                        .map(|s| Value::String(s.into()))
+                        .collect();
+                    exports.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv.clone()))));
+                    let env_obj: HashMap<Arc<str>, Value> = std::env::vars()
+                        .map(|(key, value)| (Arc::from(key.as_str()), Value::String(value.into())))
+                        .collect();
+                    exports.insert("env".into(), Value::Object(Rc::new(RefCell::new(env_obj.clone()))));
+                    // process object for process.argv, process.cwd(), etc.
+                    let mut process_obj = HashMap::new();
+                    process_obj.insert("exit".into(), Value::Native(natives::process_exit));
+                    process_obj.insert("cwd".into(), Value::Native(natives::process_cwd));
+                    process_obj.insert("exec".into(), Value::Native(natives::process_exec));
+                    process_obj.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv))));
+                    process_obj.insert("env".into(), Value::Object(Rc::new(RefCell::new(env_obj))));
+                    exports.insert("process".into(), Value::Object(Rc::new(RefCell::new(process_obj))));
+                }
+                #[cfg(not(feature = "process"))]
+                {
+                    return Err(EvalError::Error(
+                        "tish:process requires the process feature. Rebuild with: cargo build -p tish --features process".into(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(EvalError::Error(format!(
+                    "Unknown built-in module: {}. Supported: tish:fs, tish:http, tish:process",
+                    spec
+                )));
+            }
+        }
+        Ok(Value::Object(Rc::new(RefCell::new(exports))))
+    }
+
+    fn load_builtin_export(spec: &str, export_name: &str) -> Result<Value, EvalError> {
+        let module = Self::load_builtin_module(spec)?;
+        let exports = match &module {
+            Value::Object(m) => m.borrow().clone(),
+            _ => return Err(EvalError::Error("Built-in module must be object".into())),
+        };
+        exports.get(export_name).cloned().ok_or_else(|| {
+            EvalError::Error(format!("Module {} does not export '{}'", spec, export_name))
+        })
     }
 
     fn eval_expr(&self, expr: &Expr) -> Result<Value, EvalError> {
@@ -1471,9 +1528,9 @@ impl Evaluator {
             Expr::JsxElement { .. } | Expr::JsxFragment { .. } => Err(EvalError::Error(
                 "JSX is not supported in the interpreter. Use 'tish compile --target js' to compile to JavaScript.".to_string(),
             )),
-            Expr::NativeModuleLoad { spec, .. } => Err(EvalError::Error(
-                format!("Native module imports ({}) are only supported when compiling to Rust. Use 'tish compile'.", spec.as_ref()),
-            )),
+            Expr::NativeModuleLoad { spec, export_name, .. } => {
+                Self::load_builtin_export(spec.as_ref(), export_name.as_ref())
+            }
             Expr::TypeOf { operand, .. } => {
                 let v = self.eval_expr(operand)?;
                 Ok(Value::String(match &v {

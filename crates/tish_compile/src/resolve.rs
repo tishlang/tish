@@ -18,7 +18,13 @@ pub struct ResolvedNativeModule {
     pub export_fn: String,
 }
 
+/// Built-in modules that come from tish_runtime, not from package.json.
+pub fn is_builtin_native_spec(spec: &str) -> bool {
+    matches!(spec, "tish:fs" | "tish:http" | "tish:process")
+}
+
 /// Resolve all native imports in a merged program via package.json lookup.
+/// Built-in modules (tish:fs, tish:http, tish:process) are skipped - they use tish_runtime directly.
 pub fn resolve_native_modules(program: &Program, project_root: &Path) -> Result<Vec<ResolvedNativeModule>, String> {
     let root_canon = project_root
         .canonicalize()
@@ -32,9 +38,12 @@ pub fn resolve_native_modules(program: &Program, project_root: &Path) -> Result<
         } = stmt
         {
             let s = spec.as_ref();
-                if !seen.insert(s.to_string()) {
-                    continue;
-                }
+            if is_builtin_native_spec(s) {
+                continue; // Built-ins use tish_runtime, no package.json lookup
+            }
+            if !seen.insert(s.to_string()) {
+                continue;
+            }
             let m = resolve_native_module(s, &root_canon)?;
             modules.push(m);
         }

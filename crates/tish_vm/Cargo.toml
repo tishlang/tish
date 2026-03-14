@@ -11,6 +11,7 @@ regex = ["tish_core/regex"]
 wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
+tish_ast = { path = "../tish_ast" }
 tish_builtins = { path = "../tish_builtins" }
 tish_bytecode = { path = "../tish_bytecode" }
 tish_core = { path = "../tish_core" }

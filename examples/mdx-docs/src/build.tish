@@ -1,5 +1,6 @@
 // MDX build script - pre-renders content/*.mdx to dist/ at build time
 // Run: tish run src/build.tish --features fs,regex
+import { readFile, writeFile, mkdir, readDir } from 'tish:fs'
 
 fn escapeHtml(s) {
     let r = s

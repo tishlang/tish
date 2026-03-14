@@ -5,7 +5,7 @@
 #   --summary-only  skip individual test output, show only summary
 #   --no-compile    skip compilation, use cached binaries from previous runs
 #   --limit N       run only first N tests (default: all)
-#   --filter NAME   run only tests whose name contains NAME (e.g. array_stress)
+#   --filter NAME   run only tests whose dir/base contains NAME (e.g. array_stress, modules, modules/promise)
 #   --timeout SEC   timeout per tish run in seconds (default: 30, 0=no limit)
 #   --runtimes R,...  comma-separated list: vm,interp,rust,cranelift,llvm,wasi,node,bun,deno,qjs (default: all)
 #   --verbose       show stderr (crash logs, runtime errors) instead of suppressing them
@@ -41,8 +41,8 @@ command -v "$deno_cmd" &>/dev/null && has_deno=true
 command -v "$qjs_cmd" &>/dev/null && has_qjs=true
 command -v wasmtime &>/dev/null && has_wasmtime=true
 
-tish_dir="tests/core"
-perf_dir="tests/core"
+# Directories containing .js and matching .tish files
+perf_dirs=("tests/core" "tests/modules")
 # Always use local target directory for consistent builds
 target_dir="$(pwd)/target"
 profile="debug"
@@ -196,20 +196,24 @@ else
   llvm_ok=0 llvm_skip=0
   wasi_ok=0 wasi_skip=0
   count=0
-  for f in "$perf_dir"/*.js; do
-    [[ -f "$f" ]] || continue
-    base=$(basename "$f" .js)
-    [[ "$base" == "recursion_stress" ]] && continue
-    [[ -n "$filter_name" && "$base" != *"$filter_name"* ]] && continue
-    [[ $limit -gt 0 && $count -ge $limit ]] && break
-    tish_file="$tish_dir/$base.tish"
-    [[ -f "$tish_file" ]] || continue
-    count=$((count + 1))
+  for perf_dir in "${perf_dirs[@]}"; do
+    [[ -d "$perf_dir" ]] || continue
+    for f in "$perf_dir"/*.js; do
+      [[ -f "$f" ]] || continue
+      base=$(basename "$f" .js)
+      test_id="${perf_dir#tests/}/$base"
+      [[ "$base" == "recursion_stress" ]] && continue
+      [[ -n "$filter_name" && "$test_id" != *"$filter_name"* ]] && continue
+      [[ $limit -gt 0 && $count -ge $limit ]] && break
+      tish_file="$perf_dir/$base.tish"
+      [[ -f "$tish_file" ]] || continue
+      count=$((count + 1))
+      cache_key="${test_id//\//_}"
 
-    echo -n "  $base: "
+    echo -n "  $test_id: "
     # Rust native (default backend)
     if want_runtime rust; then
-      if $tish_bin compile "$tish_file" -o "$compile_dir/${base}_native" --native-backend rust >/dev/null 2>&1; then
+      if $tish_bin compile "$tish_file" -o "$compile_dir/${cache_key}_native" --native-backend rust >/dev/null 2>&1; then
         echo -n "rust "
         rust_ok=$((rust_ok + 1))
       else
@@ -219,7 +223,7 @@ else
     fi
     # Cranelift (pure Tish, no native imports)
     if want_runtime cranelift; then
-      if $tish_bin compile "$tish_file" -o "$compile_dir/${base}_cranelift" --native-backend cranelift >/dev/null 2>&1; then
+      if $tish_bin compile "$tish_file" -o "$compile_dir/${cache_key}_cranelift" --native-backend cranelift >/dev/null 2>&1; then
         echo -n "cranelift "
         cranelift_ok=$((cranelift_ok + 1))
       else
@@ -229,7 +233,7 @@ else
     fi
     # LLVM (pure Tish, no native imports; uses clang)
     if want_runtime llvm; then
-      if $tish_bin compile "$tish_file" -o "$compile_dir/${base}_llvm" --native-backend llvm >/dev/null 2>&1; then
+      if $tish_bin compile "$tish_file" -o "$compile_dir/${cache_key}_llvm" --native-backend llvm >/dev/null 2>&1; then
         echo -n "llvm "
         llvm_ok=$((llvm_ok + 1))
       else
@@ -240,7 +244,7 @@ else
     # WASI (for wasmtime)
     if want_runtime wasi; then
       if $has_wasmtime; then
-        if $tish_bin compile "$tish_file" -o "$compile_dir/${base}_wasi" --target wasi >/dev/null 2>&1; then
+        if $tish_bin compile "$tish_file" -o "$compile_dir/${cache_key}_wasi" --target wasi >/dev/null 2>&1; then
           echo -n "wasi"
           wasi_ok=$((wasi_ok + 1))
         else
@@ -252,6 +256,7 @@ else
       fi
     fi
     echo ""
+    done
   done
   echo "Compiled: rust=$rust_ok/$((rust_ok+rust_skip)) cranelift=$cranelift_ok/$((cranelift_ok+cranelift_skip)) llvm=$llvm_ok/$((llvm_ok+llvm_skip)) wasi=$wasi_ok/$((wasi_ok+wasi_skip))"
   echo "Cache location: $compile_dir"
@@ -261,24 +266,28 @@ fi
 # Phase 2: Run timing tests
 echo "Running performance tests..."
 count=0
-for f in "$perf_dir"/*.js; do
-  [[ -f "$f" ]] || continue
-  base=$(basename "$f" .js)
-  [[ "$base" == "recursion_stress" ]] && continue
-  [[ -n "$filter_name" && "$base" != *"$filter_name"* ]] && continue
-  [[ $limit -gt 0 && $count -ge $limit ]] && break
-  tish_file="$tish_dir/$base.tish"
-  [[ -f "$tish_file" ]] || continue
-  count=$((count + 1))
+for perf_dir in "${perf_dirs[@]}"; do
+  [[ -d "$perf_dir" ]] || continue
+  for f in "$perf_dir"/*.js; do
+    [[ -f "$f" ]] || continue
+    base=$(basename "$f" .js)
+    test_id="${perf_dir#tests/}/$base"
+    [[ "$base" == "recursion_stress" ]] && continue
+    [[ -n "$filter_name" && "$test_id" != *"$filter_name"* ]] && continue
+    [[ $limit -gt 0 && $count -ge $limit ]] && break
+    tish_file="$perf_dir/$base.tish"
+    [[ -f "$tish_file" ]] || continue
+    count=$((count + 1))
+    cache_key="${test_id//\//_}"
 
-  native_bin="$compile_dir/${base}_native"
-  cranelift_bin="$compile_dir/${base}_cranelift"
-  llvm_bin="$compile_dir/${base}_llvm"
-  wasi_bin="$compile_dir/${base}_wasi.wasm"
+  native_bin="$compile_dir/${cache_key}_native"
+  cranelift_bin="$compile_dir/${cache_key}_cranelift"
+  llvm_bin="$compile_dir/${cache_key}_llvm"
+  wasi_bin="$compile_dir/${cache_key}_wasi.wasm"
 
   if ! $summary_only; then
     echo "─────────────────────────────────────────"
-    echo "▶ $base"
+    echo "▶ $test_id"
     echo "─────────────────────────────────────────"
 
     # Output (use timeout to avoid hangs on intensive tests)
@@ -352,7 +361,7 @@ for f in "$perf_dir"/*.js; do
       echo ""
     fi
   else
-    echo -n "Running $base..."
+    echo -n "Running $test_id..."
   fi
 
   # Timing (multiple runs to reduce noise; report average)
@@ -545,7 +554,7 @@ for f in "$perf_dir"/*.js; do
   fi
 
   # Store results for summary
-  summary_names+=("$base")
+  summary_names+=("$test_id")
   summary_tish_vm+=("$tish_vm_avg")
   summary_tish_interp+=("$tish_interp_avg")
   summary_tish_native+=("$tish_native_avg")
@@ -575,6 +584,7 @@ for f in "$perf_dir"/*.js; do
   else
     echo " done (vm: ${tish_vm_avg}ms interp: ${tish_interp_avg}ms rust: ${tish_native_avg}ms cranelift: ${tish_cranelift_avg}ms llvm: ${tish_llvm_avg}ms wasi: ${tish_wasi_avg}ms ratio: ${ratio}%)"
   fi
+  done
 done
 
 # Print summary sorted by Tish(vm)/Node ratio (highest/slowest first)

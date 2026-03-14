@@ -1,5 +1,4 @@
 // Test process object
-import { process } from 'tish:process'
 
 // process.argv should be an array
 console.log("process.argv is array:", Array.isArray(process.argv))
