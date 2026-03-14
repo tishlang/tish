@@ -55,6 +55,13 @@ edition = "2021"
 name = "{}"
 path = "src/main.rs"
 
+[profile.release]
+# Reduce binary size: strip symbols, abort on panic (no unwinding), single codegen unit
+strip = true
+panic = "abort"
+codegen-units = 1
+lto = "thin"
+
 [dependencies]
 tish_runtime = {{ path = {:?}{} }}{}{}
 "#,

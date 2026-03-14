@@ -7,7 +7,7 @@
 #   --limit N       run only first N tests (default: all)
 #   --filter NAME   run only tests whose name contains NAME (e.g. array_stress)
 #   --timeout SEC   timeout per tish run in seconds (default: 30, 0=no limit)
-#   --runtimes R,...  comma-separated list: run,rust,cranelift,wasi,node,bun,deno,qjs (default: all)
+#   --runtimes R,...  comma-separated list: run,rust,cranelift,llvm,wasi,node,bun,deno,qjs (default: all)
 #   --verbose       show stderr (crash logs, runtime errors) instead of suppressing them
 
 set -e
@@ -144,6 +144,7 @@ declare -a summary_names=()
 declare -a summary_tish_run=()
 declare -a summary_tish_native=()
 declare -a summary_tish_cranelift=()
+declare -a summary_tish_llvm=()
 declare -a summary_tish_wasi=()
 declare -a summary_node=()
 declare -a summary_bun=()
@@ -155,7 +156,7 @@ declare -a summary_ratio=()
 
 echo "=== Tish vs JavaScript Runtimes — Performance Comparison ==="
 echo "Profile: $profile"
-[[ -n "$runtimes_filter" ]] && echo "Runtimes: $runtimes_filter (use --runtimes run,rust,cranelift,wasi,node,bun,deno,qjs)"
+[[ -n "$runtimes_filter" ]] && echo "Runtimes: $runtimes_filter (use --runtimes run,rust,cranelift,llvm,wasi,node,bun,deno,qjs)"
 $verbose && echo "Verbose: stderr (crash logs) will be shown"
 [[ $run_timeout -gt 0 ]] && echo "Tish run timeout: ${run_timeout}s (use --timeout 0 to disable)"
 echo ""
@@ -163,6 +164,7 @@ echo "Runtimes to test:"
 want_runtime run && echo "  run (tish interpreter)"
 want_runtime rust && echo "  rust (tish native)"
 want_runtime cranelift && echo "  cranelift (tish JIT)"
+want_runtime llvm && echo "  llvm (tish native via clang)"
 want_runtime wasi && echo "  wasi (wasmtime)"
 want_runtime node && echo "  node"
 want_runtime bun && $has_bun && echo "  bun"
@@ -176,14 +178,16 @@ echo ""
 if $no_compile; then
   cached_native=$(find "$compile_dir" -name '*_native' -type f \( -perm +111 -o -perm +1 \) 2>/dev/null | wc -l | tr -d ' ')
   cached_cranelift=$(find "$compile_dir" -name '*_cranelift' -type f \( -perm +111 -o -perm +1 \) 2>/dev/null | wc -l | tr -d ' ')
+  cached_llvm=$(find "$compile_dir" -name '*_llvm' -type f \( -perm +111 -o -perm +1 \) 2>/dev/null | wc -l | tr -d ' ')
   cached_wasi=$(find "$compile_dir" -name '*.wasm' -type f 2>/dev/null | wc -l | tr -d ' ')
   echo "Using cached binaries from: $compile_dir"
-  echo "Cached: rust=$cached_native cranelift=$cached_cranelift wasi=$cached_wasi"
+  echo "Cached: rust=$cached_native cranelift=$cached_cranelift llvm=$cached_llvm wasi=$cached_wasi"
   echo ""
 else
-  echo "Compiling Tish binaries (rust native, cranelift, wasi)..."
+  echo "Compiling Tish binaries (rust native, cranelift, llvm, wasi)..."
   rust_ok=0 rust_skip=0
   cranelift_ok=0 cranelift_skip=0
+  llvm_ok=0 llvm_skip=0
   wasi_ok=0 wasi_skip=0
   count=0
   for f in "$perf_dir"/*.js; do
@@ -217,6 +221,16 @@ else
         cranelift_skip=$((cranelift_skip + 1))
       fi
     fi
+    # LLVM (pure Tish, no native imports; uses clang)
+    if want_runtime llvm; then
+      if $tish_bin compile "$tish_file" -o "$compile_dir/${base}_llvm" --native-backend llvm >/dev/null 2>&1; then
+        echo -n "llvm "
+        llvm_ok=$((llvm_ok + 1))
+      else
+        echo -n "llvm-skip "
+        llvm_skip=$((llvm_skip + 1))
+      fi
+    fi
     # WASI (for wasmtime)
     if want_runtime wasi; then
       if $has_wasmtime; then
@@ -233,7 +247,7 @@ else
     fi
     echo ""
   done
-  echo "Compiled: rust=$rust_ok/$((rust_ok+rust_skip)) cranelift=$cranelift_ok/$((cranelift_ok+cranelift_skip)) wasi=$wasi_ok/$((wasi_ok+wasi_skip))"
+  echo "Compiled: rust=$rust_ok/$((rust_ok+rust_skip)) cranelift=$cranelift_ok/$((cranelift_ok+cranelift_skip)) llvm=$llvm_ok/$((llvm_ok+llvm_skip)) wasi=$wasi_ok/$((wasi_ok+wasi_skip))"
   echo "Cache location: $compile_dir"
   echo ""
 fi
@@ -253,6 +267,7 @@ for f in "$perf_dir"/*.js; do
 
   native_bin="$compile_dir/${base}_native"
   cranelift_bin="$compile_dir/${base}_cranelift"
+  llvm_bin="$compile_dir/${base}_llvm"
   wasi_bin="$compile_dir/${base}_wasi.wasm"
 
   if ! $summary_only; then
@@ -281,6 +296,16 @@ for f in "$perf_dir"/*.js; do
       echo "Tish (cranelift):"
       if [[ -x "$cranelift_bin" ]]; then
         run_with_timeout "$cranelift_bin" 2>&1 || true
+      else
+        echo "(not built)"
+      fi
+      echo ""
+    fi
+
+    if want_runtime llvm; then
+      echo "Tish (llvm):"
+      if [[ -x "$llvm_bin" ]]; then
+        run_with_timeout "$llvm_bin" 2>&1 || true
       else
         echo "(not built)"
       fi
@@ -330,6 +355,7 @@ for f in "$perf_dir"/*.js; do
   tish_run_times=()
   tish_native_times=()
   tish_cranelift_times=()
+  tish_llvm_times=()
   tish_wasi_times=()
   node_times=()
   bun_times=()
@@ -340,6 +366,7 @@ for f in "$perf_dir"/*.js; do
   want_runtime run && run_with_timeout $tish_bin run "$tish_file" >/dev/null 2>&1 || true
   want_runtime rust && [[ -x "$native_bin" ]] && run_with_timeout "$native_bin" >/dev/null 2>&1 || true
   want_runtime cranelift && [[ -x "$cranelift_bin" ]] && run_with_timeout "$cranelift_bin" >/dev/null 2>&1 || true
+  want_runtime llvm && [[ -x "$llvm_bin" ]] && run_with_timeout "$llvm_bin" >/dev/null 2>&1 || true
   want_runtime wasi && $has_wasmtime && [[ -f "$wasi_bin" ]] && run_with_timeout wasmtime "$wasi_bin" >/dev/null 2>&1 || true
   want_runtime node && "$node_cmd" "$f" >/dev/null 2>&1 || true
   want_runtime bun && $has_bun && "$bun_cmd" "$f" >/dev/null 2>&1 || true
@@ -377,6 +404,18 @@ for f in "$perf_dir"/*.js; do
       run_with_timeout "$cranelift_bin" >/dev/null 2>&1 || true
       t1=$(ms)
       tish_cranelift_times+=($((t1 - t0)))
+    done
+  fi
+
+  # Tish llvm
+  llvm_ok=false
+  if want_runtime llvm && [[ -x "$llvm_bin" ]]; then
+    llvm_ok=true
+    for _ in $(seq 1 "$n"); do
+      t0=$(ms)
+      run_with_timeout "$llvm_bin" >/dev/null 2>&1 || true
+      t1=$(ms)
+      tish_llvm_times+=($((t1 - t0)))
     done
   fi
 
@@ -436,6 +475,7 @@ for f in "$perf_dir"/*.js; do
   tish_run_sum=0
   tish_native_sum=0
   tish_cranelift_sum=0
+  tish_llvm_sum=0
   tish_wasi_sum=0
   node_sum=0
   bun_sum=0
@@ -445,15 +485,18 @@ for f in "$perf_dir"/*.js; do
   for t in "${tish_run_times[@]}"; do tish_run_sum=$((tish_run_sum + t)); done
   for t in "${tish_native_times[@]}"; do tish_native_sum=$((tish_native_sum + t)); done
   for t in "${tish_cranelift_times[@]}"; do tish_cranelift_sum=$((tish_cranelift_sum + t)); done
+  for t in "${tish_llvm_times[@]}"; do tish_llvm_sum=$((tish_llvm_sum + t)); done
   for t in "${tish_wasi_times[@]}"; do tish_wasi_sum=$((tish_wasi_sum + t)); done
   for t in "${node_times[@]}"; do node_sum=$((node_sum + t)); done
 
   tish_run_avg=$((tish_run_sum / n))
   tish_native_avg=0
   tish_cranelift_avg=0
+  tish_llvm_avg=0
   tish_wasi_avg=0
   $compile_ok && tish_native_avg=$((tish_native_sum / n))
   $cranelift_ok && tish_cranelift_avg=$((tish_cranelift_sum / n))
+  $llvm_ok && tish_llvm_avg=$((tish_llvm_sum / n))
   $wasi_ok && tish_wasi_avg=$((tish_wasi_sum / n))
   node_avg=$((node_sum / n))
   bun_avg=0
@@ -485,6 +528,7 @@ for f in "$perf_dir"/*.js; do
   summary_tish_run+=("$tish_run_avg")
   summary_tish_native+=("$tish_native_avg")
   summary_tish_cranelift+=("$tish_cranelift_avg")
+  summary_tish_llvm+=("$tish_llvm_avg")
   summary_tish_wasi+=("$tish_wasi_avg")
   summary_node+=("$node_avg")
   summary_bun+=("$bun_avg")
@@ -497,6 +541,7 @@ for f in "$perf_dir"/*.js; do
     want_runtime run && echo "  Tish (run):       ${tish_run_avg}ms"
     want_runtime rust && $compile_ok && echo "  Tish (rust):      ${tish_native_avg}ms"
     want_runtime cranelift && $cranelift_ok && echo "  Tish (cranelift): ${tish_cranelift_avg}ms"
+    want_runtime llvm && $llvm_ok && echo "  Tish (llvm):      ${tish_llvm_avg}ms"
     want_runtime wasi && $wasi_ok && echo "  Tish (wasi):      ${tish_wasi_avg}ms"
     want_runtime node && echo "  Node.js:          ${node_avg}ms"
     want_runtime bun && $has_bun && echo "  Bun:             ${bun_avg}ms"
@@ -505,7 +550,7 @@ for f in "$perf_dir"/*.js; do
     want_runtime node && echo "  Tish(run)/Node ratio: ${ratio}%"
     echo ""
   else
-    echo " done (run: ${tish_run_avg}ms rust: ${tish_native_avg}ms cranelift: ${tish_cranelift_avg}ms wasi: ${tish_wasi_avg}ms ratio: ${ratio}%)"
+    echo " done (run: ${tish_run_avg}ms rust: ${tish_native_avg}ms cranelift: ${tish_cranelift_avg}ms llvm: ${tish_llvm_avg}ms wasi: ${tish_wasi_avg}ms ratio: ${ratio}%)"
   fi
 done
 
@@ -532,6 +577,7 @@ div_args=()
 want_runtime run && { header="$header %8s"; header_args+=("run"); div_args+=("──────"); }
 want_runtime rust && { header="$header %8s"; header_args+=("rust"); div_args+=("──────"); }
 want_runtime cranelift && { header="$header %8s"; header_args+=("cranelift"); div_args+=("──────"); }
+want_runtime llvm && { header="$header %8s"; header_args+=("llvm"); div_args+=("──────"); }
 want_runtime wasi && { header="$header %8s"; header_args+=("wasi"); div_args+=("──────"); }
 want_runtime node && { header="$header %8s"; header_args+=("Node"); div_args+=("──────"); }
 want_runtime bun && $has_bun && { header="$header %8s"; header_args+=("Bun"); div_args+=("──────"); }
@@ -549,6 +595,7 @@ printf "\n"
 total_tish_run=0
 total_tish_native=0
 total_tish_cranelift=0
+total_tish_llvm=0
 total_tish_wasi=0
 total_node=0
 total_bun=0
@@ -561,6 +608,7 @@ for entry in "${sorted_indices[@]}"; do
   tish_run="${summary_tish_run[$idx]}"
   tish_native="${summary_tish_native[$idx]}"
   tish_cranelift="${summary_tish_cranelift[$idx]}"
+  tish_llvm="${summary_tish_llvm[$idx]}"
   tish_wasi="${summary_tish_wasi[$idx]}"
   node="${summary_node[$idx]}"
   bun="${summary_bun[$idx]}"
@@ -571,6 +619,7 @@ for entry in "${sorted_indices[@]}"; do
   total_tish_run=$((total_tish_run + tish_run))
   total_tish_native=$((total_tish_native + tish_native))
   total_tish_cranelift=$((total_tish_cranelift + tish_cranelift))
+  total_tish_llvm=$((total_tish_llvm + tish_llvm))
   total_tish_wasi=$((total_tish_wasi + tish_wasi))
   total_node=$((total_node + node))
   total_bun=$((total_bun + bun))
@@ -596,6 +645,8 @@ for entry in "${sorted_indices[@]}"; do
   [[ $tish_native -eq 0 ]] && native_display="-"
   cranelift_display="$tish_cranelift"
   [[ $tish_cranelift -eq 0 ]] && cranelift_display="-"
+  llvm_display="$tish_llvm"
+  [[ $tish_llvm -eq 0 ]] && llvm_display="-"
   wasi_display="$tish_wasi"
   [[ $tish_wasi -eq 0 ]] && wasi_display="-"
 
@@ -605,6 +656,7 @@ for entry in "${sorted_indices[@]}"; do
   want_runtime run && { row="$row %8d"; row_args+=("$tish_run"); }
   want_runtime rust && { row="$row %8s"; row_args+=("$native_display"); }
   want_runtime cranelift && { row="$row %8s"; row_args+=("$cranelift_display"); }
+  want_runtime llvm && { row="$row %8s"; row_args+=("$llvm_display"); }
   want_runtime wasi && { row="$row %8s"; row_args+=("$wasi_display"); }
   want_runtime node && { row="$row %8d"; row_args+=("$node"); }
   want_runtime bun && $has_bun && { row="$row %8d"; row_args+=("$bun"); }
@@ -632,6 +684,8 @@ native_total_display="$total_tish_native"
 [[ $total_tish_native -eq 0 ]] && native_total_display="-"
 cranelift_total_display="$total_tish_cranelift"
 [[ $total_tish_cranelift -eq 0 ]] && cranelift_total_display="-"
+llvm_total_display="$total_tish_llvm"
+[[ $total_tish_llvm -eq 0 ]] && llvm_total_display="-"
 wasi_total_display="$total_tish_wasi"
 [[ $total_tish_wasi -eq 0 ]] && wasi_total_display="-"
 
@@ -640,6 +694,7 @@ row_args=("TOTAL")
 want_runtime run && { row="$row %8d"; row_args+=("$total_tish_run"); }
 want_runtime rust && { row="$row %8s"; row_args+=("$native_total_display"); }
 want_runtime cranelift && { row="$row %8s"; row_args+=("$cranelift_total_display"); }
+want_runtime llvm && { row="$row %8s"; row_args+=("$llvm_total_display"); }
 want_runtime wasi && { row="$row %8s"; row_args+=("$wasi_total_display"); }
 want_runtime node && { row="$row %8d"; row_args+=("$total_node"); }
 want_runtime bun && $has_bun && { row="$row %8d"; row_args+=("$total_bun"); }
@@ -652,7 +707,7 @@ printf "$row" "${row_args[@]}"
 
 echo ""
 echo "Legend: Green = <150% | Yellow = 200-500% | Red = >500%"
-echo "        run=interpreter | rust=native(rust) | cranelift=native(cranelift) | wasi=wasmtime"
+echo "        run=interpreter | rust=native(rust) | cranelift=native(cranelift) | llvm=native(llvm) | wasi=wasmtime"
 echo ""
 echo "─────────────────────────────────────────"
 echo "Done."
