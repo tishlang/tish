@@ -1,0 +1,9 @@
+[package]
+name = "tish_llvm"
+version = "0.1.0"
+edition = "2021"
+description = "Experimental LLVM backend for Tish (bytecode/AST → native via LLVM)"
+
+# Dependencies reserved for future LLVM implementation
+# [dependencies]
+# inkwell = "0.4"  # or llvm-sys + bindgen

@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use tish_compile::ResolvedNativeModule;
 
@@ -16,14 +15,9 @@ pub fn build_via_cargo(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("tish_out");
-    let build_dir = std::env::temp_dir()
-        .join(format!("tish_build_{}_{}", out_name, std::process::id()));
+    let build_dir = tish_build_utils::create_build_dir("tish_build", out_name)?;
 
-    fs::create_dir_all(&build_dir).map_err(|e| format!("Cannot create build dir: {}", e))?;
-    fs::create_dir_all(build_dir.join("src"))
-        .map_err(|e| format!("Cannot create src: {}", e))?;
-
-    let runtime_path = find_runtime_path()?;
+    let runtime_path = tish_build_utils::find_runtime_path()?;
 
     let runtime_features: Vec<&str> = features
         .iter()
@@ -84,108 +78,18 @@ tish_runtime = {{ path = {:?}{} }}{}{}
         .parent()
         .and_then(|p| p.parent())
         .map(|ws| ws.join("target"));
-    let (target_dir, binary_dir) = if let Some(ref wt) = workspace_target.filter(|p| p.exists()) {
-        (wt.clone(), wt.join("release"))
-    } else {
-        let td = build_dir.join("target");
-        (td.clone(), td.join("release"))
-    };
+    let target_dir = workspace_target.filter(|p| p.exists());
+    let binary_dir = target_dir
+        .as_ref()
+        .map(|t| t.join("release"))
+        .unwrap_or_else(|| build_dir.join("target").join("release"));
 
-    let status = Command::new("cargo")
-        .args(["build", "--release", "--target-dir"])
-        .arg(&target_dir)
-        .current_dir(&build_dir)
-        .env_remove("CARGO_TARGET_DIR")
-        .env("CARGO_TERM_PROGRESS", "always")
-        .status()
-        .map_err(|e| format!("Failed to run cargo: {}", e))?;
+    tish_build_utils::run_cargo_build(&build_dir, target_dir.as_deref())?;
 
-    if !status.success() {
-        return Err("Compilation failed".to_string());
-    }
-
-    let binary_no_ext = binary_dir.join(out_name);
-    let binary_exe = binary_dir.join(format!("{}.exe", out_name));
-    let binary = if binary_no_ext.exists() {
-        binary_no_ext
-    } else if binary_exe.exists() {
-        binary_exe
-    } else {
-        return Err(format!(
-            "Binary not found at {} or {}",
-            binary_no_ext.display(),
-            binary_exe.display()
-        ));
-    };
-
-    let target = if output_path.extension().is_none()
-        || output_path.extension() == Some(std::ffi::OsStr::new(""))
-    {
-        let mut p = output_path.to_path_buf();
-        if cfg!(windows) {
-            p.set_extension("exe");
-        }
-        p
-    } else if output_path.to_string_lossy().ends_with('/') || output_path.is_dir() {
-        let dir = if output_path.is_dir() {
-            output_path.to_path_buf()
-        } else {
-            output_path.parent().unwrap_or(Path::new(".")).to_path_buf()
-        };
-        dir.join(if cfg!(windows) {
-            format!("{}.exe", out_name)
-        } else {
-            out_name.to_string()
-        })
-    } else {
-        output_path.to_path_buf()
-    };
-
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Cannot create output dir: {}", e))?;
-    }
-    fs::copy(&binary, &target)
-        .map_err(|e| format!("Cannot copy to {}: {}", target.display(), e))?;
+    let binary = tish_build_utils::find_release_binary(&binary_dir, out_name)?;
+    let target = tish_build_utils::resolve_output_path(output_path, out_name);
+    tish_build_utils::copy_binary_to_output(&binary, &target)?;
 
     Ok(())
 }
 
-fn find_runtime_path() -> Result<String, String> {
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let path = Path::new(&manifest_dir).join("..").join("tish_runtime");
-        if path.canonicalize().is_ok() {
-            return Ok(path.canonicalize().unwrap().display().to_string().replace('\\', "/"));
-        }
-    }
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let path = exe_dir
-                .join("..")
-                .join("..")
-                .join("crates")
-                .join("tish_runtime");
-            if path.canonicalize().is_ok() {
-                return Ok(path.canonicalize().unwrap().display().to_string().replace('\\', "/"));
-            }
-        }
-    }
-    let cwd_based = Path::new("crates").join("tish_runtime");
-    if cwd_based.canonicalize().is_ok() {
-        return Ok(cwd_based.canonicalize().unwrap().display().to_string().replace('\\', "/"));
-    }
-    if let Ok(mut current) = std::env::current_dir() {
-        for _ in 0..10 {
-            if current.join("Cargo.toml").exists() {
-                let runtime = current.join("crates").join("tish_runtime");
-                if runtime.exists() {
-                    return Ok(runtime.display().to_string().replace('\\', "/"));
-                }
-            }
-            if !current.pop() {
-                break;
-            }
-        }
-    }
-    Err("Could not find tish_runtime crate".to_string())
-}

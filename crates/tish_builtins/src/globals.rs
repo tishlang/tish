@@ -137,6 +137,33 @@ pub fn object_assign(args: &[Value]) -> Value {
     Value::Object(Rc::clone(target))
 }
 
+/// parseInt(string, radix?)
+pub fn parse_int(args: &[Value]) -> Value {
+    let s = args.first().map(Value::to_display_string).unwrap_or_default();
+    let s = s.trim();
+    let radix = args.get(1).and_then(|v| match v {
+        Value::Number(n) => Some(*n as i32),
+        _ => None,
+    }).unwrap_or(10);
+
+    if (2..=36).contains(&radix) {
+        let prefix: String = s
+            .chars()
+            .take_while(|c| *c == '-' || *c == '+' || c.is_digit(radix as u32))
+            .collect();
+        if let Ok(n) = i64::from_str_radix(&prefix, radix as u32) {
+            return Value::Number(n as f64);
+        }
+    }
+    Value::Number(f64::NAN)
+}
+
+/// parseFloat(string)
+pub fn parse_float(args: &[Value]) -> Value {
+    let s = args.first().map(Value::to_display_string).unwrap_or_default();
+    Value::Number(s.trim().parse().unwrap_or(f64::NAN))
+}
+
 /// Object.fromEntries(entries)
 pub fn object_from_entries(args: &[Value]) -> Value {
     if let Some(Value::Array(entries)) = args.first() {

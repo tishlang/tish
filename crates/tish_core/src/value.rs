@@ -278,4 +278,21 @@ impl Value {
             _ => None,
         }
     }
+
+    /// JavaScript-style typeof string for this value.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Bool(_) => "boolean",
+            Value::Null => "null",
+            Value::Array(_) => "object",
+            Value::Object(_) => "object",
+            Value::Function(_) => "function",
+            #[cfg(feature = "regex")]
+            Value::RegExp(_) => "object",
+            Value::Promise(_) => "object",
+            Value::Opaque(o) => o.type_name(),
+        }
+    }
 }

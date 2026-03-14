@@ -2195,6 +2195,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tish_build_utils"
+version = "0.1.0"
+
+[[package]]
 name = "tish_builtins"
 version = "0.1.0"
 dependencies = [
@@ -2247,6 +2251,7 @@ dependencies = [
  "cranelift-native",
  "cranelift-object",
  "target-lexicon 0.12.16",
+ "tish_build_utils",
  "tish_bytecode",
  "tish_core",
 ]
@@ -2280,10 +2285,15 @@ name = "tish_lexer"
 version = "0.1.0"
 
 [[package]]
+name = "tish_llvm"
+version = "0.1.0"
+
+[[package]]
 name = "tish_native"
 version = "0.1.0"
 dependencies = [
  "tish_ast",
+ "tish_build_utils",
  "tish_bytecode",
  "tish_compile",
  "tish_cranelift",
@@ -2328,6 +2338,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "tish_ast",
+ "tish_build_utils",
  "tish_bytecode",
  "tish_compile",
 ]

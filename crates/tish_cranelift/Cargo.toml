@@ -5,6 +5,7 @@ edition = "2021"
 description = "Bytecode to native via Cranelift"
 
 [dependencies]
+tish_build_utils = { path = "../tish_build_utils" }
 cranelift = "0.128"
 cranelift-codegen = "0.128"
 cranelift-frontend = "0.128"

@@ -54,8 +54,8 @@ fn emit_wasm_from_chunk(chunk: &Chunk, output_path: &Path) -> Result<(), WasmErr
     std::fs::create_dir_all(&out_dir_abs).map_err(|e| WasmError {
         message: format!("Cannot create output directory: {}", e),
     })?;
-    let workspace_root = find_workspace_root().ok_or_else(|| WasmError {
-        message: "Cannot find workspace root (run from crate root)".to_string(),
+    let workspace_root = tish_build_utils::find_workspace_root().map_err(|e| WasmError {
+        message: e,
     })?;
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let build_status = Command::new(&cargo)
@@ -195,8 +195,8 @@ pub fn compile_to_wasi(
         message: format!("Cannot create output directory: {}", e),
     })?;
 
-    let workspace_root = find_workspace_root().ok_or_else(|| WasmError {
-        message: "Cannot find workspace root (run from crate root)".to_string(),
+    let workspace_root = tish_build_utils::find_workspace_root().map_err(|e| WasmError {
+        message: e,
     })?;
 
     // Create generated project: wasi_build/{stem}/
@@ -305,15 +305,3 @@ fn main() {
     Ok(())
 }
 
-fn find_workspace_root() -> Option<std::path::PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        if dir.join("Cargo.toml").exists() {
-            let content = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
-            if content.contains("[workspace]") {
-                return Some(dir);
-            }
-        }
-        dir = dir.parent()?.to_path_buf();
-    }
-}

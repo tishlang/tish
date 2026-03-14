@@ -1,10 +1,11 @@
 #!/bin/bash
 # Run Tish and JS equivalents, show output and compare execution time.
-# Usage: ./scripts/run_performance_manual.sh [--release] [--summary-only] [--no-compile] [--limit N] [--runtimes R,...]
+# Usage: ./scripts/run_performance_manual.sh [--release] [--summary-only] [--no-compile] [--limit N] [--filter NAME] [--runtimes R,...]
 #   --release       use release build (recommended for fair Tish vs JS timing)
 #   --summary-only  skip individual test output, show only summary
 #   --no-compile    skip compilation, use cached binaries from previous runs
 #   --limit N       run only first N tests (default: all)
+#   --filter NAME   run only tests whose name contains NAME (e.g. array_stress)
 #   --timeout SEC   timeout per tish run in seconds (default: 30, 0=no limit)
 #   --runtimes R,...  comma-separated list: run,rust,cranelift,wasi,node,bun,deno,qjs (default: all)
 #   --verbose       show stderr (crash logs, runtime errors) instead of suppressing them
@@ -47,6 +48,7 @@ no_compile=false
 limit=0
 run_timeout=30
 runtimes_filter=""
+filter_name=""
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,6 +56,7 @@ while [[ $# -gt 0 ]]; do
     --summary-only) summary_only=true; shift ;;
     --no-compile) no_compile=true; shift ;;
     --limit) limit="$2"; shift 2 ;;
+    --filter) filter_name="$2"; shift 2 ;;
     --timeout) run_timeout="$2"; shift 2 ;;
     --runtimes) runtimes_filter="$2"; shift 2 ;;
     --verbose|-v) verbose=true; shift ;;
@@ -165,6 +168,8 @@ want_runtime node && echo "  node"
 want_runtime bun && $has_bun && echo "  bun"
 want_runtime deno && $has_deno && echo "  deno"
 want_runtime qjs && $has_qjs && echo "  qjs"
+[[ -n "$filter_name" ]] && echo "Filter: $filter_name"
+[[ $limit -gt 0 ]] && echo "Limit: $limit"
 echo ""
 
 # Phase 1: Pre-compile all Tish binaries (rust native, cranelift, wasi)
@@ -185,6 +190,7 @@ else
     [[ -f "$f" ]] || continue
     base=$(basename "$f" .js)
     [[ "$base" == "recursion_stress" ]] && continue
+    [[ -n "$filter_name" && "$base" != *"$filter_name"* ]] && continue
     [[ $limit -gt 0 && $count -ge $limit ]] && break
     tish_file="$tish_dir/$base.tish"
     [[ -f "$tish_file" ]] || continue
@@ -239,6 +245,7 @@ for f in "$perf_dir"/*.js; do
   [[ -f "$f" ]] || continue
   base=$(basename "$f" .js)
   [[ "$base" == "recursion_stress" ]] && continue
+  [[ -n "$filter_name" && "$base" != *"$filter_name"* ]] && continue
   [[ $limit -gt 0 && $count -ge $limit ]] && break
   tish_file="$tish_dir/$base.tish"
   [[ -f "$tish_file" ]] || continue

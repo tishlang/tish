@@ -55,3 +55,201 @@ object_methods              9        9        8       15       33       13      
 
 ──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
 TOTAL                   12804      486    10638    11543     1359      624     1145      572       942%
+
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                           PERFORMANCE SUMMARY
+                                    (sorted by Tish(run)/Node ratio, slowest first)
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+Test                      run     rust cranelift     wasi     Node      Bun     Deno  QuickJS  run/Node%
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+array_stress             1413       26      180      559       41       23       36       66      3446%
+object_stress            1000       40      105      364       35       23       32       67      2857%
+benchmark_granular        853       30       96      315       36       22       31       71      2369%
+new_features_perf         491       28       62      184       36       20       31       64      1363%
+objects_perf               23        9       10       20       29       14       26        8        79%
+array_methods_perf         18        9       10       20       29       15       26       10        62%
+length                     12        9        8       15       28       13       24        7        42%
+strict_equality            11        9        9       15       28       13       24        7        39%
+space_indent               11       10       10       16       28       14       25        8        39%
+scopes                     11        9        9       16       28       14       26        8        39%
+void                       11        9        9       16       29       14       25        7        37%
+optional_braces_braced       11        9        9       16       29       13       25        8        37%
+nested_complex             11        9        9       15       29       13       24        7        37%
+optional_chaining          11       12       11       19       30       15       26        8        36%
+compound_assign            10        9        8       15       28       13       24        7        35%
+uri                        10        8        9       15       28       13       24        7        35%
+types                      10        8        9       15       28       13       24        7        35%
+try_catch                  10        9        9       16       28       13       25        7        35%
+template_literals          10        9        9       16       28       13       25        8        35%
+tab_indent                 10        9        9       16       28       14       25        7        35%
+switch                     10        9        9       16       28       13       24        7        35%
+string_methods_perf        10       10       10       16       28       15       26        9        35%
+string_methods             10        9        9       15       28       13       25        8        35%
+rest_params                10       10        9       16       28       13       24       10        35%
+arrays                     10        9        8       15       28       13       26        7        35%
+math                       10        8        9       15       28       13       24        7        35%
+in_op                      10        8        9       16       28       13       24        7        35%
+higher_order_methods       10        9        9       15       28       13       24        7        35%
+for_of                     10        9        8       15       28       13       24        7        35%
+fn_any                     10        9        9       15       28       13       24        7        35%
+const                      10        9        9       15       28       13       24        7        35%
+builtins                   10        9        9       15       29       13       24        7        34%
+typeof                     10        9        9       15       29       14       25        7        34%
+arrow_functions            10        9        9       15       29       13       24        7        34%
+objects                    10        9       10       16       29       13       26        7        34%
+json                       10        9        8       15       29       13       25        8        34%
+exponentiation             10        9        9       15       29       13       24        8        34%
+do_while                   10        9        9       15       29       14       25        7        34%
+array_methods              10       11        9       15       29       13       24        7        34%
+bitwise                     9        8        9       15       28       13       24        7        32%
+mutation                    9        9        9       15       28       13       24        7        32%
+inc_dec                     9        8        9       15       28       13       24        7        32%
+conditional                 9        8        8       15       28       13       24        8        32%
+break_continue              9        9        9       15       29       13       24        7        31%
+optional_braces             9        9        9       16       29       14       30        9        31%
+nested_loops                9        8        8       15       29       13       25        7        31%
+object_methods             10        9        9       15       34       13       30        7        29%
+
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+TOTAL                    4210      511      830     2094     1376      661     1199      589       305%
+
+Legend: Green = <150% | Yellow = 200-500% | Red = >500%
+        run=interpreter | rust=native(rust) | cranelift=native(cranelift) | wasi=wasmtime
+
+─────────────────────────────────────────
+
+
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                           PERFORMANCE SUMMARY
+                                    (sorted by Tish(run)/Node ratio, slowest first)
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+Test                      run     rust cranelift     wasi     Node      Bun     Deno  QuickJS  run/Node%
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+array_stress             1413       28      179      563       41       24       38       67      3446%
+object_stress             998       40      106      357       35       21       30       67      2851%
+benchmark_granular        851       30       96      316       35       22       30       70      2431%
+new_features_perf         487       28       62      184       35       20       31       64      1391%
+objects_perf               23        9        9       19       29       14       24        7        79%
+array_methods_perf         20        9       10       20       29       13       25        9        68%
+arrow_functions            11        9        9       16       28       14       25        8        39%
+nested_complex             11        9        9       15       28       13       24        8        39%
+compound_assign            10        9        8       15       28       13       24        7        35%
+builtins                   10        9        9       15       28       13       24        7        35%
+break_continue             10        9        9       15       28       13       24        7        35%
+types                      10        9        9       15       28       13       24        7        35%
+strict_equality            10        8        9       15       28       13       25        7        35%
+space_indent               10        9        8       15       28       13       24        7        35%
+optional_chaining          10        9        9       15       28       13       24        7        35%
+length                     10        8        9       15       28       13       24        7        35%
+template_literals          10        9        9       15       29       13       24        8        34%
+string_methods_perf        10        9        8       14       29       14       25        8        34%
+string_methods             10        9        8       15       29       14       24        7        34%
+rest_params                10        9        9       15       29       13       24        7        34%
+optional_braces            10        9        9       15       29       14       24        7        34%
+arrays                     10        9        9       16       29       13       24        8        34%
+objects                    10        9        9       15       29       13       31        7        34%
+nested_loops               10        8        8       15       29       13       24        7        34%
+mutation                   10        9        9       15       29       13       24        7        34%
+math                       10        9        8       15       29       13       24        7        34%
+json                       10        8        9       15       29       13       25        7        34%
+higher_order_methods       10        9        9       15       29       13       24        7        34%
+for_of                     10        9        8       15       29       13       24        7        34%
+fn_any                     10        9        8       15       29       13       24        7        34%
+const                      10        9        9       15       29       13       24        7        34%
+array_methods              10        9        9       15       29       13       24        7        34%
+tab_indent                 10        9        8       17       30       13       24        7        33%
+optional_braces_braced        9        9        9       15       27       13       24        7        33%
+bitwise                     9        9        9       15       28       13       25        7        32%
+void                        9        9        8       15       28       13       24        7        32%
+switch                      9        9        9       15       28       13       24        7        32%
+scopes                      9        9        9       15       28       13       24        7        32%
+in_op                       9        9        9       15       28       13       24        7        32%
+exponentiation              9        8        8       15       28       14       24        7        32%
+do_while                    9        9        9       15       28       13       23        7        32%
+conditional                 9        9        8       15       28       13       24        7        32%
+uri                         9        9        8       15       29       13       24        7        31%
+typeof                      9        9        9       15       29       13       24        7        31%
+try_catch                   9        9        8       15       29       13       24        7        31%
+inc_dec                     9        9        8       16       29       13       24        7        31%
+object_methods             10        9        9       15       34       13       30        7        29%
+
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+TOTAL                    4191      508      816     2078     1379      652     1179      576       303%
+
+Legend: Green = <150% | Yellow = 200-500% | Red = >500%
+        run=interpreter | rust=native(rust) | cranelift=native(cranelift) | wasi=wasmtime
+
+─────────────────────────────────────────
+Done.
+
+
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                           PERFORMANCE SUMMARY
+                                    (sorted by Tish(run)/Node ratio, slowest first)
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+Test                      run     rust cranelift     wasi     Node      Bun     Deno  QuickJS  run/Node%
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+array_stress             1488       31      170      591       42       24       36       66      3542%
+object_stress            1043       41      108      357       35       21       30       67      2980%
+benchmark_granular        907       32      100      319       36       22       30       70      2519%
+new_features_perf         514       29       63      183       36       19       31       64      1427%
+objects_perf               23        9       10       20       28       14       25        8        82%
+array_methods_perf         19        9       10       20       29       13       25       12        65%
+nested_complex             11        9        9       16       28       13       24        7        39%
+in_op                      10        9        8       15       27       13       24        7        37%
+for_of                     10        8        8       15       27       13       24        7        37%
+builtins                   10        9        8       15       28       13       24        7        35%
+break_continue             10        8        8       15       28       13       24        7        35%
+uri                        10        9        9       15       28       13       24        7        35%
+optional_braces_braced       10        9        9       15       28       12       24        7        35%
+objects                    10        9        9       15       28       13       24        7        35%
+math                       10        9        8       15       28       13       24        7        35%
+json                       10        8        9       15       28       13       24        7        35%
+higher_order_methods       10        9        9       16       28       13       24        7        35%
+conditional                10        9        9       15       28       12       24        7        35%
+compound_assign            10        9        9       15       29       13       24        7        34%
+void                       10        9        9       16       29       14       25        8        34%
+types                      10        8        9       17       29       14       23        7        34%
+template_literals          10        9        9       15       29       13       24        7        34%
+tab_indent                 10        9        9       15       29       13       24        7        34%
+arrow_functions            10        9        8       15       29       13       24        7        34%
+switch                     10        9        8       15       29       12       24        7        34%
+string_methods_perf        10       10        9       15       29       14       24        8        34%
+string_methods             10        9        9       14       29       13       25        7        34%
+scopes                     10        9        9       15       29       13       24        7        34%
+rest_params                10        9        9       15       29       13       24        7        34%
+length                     10        9        9       15       29       13       24        7        34%
+do_while                   10        9        9       15       29       13       24        7        34%
+array_methods              10        9        9       15       29       14       25        7        34%
+typeof                      9        8        9       15       28       12       24        7        32%
+try_catch                   9        8        8       15       28       13       24        7        32%
+strict_equality             9        9        9       15       28       13       24        7        32%
+optional_chaining           9        9        9       15       28       13       24        7        32%
+inc_dec                     9        9        8       15       28       13       24        7        32%
+exponentiation              9        8        9       15       28       13       24        7        32%
+const                       9        9        9       15       28       13       24        7        32%
+bitwise                     9        9        9       15       29       13       24        7        31%
+space_indent                9        9        8       15       29       13       25        7        31%
+optional_braces             9        9        8       15       29       13       24        7        31%
+arrays                      9        9        9       15       29       13       24        7        31%
+nested_loops                9        9        8       15       29       13       24       10        31%
+mutation                    9        9        8       15       29       13       24        7        31%
+fn_any                      9        9        9       15       29       13       24        7        31%
+object_methods              9        9        9       15       34       13       30        7        26%
+
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+TOTAL                    4390      514      817     2109     1379      646     1170      579       318%
+
+
+
+./scripts/run_object_stress_profile.sh; \
+./scripts/run_benchmark_granular_profile.sh; \
+
+./scripts/run_object_stress_profile.sh --instrument; \
+TISH_PROFILE=1 cargo run -p tish --features "full,profile" -- run tests/core/benchmark_granular_04_nested_fn.tish

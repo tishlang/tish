@@ -3,28 +3,20 @@
 //! Uses Cargo to build a small binary that links our .o and runs the chunk.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 
 use crate::CraneliftError;
 
 pub fn link_to_binary(object_path: &Path, output_path: &Path) -> Result<(), CraneliftError> {
-    let workspace_root = find_workspace_root()?;
+    let workspace_root = tish_build_utils::find_workspace_root().map_err(|e| CraneliftError {
+        message: e,
+    })?;
     let out_name = output_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("tish_out");
-    let build_dir = std::env::temp_dir()
-        .join("tish_cranelift_build")
-        .join(format!("{}_{}", out_name, std::process::id()));
-
-    fs::create_dir_all(&build_dir).map_err(|e| CraneliftError {
-        message: format!("Cannot create build dir: {}", e),
-    })?;
-    fs::create_dir_all(build_dir.join("src"))
-        .map_err(|e| CraneliftError {
-            message: format!("Cannot create src: {}", e),
-        })?;
+    let build_dir = tish_build_utils::create_build_dir("tish_cranelift_build", out_name)
+        .map_err(|e| CraneliftError { message: e })?;
 
     let object_path_str = object_path
         .canonicalize()
@@ -96,107 +88,17 @@ fn main() {{
         message: format!("Cannot write build.rs: {}", e),
     })?;
 
-    let output = Command::new("cargo")
-        .args(["build", "--release", "--target-dir"])
-        .arg(build_dir.join("target"))
-        .current_dir(&build_dir)
-        .env_remove("CARGO_TARGET_DIR")
-        .output()
-        .map_err(|e| CraneliftError {
-            message: format!("Failed to run cargo: {}", e),
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(CraneliftError {
-            message: format!(
-                "Cargo build failed.\nstdout:\n{}\nstderr:\n{}",
-                stdout, stderr
-            ),
-        });
-    }
+    tish_build_utils::run_cargo_build(&build_dir, None).map_err(|e| CraneliftError { message: e })?;
 
     let binary_dir = build_dir.join("target").join("release");
-    let binary_no_ext = binary_dir.join(out_name);
-    let binary_exe = binary_dir.join(format!("{}.exe", out_name));
-    let binary = if binary_no_ext.exists() {
-        binary_no_ext
-    } else if binary_exe.exists() {
-        binary_exe
-    } else {
-        return Err(CraneliftError {
-            message: format!(
-                "Binary not found at {} or {}",
-                binary_no_ext.display(),
-                binary_exe.display()
-            ),
-        });
-    };
-
-    let target = if output_path.extension().is_none()
-        || output_path
-            .extension()
-            .map(|e| e.is_empty())
-            .unwrap_or(true)
-    {
-        let mut p = output_path.to_path_buf();
-        if cfg!(windows) {
-            p.set_extension("exe");
-        }
-        p
-    } else {
-        output_path.to_path_buf()
-    };
-
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| CraneliftError {
-            message: format!("Cannot create output dir: {}", e),
-        })?;
-    }
-    fs::copy(&binary, &target).map_err(|e| CraneliftError {
-        message: format!("Cannot copy to {}: {}", target.display(), e),
-    })?;
+    let binary =
+        tish_build_utils::find_release_binary(&binary_dir, out_name)
+            .map_err(|e| CraneliftError { message: e })?;
+    let target = tish_build_utils::resolve_output_path(output_path, out_name);
+    tish_build_utils::copy_binary_to_output(&binary, &target)
+        .map_err(|e| CraneliftError { message: e })?;
 
     Ok(())
 }
 
-fn find_workspace_root() -> Result<PathBuf, CraneliftError> {
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let path = PathBuf::from(&manifest_dir);
-        if let Some(root) = path.parent().and_then(|p| p.parent()) {
-            return Ok(root.to_path_buf());
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(mut current) = exe.parent() {
-            for _ in 0..10 {
-                let crates = current.join("crates").join("tish_cranelift_runtime");
-                if crates.exists() {
-                    return Ok(current.to_path_buf());
-                }
-                if let Some(p) = current.parent() {
-                    current = p;
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut current = cwd;
-        for _ in 0..10 {
-            let crates = current.join("crates").join("tish_cranelift_runtime");
-            if crates.exists() {
-                return Ok(current);
-            }
-            if !current.pop() {
-                break;
-            }
-        }
-    }
-    Err(CraneliftError {
-        message: "Cannot find workspace root (crates/tish_cranelift_runtime). Run from tish workspace.".to_string(),
-    })
-}
 

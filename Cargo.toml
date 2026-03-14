@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/tish_build_utils",
     "crates/tish_cranelift",
     "crates/tish_cranelift_runtime",
     "crates/tish_wasm_runtime",
@@ -15,6 +16,7 @@ members = [
     "crates/tish_compile_js",
     "crates/tish_bytecode",
     "crates/tish_vm",
+    "crates/tish_llvm",
     "crates/tish_native",
     "crates/tish_wasm",
     "crates/tish",

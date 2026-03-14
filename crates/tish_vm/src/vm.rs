@@ -170,27 +170,8 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     );
     g.insert("JSON".into(), Value::Object(Rc::new(RefCell::new(json))));
 
-    g.insert("parseInt".into(), Value::Function(Rc::new(|args: &[Value]| {
-            let s = args.first().map(|v| v.to_display_string()).unwrap_or_default();
-        let s = s.trim();
-        let radix = args.get(1).and_then(|v| v.as_number()).unwrap_or(10.0) as i32;
-        let n = if (2..=36).contains(&radix) {
-            let prefix: std::string::String = s
-                .chars()
-                .take_while(|c| *c == '-' || *c == '+' || c.is_ascii_digit())
-                .collect();
-            i64::from_str_radix(&prefix, radix as u32)
-                .ok()
-                .map(|n| n as f64)
-        } else {
-            None
-        };
-        Value::Number(n.unwrap_or(f64::NAN))
-    })));
-    g.insert("parseFloat".into(), Value::Function(Rc::new(|args: &[Value]| {
-            let s = args.first().map(|v| v.to_display_string()).unwrap_or_default();
-        Value::Number(s.trim().parse().unwrap_or(f64::NAN))
-    })));
+    g.insert("parseInt".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::parse_int(args))));
+    g.insert("parseFloat".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::parse_float(args))));
     g.insert("encodeURI".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::encode_uri(args))));
     g.insert("decodeURI".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::decode_uri(args))));
     g.insert("Boolean".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::boolean(args))));
@@ -202,7 +183,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
         "typeof".into(),
         Value::Function(Rc::new(|args: &[Value]| {
             let v = args.first().unwrap_or(&Value::Null);
-            Value::String(type_name(v).into())
+            Value::String(v.type_name().into())
         })),
     );
 
@@ -252,22 +233,6 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     g.insert("String".into(), Value::Object(Rc::new(RefCell::new(string_static))));
 
     g
-}
-
-fn type_name(v: &Value) -> &'static str {
-    match v {
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Bool(_) => "boolean",
-        Value::Null => "null",
-        Value::Array(_) => "object",
-        Value::Object(_) => "object",
-        Value::Function(_) => "function",
-        #[cfg(feature = "regex")]
-        Value::RegExp(_) => "object",
-        Value::Promise(_) => "object",
-        Value::Opaque(o) => o.type_name(),
-    }
 }
 
 /// Shared scope for closure capture (parent frame's locals).
@@ -500,7 +465,7 @@ impl Vm {
                         _ => {
                             return Err(format!(
                                 "Call of non-function: {}",
-                                type_name(&callee)
+                                callee.type_name()
                             ));
                         }
                     }
@@ -531,7 +496,7 @@ impl Vm {
                         _ => {
                             return Err(format!(
                                 "Call of non-function: {}",
-                                type_name(&callee)
+                                callee.type_name()
                             ));
                         }
                     }
@@ -987,7 +952,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             };
             Ok(Value::Function(method))
         }
-        _ => Err(format!("Cannot read property '{}' of {}", key, type_name(obj))),
+        _ => Err(format!("Cannot read property '{}' of {}", key, obj.type_name())),
     }
 }
 
@@ -1008,7 +973,7 @@ fn set_member(obj: &Value, key: &Arc<str>, val: Value) -> Result<(), String> {
             }
             Ok(())
         }
-        _ => Err(format!("Cannot set property of {}", type_name(obj))),
+        _ => Err(format!("Cannot set property of {}", obj.type_name())),
     }
 }
 
