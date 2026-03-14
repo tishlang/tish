@@ -201,6 +201,10 @@ parity-limit N:
 array-stress-profile:
     ./scripts/run_array_stress_profile.sh
 
+# Profile optional_chaining sections (find which ?? or ?. operation freezes)
+optional-chaining-profile:
+    ./scripts/run_optional_chaining_profile.sh
+
 # Show binary sizes for different builds
 sizes:
     @echo "Building secure binary..."

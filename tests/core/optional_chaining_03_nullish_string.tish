@@ -1,0 +1,5 @@
+// Isolated: ?? with string
+console.log("--- optional_chaining_03: nullish string ---");
+let z = "hello";
+console.log(z ?? "default");
+console.log("DONE 03");

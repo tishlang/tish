@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Profile each array_stress section to identify slow parts.
-# Usage: ./scripts/run_array_stress_profile.sh
+# Profile each optional_chaining section to identify freeze/slow parts.
+# Usage: ./scripts/run_optional_chaining_profile.sh [--backend vm|interp]
+#
+# If optional_chaining freezes during parity/perf/manual tests, run this to find
+# which operation (nullish ??, optional ?.) causes it.
 
 set -e
 cd "$(dirname "$0")/.."
@@ -12,18 +15,20 @@ if [[ ! -x "$tish_bin" ]]; then
   cargo build -p tish --features full --target-dir "$target_dir" -q 2>/dev/null || true
 fi
 [[ ! -x "$tish_bin" ]] && tish_bin="cargo run -q -p tish --features full --target-dir $target_dir --"
+backend_args=""
+[[ "$1" == "--backend" && -n "${2:-}" ]] && backend_args="--backend $2"
 
-echo "=== Array stress section profiling ==="
+echo "=== Optional chaining section profiling ==="
 echo ""
 
-for f in tests/core/array_stress_*.tish; do
+for f in tests/core/optional_chaining_*.tish; do
   [[ -f "$f" ]] || continue
   name=$(basename "$f")
   echo "─────────────────────────────────────────"
   echo "▶ $name"
   echo "─────────────────────────────────────────"
-  { time $tish_bin run "$f" 2>&1; } 2>&1 || true
+  { time $tish_bin run "$f" $backend_args 2>&1; } 2>&1 || true
   echo ""
 done
 
-echo "Done. Compare timings to find the slow section."
+echo "Done. If any section hung, that's the culprit."

@@ -1,0 +1,12 @@
+// Combined: all operations in sequence like optional_chaining.tish
+console.log("--- optional_chaining_06: combined ---");
+let x = null;
+console.log(x ?? "default");
+let y = 0;
+console.log(y ?? 99);
+let z = "hello";
+console.log(z ?? "default");
+let obj = { a: 1, b: 2 };
+console.log(obj?.a);
+console.log(obj?.c ?? "missing");
+console.log("DONE 06");

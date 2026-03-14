@@ -1,0 +1,5 @@
+// Isolated: ?? with 0 (0 is not nullish, so keeps 0)
+console.log("--- optional_chaining_02: nullish zero ---");
+let y = 0;
+console.log(y ?? 99);
+console.log("DONE 02");

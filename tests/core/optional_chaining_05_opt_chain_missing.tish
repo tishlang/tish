@@ -1,0 +1,5 @@
+// Isolated: optional chaining obj?.c ?? "missing"
+console.log("--- optional_chaining_05: opt chain missing ---");
+let obj = { a: 1, b: 2 };
+console.log(obj?.c ?? "missing");
+console.log("DONE 05");
