@@ -261,6 +261,73 @@ arrays                     10        9        9       15       29       13      
 array_methods              10        9        9       15       29       13       24        7        34%
 
 
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                           PERFORMANCE SUMMARY
+                                    (sorted by Tish(run)/Node ratio, slowest first)
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+Test                      run     rust cranelift     wasi     Node      Bun     Deno  QuickJS  run/Node%
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+array_stress             1413       26      175      562       42       24       36       66      3364%
+object_stress            1000       41      104      360       35       21       30       67      2857%
+benchmark_granular        851       30       97      317       35       23       31       71      2431%
+new_features_perf         487       28       62      185       36       19       31       64      1352%
+objects_perf               23        9       10       20       29       14       24        8        79%
+array_methods_perf         20       10       11       21       30       15       26       10        66%
+nested_complex             11        8        9       15       29       13       25        8        37%
+higher_order_methods       11        9        8       16       29       14       24        7        37%
+array_methods              11       10       10       16       29       14       26        8        37%
+builtins                   10        9        9       16       28       13       25        8        35%
+types                      10        9        9       15       28       13       24        7        35%
+template_literals          10        8        9       15       28       13       24        7        35%
+switch                     10        9        9       15       28       13       24        7        35%
+string_methods             10        9        9       15       28       13       24        7        35%
+strict_equality            10        8        9       15       28       13       24        7        35%
+scopes                     10        9        9       15       28       13       24        7        35%
+inc_dec                    10        9        9       15       28       13       24        7        35%
+for_of                     10        8        8       15       28       13       24        8        35%
+do_while                   10        8        9       15       28       13       24        7        35%
+compound_assign            10        9        9       15       29       13       25        7        34%
+void                       10        9        9       15       29       13       24        7        34%
+string_methods_perf        10       10        9       15       29       14       24        8        34%
+rest_params                10        9        9       15       29       13       24        7        34%
+optional_braces_braced       10        8        8       15       29       13       24        7        34%
+objects                    10        9        9       15       29       13       24        7        34%
+nested_loops               10        8        9       15       29       13       24        7        34%
+mutation                   10        9        8       15       29       13       24        7        34%
+length                     10        9        9       15       29       13       24        7        34%
+json                       10        9        9       15       29       13       24        7        34%
+fn_any                     10        9        9       17       29       13       24        7        34%
+exponentiation             10        9        9       15       29       13       24        7        34%
+const                      10        9        9       15       29       13       25        7        34%
+uri                         9        9        8       15       27       13       24        7        33%
+arrow_functions            10        9        9       16       30       14       25        7        33%
+break_continue              9        9        9       16       28       14       25        7        32%
+try_catch                   9        9        9       15       28       13       25        7        32%
+space_indent                9        9        8       15       28       13       24        8        32%
+optional_chaining           9        9        8       15       28       13       24        7        32%
+optional_braces             9        9        9       15       28       13       24        7        32%
+bitwise                     9        9        9       15       29       13       24        7        31%
+typeof                      9        9        9       15       29       13       26        7        31%
+tab_indent                  9        9        8       15       29       13       24        7        31%
+arrays                      9        9        8       15       29       14       25        8        31%
+math                        9        8        9       15       29       13       25        7        31%
+in_op                       9        9       10       16       29       13       24        7        31%
+conditional                 9        9        8       15       29       13       24        8        31%
+object_methods             10        9        9       15       34       13       30        8        29%
+
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+TOTAL                    4194      507      820     2088     1385      655     1181      582       302%
+
+Legend: Green = <150% | Yellow = 200-500% | Red = >500%
+        run=interpreter | rust=native(rust) | cranelift=native(cranelift) | wasi=wasmtime
+
+─────────────────────────────────────────
+
+
+
+
 ./scripts/run_object_stress_profile.sh; \
 ./scripts/run_benchmark_granular_profile.sh; \
 

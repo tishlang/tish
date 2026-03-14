@@ -1,13 +1,11 @@
 [package]
-name = "tish_bytecode"
+name = "tish_opt"
 version = "0.1.0"
 edition = "2021"
-description = "Bytecode compiler for Tish (AST → bytecode)"
+description = "AST optimization pass for Tish (constant folding, short-circuit, etc.)"
 
 [dependencies]
 tish_ast = { path = "../tish_ast" }
-tish_core = { path = "../tish_core" }
 
 [dev-dependencies]
 tish_parser = { path = "../tish_parser" }
-tish_opt = { path = "../tish_opt" }

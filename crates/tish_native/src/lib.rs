@@ -77,9 +77,9 @@ pub fn compile_to_native(
             tish_compile::detect_cycles(&modules).map_err(|e| NativeError {
                 message: e.to_string(),
             })?;
-            let program = tish_compile::merge_modules(modules).map_err(|e| NativeError {
+            let program = tish_opt::optimize(&tish_compile::merge_modules(modules).map_err(|e| NativeError {
                 message: e.to_string(),
-            })?;
+            })?);
 
             if tish_compile::has_native_imports(&program) {
                 return Err(NativeError {
@@ -99,7 +99,7 @@ pub fn compile_to_native(
             let modules = tish_compile::resolve_project(entry_path, project_root)
                 .map_err(|e| NativeError { message: e.to_string() })?;
             tish_compile::detect_cycles(&modules).map_err(|e| NativeError { message: e.to_string() })?;
-            let program = tish_compile::merge_modules(modules).map_err(|e| NativeError { message: e.to_string() })?;
+            let program = tish_opt::optimize(&tish_compile::merge_modules(modules).map_err(|e| NativeError { message: e.to_string() })?);
             if tish_compile::has_native_imports(&program) {
                 return Err(NativeError {
                     message: "LLVM backend does not support native imports.".to_string(),
@@ -135,17 +135,18 @@ pub fn compile_program_to_native(
 
     match backend {
         Backend::Rust => {
+            let program = tish_opt::optimize(program);
             let root = project_root.unwrap_or_else(|| Path::new("."));
-            let native_modules = tish_compile::resolve_native_modules(program, root)
+            let native_modules = tish_compile::resolve_native_modules(&program, root)
                 .map_err(|e| NativeError { message: e })?;
             let mut all_features = features.to_vec();
-            for f in tish_compile::extract_native_import_features(program) {
+            for f in tish_compile::extract_native_import_features(&program) {
                 if !all_features.contains(&f) {
                     all_features.push(f);
                 }
             }
             let rust_code = tish_compile::compile_with_native_modules(
-                program,
+                &program,
                 project_root,
                 &all_features,
                 &native_modules,
@@ -162,8 +163,9 @@ pub fn compile_program_to_native(
                     message: "Cranelift backend does not support native imports.".to_string(),
                 });
             }
+            let program = tish_opt::optimize(program);
             let chunk =
-                tish_bytecode::compile(program).map_err(|e| NativeError { message: e.to_string() })?;
+                tish_bytecode::compile(&program).map_err(|e| NativeError { message: e.to_string() })?;
             tish_cranelift::compile_chunk_to_native(&chunk, output_path)
                 .map_err(|e| NativeError { message: e.to_string() })
         }

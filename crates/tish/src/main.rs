@@ -85,11 +85,11 @@ fn run_file(path: &str, backend: &str) -> Result<(), String> {
 
     let program = if path.extension().map(|e| e == "js") == Some(true) {
         let source = fs::read_to_string(&path).map_err(|e| format!("{}", e))?;
-        js_to_tish::convert(&source).map_err(|e| format!("{}", e))?
+        tish_opt::optimize(&js_to_tish::convert(&source).map_err(|e| format!("{}", e))?)
     } else {
         let modules = tish_compile::resolve_project(&path, project_root)?;
         tish_compile::detect_cycles(&modules)?;
-        tish_compile::merge_modules(modules)?
+        tish_opt::optimize(&tish_compile::merge_modules(modules)?)
     };
 
     if backend == "interp" {

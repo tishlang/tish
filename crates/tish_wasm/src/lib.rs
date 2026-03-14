@@ -38,9 +38,9 @@ fn resolve_and_compile_to_chunk(
     detect_cycles(&modules).map_err(|e| WasmError {
         message: e.to_string(),
     })?;
-    let program = merge_modules(modules).map_err(|e| WasmError {
+    let program = tish_opt::optimize(&merge_modules(modules).map_err(|e| WasmError {
         message: e.to_string(),
-    })?;
+    })?);
     tish_bytecode::compile(&program).map_err(|e| WasmError {
         message: e.to_string(),
     })
@@ -48,7 +48,8 @@ fn resolve_and_compile_to_chunk(
 
 /// Compile a single Program (e.g. from js_to_tish) for WebAssembly.
 pub fn compile_program_to_wasm(program: &Program, output_path: &Path) -> Result<(), WasmError> {
-    let chunk = tish_bytecode::compile(program).map_err(|e| WasmError {
+    let program = tish_opt::optimize(program);
+    let chunk = tish_bytecode::compile(&program).map_err(|e| WasmError {
         message: e.to_string(),
     })?;
     emit_wasm_from_chunk(&chunk, output_path)

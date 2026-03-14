@@ -391,8 +391,8 @@ pub fn compile_project_full(
         .map_err(|e| CompileError { message: e, span: None })?;
     resolve::detect_cycles(&modules)
         .map_err(|e| CompileError { message: e, span: None })?;
-    let program = resolve::merge_modules(modules)
-        .map_err(|e| CompileError { message: e, span: None })?;
+    let program = tish_opt::optimize(&resolve::merge_modules(modules)
+        .map_err(|e| CompileError { message: e, span: None })?);
     let native_modules = resolve::resolve_native_modules(&program, root)
         .map_err(|e| CompileError { message: e, span: None })?;
     let mut all_features: Vec<String> = features.to_vec();
@@ -422,12 +422,13 @@ pub fn compile_with_native_modules(
     features: &[String],
     native_modules: &[crate::resolve::ResolvedNativeModule],
 ) -> Result<String, CompileError> {
+    let program = tish_opt::optimize(program);
     let map: std::collections::HashMap<String, (String, String)> = native_modules
         .iter()
         .map(|m| (m.spec.clone(), (m.crate_name.clone(), m.export_fn.clone())))
         .collect();
     let mut g = Codegen::new_with_native_modules(project_root, features, map);
-    g.emit_program(program)?;
+    g.emit_program(&program)?;
     Ok(g.output)
 }
 

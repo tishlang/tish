@@ -745,8 +745,9 @@ function __h(tag, props, ...children) {
 
 /// Compile a single program (no imports) to JavaScript.
 pub fn compile(program: &Program) -> Result<String, CompileError> {
+    let program = tish_opt::optimize(program);
     let mut g = Codegen::new();
-    g.emit_program(program)?;
+    g.emit_program(&program)?;
     Ok(g.output)
 }
 
@@ -760,7 +761,7 @@ pub fn compile_project(
     let modules = tish_compile::resolve_project(entry_path, project_root)
         .map_err(|e| CompileError { message: e })?;
     tish_compile::detect_cycles(&modules).map_err(|e| CompileError { message: e })?;
-    let program = tish_compile::merge_modules(modules).map_err(|e| CompileError { message: e })?;
+    let program = tish_opt::optimize(&tish_compile::merge_modules(modules).map_err(|e| CompileError { message: e })?);
     let default_export = program.statements.iter().find_map(|s| {
         if let Statement::VarDecl { name, .. } = s {
             let n = name.as_ref();
