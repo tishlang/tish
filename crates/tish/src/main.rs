@@ -123,7 +123,7 @@ fn run_file(path: &str, backend: &str, no_optimize: bool) -> Result<(), String> 
         let mut eval = tish_eval::Evaluator::new();
         let value = eval.eval_program(&program)?;
         if !matches!(value, tish_eval::Value::Null) {
-            println!("{}", value);
+            println!("{}", tish_eval::format_value_for_console(&value, tish_core::use_console_colors()));
         }
         return Ok(());
     }
@@ -136,7 +136,7 @@ fn run_file(path: &str, backend: &str, no_optimize: bool) -> Result<(), String> 
     };
     let value = tish_vm::run(&chunk)?;
     if !matches!(value, tish_core::Value::Null) {
-        println!("{}", value.to_display_string());
+        println!("{}", tish_core::format_value_styled(&value, tish_core::use_console_colors()));
     }
     Ok(())
 }
@@ -163,7 +163,7 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
                     match eval.eval_program(&program) {
                         Ok(v) => {
                             if !matches!(v, tish_eval::Value::Null) {
-                                println!("{}", v);
+                                println!("{}", tish_eval::format_value_for_console(&v, tish_core::use_console_colors()));
                             }
                         }
                         Err(e) => eprintln!("{}", e),
@@ -220,7 +220,7 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
                         match vm.borrow_mut().run(&chunk) {
                             Ok(v) => {
                                 if !matches!(v, tish_core::Value::Null) {
-                                    println!("{}", v.to_display_string());
+                                    println!("{}", tish_core::format_value_styled(&v, tish_core::use_console_colors()));
                                 }
                             }
                             Err(e) => eprintln!("{}", e),

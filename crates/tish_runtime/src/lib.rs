@@ -289,18 +289,7 @@ fn get_log_level() -> LogLevel {
 }
 
 fn format_args(args: &[Value]) -> String {
-    let mut iter = args.iter();
-    match iter.next() {
-        None => String::new(),
-        Some(first) => {
-            let mut result = first.to_display_string();
-            for arg in iter {
-                result.push(' ');
-                result.push_str(&arg.to_display_string());
-            }
-            result
-        }
-    }
+    tish_core::format_values_for_console(args, tish_core::use_console_colors())
 }
 
 pub fn console_debug(args: &[Value]) {

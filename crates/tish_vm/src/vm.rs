@@ -121,40 +121,40 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     console.insert(
         "debug".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            vm_log(&s.join(" "));
+            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            vm_log(&s);
             Value::Null
         })),
     );
     console.insert(
         "log".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            vm_log(&s.join(" "));
+            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            vm_log(&s);
             Value::Null
         })),
     );
     console.insert(
         "info".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            vm_log(&s.join(" "));
+            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            vm_log(&s);
             Value::Null
         })),
     );
     console.insert(
         "warn".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            vm_log_err(&s.join(" "));
+            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            vm_log_err(&s);
             Value::Null
         })),
     );
     console.insert(
         "error".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            vm_log_err(&s.join(" "));
+            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            vm_log_err(&s);
             Value::Null
         })),
     );
