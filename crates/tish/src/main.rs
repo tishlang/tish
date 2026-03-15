@@ -149,7 +149,7 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
         let mut eval = tish_eval::Evaluator::new();
         let mut multiline = String::new();
         loop {
-            let prompt = if multiline.is_empty() { "> " } else { "... " };
+            let prompt = repl_prompt(multiline.is_empty());
             print!("{}", prompt);
             io::stdout().flush().map_err(|e| e.to_string())?;
             buffer.clear();
@@ -223,8 +223,8 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
     let mut buffer = String::new();
 
     loop {
-        let prompt = if buffer.is_empty() { "> " } else { "... " };
-        let line = match rl.readline(prompt) {
+        let prompt = repl_prompt(buffer.is_empty());
+        let line = match rl.readline(&prompt) {
             Ok(l) => l,
             Err(rustyline::error::ReadlineError::Eof) => {
                 if buffer.is_empty() {
@@ -299,6 +299,21 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
         let _ = rl.save_history(path);
     }
     Ok(())
+}
+
+/// REPL prompt with green caret when stdout is a TTY (platform-style).
+fn repl_prompt(primary: bool) -> String {
+    if tish_core::use_console_colors() {
+        if primary {
+            "\x1b[32m> \x1b[0m".to_string()
+        } else {
+            "\x1b[32m... \x1b[0m".to_string()
+        }
+    } else if primary {
+        "> ".to_string()
+    } else {
+        "... ".to_string()
+    }
 }
 
 /// Path to REPL history file (Python-style: ~/.tish_history).
