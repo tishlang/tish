@@ -58,11 +58,13 @@ cp target/x86_64-pc-windows-msvc/release/tish.exe npm/tish/platform/win32-x64/ti
 
 ## GitHub Actions
 
-The workflow [`.github/workflows/build-npm-binaries.yml`](../.github/workflows/build-npm-binaries.yml) runs on push and PR to `main`. It builds the CLI for:
+The workflow [`.github/workflows/build-npm-binaries.yml`](../.github/workflows/build-npm-binaries.yml) runs on push and PR to `main`. It:
 
-- `linux-x64`, `linux-arm64` (Ubuntu; ARM64 via [cross](https://github.com/cross-rs/cross))
-- `darwin-arm64`, `darwin-x64` (macOS 14)
-- `win32-x64` (Windows)
+- **Test & coverage** (Ubuntu): runs `cargo nextest run -p tish --features full`, publishes **test results** (JUnit) to the Actions summary, and generates **code coverage** via `cargo llvm-cov`. Artifacts: `coverage-lcov` (lcov.info), `coverage-html` (browsable report).
+- **Build**: builds the CLI for
+  - `linux-x64`, `linux-arm64` (Ubuntu; ARM64 via [cross](https://github.com/cross-rs/cross))
+  - `darwin-arm64`, `darwin-x64` (macOS 14)
+  - `win32-x64` (Windows)
 
 The **assemble** job produces a single artifact **`npm-tish-platform-binaries`**: the full `npm/tish/platform/` directory. Download it from the workflow run and extract into your repo (or into a clean `npm/tish/` tree) before publishing.
 

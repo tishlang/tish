@@ -1,7 +1,7 @@
-# Build Tish binaries for all platforms and assemble them for the npm package.
-# On every push to main, produces artifacts that can be unpacked into npm/tish/platform/.
+# Build Tish binaries, run tests with results and coverage, and assemble platform artifacts.
+# On every push/PR to main: test + coverage on Ubuntu; build binaries per platform; assemble.
 
-name: Build npm binaries
+name: CI (test, coverage, build)
 
 on:
   push:
@@ -14,6 +14,62 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  test:
+    name: Test & coverage
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Install nextest
+        run: cargo install cargo-nextest --locked
+
+      - name: Run tests (tish, full features)
+        run: |
+          mkdir -p test-results
+          cargo nextest run -p tish --features full --no-fail-fast --output junit=test-results/junit.xml
+
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: test-results/junit.xml
+          check_name: Test results
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+
+      - name: Generate coverage
+        run: cargo llvm-cov test -p tish --features full --lcov --output-path lcov.info --html coverage-html
+
+      - name: Upload coverage (lcov)
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+
+      - name: Upload coverage (HTML)
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage-html/
+
   build:
     strategy:
       fail-fast: false
@@ -87,13 +143,13 @@ jobs:
 
   assemble:
     name: Assemble platform dir
-    needs: build
+    needs: [build, test]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download all binaries
+      - name: Download platform binaries
         uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -108,11 +164,11 @@ jobs:
           mkdir -p npm/tish/platform/linux-arm64
           mkdir -p npm/tish/platform/win32-x64
 
-          cp artifacts/linux-x64 npm/tish/platform/linux-x64/tish
-          cp artifacts/linux-arm64 npm/tish/platform/linux-arm64/tish
-          cp artifacts/darwin-arm64 npm/tish/platform/darwin-arm64/tish
-          cp artifacts/darwin-x64 npm/tish/platform/darwin-x64/tish
-          cp artifacts/win32-x64 npm/tish/platform/win32-x64/tish.exe
+          cp artifacts/linux-x64/tish npm/tish/platform/linux-x64/tish
+          cp artifacts/linux-arm64/tish npm/tish/platform/linux-arm64/tish
+          cp artifacts/darwin-arm64/tish npm/tish/platform/darwin-arm64/tish
+          cp artifacts/darwin-x64/tish npm/tish/platform/darwin-x64/tish
+          cp artifacts/win32-x64/tish.exe npm/tish/platform/win32-x64/tish.exe
 
           chmod +x npm/tish/platform/linux-x64/tish
           chmod +x npm/tish/platform/linux-arm64/tish
