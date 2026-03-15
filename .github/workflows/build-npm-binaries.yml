@@ -42,8 +42,9 @@ jobs:
 
       - name: Run tests (tish, full features)
         run: |
+          cargo nextest run -p tish --features full --no-fail-fast --profile ci
           mkdir -p test-results
-          cargo nextest run -p tish --features full --no-fail-fast --output junit=test-results/junit.xml
+          cp target/nextest/ci/junit.xml test-results/junit.xml
 
       - name: Publish test results
         uses: EnricoMi/publish-unit-test-result-action@v2

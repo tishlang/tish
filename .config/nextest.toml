@@ -1,0 +1,6 @@
+# Nextest config for CI: JUnit report for test result publishing.
+# Use: cargo nextest run --profile ci ...
+# Report is written to target/nextest/ci/junit.xml
+
+[profile.ci.junit]
+path = "junit.xml"
