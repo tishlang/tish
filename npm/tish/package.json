@@ -1,0 +1,25 @@
+{
+  "name": "@tishlang/tish",
+  "version": "0.1.0",
+  "description": "Tish - minimal TS/JS-compatible language. Run, REPL, compile to native.",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "repository": "https://github.com/tish-lang/tish",
+  "bin": {
+    "tish": "./bin/tish.js"
+  },
+  "files": [
+    "bin",
+    "platform"
+  ],
+  "engines": {
+    "node": ">=14"
+  },
+  "keywords": [
+    "tish",
+    "language",
+    "javascript",
+    "typescript",
+    "compiler",
+    "interpreter"
+  ]
+}

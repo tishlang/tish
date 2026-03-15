@@ -1,0 +1,12 @@
+{
+  "name": "tish-npm-packages",
+  "private": true,
+  "description": "Root for Tish npm packages (do not publish)",
+  "workspaces": [
+    "tish",
+    "create-tish-app"
+  ],
+  "scripts": {
+    "build:binaries": "./scripts/build-binaries.sh"
+  }
+}
