@@ -4,12 +4,12 @@ mod repl_completion;
 
 use std::cell::RefCell;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::rc::Rc;
 
 use clap::{Parser, Subcommand};
-use rustyline::Editor;
+use rustyline::{Behavior, ColorMode, CompletionType, Config, Editor};
 
 #[derive(Parser)]
 #[command(name = "tish")]
@@ -176,13 +176,25 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
     }
 
     // VM backend with tab completion (e.g. a. -> properties/methods)
+    if !std::io::stdin().is_terminal() {
+        eprintln!("Note: Tab completion and grey preview require an interactive terminal (TTY).");
+    }
     let vm = Rc::new(RefCell::new(tish_vm::Vm::new()));
     let completer = repl_completion::ReplCompleter {
         vm: Rc::clone(&vm),
         no_optimize,
     };
-    let mut rl = Editor::new().map_err(|e| e.to_string())?;
+    let config = Config::builder()
+        .completion_type(CompletionType::List)
+        .completion_show_all_if_ambiguous(true)
+        .color_mode(ColorMode::Forced)
+        .behavior(Behavior::PreferTerm)
+        .build();
+    let mut rl: Editor<repl_completion::ReplCompleter, _> =
+        Editor::with_config(config).map_err(|e| e.to_string())?;
     rl.set_helper(Some(completer));
+
+    println!("Tab after 'obj.' for completions (grey preview); press Tab again for full list.");
 
     loop {
         let line = match rl.readline("> ") {
