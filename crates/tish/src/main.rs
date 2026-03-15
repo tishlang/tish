@@ -1,10 +1,15 @@
 //! Tish CLI - run, REPL, compile to native.
 
+mod repl_completion;
+
+use std::cell::RefCell;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::rc::Rc;
 
 use clap::{Parser, Subcommand};
+use rustyline::Editor;
 
 #[derive(Parser)]
 #[command(name = "tish")]
@@ -170,19 +175,27 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
         return Ok(());
     }
 
-    // VM backend
-    let mut vm = tish_vm::Vm::new();
+    // VM backend with tab completion (e.g. a. -> properties/methods)
+    let vm = Rc::new(RefCell::new(tish_vm::Vm::new()));
+    let completer = repl_completion::ReplCompleter {
+        vm: Rc::clone(&vm),
+        no_optimize,
+    };
+    let mut rl = Editor::new().map_err(|e| e.to_string())?;
+    rl.set_helper(Some(completer));
+
     loop {
-        print!("> ");
-        io::stdout().flush().map_err(|e| e.to_string())?;
-        buffer.clear();
-        if io::stdin().read_line(&mut buffer).map_err(|e| e.to_string())? == 0 {
-            break;
-        }
-        let line = buffer.trim_end();
+        let line = match rl.readline("> ") {
+            Ok(l) => l,
+            Err(rustyline::error::ReadlineError::Eof) => break,
+            Err(rustyline::error::ReadlineError::Interrupted) => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        let line = line.trim_end();
         if line.is_empty() {
             continue;
         }
+        let _ = rl.add_history_entry(line);
         match tish_parser::parse(line) {
             Ok(program) => {
                 let compile_fn = if no_optimize {
@@ -192,7 +205,7 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
                 };
                 match compile_fn(&program) {
                     Ok(chunk) => {
-                        match vm.run(&chunk) {
+                        match vm.borrow_mut().run(&chunk) {
                             Ok(v) => {
                                 if !matches!(v, tish_core::Value::Null) {
                                     println!("{}", v.to_display_string());

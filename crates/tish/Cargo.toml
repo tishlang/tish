@@ -19,6 +19,7 @@ fs = ["tish_eval/fs", "tish_runtime/fs", "tish_compile/fs", "tish_vm/fs"]
 process = ["tish_eval/process", "tish_runtime/process", "tish_compile/process", "tish_vm/process"]
 regex = ["tish_eval/regex", "tish_runtime/regex", "tish_compile/regex", "tish_vm/regex"]
 [dependencies]
+rustyline = "17"
 tish_lexer = { path = "../tish_lexer" }
 tish_ast = { path = "../tish_ast" }
 tish_parser = { path = "../tish_parser" }

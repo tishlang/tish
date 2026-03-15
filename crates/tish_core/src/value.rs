@@ -295,4 +295,82 @@ impl Value {
             Value::Opaque(o) => o.type_name(),
         }
     }
+
+    /// Property/method names for REPL tab completion (e.g. after `obj.`).
+    pub fn completion_keys(&self) -> Vec<String> {
+        match self {
+            Value::Object(m) => {
+                let mut keys: Vec<String> = m.borrow().keys().map(|k| k.to_string()).collect();
+                keys.sort();
+                keys
+            }
+            Value::Array(_) => {
+                vec![
+                    "length".into(),
+                    "at".into(),
+                    "concat".into(),
+                    "copyWithin".into(),
+                    "entries".into(),
+                    "every".into(),
+                    "fill".into(),
+                    "filter".into(),
+                    "find".into(),
+                    "findIndex".into(),
+                    "findLast".into(),
+                    "findLastIndex".into(),
+                    "flat".into(),
+                    "flatMap".into(),
+                    "forEach".into(),
+                    "includes".into(),
+                    "indexOf".into(),
+                    "join".into(),
+                    "keys".into(),
+                    "lastIndexOf".into(),
+                    "map".into(),
+                    "pop".into(),
+                    "push".into(),
+                    "reduce".into(),
+                    "reduceRight".into(),
+                    "reverse".into(),
+                    "shift".into(),
+                    "slice".into(),
+                    "some".into(),
+                    "sort".into(),
+                    "splice".into(),
+                    "toLocaleString".into(),
+                    "toReversed".into(),
+                    "toSorted".into(),
+                    "toSpliced".into(),
+                    "toString".into(),
+                    "unshift".into(),
+                    "values".into(),
+                    "shuffle".into(),
+                ]
+            }
+            Value::String(_) => {
+                vec![
+                    "length".into(),
+                    "charAt".into(),
+                    "charCodeAt".into(),
+                    "endsWith".into(),
+                    "includes".into(),
+                    "indexOf".into(),
+                    "padEnd".into(),
+                    "padStart".into(),
+                    "repeat".into(),
+                    "replace".into(),
+                    "replaceAll".into(),
+                    "slice".into(),
+                    "split".into(),
+                    "startsWith".into(),
+                    "substring".into(),
+                    "toLowerCase".into(),
+                    "toUpperCase".into(),
+                    "trim".into(),
+                ]
+            }
+            Value::Number(_) => vec!["toFixed".into(), "toExponential".into(), "toPrecision".into()],
+            _ => vec![],
+        }
+    }
 }
