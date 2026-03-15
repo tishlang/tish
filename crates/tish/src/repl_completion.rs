@@ -53,9 +53,10 @@ impl ReplCompleter {
     }
 
     /// Bare-word completions: globals + keywords that start with prefix (Python-style).
+    /// When nothing is typed (empty prefix), return no completions so we don't show a hint at the prompt.
     fn get_bare_completions(&self, line_before_cursor: &str) -> (usize, Vec<String>) {
         let (start, prefix) = self.ident_prefix_at_cursor(line_before_cursor);
-        if prefix.is_empty() && start < line_before_cursor.len() {
+        if prefix.is_empty() {
             return (start, vec![]);
         }
         let mut names: Vec<String> = self.vm.borrow().global_names();
