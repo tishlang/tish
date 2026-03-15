@@ -1,6 +1,6 @@
-// Test File I/O functions - Node.js equivalent of file_io.tish
-const fs = require("fs");
-const path = require("path");
+// Test File I/O functions - Node.js/Deno equivalent of file_io.tish
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 let testDir = "/tmp/tish_test_" + Date.now();
 let testFile = path.join(testDir, "test.txt");

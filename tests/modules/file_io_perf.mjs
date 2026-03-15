@@ -1,8 +1,8 @@
 // Performance test for File I/O operations
-// Compatible with Node.js and Bun (CommonJS)
+// Compatible with Node.js, Bun, and Deno (ESM with node: specifiers)
 
-const fs = require("fs");
-const path = require("path");
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 let testDir = "/tmp/tish_perf_" + Date.now();
 let iterations = 1000;

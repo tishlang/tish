@@ -18,9 +18,28 @@ pub struct ResolvedNativeModule {
     pub export_fn: String,
 }
 
+/// Node-compatible aliases for built-in modules (fs -> tish:fs, etc.).
+const BUILTIN_ALIASES: &[(&str, &str)] = &[
+    ("fs", "tish:fs"),
+    ("http", "tish:http"),
+    ("process", "tish:process"),
+];
+
+/// Normalize built-in spec to canonical form. E.g. "fs" -> "tish:fs".
+pub fn normalize_builtin_spec(spec: &str) -> Option<String> {
+    if spec.starts_with("tish:") {
+        return Some(spec.to_string());
+    }
+    BUILTIN_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == spec)
+        .map(|(_, canonical)| (*canonical).to_string())
+}
+
 /// Built-in modules that come from tish_runtime, not from package.json.
 pub fn is_builtin_native_spec(spec: &str) -> bool {
     matches!(spec, "tish:fs" | "tish:http" | "tish:process")
+        || matches!(spec, "fs" | "http" | "process")
 }
 
 /// Resolve all native imports in a merged program via package.json lookup.
@@ -269,19 +288,19 @@ fn load_module_recursive(
 }
 
 /// Returns true for native module imports that don't resolve to files.
+/// - fs, http, process (Node-compatible aliases for tish:fs, tish:http, tish:process)
 /// - tish:egui, tish:polars, etc.
 /// - @scope/package (npm-style)
 pub fn is_native_import(spec: &str) -> bool {
-    spec.starts_with("tish:") || spec.starts_with('@')
+    spec.starts_with("tish:")
+        || spec.starts_with('@')
+        || matches!(spec, "fs" | "http" | "process")
 }
 
 /// Map native spec to Cargo feature name for built-in tish:* modules.
 pub fn native_spec_to_feature(spec: &str) -> Option<String> {
-    if spec.starts_with("tish:") {
-        Some(spec.strip_prefix("tish:").unwrap_or(spec).to_string())
-    } else {
-        None
-    }
+    let canonical = normalize_builtin_spec(spec)?;
+    canonical.strip_prefix("tish:").map(|s| s.to_string())
 }
 
 /// Resolve an import specifier (e.g. "./foo.tish", "../lib/utils") to an absolute path.
@@ -436,13 +455,16 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
             match stmt {
                 Statement::Import { specifiers, from, span } => {
                     if is_native_import(from) {
+                        // Normalize fs/http/process -> tish:fs etc. for Node compatibility
+                        let canonical_spec =
+                            normalize_builtin_spec(from).unwrap_or_else(|| from.to_string());
                         // Emit VarDecl with NativeModuleLoad for each specifier
                         for spec in specifiers {
                             match spec {
                                 ImportSpecifier::Named { name, alias } => {
                                     let bind = alias.as_deref().unwrap_or(name.as_ref());
                                     let init = Expr::NativeModuleLoad {
-                                        spec: from.clone(),
+                                        spec: Arc::from(canonical_spec.clone()),
                                         export_name: name.clone(),
                                         span: *span,
                                     };

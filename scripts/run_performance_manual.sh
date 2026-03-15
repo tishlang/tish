@@ -198,15 +198,21 @@ else
   count=0
   for perf_dir in "${perf_dirs[@]}"; do
     [[ -d "$perf_dir" ]] || continue
-    for f in "$perf_dir"/*.js; do
-      [[ -f "$f" ]] || continue
-      base=$(basename "$f" .js)
+    for tish_file in "$perf_dir"/*.tish; do
+      [[ -f "$tish_file" ]] || continue
+      base=$(basename "$tish_file" .tish)
+      # Prefer .mjs over .js for Deno/QuickJS ESM support
+      if [[ -f "$perf_dir/$base.mjs" ]]; then
+        f="$perf_dir/$base.mjs"
+      elif [[ -f "$perf_dir/$base.js" ]]; then
+        f="$perf_dir/$base.js"
+      else
+        continue
+      fi
       test_id="${perf_dir#tests/}/$base"
       [[ "$base" == "recursion_stress" ]] && continue
       [[ -n "$filter_name" && "$test_id" != *"$filter_name"* ]] && continue
       [[ $limit -gt 0 && $count -ge $limit ]] && break
-      tish_file="$perf_dir/$base.tish"
-      [[ -f "$tish_file" ]] || continue
       count=$((count + 1))
       cache_key="${test_id//\//_}"
 
@@ -268,15 +274,21 @@ echo "Running performance tests..."
 count=0
 for perf_dir in "${perf_dirs[@]}"; do
   [[ -d "$perf_dir" ]] || continue
-  for f in "$perf_dir"/*.js; do
-    [[ -f "$f" ]] || continue
-    base=$(basename "$f" .js)
+  for tish_file in "$perf_dir"/*.tish; do
+    [[ -f "$tish_file" ]] || continue
+    base=$(basename "$tish_file" .tish)
+    # Prefer .mjs over .js for Deno/QuickJS ESM support
+    if [[ -f "$perf_dir/$base.mjs" ]]; then
+      f="$perf_dir/$base.mjs"
+    elif [[ -f "$perf_dir/$base.js" ]]; then
+      f="$perf_dir/$base.js"
+    else
+      continue
+    fi
     test_id="${perf_dir#tests/}/$base"
     [[ "$base" == "recursion_stress" ]] && continue
     [[ -n "$filter_name" && "$test_id" != *"$filter_name"* ]] && continue
     [[ $limit -gt 0 && $count -ge $limit ]] && break
-    tish_file="$perf_dir/$base.tish"
-    [[ -f "$tish_file" ]] || continue
     count=$((count + 1))
     cache_key="${test_id//\//_}"
 

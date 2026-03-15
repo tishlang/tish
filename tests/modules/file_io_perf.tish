@@ -1,5 +1,5 @@
 // Performance test for File I/O operations - Tish version of file_io_perf.js
-import { readFile, writeFile, fileExists, readDir, mkdir } from 'tish:fs'
+import { readFile, writeFile, fileExists, readDir, mkdir } from 'fs'
 
 let testDir = "/tmp/tish_perf_" + Date.now()
 let iterations = 1000

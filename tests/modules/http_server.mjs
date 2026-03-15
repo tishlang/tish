@@ -1,7 +1,7 @@
-// HTTP Server Test - Node.js equivalent of http_server.tish
+// HTTP Server Test - Node.js/Deno equivalent of http_server.tish
 // Starts server, handles a request, then exits (for perf script compatibility)
 
-const http = require("http");
+import * as http from "node:http";
 
 const PORT = 3001;
 

@@ -1,5 +1,5 @@
-// HTTP fetch tests - Node.js equivalent of http_fetch.tish
-// Node 18+ has built-in fetch
+// HTTP fetch tests - Node.js/Deno equivalent of http_fetch.tish
+// Node 18+ and Deno have built-in fetch
 
 (async function main() {
   // Test 1: Simple GET request

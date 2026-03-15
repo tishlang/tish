@@ -1,7 +1,7 @@
 // HTTP Server Test
 // Run with: cargo run --release -- run tests/modules/http_server.tish
 // Then visit: http://localhost:3000/
-import { serve } from 'tish:http'
+import { serve } from 'http'
 
 fn handleRequest(req) {
     console.log("Request:", req.method, req.path)

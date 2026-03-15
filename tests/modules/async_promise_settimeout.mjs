@@ -1,5 +1,5 @@
 // Combined validation: async/await + Promise + setTimeout + multiple HTTP requests
-// Node.js equivalent of async_promise_settimeout.tish
+// Node.js/Deno equivalent of async_promise_settimeout.tish
 
 (async () => {
   console.log("ASYNC_VALIDATION_START");

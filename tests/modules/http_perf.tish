@@ -1,6 +1,6 @@
 // HTTP performance test - fetch and fetchAll operations
 // Tish version of http_perf.js
-import { fetch, fetchAll } from 'tish:http'
+import { fetch, fetchAll } from 'http'
 
 // Test 1: Sequential single fetches
 console.log("Testing sequential fetches...")
