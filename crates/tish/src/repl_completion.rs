@@ -1,5 +1,5 @@
-//! REPL tab completion (e.g. `a.` -> list of properties/methods).
-//! Grey preview hint below the line (like Node) and Tab/Tab for full list.
+//! REPL tab completion: dotted (e.g. `a.` -> properties/methods) and bare-word (e.g. `con` -> console).
+//! Grey preview hint below the line (like Node) and Tab for full list.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -16,6 +16,13 @@ use tish_bytecode::{compile_for_repl, compile_for_repl_unoptimized};
 use tish_parser;
 use tish_vm::Vm;
 
+/// Tish keywords for bare-word completion (Python-style).
+const KEYWORDS: &[&str] = &[
+    "async", "await", "break", "case", "catch", "const", "continue", "default", "do", "else",
+    "export", "false", "finally", "for", "fn", "function", "if", "import", "in", "let", "null",
+    "of", "return", "switch", "throw", "true", "try", "typeof", "void", "while",
+];
+
 /// ANSI dim (grey) for hint preview; reset after.
 const ANSI_DIM: &str = "\x1b[2m";
 const ANSI_RESET: &str = "\x1b[0m";
@@ -27,8 +34,43 @@ pub struct ReplCompleter {
 }
 
 impl ReplCompleter {
-    /// Get completions for line up to pos: (start_offset, list of member names).
-    fn get_completions(&self, line_before_cursor: &str) -> Option<(usize, Vec<String>)> {
+    /// Find the start of the identifier (or keyword) being typed before the cursor.
+    /// Returns (byte_start, prefix_string).
+    fn ident_prefix_at_cursor<'a>(&self, line_before_cursor: &'a str) -> (usize, &'a str) {
+        let s = line_before_cursor;
+        if s.is_empty() {
+            return (0, "");
+        }
+        let mut start = s.len();
+        for (i, c) in s.char_indices().rev() {
+            if c.is_alphanumeric() || c == '_' {
+                start = i;
+            } else {
+                break;
+            }
+        }
+        (start, &s[start..])
+    }
+
+    /// Bare-word completions: globals + keywords that start with prefix (Python-style).
+    fn get_bare_completions(&self, line_before_cursor: &str) -> (usize, Vec<String>) {
+        let (start, prefix) = self.ident_prefix_at_cursor(line_before_cursor);
+        if prefix.is_empty() && start < line_before_cursor.len() {
+            return (start, vec![]);
+        }
+        let mut names: Vec<String> = self.vm.borrow().global_names();
+        names.extend(KEYWORDS.iter().map(|s| (*s).to_string()));
+        names.sort();
+        names.dedup();
+        let filtered: Vec<String> = names
+            .into_iter()
+            .filter(|k| k.starts_with(prefix))
+            .collect();
+        (start, filtered)
+    }
+
+    /// Get completions for dotted expr (e.g. `a.` -> member names). Returns (start_offset, list).
+    fn get_dotted_completions(&self, line_before_cursor: &str) -> Option<(usize, Vec<String>)> {
         let last_dot = line_before_cursor.rfind('.')?;
         let prefix_expr = line_before_cursor[..last_dot].trim();
         if prefix_expr.is_empty() {
@@ -51,6 +93,18 @@ impl ReplCompleter {
             .filter(|k| k.starts_with(member_prefix))
             .collect();
         Some((last_dot + 1, filtered))
+    }
+
+    /// Unified: dotted if we have a dot and it works, else bare-word.
+    fn get_completions(&self, line_before_cursor: &str) -> (usize, Vec<String>) {
+        if line_before_cursor.contains('.') {
+            if let Some((start, filtered)) = self.get_dotted_completions(line_before_cursor) {
+                if !filtered.is_empty() || line_before_cursor.trim_end().ends_with('.') {
+                    return (start, filtered);
+                }
+            }
+        }
+        self.get_bare_completions(line_before_cursor)
     }
 
     /// Longest common prefix of a list of strings.
@@ -83,10 +137,7 @@ impl Completer for ReplCompleter {
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
         let line_before_cursor = &line[..pos];
-        let (start, filtered) = match self.get_completions(line_before_cursor) {
-            Some((s, f)) => (s, f),
-            None => return Ok((0, vec![])),
-        };
+        let (start, filtered) = self.get_completions(line_before_cursor);
         let pairs: Vec<Pair> = filtered
             .into_iter()
             .map(|k| Pair {
@@ -104,11 +155,11 @@ impl Hinter for ReplCompleter {
     /// Grey preview: show first completion or common prefix below the line (Node-style).
     fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<Self::Hint> {
         let line_before_cursor = &line[..pos];
-        let (start, filtered) = self.get_completions(line_before_cursor)?;
+        let (start, filtered) = self.get_completions(line_before_cursor);
         if filtered.is_empty() {
             return None;
         }
-        let member_prefix = line_before_cursor.get(start..)?.trim();
+        let member_prefix = line_before_cursor.get(start..).unwrap_or("").trim();
         // Hint = text to show after cursor (grey). Single match: full name; multiple: common prefix, or first suggestion.
         let hint = if filtered.len() == 1 {
             filtered[0].clone()

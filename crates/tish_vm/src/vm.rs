@@ -337,6 +337,11 @@ impl Vm {
         self.globals.borrow_mut().insert(name, value);
     }
 
+    /// Names of all globals (for REPL bare-word tab completion).
+    pub fn global_names(&self) -> Vec<String> {
+        self.globals.borrow().keys().map(|k| k.as_ref().to_string()).collect()
+    }
+
     fn read_u16(code: &[u8], ip: &mut usize) -> u16 {
         let a = code[*ip] as u16;
         let b = code[*ip + 1] as u16;

@@ -5,7 +5,7 @@ mod repl_completion;
 use std::cell::RefCell;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use clap::{Parser, Subcommand};
@@ -147,18 +147,29 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
 
     if backend == "interp" {
         let mut eval = tish_eval::Evaluator::new();
+        let mut multiline = String::new();
         loop {
-            print!("> ");
+            let prompt = if multiline.is_empty() { "> " } else { "... " };
+            print!("{}", prompt);
             io::stdout().flush().map_err(|e| e.to_string())?;
             buffer.clear();
             if io::stdin().read_line(&mut buffer).map_err(|e| e.to_string())? == 0 {
+                if !multiline.is_empty() {
+                    let _ = tish_parser::parse(multiline.trim());
+                }
                 break;
             }
             let line = buffer.trim_end();
-            if line.is_empty() {
+            if multiline.is_empty() && line.is_empty() {
                 continue;
             }
-            match tish_parser::parse(line) {
+            if multiline.is_empty() {
+                multiline = line.to_string();
+            } else {
+                multiline.push('\n');
+                multiline.push_str(line);
+            }
+            match tish_parser::parse(multiline.trim()) {
                 Ok(program) => {
                     match eval.eval_program(&program) {
                         Ok(v) => {
@@ -168,8 +179,16 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
                         }
                         Err(e) => eprintln!("{}", e),
                     }
+                    multiline.clear();
                 }
-                Err(e) => eprintln!("Parse error: {}", e),
+                Err(e) => {
+                    if e.to_lowercase().contains("eof") {
+                        // Incomplete: keep reading
+                    } else {
+                        eprintln!("Parse error: {}", e);
+                        multiline.clear();
+                    }
+                }
             }
         }
         return Ok(());
@@ -194,21 +213,55 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
         Editor::with_config(config).map_err(|e| e.to_string())?;
     rl.set_helper(Some(completer));
 
+    if let Some(ref path) = tish_history_path() {
+        let _ = rl.load_history(path);
+    }
+
     println!("Tab after 'obj.' for completions (grey preview); press Tab again for full list.");
+    println!("Multi-line: type until the statement is complete; use ... continuation prompt.");
+
+    let mut buffer = String::new();
 
     loop {
-        let line = match rl.readline("> ") {
+        let prompt = if buffer.is_empty() { "> " } else { "... " };
+        let line = match rl.readline(prompt) {
             Ok(l) => l,
-            Err(rustyline::error::ReadlineError::Eof) => break,
-            Err(rustyline::error::ReadlineError::Interrupted) => continue,
+            Err(rustyline::error::ReadlineError::Eof) => {
+                if buffer.is_empty() {
+                    break;
+                }
+                match tish_parser::parse(buffer.trim()) {
+                    Ok(program) => {
+                        let compile_fn = if no_optimize {
+                            tish_bytecode::compile_for_repl_unoptimized
+                        } else {
+                            tish_bytecode::compile_for_repl
+                        };
+                        if let Ok(chunk) = compile_fn(&program) {
+                            let _ = vm.borrow_mut().run(&chunk);
+                        }
+                    }
+                    Err(e) => eprintln!("Parse error: {}", e),
+                }
+                break;
+            }
+            Err(rustyline::error::ReadlineError::Interrupted) => {
+                buffer.clear();
+                continue;
+            }
             Err(e) => return Err(e.to_string()),
         };
         let line = line.trim_end();
-        if line.is_empty() {
+        if buffer.is_empty() && line.is_empty() {
             continue;
         }
-        let _ = rl.add_history_entry(line);
-        match tish_parser::parse(line) {
+        if buffer.is_empty() {
+            buffer = line.to_string();
+        } else {
+            buffer.push('\n');
+            buffer.push_str(line);
+        }
+        match tish_parser::parse(buffer.trim()) {
             Ok(program) => {
                 let compile_fn = if no_optimize {
                     tish_bytecode::compile_for_repl_unoptimized
@@ -228,11 +281,31 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
                     }
                     Err(e) => eprintln!("Compile error: {}", e),
                 }
+                let _ = rl.add_history_entry(buffer.trim());
+                buffer.clear();
             }
-            Err(e) => eprintln!("Parse error: {}", e),
+            Err(e) => {
+                if e.to_lowercase().contains("eof") {
+                    // Incomplete: keep accumulating (Python-style ... prompt)
+                } else {
+                    eprintln!("Parse error: {}", e);
+                    buffer.clear();
+                }
+            }
         }
     }
+
+    if let Some(ref path) = tish_history_path() {
+        let _ = rl.save_history(path);
+    }
     Ok(())
+}
+
+/// Path to REPL history file (Python-style: ~/.tish_history).
+fn tish_history_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"));
+    home.map(|h| PathBuf::from(h).join(".tish_history"))
 }
 
 fn compile_to_js(input_path: &Path, output_path: &str, optimize: bool) -> Result<(), String> {
