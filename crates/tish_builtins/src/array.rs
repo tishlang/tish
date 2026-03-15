@@ -75,10 +75,16 @@ pub fn index_of(arr: &Value, search: &Value) -> Value {
     Value::Number(-1.0)
 }
 
-pub fn includes(arr: &Value, search: &Value) -> Value {
+pub fn includes(arr: &Value, search: &Value, from: Option<&Value>) -> Value {
     if let Value::Array(arr) = arr {
         let arr_borrow = arr.borrow();
-        for v in arr_borrow.iter() {
+        let len = arr_borrow.len() as i64;
+        let start = match from {
+            Some(Value::Number(n)) if *n >= 0.0 => (*n as i64).min(len).max(0) as usize,
+            Some(Value::Number(n)) if *n < 0.0 => ((len + *n as i64).max(0)) as usize,
+            _ => 0,
+        };
+        for v in arr_borrow.iter().skip(start) {
             if v.strict_eq(search) {
                 return Value::Bool(true);
             }

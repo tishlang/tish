@@ -733,7 +733,13 @@ impl Evaluator {
                             "includes" => {
                                 let search = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
-                                for v in arr_borrow.iter() {
+                                let len = arr_borrow.len() as i64;
+                                let start = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) if *n >= 0.0 => (*n as i64).min(len).max(0) as usize,
+                                    Some(Value::Number(n)) if *n < 0.0 => ((len + *n as i64).max(0)) as usize,
+                                    _ => 0,
+                                };
+                                for v in arr_borrow.iter().skip(start) {
                                     if v.strict_eq(&search) {
                                         return Ok(Value::Bool(true));
                                     }
@@ -1155,7 +1161,16 @@ impl Evaluator {
                                     Some(Value::String(ss)) => ss.as_ref(),
                                     _ => return Ok(Value::Bool(false)),
                                 };
-                                return Ok(Value::Bool(s.contains(search)));
+                                let from_char = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) if *n >= 0.0 => (*n as usize).min(s.chars().count()),
+                                    Some(Value::Number(n)) if *n < 0.0 => {
+                                        let len = s.chars().count() as i64;
+                                        ((len + *n as i64).max(0)) as usize
+                                    }
+                                    _ => 0,
+                                };
+                                let byte_start: usize = s.chars().take(from_char).map(|c| c.len_utf8()).sum();
+                                return Ok(Value::Bool(s[byte_start..].contains(search)));
                             }
                             "slice" => {
                                 let chars: Vec<char> = s.chars().collect();

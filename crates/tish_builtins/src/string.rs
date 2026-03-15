@@ -57,9 +57,18 @@ pub fn index_of(s: &Value, search: &Value, from: Option<&Value>) -> Value {
     }
 }
 
-pub fn includes(s: &Value, search: &Value) -> Value {
+pub fn includes(s: &Value, search: &Value, from: Option<&Value>) -> Value {
     if let (Value::String(s), Value::String(search)) = (s, search) {
-        Value::Bool(s.contains(search.as_ref()))
+        let from_char = match from {
+            Some(Value::Number(n)) if *n >= 0.0 => (*n as usize).min(s.chars().count()),
+            Some(Value::Number(n)) if *n < 0.0 => {
+                let len = s.chars().count() as i64;
+                ((len + *n as i64).max(0)) as usize
+            }
+            _ => 0,
+        };
+        let byte_start = char_to_byte_offset(s, from_char);
+        Value::Bool(s[byte_start..].contains(search.as_ref()))
     } else {
         Value::Bool(false)
     }

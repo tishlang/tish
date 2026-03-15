@@ -342,7 +342,7 @@ for perf_dir in "${perf_dirs[@]}"; do
     if want_runtime wasi; then
       echo "Tish (wasi):"
       if $has_wasmtime && [[ -f "$wasi_bin" ]]; then
-        run_with_timeout wasmtime "$wasi_bin" 2>&1 || true
+        run_with_timeout wasmtime --dir /tmp "$wasi_bin" 2>&1 || true
       else
         echo "(not built or wasmtime not found)"
       fi

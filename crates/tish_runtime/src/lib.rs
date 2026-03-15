@@ -68,7 +68,9 @@ pub use tish_builtins::string::{
 pub fn array_push(arr: &Value, args: &[Value]) -> Value { array_push_impl(arr, args) }
 pub fn array_unshift(arr: &Value, args: &[Value]) -> Value { array_unshift_impl(arr, args) }
 pub fn array_index_of(arr: &Value, search: &Value) -> Value { array_index_of_impl(arr, search) }
-pub fn array_includes(arr: &Value, search: &Value) -> Value { array_includes_impl(arr, search) }
+pub fn array_includes(arr: &Value, search: &Value, from: &Value) -> Value {
+    array_includes_impl(arr, search, Some(from))
+}
 pub fn array_join(arr: &Value, sep: &Value) -> Value { array_join_impl(arr, sep) }
 pub fn array_splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &[Value]) -> Value {
     array_splice_impl(arr, start, delete_count, items)
@@ -87,7 +89,9 @@ pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
 pub fn string_index_of(s: &Value, search: &Value, from: &Value) -> Value {
     string_index_of_impl(s, search, Some(from))
 }
-pub fn string_includes(s: &Value, search: &Value) -> Value { string_includes_impl(s, search) }
+pub fn string_includes(s: &Value, search: &Value, from: &Value) -> Value {
+    string_includes_impl(s, search, Some(from))
+}
 pub fn string_slice(s: &Value, start: &Value, end: &Value) -> Value { string_slice_impl(s, start, end) }
 pub fn string_substring(s: &Value, start: &Value, end: &Value) -> Value { string_substring_impl(s, start, end) }
 pub fn string_split(s: &Value, sep: &Value) -> Value { string_split_impl(s, sep) }

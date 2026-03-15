@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use tish_ast::{BinOp, UnaryOp};
 use tish_builtins::array as arr_builtins;
+use tish_builtins::string as str_builtins;
 use tish_builtins::globals as globals_builtins;
 use tish_builtins::math as math_builtins;
 use tish_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
@@ -1071,7 +1072,8 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 }),
                 "includes" => Rc::new(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
-                    arr_builtins::includes(&Value::Array(Rc::clone(&a_clone)), search)
+                    let from = args.get(1);
+                    arr_builtins::includes(&Value::Array(Rc::clone(&a_clone)), search, from)
                 }),
                 "map" => Rc::new(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
@@ -1127,6 +1129,84 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     let delete_count = args.get(1).map(|v| v as &Value);
                     let items: Vec<Value> = args.get(2..).unwrap_or(&[]).to_vec();
                     arr_builtins::splice(&Value::Array(Rc::clone(&a_clone)), start, delete_count, &items)
+                }),
+                _ => return Err(format!("Property '{}' not found", key)),
+            };
+            Ok(Value::Function(method))
+        }
+        Value::String(s) => {
+            let key_s = key.as_ref();
+            if key_s == "length" {
+                return Ok(Value::Number(s.chars().count() as f64));
+            }
+            let s_clone: Arc<str> = Arc::clone(s);
+            let method: ArrayMethodFn = match key_s {
+                "indexOf" => Rc::new(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    let from = args.get(1);
+                    str_builtins::index_of(&Value::String(Arc::clone(&s_clone)), search, from)
+                }),
+                "includes" => Rc::new(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    let from = args.get(1);
+                    str_builtins::includes(&Value::String(Arc::clone(&s_clone)), search, from)
+                }),
+                "slice" => Rc::new(move |args: &[Value]| {
+                    let start = args.first().unwrap_or(&Value::Null);
+                    let end = args.get(1).unwrap_or(&Value::Null);
+                    str_builtins::slice(&Value::String(Arc::clone(&s_clone)), start, end)
+                }),
+                "substring" => Rc::new(move |args: &[Value]| {
+                    let start = args.first().unwrap_or(&Value::Null);
+                    let end = args.get(1).unwrap_or(&Value::Null);
+                    str_builtins::substring(&Value::String(Arc::clone(&s_clone)), start, end)
+                }),
+                "split" => Rc::new(move |args: &[Value]| {
+                    let sep = args.first().unwrap_or(&Value::Null);
+                    str_builtins::split(&Value::String(Arc::clone(&s_clone)), sep)
+                }),
+                "trim" => Rc::new(move |_args: &[Value]| str_builtins::trim(&Value::String(Arc::clone(&s_clone)))),
+                "toUpperCase" => Rc::new(move |_args: &[Value]| str_builtins::to_upper_case(&Value::String(Arc::clone(&s_clone)))),
+                "toLowerCase" => Rc::new(move |_args: &[Value]| str_builtins::to_lower_case(&Value::String(Arc::clone(&s_clone)))),
+                "startsWith" => Rc::new(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    str_builtins::starts_with(&Value::String(Arc::clone(&s_clone)), search)
+                }),
+                "endsWith" => Rc::new(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    str_builtins::ends_with(&Value::String(Arc::clone(&s_clone)), search)
+                }),
+                "replace" => Rc::new(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    let replacement = args.get(1).unwrap_or(&Value::Null);
+                    str_builtins::replace(&Value::String(Arc::clone(&s_clone)), search, replacement)
+                }),
+                "replaceAll" => Rc::new(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    let replacement = args.get(1).unwrap_or(&Value::Null);
+                    str_builtins::replace_all(&Value::String(Arc::clone(&s_clone)), search, replacement)
+                }),
+                "charAt" => Rc::new(move |args: &[Value]| {
+                    let idx = args.first().unwrap_or(&Value::Null);
+                    str_builtins::char_at(&Value::String(Arc::clone(&s_clone)), idx)
+                }),
+                "charCodeAt" => Rc::new(move |args: &[Value]| {
+                    let idx = args.first().unwrap_or(&Value::Null);
+                    str_builtins::char_code_at(&Value::String(Arc::clone(&s_clone)), idx)
+                }),
+                "repeat" => Rc::new(move |args: &[Value]| {
+                    let count = args.first().unwrap_or(&Value::Null);
+                    str_builtins::repeat(&Value::String(Arc::clone(&s_clone)), count)
+                }),
+                "padStart" => Rc::new(move |args: &[Value]| {
+                    let target_len = args.first().unwrap_or(&Value::Null);
+                    let pad = args.get(1).unwrap_or(&Value::Null);
+                    str_builtins::pad_start(&Value::String(Arc::clone(&s_clone)), target_len, pad)
+                }),
+                "padEnd" => Rc::new(move |args: &[Value]| {
+                    let target_len = args.first().unwrap_or(&Value::Null);
+                    let pad = args.get(1).unwrap_or(&Value::Null);
+                    str_builtins::pad_end(&Value::String(Arc::clone(&s_clone)), target_len, pad)
                 }),
                 _ => return Err(format!("Property '{}' not found", key)),
             };
