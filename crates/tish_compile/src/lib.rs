@@ -12,8 +12,9 @@ pub use codegen::{
 };
 pub use codegen::CompileError;
 pub use resolve::{
-    detect_cycles, extract_native_import_features, has_native_imports, merge_modules,
-    resolve_native_modules, resolve_project, ResolvedNativeModule,
+    detect_cycles, extract_native_import_features, has_external_native_imports, has_native_imports,
+    is_builtin_native_spec, merge_modules, resolve_native_modules, resolve_project,
+    ResolvedNativeModule,
 };
 pub use types::{RustType, TypeContext};
 
@@ -61,7 +62,7 @@ for (let i = 0; i < 5; i = i + 1) {
             .into_iter()
             .map(String::from)
             .collect::<Vec<_>>();
-        let (rust, _) = compile_project_full(&bench, bench.parent(), &features).unwrap();
+        let (rust, _) = compile_project_full(&bench, bench.parent(), &features, true).unwrap();
         assert!(
             rust.contains("(outerVar).clone()"),
             "expected outerVar to be cloned in benchmark_granular loop"

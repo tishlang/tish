@@ -205,6 +205,10 @@ array-stress-profile:
 optional-chaining-profile:
     ./scripts/run_optional_chaining_profile.sh
 
+# Performance benchmark (vm vs interp vs cranelift vs wasi vs Node)
+perf [ARGS]:
+    ./scripts/run_performance_manual.sh {{ARGS}}
+
 # Show binary sizes for different builds
 sizes:
     @echo "Building secure binary..."

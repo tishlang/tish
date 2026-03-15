@@ -33,11 +33,14 @@ pub enum PromiseState {
 /// Internal state for a Promise, shared via Rc<RefCell<>>.
 pub type PromiseStateRef = Rc<RefCell<PromiseState>>;
 
+/// Receiver for blocking until a promise settles.
+pub type PromiseRx = Rc<RefCell<Option<oneshot::Receiver<Result<Value, Value>>>>>;
+
 /// A promise value holds state and the receiver for blocking until settled.
 #[derive(Clone)]
 pub struct PromiseRef {
     pub state: PromiseStateRef,
-    pub rx: Rc<RefCell<Option<oneshot::Receiver<Result<Value, Value>>>>>,
+    pub rx: PromiseRx,
 }
 
 /// Data for resolve/reject callables passed to executor.

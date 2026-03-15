@@ -1,5 +1,6 @@
 // Test File I/O functions
 // Note: These tests require the 'fs' feature
+import { readFile, writeFile, fileExists, readDir, mkdir } from 'fs'
 
 let testDir = "/tmp/tish_test_" + Date.now()
 let testFile = testDir + "/test.txt"

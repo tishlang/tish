@@ -5,6 +5,8 @@
 mod link;
 mod lower;
 
+pub use link::link_to_binary;
+
 use std::path::Path;
 
 use tish_bytecode::Chunk;
@@ -24,10 +26,15 @@ impl std::fmt::Display for CraneliftError {
 impl std::error::Error for CraneliftError {}
 
 /// Compile a bytecode chunk to a native binary.
-pub fn compile_chunk_to_native(chunk: &Chunk, output_path: &Path) -> Result<(), CraneliftError> {
+/// `features` are passed to tish_cranelift_runtime (e.g. fs, process, http for built-in modules).
+pub fn compile_chunk_to_native(
+    chunk: &Chunk,
+    output_path: &Path,
+    features: &[String],
+) -> Result<(), CraneliftError> {
     let object_path = output_path.with_extension("o");
     lower::lower_and_emit(chunk, &object_path)?;
-    link::link_to_binary(&object_path, output_path)?;
+    link::link_to_binary(&object_path, output_path, features)?;
     // Clean up .o file
     let _ = std::fs::remove_file(&object_path);
     Ok(())

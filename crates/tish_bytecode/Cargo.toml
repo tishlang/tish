@@ -10,3 +10,4 @@ tish_core = { path = "../tish_core" }
 
 [dev-dependencies]
 tish_parser = { path = "../tish_parser" }
+tish_opt = { path = "../tish_opt" }

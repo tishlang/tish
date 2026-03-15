@@ -35,6 +35,15 @@ pub fn run(source: &str) -> Result<Value, String> {
 }
 
 /// Run a Tish file with import/export support. Resolves relative imports from the file's directory.
+/// Format an interpreter value for console output (Node/Bun-style colors when `colors` is true).
+pub fn format_value_for_console(value: &Value, colors: bool) -> String {
+    match value_convert::eval_to_core(value) {
+        Ok(core_val) => tish_core::format_value_styled(&core_val, colors),
+        Err(_) => value.to_string(),
+    }
+}
+
+/// Run a Tish file with import/export support. Resolves relative imports from the file's directory.
 pub fn run_file(path: &std::path::Path, project_root: Option<&std::path::Path>) -> Result<Value, String> {
     let path = path
         .canonicalize()

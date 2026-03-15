@@ -8,8 +8,8 @@
 # Usage: ./scripts/run_parity_compare.sh [OPTIONS]
 #
 # Options:
-#   --reference REF   Reference runtime: interp (default), node, rust
-#   --runtimes R,...   Comma-separated: interp,vm,rust,cranelift,wasi,node,bun,deno (default: all available)
+#   --reference REF   Reference runtime: interp (default), node, rust, cranelift, llvm
+#   --runtimes R,...   Comma-separated: interp,vm,rust,cranelift,llvm,wasi,node,bun,deno (default: all available)
 #   --filter NAME      Run only tests matching NAME (e.g. optional_chaining)
 #   --limit N         Run only first N tests
 #   --no-compile      Use cached binaries; skip compile step (run without --no-compile first)
@@ -165,6 +165,20 @@ for f in "$core_dir"/*.tish; do
       fi
       [[ -x "$rust_bin" ]] && ref_out=$(run_and_capture "$rust_bin" || true)
       ;;
+    cranelift)
+      cl_bin="$cache_dir/${base}_cranelift"
+      if ! $no_compile; then
+        $tish_bin compile "$f" -o "$cl_bin" --native-backend cranelift >/dev/null 2>&1 || true
+      fi
+      [[ -x "$cl_bin" ]] && ref_out=$(run_and_capture "$cl_bin" || true)
+      ;;
+    llvm)
+      llvm_bin="$cache_dir/${base}_llvm"
+      if ! $no_compile; then
+        $tish_bin compile "$f" -o "$llvm_bin" --native-backend llvm >/dev/null 2>&1 || true
+      fi
+      [[ -x "$llvm_bin" ]] && ref_out=$(run_and_capture "$llvm_bin" || true)
+      ;;
     *) echo "Unknown reference: $reference"; exit 1 ;;
   esac
 
@@ -210,7 +224,7 @@ for f in "$core_dir"/*.tish; do
   fi
 
   # Compare: cranelift
-  if want_runtime cranelift; then
+  if want_runtime cranelift && [[ "$reference" != "cranelift" ]]; then
     cl_bin="$cache_dir/${base}_cranelift"
     if ! $no_compile; then
       $tish_bin compile "$f" -o "$cl_bin" --native-backend cranelift >/dev/null 2>&1 || true
@@ -223,6 +237,24 @@ for f in "$core_dir"/*.tish; do
       fi
     else
       failures+=("cranelift(no binary)")
+      any_fail=true
+    fi
+  fi
+
+  # Compare: llvm
+  if want_runtime llvm && [[ "$reference" != "llvm" ]]; then
+    llvm_bin="$cache_dir/${base}_llvm"
+    if ! $no_compile; then
+      $tish_bin compile "$f" -o "$llvm_bin" --native-backend llvm >/dev/null 2>&1 || true
+    fi
+    if [[ -x "$llvm_bin" ]]; then
+      out=$(normalize_timing "$(run_and_capture "$llvm_bin" || true)")
+      if [[ "$out" != "$ref_normalized" ]]; then
+        any_fail=true
+        failures+=("llvm")
+      fi
+    else
+      failures+=("llvm(no binary)")
       any_fail=true
     fi
   fi
@@ -282,6 +314,7 @@ for f in "$core_dir"/*.tish; do
         case "$r" in
           vm) run_with_timeout $tish_bin run "$f" --backend vm | sed 's/^/    /' || true ;;
           cranelift) [[ -x "$cache_dir/${base}_cranelift" ]] && run_with_timeout "$cache_dir/${base}_cranelift" | sed 's/^/    /' || true ;;
+          llvm) [[ -x "$cache_dir/${base}_llvm" ]] && run_with_timeout "$cache_dir/${base}_llvm" | sed 's/^/    /' || true ;;
           wasi) [[ -f "$cache_dir/${base}_wasi.wasm" ]] && run_with_timeout wasmtime "$cache_dir/${base}_wasi.wasm" | sed 's/^/    /' || true ;;
           node) run_with_timeout "$node_cmd" "$js_file" | sed 's/^/    /' || true ;;
           *) ;;

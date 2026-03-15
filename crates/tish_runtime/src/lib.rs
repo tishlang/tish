@@ -66,7 +66,9 @@ pub use tish_builtins::string::{
 pub fn array_push(arr: &Value, args: &[Value]) -> Value { array_push_impl(arr, args) }
 pub fn array_unshift(arr: &Value, args: &[Value]) -> Value { array_unshift_impl(arr, args) }
 pub fn array_index_of(arr: &Value, search: &Value) -> Value { array_index_of_impl(arr, search) }
-pub fn array_includes(arr: &Value, search: &Value) -> Value { array_includes_impl(arr, search) }
+pub fn array_includes(arr: &Value, search: &Value, from: &Value) -> Value {
+    array_includes_impl(arr, search, Some(from))
+}
 pub fn array_join(arr: &Value, sep: &Value) -> Value { array_join_impl(arr, sep) }
 pub fn array_splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &[Value]) -> Value {
     array_splice_impl(arr, start, delete_count, items)
@@ -85,7 +87,9 @@ pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
 pub fn string_index_of(s: &Value, search: &Value, from: &Value) -> Value {
     string_index_of_impl(s, search, Some(from))
 }
-pub fn string_includes(s: &Value, search: &Value) -> Value { string_includes_impl(s, search) }
+pub fn string_includes(s: &Value, search: &Value, from: &Value) -> Value {
+    string_includes_impl(s, search, Some(from))
+}
 pub fn string_slice(s: &Value, start: &Value, end: &Value) -> Value { string_slice_impl(s, start, end) }
 pub fn string_substring(s: &Value, start: &Value, end: &Value) -> Value { string_substring_impl(s, start, end) }
 pub fn string_split(s: &Value, sep: &Value) -> Value { string_split_impl(s, sep) }
@@ -112,7 +116,7 @@ pub fn number_to_fixed(n: &Value, digits: &Value) -> Value {
         _ => f64::NAN,
     };
     let d = match digits {
-        Value::Number(x) => (*x as i32).max(0).min(20),
+        Value::Number(x) => (*x as i32).clamp(0, 20),
         _ => 0,
     };
     Value::String(format!("{:.*}", d as usize, num).into())
@@ -283,18 +287,7 @@ fn get_log_level() -> LogLevel {
 }
 
 fn format_args(args: &[Value]) -> String {
-    let mut iter = args.iter();
-    match iter.next() {
-        None => String::new(),
-        Some(first) => {
-            let mut result = first.to_display_string();
-            for arg in iter {
-                result.push(' ');
-                result.push_str(&arg.to_display_string());
-            }
-            result
-        }
-    }
+    tish_core::format_values_for_console(args, tish_core::use_console_colors())
 }
 
 pub fn console_debug(args: &[Value]) {
@@ -326,28 +319,11 @@ pub fn console_error(args: &[Value]) {
 }
 
 pub fn parse_int(args: &[Value]) -> Value {
-    let s = args.first().map(Value::to_display_string).unwrap_or_default();
-    let s = s.trim();
-    let radix = args.get(1).and_then(|v| match v {
-        Value::Number(n) => Some(*n as i32),
-        _ => None,
-    }).unwrap_or(10);
-    
-    if (2..=36).contains(&radix) {
-        let prefix: String = s
-            .chars()
-            .take_while(|c| *c == '-' || *c == '+' || c.is_digit(radix as u32))
-            .collect();
-        if let Ok(n) = i64::from_str_radix(&prefix, radix as u32) {
-            return Value::Number(n as f64);
-        }
-    }
-    Value::Number(f64::NAN)
+    tish_builtins::globals::parse_int(args)
 }
 
 pub fn parse_float(args: &[Value]) -> Value {
-    let s = args.first().map(Value::to_display_string).unwrap_or_default();
-    Value::Number(s.trim().parse().unwrap_or(f64::NAN))
+    tish_builtins::globals::parse_float(args)
 }
 
 pub fn is_finite(args: &[Value]) -> Value {
@@ -520,8 +496,6 @@ pub fn mkdir(args: &[Value]) -> Value {
 }
 
 use std::sync::Arc;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 #[inline]
 pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
@@ -925,9 +899,7 @@ fn string_replace_regex_or_callback(s: &Value, search: &Value, replacement: &Val
         let limit = if re_guard.flags.global { usize::MAX } else { 1 };
         let mut result = String::new();
         let mut last_end: usize = 0;
-        let mut count = 0usize;
-
-        for cap_result in re_guard.regex.captures_iter(input) {
+        for (count, cap_result) in re_guard.regex.captures_iter(input).enumerate() {
             if count >= limit {
                 break;
             }
@@ -955,7 +927,6 @@ fn string_replace_regex_or_callback(s: &Value, search: &Value, replacement: &Val
             result.push_str(&input[last_end..byte_start]);
             result.push_str(&repl_str);
             last_end = full.end();
-            count += 1;
         }
 
         result.push_str(&input[last_end..]);

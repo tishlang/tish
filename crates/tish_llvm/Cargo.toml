@@ -1,0 +1,11 @@
+[package]
+name = "tish_llvm"
+version = "0.1.0"
+edition = "2021"
+description = "LLVM backend for Tish (bytecode → native via clang/LLVM)"
+
+[dependencies]
+tish_bytecode = { path = "../tish_bytecode" }
+tish_compile = { path = "../tish_compile" }
+tish_cranelift = { path = "../tish_cranelift" }
+tish_build_utils = { path = "../tish_build_utils" }

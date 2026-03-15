@@ -1,0 +1,30 @@
+// JSON File Edit Example
+// Demonstrates: readFile, JSON.parse, JSON.stringify, writeFile
+// Run from this dir: tish run src/main.tish --backend interp
+// Build tish with: cargo build -p tish --release --features fs
+import { readFile, writeFile } from 'tish:fs'
+
+let filePath = "data.json"
+
+// 1. Read the JSON file
+let raw = readFile(filePath)
+console.log("Read", filePath)
+
+// 2. Decode (parse) the JSON string into an object
+let data = JSON.parse(raw)
+console.log("Parsed:", data.name, "v" + data.version)
+
+// 3. Modify the data
+data.version = data.version + 1
+data.updated = "edited by json-file-edit"
+data.items.push("delta")
+data.lastRun = Date.now()
+
+// 4. Encode and write back to the same file
+let output = JSON.stringify(data)
+writeFile(filePath, output)
+console.log("Written back to", filePath, "- version now", data.version)
+
+// Verify by reading again
+let verify = JSON.parse(readFile(filePath))
+console.log("Verified: version =", verify.version, ", items =", verify.items.length)

@@ -10,3 +10,10 @@ target/*
 
 dist/
 debug_out.txt
+
+# Build artifacts
+tish_out/
+wasi_build/
+examples/**/dist/
+examples/**/wasi_build/
+tests/core/wasi_build/

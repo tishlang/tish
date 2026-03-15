@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tish_ast::{ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp};
+use crate::resolve::is_builtin_native_spec;
 use crate::types::{RustType, TypeContext};
 
 /// Tracks variable usage for move/clone optimization.
@@ -254,18 +255,20 @@ fn program_uses_async(program: &Program) -> bool {
             Statement::FunDecl { async_, .. } if *async_ => true,
             Statement::Block { statements, .. } => statements.iter().any(stmt_has_async),
             Statement::If { then_branch, else_branch, .. } => {
-                stmt_has_async(then_branch) || else_branch.as_ref().map_or(false, |s| stmt_has_async(s.as_ref()))
+                stmt_has_async(then_branch) || else_branch.as_ref().is_some_and(|s| stmt_has_async(s.as_ref()))
             }
             Statement::While { body, .. } | Statement::For { body, .. } | Statement::ForOf { body, .. }
             | Statement::DoWhile { body, .. } => stmt_has_async(body),
             Statement::Switch { cases, default_body, .. } => {
                 cases.iter().any(|(_, stmts)| stmts.iter().any(stmt_has_async))
-                    || default_body.as_ref().map_or(false, |stmts| stmts.iter().any(stmt_has_async))
+                    || default_body
+                        .as_ref()
+                        .is_some_and(|stmts| stmts.iter().any(stmt_has_async))
             }
             Statement::Try { body, catch_body, finally_body, .. } => {
                 stmt_has_async(body)
-                    || catch_body.as_ref().map_or(false, |s| stmt_has_async(s.as_ref()))
-                    || finally_body.as_ref().map_or(false, |s| stmt_has_async(s.as_ref()))
+                    || catch_body.as_ref().is_some_and(|s| stmt_has_async(s.as_ref()))
+                    || finally_body.as_ref().is_some_and(|s| stmt_has_async(s.as_ref()))
             }
             _ => false,
         }
@@ -321,36 +324,38 @@ fn program_uses_async(program: &Program) -> bool {
     fn stmt_has_await(s: &Statement) -> bool {
         match s {
             Statement::Block { statements, .. } => statements.iter().any(stmt_has_await),
-            Statement::VarDecl { init, .. } => init.as_ref().map_or(false, expr_has_await),
+            Statement::VarDecl { init, .. } => init.as_ref().is_some_and(expr_has_await),
             Statement::VarDeclDestructure { init, .. } => expr_has_await(init),
             Statement::ExprStmt { expr, .. } => expr_has_await(expr),
             Statement::If { cond, then_branch, else_branch, .. } => {
                 expr_has_await(cond) || stmt_has_await(then_branch)
-                    || else_branch.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
+                    || else_branch.as_ref().is_some_and(|s| stmt_has_await(s.as_ref()))
             }
             Statement::While { cond, body, .. } => expr_has_await(cond) || stmt_has_await(body),
             Statement::For { init, cond, update, body, .. } => {
-                init.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
-                    || cond.as_ref().map_or(false, expr_has_await)
-                    || update.as_ref().map_or(false, expr_has_await)
+                init.as_ref().is_some_and(|s| stmt_has_await(s.as_ref()))
+                    || cond.as_ref().is_some_and(expr_has_await)
+                    || update.as_ref().is_some_and(expr_has_await)
                     || stmt_has_await(body)
             }
             Statement::ForOf { iterable, body, .. } => expr_has_await(iterable) || stmt_has_await(body),
-            Statement::Return { value, .. } => value.as_ref().map_or(false, expr_has_await),
+            Statement::Return { value, .. } => value.as_ref().is_some_and(expr_has_await),
             Statement::FunDecl { body, .. } => stmt_has_await(body),
             Statement::Switch { expr, cases, default_body, .. } => {
                 expr_has_await(expr)
                     || cases.iter().any(|(c, stmts)| {
-                        c.as_ref().map_or(false, expr_has_await) || stmts.iter().any(stmt_has_await)
+                        c.as_ref().is_some_and(expr_has_await) || stmts.iter().any(stmt_has_await)
                     })
-                    || default_body.as_ref().map_or(false, |stmts| stmts.iter().any(stmt_has_await))
+                    || default_body
+                        .as_ref()
+                        .is_some_and(|stmts| stmts.iter().any(stmt_has_await))
             }
             Statement::DoWhile { body, cond, .. } => stmt_has_await(body) || expr_has_await(cond),
             Statement::Throw { value, .. } => expr_has_await(value),
             Statement::Try { body, catch_body, finally_body, .. } => {
                 stmt_has_await(body)
-                    || catch_body.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
-                    || finally_body.as_ref().map_or(false, |s| stmt_has_await(s.as_ref()))
+                    || catch_body.as_ref().is_some_and(|s| stmt_has_await(s.as_ref()))
+                    || finally_body.as_ref().is_some_and(|s| stmt_has_await(s.as_ref()))
             }
             Statement::Import { .. } | Statement::Export { .. } => false,
             _ => false,
@@ -375,7 +380,7 @@ pub fn compile_project(
     project_root: Option<&Path>,
     features: &[String],
 ) -> Result<String, CompileError> {
-    let (rust, _) = compile_project_full(entry_path, project_root, features)?;
+    let (rust, _) = compile_project_full(entry_path, project_root, features, true)?;
     Ok(rust)
 }
 
@@ -384,6 +389,7 @@ pub fn compile_project_full(
     entry_path: &Path,
     project_root: Option<&Path>,
     features: &[String],
+    optimize: bool,
 ) -> Result<(String, Vec<crate::resolve::ResolvedNativeModule>), CompileError> {
     use crate::resolve;
     let root = project_root.unwrap_or_else(|| entry_path.parent().unwrap_or(Path::new(".")));
@@ -391,17 +397,17 @@ pub fn compile_project_full(
         .map_err(|e| CompileError { message: e, span: None })?;
     resolve::detect_cycles(&modules)
         .map_err(|e| CompileError { message: e, span: None })?;
-    let program = resolve::merge_modules(modules)
+    let merged = resolve::merge_modules(modules)
         .map_err(|e| CompileError { message: e, span: None })?;
-    let native_modules = resolve::resolve_native_modules(&program, root)
+    let native_modules = resolve::resolve_native_modules(&merged, root)
         .map_err(|e| CompileError { message: e, span: None })?;
     let mut all_features: Vec<String> = features.to_vec();
-    for f in resolve::extract_native_import_features(&program) {
+    for f in resolve::extract_native_import_features(&merged) {
         if !all_features.contains(&f) {
             all_features.push(f);
         }
     }
-    let rust = compile_with_native_modules(&program, project_root, &all_features, &native_modules)?;
+    let rust = compile_with_native_modules(&merged, project_root, &all_features, &native_modules, optimize)?;
     Ok((rust, native_modules))
 }
 
@@ -412,7 +418,7 @@ pub fn compile_with_features(
     project_root: Option<&Path>,
     features: &[String],
 ) -> Result<String, CompileError> {
-    compile_with_native_modules(program, project_root, features, &[])
+    compile_with_native_modules(program, project_root, features, &[], true)
 }
 
 /// Compile with resolved native modules. Native imports emit calls to the module crates directly.
@@ -421,13 +427,15 @@ pub fn compile_with_native_modules(
     project_root: Option<&Path>,
     features: &[String],
     native_modules: &[crate::resolve::ResolvedNativeModule],
+    optimize: bool,
 ) -> Result<String, CompileError> {
+    let program = if optimize { tish_opt::optimize(program) } else { program.clone() };
     let map: std::collections::HashMap<String, (String, String)> = native_modules
         .iter()
         .map(|m| (m.spec.clone(), (m.crate_name.clone(), m.export_fn.clone())))
         .collect();
     let mut g = Codegen::new_with_native_modules(project_root, features, map);
-    g.emit_program(program)?;
+    g.emit_program(&program)?;
     Ok(g.output)
 }
 
@@ -489,10 +497,52 @@ impl Codegen {
     }
 
     /// Map native module spec to Rust init expression using resolved package.json modules.
-    fn native_module_rust_init(&self, spec: &str) -> Option<String> {
-        self.native_module_map
-            .get(spec)
-            .map(|(crate_name, export_fn)| format!("{}::{}()", crate_name, export_fn))
+    /// For built-in modules (tish:fs, tish:http, tish:process), use builtin_native_module_rust_init.
+    fn native_module_rust_init(&self, spec: &str, export_name: &str) -> Option<String> {
+        if is_builtin_native_spec(spec) {
+            return self.builtin_native_module_rust_init(spec, export_name);
+        }
+        self.native_module_map.get(spec).map(|(crate_name, export_fn)| {
+            format!("{}::{}()", crate_name, export_fn)
+        })
+    }
+
+    /// Rust init for built-in modules (tish:fs, tish:http, tish:process) - uses tish_runtime.
+    fn builtin_native_module_rust_init(&self, spec: &str, export_name: &str) -> Option<String> {
+        let init = match spec {
+            "tish:fs" if self.has_feature("fs") => match export_name {
+                    "readFile" => Some("Value::Function(Rc::new(|args: &[Value]| tish_read_file(args)))"),
+                    "writeFile" => Some("Value::Function(Rc::new(|args: &[Value]| tish_write_file(args)))"),
+                    "fileExists" => Some("Value::Function(Rc::new(|args: &[Value]| tish_file_exists(args)))"),
+                    "readDir" => Some("Value::Function(Rc::new(|args: &[Value]| tish_read_dir(args)))"),
+                    "mkdir" => Some("Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)))"),
+                    _ => None,
+                },
+            "tish:http" if self.has_feature("http") => match export_name {
+                    "fetch" => Some("Value::Function(Rc::new(|args: &[Value]| tish_http_fetch(args)))"),
+                    "fetchAll" => Some("Value::Function(Rc::new(|args: &[Value]| tish_http_fetch_all(args)))"),
+                    "fetchAsync" => Some("Value::Function(Rc::new(|args: &[Value]| tish_fetch_async_promise(args.to_vec())))"),
+                    "fetchAllAsync" => Some("Value::Function(Rc::new(|_args: &[Value]| panic!(\"fetchAllAsync must be used with await\")))"),
+                    "serve" => Some("Value::Function(Rc::new(|args: &[Value]| { let port = args.first().cloned().unwrap_or(Value::Null); let handler = args.get(1).cloned().unwrap_or(Value::Null); if let Value::Function(f) = handler { tish_http_serve(args, move |req_args| f(req_args)) } else { Value::Null } }))"),
+                    "Promise" => Some("tish_promise_object()"),
+                    "setTimeout" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_set_timeout(args)))"),
+                    "setInterval" => Some("Value::Function(Rc::new(|_args: &[Value]| panic!(\"setInterval not yet supported in native\")))"),
+                    "clearTimeout" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_timeout(args)))"),
+                    "clearInterval" => Some("Value::Function(Rc::new(|_args: &[Value]| Value::Null))"),
+                    _ => None,
+                },
+            "tish:process" if self.has_feature("process") => match export_name {
+                    "exit" => Some("Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args)))"),
+                    "cwd" => Some("Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args)))"),
+                    "exec" => Some("Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args)))"),
+                    "argv" => Some("Value::Array(Rc::new(RefCell::new(std::env::args().map(|s| Value::String(s.into())).collect())))"),
+                    "env" => Some("Value::Object(Rc::new(RefCell::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect())))"),
+                    "process" => Some("{ let mut m = HashMap::new(); m.insert(Arc::from(\"exit\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args)))); m.insert(Arc::from(\"cwd\"), Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args)))); m.insert(Arc::from(\"exec\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args)))); m.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(std::env::args().map(|s| Value::String(s.into())).collect())))); m.insert(Arc::from(\"env\"), Value::Object(Rc::new(RefCell::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect())))); Value::Object(Rc::new(RefCell::new(m))) }"),
+                    _ => None,
+                },
+            _ => return None,
+        };
+        init.map(String::from)
     }
 
     fn has_feature(&self, name: &str) -> bool {
@@ -867,7 +917,7 @@ impl Codegen {
             self.writeln("let handler = args.get(1).cloned().unwrap_or(Value::Null);");
             self.writeln("if let Value::Function(f) = handler {");
             self.indent += 1;
-            self.writeln("tish_http_serve(&[port], move |req_args| f(req_args))");
+            self.writeln("tish_http_serve(args, move |req_args| f(req_args))");
             self.indent -= 1;
             self.writeln("} else {");
             self.indent += 1;
@@ -998,7 +1048,7 @@ impl Codegen {
                         let init_val = if clone_needed {
                             format!("({}).clone()", expr_str)
                         } else {
-                            format!("{}", expr_str)
+                            expr_str.to_string()
                         };
                         self.writeln(&format!("let {} = std::rc::Rc::new(RefCell::new({}));", escaped_name, init_val));
                     } else if clone_needed {
@@ -1607,7 +1657,7 @@ impl Codegen {
             Expr::Call { callee, args, .. } => {
                 // Compile-time embed: Polars.read_csv("<literal path>") when file exists
                 if let Some((crate_name, _)) = self.native_module_map.get("tish:polars") {
-                    if let (Some(ref root), Some(CallArg::Expr(first_arg))) =
+                    if let (Some(root), Some(CallArg::Expr(first_arg))) =
                         (self.project_root.as_ref(), args.first())
                     {
                         if let Expr::Member {
@@ -1687,9 +1737,10 @@ impl Codegen {
                         }
                         "includes" => {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let from = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tish_runtime::array_includes(&_obj, &{}), Value::String(_) => tish_runtime::string_includes(&_obj, &{}), _ => Value::Bool(false) }} }}",
-                                obj_expr, search, search
+                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tish_runtime::array_includes(&_obj, &{}, &{}), Value::String(_) => tish_runtime::string_includes(&_obj, &{}, &{}), _ => Value::Bool(false) }} }}",
+                                obj_expr, search, from, search, from
                             ));
                         }
                         "join" => {
@@ -2303,13 +2354,22 @@ impl Codegen {
             Expr::JsxElement { .. } | Expr::JsxFragment { .. } => {
                 return Err(CompileError { message: "JSX is only supported when compiling to JavaScript (tish compile --target js).".to_string(), span: None });
             }
-            Expr::NativeModuleLoad { spec, .. } => {
-                self.native_module_rust_init(spec.as_ref())
+            Expr::NativeModuleLoad { spec, export_name, .. } => {
+                self.native_module_rust_init(spec.as_ref(), export_name.as_ref())
                     .ok_or_else(|| CompileError {
-                        message: format!(
-                            "Native module '{}' not found. Add it as a dependency and ensure package.json has tish.module.",
-                            spec.as_ref()
-                        ),
+                        message: if crate::resolve::is_builtin_native_spec(spec.as_ref()) {
+                            format!(
+                                "Built-in module '{}' does not export '{}'. Add --feature {} when compiling.",
+                                spec.as_ref(),
+                                export_name.as_ref(),
+                                spec.as_ref().strip_prefix("tish:").unwrap_or(spec.as_ref())
+                            )
+                        } else {
+                            format!(
+                                "Native module '{}' not found. Add it as a dependency and ensure package.json has tish.module.",
+                                spec.as_ref()
+                            )
+                        },
                         span: None,
                     })?
             }
@@ -2641,16 +2701,18 @@ impl Codegen {
                 Statement::VarDeclDestructure { pattern, .. } => {
                     Self::collect_destruct_names(pattern, names);
                 }
-                Statement::For { init, .. } => {
-                    if let Some(i) = init {
-                        if let Statement::VarDecl { name, .. } = i.as_ref() {
-                            names.insert(name.to_string());
-                        }
-                        if let Statement::VarDeclDestructure { pattern, .. } = i.as_ref() {
-                            Self::collect_destruct_names(pattern, names);
-                        }
+                Statement::For {
+                    init: Some(i),
+                    ..
+                } => {
+                    if let Statement::VarDecl { name, .. } = i.as_ref() {
+                        names.insert(name.to_string());
+                    }
+                    if let Statement::VarDeclDestructure { pattern, .. } = i.as_ref() {
+                        Self::collect_destruct_names(pattern, names);
                     }
                 }
+                Statement::For { init: None, .. } => {}
                 _ => {}
             }
         }
@@ -2849,18 +2911,14 @@ impl Codegen {
                     Self::collect_mutated_captures_from_statements(f, block_vars, result);
                 }
             }
-            Statement::VarDecl { init, .. } => {
-                if let Some(e) = init {
-                    Self::collect_mutated_captures_from_expr(e, block_vars, result);
-                }
+            Statement::VarDecl { init: Some(e), .. } => {
+                Self::collect_mutated_captures_from_expr(e, block_vars, result);
             }
             Statement::VarDeclDestructure { init, .. } => {
                 Self::collect_mutated_captures_from_expr(init, block_vars, result);
             }
-            Statement::Return { value, .. } => {
-                if let Some(e) = value {
-                    Self::collect_mutated_captures_from_expr(e, block_vars, result);
-                }
+            Statement::Return { value: Some(e), .. } => {
+                Self::collect_mutated_captures_from_expr(e, block_vars, result);
             }
             Statement::Throw { value, .. } => Self::collect_mutated_captures_from_expr(value, block_vars, result),
             _ => {}

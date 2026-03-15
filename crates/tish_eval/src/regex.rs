@@ -187,9 +187,7 @@ where
     let limit = if re.flags.global { usize::MAX } else { 1 };
     let mut result = String::new();
     let mut last_end: usize = 0;
-    let mut count = 0usize;
-
-    for cap_result in re.regex.captures_iter(input) {
+    for (count, cap_result) in re.regex.captures_iter(input).enumerate() {
         if count >= limit {
             break;
         }
@@ -214,7 +212,6 @@ where
         result.push_str(&input[last_end..byte_start]);
         result.push_str(&repl);
         last_end = full.end();
-        count += 1;
     }
 
     result.push_str(&input[last_end..]);

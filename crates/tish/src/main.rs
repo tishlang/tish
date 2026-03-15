@@ -1,51 +1,68 @@
 //! Tish CLI - run, REPL, compile to native.
 
+mod repl_completion;
+
+use std::cell::RefCell;
 use std::fs;
-use std::io::{self, Write};
-use std::path::Path;
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use clap::{Parser, Subcommand};
+use rustyline::{Behavior, ColorMode, CompletionType, Config, Editor};
 
 #[derive(Parser)]
 #[command(name = "tish")]
 #[command(about = "Tish - minimal TS/JS-compatible language")]
+#[command(after_help = "To disable optimizations: TISH_NO_OPTIMIZE=1")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
+#[derive(Parser)]
+struct RunArgs {
+    #[arg(required = true)]
+    file: String,
+    #[arg(long, default_value = "vm")]
+    backend: String,
+    /// Disable AST and bytecode optimizations (for debugging)
+    #[arg(long)]
+    no_optimize: bool,
+}
+
+#[derive(Parser)]
+struct ReplArgs {
+    #[arg(long, default_value = "vm")]
+    backend: String,
+    #[arg(long)]
+    no_optimize: bool,
+}
+
+#[derive(Parser)]
+struct CompileArgs {
+    #[arg(required = true)]
+    file: String,
+    #[arg(short, long, default_value = "tish_out")]
+    output: String,
+    #[arg(long, default_value = "native")]
+    target: String,
+    #[arg(long, default_value = "rust")]
+    native_backend: String,
+    #[arg(long = "feature", action = clap::ArgAction::Append)]
+    features: Vec<String>,
+    #[arg(long)]
+    no_optimize: bool,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Run a Tish file (interpret)
-    Run {
-        #[arg(required = true)]
-        file: String,
-        /// Backend: vm (default) or interp (tree-walk interpreter)
-        #[arg(long, default_value = "vm")]
-        backend: String,
-    },
+    Run(RunArgs),
     /// Interactive REPL
-    Repl {
-        /// Backend: vm (default) or interp (tree-walk interpreter)
-        #[arg(long, default_value = "vm")]
-        backend: String,
-    },
+    Repl(ReplArgs),
     /// Compile to native binary or JavaScript
-    Compile {
-        #[arg(required = true)]
-        file: String,
-        #[arg(short, long, default_value = "tish_out")]
-        output: String,
-        /// Target: native (default), js, wasm, or wasi
-        #[arg(long, default_value = "native")]
-        target: String,
-        /// Native backend: rust (default, full Rust ecosystem) or cranelift (faster, no native imports)
-        #[arg(long, default_value = "rust")]
-        native_backend: String,
-        /// Enable feature (http, fs, process, regex, polars, egui). For native target only. Can be repeated.
-        #[arg(long = "feature", action = clap::ArgAction::Append)]
-        features: Vec<String>,
-    },
+    Compile(CompileArgs),
     /// Parse and dump AST
     #[command(name = "dump-ast")]
     DumpAst {
@@ -56,15 +73,15 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
-
+    let no_opt_env = std::env::var_os("TISH_NO_OPTIMIZE")
+        .map(|v| v == "1" || v == "true" || v == "yes")
+        .unwrap_or(false);
     let result = match cli.command {
-        Some(Commands::Run { file, backend }) => run_file(&file, &backend),
-        Some(Commands::Repl { backend }) => run_repl(&backend),
-        Some(Commands::Compile { file, output, target, native_backend, features }) => {
-            compile_file(&file, &output, &target, &native_backend, &features)
-        }
+        Some(Commands::Run(a)) => run_file(&a.file, &a.backend, a.no_optimize || no_opt_env),
+        Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env),
+        Some(Commands::Compile(a)) => compile_file(&a.file, &a.output, &a.target, &a.native_backend, &a.features, a.no_optimize || no_opt_env),
         Some(Commands::DumpAst { file }) => dump_ast(&file),
-        None => run_repl("vm"), // No args = REPL
+        None => run_repl("vm", false), // No args = REPL
     };
 
     if let Err(e) = result {
@@ -73,7 +90,7 @@ fn main() {
     }
 }
 
-fn run_file(path: &str, backend: &str) -> Result<(), String> {
+fn run_file(path: &str, backend: &str, no_optimize: bool) -> Result<(), String> {
     let path = Path::new(path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", path, e))?;
     let project_root = path.parent().and_then(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
@@ -84,104 +101,229 @@ fn run_file(path: &str, backend: &str) -> Result<(), String> {
     });
 
     let program = if path.extension().map(|e| e == "js") == Some(true) {
-        let source = fs::read_to_string(&path).map_err(|e| format!("{}", e))?;
-        js_to_tish::convert(&source).map_err(|e| format!("{}", e))?
+        let prog = js_to_tish::convert(&fs::read_to_string(&path).map_err(|e| format!("{}", e))?)
+            .map_err(|e| format!("{}", e))?;
+        if no_optimize {
+            prog
+        } else {
+            tish_opt::optimize(&prog)
+        }
     } else {
         let modules = tish_compile::resolve_project(&path, project_root)?;
         tish_compile::detect_cycles(&modules)?;
-        tish_compile::merge_modules(modules)?
+        let prog = tish_compile::merge_modules(modules)?;
+        if no_optimize {
+            prog
+        } else {
+            tish_opt::optimize(&prog)
+        }
     };
 
     if backend == "interp" {
         let mut eval = tish_eval::Evaluator::new();
         let value = eval.eval_program(&program)?;
         if !matches!(value, tish_eval::Value::Null) {
-            println!("{}", value);
+            println!("{}", tish_eval::format_value_for_console(&value, tish_core::use_console_colors()));
         }
         return Ok(());
     }
 
-    let chunk = tish_bytecode::compile(&program).map_err(|e| e.to_string())?;
+    // VM backend (bytecode) - supports native imports when built with fs/http/process features
+    let chunk = if no_optimize {
+        tish_bytecode::compile_unoptimized(&program).map_err(|e| e.to_string())?
+    } else {
+        tish_bytecode::compile(&program).map_err(|e| e.to_string())?
+    };
     let value = tish_vm::run(&chunk)?;
     if !matches!(value, tish_core::Value::Null) {
-        println!("{}", value.to_display_string());
+        println!("{}", tish_core::format_value_styled(&value, tish_core::use_console_colors()));
     }
     Ok(())
 }
 
-fn run_repl(backend: &str) -> Result<(), String> {
+fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
     println!("Tish REPL (Ctrl-D to exit)");
     let mut buffer = String::new();
 
     if backend == "interp" {
         let mut eval = tish_eval::Evaluator::new();
+        let mut multiline = String::new();
         loop {
-            print!("> ");
+            let prompt = repl_prompt(multiline.is_empty());
+            print!("{}", prompt);
             io::stdout().flush().map_err(|e| e.to_string())?;
             buffer.clear();
             if io::stdin().read_line(&mut buffer).map_err(|e| e.to_string())? == 0 {
+                if !multiline.is_empty() {
+                    let _ = tish_parser::parse(multiline.trim());
+                }
                 break;
             }
             let line = buffer.trim_end();
-            if line.is_empty() {
+            if multiline.is_empty() && line.is_empty() {
                 continue;
             }
-            match tish_parser::parse(line) {
+            if multiline.is_empty() {
+                multiline = line.to_string();
+            } else {
+                multiline.push('\n');
+                multiline.push_str(line);
+            }
+            match tish_parser::parse(multiline.trim()) {
                 Ok(program) => {
-                    for stmt in &program.statements {
-                        if let Ok(v) = eval.eval_program(&tish_ast::Program {
-                            statements: vec![stmt.clone()],
-                        }) {
+                    match eval.eval_program(&program) {
+                        Ok(v) => {
                             if !matches!(v, tish_eval::Value::Null) {
-                                println!("{}", v);
+                                println!("{}", tish_eval::format_value_for_console(&v, tish_core::use_console_colors()));
                             }
                         }
+                        Err(e) => eprintln!("{}", e),
+                    }
+                    multiline.clear();
+                }
+                Err(e) => {
+                    if e.to_lowercase().contains("eof") {
+                        // Incomplete: keep reading
+                    } else {
+                        eprintln!("Parse error: {}", e);
+                        multiline.clear();
                     }
                 }
-                Err(e) => eprintln!("Parse error: {}", e),
             }
         }
         return Ok(());
     }
 
-    // VM backend
-    let mut vm = tish_vm::Vm::new();
+    // VM backend with tab completion (e.g. a. -> properties/methods)
+    if !std::io::stdin().is_terminal() {
+        eprintln!("Note: Tab completion and grey preview require an interactive terminal (TTY).");
+    }
+    let vm = Rc::new(RefCell::new(tish_vm::Vm::new()));
+    let completer = repl_completion::ReplCompleter {
+        vm: Rc::clone(&vm),
+        no_optimize,
+    };
+    let config = Config::builder()
+        .completion_type(CompletionType::List)
+        .completion_show_all_if_ambiguous(true)
+        .color_mode(ColorMode::Forced)
+        .behavior(Behavior::PreferTerm)
+        .build();
+    let mut rl: Editor<repl_completion::ReplCompleter, _> =
+        Editor::with_config(config).map_err(|e| e.to_string())?;
+    rl.set_helper(Some(completer));
+
+    if let Some(ref path) = tish_history_path() {
+        let _ = rl.load_history(path);
+    }
+
+    println!("Tab after 'obj.' for completions (grey preview); press Tab again for full list.");
+    println!("Multi-line: type until the statement is complete; use ... continuation prompt.");
+
+    let mut buffer = String::new();
+
     loop {
-        print!("> ");
-        io::stdout().flush().map_err(|e| e.to_string())?;
-        buffer.clear();
-        if io::stdin().read_line(&mut buffer).map_err(|e| e.to_string())? == 0 {
-            break;
-        }
-        let line = buffer.trim_end();
-        if line.is_empty() {
+        let prompt = repl_prompt(buffer.is_empty());
+        let line = match rl.readline(&prompt) {
+            Ok(l) => l,
+            Err(rustyline::error::ReadlineError::Eof) => {
+                if buffer.is_empty() {
+                    break;
+                }
+                match tish_parser::parse(buffer.trim()) {
+                    Ok(program) => {
+                        let compile_fn = if no_optimize {
+                            tish_bytecode::compile_for_repl_unoptimized
+                        } else {
+                            tish_bytecode::compile_for_repl
+                        };
+                        if let Ok(chunk) = compile_fn(&program) {
+                            let _ = vm.borrow_mut().run(&chunk);
+                        }
+                    }
+                    Err(e) => eprintln!("Parse error: {}", e),
+                }
+                break;
+            }
+            Err(rustyline::error::ReadlineError::Interrupted) => {
+                buffer.clear();
+                continue;
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        let line = line.trim_end();
+        if buffer.is_empty() && line.is_empty() {
             continue;
         }
-        match tish_parser::parse(line) {
+        if buffer.is_empty() {
+            buffer = line.to_string();
+        } else {
+            buffer.push('\n');
+            buffer.push_str(line);
+        }
+        match tish_parser::parse(buffer.trim()) {
             Ok(program) => {
-                for stmt in &program.statements {
-                    let prog = tish_ast::Program {
-                        statements: vec![stmt.clone()],
-                    };
-                    match tish_bytecode::compile(&prog) {
-                        Ok(chunk) => {
-                            if let Ok(v) = vm.run(&chunk) {
+                let compile_fn = if no_optimize {
+                    tish_bytecode::compile_for_repl_unoptimized
+                } else {
+                    tish_bytecode::compile_for_repl
+                };
+                match compile_fn(&program) {
+                    Ok(chunk) => {
+                        match vm.borrow_mut().run(&chunk) {
+                            Ok(v) => {
                                 if !matches!(v, tish_core::Value::Null) {
-                                    println!("{}", v.to_display_string());
+                                    println!("{}", tish_core::format_value_styled(&v, tish_core::use_console_colors()));
                                 }
                             }
+                            Err(e) => eprintln!("{}", e),
                         }
-                        Err(e) => eprintln!("Compile error: {}", e),
                     }
+                    Err(e) => eprintln!("Compile error: {}", e),
+                }
+                let _ = rl.add_history_entry(buffer.trim());
+                buffer.clear();
+            }
+            Err(e) => {
+                if e.to_lowercase().contains("eof") {
+                    // Incomplete: keep accumulating (Python-style ... prompt)
+                } else {
+                    eprintln!("Parse error: {}", e);
+                    buffer.clear();
                 }
             }
-            Err(e) => eprintln!("Parse error: {}", e),
         }
+    }
+
+    if let Some(ref path) = tish_history_path() {
+        let _ = rl.save_history(path);
     }
     Ok(())
 }
 
-fn compile_to_js(input_path: &Path, output_path: &str) -> Result<(), String> {
+/// REPL prompt with green caret when stdout is a TTY (platform-style).
+fn repl_prompt(primary: bool) -> String {
+    if tish_core::use_console_colors() {
+        if primary {
+            "\x1b[32m> \x1b[0m".to_string()
+        } else {
+            "\x1b[32m... \x1b[0m".to_string()
+        }
+    } else if primary {
+        "> ".to_string()
+    } else {
+        "... ".to_string()
+    }
+}
+
+/// Path to REPL history file (Python-style: ~/.tish_history).
+fn tish_history_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"));
+    home.map(|h| PathBuf::from(h).join(".tish_history"))
+}
+
+fn compile_to_js(input_path: &Path, output_path: &str, optimize: bool) -> Result<(), String> {
     let project_root = input_path.parent().and_then(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
             p.parent()
@@ -192,9 +334,9 @@ fn compile_to_js(input_path: &Path, output_path: &str) -> Result<(), String> {
     let js = if input_path.extension().map(|e| e == "js") == Some(true) {
         let source = fs::read_to_string(input_path).map_err(|e| format!("{}", e))?;
         let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        tish_compile_js::compile(&program).map_err(|e| format!("{}", e))?
+        tish_compile_js::compile(&program, optimize).map_err(|e| format!("{}", e))?
     } else {
-        tish_compile_js::compile_project(input_path, project_root)
+        tish_compile_js::compile_project(input_path, project_root, optimize)
             .map_err(|e| format!("{}", e))?
     };
 
@@ -216,52 +358,6 @@ fn compile_to_js(input_path: &Path, output_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Find the tish_runtime crate path using multiple strategies
-#[allow(dead_code)]
-fn find_runtime_path() -> Result<String, String> {
-    // Strategy 1: CARGO_MANIFEST_DIR (works during cargo run/build)
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let path = Path::new(&manifest_dir).join("..").join("tish_runtime");
-        if let Ok(canonical) = path.canonicalize() {
-            return Ok(canonical.display().to_string().replace('\\', "/"));
-        }
-    }
-
-    // Strategy 2: Relative to executable location (target/debug/tish or target/release/tish)
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let path = exe_dir.join("..").join("..").join("crates").join("tish_runtime");
-            if let Ok(canonical) = path.canonicalize() {
-                return Ok(canonical.display().to_string().replace('\\', "/"));
-            }
-        }
-    }
-
-    // Strategy 3: Current working directory based (common dev scenario)
-    let cwd_based = Path::new("crates").join("tish_runtime");
-    if let Ok(canonical) = cwd_based.canonicalize() {
-        return Ok(canonical.display().to_string().replace('\\', "/"));
-    }
-
-    // Strategy 4: Look for Cargo.toml to find workspace root
-    if let Ok(mut current) = std::env::current_dir() {
-        for _ in 0..10 {
-            let cargo_toml = current.join("Cargo.toml");
-            if cargo_toml.exists() {
-                let runtime = current.join("crates").join("tish_runtime");
-                if runtime.exists() {
-                    return Ok(runtime.display().to_string().replace('\\', "/"));
-                }
-            }
-            if !current.pop() {
-                break;
-            }
-        }
-    }
-
-    Err("Could not find tish_runtime crate. Run from workspace root or use cargo run.".to_string())
-}
-
 #[allow(clippy::vec_init_then_push)]
 fn compile_file(
     input_path: &str,
@@ -269,20 +365,23 @@ fn compile_file(
     target: &str,
     native_backend: &str,
     cli_features: &[String],
+    no_optimize: bool,
 ) -> Result<(), String> {
+    let optimize = !no_optimize;
     let input_path =
         Path::new(input_path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", input_path, e))?;
 
     let is_js = input_path.extension().map(|e| e == "js") == Some(true);
 
     if target == "js" {
-        return compile_to_js(&input_path, output_path);
+        return compile_to_js(&input_path, output_path, optimize);
     }
 
     if target == "wasm" && is_js {
         let source = fs::read_to_string(&input_path).map_err(|e| format!("{}", e))?;
         let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        return tish_wasm::compile_program_to_wasm(&program, Path::new(output_path)).map_err(|e| format!("{}", e));
+        return tish_wasm::compile_program_to_wasm(&program, Path::new(output_path), optimize)
+            .map_err(|e| format!("{}", e));
     }
 
     if target == "wasm" {
@@ -293,7 +392,7 @@ fn compile_file(
                 Some(p)
             }
         });
-        return tish_wasm::compile_to_wasm(&input_path, project_root, Path::new(output_path))
+        return tish_wasm::compile_to_wasm(&input_path, project_root, Path::new(output_path), optimize)
             .map_err(|e| e.to_string());
     }
 
@@ -305,7 +404,7 @@ fn compile_file(
                 Some(p)
             }
         });
-        return tish_wasm::compile_to_wasi(&input_path, project_root, Path::new(output_path))
+        return tish_wasm::compile_to_wasi(&input_path, project_root, Path::new(output_path), optimize)
             .map_err(|e| e.to_string());
     }
 
@@ -324,6 +423,7 @@ fn compile_file(
         }
     });
     let features: Vec<String> = if cli_features.is_empty() {
+        #[allow(unused_mut)]
         let mut f = Vec::new();
         #[cfg(feature = "http")]
         f.push("http".to_string());
@@ -341,11 +441,25 @@ fn compile_file(
     if is_js {
         let source = fs::read_to_string(&input_path).map_err(|e| format!("{}", e))?;
         let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        tish_native::compile_program_to_native(&program, project_root.as_deref(), Path::new(output_path), &features, native_backend)
-            .map_err(|e| e.to_string())?;
+        tish_native::compile_program_to_native(
+            &program,
+            project_root,
+            Path::new(output_path),
+            &features,
+            native_backend,
+            optimize,
+        )
+        .map_err(|e| e.to_string())?;
     } else {
-        tish_native::compile_to_native(&input_path, project_root.as_deref(), Path::new(output_path), &features, native_backend)
-            .map_err(|e| e.to_string())?;
+        tish_native::compile_to_native(
+            &input_path,
+            project_root,
+            Path::new(output_path),
+            &features,
+            native_backend,
+            optimize,
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     let out_name = Path::new(output_path)

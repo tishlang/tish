@@ -1,5 +1,6 @@
 // HTTP fetch tests
 // Note: These tests require network access
+import { fetch, fetchAll } from 'http'
 
 // Test 1: Simple GET request
 let response = fetch("https://httpbin.org/get")

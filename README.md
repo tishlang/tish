@@ -1,8 +1,12 @@
 # Tish
 
+An experimental and opinionated javascript/typescript-like multi-target native compilable language built for friends and family of the JS community.
+
+**License:** [Pay It Forward (PIF)](https://payitforwardlicense.com/) — see [LICENSE](LICENSE).
+
 > 🚧 Experimental multi target ts/js 
 
-Minimal, TS/JS-compatible language. Runs via interpreter or compiles to native. See `docs/` for spec and ECMA alignment.
+Minimal, TS/JS-compatible language. Runs via interpreter or compiles to native. See [docs/](docs/) for spec and ECMA alignment; user-facing docs: [tish-docs](https://github.com/tish-lang/tish-docs).
 
 ## Quick Example
 
@@ -169,6 +173,3 @@ JavaScript equivalents in `tests/core/*.js`. Compare Tish vs Node.js/Bun:
 - **String methods**: `slice`, `split`, `trim`, `toUpperCase`, `includes`, etc.
 
 See `docs/plan-gap-analysis.md` for full feature list and JS compatibility.
-
-
-ZECTRE_API_URL=http://localhost:47080 cargo run -p zectre-cli --manifest-path ../../../zectre-cli/Cargo.toml -- deploy --wait

@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "Runtime for Cranelift-compiled Tish bytecode"
 
+[features]
+default = []
+fs = ["tish_vm/fs"]
+process = ["tish_vm/process"]
+http = ["tish_vm/http"]
+
 [lib]
 crate-type = ["staticlib", "rlib"]
 

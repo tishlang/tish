@@ -18,7 +18,32 @@ pub struct ResolvedNativeModule {
     pub export_fn: String,
 }
 
+/// Node-compatible aliases for built-in modules (fs -> tish:fs, etc.).
+const BUILTIN_ALIASES: &[(&str, &str)] = &[
+    ("fs", "tish:fs"),
+    ("http", "tish:http"),
+    ("process", "tish:process"),
+];
+
+/// Normalize built-in spec to canonical form. E.g. "fs" -> "tish:fs".
+pub fn normalize_builtin_spec(spec: &str) -> Option<String> {
+    if spec.starts_with("tish:") {
+        return Some(spec.to_string());
+    }
+    BUILTIN_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == spec)
+        .map(|(_, canonical)| (*canonical).to_string())
+}
+
+/// Built-in modules that come from tish_runtime, not from package.json.
+pub fn is_builtin_native_spec(spec: &str) -> bool {
+    matches!(spec, "tish:fs" | "tish:http" | "tish:process")
+        || matches!(spec, "fs" | "http" | "process")
+}
+
 /// Resolve all native imports in a merged program via package.json lookup.
+/// Built-in modules (tish:fs, tish:http, tish:process) are skipped - they use tish_runtime directly.
 pub fn resolve_native_modules(program: &Program, project_root: &Path) -> Result<Vec<ResolvedNativeModule>, String> {
     let root_canon = project_root
         .canonicalize()
@@ -26,15 +51,20 @@ pub fn resolve_native_modules(program: &Program, project_root: &Path) -> Result<
     let mut seen = HashSet::new();
     let mut modules = Vec::new();
     for stmt in &program.statements {
-        if let Statement::VarDecl { init: Some(init), .. } = stmt {
-            if let Expr::NativeModuleLoad { spec, .. } = init {
-                let s = spec.as_ref();
-                if !seen.insert(s.to_string()) {
-                    continue;
-                }
-                let m = resolve_native_module(s, &root_canon)?;
-                modules.push(m);
+        if let Statement::VarDecl {
+            init: Some(Expr::NativeModuleLoad { spec, .. }),
+            ..
+        } = stmt
+        {
+            let s = spec.as_ref();
+            if is_builtin_native_spec(s) {
+                continue; // Built-ins use tish_runtime, no package.json lookup
             }
+            if !seen.insert(s.to_string()) {
+                continue;
+            }
+            let m = resolve_native_module(s, &root_canon)?;
+            modules.push(m);
         }
     }
     Ok(modules)
@@ -86,21 +116,21 @@ fn find_package_dir(package_name: &str, project_root: &Path) -> Result<PathBuf, 
     let mut search = project_root.to_path_buf();
     loop {
         let node_mod = search.join("node_modules").join(package_name);
-        if node_mod.join("package.json").exists() {
-            if read_package_name(&node_mod.join("package.json")) == Some(package_name.to_string()) {
-                return Ok(node_mod);
-            }
+        if node_mod.join("package.json").exists()
+            && read_package_name(&node_mod.join("package.json")) == Some(package_name.to_string())
+        {
+            return Ok(node_mod);
         }
         let sibling = search.join(package_name);
-        if sibling.join("package.json").exists() {
-            if read_package_name(&sibling.join("package.json")) == Some(package_name.to_string()) {
-                return Ok(sibling);
-            }
+        if sibling.join("package.json").exists()
+            && read_package_name(&sibling.join("package.json")) == Some(package_name.to_string())
+        {
+            return Ok(sibling);
         }
-        if search.join("package.json").exists() {
-            if read_package_name(&search.join("package.json")) == Some(package_name.to_string()) {
-                return Ok(search);
-            }
+        if search.join("package.json").exists()
+            && read_package_name(&search.join("package.json")) == Some(package_name.to_string())
+        {
+            return Ok(search);
         }
         if let Some(parent) = search.parent() {
             search = parent.to_path_buf();
@@ -125,11 +155,13 @@ fn read_package_name(pkg_path: &Path) -> Option<String> {
 pub fn extract_native_import_features(program: &Program) -> Vec<String> {
     let mut features = std::collections::HashSet::new();
     for stmt in &program.statements {
-        if let Statement::VarDecl { init: Some(init), .. } = stmt {
-            if let Expr::NativeModuleLoad { spec, .. } = init {
-                if let Some(f) = native_spec_to_feature(spec.as_ref()) {
-                    features.insert(f);
-                }
+        if let Statement::VarDecl {
+            init: Some(Expr::NativeModuleLoad { spec, .. }),
+            ..
+        } = stmt
+        {
+            if let Some(f) = native_spec_to_feature(spec.as_ref()) {
+                features.insert(f);
             }
         }
     }
@@ -145,6 +177,23 @@ pub fn has_native_imports(program: &Program) -> bool {
         } = stmt
         {
             return true;
+        }
+    }
+    false
+}
+
+/// Returns true if the merged program contains external native imports (not built-in tish:fs/http/process).
+/// Cranelift/LLVM reject these; bytecode VM supports built-ins only.
+pub fn has_external_native_imports(program: &Program) -> bool {
+    for stmt in &program.statements {
+        if let Statement::VarDecl {
+            init: Some(Expr::NativeModuleLoad { spec, .. }),
+            ..
+        } = stmt
+        {
+            if !is_builtin_native_spec(spec.as_ref()) {
+                return true;
+            }
         }
     }
     false
@@ -239,19 +288,19 @@ fn load_module_recursive(
 }
 
 /// Returns true for native module imports that don't resolve to files.
+/// - fs, http, process (Node-compatible aliases for tish:fs, tish:http, tish:process)
 /// - tish:egui, tish:polars, etc.
 /// - @scope/package (npm-style)
 pub fn is_native_import(spec: &str) -> bool {
-    spec.starts_with("tish:") || spec.starts_with('@')
+    spec.starts_with("tish:")
+        || spec.starts_with('@')
+        || matches!(spec, "fs" | "http" | "process")
 }
 
 /// Map native spec to Cargo feature name for built-in tish:* modules.
 pub fn native_spec_to_feature(spec: &str) -> Option<String> {
-    if spec.starts_with("tish:") {
-        Some(spec.strip_prefix("tish:").unwrap_or(spec).to_string())
-    } else {
-        None
-    }
+    let canonical = normalize_builtin_spec(spec)?;
+    canonical.strip_prefix("tish:").map(|s| s.to_string())
 }
 
 /// Resolve an import specifier (e.g. "./foo.tish", "../lib/utils") to an absolute path.
@@ -406,13 +455,16 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
             match stmt {
                 Statement::Import { specifiers, from, span } => {
                     if is_native_import(from) {
+                        // Normalize fs/http/process -> tish:fs etc. for Node compatibility
+                        let canonical_spec =
+                            normalize_builtin_spec(from).unwrap_or_else(|| from.to_string());
                         // Emit VarDecl with NativeModuleLoad for each specifier
                         for spec in specifiers {
                             match spec {
                                 ImportSpecifier::Named { name, alias } => {
                                     let bind = alias.as_deref().unwrap_or(name.as_ref());
                                     let init = Expr::NativeModuleLoad {
-                                        spec: from.clone(),
+                                        spec: Arc::from(canonical_spec.clone()),
                                         export_name: name.clone(),
                                         span: *span,
                                     };
@@ -446,7 +498,7 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
                     let dep_path = resolve_import_path(from, dir, Path::new("."))?;
                     let dep_path = dep_path
                         .canonicalize()
-                        .unwrap_or_else(|_| dep_path);
+                        .unwrap_or(dep_path);
                     let dep_idx = *path_to_idx
                         .get(&dep_path)
                         .ok_or_else(|| format!("Resolved import '{}' not in module list", from))?;

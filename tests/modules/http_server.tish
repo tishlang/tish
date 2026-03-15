@@ -1,6 +1,7 @@
 // HTTP Server Test
 // Run with: cargo run --release -- run tests/modules/http_server.tish
 // Then visit: http://localhost:3000/
+import { serve } from 'http'
 
 fn handleRequest(req) {
     console.log("Request:", req.method, req.path)
@@ -34,4 +35,5 @@ fn handleRequest(req) {
 }
 
 console.log("Starting Tish HTTP Server...")
-serve(3000, handleRequest)
+// Third arg 1 = handle one request then exit (perf/test friendly, like .mjs)
+serve(3000, handleRequest, 1)

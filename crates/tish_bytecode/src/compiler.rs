@@ -4,12 +4,31 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tish_ast::{
-    ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr,
-    Literal, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp,
+    ArrayElement, ArrowBody, BinOp, CallArg, DestructElement, DestructPattern, Expr,
+    Literal, MemberProp, ObjectProp, Program, Span, Statement,
 };
 
 use crate::chunk::{Chunk, Constant};
+use crate::encoding::{binop_to_u8, compound_op_to_u8, unaryop_to_u8};
 use crate::opcode::Opcode;
+
+enum SimpleMapResult {
+    Identity,
+    BinOp(BinOp, Constant, bool), // op, constant, param_on_left
+}
+
+fn literal_to_constant(expr: &Expr) -> Option<Constant> {
+    if let Expr::Literal { value, .. } = expr {
+        Some(match value {
+            Literal::Number(n) => Constant::Number(*n),
+            Literal::String(s) => Constant::String(Arc::clone(s)),
+            Literal::Bool(b) => Constant::Bool(*b),
+            Literal::Null => Constant::Null,
+        })
+    } else {
+        None
+    }
+}
 
 #[derive(Debug)]
 pub struct CompileError {
@@ -42,15 +61,18 @@ struct Compiler<'a> {
     /// Stack of loop info for break/continue.
     loop_stack: Vec<LoopInfo>,
     switch_stack: Vec<SwitchInfo>,
+    /// When true (REPL mode), last ExprStmt leaves its value on the stack and we skip trailing LoadConst Null.
+    retain_last_expr: bool,
 }
 
 impl<'a> Compiler<'a> {
-    fn new(chunk: &'a mut Chunk) -> Self {
+    fn new(chunk: &'a mut Chunk, retain_last_expr: bool) -> Self {
         Self {
             chunk,
             scope: vec![HashMap::new()],
             loop_stack: Vec::new(),
             switch_stack: Vec::new(),
+            retain_last_expr,
         }
     }
 
@@ -178,13 +200,125 @@ impl<'a> Compiler<'a> {
         None
     }
 
-    fn compile_program(&mut self, program: &Program) -> Result<(), CompileError> {
-        for stmt in &program.statements {
-            self.compile_statement(stmt)?;
+    /// Detect simple map callback: x => x (identity) or x => x op const / x => const op x.
+    /// Returns SimpleMapResult for map optimization.
+    fn detect_simple_map_callback(expr: &Expr) -> Option<SimpleMapResult> {
+        let (params, body) = match expr {
+            Expr::ArrowFunction { params, body, .. } => (params, body),
+            _ => return None,
+        };
+        if params.len() != 1 {
+            return None;
         }
-        let idx = self.constant_idx(Constant::Null);
-        self.emit(Opcode::LoadConst);
-        self.chunk.write_u16(idx);
+        let param_name = params[0].name.as_ref();
+        let expr_ref: &Expr = match body {
+            ArrowBody::Expr(e) => e.as_ref(),
+            ArrowBody::Block(stmt) => {
+                let s = stmt.as_ref();
+                if let Statement::Return { value: Some(ref e), .. } = s {
+                    e
+                } else if let Statement::ExprStmt { expr: ref e, .. } = s {
+                    e
+                } else {
+                    return None;
+                }
+            }
+        };
+        // Identity: x => x
+        if let Expr::Ident { name, .. } = expr_ref {
+            if name.as_ref() == param_name {
+                return Some(SimpleMapResult::Identity);
+            }
+        }
+        // Binary: x op const or const op x
+        if let Expr::Binary { left, op, right, .. } = expr_ref {
+            let left_is_param = matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
+            let right_is_param = matches!(right.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
+            let left_is_literal = matches!(left.as_ref(), Expr::Literal { .. });
+            let right_is_literal = matches!(right.as_ref(), Expr::Literal { .. });
+            if left_is_param && right_is_literal {
+                if let Some(c) = literal_to_constant(right.as_ref()) {
+                    return Some(SimpleMapResult::BinOp(*op, c, true));
+                }
+            }
+            if left_is_literal && right_is_param {
+                if let Some(c) = literal_to_constant(left.as_ref()) {
+                    return Some(SimpleMapResult::BinOp(*op, c, false));
+                }
+            }
+        }
+        None
+    }
+
+    /// Detect simple filter callback: x => x op const or x => const op x (comparison that returns bool).
+    fn detect_simple_filter_callback(expr: &Expr) -> Option<(BinOp, Constant, bool)> {
+        let (params, body) = match expr {
+            Expr::ArrowFunction { params, body, .. } => (params, body),
+            _ => return None,
+        };
+        if params.len() != 1 {
+            return None;
+        }
+        let param_name = params[0].name.as_ref();
+        let expr_ref: &Expr = match body {
+            ArrowBody::Expr(e) => e.as_ref(),
+            ArrowBody::Block(stmt) => {
+                let s = stmt.as_ref();
+                if let Statement::Return { value: Some(ref e), .. } = s {
+                    e
+                } else if let Statement::ExprStmt { expr: ref e, .. } = s {
+                    e
+                } else {
+                    return None;
+                }
+            }
+        };
+        if let Expr::Binary { left, op, right, .. } = expr_ref {
+            if !matches!(op, BinOp::Eq | BinOp::Ne | BinOp::StrictEq | BinOp::StrictNe | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or) {
+                return None;
+            }
+            let left_is_param = matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
+            let right_is_param = matches!(right.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
+            let left_is_literal = matches!(left.as_ref(), Expr::Literal { .. });
+            let right_is_literal = matches!(right.as_ref(), Expr::Literal { .. });
+            if left_is_param && right_is_literal {
+                if let Some(c) = literal_to_constant(right.as_ref()) {
+                    return Some((*op, c, true));
+                }
+            }
+            if left_is_literal && right_is_param {
+                if let Some(c) = literal_to_constant(left.as_ref()) {
+                    return Some((*op, c, false));
+                }
+            }
+        }
+        None
+    }
+
+    fn compile_program(&mut self, program: &Program) -> Result<(), CompileError> {
+        let stmts = &program.statements;
+        let last_is_expr = self.retain_last_expr
+            && stmts
+                .last()
+                .map(|s| matches!(s, Statement::ExprStmt { .. }))
+                .unwrap_or(false);
+
+        if last_is_expr {
+            let (rest, last) = stmts.split_at(stmts.len().saturating_sub(1));
+            for stmt in rest {
+                self.compile_statement(stmt)?;
+            }
+            if let Some(Statement::ExprStmt { expr, .. }) = last.first() {
+                self.compile_expr(expr)?;
+            }
+        } else {
+            for stmt in stmts {
+                self.compile_statement(stmt)?;
+            }
+            let idx = self.constant_idx(Constant::Null);
+            self.emit(Opcode::LoadConst);
+            self.chunk.write_u16(idx);
+        }
         Ok(())
     }
 
@@ -409,7 +543,7 @@ impl<'a> Compiler<'a> {
                     inner.add_name(Arc::clone(p));
                 }
                 inner.param_count = param_names.len() as u16;
-                let mut inner_comp = Compiler::new(&mut inner);
+                let mut inner_comp = Compiler::new(&mut inner, false);
                 inner_comp.scope = vec![param_names
                     .iter()
                     .map(|n| (Arc::clone(n), false))
@@ -668,6 +802,37 @@ impl<'a> Compiler<'a> {
                                 return Ok(());
                             }
                         }
+                        if key.as_ref() == "map" {
+                            if let Some(simple) = Self::detect_simple_map_callback(cmp_expr) {
+                                self.compile_expr(object)?;
+                                match simple {
+                                    SimpleMapResult::Identity => {
+                                        self.emit(Opcode::ArrayMapIdentity);
+                                    }
+                                    SimpleMapResult::BinOp(op, c, param_left) => {
+                                        let const_idx = self.constant_idx(c);
+                                        self.emit(Opcode::ArrayMapBinOp);
+                                        self.chunk.write_u8(binop_to_u8(op));
+                                        self.chunk.write_u16(const_idx);
+                                        self.chunk.write_u8(if param_left { 0 } else { 1 });
+                                    }
+                                }
+                                return Ok(());
+                            }
+                        }
+                        if key.as_ref() == "filter" {
+                            if let Some((op, const_val, param_left)) =
+                                Self::detect_simple_filter_callback(cmp_expr)
+                            {
+                                self.compile_expr(object)?;
+                                let const_idx = self.constant_idx(const_val);
+                                self.emit(Opcode::ArrayFilterBinOp);
+                                self.chunk.write_u8(binop_to_u8(op));
+                                self.chunk.write_u16(const_idx);
+                                self.chunk.write_u8(if param_left { 0 } else { 1 });
+                                return Ok(());
+                            }
+                        }
                     }
                 }
                 let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
@@ -859,18 +1024,18 @@ impl<'a> Compiler<'a> {
                     inner.add_name(Arc::clone(p));
                 }
                 inner.param_count = param_names.len() as u16;
-                let mut inner_comp = Compiler::new(&mut inner);
+                let mut inner_comp = Compiler::new(&mut inner, false);
                 inner_comp.scope = vec![param_names
                     .iter()
                     .map(|n| (Arc::clone(n), false))
                     .collect::<HashMap<_, _>>()];
                 match body {
                     ArrowBody::Expr(e) => {
-                        inner_comp.compile_expr(&e)?;
+                        inner_comp.compile_expr(e)?;
                         inner_comp.emit(Opcode::Return);
                     }
                     ArrowBody::Block(s) => {
-                        inner_comp.compile_statement(&s)?;
+                        inner_comp.compile_statement(s)?;
                         let idx = inner_comp.constant_idx(Constant::Null);
                         inner_comp.emit(Opcode::LoadConst);
                         inner_comp.chunk.write_u16(idx);
@@ -966,11 +1131,17 @@ impl<'a> Compiler<'a> {
                 self.emit(Opcode::Dup); // leave copy for assignment expression result
                 self.emit(Opcode::SetIndex);
             }
+            Expr::NativeModuleLoad { spec, export_name, .. } => {
+                let spec_idx = self.constant_idx(Constant::String(Arc::clone(spec)));
+                let export_idx = self.constant_idx(Constant::String(Arc::clone(export_name)));
+                self.emit(Opcode::LoadNativeExport);
+                self.chunk.write_u16(spec_idx);
+                self.chunk.write_u16(export_idx);
+            }
             Expr::LogicalAssign { .. }
             | Expr::Await { .. }
             | Expr::JsxElement { .. }
-            | Expr::JsxFragment { .. }
-            | Expr::NativeModuleLoad { .. } => {
+            | Expr::JsxFragment { .. } => {
                 return Err(CompileError {
                     message: format!(
                         "Expression not yet supported in bytecode: {:?}",
@@ -983,60 +1154,36 @@ impl<'a> Compiler<'a> {
     }
 }
 
-fn binop_to_u8(op: BinOp) -> u8 {
-    use tish_ast::BinOp::*;
-    match op {
-        Add => 0,
-        Sub => 1,
-        Mul => 2,
-        Div => 3,
-        Mod => 4,
-        Pow => 5,
-        Eq => 6,
-        Ne => 7,
-        StrictEq => 8,
-        StrictNe => 9,
-        Lt => 10,
-        Le => 11,
-        Gt => 12,
-        Ge => 13,
-        And => 14,
-        Or => 15,
-        BitAnd => 16,
-        BitOr => 17,
-        BitXor => 18,
-        Shl => 19,
-        Shr => 20,
-        In => 21,
-    }
-}
-
-fn compound_op_to_u8(op: CompoundOp) -> u8 {
-    use tish_ast::CompoundOp::*;
-    match op {
-        Add => 0,
-        Sub => 1,
-        Mul => 2,
-        Div => 3,
-        Mod => 4,
-    }
-}
-
-fn unaryop_to_u8(op: UnaryOp) -> u8 {
-    use tish_ast::UnaryOp::*;
-    match op {
-        Not => 0,
-        Neg => 1,
-        Pos => 2,
-        BitNot => 3,
-        Void => 4,
-    }
-}
-
-/// Compile a Tish program to bytecode.
+/// Compile a Tish program to bytecode (with peephole optimizations).
 pub fn compile(program: &Program) -> Result<Chunk, CompileError> {
+    compile_internal(program, true, false)
+}
+
+/// Compile without peephole optimizations (for --no-optimize).
+pub fn compile_unoptimized(program: &Program) -> Result<Chunk, CompileError> {
+    compile_internal(program, false, false)
+}
+
+/// Compile for REPL: last expression statement leaves its value on the stack (no Pop, no trailing Null).
+pub fn compile_for_repl(program: &Program) -> Result<Chunk, CompileError> {
+    compile_internal(program, true, true)
+}
+
+/// Compile for REPL without peephole optimizations.
+pub fn compile_for_repl_unoptimized(program: &Program) -> Result<Chunk, CompileError> {
+    compile_internal(program, false, true)
+}
+
+fn compile_internal(
+    program: &Program,
+    peephole: bool,
+    retain_last_expr: bool,
+) -> Result<Chunk, CompileError> {
     let mut chunk = Chunk::new();
-    let mut compiler = Compiler::new(&mut chunk);
+    let mut compiler = Compiler::new(&mut chunk, retain_last_expr);
     compiler.compile_program(program)?;
+    if peephole {
+        crate::peephole::optimize(&mut chunk);
+    }
     Ok(chunk)
 }

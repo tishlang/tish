@@ -12,6 +12,7 @@ use tish_vm::Vm;
 /// - for each constant: u8 tag + payload
 /// - u64: names count
 /// - for each name: u64 len + bytes
+///
 /// Rust-callable wrapper. Run serialized chunk data. Returns exit code (0 on success).
 pub fn tish_run_chunk(ptr: *const u8, len: usize) -> i32 {
     tish_run_chunk_impl(ptr, len)

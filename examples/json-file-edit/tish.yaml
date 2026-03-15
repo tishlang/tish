@@ -1,0 +1,9 @@
+name: json-file-edit
+
+build:
+  source: ./src/main.tish
+  features:
+    - fs
+
+deploy:
+  replicas: 1

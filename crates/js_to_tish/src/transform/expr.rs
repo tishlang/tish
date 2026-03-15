@@ -343,11 +343,12 @@ fn convert_assignment(
     span: tish_ast::Span,
 ) -> Result<Expr, ConvertError> {
     let (left, right) = (&a.left, &a.right);
-    if let Some(s) = left.as_simple_assignment_target() {
-        if let oxc::ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = s {
-            let name = id.name.as_str();
-            let value = Box::new(convert_expr(right, ctx)?);
-            return match &a.operator {
+    if let Some(oxc::ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id)) =
+        left.as_simple_assignment_target()
+    {
+        let name = id.name.as_str();
+        let value = Box::new(convert_expr(right, ctx)?);
+        return match &a.operator {
                 oxc::ast::ast::AssignmentOperator::Assign => {
                     Ok(Expr::Assign {
                         name: Arc::from(name),
@@ -419,12 +420,11 @@ fn convert_assignment(
                         span,
                     })
                 }
-                _ => Err(ConvertError::new(ConvertErrorKind::Unsupported {
-                    what: "assignment operator".into(),
-                    hint: None,
-                })),
-            };
-        }
+            _ => Err(ConvertError::new(ConvertErrorKind::Unsupported {
+                what: "assignment operator".into(),
+                hint: None,
+            })),
+        };
     }
     Err(ConvertError::new(ConvertErrorKind::Unsupported {
         what: "complex assignment target".into(),

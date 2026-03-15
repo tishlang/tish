@@ -5,12 +5,87 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use tish_ast::{BinOp, UnaryOp};
 use tish_builtins::array as arr_builtins;
+use tish_builtins::string as str_builtins;
 use tish_builtins::globals as globals_builtins;
 use tish_builtins::math as math_builtins;
-use tish_builtins::string as string_builtins;
-use tish_bytecode::{Chunk, Constant, Opcode, NO_REST_PARAM};
+use tish_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
 use tish_core::Value;
+
+type ArrayMethodFn = Rc<dyn Fn(&[Value]) -> Value>;
+
+/// Look up built-in module export for LoadNativeExport. Returns None if unknown or feature disabled.
+/// Parameters are only used when the corresponding feature (fs, http, process) is enabled.
+#[cfg_attr(not(any(feature = "fs", feature = "http", feature = "process")), allow(unused_variables))]
+fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
+    #[cfg(feature = "fs")]
+    if spec == "tish:fs" {
+        return match export_name {
+            "readFile" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::read_file(args)))),
+            "writeFile" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::write_file(args)))),
+            "fileExists" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::file_exists(args)))),
+            "readDir" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::read_dir(args)))),
+            "mkdir" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::mkdir(args)))),
+            _ => None,
+        };
+    }
+    #[cfg(feature = "http")]
+    if spec == "tish:http" {
+        return match export_name {
+            "fetch" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::http_fetch(args)))),
+            "fetchAll" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::http_fetch_all(args)))),
+            "serve" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                let handler = args.get(1).cloned().unwrap_or(Value::Null);
+                if let Value::Function(f) = handler {
+                    tish_runtime::http_serve(args, move |req_args| f(req_args))
+                } else {
+                    Value::Null
+                }
+            }))),
+            _ => None,
+        };
+    }
+    #[cfg(feature = "process")]
+    if spec == "tish:process" {
+        return match export_name {
+            "exit" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exit(args)))),
+            "cwd" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_cwd(args)))),
+            "exec" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exec(args)))),
+            "argv" => Some(Value::Array(Rc::new(RefCell::new(
+                std::env::args().map(|s| Value::String(s.into())).collect(),
+            )))),
+            "env" => Some(Value::Object(Rc::new(RefCell::new(
+                std::env::vars()
+                    .map(|(k, v)| (Arc::from(k.as_str()), Value::String(v.into())))
+                    .collect(),
+            )))),
+            "process" => {
+                let mut m = HashMap::new();
+                m.insert("exit".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exit(args))));
+                m.insert("cwd".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_cwd(args))));
+                m.insert("exec".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exec(args))));
+                m.insert(
+                    "argv".into(),
+                    Value::Array(Rc::new(RefCell::new(
+                        std::env::args().map(|s| Value::String(s.into())).collect(),
+                    ))),
+                );
+                m.insert(
+                    "env".into(),
+                    Value::Object(Rc::new(RefCell::new(
+                        std::env::vars()
+                            .map(|(k, v)| (Arc::from(k.as_str()), Value::String(v.into())))
+                            .collect(),
+                    ))),
+                );
+                Some(Value::Object(Rc::new(RefCell::new(m))))
+            }
+            _ => None,
+        };
+    }
+    None
+}
 
 /// Console output: println! on native, web_sys::console on wasm
 #[cfg(not(feature = "wasm"))]
@@ -48,40 +123,40 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     console.insert(
         "debug".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            vm_log(&s.join(" "));
+            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            vm_log(&s);
             Value::Null
         })),
     );
     console.insert(
         "log".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            vm_log(&s.join(" "));
+            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            vm_log(&s);
             Value::Null
         })),
     );
     console.insert(
         "info".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            vm_log(&s.join(" "));
+            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            vm_log(&s);
             Value::Null
         })),
     );
     console.insert(
         "warn".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            vm_log_err(&s.join(" "));
+            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            vm_log_err(&s);
             Value::Null
         })),
     );
     console.insert(
         "error".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s: Vec<std::string::String> = args.iter().map(|v| v.to_display_string()).collect();
-            vm_log_err(&s.join(" "));
+            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            vm_log_err(&s);
             Value::Null
         })),
     );
@@ -170,27 +245,8 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     );
     g.insert("JSON".into(), Value::Object(Rc::new(RefCell::new(json))));
 
-    g.insert("parseInt".into(), Value::Function(Rc::new(|args: &[Value]| {
-            let s = args.first().map(|v| v.to_display_string()).unwrap_or_default();
-        let s = s.trim();
-        let radix = args.get(1).and_then(|v| v.as_number()).unwrap_or(10.0) as i32;
-        let n = if (2..=36).contains(&radix) {
-            let prefix: std::string::String = s
-                .chars()
-                .take_while(|c| *c == '-' || *c == '+' || c.is_ascii_digit())
-                .collect();
-            i64::from_str_radix(&prefix, radix as u32)
-                .ok()
-                .map(|n| n as f64)
-        } else {
-            None
-        };
-        Value::Number(n.unwrap_or(f64::NAN))
-    })));
-    g.insert("parseFloat".into(), Value::Function(Rc::new(|args: &[Value]| {
-            let s = args.first().map(|v| v.to_display_string()).unwrap_or_default();
-        Value::Number(s.trim().parse().unwrap_or(f64::NAN))
-    })));
+    g.insert("parseInt".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::parse_int(args))));
+    g.insert("parseFloat".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::parse_float(args))));
     g.insert("encodeURI".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::encode_uri(args))));
     g.insert("decodeURI".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::decode_uri(args))));
     g.insert("Boolean".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::boolean(args))));
@@ -202,7 +258,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
         "typeof".into(),
         Value::Function(Rc::new(|args: &[Value]| {
             let v = args.first().unwrap_or(&Value::Null);
-            Value::String(type_name(v).into())
+            Value::String(v.type_name().into())
         })),
     );
 
@@ -254,22 +310,6 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     g
 }
 
-fn type_name(v: &Value) -> &'static str {
-    match v {
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Bool(_) => "boolean",
-        Value::Null => "null",
-        Value::Array(_) => "object",
-        Value::Object(_) => "object",
-        Value::Function(_) => "function",
-        #[cfg(feature = "regex")]
-        Value::RegExp(_) => "object",
-        Value::Promise(_) => "object",
-        Value::Opaque(o) => o.type_name(),
-    }
-}
-
 /// Shared scope for closure capture (parent frame's locals).
 type ScopeMap = Rc<RefCell<HashMap<Arc<str>, Value>>>;
 
@@ -297,6 +337,11 @@ impl Vm {
 
     pub fn set_global(&mut self, name: Arc<str>, value: Value) {
         self.globals.borrow_mut().insert(name, value);
+    }
+
+    /// Names of all globals (for REPL bare-word tab completion).
+    pub fn global_names(&self) -> Vec<String> {
+        self.globals.borrow().keys().map(|k| k.as_ref().to_string()).collect()
     }
 
     fn read_u16(code: &[u8], ip: &mut usize) -> u16 {
@@ -355,6 +400,9 @@ impl Vm {
             }
             let op = code[ip];
             ip += 1;
+            if op == Opcode::Nop as u8 {
+                continue;
+            }
             let opcode = Opcode::from_u8(op).ok_or_else(|| format!("Unknown opcode: {}", op))?;
 
             match opcode {
@@ -436,8 +484,12 @@ impl Vm {
                             .borrow_mut()
                             .insert(Arc::clone(name), v);
                     } else {
-                        // New variable: store in current frame so closures can capture via enclosing
-                        local_scope.borrow_mut().insert(Arc::clone(name), v);
+                        // New variable: at top level (no enclosing) store in globals so REPL persists across lines
+                        if self.enclosing.is_none() {
+                            self.globals.borrow_mut().insert(Arc::clone(name), v);
+                        } else {
+                            local_scope.borrow_mut().insert(Arc::clone(name), v);
+                        }
                     }
                 }
                 Opcode::LoadGlobal => {
@@ -500,7 +552,7 @@ impl Vm {
                         _ => {
                             return Err(format!(
                                 "Call of non-function: {}",
-                                type_name(&callee)
+                                callee.type_name()
                             ));
                         }
                     }
@@ -531,7 +583,7 @@ impl Vm {
                         _ => {
                             return Err(format!(
                                 "Call of non-function: {}",
-                                type_name(&callee)
+                                callee.type_name()
                             ));
                         }
                     }
@@ -559,7 +611,7 @@ impl Vm {
                     ip = ip.saturating_sub(dist);
                 }
                 Opcode::BinOp => {
-                    let op = Self::read_u16(code, &mut ip) as u8;
+                    let op_u8 = Self::read_u16(code, &mut ip) as u8;
                     let r = self
                         .stack
                         .pop()
@@ -568,15 +620,19 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
+                    let op = u8_to_binop(op_u8)
+                        .ok_or_else(|| format!("Unknown binop: {}", op_u8))?;
                     let result = eval_binop(op, &l, &r)?;
                     self.stack.push(result);
                 }
                 Opcode::UnaryOp => {
-                    let op = Self::read_u16(code, &mut ip) as u8;
+                    let op_u8 = Self::read_u16(code, &mut ip) as u8;
                     let o = self
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
+                    let op = u8_to_unaryop(op_u8)
+                        .ok_or_else(|| format!("Unknown unary op: {}", op_u8))?;
                     let result = eval_unary(op, &o)?;
                     self.stack.push(result);
                 }
@@ -791,6 +847,85 @@ impl Vm {
                     let result = arr_builtins::sort_by_property_numeric(&arr, prop, asc);
                     self.stack.push(result);
                 }
+                Opcode::ArrayMapIdentity => {
+                    let arr = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let result = match &arr {
+                        Value::Array(a) => {
+                            Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                        }
+                        _ => Value::Null,
+                    };
+                    self.stack.push(result);
+                }
+                Opcode::ArrayMapBinOp => {
+                    let binop_u8 = code[ip];
+                    ip += 1;
+                    let const_idx = Self::read_u16(code, &mut ip);
+                    let param_left = code[ip] == 0; // 0 = param on left (x op const), 1 = param on right (const op x)
+                    ip += 1;
+                    let binop = u8_to_binop(binop_u8)
+                        .ok_or_else(|| format!("Unknown binop in ArrayMapBinOp: {}", binop_u8))?;
+                    let arr = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let const_val = constants
+                        .get(const_idx as usize)
+                        .map(|c| c.to_value())
+                        .unwrap_or(Value::Null);
+                    let result = if let Value::Array(a) = &arr {
+                        let arr_borrow = a.borrow();
+                        let mapped: Vec<Value> = arr_borrow
+                            .iter()
+                            .map(|v| {
+                                let l: Value = if param_left { (*v).clone() } else { const_val.clone() };
+                                let r: Value = if param_left { const_val.clone() } else { (*v).clone() };
+                                eval_binop(binop, &l, &r).unwrap_or(Value::Null)
+                            })
+                            .collect();
+                        Value::Array(Rc::new(RefCell::new(mapped)))
+                    } else {
+                        Value::Null
+                    };
+                    self.stack.push(result);
+                }
+                Opcode::ArrayFilterBinOp => {
+                    let binop_u8 = code[ip];
+                    ip += 1;
+                    let const_idx = Self::read_u16(code, &mut ip);
+                    let param_left = code[ip] == 0; // 0 = param on left (x op const), 1 = param on right (const op x)
+                    ip += 1;
+                    let binop = u8_to_binop(binop_u8)
+                        .ok_or_else(|| format!("Unknown binop in ArrayFilterBinOp: {}", binop_u8))?;
+                    let arr = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let const_val = constants
+                        .get(const_idx as usize)
+                        .map(|c| c.to_value())
+                        .unwrap_or(Value::Null);
+                    let result = if let Value::Array(a) = &arr {
+                        let arr_borrow = a.borrow();
+                        let filtered: Vec<Value> = arr_borrow
+                            .iter()
+                            .filter(|v| {
+                                let l: Value = if param_left { (*v).clone() } else { const_val.clone() };
+                                let r: Value = if param_left { const_val.clone() } else { (*v).clone() };
+                                let b = eval_binop(binop, &l, &r).unwrap_or(Value::Null);
+                                b.is_truthy()
+                            })
+                            .cloned()
+                            .collect();
+                        Value::Array(Rc::new(RefCell::new(filtered)))
+                    } else {
+                        Value::Null
+                    };
+                    self.stack.push(result);
+                }
                 Opcode::Throw => {
                     let v = self
                         .stack
@@ -802,6 +937,29 @@ impl Vm {
                     self.stack.truncate(stack_len);
                     self.stack.push(v);
                     ip = catch_ip;
+                }
+                Opcode::LoadNativeExport => {
+                    let spec_idx = Self::read_u16(code, &mut ip);
+                    let export_idx = Self::read_u16(code, &mut ip);
+                    let spec = match constants.get(spec_idx as usize) {
+                        Some(Constant::String(s)) => s.as_ref(),
+                        _ => {
+                            return Err("LoadNativeExport: spec constant out of bounds or not string".to_string());
+                        }
+                    };
+                    let export_name = match constants.get(export_idx as usize) {
+                        Some(Constant::String(s)) => s.as_ref(),
+                        _ => {
+                            return Err("LoadNativeExport: export_name constant out of bounds or not string".to_string());
+                        }
+                    };
+                    let v = get_builtin_export(spec, export_name).ok_or_else(|| {
+                        format!(
+                            "Built-in module '{}' does not export '{}' or feature not enabled. Rebuild with --features fs, http, or process.",
+                            spec, export_name
+                        )
+                    })?;
+                    self.stack.push(v);
                 }
                 Opcode::Closure | Opcode::PopN | Opcode::LoadThis => {
                     return Err(format!("Unhandled opcode: {:?}", opcode));
@@ -819,41 +977,40 @@ impl Default for Vm {
     }
 }
 
-fn eval_binop(op: u8, l: &Value, r: &Value) -> Result<Value, String> {
+fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
+    use tish_ast::BinOp::*;
     use tish_core::Value::*;
     let ln = l.as_number().unwrap_or(f64::NAN);
     let rn = r.as_number().unwrap_or(f64::NAN);
     match op {
-        0 => {
-            // Add: string concat if either is string, else numeric
+        Add => {
             if matches!(l, Value::String(_)) || matches!(r, Value::String(_)) {
                 Ok(String(format!("{}{}", l.to_display_string(), r.to_display_string()).into()))
             } else {
                 Ok(Number(ln + rn))
             }
         }
-        1 => Ok(Number(ln - rn)),  // Sub
-        2 => Ok(Number(ln * rn)),
-        3 => Ok(Number(if rn == 0.0 { f64::NAN } else { ln / rn })),
-        4 => Ok(Number(if rn == 0.0 { f64::NAN } else { ln % rn })),
-        5 => Ok(Number(ln.powf(rn))),
-        6 => Ok(Bool(l.strict_eq(r))),  // Eq
-        7 => Ok(Bool(!l.strict_eq(r))),
-        8 => Ok(Bool(l.strict_eq(r))),
-        9 => Ok(Bool(!l.strict_eq(r))),
-        10 => Ok(Bool(ln < rn)),
-        11 => Ok(Bool(ln <= rn)),
-        12 => Ok(Bool(ln > rn)),
-        13 => Ok(Bool(ln >= rn)),
-        14 => Ok(Bool(l.is_truthy() && r.is_truthy())),
-        15 => Ok(Bool(l.is_truthy() || r.is_truthy())),
-        16 => Ok(Number((ln as i32 & rn as i32) as f64)), // BitAnd
-        17 => Ok(Number((ln as i32 | rn as i32) as f64)), // BitOr
-        18 => Ok(Number((ln as i32 ^ rn as i32) as f64)), // BitXor
-        19 => Ok(Number(((ln as i32) << (rn as i32)) as f64)), // Shl
-        20 => Ok(Number(((ln as i32) >> (rn as i32)) as f64)), // Shr
-        21 => {
-            // In: key in object (l=key, r=object)
+        Sub => Ok(Number(ln - rn)),
+        Mul => Ok(Number(ln * rn)),
+        Div => Ok(Number(if rn == 0.0 { f64::NAN } else { ln / rn })),
+        Mod => Ok(Number(if rn == 0.0 { f64::NAN } else { ln % rn })),
+        Pow => Ok(Number(ln.powf(rn))),
+        Eq => Ok(Bool(l.strict_eq(r))),
+        Ne => Ok(Bool(!l.strict_eq(r))),
+        StrictEq => Ok(Bool(l.strict_eq(r))),
+        StrictNe => Ok(Bool(!l.strict_eq(r))),
+        Lt => Ok(Bool(ln < rn)),
+        Le => Ok(Bool(ln <= rn)),
+        Gt => Ok(Bool(ln > rn)),
+        Ge => Ok(Bool(ln >= rn)),
+        And => Ok(Bool(l.is_truthy() && r.is_truthy())),
+        Or => Ok(Bool(l.is_truthy() || r.is_truthy())),
+        BitAnd => Ok(Number((ln as i32 & rn as i32) as f64)),
+        BitOr => Ok(Number((ln as i32 | rn as i32) as f64)),
+        BitXor => Ok(Number((ln as i32 ^ rn as i32) as f64)),
+        Shl => Ok(Number(((ln as i32) << (rn as i32)) as f64)),
+        Shr => Ok(Number(((ln as i32) >> (rn as i32)) as f64)),
+        In => {
             let key_s: Arc<str> = l.to_display_string().into();
             Ok(Bool(match r {
                 Value::Object(m) => m.borrow().contains_key(&key_s),
@@ -869,19 +1026,18 @@ fn eval_binop(op: u8, l: &Value, r: &Value) -> Result<Value, String> {
                 _ => false,
             }))
         }
-        _ => Err(format!("Unknown binop: {}", op)),
     }
 }
 
-fn eval_unary(op: u8, o: &Value) -> Result<Value, String> {
+fn eval_unary(op: UnaryOp, o: &Value) -> Result<Value, String> {
+    use tish_ast::UnaryOp::*;
     use tish_core::Value::*;
     match op {
-        0 => Ok(Bool(!o.is_truthy())), // Not
-        1 => Ok(Number(-o.as_number().unwrap_or(f64::NAN))), // Neg
-        2 => Ok(Number(o.as_number().unwrap_or(f64::NAN))),  // Pos
-        3 => Ok(Number(!(o.as_number().unwrap_or(0.0) as i32) as f64)), // BitNot
-        4 => Ok(Null), // Void
-        _ => Err(format!("Unknown unary op: {}", op)),
+        Not => Ok(Bool(!o.is_truthy())),
+        Neg => Ok(Number(-o.as_number().unwrap_or(f64::NAN))),
+        Pos => Ok(Number(o.as_number().unwrap_or(f64::NAN))),
+        BitNot => Ok(Number(!(o.as_number().unwrap_or(0.0) as i32) as f64)),
+        Void => Ok(Null),
     }
 }
 
@@ -903,7 +1059,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 return Ok(Value::Number(a.borrow().len() as f64));
             }
             let a_clone = Rc::clone(a);
-            let method: Rc<dyn Fn(&[Value]) -> Value> = match key_s {
+            let method: ArrayMethodFn = match key_s {
                 "push" => Rc::new(move |args: &[Value]| arr_builtins::push(&Value::Array(Rc::clone(&a_clone)), args)),
                 "pop" => Rc::new(move |_args: &[Value]| arr_builtins::pop(&Value::Array(Rc::clone(&a_clone)))),
                 "shift" => Rc::new(move |_args: &[Value]| arr_builtins::shift(&Value::Array(Rc::clone(&a_clone)))),
@@ -911,66 +1067,67 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "reverse" => Rc::new(move |_args: &[Value]| arr_builtins::reverse(&Value::Array(Rc::clone(&a_clone)))),
                 "shuffle" => Rc::new(move |_args: &[Value]| arr_builtins::shuffle(&Value::Array(Rc::clone(&a_clone)))),
                 "slice" => Rc::new(move |args: &[Value]| {
-                    let start = args.get(0).unwrap_or(&Value::Null);
+                    let start = args.first().unwrap_or(&Value::Null);
                     let end = args.get(1).unwrap_or(&Value::Null);
                     arr_builtins::slice(&Value::Array(Rc::clone(&a_clone)), start, end)
                 }),
                 "concat" => Rc::new(move |args: &[Value]| arr_builtins::concat(&Value::Array(Rc::clone(&a_clone)), args)),
                 "join" => Rc::new(move |args: &[Value]| {
-                    let sep = args.get(0).unwrap_or(&Value::Null);
+                    let sep = args.first().unwrap_or(&Value::Null);
                     arr_builtins::join(&Value::Array(Rc::clone(&a_clone)), sep)
                 }),
                 "indexOf" => Rc::new(move |args: &[Value]| {
-                    let search = args.get(0).unwrap_or(&Value::Null);
+                    let search = args.first().unwrap_or(&Value::Null);
                     arr_builtins::index_of(&Value::Array(Rc::clone(&a_clone)), search)
                 }),
                 "includes" => Rc::new(move |args: &[Value]| {
-                    let search = args.get(0).unwrap_or(&Value::Null);
-                    arr_builtins::includes(&Value::Array(Rc::clone(&a_clone)), search)
+                    let search = args.first().unwrap_or(&Value::Null);
+                    let from = args.get(1);
+                    arr_builtins::includes(&Value::Array(Rc::clone(&a_clone)), search, from)
                 }),
                 "map" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::map(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "filter" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::filter(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "reduce" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     let init = args.get(1).cloned().unwrap_or(Value::Null);
                     arr_builtins::reduce(&Value::Array(Rc::clone(&a_clone)), &cb, &init)
                 }),
                 "forEach" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::for_each(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "find" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::find(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "findIndex" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::find_index(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "some" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::some(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "every" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::every(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "flat" => Rc::new(move |args: &[Value]| {
-                    let depth = args.get(0).unwrap_or(&Value::Number(1.0));
+                    let depth = args.first().unwrap_or(&Value::Number(1.0));
                     arr_builtins::flat(&Value::Array(Rc::clone(&a_clone)), depth)
                 }),
                 "flatMap" => Rc::new(move |args: &[Value]| {
-                    let cb = args.get(0).cloned().unwrap_or(Value::Null);
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::flat_map(&Value::Array(Rc::clone(&a_clone)), &cb)
                 }),
                 "sort" => Rc::new(move |args: &[Value]| {
-                    let cmp = args.get(0);
+                    let cmp = args.first();
                     if let Some(Value::Function(_)) = cmp {
                         arr_builtins::sort_with_comparator(&Value::Array(Rc::clone(&a_clone)), cmp.unwrap())
                     } else {
@@ -978,7 +1135,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     }
                 }),
                 "splice" => Rc::new(move |args: &[Value]| {
-                    let start = args.get(0).unwrap_or(&Value::Null);
+                    let start = args.first().unwrap_or(&Value::Null);
                     let delete_count = args.get(1).map(|v| v as &Value);
                     let items: Vec<Value> = args.get(2..).unwrap_or(&[]).to_vec();
                     arr_builtins::splice(&Value::Array(Rc::clone(&a_clone)), start, delete_count, &items)
@@ -987,7 +1144,85 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             };
             Ok(Value::Function(method))
         }
-        _ => Err(format!("Cannot read property '{}' of {}", key, type_name(obj))),
+        Value::String(s) => {
+            let key_s = key.as_ref();
+            if key_s == "length" {
+                return Ok(Value::Number(s.chars().count() as f64));
+            }
+            let s_clone: Arc<str> = Arc::clone(s);
+            let method: ArrayMethodFn = match key_s {
+                "indexOf" => Rc::new(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    let from = args.get(1);
+                    str_builtins::index_of(&Value::String(Arc::clone(&s_clone)), search, from)
+                }),
+                "includes" => Rc::new(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    let from = args.get(1);
+                    str_builtins::includes(&Value::String(Arc::clone(&s_clone)), search, from)
+                }),
+                "slice" => Rc::new(move |args: &[Value]| {
+                    let start = args.first().unwrap_or(&Value::Null);
+                    let end = args.get(1).unwrap_or(&Value::Null);
+                    str_builtins::slice(&Value::String(Arc::clone(&s_clone)), start, end)
+                }),
+                "substring" => Rc::new(move |args: &[Value]| {
+                    let start = args.first().unwrap_or(&Value::Null);
+                    let end = args.get(1).unwrap_or(&Value::Null);
+                    str_builtins::substring(&Value::String(Arc::clone(&s_clone)), start, end)
+                }),
+                "split" => Rc::new(move |args: &[Value]| {
+                    let sep = args.first().unwrap_or(&Value::Null);
+                    str_builtins::split(&Value::String(Arc::clone(&s_clone)), sep)
+                }),
+                "trim" => Rc::new(move |_args: &[Value]| str_builtins::trim(&Value::String(Arc::clone(&s_clone)))),
+                "toUpperCase" => Rc::new(move |_args: &[Value]| str_builtins::to_upper_case(&Value::String(Arc::clone(&s_clone)))),
+                "toLowerCase" => Rc::new(move |_args: &[Value]| str_builtins::to_lower_case(&Value::String(Arc::clone(&s_clone)))),
+                "startsWith" => Rc::new(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    str_builtins::starts_with(&Value::String(Arc::clone(&s_clone)), search)
+                }),
+                "endsWith" => Rc::new(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    str_builtins::ends_with(&Value::String(Arc::clone(&s_clone)), search)
+                }),
+                "replace" => Rc::new(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    let replacement = args.get(1).unwrap_or(&Value::Null);
+                    str_builtins::replace(&Value::String(Arc::clone(&s_clone)), search, replacement)
+                }),
+                "replaceAll" => Rc::new(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    let replacement = args.get(1).unwrap_or(&Value::Null);
+                    str_builtins::replace_all(&Value::String(Arc::clone(&s_clone)), search, replacement)
+                }),
+                "charAt" => Rc::new(move |args: &[Value]| {
+                    let idx = args.first().unwrap_or(&Value::Null);
+                    str_builtins::char_at(&Value::String(Arc::clone(&s_clone)), idx)
+                }),
+                "charCodeAt" => Rc::new(move |args: &[Value]| {
+                    let idx = args.first().unwrap_or(&Value::Null);
+                    str_builtins::char_code_at(&Value::String(Arc::clone(&s_clone)), idx)
+                }),
+                "repeat" => Rc::new(move |args: &[Value]| {
+                    let count = args.first().unwrap_or(&Value::Null);
+                    str_builtins::repeat(&Value::String(Arc::clone(&s_clone)), count)
+                }),
+                "padStart" => Rc::new(move |args: &[Value]| {
+                    let target_len = args.first().unwrap_or(&Value::Null);
+                    let pad = args.get(1).unwrap_or(&Value::Null);
+                    str_builtins::pad_start(&Value::String(Arc::clone(&s_clone)), target_len, pad)
+                }),
+                "padEnd" => Rc::new(move |args: &[Value]| {
+                    let target_len = args.first().unwrap_or(&Value::Null);
+                    let pad = args.get(1).unwrap_or(&Value::Null);
+                    str_builtins::pad_end(&Value::String(Arc::clone(&s_clone)), target_len, pad)
+                }),
+                _ => return Err(format!("Property '{}' not found", key)),
+            };
+            Ok(Value::Function(method))
+        }
+        _ => Err(format!("Cannot read property '{}' of {}", key, obj.type_name())),
     }
 }
 
@@ -1008,7 +1243,7 @@ fn set_member(obj: &Value, key: &Arc<str>, val: Value) -> Result<(), String> {
             }
             Ok(())
         }
-        _ => Err(format!("Cannot set property of {}", type_name(obj))),
+        _ => Err(format!("Cannot set property of {}", obj.type_name())),
     }
 }
 

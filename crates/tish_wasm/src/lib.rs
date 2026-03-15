@@ -10,7 +10,10 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 use tish_ast::Program;
 use tish_bytecode::{serialize, Chunk};
-use tish_compile::{detect_cycles, merge_modules, resolve_project};
+use tish_compile::{
+    detect_cycles, extract_native_import_features, has_external_native_imports, merge_modules,
+    resolve_project,
+};
 
 /// Error from WASM compilation.
 #[derive(Debug)]
@@ -26,11 +29,61 @@ impl std::fmt::Display for WasmError {
 
 impl std::error::Error for WasmError {}
 
-/// Compile a single Program (e.g. from js_to_tish) for WebAssembly.
-pub fn compile_program_to_wasm(program: &Program, output_path: &Path) -> Result<(), WasmError> {
-    let chunk = tish_bytecode::compile(program).map_err(|e| WasmError {
+/// Resolve project, merge modules, and compile to bytecode chunk.
+/// Returns (Chunk, Program) so WASI can extract features for the runtime.
+fn resolve_and_compile_to_chunk(
+    entry_path: &Path,
+    project_root: Option<&Path>,
+    optimize: bool,
+) -> Result<(Chunk, Program), WasmError> {
+    let modules = resolve_project(entry_path, project_root).map_err(|e| WasmError {
         message: e.to_string(),
     })?;
+    detect_cycles(&modules).map_err(|e| WasmError {
+        message: e.to_string(),
+    })?;
+    let program = {
+        let prog = merge_modules(modules).map_err(|e| WasmError {
+            message: e.to_string(),
+        })?;
+        if optimize {
+            tish_opt::optimize(&prog)
+        } else {
+            prog
+        }
+    };
+    let chunk = if optimize {
+        tish_bytecode::compile(&program).map_err(|e| WasmError {
+            message: e.to_string(),
+        })?
+    } else {
+        tish_bytecode::compile_unoptimized(&program).map_err(|e| WasmError {
+            message: e.to_string(),
+        })?
+    };
+    Ok((chunk, program))
+}
+
+/// Compile a single Program (e.g. from js_to_tish) for WebAssembly.
+pub fn compile_program_to_wasm(
+    program: &Program,
+    output_path: &Path,
+    optimize: bool,
+) -> Result<(), WasmError> {
+    let program = if optimize {
+        tish_opt::optimize(program)
+    } else {
+        program.clone()
+    };
+    let chunk = if optimize {
+        tish_bytecode::compile(&program).map_err(|e| WasmError {
+            message: e.to_string(),
+        })?
+    } else {
+        tish_bytecode::compile_unoptimized(&program).map_err(|e| WasmError {
+            message: e.to_string(),
+        })?
+    };
     emit_wasm_from_chunk(&chunk, output_path)
 }
 
@@ -54,8 +107,8 @@ fn emit_wasm_from_chunk(chunk: &Chunk, output_path: &Path) -> Result<(), WasmErr
     std::fs::create_dir_all(&out_dir_abs).map_err(|e| WasmError {
         message: format!("Cannot create output directory: {}", e),
     })?;
-    let workspace_root = find_workspace_root().ok_or_else(|| WasmError {
-        message: "Cannot find workspace root (run from crate root)".to_string(),
+    let workspace_root = tish_build_utils::find_workspace_root().map_err(|e| WasmError {
+        message: e,
     })?;
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let build_status = Command::new(&cargo)
@@ -134,19 +187,9 @@ pub fn compile_to_wasm(
     entry_path: &Path,
     project_root: Option<&Path>,
     output_path: &Path,
+    optimize: bool,
 ) -> Result<(), WasmError> {
-    let modules = resolve_project(entry_path, project_root).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-    detect_cycles(&modules).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-    let program = merge_modules(modules).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-    let chunk = tish_bytecode::compile(&program).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
+    let (chunk, _) = resolve_and_compile_to_chunk(entry_path, project_root, optimize)?;
     emit_wasm_from_chunk(&chunk, output_path)
 }
 
@@ -160,20 +203,15 @@ pub fn compile_to_wasi(
     entry_path: &Path,
     project_root: Option<&Path>,
     output_path: &Path,
+    optimize: bool,
 ) -> Result<(), WasmError> {
-    let modules = resolve_project(entry_path, project_root).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-    detect_cycles(&modules).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-    let program = merge_modules(modules).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-    let chunk = tish_bytecode::compile(&program).map_err(|e| WasmError {
-        message: e.to_string(),
-    })?;
-
+    let (chunk, program) = resolve_and_compile_to_chunk(entry_path, project_root, optimize)?;
+    if has_external_native_imports(&program) {
+        return Err(WasmError {
+            message: "WASI backend does not support external native imports (tish:egui, @scope/pkg). Built-in tish:fs, tish:http, tish:process are supported.".to_string(),
+        });
+    }
+    let wasi_features = extract_native_import_features(&program);
     let chunk_bytes = serialize(&chunk);
 
     let stem = output_path
@@ -195,8 +233,8 @@ pub fn compile_to_wasi(
         message: format!("Cannot create output directory: {}", e),
     })?;
 
-    let workspace_root = find_workspace_root().ok_or_else(|| WasmError {
-        message: "Cannot find workspace root (run from crate root)".to_string(),
+    let workspace_root = tish_build_utils::find_workspace_root().map_err(|e| WasmError {
+        message: e,
     })?;
 
     // Create generated project: wasi_build/{stem}/
@@ -220,6 +258,18 @@ pub fn compile_to_wasi(
         .to_string_lossy()
         .replace('\\', "/");
 
+    let features_str = if wasi_features.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ", features = [{}]",
+            wasi_features
+                .iter()
+                .map(|f| format!("{:?}", f))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     let cargo_toml = format!(
         r#"[package]
 name = "tish_wasi_{stem}"
@@ -233,10 +283,11 @@ name = "tish_wasi_{stem}"
 path = "src/main.rs"
 
 [dependencies]
-tish_wasm_runtime = {{ path = "{runtime_path_str}" }}
+tish_wasm_runtime = {{ path = "{runtime_path_str}"{features_str} }}
 "#,
         stem = stem,
-        runtime_path_str = runtime_path_str
+        runtime_path_str = runtime_path_str,
+        features_str = features_str
     );
     std::fs::write(build_dir.join("Cargo.toml"), cargo_toml).map_err(|e| WasmError {
         message: format!("Cannot write Cargo.toml: {}", e),
@@ -305,15 +356,3 @@ fn main() {
     Ok(())
 }
 
-fn find_workspace_root() -> Option<std::path::PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        if dir.join("Cargo.toml").exists() {
-            let content = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
-            if content.contains("[workspace]") {
-                return Some(dir);
-            }
-        }
-        dir = dir.parent()?.to_path_buf();
-    }
-}

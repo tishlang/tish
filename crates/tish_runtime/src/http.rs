@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::Write;
 use std::rc::Rc;
 use std::sync::Arc;
 use tish_core::Value;
@@ -296,6 +297,7 @@ fn build_error_response(error: &str) -> Value {
 
 /// Start an HTTP server that handles requests using the provided handler function.
 /// The handler receives a request object and should return a response object.
+/// Optional third arg: max_requests (number). If 1, server triggers one self-request then exits (perf/test friendly).
 pub fn serve<F>(args: &[Value], handler: F) -> Value
 where
     F: Fn(&[Value]) -> Value,
@@ -305,6 +307,11 @@ where
         _ => return build_error_response("serve requires a port number"),
     };
 
+    let max_requests: Option<usize> = args.get(2).and_then(|v| match v {
+        Value::Number(n) if *n >= 1.0 => Some(*n as usize),
+        _ => None,
+    });
+
     let server = match create_server(port) {
         Ok(s) => s,
         Err(e) => return build_error_response(&e),
@@ -312,11 +319,27 @@ where
 
     println!("Server listening on http://0.0.0.0:{}", port);
 
+    if max_requests == Some(1) {
+        let port = port;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if let Ok(mut stream) = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                let _ = stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            }
+        });
+    }
+
+    let mut count = 0usize;
     for mut request in server.incoming_requests() {
         let req_value = request_to_value(&mut request);
         let response_value = handler(&[req_value]);
         let (status, headers, body) = value_to_response(&response_value);
         send_response(request, status, headers, body);
+        count += 1;
+        if max_requests.map(|m| count >= m).unwrap_or(false) {
+            break;
+        }
     }
 
     Value::Null

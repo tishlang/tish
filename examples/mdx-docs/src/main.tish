@@ -1,5 +1,8 @@
 // MDX Docs - HTTP server serving pre-rendered static files from dist/
 // Run build.tish first, then: tish run src/main.tish --features http,fs
+import { readFile, fileExists } from 'tish:fs'
+import { process } from 'tish:process'
+import { serve } from 'tish:http'
 
 fn reqPathToFilePath(reqPathStr) {
     let step1 = reqPathStr.startsWith("/") ? reqPathStr.slice(1) : reqPathStr

@@ -2,6 +2,7 @@
 // Requires: http feature
 // Run: tish run tests/modules/async_promise_settimeout.tish --features http
 // Or: ./scripts/test_async_combined.sh
+import { fetchAsync, fetchAllAsync, Promise, setTimeout } from 'http'
 
 console.log("ASYNC_VALIDATION_START")
 

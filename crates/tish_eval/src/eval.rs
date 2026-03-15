@@ -11,6 +11,8 @@ use std::sync::Arc;
 use tish_ast::{BinOp, CompoundOp, ExportDeclaration, Expr, ImportSpecifier, Literal, LogicalAssignOp, MemberProp, Span, Statement, UnaryOp};
 
 use crate::value::Value;
+#[cfg(any(feature = "fs", feature = "process"))]
+use crate::natives;
 
 struct Scope {
     vars: HashMap<Arc<str>, Value>,
@@ -150,45 +152,7 @@ impl Evaluator {
                 s.set("RegExp".into(), Value::Native(Self::regexp_constructor_native), true);
             }
 
-            #[cfg(feature = "process")]
-            {
-                let mut process = HashMap::with_capacity(5);
-                process.insert("exit".into(), Value::Native(natives::process_exit));
-                process.insert("cwd".into(), Value::Native(natives::process_cwd));
-                process.insert("exec".into(), Value::Native(natives::process_exec));
-                let argv: Vec<Value> = std::env::args()
-                    .map(|s| Value::String(s.into()))
-                    .collect();
-                process.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv))));
-                let env_obj: HashMap<Arc<str>, Value> = std::env::vars()
-                    .map(|(key, value)| (Arc::from(key.as_str()), Value::String(value.into())))
-                    .collect();
-                process.insert("env".into(), Value::Object(Rc::new(RefCell::new(env_obj))));
-                s.set("process".into(), Value::Object(Rc::new(RefCell::new(process))), true);
-            }
-
-            #[cfg(feature = "http")]
-            {
-                s.set("fetch".into(), Value::Native(Self::fetch_native), true);
-                s.set("fetchAll".into(), Value::Native(Self::fetch_all_native), true);
-                s.set("fetchAsync".into(), Value::Native(Self::fetch_async_native), true);
-                s.set("fetchAllAsync".into(), Value::Native(Self::fetch_all_async_native), true);
-                s.set("serve".into(), Value::Serve, true);
-                s.set("Promise".into(), Value::PromiseConstructor, true);
-                s.set("setTimeout".into(), Value::TimerBuiltin(Arc::from("setTimeout")), true);
-                s.set("setInterval".into(), Value::TimerBuiltin(Arc::from("setInterval")), true);
-                s.set("clearTimeout".into(), Value::Native(Self::clear_timeout_native), true);
-                s.set("clearInterval".into(), Value::Native(Self::clear_interval_native), true);
-            }
-
-            #[cfg(feature = "fs")]
-            {
-                s.set("readFile".into(), Value::Native(natives::read_file), true);
-                s.set("writeFile".into(), Value::Native(natives::write_file), true);
-                s.set("fileExists".into(), Value::Native(natives::file_exists), true);
-                s.set("readDir".into(), Value::Native(natives::read_dir), true);
-                s.set("mkdir".into(), Value::Native(natives::mkdir), true);
-            }
+            // fs, http, process: use import { x } from 'tish:fs' etc. No globals.
         }
         Self {
             scope,
@@ -525,6 +489,9 @@ impl Evaluator {
 
     /// Load and evaluate a module, returning its exports object. Uses cache.
     fn load_module(&mut self, from: &str) -> Result<Value, EvalError> {
+        if from.starts_with("tish:") {
+            return Self::load_builtin_module(from);
+        }
         let dir = self.current_dir.borrow().clone().ok_or_else(|| {
             EvalError::Error("Cannot resolve imports: no current file directory (use run_file)".to_string())
         })?;
@@ -603,6 +570,101 @@ impl Evaluator {
         Ok(path)
     }
 
+    /// Load built-in module (tish:fs, tish:http, tish:process). Features auto-enabled when imported.
+    fn load_builtin_module(spec: &str) -> Result<Value, EvalError> {
+        match spec {
+            "tish:fs" => {
+                #[cfg(feature = "fs")]
+                {
+                    let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
+                    exports.insert("readFile".into(), Value::Native(natives::read_file));
+                    exports.insert("writeFile".into(), Value::Native(natives::write_file));
+                    exports.insert("fileExists".into(), Value::Native(natives::file_exists));
+                    exports.insert("readDir".into(), Value::Native(natives::read_dir));
+                    exports.insert("mkdir".into(), Value::Native(natives::mkdir));
+                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
+                }
+                #[cfg(not(feature = "fs"))]
+                {
+                    return Err(EvalError::Error(
+                        "tish:fs requires the fs feature. Rebuild with: cargo build -p tish --features fs".into(),
+                    ));
+                }
+            }
+            "tish:http" => {
+                #[cfg(feature = "http")]
+                {
+                    let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
+                    exports.insert("fetch".into(), Value::Native(Self::fetch_native));
+                    exports.insert("fetchAll".into(), Value::Native(Self::fetch_all_native));
+                    exports.insert("fetchAsync".into(), Value::Native(Self::fetch_async_native));
+                    exports.insert("fetchAllAsync".into(), Value::Native(Self::fetch_all_async_native));
+                    exports.insert("serve".into(), Value::Serve);
+                    exports.insert("Promise".into(), Value::PromiseConstructor);
+                    exports.insert("setTimeout".into(), Value::TimerBuiltin(Arc::from("setTimeout")));
+                    exports.insert("setInterval".into(), Value::TimerBuiltin(Arc::from("setInterval")));
+                    exports.insert("clearTimeout".into(), Value::Native(Self::clear_timeout_native));
+                    exports.insert("clearInterval".into(), Value::Native(Self::clear_interval_native));
+                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
+                }
+                #[cfg(not(feature = "http"))]
+                {
+                    return Err(EvalError::Error(
+                        "tish:http requires the http feature. Rebuild with: cargo build -p tish --features http".into(),
+                    ));
+                }
+            }
+            "tish:process" => {
+                #[cfg(feature = "process")]
+                {
+                    let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
+                    exports.insert("exit".into(), Value::Native(natives::process_exit));
+                    exports.insert("cwd".into(), Value::Native(natives::process_cwd));
+                    exports.insert("exec".into(), Value::Native(natives::process_exec));
+                    let argv: Vec<Value> = std::env::args()
+                        .map(|s| Value::String(s.into()))
+                        .collect();
+                    exports.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv.clone()))));
+                    let env_obj: HashMap<Arc<str>, Value> = std::env::vars()
+                        .map(|(key, value)| (Arc::from(key.as_str()), Value::String(value.into())))
+                        .collect();
+                    exports.insert("env".into(), Value::Object(Rc::new(RefCell::new(env_obj.clone()))));
+                    let mut process_obj = HashMap::new();
+                    process_obj.insert("exit".into(), Value::Native(natives::process_exit));
+                    process_obj.insert("cwd".into(), Value::Native(natives::process_cwd));
+                    process_obj.insert("exec".into(), Value::Native(natives::process_exec));
+                    process_obj.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv))));
+                    process_obj.insert("env".into(), Value::Object(Rc::new(RefCell::new(env_obj))));
+                    exports.insert("process".into(), Value::Object(Rc::new(RefCell::new(process_obj))));
+                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
+                }
+                #[cfg(not(feature = "process"))]
+                {
+                    return Err(EvalError::Error(
+                        "tish:process requires the process feature. Rebuild with: cargo build -p tish --features process".into(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(EvalError::Error(format!(
+                    "Unknown built-in module: {}. Supported: tish:fs, tish:http, tish:process",
+                    spec
+                )));
+            }
+        }
+    }
+
+    fn load_builtin_export(spec: &str, export_name: &str) -> Result<Value, EvalError> {
+        let module = Self::load_builtin_module(spec)?;
+        let exports = match &module {
+            Value::Object(m) => m.borrow().clone(),
+            _ => return Err(EvalError::Error("Built-in module must be object".into())),
+        };
+        exports.get(export_name).cloned().ok_or_else(|| {
+            EvalError::Error(format!("Module {} does not export '{}'", spec, export_name))
+        })
+    }
+
     fn eval_expr(&self, expr: &Expr) -> Result<Value, EvalError> {
         match expr {
             Expr::Literal { value, .. } => Ok(match value {
@@ -676,7 +738,13 @@ impl Evaluator {
                             "includes" => {
                                 let search = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
-                                for v in arr_borrow.iter() {
+                                let len = arr_borrow.len() as i64;
+                                let start = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) if *n >= 0.0 => (*n as i64).min(len).max(0) as usize,
+                                    Some(Value::Number(n)) if *n < 0.0 => ((len + *n as i64).max(0)) as usize,
+                                    _ => 0,
+                                };
+                                for v in arr_borrow.iter().skip(start) {
                                     if v.strict_eq(&search) {
                                         return Ok(Value::Bool(true));
                                     }
@@ -1098,7 +1166,16 @@ impl Evaluator {
                                     Some(Value::String(ss)) => ss.as_ref(),
                                     _ => return Ok(Value::Bool(false)),
                                 };
-                                return Ok(Value::Bool(s.contains(search)));
+                                let from_char = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) if *n >= 0.0 => (*n as usize).min(s.chars().count()),
+                                    Some(Value::Number(n)) if *n < 0.0 => {
+                                        let len = s.chars().count() as i64;
+                                        ((len + *n as i64).max(0)) as usize
+                                    }
+                                    _ => 0,
+                                };
+                                let byte_start: usize = s.chars().take(from_char).map(|c| c.len_utf8()).sum();
+                                return Ok(Value::Bool(s[byte_start..].contains(search)));
                             }
                             "slice" => {
                                 let chars: Vec<char> = s.chars().collect();
@@ -1319,21 +1396,17 @@ impl Evaluator {
 
                     // Number methods
                     if let Value::Number(n) = &obj {
-                        match method_name.as_ref() {
-                            "toFixed" => {
-                                let digits = arg_vals
-                                    .first()
-                                    .and_then(|v| match v {
-                                        Value::Number(d) => Some(*d as i32),
-                                        _ => None,
-                                    })
-                                    .unwrap_or(0)
-                                    .max(0)
-                                    .min(20); // ECMA-262: 0–20
-                                let formatted = format!("{:.*}", digits as usize, n);
-                                return Ok(Value::String(formatted.into()));
-                            }
-                            _ => {}
+                        if method_name.as_ref() == "toFixed" {
+                            let digits = arg_vals
+                                .first()
+                                .and_then(|v| match v {
+                                    Value::Number(d) => Some(*d as i32),
+                                    _ => None,
+                                })
+                                .unwrap_or(0)
+                                .clamp(0, 20); // ECMA-262: 0–20
+                            let formatted = format!("{:.*}", digits as usize, n);
+                            return Ok(Value::String(formatted.into()));
                         }
                     }
 
@@ -1475,9 +1548,9 @@ impl Evaluator {
             Expr::JsxElement { .. } | Expr::JsxFragment { .. } => Err(EvalError::Error(
                 "JSX is not supported in the interpreter. Use 'tish compile --target js' to compile to JavaScript.".to_string(),
             )),
-            Expr::NativeModuleLoad { spec, .. } => Err(EvalError::Error(
-                format!("Native module imports ({}) are only supported when compiling to Rust. Use 'tish compile'.", spec.as_ref()),
-            )),
+            Expr::NativeModuleLoad { spec, export_name, .. } => {
+                Self::load_builtin_export(spec.as_ref(), export_name.as_ref())
+            }
             Expr::TypeOf { operand, .. } => {
                 let v = self.eval_expr(operand)?;
                 Ok(Value::String(match &v {
@@ -2012,11 +2085,11 @@ impl Evaluator {
                             };
                             match handler_result {
                                 Ok(v) => {
-                                    crate::promise::settle_promise(&resolve, v, true)
+                                    crate::promise::settle_promise(resolve, v, true)
                                         .map_err(EvalError::Error)?;
                                 }
                                 Err(EvalError::Throw(v)) => {
-                                    crate::promise::settle_promise(&reject, v, false)
+                                    crate::promise::settle_promise(reject, v, false)
                                         .map_err(EvalError::Error)?;
                                 }
                                 Err(e) => return Err(e),
@@ -2025,10 +2098,10 @@ impl Evaluator {
                         crate::promise::Reaction::Finally(on_finally, ref resolve, ref reject) => {
                             let _ = self.call_func(&on_finally, &[]);
                             if is_fulfilled {
-                                crate::promise::settle_promise(&resolve, val.clone(), true)
+                                crate::promise::settle_promise(resolve, val.clone(), true)
                                     .map_err(EvalError::Error)?;
                             } else {
-                                crate::promise::settle_promise(&reject, val.clone(), false)
+                                crate::promise::settle_promise(reject, val.clone(), false)
                                     .map_err(EvalError::Error)?;
                             }
                         }
@@ -2118,11 +2191,11 @@ impl Evaluator {
         match method {
             "then" => self.run_promise_then_core(
                 promise_ref,
-                args.get(0).cloned(),
+                args.first().cloned(),
                 args.get(1).cloned(),
             ),
-            "catch" => self.run_promise_then_core(promise_ref, None, args.get(0).cloned()),
-            "finally" => self.run_promise_finally(promise_ref, args.get(0).cloned()),
+            "catch" => self.run_promise_then_core(promise_ref, None, args.first().cloned()),
+            "finally" => self.run_promise_finally(promise_ref, args.first().cloned()),
             _ => Err(EvalError::Error(format!("Unknown promise method: {}", method))),
         }
     }
@@ -2305,10 +2378,17 @@ impl Evaluator {
 
     #[cfg(feature = "http")]
     fn run_http_server(&self, args: &[Value]) -> Result<Value, EvalError> {
+        use std::io::Write;
+
         let port = match args.first() {
             Some(Value::Number(n)) => *n as u16,
             _ => return Err(EvalError::Error("serve requires a port number".to_string())),
         };
+
+        let max_requests: Option<usize> = args.get(2).and_then(|v| match v {
+            Value::Number(n) if *n >= 1.0 => Some(*n as usize),
+            _ => None,
+        });
 
         let handler = match args.get(1) {
             Some(f @ Value::Function { .. }) | Some(f @ Value::Native(_)) => f.clone(),
@@ -2322,6 +2402,18 @@ impl Evaluator {
         let server = crate::http::create_server(port).map_err(EvalError::Error)?;
         println!("Server listening on http://0.0.0.0:{}", port);
 
+        if max_requests == Some(1) {
+            let port = port;
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if let Ok(mut stream) = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                    let _ = stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                }
+            });
+        }
+
+        let mut count = 0usize;
         for mut request in server.incoming_requests() {
             let req_value = crate::http::request_to_value(&mut request);
 
@@ -2343,6 +2435,10 @@ impl Evaluator {
 
             let (status, headers, body) = crate::http::value_to_response(&response_value);
             crate::http::send_response(request, status, headers, body);
+            count += 1;
+            if max_requests.map(|m| count >= m).unwrap_or(false) {
+                break;
+            }
         }
 
         Ok(Value::Null)
@@ -2841,7 +2937,7 @@ impl Evaluator {
         let x = args.first().cloned().unwrap_or(Value::Null);
         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
         let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
-        crate::promise::settle_promise(&resolve, x, true).map_err(|e| e)?;
+        crate::promise::settle_promise(&resolve, x, true)?;
         Ok(promise)
     }
 
@@ -2850,7 +2946,7 @@ impl Evaluator {
         let r = args.first().cloned().unwrap_or(Value::Null);
         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
         let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
-        crate::promise::settle_promise(&reject, r, false).map_err(|e| e)?;
+        crate::promise::settle_promise(&reject, r, false)?;
         Ok(promise)
     }
 
@@ -2884,7 +2980,7 @@ impl Evaluator {
         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
         let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
         let arr = Value::Array(Rc::new(RefCell::new(results)));
-        crate::promise::settle_promise(&resolve, arr, true).map_err(|e| e)?;
+        crate::promise::settle_promise(&resolve, arr, true)?;
         Ok(promise)
     }
 
@@ -2904,13 +3000,13 @@ impl Evaluator {
                     crate::promise::PromiseAwaitResult::Fulfilled(x) => {
                         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
                         let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
-                        crate::promise::settle_promise(&resolve, x, true).map_err(|e| e)?;
+                        crate::promise::settle_promise(&resolve, x, true)?;
                         return Ok(promise);
                     }
                     crate::promise::PromiseAwaitResult::Rejected(x) => {
                         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
                         let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
-                        crate::promise::settle_promise(&reject, x, false).map_err(|e| e)?;
+                        crate::promise::settle_promise(&reject, x, false)?;
                         return Ok(promise);
                     }
                     crate::promise::PromiseAwaitResult::Error(e) => return Err(e),
