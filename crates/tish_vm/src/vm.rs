@@ -16,6 +16,8 @@ use tish_core::Value;
 type ArrayMethodFn = Rc<dyn Fn(&[Value]) -> Value>;
 
 /// Look up built-in module export for LoadNativeExport. Returns None if unknown or feature disabled.
+/// Parameters are only used when the corresponding feature (fs, http, process) is enabled.
+#[cfg_attr(not(any(feature = "fs", feature = "http", feature = "process")), allow(unused_variables))]
 fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
     #[cfg(feature = "fs")]
     if spec == "tish:fs" {

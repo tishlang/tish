@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 
 use tish_bytecode::{serialize, Chunk};
-use tish_compile::{detect_cycles, extract_native_import_features, merge_modules, resolve_project};
+use tish_compile::{detect_cycles, merge_modules, resolve_project};
 
 /// Compile a Tish program to a native binary via clang/LLVM.
 pub fn compile_to_native(

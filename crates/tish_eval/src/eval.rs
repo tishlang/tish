@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use tish_ast::{BinOp, CompoundOp, ExportDeclaration, Expr, ImportSpecifier, Literal, LogicalAssignOp, MemberProp, Span, Statement, UnaryOp};
 
-use crate::{natives, value::Value};
+use crate::value::Value;
+#[cfg(any(feature = "fs", feature = "process"))]
+use crate::natives;
 
 struct Scope {
     vars: HashMap<Arc<str>, Value>,
@@ -570,16 +572,17 @@ impl Evaluator {
 
     /// Load built-in module (tish:fs, tish:http, tish:process). Features auto-enabled when imported.
     fn load_builtin_module(spec: &str) -> Result<Value, EvalError> {
-        let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
         match spec {
             "tish:fs" => {
                 #[cfg(feature = "fs")]
                 {
+                    let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
                     exports.insert("readFile".into(), Value::Native(natives::read_file));
                     exports.insert("writeFile".into(), Value::Native(natives::write_file));
                     exports.insert("fileExists".into(), Value::Native(natives::file_exists));
                     exports.insert("readDir".into(), Value::Native(natives::read_dir));
                     exports.insert("mkdir".into(), Value::Native(natives::mkdir));
+                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
                 }
                 #[cfg(not(feature = "fs"))]
                 {
@@ -591,6 +594,7 @@ impl Evaluator {
             "tish:http" => {
                 #[cfg(feature = "http")]
                 {
+                    let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
                     exports.insert("fetch".into(), Value::Native(Self::fetch_native));
                     exports.insert("fetchAll".into(), Value::Native(Self::fetch_all_native));
                     exports.insert("fetchAsync".into(), Value::Native(Self::fetch_async_native));
@@ -601,6 +605,7 @@ impl Evaluator {
                     exports.insert("setInterval".into(), Value::TimerBuiltin(Arc::from("setInterval")));
                     exports.insert("clearTimeout".into(), Value::Native(Self::clear_timeout_native));
                     exports.insert("clearInterval".into(), Value::Native(Self::clear_interval_native));
+                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
                 }
                 #[cfg(not(feature = "http"))]
                 {
@@ -612,6 +617,7 @@ impl Evaluator {
             "tish:process" => {
                 #[cfg(feature = "process")]
                 {
+                    let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
                     exports.insert("exit".into(), Value::Native(natives::process_exit));
                     exports.insert("cwd".into(), Value::Native(natives::process_cwd));
                     exports.insert("exec".into(), Value::Native(natives::process_exec));
@@ -623,7 +629,6 @@ impl Evaluator {
                         .map(|(key, value)| (Arc::from(key.as_str()), Value::String(value.into())))
                         .collect();
                     exports.insert("env".into(), Value::Object(Rc::new(RefCell::new(env_obj.clone()))));
-                    // process object for process.argv, process.cwd(), etc.
                     let mut process_obj = HashMap::new();
                     process_obj.insert("exit".into(), Value::Native(natives::process_exit));
                     process_obj.insert("cwd".into(), Value::Native(natives::process_cwd));
@@ -631,6 +636,7 @@ impl Evaluator {
                     process_obj.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv))));
                     process_obj.insert("env".into(), Value::Object(Rc::new(RefCell::new(env_obj))));
                     exports.insert("process".into(), Value::Object(Rc::new(RefCell::new(process_obj))));
+                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
                 }
                 #[cfg(not(feature = "process"))]
                 {
@@ -646,7 +652,6 @@ impl Evaluator {
                 )));
             }
         }
-        Ok(Value::Object(Rc::new(RefCell::new(exports))))
     }
 
     fn load_builtin_export(spec: &str, export_name: &str) -> Result<Value, EvalError> {

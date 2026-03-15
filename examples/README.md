@@ -1,6 +1,6 @@
 # Tish Examples
 
-Ready-to-deploy example applications for the Tish Platform.
+Example applications you can run and compile with Tish. Build the CLI from the repo root: `cargo build --release -p tish`.
 
 ## Examples
 
@@ -16,35 +16,9 @@ Ready-to-deploy example applications for the Tish Platform.
 | [json-file-edit](json-file-edit/) | Read JSON file, decode, modify, write back | `fs` |
 | [tishx-example](tishx-example/) | Tish + JSX compiled to vanilla JavaScript (no 3rd party libs) | — |
 
-## Prerequisites
+## Quick start — run locally
 
-1. **Tish** – compiler/runtime (this repo). Build for the platform build service: `cargo build --release -p tish`
-2. **Zectre CLI** – deploy from the **zectre-cli** repo via `cargo run -p zectre-cli --` (no install).
-3. **Zectre Platform** – running locally, e.g. `just run-all` in zectre-platform. Config must point at this tish repo: `tish_compiler_path` and `tish_workspace_path` in platform’s `config/default.toml`.
-
-## Deploy examples (zectre CLI, no install)
-
-Deploy code from this repo’s examples using the zectre CLI run from source. Do **not** install zectre; run it with `cargo run -p zectre-cli --manifest-path <zectre-cli>/Cargo.toml --`.
-
-1. **Start platform** (in zectre-platform): `just run-all`. Set `tish_compiler_path` and `tish_workspace_path` in `config/default.toml` to this tish repo.
-
-2. **Build tish** (in this repo): `cargo build --release -p tish`.
-
-3. **Deploy an example** – from this repo, in the example directory (tish and zectre-cli siblings):
-   ```bash
-   cd examples/http-hello
-   cargo run -p zectre-cli --manifest-path ../../zectre-cli/Cargo.toml -- login
-   cargo run -p zectre-cli --manifest-path ../../zectre-cli/Cargo.toml -- projects create http-hello
-   cargo run -p zectre-cli --manifest-path ../../zectre-cli/Cargo.toml -- link
-   cargo run -p zectre-cli --manifest-path ../../zectre-cli/Cargo.toml -- deploy --wait
-   ```
-   For another example, use its name (e.g. `echo-server`, `counter-api`) and `cd` to that example dir before `link` and `deploy`. API URL defaults to `http://localhost:47080`; use `ZECTRE_API_URL` or `--api-url` to override. If you have an API key: `-- login --with-key YOUR_KEY`.
-
-## Quick Start
-
-### Local Development
-
-Run any example locally with the interpreter:
+From the repo root, run any example with the interpreter:
 
 ```bash
 cd examples/http-hello
@@ -58,64 +32,25 @@ tish compile src/main.tish -o server --features http
 ./server
 ```
 
-### Deploy to Tish Platform
+Use the same pattern for other examples; enable the features they need (e.g. `http`, `fs`, `process`).
 
-Use the **tish-dev** CLI from source (no install). From an example directory, prefix every command with:
+## Deploy
 
-`cargo run -p tish-cli --manifest-path ../../tish-dev/Cargo.toml --`
+To deploy examples to a platform, see the [deployment documentation](https://github.com/tish-lang/tish-docs) and your platform’s CLI (e.g. zectre-cli). Prerequisites: built `tish` binary and platform config pointing at this repo.
 
-1. **Authenticate**: `... -- login` (or `... -- login --with-key YOUR_KEY`)
-2. **Create project**: `... -- projects create http-hello` (use the example name)
-3. **Link**: `... -- link`
-4. **Deploy**: `... -- deploy --wait`
-5. **Logs**: `... -- status`, `... -- logs <task-id>`
+## Project structure
 
-See **Deploy examples (zectre CLI, no install)** above for the full sequence.
-
-## Project Structure
-
-Each example follows this structure:
+Each example follows:
 
 ```
 example-name/
-├── tish.yaml        # Deployment configuration
-├── README.md        # Example documentation
+├── tish.yaml        # Optional: deployment/config
+├── README.md        # Example-specific docs
 └── src/
     └── main.tish    # Entry point
 ```
 
-## Configuration Reference
-
-The `tish.yaml` file configures how your app is built and deployed:
-
-```yaml
-name: my-app                    # Required: project name
-
-build:
-  source: ./src/main.tish       # Entry point (default: ./src/main.tish)
-  features:                     # Feature flags to enable
-    - http                      # Network access (fetch, serve)
-    - fs                        # File system access
-    - process                   # Process control
-
-deploy:
-  replicas: 1                   # Number of instances (default: 1)
-  strategy: rolling             # Deployment strategy
-
-resources:
-  cpu: 100m                     # CPU limit
-  memory: 128Mi                 # Memory limit
-
-networking:
-  port: 3000                    # Port to expose
-  protocol: http                # Protocol (http, tcp, grpc)
-  health_check:
-    path: /health               # Health check endpoint
-    interval: 10s               # Check interval
-    timeout: 5s                 # Request timeout
-```
-
-## Feature Flags
+## Feature flags
 
 | Flag | Enables |
 |------|---------|
@@ -125,36 +60,4 @@ networking:
 | `regex` | Regular expressions (`RegExp`, `String.match`, etc.) |
 | `full` | All features |
 
-By default, Tish runs in **secure mode** with no features enabled.
-
-## CLI Commands Reference (tish-dev, no install)
-
-Run from an example dir: `cargo run -p tish-cli --manifest-path ../../tish-dev/Cargo.toml -- <command>`
-
-```bash
-# Authentication
--- login                    # Browser-based login
--- login --with-key KEY     # Use API key
--- logout                   # Clear credentials
--- whoami                   # Show current user
-
-# Projects
--- projects list            # List all projects
--- projects create NAME     # Create new project
--- projects delete NAME     # Delete a project
-
-# Deployment
--- link                     # Link directory to project
--- deploy                   # Deploy application
--- deploy --wait            # Deploy and wait for completion
--- deploy --prod            # Production deployment
-
-# Monitoring
--- status                   # Show deployment status
--- logs <task-id>           # View task logs
-
-# Environment Variables
--- env list                 # List env vars
--- env add KEY=value        # Add env var
--- env rm KEY               # Remove env var
-```
+By default, Tish runs in **secure mode** with no features enabled. Pass `--features http` (or other flags) when running or compiling.
