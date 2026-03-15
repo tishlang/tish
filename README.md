@@ -91,6 +91,22 @@ wasmtime app.wasm
 
 ## Installing Tish
 
+### Via npx (no install)
+
+```bash
+npx @tishlang/tish run hello.tish
+npx @tishlang/tish compile hello.tish -o hello
+```
+
+Or create a new project:
+
+```bash
+npx @tishlang/create-tish-app my-app
+cd my-app && npx @tishlang/tish run src/main.tish
+```
+
+### From source
+
 ```bash
 cargo build --release -p tish
 ```
