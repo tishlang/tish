@@ -485,6 +485,70 @@ Legend: Green = <150% | Yellow = 200-500% | Red = >500%
         vm=tish run --backend vm | interp=tish run --backend interp | rust=native(rust) | cranelift=native(cranelift) | llvm=native(llvm) | wasi=wasmtime
 
 
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                           PERFORMANCE SUMMARY
+                                    (sorted by Tish(vm)/Node ratio, slowest first)
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+Test                       vm   interp     rust cranelift     llvm     wasi     Node      Bun     Deno  QuickJS   vm/Node%
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+core/array_stress         171       67       29      185      188   213721       38       21       32       59       450%
+core/object_stress         99       82       36      100       98      317       31       18       26       60       319%
+core/new_features_perf       57       51       24       58       57      162       32       17       27       59       178%
+core/benchmark_granular       48      119       40       56       66      355       32       18       27       63       150%
+core/string_methods_perf       11       11        9        9        9       19       26       12       21        7        42%
+core/break_continue        10        9        9        7        7       14       25       11       22        6        40%
+core/higher_order_methods       10       10        9        7        7       14       25       11       21        6        40%
+core/objects_perf          10        9        9        8        8       17       26       11       20        6        38%
+core/nested_complex        10        9        8        7        7       13       26       11       21        7        38%
+core/in_op                  9        9        9        8        8       13       24       12       21        6        37%
+core/array_methods_perf       11       11       11       10       11       21       29       13       24        9        37%
+core/void                   9        8        8        7        7       13       25       11       21        6        36%
+core/uri                    9        9        8        7        7       13       25       11       21        6        36%
+core/types                  9        9        8        7        7       13       25       11       21        6        36%
+core/typeof                 9        9        9        7        7       13       25       11       21        6        36%
+core/try_catch              9        8        9        7        8       13       25       10       21        6        36%
+core/tab_indent             9        8        8        7        7       14       25       11       21        6        36%
+core/switch                 9        8        8        7        7       13       25       11       21        6        36%
+core/space_indent           9        8        9        7        7       13       25       10       21        6        36%
+core/rest_params            9        9        8        7        7       14       25       11       21        6        36%
+core/optional_braces_braced        9        9        8        7        7       14       25       11       21        6        36%
+core/optional_braces        9        8        8        7        7       13       25       11       21        6        36%
+core/objects                9        9        8        7        7       13       25       11       21        6        36%
+core/length                 9        9        9        7        7       13       25       11       21        6        36%
+core/json                   9        8        9        7        7       14       25       11       21        6        36%
+core/inc_dec                9        9        9        7        7       14       25       11       21        6        36%
+core/for_of                 9        9        9        7        7       14       25       12       22        6        36%
+core/do_while               9        9        9        7        7       14       25       11       21        6        36%
+core/const                  9        9        8        7        7       14       25       11       22        6        36%
+core/conditional            9        9        8        7        7       14       25       12       21        6        36%
+core/builtins               9        9        9        7        8       14       26       11       21        6        34%
+core/bitwise                9        9        9        8        7       14       26       11       22        6        34%
+core/template_literals        9        9        8        7        7       13       26       11       21        7        34%
+core/string_methods         9        8        8        7        7       14       26       11       21        6        34%
+core/scopes                 9        8        8        7        7       14       26       11       21        6        34%
+core/arrays                 9        9        9        7        7       14       26       11       22        6        34%
+core/mutation               9        9        8        8        7       14       26       11       21        6        34%
+core/math                   9        9        8        7        7       13       26       11       21        6        34%
+core/fn_any                 9        9        9        7        7       14       26       11       22        6        34%
+core/array_methods         10       10        9        8        8       15       29       13       24        7        34%
+core/compound_assign        9        9        9        8        8       15       27       12       21        6        33%
+core/arrow_functions       11       11       11        9        9       17       34       16       32       10        32%
+core/optional_chaining        8        9        9        8        7       13       25       10       21        6        32%
+core/exponentiation         8        9        9        7        8       13       25       11       21        6        32%
+core/strict_equality        8        9        8        7        7       14       26       11       21        6        30%
+core/object_methods         9        9        9        7        7       14       30       11       25        6        30%
+core/nested_loops           8        8        9        7        7       13       26       11       21        6        30%
+
+──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
+TOTAL                     769      704      502      714      725   215160     1245      558     1041      510        61%
+
+Legend: Green = <150% | Yellow = 200-500% | Red = >500%
+        vm=tish run --backend vm | interp=tish run --backend interp | rust=native(rust) | cranelift=native(cranelift) | llvm=native(llvm) | wasi=wasmtime
+
+
+
+
 ./scripts/run_object_stress_profile.sh; \
 ./scripts/run_benchmark_granular_profile.sh; \
 

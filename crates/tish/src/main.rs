@@ -155,14 +155,13 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
             }
             match tish_parser::parse(line) {
                 Ok(program) => {
-                    for stmt in &program.statements {
-                        if let Ok(v) = eval.eval_program(&tish_ast::Program {
-                            statements: vec![stmt.clone()],
-                        }) {
+                    match eval.eval_program(&program) {
+                        Ok(v) => {
                             if !matches!(v, tish_eval::Value::Null) {
                                 println!("{}", v);
                             }
                         }
+                        Err(e) => eprintln!("{}", e),
                     }
                 }
                 Err(e) => eprintln!("Parse error: {}", e),
@@ -186,25 +185,23 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
         }
         match tish_parser::parse(line) {
             Ok(program) => {
-                for stmt in &program.statements {
-                    let prog = tish_ast::Program {
-                        statements: vec![stmt.clone()],
-                    };
-                    let compile_fn = if no_optimize {
-                        tish_bytecode::compile_unoptimized
-                    } else {
-                        tish_bytecode::compile
-                    };
-                    match compile_fn(&prog) {
-                        Ok(chunk) => {
-                            if let Ok(v) = vm.run(&chunk) {
+                let compile_fn = if no_optimize {
+                    tish_bytecode::compile_for_repl_unoptimized
+                } else {
+                    tish_bytecode::compile_for_repl
+                };
+                match compile_fn(&program) {
+                    Ok(chunk) => {
+                        match vm.run(&chunk) {
+                            Ok(v) => {
                                 if !matches!(v, tish_core::Value::Null) {
                                     println!("{}", v.to_display_string());
                                 }
                             }
+                            Err(e) => eprintln!("{}", e),
                         }
-                        Err(e) => eprintln!("Compile error: {}", e),
                     }
+                    Err(e) => eprintln!("Compile error: {}", e),
                 }
             }
             Err(e) => eprintln!("Parse error: {}", e),

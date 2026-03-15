@@ -2373,10 +2373,17 @@ impl Evaluator {
 
     #[cfg(feature = "http")]
     fn run_http_server(&self, args: &[Value]) -> Result<Value, EvalError> {
+        use std::io::Write;
+
         let port = match args.first() {
             Some(Value::Number(n)) => *n as u16,
             _ => return Err(EvalError::Error("serve requires a port number".to_string())),
         };
+
+        let max_requests: Option<usize> = args.get(2).and_then(|v| match v {
+            Value::Number(n) if *n >= 1.0 => Some(*n as usize),
+            _ => None,
+        });
 
         let handler = match args.get(1) {
             Some(f @ Value::Function { .. }) | Some(f @ Value::Native(_)) => f.clone(),
@@ -2390,6 +2397,18 @@ impl Evaluator {
         let server = crate::http::create_server(port).map_err(EvalError::Error)?;
         println!("Server listening on http://0.0.0.0:{}", port);
 
+        if max_requests == Some(1) {
+            let port = port;
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if let Ok(mut stream) = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                    let _ = stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                }
+            });
+        }
+
+        let mut count = 0usize;
         for mut request in server.incoming_requests() {
             let req_value = crate::http::request_to_value(&mut request);
 
@@ -2411,6 +2430,10 @@ impl Evaluator {
 
             let (status, headers, body) = crate::http::value_to_response(&response_value);
             crate::http::send_response(request, status, headers, body);
+            count += 1;
+            if max_requests.map(|m| count >= m).unwrap_or(false) {
+                break;
+            }
         }
 
         Ok(Value::Null)

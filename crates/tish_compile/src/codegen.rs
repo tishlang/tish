@@ -523,7 +523,7 @@ impl Codegen {
                     "fetchAll" => Some("Value::Function(Rc::new(|args: &[Value]| tish_http_fetch_all(args)))"),
                     "fetchAsync" => Some("Value::Function(Rc::new(|args: &[Value]| tish_fetch_async_promise(args.to_vec())))"),
                     "fetchAllAsync" => Some("Value::Function(Rc::new(|_args: &[Value]| panic!(\"fetchAllAsync must be used with await\")))"),
-                    "serve" => Some("Value::Function(Rc::new(|args: &[Value]| { let port = args.first().cloned().unwrap_or(Value::Null); let handler = args.get(1).cloned().unwrap_or(Value::Null); if let Value::Function(f) = handler { tish_http_serve(&[port], move |req_args| f(req_args)) } else { Value::Null } }))"),
+                    "serve" => Some("Value::Function(Rc::new(|args: &[Value]| { let port = args.first().cloned().unwrap_or(Value::Null); let handler = args.get(1).cloned().unwrap_or(Value::Null); if let Value::Function(f) = handler { tish_http_serve(args, move |req_args| f(req_args)) } else { Value::Null } }))"),
                     "Promise" => Some("tish_promise_object()"),
                     "setTimeout" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_set_timeout(args)))"),
                     "setInterval" => Some("Value::Function(Rc::new(|_args: &[Value]| panic!(\"setInterval not yet supported in native\")))"),
@@ -917,7 +917,7 @@ impl Codegen {
             self.writeln("let handler = args.get(1).cloned().unwrap_or(Value::Null);");
             self.writeln("if let Value::Function(f) = handler {");
             self.indent += 1;
-            self.writeln("tish_http_serve(&[port], move |req_args| f(req_args))");
+            self.writeln("tish_http_serve(args, move |req_args| f(req_args))");
             self.indent -= 1;
             self.writeln("} else {");
             self.indent += 1;

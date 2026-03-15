@@ -61,15 +61,18 @@ struct Compiler<'a> {
     /// Stack of loop info for break/continue.
     loop_stack: Vec<LoopInfo>,
     switch_stack: Vec<SwitchInfo>,
+    /// When true (REPL mode), last ExprStmt leaves its value on the stack and we skip trailing LoadConst Null.
+    retain_last_expr: bool,
 }
 
 impl<'a> Compiler<'a> {
-    fn new(chunk: &'a mut Chunk) -> Self {
+    fn new(chunk: &'a mut Chunk, retain_last_expr: bool) -> Self {
         Self {
             chunk,
             scope: vec![HashMap::new()],
             loop_stack: Vec::new(),
             switch_stack: Vec::new(),
+            retain_last_expr,
         }
     }
 
@@ -293,12 +296,29 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_program(&mut self, program: &Program) -> Result<(), CompileError> {
-        for stmt in &program.statements {
-            self.compile_statement(stmt)?;
+        let stmts = &program.statements;
+        let last_is_expr = self.retain_last_expr
+            && stmts
+                .last()
+                .map(|s| matches!(s, Statement::ExprStmt { .. }))
+                .unwrap_or(false);
+
+        if last_is_expr {
+            let (rest, last) = stmts.split_at(stmts.len().saturating_sub(1));
+            for stmt in rest {
+                self.compile_statement(stmt)?;
+            }
+            if let Some(Statement::ExprStmt { expr, .. }) = last.first() {
+                self.compile_expr(expr)?;
+            }
+        } else {
+            for stmt in stmts {
+                self.compile_statement(stmt)?;
+            }
+            let idx = self.constant_idx(Constant::Null);
+            self.emit(Opcode::LoadConst);
+            self.chunk.write_u16(idx);
         }
-        let idx = self.constant_idx(Constant::Null);
-        self.emit(Opcode::LoadConst);
-        self.chunk.write_u16(idx);
         Ok(())
     }
 
@@ -523,7 +543,7 @@ impl<'a> Compiler<'a> {
                     inner.add_name(Arc::clone(p));
                 }
                 inner.param_count = param_names.len() as u16;
-                let mut inner_comp = Compiler::new(&mut inner);
+                let mut inner_comp = Compiler::new(&mut inner, false);
                 inner_comp.scope = vec![param_names
                     .iter()
                     .map(|n| (Arc::clone(n), false))
@@ -1004,7 +1024,7 @@ impl<'a> Compiler<'a> {
                     inner.add_name(Arc::clone(p));
                 }
                 inner.param_count = param_names.len() as u16;
-                let mut inner_comp = Compiler::new(&mut inner);
+                let mut inner_comp = Compiler::new(&mut inner, false);
                 inner_comp.scope = vec![param_names
                     .iter()
                     .map(|n| (Arc::clone(n), false))
@@ -1136,17 +1156,31 @@ impl<'a> Compiler<'a> {
 
 /// Compile a Tish program to bytecode (with peephole optimizations).
 pub fn compile(program: &Program) -> Result<Chunk, CompileError> {
-    compile_internal(program, true)
+    compile_internal(program, true, false)
 }
 
 /// Compile without peephole optimizations (for --no-optimize).
 pub fn compile_unoptimized(program: &Program) -> Result<Chunk, CompileError> {
-    compile_internal(program, false)
+    compile_internal(program, false, false)
 }
 
-fn compile_internal(program: &Program, peephole: bool) -> Result<Chunk, CompileError> {
+/// Compile for REPL: last expression statement leaves its value on the stack (no Pop, no trailing Null).
+pub fn compile_for_repl(program: &Program) -> Result<Chunk, CompileError> {
+    compile_internal(program, true, true)
+}
+
+/// Compile for REPL without peephole optimizations.
+pub fn compile_for_repl_unoptimized(program: &Program) -> Result<Chunk, CompileError> {
+    compile_internal(program, false, true)
+}
+
+fn compile_internal(
+    program: &Program,
+    peephole: bool,
+    retain_last_expr: bool,
+) -> Result<Chunk, CompileError> {
     let mut chunk = Chunk::new();
-    let mut compiler = Compiler::new(&mut chunk);
+    let mut compiler = Compiler::new(&mut chunk, retain_last_expr);
     compiler.compile_program(program)?;
     if peephole {
         crate::peephole::optimize(&mut chunk);

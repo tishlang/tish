@@ -1,5 +1,7 @@
 # Tish
 
+An expirimental and opinionated javascript/typescript like multi target native compilable language built for friends and family of the js community.
+
 > 🚧 Experimental multi target ts/js 
 
 Minimal, TS/JS-compatible language. Runs via interpreter or compiles to native. See `docs/` for spec and ECMA alignment.

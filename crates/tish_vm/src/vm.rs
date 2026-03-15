@@ -34,10 +34,9 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
             "fetch" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::http_fetch(args)))),
             "fetchAll" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::http_fetch_all(args)))),
             "serve" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                let port = args.first().cloned().unwrap_or(Value::Null);
                 let handler = args.get(1).cloned().unwrap_or(Value::Null);
                 if let Value::Function(f) = handler {
-                    tish_runtime::http_serve(&[port], move |req_args| f(req_args))
+                    tish_runtime::http_serve(args, move |req_args| f(req_args))
                 } else {
                     Value::Null
                 }
@@ -478,8 +477,12 @@ impl Vm {
                             .borrow_mut()
                             .insert(Arc::clone(name), v);
                     } else {
-                        // New variable: store in current frame so closures can capture via enclosing
-                        local_scope.borrow_mut().insert(Arc::clone(name), v);
+                        // New variable: at top level (no enclosing) store in globals so REPL persists across lines
+                        if self.enclosing.is_none() {
+                            self.globals.borrow_mut().insert(Arc::clone(name), v);
+                        } else {
+                            local_scope.borrow_mut().insert(Arc::clone(name), v);
+                        }
                     }
                 }
                 Opcode::LoadGlobal => {
