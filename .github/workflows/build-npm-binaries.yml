@@ -1,0 +1,126 @@
+# Build Tish binaries for all platforms and assemble them for the npm package.
+# On every push to main, produces artifacts that can be unpacked into npm/tish/platform/.
+
+name: Build npm binaries
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            binary_name: tish
+          - platform: linux-arm64
+            os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            binary_name: tish
+            use_cross: true
+          - platform: darwin-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            binary_name: tish
+          - platform: darwin-x64
+            os: macos-14
+            target: x86_64-apple-darwin
+            binary_name: tish
+          - platform: win32-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: tish.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Build (native / rustup target)
+        if: ${{ !matrix.use_cross }}
+        run: cargo build --release -p tish --target ${{ matrix.target }}
+
+      - name: Install cross and build (Linux ARM64)
+        if: ${{ matrix.use_cross }}
+        run: |
+          cargo install cross
+          cross build --target ${{ matrix.target }} -p tish --release
+
+      - name: Stage binary for upload
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} staging/
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: staging/${{ matrix.binary_name }}
+
+  assemble:
+    name: Assemble platform dir
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: '*'
+          merge-multiple: false
+
+      - name: Create platform directory layout
+        run: |
+          mkdir -p npm/tish/platform/darwin-arm64
+          mkdir -p npm/tish/platform/darwin-x64
+          mkdir -p npm/tish/platform/linux-x64
+          mkdir -p npm/tish/platform/linux-arm64
+          mkdir -p npm/tish/platform/win32-x64
+
+          cp artifacts/linux-x64 npm/tish/platform/linux-x64/tish
+          cp artifacts/linux-arm64 npm/tish/platform/linux-arm64/tish
+          cp artifacts/darwin-arm64 npm/tish/platform/darwin-arm64/tish
+          cp artifacts/darwin-x64 npm/tish/platform/darwin-x64/tish
+          cp artifacts/win32-x64 npm/tish/platform/win32-x64/tish.exe
+
+          chmod +x npm/tish/platform/linux-x64/tish
+          chmod +x npm/tish/platform/linux-arm64/tish
+          chmod +x npm/tish/platform/darwin-arm64/tish
+          chmod +x npm/tish/platform/darwin-x64/tish
+
+      - name: Upload assembled platform dir
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tish-platform-binaries
+          path: npm/tish/platform/

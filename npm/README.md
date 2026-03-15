@@ -30,7 +30,7 @@ From the **tish repo root** (parent of `npm/`):
 This writes the binary into `npm/tish/platform/<platform>/`. For a full npm release you need binaries for every platform. Either:
 
 - Run the script on each OS/arch (macOS ARM, macOS x64, Linux x64, Linux ARM64, Windows x64), or  
-- Use CI (e.g. GitHub Actions matrix) to build each target and copy artifacts into `npm/tish/platform/`.
+- Use the **GitHub Actions workflow** (see below): on every push/PR to `main`, the workflow builds all platforms and uploads the **`npm-tish-platform-binaries`** artifact. Download it from the Actions run and extract into `npm/tish/platform/` to get a full set for publishing.
 
 Example for all platforms (run the appropriate line on each machine or in CI):
 
@@ -56,9 +56,19 @@ cargo build --release -p tish --target x86_64-pc-windows-msvc
 cp target/x86_64-pc-windows-msvc/release/tish.exe npm/tish/platform/win32-x64/tish.exe
 ```
 
+## GitHub Actions
+
+The workflow [`.github/workflows/build-npm-binaries.yml`](../.github/workflows/build-npm-binaries.yml) runs on push and PR to `main`. It builds the CLI for:
+
+- `linux-x64`, `linux-arm64` (Ubuntu; ARM64 via [cross](https://github.com/cross-rs/cross))
+- `darwin-arm64`, `darwin-x64` (macOS 14)
+- `win32-x64` (Windows)
+
+The **assemble** job produces a single artifact **`npm-tish-platform-binaries`**: the full `npm/tish/platform/` directory. Download it from the workflow run and extract into your repo (or into a clean `npm/tish/` tree) before publishing.
+
 ## Publishing
 
-1. Ensure `npm/tish/platform/` contains binaries for every supported platform (see above).
+1. Ensure `npm/tish/platform/` contains binaries for every supported platform (from CI artifact or local builds).
 2. `npm login` and create the `@tishlang` org on npm if needed.
 3. Publish from the package directories:
 
