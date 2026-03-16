@@ -68,7 +68,20 @@ The workflow [`.github/workflows/build-npm-binaries.yml`](../.github/workflows/b
 
 The **assemble** job produces a single artifact **`npm-tish-platform-binaries`**: the full `npm/tish/platform/` directory. Download it from the workflow run and extract into your repo (or into a clean `npm/tish/` tree) before publishing.
 
-## Publishing
+## Automated releases (main branch)
+
+On **push to `main`**, the CI workflow runs a **release** job that:
+
+1. **Semantic versioning** — Uses [semantic-release](https://github.com/semantic-release/semantic-release) and [conventional commits](https://www.conventionalcommits.org/) to compute the next version:
+   - `fix:` or `fix(scope):` → patch
+   - `feat:` or `feat(scope):` → minor
+   - `BREAKING CHANGE:` or `feat!:` / `fix!:` → major
+2. **GitHub release** — Creates a GitHub release with generated notes and attaches **tish-platform-binaries.zip** (all platform binaries).
+3. **npm publish** — When **`NPM_TOKEN`** is configured as a repository secret, publishes `@tishlang/tish` and `@tishlang/create-tish-app` to the npm registry.
+
+To enable npm publishing: create an [npm access token](https://www.npmjs.com/settings/~/tokens) (automation type), then add it as a secret named **`NPM_TOKEN`** in the repo (Settings → Secrets and variables → Actions). The release job will skip npm publish if the secret is missing (GitHub release still runs).
+
+## Manual publishing
 
 1. Ensure `npm/tish/platform/` contains binaries for every supported platform (from CI artifact or local builds).
 2. `npm login` and create the `@tishlang` org on npm if needed.

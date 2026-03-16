@@ -4,6 +4,9 @@
   "description": "Scaffold a new Tish project",
   "license": "SEE LICENSE IN ../../../LICENSE",
   "repository": "https://github.com/tish-lang/tish",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "create-tish-app": "./index.js"
   },

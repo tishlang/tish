@@ -171,3 +171,67 @@ jobs:
         with:
           name: npm-tish-platform-binaries
           path: npm/tish/platform/
+
+  release:
+    name: Release (semantic version + GitHub + npm)
+    needs: [assemble]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download platform binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-tish-platform-binaries
+          path: npm/tish/platform/
+
+      - name: Make binaries executable
+        run: |
+          chmod +x npm/tish/platform/linux-x64/tish
+          chmod +x npm/tish/platform/linux-arm64/tish
+          chmod +x npm/tish/platform/darwin-arm64/tish
+          chmod +x npm/tish/platform/darwin-x64/tish
+
+      - name: Create platform binaries zip
+        run: |
+          cd npm/tish && zip -r tish-platform-binaries.zip platform/ && cd ../..
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install semantic-release and plugins
+        run: |
+          npm install -g \
+            semantic-release \
+            @semantic-release/commit-analyzer \
+            @semantic-release/release-notes-generator \
+            @semantic-release/npm \
+            @semantic-release/github
+
+      - name: Semantic release (tish package)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd npm/tish && npx semantic-release --extends ../../.releaserc.json
+        continue-on-error: true
+
+      - name: Sync version and publish create-tish-app
+        if: success()
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./npm/tish/package.json').version")
+          cd npm/create-tish-app
+          npm version $VERSION --no-git-tag-version --allow-same-version
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > .npmrc
+          npm publish --access public
+        continue-on-error: true
