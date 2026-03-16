@@ -46,7 +46,7 @@ jobs:
       - name: Run tests and coverage (single build)
         run: |
           cargo llvm-cov nextest -p tish --features full --no-fail-fast --profile ci \
-            --lcov --output-path lcov.info --html coverage-html
+            --lcov --output-path lcov.info
           mkdir -p test-results
           cp target/nextest/ci/junit.xml test-results/junit.xml
 
