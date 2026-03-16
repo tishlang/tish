@@ -47,6 +47,36 @@ jobs:
       - name: Build tests
         run: cargo nextest run --no-run -p tish --features full --profile ci
 
+  release_check:
+    name: Release check (conventional commits)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require release-worthy conventional commits
+        run: |
+          # If no previous tag, allow release (e.g. first release)
+          if ! LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null); then
+            echo "No previous tag found - allowing release."
+            exit 0
+          fi
+          COMMITS=$(git log "$LAST_TAG..HEAD" --pretty=format:"%s%n%b" --no-merges)
+          if echo "$COMMITS" | grep -qE '^(feat|fix|perf)(!)?(\([^)]*\))?:'; then
+            echo "Conventional commits (feat/fix/perf) detected - release will run."
+            exit 0
+          fi
+          if echo "$COMMITS" | grep -q 'BREAKING CHANGE'; then
+            echo "Breaking change detected - release will run."
+            exit 0
+          fi
+          echo "No release-worthy conventional commits since $LAST_TAG."
+          echo "Use feat:, fix:, or perf: (or BREAKING CHANGE) to trigger a release."
+          exit 1
+
   test:
     name: Test & coverage
     needs: [compile]
@@ -210,7 +240,7 @@ jobs:
 
   release:
     name: Release (GitHub only)
-    needs: [assemble]
+    needs: [assemble, release_check]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
