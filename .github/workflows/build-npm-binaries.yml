@@ -53,7 +53,7 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Generate coverage
-        run: cargo llvm-cov test -p tish --features full --lcov --output-path lcov.info --html coverage-html
+        run: cargo llvm-cov test -p tish --features full --lcov --output-path lcov.info
 
       - name: Upload coverage (lcov)
         uses: actions/upload-artifact@v4
