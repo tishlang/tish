@@ -1,5 +1,6 @@
 # Build Tish binaries, run tests with results and coverage, and assemble platform artifacts.
-# On every push/PR to main: test + coverage on Ubuntu; build binaries per platform; assemble.
+# One "compile" job runs first to populate sccache + rust-cache; test and build jobs depend on it
+# so they restore cache instead of all compiling in parallel.
 
 name: CI (test, coverage, build)
 
@@ -14,8 +15,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Test & coverage
+  compile:
+    name: Compile (populate cache)
     runs-on: ubuntu-22.04
     env:
       RUSTC_WRAPPER: sccache
@@ -42,8 +43,41 @@ jobs:
         with:
           tool: nextest,cargo-llvm-cov
 
-      # Single compile: run nextest under llvm-cov so we build once and get both test results and coverage
-      - name: Run tests and coverage (single build)
+      # Build test suite with coverage (test job restores this cache and only runs tests)
+      - name: Build tests (coverage)
+        run: cargo llvm-cov nextest --no-run -p tish --features full --profile ci
+
+  test:
+    name: Test & coverage
+    needs: [compile]
+    runs-on: ubuntu-22.04
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-workspace-crates: "true"
+
+      - name: Install nextest and cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest,cargo-llvm-cov
+
+      # Restore populated cache → run tests and coverage (minimal or no recompile)
+      - name: Run tests and coverage
         run: |
           cargo llvm-cov nextest -p tish --features full --no-fail-fast --profile ci \
             --lcov --output-path lcov.info
@@ -63,13 +97,8 @@ jobs:
           name: coverage-lcov
           path: lcov.info
 
-      - name: Upload coverage (HTML)
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-html
-          path: coverage-html/
-
   build:
+    needs: [compile]
     strategy:
       fail-fast: false
       matrix:
