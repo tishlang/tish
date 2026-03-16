@@ -246,6 +246,17 @@ jobs:
       - name: Install npm deps (semantic-release and plugins)
         run: npm install --prefix npm/tish
 
+      - name: Set repository URL for current repo (supports fork)
+        run: |
+          node -e "
+          const fs = require('fs');
+          const p = require('./npm/tish/package.json');
+          p.repository = { type: 'git', url: process.env.REPO_URL };
+          fs.writeFileSync('./npm/tish/package.json', JSON.stringify(p, null, 2));
+          "
+        env:
+          REPO_URL: ${{ format('{0}/{1}.git', github.server_url, github.repository) }}
+
       - name: Semantic release (tish package)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
