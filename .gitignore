@@ -20,3 +20,5 @@ tests/core/wasi_build/
 
 # npm package platform binaries (built by npm/scripts/build-binaries.sh or CI)
 npm/tish/platform/
+
+node_modules

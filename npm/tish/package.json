@@ -18,14 +18,14 @@
     "platform"
   ],
   "engines": {
-    "node": ">=14"
+    "node": ">=22"
   },
   "devDependencies": {
-    "@semantic-release/commit-analyzer": "^19.2.0",
-    "@semantic-release/github": "^10.1.0",
-    "@semantic-release/npm": "^11.0.0",
-    "@semantic-release/release-notes-generator": "^13.0.0",
-    "semantic-release": "^24.0.0"
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/github": "^12.0.6",
+    "@semantic-release/npm": "^13.1.5",
+    "@semantic-release/release-notes-generator": "^14.1.0",
+    "semantic-release": "^25.0.3"
   },
   "keywords": [
     "tish",
