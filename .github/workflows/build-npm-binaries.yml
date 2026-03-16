@@ -1,6 +1,6 @@
 # Build Tish binaries, run tests with results and coverage, and assemble platform artifacts.
-# One "compile" job runs first to populate sccache + rust-cache; test and build jobs depend on it
-# so they restore cache instead of all compiling in parallel.
+# Test runs first (one coverage build + one test run); build matrix runs after to avoid parallel compile stampede.
+# Integration tests: one test binary is built once, then all test functions run (no rebuild per test).
 
 name: CI (test, coverage, build)
 
@@ -15,42 +15,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  compile:
-    name: Compile (populate cache)
-    runs-on: ubuntu-22.04
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-workspace-crates: "true"
-
-      - name: Install nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
-
-      # Build test suite only (no run). Test job runs with llvm-cov and gets cache hits for deps.
-      # We must not use llvm-cov here: --no-run produces no .profraw, so merge would fail.
-      - name: Build tests
-        run: cargo nextest run --no-run -p tish --features full --profile ci
-
   test:
     name: Test & coverage
-    needs: [compile]
     runs-on: ubuntu-22.04
     env:
       RUSTC_WRAPPER: sccache
@@ -77,7 +43,7 @@ jobs:
         with:
           tool: nextest,cargo-llvm-cov
 
-      # Restore populated cache → run tests and coverage (minimal or no recompile)
+      # One build (with coverage) + one test run. cargo-llvm-cov uses target/llvm-cov-target.
       - name: Run tests and coverage
         run: |
           cargo llvm-cov nextest -p tish --features full --no-fail-fast --profile ci \
@@ -99,7 +65,7 @@ jobs:
           path: lcov.info
 
   build:
-    needs: [compile]
+    needs: [test]
     strategy:
       fail-fast: false
       matrix:
