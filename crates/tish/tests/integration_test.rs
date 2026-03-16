@@ -1,8 +1,14 @@
 //! Full-stack integration tests: parse, interpreter, and native compile of .tish files.
 //!
 //! Run with: `cargo test -p tish` (full stack) or `cargo test` (all packages).
+//! Compiled outputs are cached under target/integration_compile_cache/ so repeated runs
+//! and CI cache restores avoid re-running `tish compile` for unchanged files.
 
-use std::path::PathBuf;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::io::Read;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn workspace_root() -> PathBuf {
@@ -17,6 +23,114 @@ fn target_dir() -> PathBuf {
     std::env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| workspace_root().join("target"))
+}
+
+/// Cache dir for tish compile outputs (under target/ so CI rust-cache restores it).
+fn integration_compile_cache_dir() -> PathBuf {
+    target_dir().join("integration_compile_cache")
+}
+
+fn file_content_hash(path: &Path) -> u64 {
+    let mut f = std::fs::File::open(path).expect("open file for hash");
+    let mut content = Vec::new();
+    f.read_to_end(&mut content).expect("read file for hash");
+    let mut h = DefaultHasher::new();
+    path.to_string_lossy().hash(&mut h);
+    content.hash(&mut h);
+    h.finish()
+}
+
+/// Compile a .tish file with the given backend, using a persistent cache so we only run
+/// `tish compile` when the file or backend changed. Returns path to the compiled artifact
+/// (binary, .js, or .wasm) in a temp dir; caller may run it and then delete it.
+///
+/// Cache is keyed by backend (native, cranelift, js, wasi) so e.g. cranelift and wasi
+/// compiles of the same file do not overwrite each other: .../cranelift/<stem>_<hash> vs .../wasi/<stem>_<hash>.wasm.
+fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
+    let stem = path.file_stem().unwrap().to_string_lossy();
+    let hash = file_content_hash(path);
+    let hash8 = &format!("{:016x}", hash)[..8];
+    let cache_base = integration_compile_cache_dir().join(backend);
+    let _ = std::fs::create_dir_all(&cache_base);
+
+    let (artifact_path, compile_args): (PathBuf, Vec<OsString>) = match backend {
+        "native" => {
+            let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+            let cached = cache_base.join(format!("{}_{}{}", stem, hash8, ext));
+            let args = vec![
+                OsString::from("compile"),
+                OsString::from(path),
+                OsString::from("-o"),
+                OsString::from(&cached),
+            ];
+            (cached, args)
+        }
+        "cranelift" => {
+            let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+            let cached = cache_base.join(format!("{}_{}{}", stem, hash8, ext));
+            let args = vec![
+                OsString::from("compile"),
+                OsString::from(path),
+                OsString::from("-o"),
+                OsString::from(&cached),
+                OsString::from("--native-backend"),
+                OsString::from("cranelift"),
+            ];
+            (cached, args)
+        }
+        "js" => {
+            let cached = cache_base.join(format!("{}_{}.js", stem, hash8));
+            let args = vec![
+                OsString::from("compile"),
+                OsString::from(path),
+                OsString::from("--target"),
+                OsString::from("js"),
+                OsString::from("-o"),
+                OsString::from(&cached),
+            ];
+            (cached, args)
+        }
+        "wasi" => {
+            let out_base = cache_base.join(format!("{}_{}", stem, hash8));
+            let artifact = out_base.with_extension("wasm");
+            let args = vec![
+                OsString::from("compile"),
+                OsString::from(path),
+                OsString::from("-o"),
+                OsString::from(&out_base),
+                OsString::from("--target"),
+                OsString::from("wasi"),
+            ];
+            (artifact, args)
+        }
+        _ => panic!("unknown backend {}", backend),
+    };
+
+    if !artifact_path.exists() {
+        let out = Command::new(bin)
+            .args(compile_args)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish compile");
+        assert!(
+            out.status.success(),
+            "Compile failed for {} ({}): {}",
+            path.display(),
+            backend,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // Copy to temp so caller can run and delete without touching cache.
+    let ext = artifact_path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+    let temp_dest = std::env::temp_dir().join(format!("tish_cached_{}_{}_{}", backend, stem, hash8));
+    let temp_dest = if ext.is_empty() {
+        temp_dest
+    } else {
+        temp_dest.with_extension(ext)
+    };
+    std::fs::copy(&artifact_path, &temp_dest).expect("copy cached artifact to temp");
+    temp_dest
 }
 
 /// Path to the tish CLI binary. When running under cargo-llvm-cov, the build goes to
@@ -372,50 +486,35 @@ fn test_mvp_programs_interpreter_vs_native() {
         if !path.exists() {
             continue;
         }
-        {
-            let path_str = path.to_string_lossy();
+        let path_str = path.to_string_lossy();
 
-            let interp_out = Command::new(&bin)
-                .args(["run", &path_str, "--backend", "interp"])
-                .current_dir(workspace_root())
-                .output()
-                .expect("run tish interpreter");
-            assert!(
-                interp_out.status.success(),
-                "Interpreter failed for {}: {}",
-                path.display(),
-                String::from_utf8_lossy(&interp_out.stderr)
-            );
+        let interp_out = Command::new(&bin)
+            .args(["run", path_str.as_ref(), "--backend", "interp"])
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish interpreter");
+        assert!(
+            interp_out.status.success(),
+            "Interpreter failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&interp_out.stderr)
+        );
 
-            let out_bin = std::env::temp_dir().join(format!("tish_test_{}", path.file_stem().unwrap().to_string_lossy()));
-            let compile_out = Command::new(&bin)
-                .args(["compile", &path_str, "-o"])
-                .arg(out_bin.to_string_lossy().as_ref())
-                .current_dir(workspace_root())
-                .output()
-                .expect("run tish compile");
-            assert!(
-                compile_out.status.success(),
-                "Compile failed for {}: {}",
-                path.display(),
-                String::from_utf8_lossy(&compile_out.stderr)
-            );
+        let out_bin = compile_cached(&bin, &path, "native");
+        let native_out = Command::new(&out_bin)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run compiled binary");
+        let _ = std::fs::remove_file(&out_bin);
 
-            let native_out = Command::new(&out_bin)
-                .current_dir(workspace_root())
-                .output()
-                .expect("run compiled binary");
-            let _ = std::fs::remove_file(&out_bin);
-
-            let interp_stdout = String::from_utf8_lossy(&interp_out.stdout);
-            let native_stdout = String::from_utf8_lossy(&native_out.stdout);
-            assert_eq!(
-                interp_stdout,
-                native_stdout,
-                "Interpreter vs native output mismatch for {}",
-                path.display()
-            );
-        }
+        let interp_stdout = String::from_utf8_lossy(&interp_out.stdout);
+        let native_stdout = String::from_utf8_lossy(&native_out.stdout);
+        assert_eq!(
+            interp_stdout,
+            native_stdout,
+            "Interpreter vs native output mismatch for {}",
+            path.display()
+        );
     }
 }
 
@@ -459,8 +558,6 @@ fn test_mvp_programs_interpreter_vs_cranelift() {
             continue;
         }
         let path_str = path.to_string_lossy();
-        let out_bin = std::env::temp_dir()
-            .join(format!("tish_cranelift_test_{}", path.file_stem().unwrap().to_string_lossy()));
 
         let interp_out = Command::new(&bin)
             .args(["run", path_str.as_ref(), "--backend", "interp"])
@@ -474,25 +571,7 @@ fn test_mvp_programs_interpreter_vs_cranelift() {
             String::from_utf8_lossy(&interp_out.stderr)
         );
 
-        let compile_out = Command::new(&bin)
-            .args([
-                "compile",
-                path_str.as_ref(),
-                "-o",
-                out_bin.to_string_lossy().as_ref(),
-                "--native-backend",
-                "cranelift",
-            ])
-            .current_dir(workspace_root())
-            .output()
-            .expect("run tish compile cranelift");
-        assert!(
-            compile_out.status.success(),
-            "Cranelift compile failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&compile_out.stderr)
-        );
-
+        let out_bin = compile_cached(&bin, &path, "cranelift");
         let cranelift_out = Command::new(&out_bin)
             .current_dir(workspace_root())
             .output()
@@ -558,9 +637,6 @@ fn test_mvp_programs_interpreter_vs_wasi() {
             continue;
         }
         let path_str = path.to_string_lossy();
-        let stem = path.file_stem().unwrap().to_string_lossy();
-        let out_wasm = std::env::temp_dir()
-            .join(format!("tish_wasi_test_{}.wasm", stem));
 
         let interp_out = Command::new(&bin)
             .args(["run", path_str.as_ref(), "--backend", "interp"])
@@ -574,27 +650,7 @@ fn test_mvp_programs_interpreter_vs_wasi() {
             String::from_utf8_lossy(&interp_out.stderr)
         );
 
-        let compile_out = Command::new(&bin)
-            .args([
-                "compile",
-                path_str.as_ref(),
-                "-o",
-                out_wasm.with_extension("").to_string_lossy().as_ref(),
-                "--target",
-                "wasi",
-            ])
-            .current_dir(workspace_root())
-            .output()
-            .expect("run tish compile wasi");
-        if !compile_out.status.success() {
-            eprintln!(
-                "Skipping {}: WASI compile failed (wasm32-wasip1 target may be missing): {}",
-                path.display(),
-                String::from_utf8_lossy(&compile_out.stderr)
-            );
-            continue;
-        }
-
+        let out_wasm = compile_cached(&bin, &path, "wasi");
         let wasi_out = Command::new("wasmtime")
             .arg(out_wasm.as_os_str())
             .current_dir(workspace_root())
@@ -717,28 +773,7 @@ fn test_mvp_programs_interpreter_vs_js() {
             continue;
         }
 
-        // Compile to JS and compare to Node
-        let out_js = std::env::temp_dir()
-            .join(format!("tish_js_test_{}.js", path.file_stem().unwrap().to_string_lossy()));
-        let compile_out = Command::new(&bin)
-            .args([
-                "compile",
-                path_str.as_ref(),
-                "--target",
-                "js",
-                "-o",
-                out_js.to_string_lossy().as_ref(),
-            ])
-            .current_dir(workspace_root())
-            .output()
-            .expect("run tish compile --target js");
-        assert!(
-            compile_out.status.success(),
-            "JS compile failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&compile_out.stderr)
-        );
-
+        let out_js = compile_cached(&bin, &path, "js");
         let node_out = Command::new("node")
             .arg(&out_js)
             .current_dir(workspace_root())
