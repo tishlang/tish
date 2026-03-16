@@ -13,6 +13,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rayon::prelude::*;
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
@@ -497,7 +499,7 @@ fn test_mvp_programs_interpreter() {
     }
 }
 
-/// Compile each .tish file to native, run, and compare stdout to static expected.
+/// Compile each .tish file to native, run, and compare stdout to static expected (parallelized).
 #[test]
 fn test_mvp_programs_native() {
     let core_dir = core_dir();
@@ -507,32 +509,40 @@ fn test_mvp_programs_native() {
         "tish binary not found at {}. Run `cargo build -p tish` first.",
         bin.display()
     );
-    for name in MVP_TEST_FILES {
-        let path = core_dir.join(name);
-        if !path.exists() {
-            continue;
-        }
-        let expected = get_expected(&path).unwrap_or_else(|| {
-            panic!(
-                "missing expected file for {}; run with REGENERATE_EXPECTED=1 to generate",
-                path.display()
-            )
-        });
-        let out_bin = compile_cached(&bin, &path, "native");
-        let out = Command::new(&out_bin)
-            .current_dir(workspace_root())
-            .output()
-            .expect("run compiled binary");
-        let _ = std::fs::remove_file(&out_bin);
-        assert!(
-            out.status.success(),
-            "Native binary failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert_eq!(stdout, expected, "Native output mismatch for {}", path.display());
-    }
+    let errors: Vec<String> = MVP_TEST_FILES
+        .par_iter()
+        .filter_map(|name| {
+            let path = core_dir.join(name);
+            if !path.exists() {
+                return None;
+            }
+            let expected = match get_expected(&path) {
+                Some(e) => e,
+                None => return Some(format!("missing expected: {}", path.display())),
+            };
+            let out_bin = compile_cached(&bin, &path, "native");
+            let out = match Command::new(&out_bin)
+                .current_dir(workspace_root())
+                .output()
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&out_bin);
+                    return Some(format!("{}: run failed: {}", path.display(), e));
+                }
+            };
+            let _ = std::fs::remove_file(&out_bin);
+            if !out.status.success() {
+                return Some(format!("{}: {}", path.display(), String::from_utf8_lossy(&out.stderr)));
+            }
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout != expected {
+                return Some(format!("{}: output mismatch", path.display()));
+            }
+            None
+        })
+        .collect();
+    assert!(errors.is_empty(), "native failures:\n{}", errors.join("\n"));
 }
 
 /// Curated list: files that pass with Cranelift (some constructs cause stack-underflow; see docs/builtins-gap-analysis.md).
@@ -556,7 +566,7 @@ const CRANELIFT_TEST_FILES: &[&str] = &[
     "types.tish",
 ];
 
-/// Compile each .tish file with Cranelift backend, run, and compare stdout to static expected.
+/// Compile each .tish file with Cranelift backend, run, and compare stdout to static expected (parallelized).
 #[test]
 fn test_mvp_programs_cranelift() {
     let core_dir = core_dir();
@@ -566,35 +576,43 @@ fn test_mvp_programs_cranelift() {
         "tish binary not found at {}. Run `cargo build -p tish` first.",
         bin.display()
     );
-    for name in CRANELIFT_TEST_FILES {
-        let path = core_dir.join(name);
-        if !path.exists() {
-            continue;
-        }
-        let expected = get_expected(&path).unwrap_or_else(|| {
-            panic!(
-                "missing expected file for {}; run with REGENERATE_EXPECTED=1 to generate",
-                path.display()
-            )
-        });
-        let out_bin = compile_cached(&bin, &path, "cranelift");
-        let out = Command::new(&out_bin)
-            .current_dir(workspace_root())
-            .output()
-            .expect("run cranelift binary");
-        let _ = std::fs::remove_file(&out_bin);
-        assert!(
-            out.status.success(),
-            "Cranelift binary failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert_eq!(stdout, expected, "Cranelift output mismatch for {}", path.display());
-    }
+    let errors: Vec<String> = CRANELIFT_TEST_FILES
+        .par_iter()
+        .filter_map(|name| {
+            let path = core_dir.join(name);
+            if !path.exists() {
+                return None;
+            }
+            let expected = match get_expected(&path) {
+                Some(e) => e,
+                None => return Some(format!("missing expected: {}", path.display())),
+            };
+            let out_bin = compile_cached(&bin, &path, "cranelift");
+            let out = match Command::new(&out_bin)
+                .current_dir(workspace_root())
+                .output()
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&out_bin);
+                    return Some(format!("{}: run failed: {}", path.display(), e));
+                }
+            };
+            let _ = std::fs::remove_file(&out_bin);
+            if !out.status.success() {
+                return Some(format!("{}: {}", path.display(), String::from_utf8_lossy(&out.stderr)));
+            }
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout != expected {
+                return Some(format!("{}: output mismatch", path.display()));
+            }
+            None
+        })
+        .collect();
+    assert!(errors.is_empty(), "cranelift failures:\n{}", errors.join("\n"));
 }
 
-/// Compile each .tish file to WASI, run with wasmtime, and compare stdout to static expected.
+/// Compile each .tish file to WASI, run with wasmtime, and compare stdout to static expected (parallelized).
 /// Skips if wasmtime is not available.
 #[test]
 fn test_mvp_programs_wasi() {
@@ -614,33 +632,41 @@ fn test_mvp_programs_wasi() {
         "tish binary not found at {}. Run `cargo build -p tish` first.",
         bin.display()
     );
-    for name in CRANELIFT_TEST_FILES {
-        let path = core_dir.join(name);
-        if !path.exists() {
-            continue;
-        }
-        let expected = get_expected(&path).unwrap_or_else(|| {
-            panic!(
-                "missing expected file for {}; run with REGENERATE_EXPECTED=1 to generate",
-                path.display()
-            )
-        });
-        let out_wasm = compile_cached(&bin, &path, "wasi");
-        let out = Command::new("wasmtime")
-            .arg(out_wasm.as_os_str())
-            .current_dir(workspace_root())
-            .output()
-            .expect("run wasmtime");
-        let _ = std::fs::remove_file(&out_wasm);
-        assert!(
-            out.status.success(),
-            "WASI run failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert_eq!(stdout, expected, "WASI output mismatch for {}", path.display());
-    }
+    let errors: Vec<String> = CRANELIFT_TEST_FILES
+        .par_iter()
+        .filter_map(|name| {
+            let path = core_dir.join(name);
+            if !path.exists() {
+                return None;
+            }
+            let expected = match get_expected(&path) {
+                Some(e) => e,
+                None => return Some(format!("missing expected: {}", path.display())),
+            };
+            let out_wasm = compile_cached(&bin, &path, "wasi");
+            let out = match Command::new("wasmtime")
+                .arg(out_wasm.as_os_str())
+                .current_dir(workspace_root())
+                .output()
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&out_wasm);
+                    return Some(format!("{}: wasmtime failed: {}", path.display(), e));
+                }
+            };
+            let _ = std::fs::remove_file(&out_wasm);
+            if !out.status.success() {
+                return Some(format!("{}: {}", path.display(), String::from_utf8_lossy(&out.stderr)));
+            }
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout != expected {
+                return Some(format!("{}: output mismatch", path.display()));
+            }
+            None
+        })
+        .collect();
+    assert!(errors.is_empty(), "wasi failures:\n{}", errors.join("\n"));
 }
 
 /// Files where Tish intentionally differs from JavaScript (typeof, void); skip in JS test since we compare to Tish expected.

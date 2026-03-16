@@ -104,7 +104,8 @@ compile-with FEATURES INPUT OUTPUT:
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 #   just test              # same as CI: nextest, -p tish, full features (recommended)
-#   just test-nextest      # same, explicit
+#   just test-quick        # skip slow backend tests (native/cranelift/wasi) for fast iteration
+#   just test-nextest      # same as test, explicit
 #   just test-coverage     # nextest + llvm-cov (writes lcov.info, coverage-html/)
 #   just test-cargo        # plain cargo test (whole workspace, full features)
 #   just test-secure       # cargo test, no features
@@ -120,6 +121,10 @@ test *ARGS:
 # Explicit nextest (same as test)
 test-nextest *ARGS:
     cargo nextest run -p tish --features full -- {{ARGS}}
+
+# Skip slow backend tests (native/cranelift/wasi) for fast local iteration
+test-quick:
+    cargo nextest run -p tish --features full -- --skip test_mvp_programs_native --skip test_mvp_programs_cranelift --skip test_mvp_programs_wasi
 
 # Run tests with coverage (requires llvm-tools: rustup component add llvm-tools-preview)
 test-coverage:
