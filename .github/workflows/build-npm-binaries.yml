@@ -38,14 +38,15 @@ jobs:
         with:
           cache-workspace-crates: "true"
 
-      - name: Install nextest and cargo-llvm-cov
+      - name: Install nextest
         uses: taiki-e/install-action@v2
         with:
-          tool: nextest,cargo-llvm-cov
+          tool: nextest
 
-      # Build test suite with coverage (test job restores this cache and only runs tests)
-      - name: Build tests (coverage)
-        run: cargo llvm-cov nextest --no-run -p tish --features full --profile ci
+      # Build test suite only (no run). Test job runs with llvm-cov and gets cache hits for deps.
+      # We must not use llvm-cov here: --no-run produces no .profraw, so merge would fail.
+      - name: Build tests
+        run: cargo nextest run --no-run -p tish --features full --profile ci
 
   test:
     name: Test & coverage
