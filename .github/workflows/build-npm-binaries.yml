@@ -209,7 +209,7 @@ jobs:
           path: npm/tish/platform/
 
   release:
-    name: Release (semantic version + GitHub + npm)
+    name: Release (GitHub only)
     needs: [assemble]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -257,21 +257,8 @@ jobs:
         env:
           REPO_URL: ${{ format('{0}/{1}.git', github.server_url, github.repository) }}
 
-      - name: Semantic release (tish package)
+      - name: Semantic release (GitHub release + tag + version bump, no npm publish)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd npm/tish && npx semantic-release --extends ../../.releaserc.json
-
-      - name: Sync version and publish create-tish-app
-        if: success()
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          VERSION=$(node -p "require('./npm/tish/package.json').version")
-          cd npm/create-tish-app
-          npm version $VERSION --no-git-tag-version --allow-same-version
-          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > .npmrc
-          npm publish --access public
-        continue-on-error: true
