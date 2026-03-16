@@ -4,3 +4,10 @@
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# test_async_await_compile_via_binary runs a compiled Tish async program; the child process
+# (or its runtime) can leave stdout/stderr open briefly after exit. Give it more time before
+# nextest marks the test as LEAK (default is 100ms).
+[[profile.ci.overrides]]
+filter = 'test(test_async_await_compile_via_binary)'
+leak-timeout = "2s"

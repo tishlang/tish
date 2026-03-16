@@ -2238,7 +2238,7 @@ impl Codegen {
                 format!(
                     "Value::String(match &{} {{ \
                      Value::Number(_) => \"number\".into(), Value::String(_) => \"string\".into(), \
-                     Value::Bool(_) => \"boolean\".into(), Value::Null => \"object\".into(), \
+                     Value::Bool(_) => \"boolean\".into(), Value::Null => \"null\".into(), \
                      Value::Array(_) => \"object\".into(), Value::Object(_) => \"object\".into(), \
                      Value::Function(_) => \"function\".into(), _ => \"object\".into() }})",
                     o
