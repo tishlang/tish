@@ -19,8 +19,19 @@ fn target_dir() -> PathBuf {
         .unwrap_or_else(|_| workspace_root().join("target"))
 }
 
+/// Path to the tish CLI binary. When running under cargo-llvm-cov, the build goes to
+/// target/llvm-cov-target and CARGO_TARGET_DIR may not be set for the test process.
 fn tish_bin() -> PathBuf {
-    target_dir().join("debug").join("tish")
+    let bin_name = if cfg!(target_os = "windows") { "tish.exe" } else { "tish" };
+    let default = target_dir().join("debug").join(bin_name);
+    if default.exists() {
+        return default;
+    }
+    let llvm_cov = workspace_root().join("target").join("llvm-cov-target").join("debug").join(bin_name);
+    if llvm_cov.exists() {
+        return llvm_cov;
+    }
+    default
 }
 
 /// Parse async-await example (validates async fn parsing).
@@ -38,7 +49,7 @@ fn test_async_await_parse() {
 #[test]
 #[cfg(feature = "http")]
 fn test_async_await_compile_via_binary() {
-    let bin = target_dir().join("debug").join("tish");
+    let bin = tish_bin();
     let path = workspace_root().join("examples").join("async-await").join("src").join("main.tish");
     if path.exists() && bin.exists() {
         let out = std::env::temp_dir().join("tish_async_test_out");
@@ -73,7 +84,7 @@ fn test_async_await_compile_via_binary() {
 #[test]
 #[cfg(feature = "http")]
 fn test_async_parallel_vs_sequential_timing() {
-    let bin = target_dir().join("debug").join("tish");
+    let bin = tish_bin();
     let parallel_src = workspace_root().join("examples").join("async-await").join("src").join("parallel.tish");
     let sequential_src = workspace_root().join("examples").join("async-await").join("src").join("sequential.tish");
     if !parallel_src.exists() || !sequential_src.exists() || !bin.exists() {
@@ -189,7 +200,7 @@ fn test_vm_date_now() {
     let result = tish_vm::run(&chunk);
     assert!(result.is_ok(), "VM run (library) failed: {:?}", result.err());
     // Binary path - same flow as `tish run <file>`
-    let bin = target_dir().join("debug").join("tish");
+    let bin = tish_bin();
     if bin.exists() {
         let out = Command::new(&bin)
             .args(["run", path.to_string_lossy().as_ref()])
