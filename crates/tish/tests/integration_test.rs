@@ -212,6 +212,7 @@ fn test_async_await_compile_via_binary() {
 /// Uses httpbin.org/delay/1 (1s each). 3 parallel ≈ 1s, 3 sequential ≈ 3s.
 #[test]
 #[cfg(feature = "http")]
+#[ignore = "timing and network sensitive; run manually: cargo test test_async_parallel_vs_sequential_timing -p tish --features http -- --ignored"]
 fn test_async_parallel_vs_sequential_timing() {
     let bin = tish_bin();
     let parallel_src = workspace_root().join("examples").join("async-await").join("src").join("parallel.tish");

@@ -20,6 +20,13 @@
   "engines": {
     "node": ">=14"
   },
+  "devDependencies": {
+    "@semantic-release/commit-analyzer": "^19.2.0",
+    "@semantic-release/github": "^10.1.0",
+    "@semantic-release/npm": "^11.0.0",
+    "@semantic-release/release-notes-generator": "^13.0.0",
+    "semantic-release": "^24.0.0"
+  },
   "keywords": [
     "tish",
     "language",

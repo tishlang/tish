@@ -243,14 +243,8 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install semantic-release and plugins
-        run: |
-          npm install -g \
-            semantic-release \
-            @semantic-release/commit-analyzer \
-            @semantic-release/release-notes-generator \
-            @semantic-release/npm \
-            @semantic-release/github
+      - name: Install npm deps (semantic-release and plugins)
+        run: npm install --prefix npm/tish
 
       - name: Semantic release (tish package)
         env:
@@ -258,7 +252,6 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd npm/tish && npx semantic-release --extends ../../.releaserc.json
-        continue-on-error: true
 
       - name: Sync version and publish create-tish-app
         if: success()
