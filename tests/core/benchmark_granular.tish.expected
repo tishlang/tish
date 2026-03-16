@@ -1,0 +1,86 @@
+=== Granular Operation Benchmarks ===
+Iterations per test: 5000
+
+--- Arithmetic ---
+Basic math (+, *, -): 9ms
+Exponentiation (**): 9ms
+Modulo (%): 9ms
+
+--- Variable Access ---
+Local var read: 8ms
+Local var write: 7ms
+
+--- Function Calls ---
+Empty arrow fn call: 8ms
+Arrow fn with args: 14ms
+Named fn call: 13ms
+
+--- Nested Functions ---
+Nested fn call: 41ms
+3-level nested fn: 46ms
+
+--- Object Creation ---
+Create 1-prop object: 10ms
+Create 5-prop object: 18ms
+Create object with exprs: 15ms
+
+--- Object Access ---
+Dot property read: 10ms
+Dot property write: 9ms
+Bracket property read: 11ms
+Bracket property write: 9ms
+Deep property chain (4): 13ms
+
+--- Array Creation ---
+Create 3-elem array: 9ms
+Create 10-elem array: 11ms
+
+--- Array Access ---
+Array index read: 9ms
+Array index write: 8ms
+Array .length: 9ms
+
+--- Array Methods ---
+Array.push(): 11ms
+Array.pop(): 11ms
+Array.sort() (5 elems): 15ms
+Array.map() (5 elems): 18ms
+Array.filter() (5 elems): 19ms
+Array.reduce() (5 elems): 42ms
+Array.splice(): 13ms
+
+--- Spread Operators ---
+Array spread copy: 10ms
+Array spread + concat: 10ms
+Object spread copy: 13ms
+Object spread + extend: 13ms
+
+--- Destructuring ---
+Array destructure (3): 12ms
+Object destructure (2): 15ms
+
+--- Object Statics ---
+Object.assign(): 19ms
+Object.keys(): 14ms
+Object.values(): 15ms
+Object.entries(): 15ms
+Object.fromEntries(): 16ms
+
+--- Loops ---
+for loop (100x50): 8ms
+while loop (100x50): 9ms
+for-of loop (500x10): 6ms
+
+--- Conditionals ---
+if-else: 10ms
+ternary: 9ms
+switch (4 cases): 11ms
+
+--- String Operations ---
+String concat (+): 7ms
+Template literal: 11ms
+String.length: 9ms
+String.toUpperCase(): 7ms
+String.split(): 9ms
+
+=== Granular Benchmarks Complete ===

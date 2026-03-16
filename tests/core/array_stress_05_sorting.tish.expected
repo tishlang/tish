@@ -1,0 +1,4 @@
+--- array_stress_05: Sorting ---
+sort 100 x3: 2ms
+sort 1000 x2: 15ms
+DONE 05

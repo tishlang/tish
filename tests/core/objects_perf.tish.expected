@@ -1,0 +1,12 @@
+sum: 11000
+total: 15
+root: 1
+left: 2
+right: 3
+left-left: 4
+left-right: 5
+right-left: 6
+right-right: 7
+active: 3
+chainSum: 21000
+inCount: 700

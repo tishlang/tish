@@ -1,0 +1,11 @@
+Array.isArray([]): true
+Array.isArray([1,2,3]): true
+Array.isArray({}): false
+Array.isArray('string'): false
+Array.isArray(null): false
+Array.isArray(42): false
+String.fromCharCode(65): A
+String.fromCharCode(66, 67, 68): BCD
+String.fromCharCode(72, 105): Hi
+Hello from charCodes: Hello
+hello === 'Hello': true

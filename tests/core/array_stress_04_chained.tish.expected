@@ -1,0 +1,4 @@
+--- array_stress_04: Chained Operations ---
+chain x1: 0ms
+filter-map-reduce x3: 1ms
+DONE 04

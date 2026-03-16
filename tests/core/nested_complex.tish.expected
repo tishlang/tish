@@ -1,0 +1,26 @@
+Triple nested sum: 351
+Mixed loops count: 27
+Matrix sum: 21
+Break/continue sum: 18
+Innermost x: 4
+Third level x: 3
+Second level x: 2
+Outer x: 1
+Deep access: 90
+Loop scoped: 33
+Nested func: 15
+Helper result: 60
+4 level nesting: 10
+Fib 10: 55
+Is 10 even? true
+Is 7 even? false
+Process matrix: 45
+Transform sum: 80
+Complex accum: 28
+Cond 0: zero
+Cond 5: positive-small
+Cond 50: positive-large
+Cond 150: positive-large-huge
+Cond -5: negative
+Deep compute: 405
+All nested tests passed!

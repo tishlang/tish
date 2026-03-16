@@ -1,0 +1,12 @@
+x: 10
+s: hello
+b: true
+n: null
+arr: 1 2 3
+obj.a: 1
+inner: 42
+item: a
+item: b
+item: c
+mutable: 2
+Hello, World

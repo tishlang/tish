@@ -1,8 +1,10 @@
-//! Full-stack integration tests: parse, interpreter, and native compile of .tish files.
+//! Full-stack integration tests: run .tish files with interpreter or each backend and compare
+//! stdout to static expected files (e.g. `fn_any.tish.expected`).
 //!
-//! Run with: `cargo test -p tish` (full stack) or `cargo test` (all packages).
-//! Compiled outputs are cached under target/integration_compile_cache/ so repeated runs
-//! and CI cache restores avoid re-running `tish compile` for unchanged files.
+//! - Run: `cargo test -p tish` (or `cargo nextest run -p tish`).
+//! - Generate/update expected files: `REGENERATE_EXPECTED=1 cargo test -p tish test_mvp_programs_interpreter`
+//!   then commit the new/updated `tests/core/*.tish.expected` files.
+//! - Compiled outputs are cached under `target/integration_compile_cache/` per backend.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -17,6 +19,17 @@ fn workspace_root() -> PathBuf {
 
 fn core_dir() -> PathBuf {
     workspace_root().join("tests").join("core")
+}
+
+/// Path to the static expected stdout for a .tish file (e.g. fn_any.tish -> fn_any.tish.expected).
+fn expected_path(path: &Path) -> PathBuf {
+    path.with_file_name(format!("{}.expected", path.file_name().unwrap().to_string_lossy()))
+}
+
+/// Read static expected stdout for a test file. Returns None if the file does not exist.
+fn get_expected(path: &Path) -> Option<String> {
+    let p = expected_path(path);
+    std::fs::read_to_string(&p).ok()
 }
 
 fn target_dir() -> PathBuf {
@@ -397,35 +410,53 @@ fn test_full_stack_parse() {
     }
 }
 
-/// Full stack: parse + interpret each .tish file and assert no runtime error.
-/// Skips files that overflow the stack in-process (recursion_stress, array_stress) or are slow.
+/// Shared list of MVP test files used for static comparison (interpreter and native).
+const MVP_TEST_FILES: &[&str] = &[
+    "nested_loops.tish",
+    "scopes.tish",
+    "optional_braces.tish",
+    "optional_braces_braced.tish",
+    "tab_indent.tish",
+    "space_indent.tish",
+    "fn_any.tish",
+    "strict_equality.tish",
+    "arrays.tish",
+    "break_continue.tish",
+    "length.tish",
+    "objects.tish",
+    "conditional.tish",
+    "switch.tish",
+    "do_while.tish",
+    "typeof.tish",
+    "inc_dec.tish",
+    "try_catch.tish",
+    "builtins.tish",
+    "exponentiation.tish",
+    "for_of.tish",
+    "bitwise.tish",
+    "math.tish",
+    "optional_chaining.tish",
+    "void.tish",
+    "rest_params.tish",
+    "json.tish",
+    "uri.tish",
+    "in_op.tish",
+    "arrow_functions.tish",
+    "template_literals.tish",
+    "compound_assign.tish",
+    "mutation.tish",
+    "string_methods.tish",
+    "array_methods.tish",
+    "object_methods.tish",
+    "types.tish",
+    "logical_assign.tish",
+    "spread.tish",
+];
+
+/// Run each .tish file with interpreter and compare stdout to static expected.
+/// Set REGENERATE_EXPECTED=1 to write .expected files from interpreter output (run once, then commit).
 #[test]
 fn test_mvp_programs_interpreter() {
-    let core_dir = core_dir();
-    let skip = ["recursion_stress.tish", "array_stress.tish"];
-    for entry in std::fs::read_dir(&core_dir).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        if path.extension().map(|e| e == "tish").unwrap_or(false) {
-            let name = path.file_name().unwrap().to_string_lossy();
-            if skip.contains(&name.as_ref()) {
-                continue;
-            }
-            let source = std::fs::read_to_string(&path).unwrap();
-            let result = tish_eval::run(&source);
-            assert!(
-                result.is_ok(),
-                "Failed to run {}: {:?}",
-                path.display(),
-                result.err()
-            );
-        }
-    }
-}
-
-/// Full stack: compile each .tish file to native, run, and compare output to interpreter.
-#[test]
-fn test_mvp_programs_interpreter_vs_native() {
     let core_dir = core_dir();
     let bin = tish_bin();
     assert!(
@@ -433,96 +464,101 @@ fn test_mvp_programs_interpreter_vs_native() {
         "tish binary not found at {}. Run `cargo build -p tish` first.",
         bin.display()
     );
-
-    // Plan Section 7 MVP programs + extended feature set (each compile ~1-2s)
-    let test_files = [
-        // Plan-mandated concrete MVP programs
-        "nested_loops.tish",
-        "scopes.tish",
-        "optional_braces.tish",
-        "optional_braces_braced.tish",
-        "tab_indent.tish",
-        "space_indent.tish",
-        "fn_any.tish",
-        "strict_equality.tish",
-        // Extended features
-        "arrays.tish",
-        "break_continue.tish",
-        "length.tish",
-        "objects.tish",
-        "conditional.tish",
-        "switch.tish",
-        "do_while.tish",
-        "typeof.tish",
-        "inc_dec.tish",
-        "try_catch.tish",
-        "builtins.tish",
-        "exponentiation.tish",
-        "for_of.tish",
-        "bitwise.tish",
-        "math.tish",
-        "optional_chaining.tish",
-        "void.tish",
-        "rest_params.tish",
-        "json.tish",
-        "uri.tish",
-        "in_op.tish",
-        // Additional parity tests
-        "arrow_functions.tish",
-        "template_literals.tish",
-        "compound_assign.tish",
-        "mutation.tish",
-        "string_methods.tish",
-        "array_methods.tish",
-        "object_methods.tish",
-        "types.tish", // type annotations - now supported in codegen
-        // higher_order_methods.tish - addToTotal RefCell fix works but reduce (no init) panics in native
-        // destructuring.tish - excluded: destructured vars not in scope outside if-let block
-        "logical_assign.tish",
-        "spread.tish",
-    ];
-    for name in test_files {
+    let regenerate = std::env::var("REGENERATE_EXPECTED").as_deref() == Ok("1");
+    for name in MVP_TEST_FILES {
         let path = core_dir.join(name);
         if !path.exists() {
             continue;
         }
         let path_str = path.to_string_lossy();
-
-        let interp_out = Command::new(&bin)
+        let out = Command::new(&bin)
             .args(["run", path_str.as_ref(), "--backend", "interp"])
             .current_dir(workspace_root())
             .output()
             .expect("run tish interpreter");
         assert!(
-            interp_out.status.success(),
+            out.status.success(),
             "Interpreter failed for {}: {}",
             path.display(),
-            String::from_utf8_lossy(&interp_out.stderr)
+            String::from_utf8_lossy(&out.stderr)
         );
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        if regenerate {
+            std::fs::write(expected_path(&path), &stdout).expect("write expected");
+        } else {
+            let expected = get_expected(&path).unwrap_or_else(|| {
+                panic!(
+                    "missing expected file for {}; run with REGENERATE_EXPECTED=1 to generate",
+                    path.display()
+                )
+            });
+            assert_eq!(stdout, expected, "Interpreter output mismatch for {}", path.display());
+        }
+    }
+}
 
+/// Compile each .tish file to native, run, and compare stdout to static expected.
+#[test]
+fn test_mvp_programs_native() {
+    let core_dir = core_dir();
+    let bin = tish_bin();
+    assert!(
+        bin.exists(),
+        "tish binary not found at {}. Run `cargo build -p tish` first.",
+        bin.display()
+    );
+    for name in MVP_TEST_FILES {
+        let path = core_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let expected = get_expected(&path).unwrap_or_else(|| {
+            panic!(
+                "missing expected file for {}; run with REGENERATE_EXPECTED=1 to generate",
+                path.display()
+            )
+        });
         let out_bin = compile_cached(&bin, &path, "native");
-        let native_out = Command::new(&out_bin)
+        let out = Command::new(&out_bin)
             .current_dir(workspace_root())
             .output()
             .expect("run compiled binary");
         let _ = std::fs::remove_file(&out_bin);
-
-        let interp_stdout = String::from_utf8_lossy(&interp_out.stdout);
-        let native_stdout = String::from_utf8_lossy(&native_out.stdout);
-        assert_eq!(
-            interp_stdout,
-            native_stdout,
-            "Interpreter vs native output mismatch for {}",
-            path.display()
+        assert!(
+            out.status.success(),
+            "Native binary failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr)
         );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(stdout, expected, "Native output mismatch for {}", path.display());
     }
 }
 
-/// Full stack: compile each .tish file with Cranelift backend, run, and compare output to interpreter.
-/// Uses a curated list of pure Tish tests known to work with Cranelift (some constructs cause
-/// stack-underflow in the Cranelift backend; see docs/builtins-gap-analysis.md).
+/// Curated list: files that pass with Cranelift (some constructs cause stack-underflow; see docs/builtins-gap-analysis.md).
+const CRANELIFT_TEST_FILES: &[&str] = &[
+    "fn_any.tish",
+    "strict_equality.tish",
+    "switch.tish",
+    "do_while.tish",
+    "typeof.tish",
+    "try_catch.tish",
+    "json.tish",
+    "math.tish",
+    "builtins.tish",
+    "uri.tish",
+    "inc_dec.tish",
+    "exponentiation.tish",
+    "void.tish",
+    "rest_params.tish",
+    "arrow_functions.tish",
+    "array_methods.tish",
+    "types.tish",
+];
+
+/// Compile each .tish file with Cranelift backend, run, and compare stdout to static expected.
 #[test]
-fn test_mvp_programs_interpreter_vs_cranelift() {
+fn test_mvp_programs_cranelift() {
     let core_dir = core_dir();
     let bin = tish_bin();
     assert!(
@@ -530,79 +566,47 @@ fn test_mvp_programs_interpreter_vs_cranelift() {
         "tish binary not found at {}. Run `cargo build -p tish` first.",
         bin.display()
     );
-
-    // Curated list: only files that pass with Cranelift (many fail with stack-underflow or scope bugs).
-    let test_files = [
-        "fn_any.tish",
-        "strict_equality.tish",
-        "switch.tish",
-        "do_while.tish",
-        "typeof.tish",
-        "try_catch.tish",
-        "json.tish",
-        "math.tish",
-        "builtins.tish",
-        "uri.tish",
-        "inc_dec.tish",
-        "exponentiation.tish",
-        "void.tish",
-        "rest_params.tish",
-        "arrow_functions.tish",
-        "array_methods.tish",
-        "types.tish",
-    ];
-
-    for name in test_files {
+    for name in CRANELIFT_TEST_FILES {
         let path = core_dir.join(name);
         if !path.exists() {
             continue;
         }
-        let path_str = path.to_string_lossy();
-
-        let interp_out = Command::new(&bin)
-            .args(["run", path_str.as_ref(), "--backend", "interp"])
-            .current_dir(workspace_root())
-            .output()
-            .expect("run tish interpreter");
-        assert!(
-            interp_out.status.success(),
-            "Interpreter failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&interp_out.stderr)
-        );
-
+        let expected = get_expected(&path).unwrap_or_else(|| {
+            panic!(
+                "missing expected file for {}; run with REGENERATE_EXPECTED=1 to generate",
+                path.display()
+            )
+        });
         let out_bin = compile_cached(&bin, &path, "cranelift");
-        let cranelift_out = Command::new(&out_bin)
+        let out = Command::new(&out_bin)
             .current_dir(workspace_root())
             .output()
             .expect("run cranelift binary");
         let _ = std::fs::remove_file(&out_bin);
-
-        let interp_stdout = String::from_utf8_lossy(&interp_out.stdout);
-        let cranelift_stdout = String::from_utf8_lossy(&cranelift_out.stdout);
-        assert_eq!(
-            interp_stdout,
-            cranelift_stdout,
-            "Interpreter vs Cranelift output mismatch for {}",
-            path.display()
+        assert!(
+            out.status.success(),
+            "Cranelift binary failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr)
         );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(stdout, expected, "Cranelift output mismatch for {}", path.display());
     }
 }
 
-/// Full stack: compile each .tish file to WASI, run with wasmtime, and compare output to interpreter.
-/// Skips if wasmtime is not available. Uses same curated list as Cranelift (WASI uses bytecode VM).
+/// Compile each .tish file to WASI, run with wasmtime, and compare stdout to static expected.
+/// Skips if wasmtime is not available.
 #[test]
-fn test_mvp_programs_interpreter_vs_wasi() {
+fn test_mvp_programs_wasi() {
     let wasmtime_available = Command::new("wasmtime")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !wasmtime_available {
-        eprintln!("Skipping test_mvp_programs_interpreter_vs_wasi: wasmtime not found");
+        eprintln!("Skipping test_mvp_programs_wasi: wasmtime not found");
         return;
     }
-
     let core_dir = core_dir();
     let bin = tish_bin();
     assert!(
@@ -610,79 +614,50 @@ fn test_mvp_programs_interpreter_vs_wasi() {
         "tish binary not found at {}. Run `cargo build -p tish` first.",
         bin.display()
     );
-
-    let test_files = [
-        "fn_any.tish",
-        "strict_equality.tish",
-        "switch.tish",
-        "do_while.tish",
-        "typeof.tish",
-        "try_catch.tish",
-        "json.tish",
-        "math.tish",
-        "builtins.tish",
-        "uri.tish",
-        "inc_dec.tish",
-        "exponentiation.tish",
-        "void.tish",
-        "rest_params.tish",
-        "arrow_functions.tish",
-        "array_methods.tish",
-        "types.tish",
-    ];
-
-    for name in test_files {
+    for name in CRANELIFT_TEST_FILES {
         let path = core_dir.join(name);
         if !path.exists() {
             continue;
         }
-        let path_str = path.to_string_lossy();
-
-        let interp_out = Command::new(&bin)
-            .args(["run", path_str.as_ref(), "--backend", "interp"])
-            .current_dir(workspace_root())
-            .output()
-            .expect("run tish interpreter");
-        assert!(
-            interp_out.status.success(),
-            "Interpreter failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&interp_out.stderr)
-        );
-
+        let expected = get_expected(&path).unwrap_or_else(|| {
+            panic!(
+                "missing expected file for {}; run with REGENERATE_EXPECTED=1 to generate",
+                path.display()
+            )
+        });
         let out_wasm = compile_cached(&bin, &path, "wasi");
-        let wasi_out = Command::new("wasmtime")
+        let out = Command::new("wasmtime")
             .arg(out_wasm.as_os_str())
             .current_dir(workspace_root())
             .output()
             .expect("run wasmtime");
         let _ = std::fs::remove_file(&out_wasm);
-
-        let interp_stdout = String::from_utf8_lossy(&interp_out.stdout);
-        let wasi_stdout = String::from_utf8_lossy(&wasi_out.stdout);
-        assert_eq!(
-            interp_stdout,
-            wasi_stdout,
-            "Interpreter vs WASI output mismatch for {}",
-            path.display()
+        assert!(
+            out.status.success(),
+            "WASI run failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr)
         );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(stdout, expected, "WASI output mismatch for {}", path.display());
     }
 }
 
-/// Full stack: compile each .tish file to JS, run with Node, and compare output to interpreter.
+/// Files where Tish intentionally differs from JavaScript (typeof, void); skip in JS test since we compare to Tish expected.
+const JS_SKIP_FILES: &[&str] = &["typeof.tish", "void.tish"];
+
+/// Compile each .tish file to JS, run with Node, and compare stdout to static expected.
 #[test]
-fn test_mvp_programs_interpreter_vs_js() {
-    // Skip if Node.js is not available
+fn test_mvp_programs_js() {
     let node_available = Command::new("node")
         .args(["--version"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !node_available {
-        eprintln!("Skipping test_mvp_programs_interpreter_vs_js: Node.js not found");
+        eprintln!("Skipping test_mvp_programs_js: Node.js not found");
         return;
     }
-
     let core_dir = core_dir();
     let bin = tish_bin();
     assert!(
@@ -690,113 +665,35 @@ fn test_mvp_programs_interpreter_vs_js() {
         "tish binary not found at {}. Run `cargo build -p tish` first.",
         bin.display()
     );
-
-    // Files where Tish intentionally differs from JavaScript: assert interpreter matches expected Tish output.
-    let tish_intentional_differences: std::collections::HashMap<&str, &str> = [
-        ("typeof.tish", "number\nstring\nboolean\nnull\nobject\nobject\nfunction\n"),
-        ("void.tish", "null\ntrue\nside effect\n"),
-    ]
-    .into_iter()
-    .collect();
-
-    let test_files = [
-        "nested_loops.tish",
-        "scopes.tish",
-        "optional_braces.tish",
-        "optional_braces_braced.tish",
-        "tab_indent.tish",
-        "space_indent.tish",
-        "fn_any.tish",
-        "strict_equality.tish",
-        "arrays.tish",
-        "break_continue.tish",
-        "length.tish",
-        "objects.tish",
-        "conditional.tish",
-        "switch.tish",
-        "do_while.tish",
-        "typeof.tish",
-        "inc_dec.tish",
-        "try_catch.tish",
-        "builtins.tish",
-        "exponentiation.tish",
-        "for_of.tish",
-        "bitwise.tish",
-        "math.tish",
-        "optional_chaining.tish",
-        "void.tish",
-        "rest_params.tish",
-        "json.tish",
-        "uri.tish",
-        "in_op.tish",
-        "arrow_functions.tish",
-        "template_literals.tish",
-        "compound_assign.tish",
-        "mutation.tish",
-        "string_methods.tish",
-        "array_methods.tish",
-        "object_methods.tish",
-        "types.tish",
-        "logical_assign.tish",
-        "spread.tish",
-    ];
-
-    for name in test_files {
+    for name in MVP_TEST_FILES {
+        if JS_SKIP_FILES.contains(name) {
+            continue;
+        }
         let path = core_dir.join(name);
         if !path.exists() {
             continue;
         }
-        let path_str = path.to_string_lossy();
-
-        // Run interpreter
-        let interp_out = Command::new(&bin)
-            .args(["run", path_str.as_ref(), "--backend", "interp"])
-            .current_dir(workspace_root())
-            .output()
-            .expect("run tish interpreter");
-        assert!(
-            interp_out.status.success(),
-            "Interpreter failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&interp_out.stderr)
-        );
-
-        let interp_stdout = String::from_utf8_lossy(&interp_out.stdout);
-
-        if let Some(&expected) = tish_intentional_differences.get(name) {
-            assert_eq!(
-                interp_stdout,
-                expected,
-                "Interpreter output mismatch for {} (Tish intentional difference from JS)",
+        let expected = get_expected(&path).unwrap_or_else(|| {
+            panic!(
+                "missing expected file for {}; run with REGENERATE_EXPECTED=1 to generate",
                 path.display()
-            );
-            continue;
-        }
-
+            )
+        });
         let out_js = compile_cached(&bin, &path, "js");
-        let node_out = Command::new("node")
+        let out = Command::new("node")
             .arg(&out_js)
             .current_dir(workspace_root())
             .output()
             .expect("run node");
         let _ = std::fs::remove_file(&out_js);
-
         assert!(
-            node_out.status.success(),
+            out.status.success(),
             "Node failed for {}: {}",
             path.display(),
-            String::from_utf8_lossy(&node_out.stderr)
+            String::from_utf8_lossy(&out.stderr)
         );
-
-        let node_stdout = String::from_utf8_lossy(&node_out.stdout);
-        assert_eq!(
-            interp_stdout,
-            node_stdout,
-            "Interpreter vs JS output mismatch for {}:\n--- interpreter ---\n{}--- node ---\n{}",
-            path.display(),
-            interp_stdout,
-            node_stdout
-        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(stdout, expected, "JS output mismatch for {}", path.display());
     }
 }
 

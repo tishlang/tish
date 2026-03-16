@@ -1,0 +1,5 @@
+--- array_stress_02: Array Iteration ---
+for-i: 3ms sum=499500
+for-of: 1ms
+forEach: 1ms
+DONE 02

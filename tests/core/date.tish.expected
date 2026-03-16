@@ -1,0 +1,3 @@
+Date.now() returns a number: true
+Timestamp is reasonable: true
+Time progresses: true

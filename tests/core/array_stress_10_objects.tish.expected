@@ -1,0 +1,6 @@
+--- array_stress_10: Array of Objects ---
+filter objects x3: 0ms
+map to property x3: 0ms
+find by property x3: 0ms
+sort by property x3: 1ms
+DONE 10

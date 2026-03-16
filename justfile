@@ -99,13 +99,39 @@ compile-wasi INPUT OUTPUT:
 compile-with FEATURES INPUT OUTPUT:
     cargo run --release --no-default-features --features "{{FEATURES}}" -- compile {{INPUT}} -o {{OUTPUT}}
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TESTS (match CI: nextest, full features, tish package)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#   just test              # same as CI: nextest, -p tish, full features (recommended)
+#   just test-nextest      # same, explicit
+#   just test-coverage     # nextest + llvm-cov (writes lcov.info, coverage-html/)
+#   just test-cargo        # plain cargo test (whole workspace, full features)
+#   just test-secure       # cargo test, no features
+#
+# Regenerate static expected files (after changing interpreter output):
+#   REGENERATE_EXPECTED=1 just test test_mvp_programs_interpreter
+
+# Run tests the same way as CI: nextest, tish package, full features
+# Usage: just test              (all tests) | just test test_mvp_programs_native (one test)
+test *ARGS:
+    cargo nextest run -p tish --features full -- {{ARGS}}
+
+# Explicit nextest (same as test)
+test-nextest *ARGS:
+    cargo nextest run -p tish --features full -- {{ARGS}}
+
+# Run tests with coverage (requires llvm-tools: rustup component add llvm-tools-preview)
+test-coverage:
+    cargo llvm-cov nextest -p tish --features full --lcov --output-path lcov.info --html coverage-html
+
+# Plain cargo test (whole workspace)
+test-cargo:
+    cargo test --features full
+
 # Test secure mode
 test-secure:
     cargo test --no-default-features
-
-# Test all features
-test:
-    cargo test --features full
 
 # Install tish CLI (secure mode - no dangerous features)
 install:
@@ -206,7 +232,7 @@ optional-chaining-profile:
     ./scripts/run_optional_chaining_profile.sh
 
 # Performance benchmark (vm vs interp vs cranelift vs wasi vs Node)
-perf [ARGS]:
+perf *ARGS:
     ./scripts/run_performance_manual.sh {{ARGS}}
 
 # Show binary sizes for different builds

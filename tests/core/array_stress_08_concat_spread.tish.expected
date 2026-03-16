@@ -1,0 +1,4 @@
+--- array_stress_08: Concat/Spread ---
+concat x10: 0ms
+spread x10: 0ms
+DONE 08

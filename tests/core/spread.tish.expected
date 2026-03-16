@@ -1,0 +1,27 @@
+=== Array spread tests ===
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true
+=== Object spread tests ===
+true
+true
+true
+true
+true
+true
+true
+true
+true
+=== Function call spread tests ===
+true
+true
+=== All spread tests passed ===

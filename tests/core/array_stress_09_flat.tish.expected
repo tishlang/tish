@@ -1,0 +1,4 @@
+--- array_stress_09: Flat/FlatMap ---
+flat x10: 0ms
+map+flat x3: 1ms
+DONE 09

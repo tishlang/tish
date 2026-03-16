@@ -1,0 +1,9 @@
+doubled: 2,4,6,8,10
+sum: 15
+Hello
+process(5): 11
+evens: 2,4
+chained: 36,64,100
+add(5, 3): 8
+names: Alice,Bob,Charlie
+oldest: Bob

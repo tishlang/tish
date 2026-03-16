@@ -1,0 +1,5 @@
+--- array_stress_03: Map/Filter/Reduce ---
+map x3: 0ms
+filter x3: 0ms
+reduce x3: 0ms
+DONE 03

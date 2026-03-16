@@ -1,0 +1,4 @@
+in try
+caught: oops
+done
+got 42

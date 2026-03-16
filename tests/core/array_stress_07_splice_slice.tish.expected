@@ -1,0 +1,5 @@
+--- array_stress_07: Splice/Slice ---
+splice insert x10: 0ms
+splice delete x10: 0ms
+slice x10: 0ms
+DONE 07

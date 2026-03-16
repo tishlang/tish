@@ -1,0 +1,63 @@
+=== Object Stress Tests ===
+
+--- Object Creation ---
+Empty object creation x5000: 7ms
+3-prop literal x5000: 11ms
+10-prop literal x5000: 28ms
+Computed props x5000: 17ms
+
+--- Property Access ---
+Dot access (first prop) x10000: 17ms
+Dot access (last of 3) x10000: 17ms
+Dot access (last of 20) x10000: 17ms
+Bracket access x10000: 20ms
+Dynamic key access (3 keys x3000): 19ms
+
+--- Property Write ---
+Dot write x10000: 15ms
+Bracket write x10000: 17ms
+Dynamic prop add x5000: 16ms
+
+--- Deep Nested Access ---
+3-level deep access x10000: 21ms
+5-level deep access x10000: 27ms
+7-level deep access x10000: 30ms
+
+--- Optional Chaining ---
+Optional chain (all exist) x10000: 22ms
+Optional chain (short-circuit) x10000: 18ms
+
+--- Object Spread ---
+Spread copy (3 props) x5000: 13ms
+Spread copy (10 props) x5000: 30ms
+Spread + extend x5000: 18ms
+Merge two objects x3000: 20ms
+
+--- Object.assign ---
+assign to empty x5000: 18ms
+assign multiple sources x5000: 42ms
+
+--- Object.keys/values/entries ---
+Object.keys (10 props) x5000: 11ms
+Object.values (10 props) x5000: 11ms
+Object.entries (10 props) x5000: 16ms
+Object.fromEntries x5000: 22ms
+
+--- 'in' Operator ---
+'in' existing key x10000: 17ms
+'in' missing key x10000: 17ms
+
+--- Destructuring ---
+Destructure 3 props x5000: 13ms
+Destructure 10 props x5000: 36ms
+Destructure 5 props x3000: 13ms
+
+--- Object Iteration ---
+for-of Object.keys x2000: 38ms
+for-of Object.entries x2000: 42ms
+
+--- Factory Patterns ---
+Factory function x3000: 18ms
+Factory + access x2000: 11ms
+
+=== Object Stress Tests Complete ===

@@ -1,0 +1,55 @@
+=== Array Stress Tests ===
+
+--- Large Array Creation ---
+Build 100-elem array (push): 0ms
+Build 1000-elem array (push): 2ms
+Build 5000-elem array (push): 7ms
+
+--- Array Iteration ---
+for-i loop 1000 elems: 2ms (sum=499500)
+for-of loop 1000 elems: 1ms
+forEach 1000 elems: 2ms
+
+--- Map/Filter/Reduce ---
+map 1000 elems: 0ms
+filter 1000 elems: 1ms
+reduce 1000 elems: 0ms
+map 100 elems x100: 2ms
+filter 100 elems x100: 1ms
+reduce 100 elems x100: 10ms
+
+--- Chained Operations ---
+map-filter-map chain: 0ms
+filter-map-reduce x50: 7ms
+
+--- Sorting ---
+sort 100 elems x100: 73ms
+sort 1000 elems x20: 147ms
+
+--- Search Operations ---
+find middle (1000 elems x500): 28ms
+includes middle (1000 elems x500): 3ms
+indexOf middle (1000 elems x500): 3ms
+some (1000 elems x500): 29ms
+every (1000 elems x500): 56ms
+
+--- Splice/Slice ---
+splice insert (100 elems x1000): 4ms
+splice delete (100 elems x1000): 4ms
+slice (100 elems x1000): 3ms
+
+--- Concat/Spread ---
+concat 50+50 x1000: 3ms
+spread 50+50 x1000: 3ms
+
+--- Flat/FlatMap ---
+flat (5x2) x2000: 4ms
+map+flat (100 elems) x500: 54ms
+
+--- Array of Objects ---
+filter objects (100 objs x200): 6ms
+map to property (100 objs x200): 7ms
+find by property (100 objs x200): 9ms
+sort by property (100 objs x50): 7ms
+
+=== Array Stress Tests Complete ===

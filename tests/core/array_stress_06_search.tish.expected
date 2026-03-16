@@ -1,0 +1,7 @@
+--- array_stress_06: Search Operations ---
+find x3: 1ms
+includes x3: 0ms
+indexOf x3: 0ms
+some x3: 0ms
+every x3: 0ms
+DONE 06

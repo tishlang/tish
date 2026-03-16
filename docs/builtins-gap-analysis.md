@@ -4,13 +4,13 @@ Comprehensive overview of builtins across the Rust implementation vs. the byteco
 
 ## Why Tests Were Passing Despite Gaps
 
-Integration tests in `crates/tish/tests/integration_test.rs` historically compared interpreter vs. **Rust native** only (`test_mvp_programs_interpreter_vs_native`). Cranelift and WASI were never exercised in CI. Many test files do not use the missing builtins (encodeURI, Object.keys, etc.), so the interpreter vs. native parity passed even though Cranelift and WASI would have failed on programs that use those builtins. Explicit backend parity tests were added to fix this.
+Integration tests in `crates/tish/tests/integration_test.rs` run each backend (interpreter, native, Cranelift, WASI, JS) and compare stdout to static expected files (`*.tish.expected`). Historically only interpreter vs. native was exercised; Cranelift and WASI parity tests were added so all backends are checked against the same expected output.
 
 ## Explicit Tests
 
 ### Cranelift Integration Test
 
-- **Name:** `test_mvp_programs_interpreter_vs_cranelift`
+- **Name:** `test_mvp_programs_cranelift`
 - **Location:** `crates/tish/tests/integration_test.rs`
 - **What it runs:** For each file in the curated list: run interpreter (`tish run <file> --backend interp`), compile with `tish compile <file> -o <temp> --native-backend cranelift`, run the binary, assert stdout equality.
 - **Test files (curated):** `fn_any`, `strict_equality`, `switch`, `do_while`, `typeof`, `try_catch`, `json`, `math`, `builtins`, `uri`, `inc_dec`, `exponentiation`, `void`, `rest_params`, `arrow_functions`, `array_methods`, `types`. Many other files cause stack-underflow or scope bugs in the Cranelift backend and are excluded until fixed.
@@ -18,7 +18,7 @@ Integration tests in `crates/tish/tests/integration_test.rs` historically compar
 
 ### WASI Integration Test
 
-- **Name:** `test_mvp_programs_interpreter_vs_wasi`
+- **Name:** `test_mvp_programs_wasi`
 - **Location:** `crates/tish/tests/integration_test.rs`
 - **What it runs:** For each file in the curated list: run interpreter, compile with `tish compile <file> -o <temp> --target wasi`, run with `wasmtime <temp>.wasm`, assert stdout equality.
 - **Test files:** Same as Cranelift (WASI uses bytecode VM; same programs work).

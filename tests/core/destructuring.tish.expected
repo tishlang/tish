@@ -1,0 +1,27 @@
+=== Array destructuring tests ===
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true
+=== Object destructuring tests ===
+true
+true
+true
+true
+true
+true
+true
+true
+true
+=== Const destructuring ===
+true
+true
+true
+=== All destructuring tests passed ===

@@ -1,0 +1,5 @@
+x = 42
+name = hello
+flag = true
+nums = [1, 2, 3]
+dynamic = anything

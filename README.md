@@ -162,7 +162,7 @@ cargo test -p tish
 Tests:
 - `test_full_stack_parse` – lex + parse each .tish file
 - `test_mvp_programs_interpreter` – run via interpreter
-- `test_mvp_programs_interpreter_vs_native` – compile to native, compare output
+- `test_mvp_programs_native` – compile to native, run, compare stdout to static expected (`*.tish.expected`)
 
 Run any test file: `tish run tests/core/<name>.tish`
 

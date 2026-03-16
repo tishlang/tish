@@ -1,0 +1,12 @@
+keys count: 3
+values count: 3
+entries count: 3
+entries:
+  key: age val: 30
+  key: city val: NYC
+  key: name val: Alice
+mapped keys: age,city,name
+empty keys: 0
+empty values: 0
+empty entries: 0
+nested keys: 3

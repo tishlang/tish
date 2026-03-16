@@ -1,0 +1,5 @@
+--- array_stress_01: Large Array Creation ---
+arr100: 0ms
+arr1000: 1ms
+arr5000: 8ms
+DONE 01

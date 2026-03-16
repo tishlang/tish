@@ -1,0 +1,14 @@
+=== Performance tests for new features ===
+Iterations: 10000
+array.sort() with comparator: 35ms
+array.splice(): 29ms
+Object.assign(): 49ms
+Object.fromEntries(): 46ms
+Array destructuring: 23ms
+Object destructuring: 36ms
+Array spread: 26ms
+Object spread: 37ms
+Function call spread: 44ms
+Default parameters (using default): 24ms
+Default parameters (with arg): 26ms
+=== Performance tests complete ===
