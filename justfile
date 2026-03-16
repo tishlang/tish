@@ -100,26 +100,24 @@ compile-with FEATURES INPUT OUTPUT:
     cargo run --release --no-default-features --features "{{FEATURES}}" -- compile {{INPUT}} -o {{OUTPUT}}
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TESTS (match CI: nextest, full features, tish package)
+# TESTS
 # ═══════════════════════════════════════════════════════════════════════════════
 #
-#   just test              # same as CI: nextest, -p tish, full features (recommended)
-#   just test-quick        # skip slow backend tests (native/cranelift/wasi) for fast iteration
-#   just test-nextest      # same as test, explicit
-#   just test-coverage     # nextest + llvm-cov (writes lcov.info, coverage-html/)
+#   just test              # full workspace: unit tests (tish_compile, tish_opt, etc.) + tish integration
+#   just test-tish         # tish package only (same as CI; no other crates' unit tests)
+#   just test-quick        # tish only, skip slow backend tests (native/cranelift/wasi)
+#   just test-coverage     # tish only + llvm-cov (writes lcov.info, coverage-html/)
 #   just test-cargo        # plain cargo test (whole workspace, full features)
 #   just test-secure       # cargo test, no features
 #
-# Regenerate static expected files (after changing interpreter output):
-#   REGENERATE_EXPECTED=1 just test test_mvp_programs_interpreter
+# Regenerate static expected files: REGENERATE_EXPECTED=1 just test-tish test_mvp_programs_interpreter
 
-# Run tests the same way as CI: nextest, tish package, full features
-# Usage: just test              (all tests) | just test test_mvp_programs_native (one test)
+# Run all tests in the workspace (unit tests in every crate + tish integration tests)
 test *ARGS:
-    cargo nextest run -p tish --features full -- {{ARGS}}
+    cargo nextest run --workspace --features full -- {{ARGS}}
 
-# Explicit nextest (same as test)
-test-nextest *ARGS:
+# Run only tish package tests (same as CI: integration tests only)
+test-tish *ARGS:
     cargo nextest run -p tish --features full -- {{ARGS}}
 
 # Skip slow backend tests (native/cranelift/wasi) for fast local iteration
