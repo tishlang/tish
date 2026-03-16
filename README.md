@@ -166,6 +166,27 @@ Tests:
 
 Run any test file: `tish run tests/core/<name>.tish`
 
+## Releasing
+
+Releases are driven by **GitHub**: the main CI creates a **GitHub Release** (with tag and assets) when commits on `main` follow [Conventional Commits](https://www.conventionalcommits.org/). A separate workflow then publishes the same version to npm when that release is published.
+
+### Conventional commits
+
+Use these commit message formats so semantic-release can determine the next version:
+
+| Type     | Example                    | Release impact |
+|----------|----------------------------|----------------|
+| `feat:`  | `feat: add optional chaining` | **Minor** (1.0.0 → 1.1.0) |
+| `fix:`   | `fix: correct loop bound`  | **Patch** (1.0.0 → 1.0.1) |
+| `perf:`  | `perf: faster parser`      | **Patch** (1.0.0 → 1.0.1) |
+| `docs:`  | `docs: update README`      | No release by default |
+| `chore:` | `chore: bump deps`        | No release by default |
+| Breaking | `feat!: change API` or body `BREAKING CHANGE:` | **Major** (1.0.0 → 2.0.0) |
+
+**Format:** `<type>(<scope>): <description>`, e.g. `fix(vm): handle empty array`.
+
+The first commit on `main` that would trigger a release (e.g. a `feat:` or `fix:`) causes CI to create the GitHub Release and tag; publishing that release triggers the npm publish workflow.
+
 ## Performance Comparison
 
 JavaScript equivalents in `tests/core/*.js`. Compare Tish vs Node.js/Bun:
