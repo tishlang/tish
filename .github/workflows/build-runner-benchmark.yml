@@ -75,7 +75,7 @@ jobs:
 
       - name: Build (native) — rust / cranelift / llvm
         if: matrix.build_method != 'wasi' && matrix.build_target.target == matrix.runner.native_target
-        id: build
+        id: build_native
         run: |
           start=$(date +%s)
           cargo build --release -p tish --target ${{ matrix.build_target.target }}
@@ -85,7 +85,7 @@ jobs:
 
       - name: Build (cross) — rust / cranelift / llvm
         if: matrix.build_method != 'wasi' && matrix.build_target.target != matrix.runner.native_target
-        id: build
+        id: build_cross
         run: |
           start=$(date +%s)
           cargo install cross
@@ -96,7 +96,7 @@ jobs:
 
       - name: Build (wasi)
         if: matrix.build_method == 'wasi'
-        id: build
+        id: build_wasi
         run: |
           start=$(date +%s)
           cargo build --release -p tish --target wasm32-wasip1
@@ -127,5 +127,5 @@ jobs:
       - name: Build duration summary
         run: |
           echo "### ${{ matrix.runner.name }} → ${{ matrix.build_target.platform }} (${{ matrix.build_method }})" >> $GITHUB_STEP_SUMMARY
-          echo "Build time: **${{ steps.build.outputs.duration_sec }}s**" >> $GITHUB_STEP_SUMMARY
+          echo "Build time: **${{ steps.build_native.outputs.duration_sec || steps.build_cross.outputs.duration_sec || steps.build_wasi.outputs.duration_sec }}s**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
