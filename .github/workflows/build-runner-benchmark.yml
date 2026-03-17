@@ -1,6 +1,6 @@
-# Manual workflow to benchmark build times across Blacksmith vs GitHub-hosted runners (x64 and ARM).
+# Manual workflow: runners × build_targets × build_methods (full 3D matrix).
 # Run via Actions → "Build runner benchmark" → Run workflow.
-# Compare job durations in the run summary to see which platform builds fastest.
+# Compare job durations to see which runner builds which target with which method fastest.
 
 name: Build runner benchmark
 
@@ -12,33 +12,46 @@ env:
 
 jobs:
   build:
-    name: Build (${{ matrix.runner_type }} ${{ matrix.arch }})
+    name: Build (${{ matrix.runner.name }} / ${{ matrix.build_target.platform }} / ${{ matrix.build_method }})
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner_type: blacksmith
-            arch: x64
+        runner:
+          - name: blacksmith-x64
             runs_on: blacksmith-4vcpu-ubuntu-2404
-            target: x86_64-unknown-linux-gnu
-            binary_name: tish
-          - runner_type: blacksmith
-            arch: arm64
+            native_target: x86_64-unknown-linux-gnu
+          - name: blacksmith-arm64
             runs_on: blacksmith-4vcpu-ubuntu-2404-arm
-            target: aarch64-unknown-linux-gnu
-            binary_name: tish
-          - runner_type: gha
-            arch: x64
+            native_target: aarch64-unknown-linux-gnu
+          - name: gha-x64
             runs_on: ubuntu-22.04
+            native_target: x86_64-unknown-linux-gnu
+          - name: gha-arm64
+            runs_on: ubuntu-22.04-arm
+            native_target: aarch64-unknown-linux-gnu
+        build_target:
+          - platform: linux-x64
             target: x86_64-unknown-linux-gnu
             binary_name: tish
-          - runner_type: gha
-            arch: arm64
-            runs_on: ubuntu-22.04-arm
+          - platform: linux-arm64
             target: aarch64-unknown-linux-gnu
             binary_name: tish
+          - platform: darwin-arm64
+            target: aarch64-apple-darwin
+            binary_name: tish
+          - platform: darwin-x64
+            target: x86_64-apple-darwin
+            binary_name: tish
+          - platform: win32-x64
+            target: x86_64-pc-windows-msvc
+            binary_name: tish.exe
+        build_method:
+          - rust
+          - cranelift
+          - wasi
+          - llvm
 
-    runs-on: ${{ matrix.runs_on }}
+    runs-on: ${{ matrix.runner.runs_on }}
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
@@ -52,37 +65,67 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.build_method == 'wasi' && 'wasm32-wasip1' || matrix.build_target.target }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}-benchmark
+          key: benchmark-${{ matrix.runner.name }}-${{ matrix.build_target.platform }}-${{ matrix.build_method }}
           cache-workspace-crates: "true"
 
-      - name: Build (timed)
+      - name: Build (native) — rust / cranelift / llvm
+        if: matrix.build_method != 'wasi' && matrix.build_target.target == matrix.runner.native_target
         id: build
         run: |
           start=$(date +%s)
-          cargo build --release -p tish --target ${{ matrix.target }}
+          cargo build --release -p tish --target ${{ matrix.build_target.target }}
           end=$(date +%s)
           echo "duration_sec=$((end - start))" >> "$GITHUB_OUTPUT"
-          echo "Build completed in $((end - start))s on ${{ matrix.runner_type }} ${{ matrix.arch }}"
+          echo "Build (native / ${{ matrix.build_method }}) completed in $((end - start))s"
 
-      - name: Stage binary for upload
+      - name: Build (cross) — rust / cranelift / llvm
+        if: matrix.build_method != 'wasi' && matrix.build_target.target != matrix.runner.native_target
+        id: build
+        run: |
+          start=$(date +%s)
+          cargo install cross
+          cross build --target ${{ matrix.build_target.target }} -p tish --release
+          end=$(date +%s)
+          echo "duration_sec=$((end - start))" >> "$GITHUB_OUTPUT"
+          echo "Build (cross / ${{ matrix.build_method }}) completed in $((end - start))s"
+
+      - name: Build (wasi)
+        if: matrix.build_method == 'wasi'
+        id: build
+        run: |
+          start=$(date +%s)
+          cargo build --release -p tish --target wasm32-wasip1
+          end=$(date +%s)
+          echo "duration_sec=$((end - start))" >> "$GITHUB_OUTPUT"
+          echo "Build (wasi) completed in $((end - start))s"
+
+      - name: Stage binary for upload (native/cross)
+        if: matrix.build_method != 'wasi'
         shell: bash
         run: |
           mkdir -p staging
-          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} staging/
+          cp target/${{ matrix.build_target.target }}/release/${{ matrix.build_target.binary_name }} staging/
+
+      - name: Stage binary for upload (wasi)
+        if: matrix.build_method == 'wasi'
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp target/wasm32-wasip1/release/tish.wasm staging/ 2>/dev/null || cp target/wasm32-wasip1/release/tish staging/
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ matrix.runner_type }}-${{ matrix.arch }}
-          path: staging/${{ matrix.binary_name }}
+          name: ${{ matrix.runner.name }}-${{ matrix.build_target.platform }}-${{ matrix.build_method }}
+          path: staging
 
       - name: Build duration summary
         run: |
-          echo "### ${{ matrix.runner_type }} / ${{ matrix.arch }}" >> $GITHUB_STEP_SUMMARY
+          echo "### ${{ matrix.runner.name }} → ${{ matrix.build_target.platform }} (${{ matrix.build_method }})" >> $GITHUB_STEP_SUMMARY
           echo "Build time: **${{ steps.build.outputs.duration_sec }}s**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
