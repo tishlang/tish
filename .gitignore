@@ -22,3 +22,4 @@ tests/core/wasi_build/
 npm/tish/platform/
 
 node_modules
+.zectre
