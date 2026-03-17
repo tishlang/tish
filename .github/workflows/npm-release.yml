@@ -1,5 +1,5 @@
 # Publish to npm when a GitHub release is promoted from prerelease to full release.
-# Triggered when you use "Set as latest release" on a prerelease; version comes from the tag.
+# Downloads the npm package tarball from the release (no rebuild).
 
 name: NPM release
 
@@ -14,22 +14,22 @@ jobs:
     if: github.event.release.prerelease == false
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - name: Checkout at release tag
+      - name: Checkout (for create-tish-app)
         uses: actions/checkout@v4
         with:
           ref: refs/tags/${{ github.event.release.tag_name }}
           fetch-depth: 0
 
-      - name: Set package version from release tag
+      - name: Download npm package tarball from release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
-          VERSION="${TAG#v}"
-          node -e "
-          const fs = require('fs');
-          const p = require('./npm/tish/package.json');
-          p.version = '"$VERSION"';
-          fs.writeFileSync('./npm/tish/package.json', JSON.stringify(p, null, 2));
-          "
+          ASSET_URL=$(echo '${{ toJSON(github.event.release.assets) }}' | jq -r '.[] | select(.name == "tish-npm-package.tgz") | .url')
+          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+            echo "Release has no asset tish-npm-package.tgz"
+            exit 1
+          fi
+          curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL" -o tish-npm-package.tgz
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -37,11 +37,10 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Publish @tishlang/tish
-        working-directory: npm/tish
+      - name: Publish @tishlang/tish from tarball
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: npm publish tish-npm-package.tgz --access public
 
       - name: Sync version and publish create-tish-app
         env:
