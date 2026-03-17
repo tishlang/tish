@@ -365,15 +365,32 @@ jobs:
           fi
           echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
 
-      - name: Upload platform zip to prerelease
+      - name: Upload platform binaries to prerelease (individual + zip)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RELEASE_ID="${{ steps.create_release.outputs.release_id }}"
-          curl -s -X POST \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "Content-Type: application/zip" \
-            --data-binary @npm/tish/tish-platform-binaries.zip \
-            "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=tish-platform-binaries.zip&label=Platform%20binaries%20(all%20OS)"
+          REPO="${{ github.repository }}"
+          UPLOAD_URL="https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets"
+          AUTH="Authorization: Bearer $GITHUB_TOKEN"
+          ACCEPT="Accept: application/vnd.github+json"
+          API_VER="X-GitHub-Api-Version: 2022-11-28"
+
+          upload_asset() {
+            local path="$1" name="$2" label="$3" ctype="$4"
+            local label_enc
+            label_enc=$(printf %s "$label" | jq -sRr @uri)
+            curl -s -X POST -H "$AUTH" -H "$ACCEPT" -H "$API_VER" \
+              -H "Content-Type: $ctype" \
+              --data-binary @"$path" \
+              "${UPLOAD_URL}?name=${name}&label=${label_enc}"
+          }
+
+          cd npm/tish/platform
+          upload_asset linux-x64/tish "tish-linux-x64" "Linux (x64)" "application/octet-stream"
+          upload_asset linux-arm64/tish "tish-linux-arm64" "Linux (ARM64)" "application/octet-stream"
+          upload_asset darwin-arm64/tish "tish-darwin-arm64" "macOS (Apple Silicon)" "application/octet-stream"
+          upload_asset darwin-x64/tish "tish-darwin-x64" "macOS (Intel)" "application/octet-stream"
+          upload_asset win32-x64/tish.exe "tish-win32-x64.exe" "Windows (x64)" "application/octet-stream"
+          cd ../../..
+          upload_asset npm/tish/tish-platform-binaries.zip "tish-platform-binaries.zip" "Platform binaries (all OS)" "application/zip"
