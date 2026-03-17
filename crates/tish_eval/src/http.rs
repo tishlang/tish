@@ -80,6 +80,37 @@ async fn fetch_async_owned(url: String, options: Option<Value>) -> Result<Value,
     Ok(build_response_object(status, ok, &response_headers, body_text))
 }
 
+/// Interrupt streaming to propagate user callback errors from the interpreter.
+#[cfg(feature = "http")]
+pub enum FetchStreamInterrupt {
+    Net(String),
+    UserThrow(Value),
+    UserError(String),
+}
+
+/// Delegates line streaming to `tish_runtime::fetch_stream_lines_core` (single implementation).
+#[cfg(feature = "http")]
+pub fn fetch_stream_lines_eval<F>(url: String, options: Option<Value>, on_line: F) -> Result<Value, FetchStreamInterrupt>
+where
+    F: FnMut(String) -> Result<(), FetchStreamInterrupt>,
+{
+    let core_opt = match options {
+        None => None,
+        Some(o) => Some(crate::value_convert::eval_to_core(&o).map_err(FetchStreamInterrupt::UserError)?),
+    };
+    RUNTIME.with(|rt| {
+        rt.block_on(async move {
+            match tish_runtime::http_fetch_stream_lines_core(url, core_opt, on_line).await {
+                Err(s) => Err(FetchStreamInterrupt::Net(s)),
+                Ok(tish_runtime::FetchStreamLinesOutcome::Done(v)) => {
+                    Ok(crate::value_convert::core_to_eval(v))
+                }
+                Ok(tish_runtime::FetchStreamLinesOutcome::Aborted(e)) => Err(e),
+            }
+        })
+    })
+}
+
 /// Async fetchAll - returns a Future. Use with await in Tish.
 pub async fn fetch_all_async(requests: Vec<Value>) -> Result<Value, String> {
     let mut futures = Vec::new();

@@ -674,6 +674,9 @@ pub use http::{
     await_fetch_all as http_await_fetch_all,
     fetch_async as http_fetch_async,
     fetch_all_async as http_fetch_all_async,
+    fetch_stream_lines as http_fetch_stream_lines,
+    fetch_stream_lines_core as http_fetch_stream_lines_core,
+    FetchStreamLinesOutcome,
     serve as http_serve,
 };
 

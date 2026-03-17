@@ -120,6 +120,13 @@ Log level controlled via `TISH_LOG_LEVEL` environment variable:
 - **No prototypes**: Plain objects and arrays; fixed shapes.
 - **Closures**: Functions capture by name; lexical scope.
 
+## HTTP module (`import { … } from 'http'`)
+
+Requires the `http` feature when compiling.
+
+- **`fetch(url, options?)`** — Returns when the **entire** response body has been read. Response shape: `{ status, ok, body, headers }`. Use for JSON and small payloads.
+- **`fetchStreamLines(url, onLine)`** or **`fetchStreamLines(url, options, onLine)`** — Streams the body: `onLine(line)` is called for each complete line (split on `\n`, line without the newline) and once for any trailing bytes after the last newline. Same `options` as `fetch` (`method`, `headers`, `body`). On HTTP error status (4xx/5xx), the callback is **not** invoked; the return value matches `fetch` with the error body in `body`. On success, `body` is empty. Use for **SSE** and other line-oriented streams (e.g. LLM token streams) so handlers run as data arrives instead of after the full response buffers.
+
 ## Type Annotations (Optional)
 
 Tish supports optional TypeScript-style type annotations. Types are parsed but not enforced at runtime (gradual typing).

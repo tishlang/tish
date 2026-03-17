@@ -41,6 +41,8 @@ pub enum Value {
     /// HTTP serve function (needs special handling for callbacks)
     #[cfg(feature = "http")]
     Serve,
+    /// HTTP fetchStreamLines (per-line streaming callback); only exported when `http` feature is on.
+    FetchStreamLines,
     #[cfg(feature = "regex")]
     RegExp(Rc<RefCell<TishRegExp>>),
     /// Promise (ECMA-262 §27.2). Requires http feature for tokio.
@@ -77,6 +79,7 @@ impl std::fmt::Debug for Value {
             Value::Native(_) => write!(f, "Native"),
             #[cfg(feature = "http")]
             Value::Serve => write!(f, "Serve"),
+            Value::FetchStreamLines => write!(f, "FetchStreamLines"),
             #[cfg(feature = "regex")]
             Value::RegExp(re) => write!(f, "RegExp(/{}/{})", re.borrow().source, re.borrow().flags_string()),
             #[cfg(feature = "http")]
@@ -126,6 +129,7 @@ impl std::fmt::Display for Value {
             Value::Native(_) => write!(f, "[NativeFunction]"),
             #[cfg(feature = "http")]
             Value::Serve => write!(f, "[NativeFunction: serve]"),
+            Value::FetchStreamLines => write!(f, "[NativeFunction: fetchStreamLines]"),
             #[cfg(feature = "regex")]
             Value::RegExp(re) => {
                 let re = re.borrow();

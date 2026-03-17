@@ -524,6 +524,7 @@ impl Codegen {
                     "fetchAsync" => Some("Value::Function(Rc::new(|args: &[Value]| tish_fetch_async_promise(args.to_vec())))"),
                     "fetchAllAsync" => Some("Value::Function(Rc::new(|_args: &[Value]| panic!(\"fetchAllAsync must be used with await\")))"),
                     "serve" => Some("Value::Function(Rc::new(|args: &[Value]| { let port = args.first().cloned().unwrap_or(Value::Null); let handler = args.get(1).cloned().unwrap_or(Value::Null); if let Value::Function(f) = handler { tish_http_serve(args, move |req_args| f(req_args)) } else { Value::Null } }))"),
+                    "fetchStreamLines" => Some("Value::Function(Rc::new(|args: &[Value]| match args.len() { 0 | 1 => tish_http_fetch_stream_lines(args), 2 => { let url = match args.first() { Some(Value::String(s)) => s.to_string(), Some(v) => v.to_display_string(), None => return tish_http_fetch_stream_lines(args), }; match args.get(1) { Some(Value::Function(f)) => tish_http_fetch_stream_lines(&[Value::String(url.into()), Value::Function(Rc::clone(f))]), _ => tish_http_fetch_stream_lines(args), } }, _ => { let url = match args.first() { Some(Value::String(s)) => s.to_string(), Some(v) => v.to_display_string(), None => return tish_http_fetch_stream_lines(args), }; let opts = args.get(1).cloned().unwrap_or(Value::Null); match args.get(2) { Some(Value::Function(f)) => tish_http_fetch_stream_lines(&[Value::String(url.into()), opts, Value::Function(Rc::clone(f))]), _ => tish_http_fetch_stream_lines(args), } } }))"),
                     "Promise" => Some("tish_promise_object()"),
                     "setTimeout" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_set_timeout(args)))"),
                     "setInterval" => Some("Value::Function(Rc::new(|_args: &[Value]| panic!(\"setInterval not yet supported in native\")))"),
@@ -764,9 +765,9 @@ impl Codegen {
         }
         if self.has_feature("http") {
             if self.is_async {
-                self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_fetch_async as tish_http_fetch_async, http_fetch_all_async as tish_http_fetch_all_async, http_await_fetch as tish_http_await_fetch, http_await_fetch_all as tish_http_await_fetch_all, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, promise_object as tish_promise_object, fetch_async_promise as tish_fetch_async_promise, await_promise as tish_await_promise};\n");
+                self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_fetch_async as tish_http_fetch_async, http_fetch_all_async as tish_http_fetch_all_async, http_await_fetch as tish_http_await_fetch, http_await_fetch_all as tish_http_await_fetch_all, http_fetch_stream_lines as tish_http_fetch_stream_lines, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, promise_object as tish_promise_object, fetch_async_promise as tish_fetch_async_promise, await_promise as tish_await_promise};\n");
             } else {
-                self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_serve as tish_http_serve};\n");
+                self.write("use tish_runtime::{http_fetch as tish_http_fetch, http_fetch_all as tish_http_fetch_all, http_fetch_stream_lines as tish_http_fetch_stream_lines, http_serve as tish_http_serve};\n");
             }
         }
         if self.has_feature("fs") {
@@ -904,6 +905,7 @@ impl Codegen {
         if self.has_feature("http") {
             self.writeln("let fetch = Value::Function(Rc::new(|args: &[Value]| tish_http_fetch(args)));");
             self.writeln("let fetchAll = Value::Function(Rc::new(|args: &[Value]| tish_http_fetch_all(args)));");
+            self.writeln("let fetchStreamLines = Value::Function(Rc::new(|args: &[Value]| match args.len() { 0 | 1 => tish_http_fetch_stream_lines(args), 2 => { let url = match args.first() { Some(Value::String(s)) => s.to_string(), Some(v) => v.to_display_string(), None => return tish_http_fetch_stream_lines(args), }; match args.get(1) { Some(Value::Function(f)) => tish_http_fetch_stream_lines(&[Value::String(url.into()), Value::Function(Rc::clone(f))]), _ => tish_http_fetch_stream_lines(args), } }, _ => { let url = match args.first() { Some(Value::String(s)) => s.to_string(), Some(v) => v.to_display_string(), None => return tish_http_fetch_stream_lines(args), }; let opts = args.get(1).cloned().unwrap_or(Value::Null); match args.get(2) { Some(Value::Function(f)) => tish_http_fetch_stream_lines(&[Value::String(url.into()), opts, Value::Function(Rc::clone(f))]), _ => tish_http_fetch_stream_lines(args), } } }));");
             if self.is_async {
                 self.writeln("let fetchAsync = Value::Function(Rc::new(|args: &[Value]| tish_fetch_async_promise(args.to_vec())));");
                 self.writeln("let fetchAllAsync = Value::Function(Rc::new(|_args: &[Value]| panic!(\"fetchAllAsync must be used with await\")));");

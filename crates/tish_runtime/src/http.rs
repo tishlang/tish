@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::rc::Rc;
 use std::sync::Arc;
+use futures::StreamExt;
 use tish_core::Value;
 use tokio::runtime::Runtime;
 
@@ -166,6 +167,151 @@ async fn fetch_one_async_owned(url: String, options: Option<Value>) -> Result<Va
     Ok(build_response_object(status, ok, &response_headers, body_text))
 }
 
+/// Stream response body line-by-line; invokes `onLine(line)` for each complete line (no trailing `\n`)
+/// and once for any trailing bytes without a final newline. Does not call the callback on HTTP error
+/// responses (4xx/5xx); returns the same shape as `fetch` with full error body in `body`.
+///
+/// Args: `(url, onLine)` or `(url, options, onLine)` — same `method` / `headers` / `body` as `fetch`.
+pub fn fetch_stream_lines(args: &[Value]) -> Value {
+    match fetch_stream_lines_impl(args) {
+        Ok(v) => v,
+        Err(e) => build_error_response(&e),
+    }
+}
+
+fn fetch_stream_lines_impl(args: &[Value]) -> Result<Value, String> {
+    let (url, options, callback) = match args.len() {
+        0 | 1 => {
+            return Err(
+                "fetchStreamLines requires (url, onLine) or (url, options, onLine)".to_string(),
+            );
+        }
+        2 => {
+            let url = match args.first() {
+                Some(Value::String(s)) => s.to_string(),
+                Some(v) => v.to_display_string(),
+                None => unreachable!(),
+            };
+            (url, None, args.get(1).cloned().unwrap_or(Value::Null))
+        }
+        _ => {
+            let url = match args.first() {
+                Some(Value::String(s)) => s.to_string(),
+                Some(v) => v.to_display_string(),
+                None => unreachable!(),
+            };
+            (
+                url,
+                Some(args.get(1).cloned().unwrap_or(Value::Null)),
+                args.get(2).cloned().unwrap_or(Value::Null),
+            )
+        }
+    };
+    let Value::Function(f) = callback else {
+        return Err("fetchStreamLines: last argument must be a function".to_string());
+    };
+    RUNTIME.with(|rt| {
+        let f = Rc::clone(&f);
+        rt.block_on(async move {
+            match fetch_stream_lines_core(url, options, |line| {
+                let _ = f(&[Value::String(line.into())]);
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await
+            {
+                Err(e) => Err(e),
+                Ok(FetchStreamLinesOutcome::Done(v)) => Ok(v),
+                Ok(FetchStreamLinesOutcome::Aborted(n)) => match n {},
+            }
+        })
+    })
+}
+
+/// Result of [`fetch_stream_lines_core`]: either a normal HTTP response object, or early exit from the line callback.
+pub enum FetchStreamLinesOutcome<E> {
+    Done(Value),
+    Aborted(E),
+}
+
+/// Shared streaming implementation: same request shape as `fetch`, then one `on_line` per logical line.
+/// Returns `Err` only for network/transport failures. HTTP 4xx/5xx yields `Done(error_response)` without calling `on_line` on the success path.
+pub async fn fetch_stream_lines_core<E, F>(
+    url: String,
+    options: Option<Value>,
+    mut on_line: F,
+) -> Result<FetchStreamLinesOutcome<E>, String>
+where
+    F: FnMut(String) -> Result<(), E>,
+{
+    let client = reqwest::Client::new();
+    let method = extract_method(options.as_ref());
+    let headers = extract_headers(options.as_ref());
+    let body = extract_body(options.as_ref());
+
+    let mut req = match method.as_str() {
+        "GET" => client.get(&url),
+        "POST" => client.post(&url),
+        "PUT" => client.put(&url),
+        "DELETE" => client.delete(&url),
+        "PATCH" => client.patch(&url),
+        "HEAD" => client.head(&url),
+        _ => client.get(&url),
+    };
+    for (key, value) in headers {
+        req = req.header(key, value);
+    }
+    if let Some(body) = body {
+        req = req.body(body);
+    }
+
+    let response = req.send().await.map_err(|e| e.to_string())?;
+    let status = response.status().as_u16() as f64;
+    let ok = response.status().is_success();
+    let response_headers = response.headers().clone();
+
+    if !ok {
+        let body_text = response.text().await.map_err(|e| e.to_string())?;
+        return Ok(FetchStreamLinesOutcome::Done(build_response_object(
+            status,
+            false,
+            &response_headers,
+            body_text,
+        )));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut carry = String::new();
+    while let Some(item) = stream.next().await {
+        let chunk = item.map_err(|e| e.to_string())?;
+        carry.push_str(&String::from_utf8_lossy(&chunk));
+        loop {
+            match carry.find('\n') {
+                None => break,
+                Some(pos) => {
+                    let line = carry[..pos].to_string();
+                    carry = carry[pos + 1..].to_string();
+                    match on_line(line) {
+                        Ok(()) => {}
+                        Err(e) => return Ok(FetchStreamLinesOutcome::Aborted(e)),
+                    }
+                }
+            }
+        }
+    }
+    if !carry.is_empty() {
+        match on_line(carry) {
+            Ok(()) => {}
+            Err(e) => return Ok(FetchStreamLinesOutcome::Aborted(e)),
+        }
+    }
+
+    Ok(FetchStreamLinesOutcome::Done(build_response_object(
+        status,
+        true,
+        &response_headers,
+        String::new(),
+    )))
+}
 
 /// Primitive fetch result (all Send) for use with native Promise.
 pub struct FetchResultPrimitive {

@@ -600,6 +600,7 @@ impl Evaluator {
                     exports.insert("fetchAsync".into(), Value::Native(Self::fetch_async_native));
                     exports.insert("fetchAllAsync".into(), Value::Native(Self::fetch_all_async_native));
                     exports.insert("serve".into(), Value::Serve);
+                    exports.insert("fetchStreamLines".into(), Value::FetchStreamLines);
                     exports.insert("Promise".into(), Value::PromiseConstructor);
                     exports.insert("setTimeout".into(), Value::TimerBuiltin(Arc::from("setTimeout")));
                     exports.insert("setInterval".into(), Value::TimerBuiltin(Arc::from("setInterval")));
@@ -1561,8 +1562,11 @@ impl Evaluator {
                     Value::Array(_) => "object".into(),
                     Value::Object(_) => "object".into(),
                     Value::Function { .. } | Value::Native(_) => "function".into(),
+                    Value::FetchStreamLines => "function".into(),
                     #[cfg(feature = "http")]
-                    Value::Serve | Value::PromiseResolver(_) | Value::PromiseConstructor
+                    Value::Serve
+                    | Value::PromiseResolver(_)
+                    | Value::PromiseConstructor
                     | Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => "function".into(),
                     #[cfg(feature = "http")]
                     Value::Promise(_) => "object".into(),
@@ -2120,6 +2124,18 @@ impl Evaluator {
             }
             #[cfg(feature = "http")]
             Value::Serve => self.run_http_server(args),
+            Value::FetchStreamLines => {
+                #[cfg(feature = "http")]
+                {
+                    self.run_fetch_stream_lines(args)
+                }
+                #[cfg(not(feature = "http"))]
+                {
+                    Err(EvalError::Error(
+                        "fetchStreamLines requires the http feature".into(),
+                    ))
+                }
+            }
             #[cfg(feature = "regex")]
             Value::RegExp(_) => Err(EvalError::Error("RegExp is not callable".to_string())),
             #[cfg(feature = "http")]
@@ -2442,6 +2458,58 @@ impl Evaluator {
         }
 
         Ok(Value::Null)
+    }
+
+    #[cfg(feature = "http")]
+    fn run_fetch_stream_lines(&self, args: &[Value]) -> Result<Value, EvalError> {
+        let (url, options, cb) = match args.len() {
+            0 | 1 => {
+                return Err(EvalError::Error(
+                    "fetchStreamLines requires (url, onLine) or (url, options, onLine)".into(),
+                ));
+            }
+            2 => {
+                let url = args.first().unwrap().to_string();
+                (url, None, args.get(1).cloned().unwrap_or(Value::Null))
+            }
+            _ => {
+                let url = args.first().unwrap().to_string();
+                (
+                    url,
+                    Some(args.get(1).cloned().unwrap_or(Value::Null)),
+                    args.get(2).cloned().unwrap_or(Value::Null),
+                )
+            }
+        };
+        match &cb {
+            Value::Function { .. } | Value::Native(_) => {}
+            _ => {
+                return Err(EvalError::Error(
+                    "fetchStreamLines: last argument must be a function".into(),
+                ));
+            }
+        }
+
+        match crate::http::fetch_stream_lines_eval(url, options, |line| {
+            match self.call_func(&cb, &[Value::String(line.into())]) {
+                Ok(_) => Ok(()),
+                Err(EvalError::Throw(v)) => Err(crate::http::FetchStreamInterrupt::UserThrow(v)),
+                Err(EvalError::Error(s)) => Err(crate::http::FetchStreamInterrupt::UserError(s)),
+                Err(EvalError::Break) | Err(EvalError::Continue) => Err(
+                    crate::http::FetchStreamInterrupt::UserError(
+                        "break/continue invalid in fetchStreamLines callback".into(),
+                    ),
+                ),
+                Err(EvalError::Return(_)) => Err(crate::http::FetchStreamInterrupt::UserError(
+                    "return invalid in fetchStreamLines callback".into(),
+                )),
+            }
+        }) {
+            Ok(v) => Ok(v),
+            Err(crate::http::FetchStreamInterrupt::Net(s)) => Err(EvalError::Error(s)),
+            Err(crate::http::FetchStreamInterrupt::UserThrow(v)) => Err(EvalError::Throw(v)),
+            Err(crate::http::FetchStreamInterrupt::UserError(s)) => Err(EvalError::Error(s)),
+        }
     }
 
     fn eval_call_args(&self, args: &[tish_ast::CallArg]) -> Result<Vec<Value>, EvalError> {
@@ -2840,8 +2908,12 @@ impl Evaluator {
                 format!("{{{}}}", entries.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(","))
             }
             Value::Function { .. } | Value::Native(_) => "null".to_string(),
+            Value::FetchStreamLines => "null".to_string(),
             #[cfg(feature = "http")]
-            Value::Serve | Value::Promise(_) | Value::PromiseResolver(_) | Value::PromiseConstructor
+            Value::Serve
+            | Value::Promise(_)
+            | Value::PromiseResolver(_)
+            | Value::PromiseConstructor
             | Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => "null".to_string(),
             #[cfg(feature = "regex")]
             Value::RegExp(_) => "null".to_string(),

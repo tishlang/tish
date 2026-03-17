@@ -54,7 +54,7 @@ example-name/
 
 | Flag | Enables |
 |------|---------|
-| `http` | Network access (`fetch`, `fetchAll`, `serve`) |
+| `http` | Network access (`fetch`, `fetchAll`, `fetchStreamLines`, `serve`) |
 | `fs` | File system (`readFile`, `writeFile`, `mkdir`, etc.) |
 | `process` | Process control (`process.exit`, `process.env`, etc.) |
 | `regex` | Regular expressions (`RegExp`, `String.match`, etc.) |
