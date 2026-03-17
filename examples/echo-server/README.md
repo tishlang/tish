@@ -47,11 +47,6 @@ curl -X POST -H "Content-Type: application/json" \
 
 Or with tish installed: `tish run src/main.tish --features http`
 
-## Deploy to Tish Platform
+## Deploy
 
-```bash
-tish-cli login
-tish-cli projects create echo-server
-tish-cli link
-tish-cli deploy --wait
-```
+Deploy with Zectre: `zectre deploy --wait` from this directory. See [Deploy Overview](https://tish-lang.github.io/tish-docs/deploy/overview/) for details.

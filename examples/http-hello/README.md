@@ -27,30 +27,6 @@ cargo run -p tish --manifest-path ../../Cargo.toml --release --features http -- 
 
 Or with tish installed: `tish run src/main.tish --features http`
 
-## Deploy to Tish Platform
+## Deploy
 
-```bash
-tish-cli login
-tish-cli projects create http-hello
-tish-cli link
-tish-cli deploy --wait
-```
-
-The deployment includes:
-- 2 replicas for high availability
-- Rolling deployment strategy
-- Health check on `/health` endpoint
-
-### Environment Variables
-
-Add env vars in `tish.yaml` under `deploy.env`:
-
-```yaml
-deploy:
-  replicas: 2
-  strategy: rolling
-  env:
-    LOG_LEVEL: info
-```
-
-Or set app-level vars with `tish-cli env add KEY VALUE`. Each process also receives `DEPLOYMENT_ID` and `TASK_ID` from the platform.
+Deploy with Zectre: `zectre deploy --wait` from this directory. See [Deploy Overview](https://tish-lang.github.io/tish-docs/deploy/overview/) for details.

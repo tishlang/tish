@@ -57,4 +57,4 @@ mdx-docs/
 
 ## Deploy
 
-Run the build step before compiling. The deploy artifact must include `dist/` (or run `build.tish` in CI and bundle the output).
+Deploy with Zectre. Run the build step before compiling so `dist/` exists (or run `build.tish` in CI and bundle the output). See [Deploy Overview](https://tish-lang.github.io/tish-docs/deploy/overview/) for details.

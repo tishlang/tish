@@ -36,7 +36,7 @@ Use the same pattern for other examples; enable the features they need (e.g. `ht
 
 ## Deploy
 
-To deploy examples to a platform, see the [deployment documentation](https://github.com/tish-lang/tish-docs) and your platform’s CLI (e.g. zectre-cli). Prerequisites: built `tish` binary and platform config pointing at this repo.
+Use the **zectre** CLI from an example directory. See [Deploy Overview](https://tish-lang.github.io/tish-docs/deploy/overview/) for details. Prerequisites: built `tish` binary and platform config pointing at this repo.
 
 ## Project structure
 

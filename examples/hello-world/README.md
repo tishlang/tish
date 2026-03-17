@@ -27,11 +27,6 @@ cargo run -p tish --manifest-path ../../Cargo.toml --release --features full -- 
 
 Or with tish installed: `tish run src/main.tish` and `tish compile src/main.tish -o hello`
 
-## Deploy to Tish Platform
+## Deploy
 
-```bash
-tish-cli login
-tish-cli projects create hello-world
-tish-cli link
-tish-cli deploy --wait
-```
+Deploy with Zectre: `zectre deploy --wait` from this directory. See [Deploy Overview](https://tish-lang.github.io/tish-docs/deploy/overview/) for details.

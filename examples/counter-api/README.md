@@ -59,14 +59,9 @@ curl -X POST http://localhost:3000/counter/test/increment
 
 Or with tish installed: `tish run src/main.tish --features http`
 
-## Deploy to Tish Platform
+## Deploy
 
-```bash
-tish-cli login
-tish-cli projects create counter-api
-tish-cli link
-tish-cli deploy --wait
-```
+Deploy with Zectre: `zectre deploy --wait` from this directory. See [Deploy Overview](https://tish-lang.github.io/tish-docs/deploy/overview/) for details.
 
 ## Note on State
 

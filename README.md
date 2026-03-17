@@ -47,7 +47,7 @@ tish compile hello.tish -o hello
 # 1 + 2 = 3
 ```
 
-Best for: distribution, performance, deploying without Tish installed.
+Best for: distribution, performance, deploying without Tish installed. To deploy apps to the Zectre Platform, see the [Deploy guide](https://tish-lang.github.io/tish-docs/deploy/overview/) in the documentation.
 
 The compiled binary is **fully standalone** — no Tish or Rust runtime needed to run it.
 

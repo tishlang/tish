@@ -29,4 +29,4 @@ Then visit `http://localhost:8080` for JSON response with the greeting.
 
 ## Deploy
 
-Use the tish-dev CLI from this directory. See [Deploy Overview](/deploy/overview/).
+Use the **zectre** CLI from this directory. See [Deploy Overview](https://tish-lang.github.io/tish-docs/deploy/overview/) for details.
