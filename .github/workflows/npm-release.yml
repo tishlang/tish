@@ -1,15 +1,17 @@
-# Publish to npm when a GitHub release is created or updated.
-# Keeps npm packages in sync with GitHub releases; GitHub is the source of truth.
+# Publish to npm when a GitHub release is promoted from prerelease to full release.
+# Triggered when you use "Set as latest release" on a prerelease; version comes from the tag.
 
 name: NPM release
 
 on:
   release:
-    types: [published]
+    types: [published, edited]
 
 jobs:
   publish:
     name: Publish to npm
+    # Only run when this is a full release (not a prerelease)
+    if: github.event.release.prerelease == false
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Checkout at release tag
@@ -17,6 +19,17 @@ jobs:
         with:
           ref: refs/tags/${{ github.event.release.tag_name }}
           fetch-depth: 0
+
+      - name: Set package version from release tag
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          node -e "
+          const fs = require('fs');
+          const p = require('./npm/tish/package.json');
+          p.version = '"$VERSION"';
+          fs.writeFileSync('./npm/tish/package.json', JSON.stringify(p, null, 2));
+          "
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -34,7 +47,8 @@ jobs:
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          VERSION=$(node -p "require('./npm/tish/package.json').version")
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
           cd npm/create-tish-app
           npm version $VERSION --no-git-tag-version --allow-same-version
           echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > .npmrc

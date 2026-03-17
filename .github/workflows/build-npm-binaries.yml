@@ -48,7 +48,7 @@ jobs:
         run: cargo nextest run --no-run -p tish --features full --profile ci
 
   release_check:
-    name: Release check (conventional commits)
+    name: Release check (semantic-release dry-run)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
@@ -57,25 +57,35 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Require release-worthy conventional commits
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install npm deps (semantic-release and plugins)
+        run: npm install --prefix npm/tish
+
+      - name: Set repository URL for current repo (supports fork)
         run: |
-          # If no previous tag, allow release (e.g. first release)
-          if ! LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null); then
-            echo "No previous tag found - allowing release."
-            exit 0
+          node -e "
+          const fs = require('fs');
+          const p = require('./npm/tish/package.json');
+          p.repository = { type: 'git', url: process.env.REPO_URL };
+          fs.writeFileSync('./npm/tish/package.json', JSON.stringify(p, null, 2));
+          "
+        env:
+          REPO_URL: ${{ format('{0}/{1}.git', github.server_url, github.repository) }}
+
+      - name: Require incremental release (same logic as semantic-release)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd npm/tish && npx semantic-release --dry-run --extends ../../.releaserc.json 2>&1 | tee release-check.log
+          if grep -q "There are no relevant changes, so no new version is released." release-check.log; then
+            echo "No incremental release would be triggered. Push commits that trigger a release (feat/fix/perf/BREAKING CHANGE per conventional commits)."
+            exit 1
           fi
-          COMMITS=$(git log "$LAST_TAG..HEAD" --pretty=format:"%s%n%b" --no-merges)
-          if echo "$COMMITS" | grep -qE '^(feat|fix|perf)(!)?(\([^)]*\))?:'; then
-            echo "Conventional commits (feat/fix/perf) detected - release will run."
-            exit 0
-          fi
-          if echo "$COMMITS" | grep -q 'BREAKING CHANGE'; then
-            echo "Breaking change detected - release will run."
-            exit 0
-          fi
-          echo "No release-worthy conventional commits since $LAST_TAG."
-          echo "Use feat:, fix:, or perf: (or BREAKING CHANGE) to trigger a release."
-          exit 1
+          echo "Release would be triggered - check passed."
 
   test:
     name: Test & coverage
@@ -239,7 +249,7 @@ jobs:
           path: npm/tish/platform/
 
   release:
-    name: Release (GitHub only)
+    name: Release (prerelease branch + GitHub API)
     needs: [assemble, release_check]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -287,8 +297,83 @@ jobs:
         env:
           REPO_URL: ${{ format('{0}/{1}.git', github.server_url, github.repository) }}
 
-      - name: Semantic release (GitHub release + tag + version bump, no npm publish)
+      - name: Get next version (semantic-release dry-run)
+        id: next_version
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cd npm/tish && npx semantic-release --extends ../../.releaserc.json
+          cd npm/tish && npx semantic-release --dry-run --extends ../../.releaserc.json 2>&1 | tee release.log
+          VERSION=$(sed -n 's/.*Published release \([0-9.]*\).*/\1/p' release.log | head -1)
+          if [ -z "$VERSION" ]; then
+            echo "Could not determine next version from semantic-release output"
+            exit 1
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Next version: $VERSION"
+
+      - name: Create or update release branch and push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH="release/v${{ steps.next_version.outputs.version }}"
+          git checkout -B "$BRANCH"
+          git push origin "$BRANCH" --force
+
+      - name: Create or update GitHub prerelease via API
+        id: create_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.next_version.outputs.version }}
+        run: |
+          TAG="v${VERSION}"
+          BRANCH="release/v${VERSION}"
+          BODY="Pre-release. Attach any extra artifacts, then use **Set as latest release** to publish. That will trigger the npm release workflow."
+          # Create or update release (idempotent: PATCH if tag exists)
+          RESP=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/releases" \
+            -d "{\"tag_name\":\"$TAG\",\"target_commitish\":\"$BRANCH\",\"name\":\"$TAG\",\"body\":$(echo "$BODY" | jq -Rs .),\"prerelease\":true}")
+          HTTP_CODE=$(echo "$RESP" | tail -n1)
+          BODY_RESP=$(echo "$RESP" | sed '$d')
+          if [ "$HTTP_CODE" = "201" ]; then
+            echo "Created prerelease $TAG"
+            RELEASE_ID=$(echo "$BODY_RESP" | jq -r .id)
+          elif [ "$HTTP_CODE" = "422" ]; then
+            # Tag/release may already exist (e.g. re-run); get release by tag and update
+            RELEASE_ID=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" | jq -r .id)
+            if [ "$RELEASE_ID" != "null" ] && [ -n "$RELEASE_ID" ]; then
+              curl -s -X PATCH \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID" \
+                -d "{\"target_commitish\":\"$BRANCH\",\"body\":$(echo "$BODY" | jq -Rs .),\"prerelease\":true}"
+              echo "Updated existing prerelease $TAG"
+            else
+              echo "Release creation failed (422) and could not find release by tag"
+              exit 1
+            fi
+          else
+            echo "Unexpected response: $HTTP_CODE"
+            echo "$BODY_RESP"
+            exit 1
+          fi
+          echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
+
+      - name: Upload platform zip to prerelease
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_ID="${{ steps.create_release.outputs.release_id }}"
+          curl -s -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/zip" \
+            --data-binary @npm/tish/tish-platform-binaries.zip \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=tish-platform-binaries.zip&label=Platform%20binaries%20(all%20OS)"

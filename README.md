@@ -168,7 +168,13 @@ Run any test file: `tish run tests/core/<name>.tish`
 
 ## Releasing
 
-Releases are driven by **GitHub**: the main CI creates a **GitHub Release** (with tag and assets) when commits on `main` follow [Conventional Commits](https://www.conventionalcommits.org/). A separate workflow then publishes the same version to npm when that release is published.
+Releases are **GitHub-led** and do not modify `main`. The main CI does not push to `main`; it creates a **release branch** and a **GitHub prerelease**.
+
+1. **On push to `main`** (with [conventional commits](#conventional-commits) that trigger a release): CI runs semantic-release in dry-run to get the next version, creates/updates a branch `release/vX.Y.Z`, and creates a **prerelease** on GitHub via the API (with the platform zip attached). There is no version bump or tag on `main`.
+2. **When you’re ready**: In GitHub, open the prerelease, attach any extra artifacts if needed, then use **Set as latest release** (uncheck “Set as a pre-release”). That promotes the prerelease to a full release.
+3. **NPM publish**: The “NPM release” workflow runs when a full release is published (or when a release is edited to no longer be a prerelease). It checks out the release tag, sets the package version from the tag, and publishes `@tishlang/tish` and `@tishlang/create-tish-app` to npm.
+
+This gives time for the pipeline (or you) to attach the right binaries and only publishes to npm when the release is promoted.
 
 ### Conventional commits
 
@@ -184,8 +190,6 @@ Use these commit message formats so semantic-release can determine the next vers
 | Breaking | `feat!: change API` or body `BREAKING CHANGE:` | **Major** (1.0.0 → 2.0.0) |
 
 **Format:** `<type>(<scope>): <description>`, e.g. `fix(vm): handle empty array`.
-
-The first commit on `main` that would trigger a release (e.g. a `feat:` or `fix:`) causes CI to create the GitHub Release and tag; publishing that release triggers the npm publish workflow.
 
 ## Performance Comparison
 
