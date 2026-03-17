@@ -1,0 +1,88 @@
+# Manual workflow to benchmark build times across Blacksmith vs GitHub-hosted runners (x64 and ARM).
+# Run via Actions → "Build runner benchmark" → Run workflow.
+# Compare job durations in the run summary to see which platform builds fastest.
+
+name: Build runner benchmark
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.runner_type }} ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner_type: blacksmith
+            arch: x64
+            runs_on: blacksmith-4vcpu-ubuntu-2404
+            target: x86_64-unknown-linux-gnu
+            binary_name: tish
+          - runner_type: blacksmith
+            arch: arm64
+            runs_on: blacksmith-4vcpu-ubuntu-2404-arm
+            target: aarch64-unknown-linux-gnu
+            binary_name: tish
+          - runner_type: gha
+            arch: x64
+            runs_on: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            binary_name: tish
+          - runner_type: gha
+            arch: arm64
+            runs_on: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary_name: tish
+
+    runs-on: ${{ matrix.runs_on }}
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-benchmark
+          cache-workspace-crates: "true"
+
+      - name: Build (timed)
+        id: build
+        run: |
+          start=$(date +%s)
+          cargo build --release -p tish --target ${{ matrix.target }}
+          end=$(date +%s)
+          echo "duration_sec=$((end - start))" >> "$GITHUB_OUTPUT"
+          echo "Build completed in $((end - start))s on ${{ matrix.runner_type }} ${{ matrix.arch }}"
+
+      - name: Stage binary for upload
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} staging/
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.runner_type }}-${{ matrix.arch }}
+          path: staging/${{ matrix.binary_name }}
+
+      - name: Build duration summary
+        run: |
+          echo "### ${{ matrix.runner_type }} / ${{ matrix.arch }}" >> $GITHUB_STEP_SUMMARY
+          echo "Build time: **${{ steps.build.outputs.duration_sec }}s**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
