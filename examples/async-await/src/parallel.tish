@@ -1,9 +1,11 @@
-// Parallel: fetchAllAsync - all requests run concurrently (non-blocking)
-// Each httpbin.org/delay/1 waits 1 second. 3 parallel = ~1s total.
+// Parallel: await fetchAll — all requests run concurrently (non-blocking)
+import { fetchAll } from 'http'
+
 let urls = [
     "https://httpbin.org/delay/1",
     "https://httpbin.org/delay/1",
     "https://httpbin.org/delay/1"
 ]
-let results = await fetchAllAsync(urls.map(u => ({ url: u })))
-console.log("Parallel done:", results.length, "results")
+let results = await fetchAll(urls.map(u => ({ url: u })))
+let allOk = results.every(r => r.ok)
+console.log("Parallel:", results.length, "responses, all ok:", allOk)

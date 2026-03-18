@@ -1,31 +1,29 @@
-// HTTP fetch tests
-// Note: These tests require network access
+// HTTP fetch tests (Promise-based fetch + await). Requires network.
 import { fetch, fetchAll } from 'http'
 
-// Test 1: Simple GET request
-let response = fetch("https://httpbin.org/get")
+let response = await fetch("https://httpbin.org/get")
 console.log("GET status:", response.status)
 console.log("GET ok:", response.ok)
 
-// Test 2: POST request with JSON body
 let postOptions = { method: "POST", body: "{\"name\": \"tish\"}" }
-let postResponse = fetch("https://httpbin.org/post", postOptions)
+let postResponse = await fetch("https://httpbin.org/post", postOptions)
 console.log("POST status:", postResponse.status)
 console.log("POST ok:", postResponse.ok)
 
-// Test 3: Parse JSON response
-let jsonResponse = fetch("https://httpbin.org/json")
+let jsonResponse = await fetch("https://httpbin.org/json")
 if (jsonResponse.ok) {
-  let data = JSON.parse(jsonResponse.body)
-  console.log("JSON response parsed successfully")
+  let data = await jsonResponse.json()
+  if (data) {
+    console.log("JSON response parsed successfully")
+  }
 }
 
-// Test 4: fetchAll for parallel requests
 let req1 = { url: "https://httpbin.org/get" }
 let req2 = { url: "https://httpbin.org/status/200" }
 let req3 = { url: "https://httpbin.org/headers" }
-let responses = fetchAll([req1, req2, req3])
+let responses = await fetchAll([req1, req2, req3])
 console.log("Parallel fetch count:", responses.length)
-console.log("All responses ok:", responses[0].ok && responses[1].ok && responses[2].ok)
+let allOk = responses[0].ok && responses[1].ok && responses[2].ok
+console.log("All responses ok:", allOk)
 
 console.log("HTTP tests completed")

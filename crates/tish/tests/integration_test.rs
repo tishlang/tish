@@ -192,7 +192,7 @@ fn test_async_await_compile_via_binary() {
             "tish compile failed: {}",
             String::from_utf8_lossy(&compile_out.stderr)
         );
-        // Run compiled binary to validate non-blocking fetchAllAsync executes correctly
+        // Run compiled binary to validate non-blocking fetchAll executes correctly
         let run_result = Command::new(&out)
             .current_dir(workspace_root())
             .output();

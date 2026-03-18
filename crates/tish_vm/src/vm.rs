@@ -33,49 +33,18 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
     #[cfg(feature = "http")]
     if spec == "tish:http" {
         return match export_name {
-            "fetch" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::http_fetch(args)))),
-            "fetchAll" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::http_fetch_all(args)))),
+            "fetch" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tish_runtime::fetch_promise(args.to_vec())
+            }))),
+            "fetchAll" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tish_runtime::fetch_all_promise(args.to_vec())
+            }))),
             "serve" => Some(Value::Function(Rc::new(|args: &[Value]| {
                 let handler = args.get(1).cloned().unwrap_or(Value::Null);
                 if let Value::Function(f) = handler {
                     tish_runtime::http_serve(args, move |req_args| f(req_args))
                 } else {
                     Value::Null
-                }
-            }))),
-            "fetchStreamLines" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                match args.len() {
-                    0 | 1 => tish_runtime::http_fetch_stream_lines(args),
-                    2 => {
-                        let url = match args.first() {
-                            Some(Value::String(s)) => s.to_string(),
-                            Some(v) => v.to_display_string(),
-                            None => return tish_runtime::http_fetch_stream_lines(args),
-                        };
-                        match args.get(1) {
-                            Some(Value::Function(f)) => tish_runtime::http_fetch_stream_lines(&[
-                                Value::String(url.into()),
-                                Value::Function(Rc::clone(f)),
-                            ]),
-                            _ => tish_runtime::http_fetch_stream_lines(args),
-                        }
-                    }
-                    _ => {
-                        let url = match args.first() {
-                            Some(Value::String(s)) => s.to_string(),
-                            Some(v) => v.to_display_string(),
-                            None => return tish_runtime::http_fetch_stream_lines(args),
-                        };
-                        let opts = args.get(1).cloned().unwrap_or(Value::Null);
-                        match args.get(2) {
-                            Some(Value::Function(f)) => tish_runtime::http_fetch_stream_lines(&[
-                                Value::String(url.into()),
-                                opts,
-                                Value::Function(Rc::clone(f)),
-                            ]),
-                            _ => tish_runtime::http_fetch_stream_lines(args),
-                        }
-                    }
                 }
             }))),
             _ => None,

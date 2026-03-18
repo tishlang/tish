@@ -60,10 +60,12 @@ pub fn core_to_eval(v: CoreValue) -> Value {
             Value::Object(Rc::new(RefCell::new(out)))
         }
         CoreValue::Opaque(o) => Value::Opaque(o),
-        CoreValue::Function(_) | CoreValue::Promise(_) => {
-            // Not convertible to interpreter Value; caller should not receive these from opaque methods
-            Value::Null
-        }
+        #[cfg(feature = "http")]
+        CoreValue::Promise(p) => Value::CorePromise(Arc::clone(&p)),
+        #[cfg(feature = "http")]
+        CoreValue::Function(f) => Value::CoreFn(Rc::clone(&f)),
+        #[cfg(not(feature = "http"))]
+        CoreValue::Function(_) | CoreValue::Promise(_) => Value::Null,
         // tish_core gets regex from http or regex features; handle RegExp when it exists
         #[cfg(any(feature = "http", feature = "regex"))]
         CoreValue::RegExp(re) => {

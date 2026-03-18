@@ -597,10 +597,7 @@ impl Evaluator {
                     let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
                     exports.insert("fetch".into(), Value::Native(Self::fetch_native));
                     exports.insert("fetchAll".into(), Value::Native(Self::fetch_all_native));
-                    exports.insert("fetchAsync".into(), Value::Native(Self::fetch_async_native));
-                    exports.insert("fetchAllAsync".into(), Value::Native(Self::fetch_all_async_native));
                     exports.insert("serve".into(), Value::Serve);
-                    exports.insert("fetchStreamLines".into(), Value::FetchStreamLines);
                     exports.insert("Promise".into(), Value::PromiseConstructor);
                     exports.insert("setTimeout".into(), Value::TimerBuiltin(Arc::from("setTimeout")));
                     exports.insert("setInterval".into(), Value::TimerBuiltin(Arc::from("setInterval")));
@@ -1562,7 +1559,10 @@ impl Evaluator {
                     Value::Array(_) => "object".into(),
                     Value::Object(_) => "object".into(),
                     Value::Function { .. } | Value::Native(_) => "function".into(),
-                    Value::FetchStreamLines => "function".into(),
+                    #[cfg(feature = "http")]
+                    Value::CoreFn(_) => "function".into(),
+                    #[cfg(feature = "http")]
+                    Value::CorePromise(_) => "object".into(),
                     #[cfg(feature = "http")]
                     Value::Serve
                     | Value::PromiseResolver(_)
@@ -2124,17 +2124,12 @@ impl Evaluator {
             }
             #[cfg(feature = "http")]
             Value::Serve => self.run_http_server(args),
-            Value::FetchStreamLines => {
-                #[cfg(feature = "http")]
-                {
-                    self.run_fetch_stream_lines(args)
-                }
-                #[cfg(not(feature = "http"))]
-                {
-                    Err(EvalError::Error(
-                        "fetchStreamLines requires the http feature".into(),
-                    ))
-                }
+            #[cfg(feature = "http")]
+            Value::CoreFn(f) => {
+                let ca: Result<Vec<tish_core::Value>, String> =
+                    args.iter().map(crate::value_convert::eval_to_core).collect();
+                let ca = ca.map_err(EvalError::Error)?;
+                Ok(crate::value_convert::core_to_eval(f(&ca)))
             }
             #[cfg(feature = "regex")]
             Value::RegExp(_) => Err(EvalError::Error("RegExp is not callable".to_string())),
@@ -2460,58 +2455,6 @@ impl Evaluator {
         Ok(Value::Null)
     }
 
-    #[cfg(feature = "http")]
-    fn run_fetch_stream_lines(&self, args: &[Value]) -> Result<Value, EvalError> {
-        let (url, options, cb) = match args.len() {
-            0 | 1 => {
-                return Err(EvalError::Error(
-                    "fetchStreamLines requires (url, onLine) or (url, options, onLine)".into(),
-                ));
-            }
-            2 => {
-                let url = args.first().unwrap().to_string();
-                (url, None, args.get(1).cloned().unwrap_or(Value::Null))
-            }
-            _ => {
-                let url = args.first().unwrap().to_string();
-                (
-                    url,
-                    Some(args.get(1).cloned().unwrap_or(Value::Null)),
-                    args.get(2).cloned().unwrap_or(Value::Null),
-                )
-            }
-        };
-        match &cb {
-            Value::Function { .. } | Value::Native(_) => {}
-            _ => {
-                return Err(EvalError::Error(
-                    "fetchStreamLines: last argument must be a function".into(),
-                ));
-            }
-        }
-
-        match crate::http::fetch_stream_lines_eval(url, options, |line| {
-            match self.call_func(&cb, &[Value::String(line.into())]) {
-                Ok(_) => Ok(()),
-                Err(EvalError::Throw(v)) => Err(crate::http::FetchStreamInterrupt::UserThrow(v)),
-                Err(EvalError::Error(s)) => Err(crate::http::FetchStreamInterrupt::UserError(s)),
-                Err(EvalError::Break) | Err(EvalError::Continue) => Err(
-                    crate::http::FetchStreamInterrupt::UserError(
-                        "break/continue invalid in fetchStreamLines callback".into(),
-                    ),
-                ),
-                Err(EvalError::Return(_)) => Err(crate::http::FetchStreamInterrupt::UserError(
-                    "return invalid in fetchStreamLines callback".into(),
-                )),
-            }
-        }) {
-            Ok(v) => Ok(v),
-            Err(crate::http::FetchStreamInterrupt::Net(s)) => Err(EvalError::Error(s)),
-            Err(crate::http::FetchStreamInterrupt::UserThrow(v)) => Err(EvalError::Throw(v)),
-            Err(crate::http::FetchStreamInterrupt::UserError(s)) => Err(EvalError::Error(s)),
-        }
-    }
-
     fn eval_call_args(&self, args: &[tish_ast::CallArg]) -> Result<Vec<Value>, EvalError> {
         let mut result = Vec::with_capacity(args.len());
         for arg in args {
@@ -2619,6 +2562,8 @@ impl Evaluator {
                 _ => Ok(Value::Null),
             },
             #[cfg(feature = "http")]
+            Value::CorePromise(_) => Ok(Value::Null),
+            #[cfg(feature = "http")]
             Value::PromiseConstructor => match key {
                 "resolve" => Ok(Value::Native(Self::promise_resolve)),
                 "reject" => Ok(Value::Native(Self::promise_reject)),
@@ -2671,7 +2616,7 @@ impl Evaluator {
                 Ok(map.borrow().get(&key).cloned().unwrap_or(Value::Null))
             }
             #[cfg(feature = "http")]
-            Value::Promise(_) => {
+            Value::Promise(_) | Value::CorePromise(_) => {
                 let key = match index {
                     Value::String(s) => s.as_ref(),
                     _ => return Ok(Value::Null),
@@ -2908,7 +2853,8 @@ impl Evaluator {
                 format!("{{{}}}", entries.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(","))
             }
             Value::Function { .. } | Value::Native(_) => "null".to_string(),
-            Value::FetchStreamLines => "null".to_string(),
+            #[cfg(feature = "http")]
+            Value::CorePromise(_) | Value::CoreFn(_) => "null".to_string(),
             #[cfg(feature = "http")]
             Value::Serve
             | Value::Promise(_)
@@ -3045,6 +2991,20 @@ impl Evaluator {
                     }
                     crate::promise::PromiseAwaitResult::Error(e) => return Err(e),
                 }
+            } else if let Value::CorePromise(ref p) = v {
+                match p.block_until_settled() {
+                    Ok(x) => results.push(crate::value_convert::core_to_eval(x)),
+                    Err(x) => {
+                        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+                        let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+                        let _ = crate::promise::settle_promise(
+                            &reject,
+                            crate::value_convert::core_to_eval(x),
+                            false,
+                        );
+                        return Ok(promise);
+                    }
+                }
             } else {
                 results.push(v);
             }
@@ -3067,6 +3027,30 @@ impl Evaluator {
             _ => return Err("Promise.race requires array or iterable".to_string()),
         };
         for v in values {
+            if let Value::CorePromise(ref p) = v {
+                match p.block_until_settled() {
+                    Ok(x) => {
+                        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+                        let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+                        crate::promise::settle_promise(
+                            &resolve,
+                            crate::value_convert::core_to_eval(x),
+                            true,
+                        )?;
+                        return Ok(promise);
+                    }
+                    Err(x) => {
+                        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+                        let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+                        crate::promise::settle_promise(
+                            &reject,
+                            crate::value_convert::core_to_eval(x),
+                            false,
+                        )?;
+                        return Ok(promise);
+                    }
+                }
+            }
             if let Value::Promise(ref p) = v {
                 match crate::promise::block_until_settled(p) {
                     crate::promise::PromiseAwaitResult::Fulfilled(x) => {
@@ -3090,47 +3074,25 @@ impl Evaluator {
 
     #[cfg(feature = "http")]
     fn fetch_native(args: &[Value]) -> Result<Value, String> {
-        crate::http::fetch(args)
-    }
-
-    #[cfg(feature = "http")]
-    fn fetch_all_native(args: &[Value]) -> Result<Value, String> {
-        crate::http::fetch_all(args)
-    }
-
-    #[cfg(feature = "http")]
-    fn fetch_async_native(args: &[Value]) -> Result<Value, String> {
-        let url = args
-            .first()
-            .map(|v| v.to_string())
-            .ok_or_else(|| "fetchAsync requires a URL".to_string())?;
-        let options = args.get(1).cloned();
-        let result =
-            crate::http::RUNTIME.with(|rt| rt.block_on(crate::http::fetch_async(&url, options.as_ref())));
-        match result {
-            Ok(v) => Self::promise_resolve(&[v]),
-            Err(e) => Self::promise_reject(&[Value::String(e.into())]),
+        let mut cv = Vec::new();
+        for a in args {
+            cv.push(crate::value_convert::eval_to_core(a)?);
+        }
+        match tish_runtime::fetch_promise(cv) {
+            tish_core::Value::Promise(p) => Ok(Value::CorePromise(p)),
+            _ => Err("internal: fetch did not return Promise".into()),
         }
     }
 
     #[cfg(feature = "http")]
-    fn fetch_all_async_native(args: &[Value]) -> Result<Value, String> {
-        let requests = args
-            .first()
-            .and_then(|v| {
-                if let Value::Array(arr) = v {
-                    Some(arr.borrow().clone())
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| "fetchAllAsync requires an array of requests".to_string())?;
-        let result = crate::http::RUNTIME.with(|rt| {
-            rt.block_on(crate::http::fetch_all_async(requests))
-        });
-        match result {
-            Ok(v) => Self::promise_resolve(&[v]),
-            Err(e) => Self::promise_reject(&[Value::String(e.into())]),
+    fn fetch_all_native(args: &[Value]) -> Result<Value, String> {
+        let mut cv = Vec::new();
+        for a in args {
+            cv.push(crate::value_convert::eval_to_core(a)?);
+        }
+        match tish_runtime::fetch_all_promise(cv) {
+            tish_core::Value::Promise(p) => Ok(Value::CorePromise(p)),
+            _ => Err("internal: fetchAll did not return Promise".into()),
         }
     }
 
@@ -3143,9 +3105,14 @@ impl Evaluator {
                 crate::promise::PromiseAwaitResult::Rejected(v) => Err(EvalError::Throw(v)),
                 crate::promise::PromiseAwaitResult::Error(e) => Err(EvalError::Error(e)),
             }
+        } else if let Value::CorePromise(ref p) = val {
+            match p.block_until_settled() {
+                Ok(v) => Ok(crate::value_convert::core_to_eval(v)),
+                Err(v) => Err(EvalError::Throw(crate::value_convert::core_to_eval(v))),
+            }
         } else {
             Err(EvalError::Error(
-                "await requires a Promise (use fetchAsync, fetchAllAsync, or Promise)".to_string(),
+                "await requires a Promise (use await fetch(...), await reader.read(), etc.)".into(),
             ))
         }
     }
@@ -3153,7 +3120,7 @@ impl Evaluator {
     #[cfg(not(feature = "http"))]
     fn eval_await(&self, _operand: &Expr) -> Result<Value, EvalError> {
         Err(EvalError::Error(
-            "await requires the http feature (fetchAsync, fetchAllAsync)".to_string(),
+            "await requires the http feature".to_string(),
         ))
     }
 

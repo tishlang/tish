@@ -21,6 +21,9 @@ members = [
     "crates/tish_wasm",
     "crates/tish",
     "crates/js_to_tish",
+    "crates/tish_fmt",
+    "crates/tish_lint",
+    "crates/tish_lsp",
 ]
 resolver = "2"
 

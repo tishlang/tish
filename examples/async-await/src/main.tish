@@ -1,21 +1,15 @@
-// async-await example - non-blocking fetch with parallel execution
-// Run: tish run src/main.tish (with http feature)
-// Build: cargo run -p tish --features http -- compile examples/async-await/src/main.tish -o async_demo
+// Async/await + parallel HTTP (native / async entry)
+import { fetchAll } from 'http'
 
-console.log("Fetching URLs in parallel with fetchAllAsync...")
+console.log("Fetching URLs in parallel with fetchAll...")
 
 let urls = [
     "https://httpbin.org/get",
+    "https://httpbin.org/uuid",
     "https://httpbin.org/headers"
 ]
 
-// fetchAllAsync runs all fetches in parallel (non-blocking)
-let results = await fetchAllAsync(urls.map(u => ({ url: u })))
-
-for (let i = 0; i < results.length; i++) {
-    let r = results[i]
-    let size = r.body ? r.body.length : 0
-    console.log("Got", size, "bytes from", urls[i])
-}
-
+let results = await fetchAll(urls.map(u => ({ url: u })))
+let allOk = results.every(r => r.ok)
+console.log("All fetches ok:", allOk, "count:", results.length)
 console.log("Done")

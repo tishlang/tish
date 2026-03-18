@@ -1,5 +1,7 @@
 // Promises and async/await example
-// Run: cargo run -p tish --features http -- run examples/async-await/src/promises.tish
+// Run: cargo run -p tish --features http -- run examples/async-await/src/promises.tish --backend interp
+
+import { fetch } from 'http'
 
 console.log("Promise basics:")
 
@@ -13,8 +15,8 @@ console.log("Promise.resolve + .then:")
 let doubled = await Promise.resolve(10).then(x => x * 2)
 console.log("10 * 2 =", doubled)
 
-console.log("fetchAsync returns Promise:")
-let r = await fetchAsync("https://httpbin.org/get")
+console.log("fetch returns Promise:")
+let r = await fetch("https://httpbin.org/get")
 console.log("fetch status:", r.status)
 
 console.log("Done")

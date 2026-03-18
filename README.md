@@ -116,6 +116,20 @@ The binary is `target/release/tish`. Add it to your PATH or run directly.
 
 **Note**: Compiling to native (`tish compile`) requires `rustc` and must be run from the workspace root (needs access to `crates/tish_runtime`).
 
+## Developer tooling
+
+Editor tooling is **separate from the compiler** (`tish` = run / repl / compile / dump-ast only).
+
+| Tool | Purpose |
+|------|---------|
+| **`tish`** | Run, REPL, compile, `dump-ast` — the language implementation. |
+| **`tish-fmt`** | Formatter (`cargo build --release -p tish_fmt` → `tish-fmt`). |
+| **`tish-lint`** | Linter (`cargo build --release -p tish_lint` → `tish-lint`). |
+| **`tish-lsp`** | Language server — links `tish_fmt` / `tish_lint` as libraries for editor integration. |
+| **VS Code extension** | [tish-vscode](https://github.com/tish-lang/tish-vscode) — grammar, snippets, LSP client, tasks. |
+
+User-facing docs: [Editor & IDE](https://tish-lang.github.io/tish-docs/getting-started/editor/), [Language server](https://tish-lang.github.io/tish-docs/reference/language-server/), [Formatting](https://tish-lang.github.io/tish-docs/reference/formatting/), [Linting](https://tish-lang.github.io/tish-docs/reference/linting/). Contributor notes: [docs/tooling.md](docs/tooling.md).
+
 ## Using just (Recommended)
 
 The project includes a `justfile` for common tasks:
@@ -144,7 +158,7 @@ Tish has compile-time feature flags for security:
 
 | Flag | Enables |
 |------|---------|
-| `http` | Network access (`fetch`, `fetchAll`, `fetchStreamLines`, `serve`) |
+| `http` | Network access (`fetch`, `fetchAll`, `serve`) — Fetch-style Promises + ReadableStream |
 | `fs` | File system (`readFile`, `writeFile`, `mkdir`, etc.) |
 | `process` | Process control (`process.exit`, `process.env`, etc.) |
 | `regex` | Regular expressions (`RegExp`, `String.match`, etc.) |
@@ -204,7 +218,7 @@ JavaScript equivalents in `tests/core/*.js`. Compare Tish vs Node.js/Bun:
 
 - **Variables**: `let` (mutable), `const` (immutable)
 - **Functions**: `fn name(a, b) { ... }` or `fn name(a) = expr`
-- **Async/await**: `async fn` and `await` with `fetchAsync`/`fetchAllAsync`
+- **Async/await**: `await fetch` / `await fetchAll` (native); interpreter: `--backend interp` for top-level `await`
 - **Arrow functions**: `x => x * 2`, `(a, b) => a + b`
 - **Template literals**: `` `Hello, ${name}!` ``
 - **Control flow**: `if/else`, `while`, `for`, `for..of`, `switch`

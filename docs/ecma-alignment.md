@@ -55,7 +55,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **strict-equals** — Follow (`===`, `!==`)
 - **increment/decrement** — Follow (postfix `++`, `--` on identifiers)
 - **typeof** — Follow; `typeof null` returns `"null"` (not `"object"`) since Tish has no undefined
-- **async, await** — Follow (simplify); `await` works on any Promise (fetchAsync, fetchAllAsync, Promise)
+- **async, await** — Follow (simplify); `await` works on Promises (`fetch`, `fetchAll`, user `Promise`, etc.)
 - **generators, yield** — Omit
 - **class, new, super, this** — Omit
 - **delete, in, instanceof** — Omit or Simplify

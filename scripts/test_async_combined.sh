@@ -24,7 +24,7 @@ if [[ ! -x "$tish_bin" ]]; then
 fi
 
 echo "Running combined async/Promise/setTimeout validation..."
-output=$("$tish_bin" run "$script" 2>&1) || true
+output=$("$tish_bin" run "$script" --backend interp 2>&1) || true
 exit_code=$?
 
 echo "$output"
@@ -44,10 +44,10 @@ check() {
 echo "Validation:"
 check "ASYNC_VALIDATION_START"   "Script started"
 check "PROMISE_AWAIT: ok"        "Promise + await"
-check "FETCH_1:"                 "fetchAsync request 1"
-check "FETCH_2:"                 "fetchAsync request 2"
+check "FETCH_1:"                 "fetch request 1"
+check "FETCH_2:"                 "fetch request 2"
 check "PROMISE_ALL_FETCHES: 3"   "Promise.all with 3 fetches"
-check "FETCH_ALL_ASYNC: 3"       "fetchAllAsync parallel"
+check "FETCH_ALL: 3"             "fetchAll parallel"
 check "MAIN_DONE"                "Main execution completed"
 check "TIMER_1_FIRED"            "setTimeout(0) callback ran"
 check "TIMER_2_FIRED"            "setTimeout(20) callback ran"

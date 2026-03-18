@@ -61,8 +61,8 @@ fn double(x) = x * 2   // single-expression, implicit return
 
 // Async functions (use with await)
 async fn fetchData(url) {
-    let res = await fetchAsync(url)
-    return res.ok ? res.body : null
+    let res = await fetch(url)
+    return res.ok ? await res.text() : null
 }
 ```
 
@@ -122,10 +122,14 @@ Log level controlled via `TISH_LOG_LEVEL` environment variable:
 
 ## HTTP module (`import { … } from 'http'`)
 
-Requires the `http` feature when compiling.
+Requires the `http` feature when compiling. Aligned with the **Fetch** model (Promises, streaming body).
 
-- **`fetch(url, options?)`** — Returns when the **entire** response body has been read. Response shape: `{ status, ok, body, headers }`. Use for JSON and small payloads.
-- **`fetchStreamLines(url, onLine)`** or **`fetchStreamLines(url, options, onLine)`** — Streams the body: `onLine(line)` is called for each complete line (split on `\n`, line without the newline) and once for any trailing bytes after the last newline. Same `options` as `fetch` (`method`, `headers`, `body`). On HTTP error status (4xx/5xx), the callback is **not** invoked; the return value matches `fetch` with the error body in `body`. On success, `body` is empty. Use for **SSE** and other line-oriented streams (e.g. LLM token streams) so handlers run as data arrives instead of after the full response buffers.
+- **`fetch(url, options?)`** — Returns a **Promise** that resolves to a **Response** once headers arrive: `{ status, ok, headers, body, text, json }`.
+  - **`body`** — `ReadableStream` (opaque) or `null` (e.g. no body). Only one consumer: either stream via **`body.getReader()`** and **`await reader.read()`** (yields `{ done, value }` with `value` as byte array), **or** **`await response.text()`** / **`await response.json()`** (mutually exclusive; second use throws).
+- **`fetchAll(requests[])`** — Promise resolving to an array of Responses (or error objects per slot). Same request shapes as before (`url` string or `{ url, method?, headers?, body? }`).
+- **`serve(port, handler)`** — synchronous HTTP server (unchanged).
+
+**Interpreter:** use **`tish run … --backend interp`** for top-level **`await`** (VM bytecode does not support `await` yet). **Native** (`tish compile`): use **`async fn main()`** and **`await fetch(...)`**.
 
 ## Type Annotations (Optional)
 

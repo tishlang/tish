@@ -3,9 +3,7 @@
 //! Re-exports core types from tish_core and provides console, Math,
 //! and other builtin functions for compiled Tish programs.
 
-use std::cell::RefCell;
 use std::fmt;
-use std::rc::Rc;
 use std::sync::OnceLock;
 use tish_builtins::helpers::extract_num;
 #[cfg(feature = "fs")]
@@ -655,7 +653,13 @@ pub fn object_from_entries(args: &[Value]) -> Value {
 
 // HTTP Support
 #[cfg(feature = "http")]
+mod promise_io;
+
+#[cfg(feature = "http")]
 mod http;
+
+#[cfg(feature = "http")]
+mod http_fetch;
 
 #[cfg(feature = "http")]
 mod timers;
@@ -668,15 +672,8 @@ mod native_promise;
 
 #[cfg(feature = "http")]
 pub use http::{
-    fetch as http_fetch,
-    fetch_all as http_fetch_all,
     await_fetch as http_await_fetch,
     await_fetch_all as http_await_fetch_all,
-    fetch_async as http_fetch_async,
-    fetch_all_async as http_fetch_all_async,
-    fetch_stream_lines as http_fetch_stream_lines,
-    fetch_stream_lines_core as http_fetch_stream_lines_core,
-    FetchStreamLinesOutcome,
     serve as http_serve,
 };
 
@@ -687,7 +684,7 @@ pub use timers::{set_timeout as timer_set_timeout, clear_timeout as timer_clear_
 pub use promise::promise_object;
 
 #[cfg(feature = "http")]
-pub use native_promise::{fetch_async_promise, await_promise};
+pub use native_promise::{await_promise, fetch_all_promise, fetch_async_promise, fetch_promise};
 
 // RegExp Support
 #[cfg(feature = "regex")]

@@ -1,0 +1,16 @@
+[package]
+name = "tish_fmt"
+version = "0.1.0"
+edition = "2021"
+description = "Opinionated formatter for Tish source (parse → pretty-print)"
+license-file = { workspace = true }
+repository = { workspace = true }
+
+[[bin]]
+name = "tish-fmt"
+path = "src/bin/tish-fmt.rs"
+
+[dependencies]
+clap = { version = "4.5.60", features = ["derive"] }
+tish_ast = { path = "../tish_ast" }
+tish_parser = { path = "../tish_parser" }

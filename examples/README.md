@@ -11,7 +11,7 @@ Example applications you can run and compile with Tish. Build the CLI from the r
 | [json-api](json-api/) | REST API with JSON responses | `http` |
 | [echo-server](echo-server/) | Echoes request details back | `http` |
 | [counter-api](counter-api/) | Stateful counter service | `http` |
-| [async-await](async-await/) | Async/await with fetchAsync | `http` |
+| [async-await](async-await/) | Async/await with `fetch` / `fetchAll` | `http` |
 | [mdx-docs](mdx-docs/) | Static docs: MDX, file-based routing, pre-rendered | `http`, `fs` |
 | [json-file-edit](json-file-edit/) | Read JSON file, decode, modify, write back | `fs` |
 | [tishx-example](tishx-example/) | Tish + JSX compiled to vanilla JavaScript (no 3rd party libs) | — |
@@ -54,7 +54,7 @@ example-name/
 
 | Flag | Enables |
 |------|---------|
-| `http` | Network access (`fetch`, `fetchAll`, `fetchStreamLines`, `serve`) |
+| `http` | Network access (`fetch`, `fetchAll`, `serve`) |
 | `fs` | File system (`readFile`, `writeFile`, `mkdir`, etc.) |
 | `process` | Process control (`process.exit`, `process.env`, etc.) |
 | `regex` | Regular expressions (`RegExp`, `String.match`, etc.) |

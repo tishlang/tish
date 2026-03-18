@@ -1,40 +1,31 @@
-// Combined validation: async/await + Promise + setTimeout + multiple HTTP requests
-// Requires: http feature
-// Run: tish run tests/modules/async_promise_settimeout.tish --features http
-// Or: ./scripts/test_async_combined.sh
-import { fetchAsync, fetchAllAsync, Promise, setTimeout } from 'http'
+// async/await + Promise + setTimeout + fetch / fetchAll
+import { fetch, fetchAll, Promise, setTimeout } from 'http'
 
 console.log("ASYNC_VALIDATION_START")
 
-// 1. setTimeout (non-blocking) - callbacks run after main script
 setTimeout(() => { console.log("TIMER_1_FIRED") }, 0)
 setTimeout(() => { console.log("TIMER_2_FIRED") }, 20)
 
-// 2. Promise + await
 let p = Promise.resolve("ok")
 let v = await p
 console.log("PROMISE_AWAIT:", v)
 
-// 3. fetchAsync returns Promise - multiple requests
-let r1 = await fetchAsync("https://httpbin.org/get")
-let r2 = await fetchAsync("https://httpbin.org/headers")
+let r1 = await fetch("https://httpbin.org/get")
+let r2 = await fetch("https://httpbin.org/headers")
 console.log("FETCH_1:", r1.status, "FETCH_2:", r2.status)
 
-// 4. Promise.all with fetchAsync (idiomatic - fetchAsync returns Promise, no await in map)
 let urls = [
     "https://httpbin.org/get",
     "https://httpbin.org/uuid",
     "https://httpbin.org/headers"
 ]
-let results = await Promise.all(urls.map(u => fetchAsync(u)))
+let results = await Promise.all(urls.map(u => fetch(u)))
 let allOk = results.every(r => r.ok)
 let count = results.length
 console.log("PROMISE_ALL_FETCHES:", count, "all_ok:", allOk)
 
-// 5. fetchAllAsync (parallel)
-let parallel = await fetchAllAsync(urls.map(u => ({ url: u })))
-console.log("FETCH_ALL_ASYNC:", parallel.length, "parallel_ok:", parallel.every(r => r.ok))
+let parallel = await fetchAll(urls.map(u => ({ url: u })))
+console.log("FETCH_ALL:", parallel.length, "parallel_ok:", parallel.every(r => r.ok))
 
 console.log("MAIN_DONE")
-// Timer phase runs here; TIMER_1_FIRED and TIMER_2_FIRED will appear after MAIN_DONE
 console.log("ASYNC_VALIDATION_END")

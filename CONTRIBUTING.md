@@ -33,9 +33,17 @@ Thanks for your interest in contributing. Tish is licensed under the [Pay It For
 - Format: `cargo fmt`
 - Lint: `cargo clippy -p tish` (and the crate you changed)
 
+## Tooling (separate from `tish` CLI)
+
+- **Compiler CLI**: `tish` — run, repl, compile, dump-ast only.
+- **Formatter**: `cargo build -p tish_fmt` → **`tish-fmt`** binary. Library: `crates/tish_fmt`.
+- **Linter**: `cargo build -p tish_lint` → **`tish-lint`** binary. Library: `crates/tish_lint`.
+- **LSP**: `cargo build -p tish_lsp` → **`tish-lsp`** (uses `tish_fmt` + `tish_lint` as deps). See [docs/tooling.md](docs/tooling.md).
+- **User docs** in **tish-docs**; update when behavior changes.
+
 ## Docs and design
 
-- **In-repo (contributor) docs**: [docs/](docs/) — language spec, ECMA alignment, gap analysis, architecture.
+- **In-repo (contributor) docs**: [docs/](docs/) — language spec, ECMA alignment, gap analysis, architecture, tooling.
 - **User-facing docs**: [tish-docs](https://github.com/tish-lang/tish-docs) — installation, guides, reference.
 
 ## Pull requests

@@ -11,6 +11,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use tish_ast::{Expr, Statement};
+#[cfg(feature = "http")]
+use tish_core::{NativeFn as CoreNativeFn, TishPromise};
 use tish_core::TishOpaque;
 
 #[cfg(feature = "http")]
@@ -41,8 +43,6 @@ pub enum Value {
     /// HTTP serve function (needs special handling for callbacks)
     #[cfg(feature = "http")]
     Serve,
-    /// HTTP fetchStreamLines (per-line streaming callback); only exported when `http` feature is on.
-    FetchStreamLines,
     #[cfg(feature = "regex")]
     RegExp(Rc<RefCell<TishRegExp>>),
     /// Promise (ECMA-262 §27.2). Requires http feature for tokio.
@@ -60,6 +60,12 @@ pub enum Value {
     /// Timer builtins: setTimeout, setInterval. Need evaluator for callback.
     #[cfg(feature = "http")]
     TimerBuiltin(std::sync::Arc<str>),
+    /// Native `tish_core` Promise (fetch / reader.read / response.text).
+    #[cfg(feature = "http")]
+    CorePromise(Arc<dyn TishPromise>),
+    /// `tish_core::Value::Function` (e.g. response.text/json) callable from eval.
+    #[cfg(feature = "http")]
+    CoreFn(CoreNativeFn),
     /// Opaque handle to a native Rust type (e.g. Polars DataFrame).
     Opaque(Arc<dyn TishOpaque>),
     /// Bound method on an opaque value (opaque, method_name). Callable.
@@ -79,7 +85,6 @@ impl std::fmt::Debug for Value {
             Value::Native(_) => write!(f, "Native"),
             #[cfg(feature = "http")]
             Value::Serve => write!(f, "Serve"),
-            Value::FetchStreamLines => write!(f, "FetchStreamLines"),
             #[cfg(feature = "regex")]
             Value::RegExp(re) => write!(f, "RegExp(/{}/{})", re.borrow().source, re.borrow().flags_string()),
             #[cfg(feature = "http")]
@@ -90,6 +95,10 @@ impl std::fmt::Debug for Value {
             Value::PromiseConstructor => write!(f, "[Function: Promise]"),
             #[cfg(feature = "http")]
             Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => write!(f, "[Function]"),
+            #[cfg(feature = "http")]
+            Value::CorePromise(_) => write!(f, "Promise"),
+            #[cfg(feature = "http")]
+            Value::CoreFn(_) => write!(f, "CoreFn"),
             Value::Opaque(o) => write!(f, "{}(opaque)", o.type_name()),
             Value::OpaqueMethod(_, _) => write!(f, "[Function]"),
         }
@@ -129,7 +138,6 @@ impl std::fmt::Display for Value {
             Value::Native(_) => write!(f, "[NativeFunction]"),
             #[cfg(feature = "http")]
             Value::Serve => write!(f, "[NativeFunction: serve]"),
-            Value::FetchStreamLines => write!(f, "[NativeFunction: fetchStreamLines]"),
             #[cfg(feature = "regex")]
             Value::RegExp(re) => {
                 let re = re.borrow();
@@ -143,6 +151,10 @@ impl std::fmt::Display for Value {
             Value::PromiseConstructor => write!(f, "function Promise() {{ [native code] }}"),
             #[cfg(feature = "http")]
             Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => write!(f, "[Function]"),
+            #[cfg(feature = "http")]
+            Value::CorePromise(_) => write!(f, "[Promise]"),
+            #[cfg(feature = "http")]
+            Value::CoreFn(_) => write!(f, "[Function]"),
             Value::Opaque(o) => write!(f, "[object {}]", o.type_name()),
             Value::OpaqueMethod(_, _) => write!(f, "[Function]"),
         }
