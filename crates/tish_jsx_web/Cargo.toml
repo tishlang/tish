@@ -1,0 +1,7 @@
+[package]
+name = "tish_jsx_web"
+version = "0.1.0"
+edition = "2021"
+description = "JSX / DOM runtime snippets for Tish JS target only (not used by native)"
+
+[dependencies]

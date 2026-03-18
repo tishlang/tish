@@ -8,6 +8,8 @@ description = "Tish to JavaScript transpiler backend"
 default = []
 
 [dependencies]
+tish_jsx_web = { path = "../tish_jsx_web" }
+
 tish_ast = { path = "../tish_ast" }
 tish_compile = { path = "../tish_compile" }
 tish_opt = { path = "../tish_opt" }

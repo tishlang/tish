@@ -15,7 +15,7 @@ use rustyline::{Behavior, ColorMode, CompletionType, Config, Editor};
 #[command(name = "tish")]
 #[command(about = "Tish - minimal TS/JS-compatible language")]
 #[command(after_help = "To disable optimizations: TISH_NO_OPTIMIZE=1")]
-struct Cli {
+pub(crate) struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -41,8 +41,6 @@ struct ReplArgs {
 
 #[derive(Parser)]
 struct CompileArgs {
-    #[arg(required = true)]
-    file: String,
     #[arg(short, long, default_value = "tish_out")]
     output: String,
     #[arg(long, default_value = "native")]
@@ -53,10 +51,15 @@ struct CompileArgs {
     features: Vec<String>,
     #[arg(long)]
     no_optimize: bool,
+    /// JS target only: `tishact` (default), `legacy` (__h preamble), `vdom` (vnode + patch).
+    #[arg(long = "jsx", value_name = "MODE", default_value = "tishact")]
+    jsx_mode: String,
+    #[arg(required = true)]
+    file: String,
 }
 
 #[derive(Subcommand)]
-enum Commands {
+pub(crate) enum Commands {
     /// Run a Tish file (interpret)
     Run(RunArgs),
     /// Interactive REPL
@@ -79,7 +82,15 @@ fn main() {
     let result = match cli.command {
         Some(Commands::Run(a)) => run_file(&a.file, &a.backend, a.no_optimize || no_opt_env),
         Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env),
-        Some(Commands::Compile(a)) => compile_file(&a.file, &a.output, &a.target, &a.native_backend, &a.features, a.no_optimize || no_opt_env),
+        Some(Commands::Compile(a)) => compile_file(
+            &a.file,
+            &a.output,
+            &a.target,
+            &a.native_backend,
+            &a.features,
+            a.no_optimize || no_opt_env,
+            &a.jsx_mode,
+        ),
         Some(Commands::DumpAst { file }) => dump_ast(&file),
         None => run_repl("vm", false), // No args = REPL
     };
@@ -323,7 +334,21 @@ fn tish_history_path() -> Option<PathBuf> {
     home.map(|h| PathBuf::from(h).join(".tish_history"))
 }
 
-fn compile_to_js(input_path: &Path, output_path: &str, optimize: bool) -> Result<(), String> {
+fn parse_jsx_mode(s: &str) -> tish_compile_js::JsxMode {
+    match s {
+        "legacy" => tish_compile_js::JsxMode::LegacyDom,
+        "vdom" => tish_compile_js::JsxMode::Vdom,
+        _ => tish_compile_js::JsxMode::TishactH,
+    }
+}
+
+fn compile_to_js(
+    input_path: &Path,
+    output_path: &str,
+    optimize: bool,
+    jsx: &str,
+) -> Result<(), String> {
+    let jsx_mode = parse_jsx_mode(jsx);
     let project_root = input_path.parent().and_then(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
             p.parent()
@@ -331,12 +356,31 @@ fn compile_to_js(input_path: &Path, output_path: &str, optimize: bool) -> Result
             Some(p)
         }
     });
-    let js = if input_path.extension().map(|e| e == "js") == Some(true) {
+    let js = if input_path.extension().map(|e| e == "jsx") == Some(true) {
+        let source = fs::read_to_string(input_path).map_err(|e| format!("{}", e))?;
+        let wrapped = format!(
+            "export fn __TishJsxRoot() {{\n  return (\n{}\n  )\n}}",
+            source.trim()
+        );
+        let program = tish_parser::parse(&wrapped)
+            .map_err(|e| format!("JSX wrapper parse: {}", e))?;
+        let p = if optimize {
+            tish_opt::optimize(&program)
+        } else {
+            program
+        };
+        let jsx_standalone = if jsx_mode == tish_compile_js::JsxMode::Vdom {
+            tish_compile_js::JsxMode::Vdom
+        } else {
+            tish_compile_js::JsxMode::LegacyDom
+        };
+        tish_compile_js::compile_with_jsx(&p, optimize, jsx_standalone).map_err(|e| format!("{}", e))?
+    } else if input_path.extension().map(|e| e == "js") == Some(true) {
         let source = fs::read_to_string(input_path).map_err(|e| format!("{}", e))?;
         let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        tish_compile_js::compile(&program, optimize).map_err(|e| format!("{}", e))?
+        tish_compile_js::compile_with_jsx(&program, optimize, jsx_mode).map_err(|e| format!("{}", e))?
     } else {
-        tish_compile_js::compile_project(input_path, project_root, optimize)
+        tish_compile_js::compile_project_with_jsx(input_path, project_root, optimize, jsx_mode)
             .map_err(|e| format!("{}", e))?
     };
 
@@ -366,6 +410,7 @@ fn compile_file(
     native_backend: &str,
     cli_features: &[String],
     no_optimize: bool,
+    jsx: &str,
 ) -> Result<(), String> {
     let optimize = !no_optimize;
     let input_path =
@@ -374,7 +419,7 @@ fn compile_file(
     let is_js = input_path.extension().map(|e| e == "js") == Some(true);
 
     if target == "js" {
-        return compile_to_js(&input_path, output_path, optimize);
+        return compile_to_js(&input_path, output_path, optimize, jsx.trim());
     }
 
     if target == "wasm" && is_js {
@@ -473,6 +518,45 @@ fn compile_file(
     };
     println!("Built: {}", built_path.display());
     Ok(())
+}
+
+
+
+#[cfg(test)]
+mod cli_tests {
+    use clap::Parser;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn compile_jsx_defaults_to_tishact() {
+        let cli = Cli::try_parse_from([
+            "tish",
+            "compile",
+            "m.tish",
+            "--target",
+            "js",
+            "-o",
+            "x.js",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Compile(a)) => assert_eq!(a.jsx_mode.as_str(), "tishact"),
+            _ => panic!("expected Compile"),
+        }
+    }
+
+    #[test]
+    fn compile_jsx_flag_legacy() {
+        let cli = Cli::try_parse_from([
+            "tish", "compile", "a.tish", "--target", "js", "--jsx", "legacy",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Compile(a)) => assert_eq!(a.jsx_mode.as_str(), "legacy"),
+            _ => panic!("expected Compile"),
+        }
+    }
 }
 
 fn dump_ast(path: &str) -> Result<(), String> {

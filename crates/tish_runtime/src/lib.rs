@@ -3,6 +3,8 @@
 //! Re-exports core types from tish_core and provides console, Math,
 //! and other builtin functions for compiled Tish programs.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::fmt;
 use std::sync::OnceLock;
 use tish_builtins::helpers::extract_num;

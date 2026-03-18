@@ -1,0 +1,8 @@
+// Smoke: JSX + vdom compile (used by CI / manual verify)
+fn Root() {
+  return <p class="smoke">{"ok"}</p>
+}
+
+export fn main() {
+  return 0
+}

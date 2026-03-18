@@ -2540,6 +2540,7 @@ version = "0.1.0"
 dependencies = [
  "tish_ast",
  "tish_compile",
+ "tish_jsx_web",
  "tish_opt",
  "tish_parser",
 ]
@@ -2600,6 +2601,10 @@ dependencies = [
  "tish_ast",
  "tish_parser",
 ]
+
+[[package]]
+name = "tish_jsx_web"
+version = "0.1.0"
 
 [[package]]
 name = "tish_lexer"
