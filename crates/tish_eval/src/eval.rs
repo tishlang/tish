@@ -612,6 +612,21 @@ impl Evaluator {
                     ));
                 }
             }
+            "tish:ws" => {
+                #[cfg(feature = "ws")]
+                {
+                    let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
+                    exports.insert("WebSocket".into(), Value::Native(Self::ws_web_socket_native));
+                    exports.insert("Server".into(), Value::Native(Self::ws_server_native));
+                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
+                }
+                #[cfg(not(feature = "ws"))]
+                {
+                    return Err(EvalError::Error(
+                        "tish:ws requires the ws feature. Rebuild with: cargo build -p tish --features ws".into(),
+                    ));
+                }
+            }
             "tish:process" => {
                 #[cfg(feature = "process")]
                 {
@@ -645,7 +660,7 @@ impl Evaluator {
             }
             _ => {
                 return Err(EvalError::Error(format!(
-                    "Unknown built-in module: {}. Supported: tish:fs, tish:http, tish:process",
+                    "Unknown built-in module: {}. Supported: tish:fs, tish:http, tish:process, tish:ws",
                     spec
                 )));
             }
@@ -1559,7 +1574,7 @@ impl Evaluator {
                     Value::Array(_) => "object".into(),
                     Value::Object(_) => "object".into(),
                     Value::Function { .. } | Value::Native(_) => "function".into(),
-                    #[cfg(feature = "http")]
+                    #[cfg(any(feature = "http", feature = "ws"))]
                     Value::CoreFn(_) => "function".into(),
                     #[cfg(feature = "http")]
                     Value::CorePromise(_) => "object".into(),
@@ -2124,7 +2139,7 @@ impl Evaluator {
             }
             #[cfg(feature = "http")]
             Value::Serve => self.run_http_server(args),
-            #[cfg(feature = "http")]
+            #[cfg(any(feature = "http", feature = "ws"))]
             Value::CoreFn(f) => {
                 let ca: Result<Vec<tish_core::Value>, String> =
                     args.iter().map(crate::value_convert::eval_to_core).collect();
@@ -2854,7 +2869,9 @@ impl Evaluator {
             }
             Value::Function { .. } | Value::Native(_) => "null".to_string(),
             #[cfg(feature = "http")]
-            Value::CorePromise(_) | Value::CoreFn(_) => "null".to_string(),
+            Value::CorePromise(_) => "null".to_string(),
+            #[cfg(any(feature = "http", feature = "ws"))]
+            Value::CoreFn(_) => "null".to_string(),
             #[cfg(feature = "http")]
             Value::Serve
             | Value::Promise(_)
@@ -3070,6 +3087,24 @@ impl Evaluator {
             }
         }
         Err("Promise.race requires at least one promise".to_string())
+    }
+
+    #[cfg(feature = "ws")]
+    fn ws_web_socket_native(args: &[Value]) -> Result<Value, String> {
+        let mut cv = Vec::new();
+        for a in args {
+            cv.push(crate::value_convert::eval_to_core(a)?);
+        }
+        Ok(crate::value_convert::core_to_eval(tish_runtime::web_socket_client(&cv)))
+    }
+
+    #[cfg(feature = "ws")]
+    fn ws_server_native(args: &[Value]) -> Result<Value, String> {
+        let mut cv = Vec::new();
+        for a in args {
+            cv.push(crate::value_convert::eval_to_core(a)?);
+        }
+        Ok(crate::value_convert::core_to_eval(tish_runtime::web_socket_server_construct(&cv)))
     }
 
     #[cfg(feature = "http")]

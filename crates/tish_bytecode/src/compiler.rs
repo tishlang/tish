@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tish_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, DestructElement, DestructPattern, Expr,
-    Literal, MemberProp, ObjectProp, Program, Span, Statement,
+    JsxAttrValue, JsxChild, JsxProp, Literal, MemberProp, ObjectProp, Program, Span, Statement,
 };
 
 use crate::chunk::{Chunk, Constant};
@@ -105,9 +105,27 @@ impl<'a> Compiler<'a> {
         pos + 1
     }
 
+    /// Emit JumpBack with placeholder distance; patch later with patch_jump_back.
+    fn emit_jump_back(&mut self) -> usize {
+        let pos = self.chunk.code.len();
+        self.chunk.write_u8(Opcode::JumpBack as u8);
+        self.chunk.write_u16(0);
+        pos + 1
+    }
+
     fn patch_jump(&mut self, patch_pos: usize, target: usize) {
-        let jump_offset = target - (patch_pos + 2);
-        let bytes = (jump_offset as u16).to_be_bytes();
+        let base = patch_pos + 2;
+        let jump_offset = (target as i32).wrapping_sub(base as i32);
+        let bytes = (jump_offset as i16).to_be_bytes();
+        self.chunk.code[patch_pos] = bytes[0];
+        self.chunk.code[patch_pos + 1] = bytes[1];
+    }
+
+    /// Patch a JumpBack operand: distance from (patch_pos+3) back to target.
+    fn patch_jump_back(&mut self, patch_pos: usize, target: usize) {
+        let after_insn = patch_pos + 3;
+        let dist = after_insn.saturating_sub(target);
+        let bytes = (dist as u16).to_be_bytes();
         self.chunk.code[patch_pos] = bytes[0];
         self.chunk.code[patch_pos + 1] = bytes[1];
     }
@@ -385,13 +403,13 @@ impl<'a> Compiler<'a> {
                 let jump_out = self.emit_jump(Opcode::JumpIfFalse);
                 // JumpIfFalse already pops condition when taking body
                 self.compile_statement(body)?;
-                let jump_back_dist = self.chunk.code.len() + 3 - start;
+                let jump_back_dist = (self.chunk.code.len() + 3).saturating_sub(start);
                 self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
                 let end = self.chunk.code.len();
                 self.patch_jump(jump_out, end);
                 let info = self.loop_stack.pop().unwrap();
                 for p in info.continue_patches {
-                    self.patch_jump(p, start);
+                    self.patch_jump_back(p, start);
                 }
                 for p in info.break_patches {
                     self.patch_jump(p, end);
@@ -429,9 +447,9 @@ impl<'a> Compiler<'a> {
                 }
                 let info = self.loop_stack.pop().unwrap();
                 for p in info.continue_patches {
-                    self.patch_jump(p, update_start);
+                    self.patch_jump_back(p, update_start);
                 }
-                let jump_back_dist = self.chunk.code.len() + 3 - cond_start;
+                let jump_back_dist = (self.chunk.code.len() + 3).saturating_sub(cond_start);
                 self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
                 let end = self.chunk.code.len();
                 self.patch_jump(jump_out, end);
@@ -483,13 +501,13 @@ impl<'a> Compiler<'a> {
                 self.emit_u16(Opcode::LoadVar, len_idx);
                 self.emit_u8(Opcode::BinOp, 10);
                 let jump_out = self.emit_jump(Opcode::JumpIfFalse);
-                let jump_back_dist = self.chunk.code.len() + 3 - loop_start;
+                let jump_back_dist = (self.chunk.code.len() + 3).saturating_sub(loop_start);
                 self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
                 let end = self.chunk.code.len();
                 self.patch_jump(jump_out, end);
                 let info = self.loop_stack.pop().unwrap();
                 for p in info.continue_patches {
-                    self.patch_jump(p, loop_start);
+                    self.patch_jump_back(p, loop_start);
                 }
                 for p in info.break_patches {
                     self.patch_jump(p, end);
@@ -519,7 +537,7 @@ impl<'a> Compiler<'a> {
                 }
             }
             Statement::Continue { .. } => {
-                let pos = self.emit_jump(Opcode::Jump);
+                let pos = self.emit_jump_back();
                 self.loop_stack.last_mut().ok_or_else(|| CompileError {
                     message: "continue not inside a loop".to_string(),
                 })?.continue_patches.push(pos);
@@ -537,7 +555,7 @@ impl<'a> Compiler<'a> {
                     params.iter().map(|p| Arc::clone(&p.name)).collect();
                 if let Some(rp) = rest_param {
                     param_names.push(rp.name.clone());
-                    inner.rest_param_index = param_names.len() as u16 - 1;
+                    inner.rest_param_index = (param_names.len() as u16).saturating_sub(1);
                 }
                 for p in &param_names {
                     inner.add_name(Arc::clone(p));
@@ -571,13 +589,13 @@ impl<'a> Compiler<'a> {
                 let cond_start = self.chunk.code.len();
                 self.compile_expr(cond)?;
                 let jump_back = self.emit_jump(Opcode::JumpIfFalse);
-                let jump_back_dist = self.chunk.code.len() + 3 - start;
+                let jump_back_dist = (self.chunk.code.len() + 3).saturating_sub(start);
                 self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
                 let end = self.chunk.code.len();
                 self.patch_jump(jump_back, end);
                 let info = self.loop_stack.pop().unwrap();
                 for p in info.continue_patches {
-                    self.patch_jump(p, cond_start);
+                    self.patch_jump_back(p, cond_start);
                 }
                 for p in info.break_patches {
                     self.patch_jump(p, end);
@@ -1138,10 +1156,15 @@ impl<'a> Compiler<'a> {
                 self.chunk.write_u16(spec_idx);
                 self.chunk.write_u16(export_idx);
             }
-            Expr::LogicalAssign { .. }
-            | Expr::Await { .. }
-            | Expr::JsxElement { .. }
-            | Expr::JsxFragment { .. } => {
+            Expr::JsxElement {
+                tag, props, children, ..
+            } => {
+                self.compile_jsx_element(tag, props, children)?;
+            }
+            Expr::JsxFragment { children, .. } => {
+                self.compile_jsx_fragment(children)?;
+            }
+            Expr::LogicalAssign { .. } | Expr::Await { .. } => {
                 return Err(CompileError {
                     message: format!(
                         "Expression not yet supported in bytecode: {:?}",
@@ -1150,6 +1173,122 @@ impl<'a> Compiler<'a> {
                 });
             }
         }
+        Ok(())
+    }
+
+    fn compile_jsx_element(
+        &mut self,
+        tag: &Arc<str>,
+        props: &[JsxProp],
+        children: &[JsxChild],
+    ) -> Result<(), CompileError> {
+        let h_idx = self.name_idx(&Arc::from("h"));
+        self.emit_u16(Opcode::LoadGlobal, h_idx);
+        let tag_str = tag.as_ref();
+        let is_component = tag_str.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+        if is_component {
+            let tag_idx = self.name_idx(tag);
+            self.emit_u16(Opcode::LoadGlobal, tag_idx);
+        } else {
+            let tag_const = self.constant_idx(Constant::String(Arc::from(tag_str)));
+            self.emit(Opcode::LoadConst);
+            self.chunk.write_u16(tag_const);
+        }
+        self.compile_jsx_props(props)?;
+        self.compile_jsx_children(children)?;
+        self.emit_u16(Opcode::Call, 3);
+        Ok(())
+    }
+
+    fn compile_jsx_fragment(&mut self, children: &[JsxChild]) -> Result<(), CompileError> {
+        let h_idx = self.name_idx(&Arc::from("h"));
+        self.emit_u16(Opcode::LoadGlobal, h_idx);
+        let fragment_idx = self.name_idx(&Arc::from("Fragment"));
+        self.emit_u16(Opcode::LoadGlobal, fragment_idx);
+        let null_idx = self.constant_idx(Constant::Null);
+        self.emit(Opcode::LoadConst);
+        self.chunk.write_u16(null_idx);
+        self.compile_jsx_children(children)?;
+        self.emit_u16(Opcode::Call, 3);
+        Ok(())
+    }
+
+    fn compile_jsx_props(&mut self, props: &[JsxProp]) -> Result<(), CompileError> {
+        if props.is_empty() {
+            let null_idx = self.constant_idx(Constant::Null);
+            self.emit(Opcode::LoadConst);
+            self.chunk.write_u16(null_idx);
+            return Ok(());
+        }
+        let has_spread = props.iter().any(|p| matches!(p, JsxProp::Spread(_)));
+        if has_spread {
+            self.emit_u16(Opcode::NewObject, 0);
+            for prop in props {
+                match prop {
+                    JsxProp::Attr { name, value } => {
+                        let key_idx = self.constant_idx(Constant::String(Arc::clone(name)));
+                        self.emit(Opcode::LoadConst);
+                        self.chunk.write_u16(key_idx);
+                        match value {
+                            JsxAttrValue::String(s) => {
+                                let val_idx = self.constant_idx(Constant::String(Arc::clone(s)));
+                                self.emit(Opcode::LoadConst);
+                                self.chunk.write_u16(val_idx);
+                            }
+                            JsxAttrValue::Expr(e) => self.compile_expr(e)?,
+                            JsxAttrValue::ImplicitTrue => {
+                                let true_idx = self.constant_idx(Constant::Bool(true));
+                                self.emit(Opcode::LoadConst);
+                                self.chunk.write_u16(true_idx);
+                            }
+                        }
+                        self.emit_u16(Opcode::NewObject, 1);
+                        self.emit(Opcode::MergeObject);
+                    }
+                    JsxProp::Spread(expr) => {
+                        self.compile_expr(expr)?;
+                        self.emit(Opcode::MergeObject);
+                    }
+                }
+            }
+        } else {
+            for prop in props {
+                if let JsxProp::Attr { name, value } = prop {
+                    let key_idx = self.constant_idx(Constant::String(Arc::clone(name)));
+                    self.emit(Opcode::LoadConst);
+                    self.chunk.write_u16(key_idx);
+                    match value {
+                        JsxAttrValue::String(s) => {
+                            let val_idx = self.constant_idx(Constant::String(Arc::clone(s)));
+                            self.emit(Opcode::LoadConst);
+                            self.chunk.write_u16(val_idx);
+                        }
+                        JsxAttrValue::Expr(e) => self.compile_expr(e)?,
+                        JsxAttrValue::ImplicitTrue => {
+                            let true_idx = self.constant_idx(Constant::Bool(true));
+                            self.emit(Opcode::LoadConst);
+                            self.chunk.write_u16(true_idx);
+                        }
+                    }
+                }
+            }
+            self.emit_u16(Opcode::NewObject, props.len() as u16);
+        }
+        Ok(())
+    }
+
+    fn compile_jsx_children(&mut self, children: &[JsxChild]) -> Result<(), CompileError> {
+        for child in children {
+            match child {
+                JsxChild::Text(s) => {
+                    let idx = self.constant_idx(Constant::String(Arc::clone(s)));
+                    self.emit(Opcode::LoadConst);
+                    self.chunk.write_u16(idx);
+                }
+                JsxChild::Expr(e) => self.compile_expr(e)?,
+            }
+        }
+        self.emit_u16(Opcode::NewArray, children.len() as u16);
         Ok(())
     }
 }

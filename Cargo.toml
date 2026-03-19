@@ -30,7 +30,7 @@ resolver = "2"
 
 [workspace.package]
 license-file = "LICENSE"
-repository = "https://github.com/tish-lang/tish"
+repository = "https://github.com/tishlang/tish"
 
 [profile.release]
 lto = "thin"

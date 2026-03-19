@@ -13,6 +13,10 @@ fn read_u16(code: &[u8], pos: usize) -> u16 {
     (a << 8) | b
 }
 
+fn read_i16(code: &[u8], pos: usize) -> i16 {
+    read_u16(code, pos) as i16
+}
+
 fn write_u16(code: &mut [u8], pos: usize, v: u16) {
     if pos + 1 < code.len() {
         let bytes = v.to_be_bytes();
@@ -45,12 +49,12 @@ fn final_jump_target(code: &[u8], jump_ip: usize) -> Option<usize> {
         let op = Opcode::from_u8(code[ip])?;
         match op {
             Opcode::Jump => {
-                let offset = read_u16(code, ip + 1) as usize;
-                ip = ip + 3 + offset;
+                let offset = read_i16(code, ip + 1) as isize;
+                ip = (ip as isize + 3 + offset).max(0) as usize;
             }
             Opcode::JumpIfFalse => {
-                let offset = read_u16(code, ip + 1) as usize;
-                ip = ip + 3 + offset;
+                let offset = read_i16(code, ip + 1) as isize;
+                ip = (ip as isize + 3 + offset).max(0) as usize;
             }
             _ => return Some(ip),
         }
@@ -124,12 +128,16 @@ fn chain_jumps(code: &mut [u8]) {
         };
         match op {
             Opcode::Jump | Opcode::JumpIfFalse => {
-                let current_offset = read_u16(code, ip + 1) as usize;
-                let current_target = ip + 3 + current_offset;
+                let current_offset = read_i16(code, ip + 1) as isize;
+                let current_target = (ip as isize + 3 + current_offset).max(0) as usize;
                 if let Some(final_target) = final_jump_target(code, ip) {
                     if final_target != current_target {
-                        let new_offset = final_target.saturating_sub(ip + 3);
-                        write_u16(code, ip + 1, new_offset as u16);
+                        let new_offset = final_target as i32 - (ip + 3) as i32;
+                        let bytes = (new_offset as i16).to_be_bytes();
+                        if ip + 2 < code.len() {
+                            code[ip + 1] = bytes[0];
+                            code[ip + 2] = bytes[1];
+                        }
                     }
                 }
             }

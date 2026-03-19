@@ -65,7 +65,7 @@ console.log(message)
 `,
     'README.md': `# ${name}
 
-A [Tish](https://github.com/tish-lang/tish) project.
+A [Tish](https://github.com/tishlang/tish) project.
 
 ## Run (interpret)
 

@@ -478,6 +478,8 @@ fn compile_file(
         f.push("process".to_string());
         #[cfg(feature = "regex")]
         f.push("regex".to_string());
+        #[cfg(feature = "ws")]
+        f.push("ws".to_string());
         f
     } else {
         cli_features.to_vec()

@@ -13,7 +13,7 @@ const binPath = path.join(__dirname, '..', 'platform', platformKey, binaryName);
 if (!fs.existsSync(binPath)) {
   console.error(`[tish] Unsupported or missing binary for platform: ${platformKey}`);
   console.error('Supported:', supported.join(', '));
-  console.error('Build from source: https://github.com/tish-lang/tish');
+  console.error('Build from source: https://github.com/tishlang/tish');
   process.exit(1);
 }
 

@@ -1300,13 +1300,49 @@ impl<'a> Parser<'a> {
                         let expr = self.parse_expr()?;
                         props.push(ObjectProp::Spread(expr));
                     } else {
-                        let key = self
-                            .expect(TokenKind::Ident)?
-                            .literal
-                            .clone()
-                            .ok_or("Expected key")?;
-                        self.expect(TokenKind::Colon)?;
-                        let value = self.parse_expr()?;
+                        let key_tok = self.advance().ok_or("Expected object key")?;
+                        let (key, key_span, is_ident_key) = match key_tok.kind {
+                            TokenKind::Ident => {
+                                let k = key_tok
+                                    .literal
+                                    .clone()
+                                    .ok_or("Expected key")?;
+                                let sp = Span {
+                                    start: key_tok.span.start,
+                                    end: key_tok.span.end,
+                                };
+                                (k, sp, true)
+                            }
+                            TokenKind::String => {
+                                let k = key_tok
+                                    .literal
+                                    .clone()
+                                    .ok_or("Expected string key")?;
+                                let sp = Span {
+                                    start: key_tok.span.start,
+                                    end: key_tok.span.end,
+                                };
+                                (k, sp, false)
+                            }
+                            _ => return Err(format!(
+                                "Expected object key (ident or string), got {:?}",
+                                key_tok.kind
+                            )),
+                        };
+                        let value = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+                            self.expect(TokenKind::Colon)?;
+                            self.parse_expr()?
+                        } else {
+                            // ES6 shorthand: { key } => { key: key } (ident only, not string keys)
+                            if is_ident_key {
+                                Expr::Ident {
+                                    name: key.clone(),
+                                    span: key_span,
+                                }
+                            } else {
+                                return Err("String key in object literal requires explicit value (key: value)".to_string());
+                            }
+                        };
                         props.push(ObjectProp::KeyValue(key, value));
                     }
                     if !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {

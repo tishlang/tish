@@ -23,6 +23,7 @@ const BUILTIN_ALIASES: &[(&str, &str)] = &[
     ("fs", "tish:fs"),
     ("http", "tish:http"),
     ("process", "tish:process"),
+    ("ws", "tish:ws"),
 ];
 
 /// Normalize built-in spec to canonical form. E.g. "fs" -> "tish:fs".
@@ -38,8 +39,8 @@ pub fn normalize_builtin_spec(spec: &str) -> Option<String> {
 
 /// Built-in modules that come from tish_runtime, not from package.json.
 pub fn is_builtin_native_spec(spec: &str) -> bool {
-    matches!(spec, "tish:fs" | "tish:http" | "tish:process")
-        || matches!(spec, "fs" | "http" | "process")
+    matches!(spec, "tish:fs" | "tish:http" | "tish:process" | "tish:ws")
+        || matches!(spec, "fs" | "http" | "process" | "ws")
 }
 
 /// Resolve all native imports in a merged program via package.json lookup.
@@ -288,13 +289,13 @@ fn load_module_recursive(
 }
 
 /// Returns true for native module imports that don't resolve to files.
-/// - fs, http, process (Node-compatible aliases for tish:fs, tish:http, tish:process)
+/// - fs, http, process, ws (Node-compatible aliases for tish:fs, tish:http, tish:process, tish:ws)
 /// - tish:egui, tish:polars, etc.
 /// - @scope/package (npm-style)
 pub fn is_native_import(spec: &str) -> bool {
     spec.starts_with("tish:")
         || spec.starts_with('@')
-        || matches!(spec, "fs" | "http" | "process")
+        || matches!(spec, "fs" | "http" | "process" | "ws")
 }
 
 /// Map native spec to Cargo feature name for built-in tish:* modules.

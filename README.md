@@ -7,7 +7,7 @@ An experimental and opinionated javascript/typescript-like multi-target native c
 **License:** [Pay It Forward (PIF)](https://payitforwardlicense.com/) — see [LICENSE](LICENSE).
 
 
-Minimal, TS/JS-compatible language. Runs via interpreter or compiles to native. See [docs/](docs/) for spec and ECMA alignment; user-facing docs: [tish-docs](https://github.com/tish-lang/tish-docs).
+Minimal, TS/JS-compatible language. Runs via interpreter or compiles to native. See [docs/](docs/) for spec and ECMA alignment; user-facing docs: [tish-docs](https://github.com/tishlang/tish-docs).
 
 ## Quick Example
 
@@ -47,7 +47,7 @@ tish compile hello.tish -o hello
 # 1 + 2 = 3
 ```
 
-Best for: distribution, performance, deploying without Tish installed. To deploy apps to the Zectre Platform, see the [Deploy guide](https://tish-lang.github.io/tish-docs/deploy/overview/) in the documentation.
+Best for: distribution, performance, deploying without Tish installed. To deploy apps to the Zectre Platform, see the [Deploy guide](https://tishlang.github.io/tish-docs/deploy/overview/) in the documentation.
 
 The compiled binary is **fully standalone** — no Tish or Rust runtime needed to run it.
 
@@ -126,9 +126,9 @@ Editor tooling is **separate from the compiler** (`tish` = run / repl / compile 
 | **`tish-fmt`** | Formatter (`cargo build --release -p tish_fmt` → `tish-fmt`). |
 | **`tish-lint`** | Linter (`cargo build --release -p tish_lint` → `tish-lint`). |
 | **`tish-lsp`** | Language server — links `tish_fmt` / `tish_lint` as libraries for editor integration. |
-| **VS Code extension** | [tish-vscode](https://github.com/tish-lang/tish-vscode) — grammar, snippets, LSP client, tasks. |
+| **VS Code extension** | [tish-vscode](https://github.com/tishlang/tish-vscode) — grammar, snippets, LSP client, tasks. |
 
-User-facing docs: [Editor & IDE](https://tish-lang.github.io/tish-docs/getting-started/editor/), [Language server](https://tish-lang.github.io/tish-docs/reference/language-server/), [Formatting](https://tish-lang.github.io/tish-docs/reference/formatting/), [Linting](https://tish-lang.github.io/tish-docs/reference/linting/). Contributor notes: [docs/tooling.md](docs/tooling.md).
+User-facing docs: [Editor & IDE](https://tishlang.github.io/tish-docs/getting-started/editor/), [Language server](https://tishlang.github.io/tish-docs/reference/language-server/), [Formatting](https://tishlang.github.io/tish-docs/reference/formatting/), [Linting](https://tishlang.github.io/tish-docs/reference/linting/). Contributor notes: [docs/tooling.md](docs/tooling.md).
 
 ## Using just (Recommended)
 

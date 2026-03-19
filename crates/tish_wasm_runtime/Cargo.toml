@@ -19,3 +19,7 @@ http = ["tish_vm/http"]
 tish_bytecode = { path = "../tish_bytecode" }
 tish_vm = { path = "../tish_vm" }
 wasm-bindgen = { version = "0.2", optional = true }
+
+# rand_core → getrandom 0.4 needs wasm_js on wasm32-unknown-unknown (browser VM build).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }

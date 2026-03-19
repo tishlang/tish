@@ -29,4 +29,4 @@ Or with tish installed: `tish run src/main.tish` and `tish compile src/main.tish
 
 ## Deploy
 
-Deploy with Zectre: `zectre deploy --wait` from this directory. See [Deploy Overview](https://tish-lang.github.io/tish-docs/deploy/overview/) for details.
+Deploy with Zectre: `zectre deploy --wait` from this directory. See [Deploy Overview](https://tishlang.github.io/tish-docs/deploy/overview/) for details.

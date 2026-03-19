@@ -538,6 +538,11 @@ impl Codegen {
                     "process" => Some("{ let mut m = HashMap::new(); m.insert(Arc::from(\"exit\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args)))); m.insert(Arc::from(\"cwd\"), Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args)))); m.insert(Arc::from(\"exec\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args)))); m.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(std::env::args().map(|s| Value::String(s.into())).collect())))); m.insert(Arc::from(\"env\"), Value::Object(Rc::new(RefCell::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect())))); Value::Object(Rc::new(RefCell::new(m))) }"),
                     _ => None,
                 },
+            "tish:ws" if self.has_feature("ws") => match export_name {
+                    "WebSocket" => Some("Value::Function(Rc::new(|args: &[Value]| tish_ws_client(args)))"),
+                    "Server" => Some("Value::Function(Rc::new(|args: &[Value]| tish_ws_server_construct(args)))"),
+                    _ => None,
+                },
             _ => return None,
         };
         init.map(String::from)
@@ -559,6 +564,10 @@ impl Codegen {
             }
             #[cfg(feature = "regex")]
             if name == "regex" {
+                return true;
+            }
+            #[cfg(feature = "ws")]
+            if name == "ws" {
                 return true;
             }
             false
@@ -769,6 +778,9 @@ impl Codegen {
         }
         if self.has_feature("fs") {
             self.write("use tish_runtime::{read_file as tish_read_file, write_file as tish_write_file, file_exists as tish_file_exists, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
+        }
+        if self.has_feature("ws") {
+            self.write("use tish_runtime::{web_socket_client as tish_ws_client, web_socket_server_construct as tish_ws_server_construct};\n");
         }
         if self.has_feature("regex") {
             self.write("use tish_runtime::regexp_new;\n");

@@ -3,7 +3,9 @@
 //! Re-exports core types from tish_core and provides console, Math,
 //! and other builtin functions for compiled Tish programs.
 
+#[cfg(feature = "regex")]
 use std::cell::RefCell;
+#[cfg(feature = "regex")]
 use std::rc::Rc;
 use std::fmt;
 use std::sync::OnceLock;
@@ -671,6 +673,14 @@ mod promise;
 
 #[cfg(feature = "http")]
 mod native_promise;
+
+#[cfg(feature = "ws")]
+mod ws;
+
+#[cfg(feature = "ws")]
+pub use ws::{
+    web_socket_client, web_socket_server_accept, web_socket_server_construct, web_socket_server_listen,
+};
 
 #[cfg(feature = "http")]
 pub use http::{

@@ -5,7 +5,7 @@
   "license": "SEE LICENSE IN ../../LICENSE",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tish-lang/tish.git"
+    "url": "https://github.com/tishlang/tish.git"
   },
   "publishConfig": {
     "access": "public"

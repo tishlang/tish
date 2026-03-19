@@ -17,7 +17,10 @@ type ArrayMethodFn = Rc<dyn Fn(&[Value]) -> Value>;
 
 /// Look up built-in module export for LoadNativeExport. Returns None if unknown or feature disabled.
 /// Parameters are only used when the corresponding feature (fs, http, process) is enabled.
-#[cfg_attr(not(any(feature = "fs", feature = "http", feature = "process")), allow(unused_variables))]
+#[cfg_attr(
+    not(any(feature = "fs", feature = "http", feature = "process", feature = "ws")),
+    allow(unused_variables)
+)]
 fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
     #[cfg(feature = "fs")]
     if spec == "tish:fs" {
@@ -85,6 +88,18 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
                 );
                 Some(Value::Object(Rc::new(RefCell::new(m))))
             }
+            _ => None,
+        };
+    }
+    #[cfg(feature = "ws")]
+    if spec == "tish:ws" {
+        return match export_name {
+            "WebSocket" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tish_runtime::web_socket_client(args)
+            }))),
+            "Server" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tish_runtime::web_socket_server_construct(args)
+            }))),
             _ => None,
         };
     }
@@ -311,6 +326,38 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     );
     g.insert("String".into(), Value::Object(Rc::new(RefCell::new(string_static))));
 
+    // JSX / Tishact: stubs for bytecode VM when no DOM (e.g. console). Override via set_global in browser.
+    g.insert(
+        "h".into(),
+        Value::Function(Rc::new(|_args: &[Value]| Value::Null)),
+    );
+    g.insert(
+        "Fragment".into(),
+        Value::Object(Rc::new(RefCell::new(HashMap::new()))),
+    );
+    g.insert(
+        "createRoot".into(),
+        Value::Function(Rc::new(|_args: &[Value]| {
+            let mut render_obj = HashMap::new();
+            render_obj.insert(
+                "render".into(),
+                Value::Function(Rc::new(|_args: &[Value]| Value::Null)),
+            );
+            Value::Object(Rc::new(RefCell::new(render_obj)))
+        })),
+    );
+    g.insert(
+        "useState".into(),
+        Value::Function(Rc::new(|args: &[Value]| {
+            let init = args.first().cloned().unwrap_or(Value::Null);
+            let arr = vec![init, Value::Function(Rc::new(|_| Value::Null))];
+            Value::Array(Rc::new(RefCell::new(arr)))
+        })),
+    );
+    let mut document_obj = HashMap::new();
+    document_obj.insert("body".into(), Value::Null);
+    g.insert("document".into(), Value::Object(Rc::new(RefCell::new(document_obj))));
+
     g
 }
 
@@ -353,6 +400,10 @@ impl Vm {
         let b = code[*ip + 1] as u16;
         *ip += 2;
         (a << 8) | b
+    }
+
+    fn read_i16(code: &[u8], ip: &mut usize) -> i16 {
+        Self::read_u16(code, ip) as i16
     }
 
     pub fn run(&mut self, chunk: &Chunk) -> Result<Value, String> {
@@ -525,6 +576,12 @@ impl Vm {
                 Opcode::Pop => {
                     self.stack.pop().ok_or_else(|| "Stack underflow".to_string())?;
                 }
+                Opcode::PopN => {
+                    let n = Self::read_u16(code, &mut ip) as usize;
+                    for _ in 0..n {
+                        self.stack.pop().ok_or_else(|| "Stack underflow".to_string())?;
+                    }
+                }
                 Opcode::Dup => {
                     let v = self
                         .stack
@@ -597,17 +654,17 @@ impl Vm {
                     return Ok(v);
                 }
                 Opcode::Jump => {
-                    let offset = Self::read_u16(code, &mut ip) as usize;
-                    ip = ip.saturating_add(offset as isize as usize);
+                    let offset = Self::read_i16(code, &mut ip) as isize;
+                    ip = (ip as isize + offset).max(0) as usize;
                 }
                 Opcode::JumpIfFalse => {
-                    let offset = Self::read_u16(code, &mut ip) as usize;
+                    let offset = Self::read_i16(code, &mut ip) as isize;
                     let v = self
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
                     if !v.is_truthy() {
-                        ip = ip.saturating_add(offset as isize as usize);
+                        ip = (ip as isize + offset).max(0) as usize;
                     }
                 }
                 Opcode::JumpBack => {
@@ -965,7 +1022,7 @@ impl Vm {
                     })?;
                     self.stack.push(v);
                 }
-                Opcode::Closure | Opcode::PopN | Opcode::LoadThis => {
+                Opcode::Closure | Opcode::LoadThis => {
                     return Err(format!("Unhandled opcode: {:?}", opcode));
                 }
             }

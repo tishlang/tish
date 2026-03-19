@@ -140,7 +140,7 @@ const y = 10    // immutable binding (error on reassignment)
 
 ## Implementation gaps (JS compatibility)
 
-Gaps discovered when porting JS patterns (e.g. mdx-docs). See [tish-docs JS Compatibility Gaps](https://github.com/tish-lang/tish-docs/blob/main/src/content/docs/resources/js-compatibility-gaps.mdx) and [TODO-GAPS.md](https://github.com/tish-lang/tish-docs/blob/main/TODO-GAPS.md).
+Gaps discovered when porting JS patterns (e.g. mdx-docs). See [tish-docs JS Compatibility Gaps](https://github.com/tishlang/tish-docs/blob/main/src/content/docs/resources/js-compatibility-gaps.mdx) and [TODO-GAPS.md](https://github.com/tishlang/tish-docs/blob/main/TODO-GAPS.md).
 
 | Gap | Impact | Resolution task |
 |-----|--------|-----------------|

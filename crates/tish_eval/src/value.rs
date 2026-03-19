@@ -11,8 +11,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use tish_ast::{Expr, Statement};
+#[cfg(any(feature = "http", feature = "ws"))]
+use tish_core::NativeFn as CoreNativeFn;
 #[cfg(feature = "http")]
-use tish_core::{NativeFn as CoreNativeFn, TishPromise};
+use tish_core::TishPromise;
 use tish_core::TishOpaque;
 
 #[cfg(feature = "http")]
@@ -63,8 +65,8 @@ pub enum Value {
     /// Native `tish_core` Promise (fetch / reader.read / response.text).
     #[cfg(feature = "http")]
     CorePromise(Arc<dyn TishPromise>),
-    /// `tish_core::Value::Function` (e.g. response.text/json) callable from eval.
-    #[cfg(feature = "http")]
+    /// `tish_core::Value::Function` (e.g. response.text/json, ws send/receive) callable from eval.
+    #[cfg(any(feature = "http", feature = "ws"))]
     CoreFn(CoreNativeFn),
     /// Opaque handle to a native Rust type (e.g. Polars DataFrame).
     Opaque(Arc<dyn TishOpaque>),
@@ -97,7 +99,7 @@ impl std::fmt::Debug for Value {
             Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => write!(f, "[Function]"),
             #[cfg(feature = "http")]
             Value::CorePromise(_) => write!(f, "Promise"),
-            #[cfg(feature = "http")]
+            #[cfg(any(feature = "http", feature = "ws"))]
             Value::CoreFn(_) => write!(f, "CoreFn"),
             Value::Opaque(o) => write!(f, "{}(opaque)", o.type_name()),
             Value::OpaqueMethod(_, _) => write!(f, "[Function]"),
@@ -153,7 +155,7 @@ impl std::fmt::Display for Value {
             Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => write!(f, "[Function]"),
             #[cfg(feature = "http")]
             Value::CorePromise(_) => write!(f, "[Promise]"),
-            #[cfg(feature = "http")]
+            #[cfg(any(feature = "http", feature = "ws"))]
             Value::CoreFn(_) => write!(f, "[Function]"),
             Value::Opaque(o) => write!(f, "[object {}]", o.type_name()),
             Value::OpaqueMethod(_, _) => write!(f, "[Function]"),
