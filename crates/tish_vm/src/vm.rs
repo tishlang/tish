@@ -101,6 +101,15 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
             "Server" => Some(Value::Function(Rc::new(|args: &[Value]| {
                 tish_runtime::web_socket_server_construct(args)
             }))),
+            "wsSend" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                Value::Bool(tish_runtime::ws_send_native(
+                    args.first().unwrap_or(&Value::Null),
+                    &args.get(1).map(|v| v.to_display_string()).unwrap_or_default(),
+                ))
+            }))),
+            "wsBroadcast" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tish_runtime::ws_broadcast_native(args)
+            }))),
             _ => None,
         };
     }
@@ -358,6 +367,53 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     let mut document_obj = HashMap::new();
     document_obj.insert("body".into(), Value::Null);
     g.insert("document".into(), Value::Object(Rc::new(RefCell::new(document_obj))));
+
+    #[cfg(feature = "process")]
+    {
+        let mut process_obj = HashMap::new();
+        process_obj.insert(
+            "exit".into(),
+            Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exit(args))),
+        );
+        process_obj.insert(
+            "cwd".into(),
+            Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_cwd(args))),
+        );
+        process_obj.insert(
+            "exec".into(),
+            Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exec(args))),
+        );
+        process_obj.insert(
+            "argv".into(),
+            Value::Array(Rc::new(RefCell::new(
+                std::env::args().map(|s| Value::String(s.into())).collect(),
+            ))),
+        );
+        process_obj.insert(
+            "env".into(),
+            Value::Object(Rc::new(RefCell::new(
+                std::env::vars()
+                    .map(|(k, v)| (Arc::from(k.as_str()), Value::String(v.into())))
+                    .collect(),
+            ))),
+        );
+        g.insert("process".into(), Value::Object(Rc::new(RefCell::new(process_obj))));
+    }
+
+    #[cfg(feature = "http")]
+    {
+        g.insert(
+            "serve".into(),
+            Value::Function(Rc::new(|args: &[Value]| {
+                let handler = args.get(1).cloned().unwrap_or(Value::Null);
+                if let Value::Function(f) = handler {
+                    tish_runtime::http_serve(args, move |req_args| f(req_args))
+                } else {
+                    Value::Null
+                }
+            })),
+        );
+    }
 
     g
 }
@@ -1017,7 +1073,7 @@ impl Vm {
                     };
                     let v = get_builtin_export(spec, export_name).ok_or_else(|| {
                         format!(
-                            "Built-in module '{}' does not export '{}' or feature not enabled. Rebuild with --features fs, http, or process.",
+                            "Built-in module '{}' does not export '{}' or feature not enabled. Rebuild with --features full (or fs, http, process, ws).",
                             spec, export_name
                         )
                     })?;
