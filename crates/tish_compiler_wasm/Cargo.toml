@@ -9,8 +9,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 base64 = "0.22"
+serde_json = "1.0"
 wasm-bindgen = "0.2"
 
+tish_ast = { path = "../tish_ast" }
 tish_bytecode = { path = "../tish_bytecode" }
 tish_compile_js = { path = "../tish_compile_js" }
 tish_opt = { path = "../tish_opt" }

@@ -1,6 +1,9 @@
 //! WebSocket module for Tish (tish:ws).
-//! JS-like API: `WebSocket(url)` returns client with send/close/readyState/receive;
-//! `Server(options)` returns server with on/listen (see `web_socket_server_construct`).
+//!
+//! Node.js `ws`-compatible API:
+//! - **Server**: `Server({ port })` — has `clients` (array), `on('connection', fn)`, `listen()`, `acceptTimeout(server, ms)`
+//! - **Connection**: `send(data)`, `close()`, `readyState` (1=OPEN), `receive()` / `receiveTimeout(ms)`
+//! - **Broadcast** (Node pattern): `server.clients.forEach(ws => ws.send(data))` or iterate room conns and `wsSend(ws, data)` (same as `ws.send(data)`)
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -452,12 +455,15 @@ pub fn web_socket_server_accept_timeout(args: &[Value]) -> Value {
     }
 }
 
-/// `Server(options)` — object with `_handle`, `_onConnection`, `on`, `listen`.
+/// `Server(options)` — object with `_handle`, `_onConnection`, `on`, `listen`, `clients` (Node.js-compatible).
 pub fn web_socket_server_construct(args: &[Value]) -> Value {
     let handle_val = web_socket_server_listen(args);
     if matches!(handle_val, Value::Null) {
         return Value::Null;
     }
+
+    // Node.js-compatible: server.clients is array of connected WebSocket instances
+    let clients: Rc<RefCell<Vec<Value>>> = Rc::new(RefCell::new(Vec::new()));
 
     let on_fn = Rc::new(|args: &[Value]| {
         let Some(Value::Object(so)) = args.first() else {
@@ -475,7 +481,8 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
         Value::Null
     });
 
-    let listen_fn = Rc::new(|args: &[Value]| {
+    let clients_listen = Rc::clone(&clients);
+    let listen_fn = Rc::new(move |args: &[Value]| {
         let Some(Value::Object(so)) = args.first() else {
             return Value::Null;
         };
@@ -496,6 +503,7 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
             if matches!(ws, Value::Null) {
                 break;
             }
+            clients_listen.borrow_mut().push(ws.clone());
             if let Value::Function(f) = cb {
                 let _ = f(&[ws]);
             }
@@ -503,7 +511,8 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
         Value::Null
     });
 
-    let accept_timeout_fn = Rc::new(|args: &[Value]| {
+    let clients_accept = Rc::clone(&clients);
+    let accept_timeout_fn = Rc::new(move |args: &[Value]| {
         let Some(Value::Object(so)) = args.first() else {
             return Value::Null;
         };
@@ -513,12 +522,17 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
             .cloned()
             .unwrap_or(Value::Null);
         let timeout_ms = args.get(1).cloned().unwrap_or(Value::Number(100.0));
-        web_socket_server_accept_timeout(&[handle_n, timeout_ms])
+        let ws = web_socket_server_accept_timeout(&[handle_n, timeout_ms]);
+        if !matches!(ws, Value::Null) {
+            clients_accept.borrow_mut().push(ws.clone());
+        }
+        ws
     });
 
     let mut m: HashMap<Arc<str>, Value> = HashMap::new();
     m.insert(Arc::from("_handle"), handle_val);
     m.insert(Arc::from("_onConnection"), Value::Null);
+    m.insert(Arc::from("clients"), Value::Array(clients));
     m.insert(Arc::from("on"), Value::Function(on_fn));
     m.insert(Arc::from("listen"), Value::Function(listen_fn));
     m.insert(Arc::from("acceptTimeout"), Value::Function(accept_timeout_fn));

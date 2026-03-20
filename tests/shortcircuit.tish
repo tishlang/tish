@@ -1,0 +1,3 @@
+let x = null
+let y = x != null && x.foo
+console.log("y=" + String(y))

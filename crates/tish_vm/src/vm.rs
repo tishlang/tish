@@ -326,11 +326,18 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     );
     g.insert("Array".into(), Value::Object(Rc::new(RefCell::new(array_static))));
 
-    // String.fromCharCode
+    // String.fromCharCode; String(x) uses __call for callability
     let mut string_static = HashMap::new();
     string_static.insert(
         "fromCharCode".into(),
         Value::Function(Rc::new(|args: &[Value]| globals_builtins::string_from_char_code(args))),
+    );
+    string_static.insert(
+        "__call".into(),
+        Value::Function(Rc::new(|args: &[Value]| {
+            let v = args.first().unwrap_or(&Value::Null);
+            Value::String(v.to_display_string().into())
+        })),
     );
     g.insert("String".into(), Value::Object(Rc::new(RefCell::new(string_static))));
 
@@ -599,6 +606,7 @@ impl Vm {
                     self.stack.push(v);
                 }
                 Opcode::Call => {
+                    let call_ip = ip - 1; // Call opcode position for diagnostics
                     let argc = Self::read_u16(code, &mut ip) as usize;
                     let mut args = Vec::with_capacity(argc);
                     for _ in 0..argc {
@@ -613,20 +621,43 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow: no callee".to_string())?;
-                    match &callee {
-                        Value::Function(f) => {
-                            let result = f(&args);
-                            self.stack.push(result);
+                    let result = match &callee {
+                        Value::Function(f) => f(&args),
+                        Value::Object(o) => {
+                            let b = o.borrow();
+                            if let Some(Value::Function(f)) = b.get(&Arc::from("__call")) {
+                                f(&args)
+                            } else {
+                                let keys: Vec<String> = b.keys().map(|k| k.to_string()).collect();
+                                drop(b);
+                                return Err(format!(
+                                    "Call of non-function at ip={} (argc={}, arg0={}): object (keys: {:?})\n  chunk names: [{}]",
+                                    call_ip, argc,
+                                    args.first().map(|a| a.type_name()).unwrap_or_default(),
+                                    keys,
+                                    names.iter().take(20).map(|n| n.as_ref().to_string()).collect::<Vec<_>>().join(", ")
+                                ));
+                            }
                         }
                         _ => {
+                            let extra = if let Value::Object(o) = &callee {
+                                let keys: Vec<String> = o.borrow().keys().map(|k| k.to_string()).collect();
+                                format!(" (keys: {:?})", keys)
+                            } else {
+                                String::new()
+                            };
+                            let arg0_preview = args.first().map(|a| a.type_name()).unwrap_or_default();
+                            let names_preview: String = names.iter().take(20).map(|n| n.as_ref().to_string()).collect::<Vec<_>>().join(", ");
                             return Err(format!(
-                                "Call of non-function: {}",
-                                callee.type_name()
+                                "Call of non-function at ip={} (argc={}, arg0={}): {}{}\n  chunk names: [{}]",
+                                call_ip, argc, arg0_preview, callee.type_name(), extra, names_preview
                             ));
                         }
-                    }
+                    };
+                    self.stack.push(result);
                 }
                 Opcode::CallSpread => {
+                    let call_ip = ip - 1;
                     let callee = self
                         .stack
                         .pop()
@@ -644,18 +675,37 @@ impl Vm {
                             ));
                         }
                     };
-                    match &callee {
-                        Value::Function(f) => {
-                            let result = f(&args);
-                            self.stack.push(result);
+                    let result = match &callee {
+                        Value::Function(f) => f(&args),
+                        Value::Object(o) => {
+                            let b = o.borrow();
+                            if let Some(Value::Function(f)) = b.get(&Arc::from("__call")) {
+                                f(&args)
+                            } else {
+                                let keys: Vec<String> = b.keys().map(|k| k.to_string()).collect();
+                                drop(b);
+                                let names_preview: String = names.iter().take(20).map(|n| n.as_ref().to_string()).collect::<Vec<_>>().join(", ");
+                                return Err(format!(
+                                    "CallSpread of non-function at ip={}: object (keys: {:?})\n  chunk names: [{}]",
+                                    call_ip, keys, names_preview
+                                ));
+                            }
                         }
                         _ => {
+                            let extra = if let Value::Object(o) = &callee {
+                                let keys: Vec<String> = o.borrow().keys().map(|k| k.to_string()).collect();
+                                format!(" (keys: {:?})", keys)
+                            } else {
+                                String::new()
+                            };
+                            let names_preview: String = names.iter().take(20).map(|n| n.as_ref().to_string()).collect::<Vec<_>>().join(", ");
                             return Err(format!(
-                                "Call of non-function: {}",
-                                callee.type_name()
+                                "CallSpread of non-function at ip={}: {}{}\n  chunk names: [{}]",
+                                call_ip, callee.type_name(), extra, names_preview
                             ));
                         }
-                    }
+                    };
+                    self.stack.push(result);
                 }
                 Opcode::Return => {
                     let v = self.stack.pop().unwrap_or(Value::Null);

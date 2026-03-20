@@ -2598,9 +2598,11 @@ name = "tish_bytecode"
 version = "0.1.0"
 dependencies = [
  "tish_ast",
+ "tish_compile",
  "tish_core",
  "tish_opt",
  "tish_parser",
+ "tish_vm",
 ]
 
 [[package]]
@@ -2629,6 +2631,8 @@ name = "tish_compiler_wasm"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "serde_json",
+ "tish_ast",
  "tish_bytecode",
  "tish_compile_js",
  "tish_opt",

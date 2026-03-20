@@ -788,9 +788,35 @@ impl<'a> Compiler<'a> {
                 self.emit_u16(Opcode::LoadVar, idx);
             }
             Expr::Binary { left, op, right, .. } => {
-                self.compile_expr(left)?;
-                self.compile_expr(right)?;
-                self.emit_u8(Opcode::BinOp, binop_to_u8(*op));
+                match op {
+                    BinOp::And => {
+                        // Short-circuit: a && b => if !a then a else b
+                        self.compile_expr(left)?;
+                        self.emit(Opcode::Dup);
+                        let jump_shortcut = self.emit_jump(Opcode::JumpIfFalse);
+                        self.compile_expr(right)?; // left still on stack from Dup
+                        self.emit_u8(Opcode::BinOp, binop_to_u8(BinOp::And));
+                        let jump_end = self.emit_jump(Opcode::Jump);
+                        self.patch_jump(jump_shortcut, self.chunk.code.len());
+                        self.patch_jump(jump_end, self.chunk.code.len());
+                    }
+                    BinOp::Or => {
+                        // Short-circuit: a || b => if a then a else b
+                        self.compile_expr(left)?;
+                        self.emit(Opcode::Dup);
+                        let jump_eval_right = self.emit_jump(Opcode::JumpIfFalse);
+                        let jump_end = self.emit_jump(Opcode::Jump);
+                        self.patch_jump(jump_eval_right, self.chunk.code.len());
+                        self.emit(Opcode::Pop); // discard falsy left
+                        self.compile_expr(right)?;
+                        self.patch_jump(jump_end, self.chunk.code.len());
+                    }
+                    _ => {
+                        self.compile_expr(left)?;
+                        self.compile_expr(right)?;
+                        self.emit_u8(Opcode::BinOp, binop_to_u8(*op));
+                    }
+                }
             }
             Expr::Unary { op, operand, .. } => {
                 self.compile_expr(operand)?;
