@@ -265,6 +265,12 @@ pub fn file_exists(args: &[Value]) -> Result<Value, String> {
 }
 
 #[cfg(feature = "fs")]
+pub fn is_dir(args: &[Value]) -> Result<Value, String> {
+    let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+    Ok(Value::Bool(std::path::Path::new(&path).is_dir()))
+}
+
+#[cfg(feature = "fs")]
 pub fn read_dir(args: &[Value]) -> Result<Value, String> {
     use std::cell::RefCell;
     use std::rc::Rc;

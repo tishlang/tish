@@ -514,6 +514,7 @@ impl Codegen {
                     "readFile" => Some("Value::Function(Rc::new(|args: &[Value]| tish_read_file(args)))"),
                     "writeFile" => Some("Value::Function(Rc::new(|args: &[Value]| tish_write_file(args)))"),
                     "fileExists" => Some("Value::Function(Rc::new(|args: &[Value]| tish_file_exists(args)))"),
+                    "isDir" => Some("Value::Function(Rc::new(|args: &[Value]| tish_is_dir(args)))"),
                     "readDir" => Some("Value::Function(Rc::new(|args: &[Value]| tish_read_dir(args)))"),
                     "mkdir" => Some("Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)))"),
                     _ => None,
@@ -779,7 +780,7 @@ impl Codegen {
             }
         }
         if self.has_feature("fs") {
-            self.write("use tish_runtime::{read_file as tish_read_file, write_file as tish_write_file, file_exists as tish_file_exists, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
+            self.write("use tish_runtime::{read_file as tish_read_file, write_file as tish_write_file, file_exists as tish_file_exists, is_dir as tish_is_dir, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
         }
         if self.has_feature("ws") {
             self.write("use tish_runtime::{web_socket_client as tish_ws_client, web_socket_server_construct as tish_ws_server_construct};\n");
@@ -942,6 +943,7 @@ impl Codegen {
             self.writeln("let readFile = Value::Function(Rc::new(|args: &[Value]| tish_read_file(args)));");
             self.writeln("let writeFile = Value::Function(Rc::new(|args: &[Value]| tish_write_file(args)));");
             self.writeln("let fileExists = Value::Function(Rc::new(|args: &[Value]| tish_file_exists(args)));");
+            self.writeln("let isDir = Value::Function(Rc::new(|args: &[Value]| tish_is_dir(args)));");
             self.writeln("let readDir = Value::Function(Rc::new(|args: &[Value]| tish_read_dir(args)));");
             self.writeln("let mkdir = Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)));");
         }

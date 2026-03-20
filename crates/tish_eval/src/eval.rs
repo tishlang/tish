@@ -580,6 +580,7 @@ impl Evaluator {
                     exports.insert("readFile".into(), Value::Native(natives::read_file));
                     exports.insert("writeFile".into(), Value::Native(natives::write_file));
                     exports.insert("fileExists".into(), Value::Native(natives::file_exists));
+                    exports.insert("isDir".into(), Value::Native(natives::is_dir));
                     exports.insert("readDir".into(), Value::Native(natives::read_dir));
                     exports.insert("mkdir".into(), Value::Native(natives::mkdir));
                     return Ok(Value::Object(Rc::new(RefCell::new(exports))));

@@ -28,6 +28,7 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
             "readFile" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::read_file(args)))),
             "writeFile" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::write_file(args)))),
             "fileExists" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::file_exists(args)))),
+            "isDir" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::is_dir(args)))),
             "readDir" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::read_dir(args)))),
             "mkdir" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::mkdir(args)))),
             _ => None,
@@ -42,10 +43,6 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
             "fetchAll" => Some(Value::Function(Rc::new(|args: &[Value]| {
                 tish_runtime::fetch_all_promise(args.to_vec())
             }))),
-            "await" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                let p = args.first().cloned().unwrap_or(Value::Null);
-                tish_runtime::await_promise(p)
-            }))),
             "serve" => Some(Value::Function(Rc::new(|args: &[Value]| {
                 let handler = args.get(1).cloned().unwrap_or(Value::Null);
                 if let Value::Function(f) = handler {
@@ -53,12 +50,6 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
                 } else {
                     Value::Null
                 }
-            }))),
-            "setTimeout" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                tish_runtime::timer_set_timeout(args)
-            }))),
-            "clearTimeout" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                tish_runtime::timer_clear_timeout(args)
             }))),
             _ => None,
         };
@@ -109,14 +100,6 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
             }))),
             "Server" => Some(Value::Function(Rc::new(|args: &[Value]| {
                 tish_runtime::web_socket_server_construct(args)
-            }))),
-            "wsSend" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                let conn = args.first().unwrap_or(&Value::Null);
-                let data = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
-                Value::Bool(tish_runtime::ws_send_native(conn, &data))
-            }))),
-            "wsBroadcast" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                tish_runtime::ws_broadcast_native(args)
             }))),
             _ => None,
         };
@@ -336,18 +319,11 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     );
     g.insert("Array".into(), Value::Object(Rc::new(RefCell::new(array_static))));
 
-    // String.fromCharCode; String(x) uses __call for callability
+    // String.fromCharCode
     let mut string_static = HashMap::new();
     string_static.insert(
         "fromCharCode".into(),
         Value::Function(Rc::new(|args: &[Value]| globals_builtins::string_from_char_code(args))),
-    );
-    string_static.insert(
-        "__call".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
-            let v = args.first().unwrap_or(&Value::Null);
-            Value::String(v.to_display_string().into())
-        })),
     );
     g.insert("String".into(), Value::Object(Rc::new(RefCell::new(string_static))));
 
@@ -382,33 +358,6 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     let mut document_obj = HashMap::new();
     document_obj.insert("body".into(), Value::Null);
     g.insert("document".into(), Value::Object(Rc::new(RefCell::new(document_obj))));
-
-    // Feature-gated globals (Node-style: process, serve, fetch, etc.)
-    #[cfg(feature = "process")]
-    if let Some(process_val) = get_builtin_export("tish:process", "process") {
-        g.insert("process".into(), process_val);
-    }
-    #[cfg(feature = "http")]
-    {
-        if let Some(v) = get_builtin_export("tish:http", "serve") {
-            g.insert("serve".into(), v);
-        }
-        if let Some(v) = get_builtin_export("tish:http", "fetch") {
-            g.insert("fetch".into(), v);
-        }
-        if let Some(v) = get_builtin_export("tish:http", "fetchAll") {
-            g.insert("fetchAll".into(), v);
-        }
-        if let Some(v) = get_builtin_export("tish:http", "await") {
-            g.insert("await".into(), v);
-        }
-        if let Some(v) = get_builtin_export("tish:http", "setTimeout") {
-            g.insert("setTimeout".into(), v);
-        }
-        if let Some(v) = get_builtin_export("tish:http", "clearTimeout") {
-            g.insert("clearTimeout".into(), v);
-        }
-    }
 
     g
 }
@@ -643,7 +592,6 @@ impl Vm {
                     self.stack.push(v);
                 }
                 Opcode::Call => {
-                    let call_ip = ip - 1; // Call opcode position for diagnostics
                     let argc = Self::read_u16(code, &mut ip) as usize;
                     let mut args = Vec::with_capacity(argc);
                     for _ in 0..argc {
@@ -658,43 +606,20 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow: no callee".to_string())?;
-                    let result = match &callee {
-                        Value::Function(f) => f(&args),
-                        Value::Object(o) => {
-                            let b = o.borrow();
-                            if let Some(Value::Function(f)) = b.get(&Arc::from("__call")) {
-                                f(&args)
-                            } else {
-                                let keys: Vec<String> = b.keys().map(|k| k.to_string()).collect();
-                                drop(b);
-                                return Err(format!(
-                                    "Call of non-function at ip={} (argc={}, arg0={}): object (keys: {:?})\n  chunk names: [{}]",
-                                    call_ip, argc,
-                                    args.first().map(|a| a.type_name()).unwrap_or_default(),
-                                    keys,
-                                    names.iter().take(20).map(|n| n.as_ref().to_string()).collect::<Vec<_>>().join(", ")
-                                ));
-                            }
+                    match &callee {
+                        Value::Function(f) => {
+                            let result = f(&args);
+                            self.stack.push(result);
                         }
                         _ => {
-                            let extra = if let Value::Object(o) = &callee {
-                                let keys: Vec<String> = o.borrow().keys().map(|k| k.to_string()).collect();
-                                format!(" (keys: {:?})", keys)
-                            } else {
-                                String::new()
-                            };
-                            let arg0_preview = args.first().map(|a| a.type_name()).unwrap_or_default();
-                            let names_preview: String = names.iter().take(20).map(|n| n.as_ref().to_string()).collect::<Vec<_>>().join(", ");
                             return Err(format!(
-                                "Call of non-function at ip={} (argc={}, arg0={}): {}{}\n  chunk names: [{}]",
-                                call_ip, argc, arg0_preview, callee.type_name(), extra, names_preview
+                                "Call of non-function: {}",
+                                callee.type_name()
                             ));
                         }
-                    };
-                    self.stack.push(result);
+                    }
                 }
                 Opcode::CallSpread => {
-                    let call_ip = ip - 1;
                     let callee = self
                         .stack
                         .pop()
@@ -712,37 +637,18 @@ impl Vm {
                             ));
                         }
                     };
-                    let result = match &callee {
-                        Value::Function(f) => f(&args),
-                        Value::Object(o) => {
-                            let b = o.borrow();
-                            if let Some(Value::Function(f)) = b.get(&Arc::from("__call")) {
-                                f(&args)
-                            } else {
-                                let keys: Vec<String> = b.keys().map(|k| k.to_string()).collect();
-                                drop(b);
-                                let names_preview: String = names.iter().take(20).map(|n| n.as_ref().to_string()).collect::<Vec<_>>().join(", ");
-                                return Err(format!(
-                                    "CallSpread of non-function at ip={}: object (keys: {:?})\n  chunk names: [{}]",
-                                    call_ip, keys, names_preview
-                                ));
-                            }
+                    match &callee {
+                        Value::Function(f) => {
+                            let result = f(&args);
+                            self.stack.push(result);
                         }
                         _ => {
-                            let extra = if let Value::Object(o) = &callee {
-                                let keys: Vec<String> = o.borrow().keys().map(|k| k.to_string()).collect();
-                                format!(" (keys: {:?})", keys)
-                            } else {
-                                String::new()
-                            };
-                            let names_preview: String = names.iter().take(20).map(|n| n.as_ref().to_string()).collect::<Vec<_>>().join(", ");
                             return Err(format!(
-                                "CallSpread of non-function at ip={}: {}{}\n  chunk names: [{}]",
-                                call_ip, callee.type_name(), extra, names_preview
+                                "Call of non-function: {}",
+                                callee.type_name()
                             ));
                         }
-                    };
-                    self.stack.push(result);
+                    }
                 }
                 Opcode::Return => {
                     let v = self.stack.pop().unwrap_or(Value::Null);
