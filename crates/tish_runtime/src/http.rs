@@ -17,13 +17,21 @@ thread_local! {
         .expect("Failed to create tokio runtime");
 }
 
-/// Block on a future on the HTTP runtime (works from sync code or from inside another Tokio runtime).
-pub(crate) fn block_on_http<F: std::future::Future>(f: F) -> F::Output {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::task::block_in_place(|| RUNTIME.with(|rt| rt.block_on(f)))
-    } else {
-        RUNTIME.with(|rt| rt.block_on(f))
-    }
+/// Block on a future on the HTTP runtime. Uses a dedicated thread to avoid deadlocks when
+/// called from contexts that share or nest tokio runtimes (e.g. WS + HTTP both enabled).
+pub(crate) fn block_on_http<F>(f: F) -> F::Output
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    std::thread::scope(|s| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        s.spawn(move || {
+            let out = RUNTIME.with(|rt| rt.block_on(f));
+            let _ = tx.send(out);
+        });
+        rx.recv().expect("block_on_http thread panicked")
+    })
 }
 
 pub fn await_fetch(args: Vec<Value>) -> Value {

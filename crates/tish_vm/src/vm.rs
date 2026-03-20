@@ -42,6 +42,10 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
             "fetchAll" => Some(Value::Function(Rc::new(|args: &[Value]| {
                 tish_runtime::fetch_all_promise(args.to_vec())
             }))),
+            "await" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                let p = args.first().cloned().unwrap_or(Value::Null);
+                tish_runtime::await_promise(p)
+            }))),
             "serve" => Some(Value::Function(Rc::new(|args: &[Value]| {
                 let handler = args.get(1).cloned().unwrap_or(Value::Null);
                 if let Value::Function(f) = handler {

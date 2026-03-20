@@ -282,7 +282,7 @@ pub fn web_socket_client(args: &[Value]) -> Value {
                 }
                 Err(e) => {
                     let hint = if e.to_string().contains("200 OK") {
-                        " Another process may be using the port (not the WebSocket gateway). With gateway running, run: lsof -i :8765"
+                        " Another process may be using the port (not the WebSocket gateway). With gateway running, run: lsof -i :<port>"
                     } else {
                         ""
                     };
@@ -623,6 +623,102 @@ mod tests {
             .map(|v| v.to_display_string())
             .unwrap_or_default();
         assert_eq!(data, "hello");
+
+        let _ = server.join();
+    }
+
+    /// Gateway→agent flow: server receives "join", sends "joined" + "presence"; client must receive both via receiveTimeout.
+    #[test]
+    fn ws_gateway_agent_flow() {
+        let port: u16 = 18_743;
+        let opts = {
+            let mut m: HashMap<Arc<str>, Value> = HashMap::new();
+            m.insert(Arc::from("port"), Value::Number(port as f64));
+            Value::Object(Rc::new(RefCell::new(m)))
+        };
+
+        let handle = match web_socket_server_listen(std::slice::from_ref(&opts)) {
+            Value::Number(h) => h as u32,
+            _ => panic!("listen failed"),
+        };
+
+        let server = thread::spawn(move || {
+            let ws = web_socket_server_accept(&[Value::Number(handle as f64)]);
+            let Value::Object(wso) = ws else {
+                panic!("accept failed");
+            };
+            let recv_fn = wso.borrow().get(&Arc::from("receive")).cloned();
+            let Value::Function(rf) = recv_fn.unwrap() else {
+                panic!("no receive");
+            };
+            // Poll until we get join
+            for _ in 0..200 {
+                let msg = rf(&[]);
+                if !matches!(msg, Value::Null) {
+                    let data = match &msg {
+                        Value::Object(ev) => ev
+                            .borrow()
+                            .get(&Arc::from("data"))
+                            .map(|v| v.to_display_string())
+                            .unwrap_or_default(),
+                        _ => String::new(),
+                    };
+                    if data.contains("\"type\":\"join\"") || data.contains("\"type\": \"join\"") {
+                        let joined = r#"{"type":"joined","sessionId":"default"}"#;
+                        let presence = r#"{"type":"presence","agentLanes":["ai-a"]}"#;
+                        ws_send_native(&Value::Object(Rc::clone(&wso)), joined);
+                        ws_send_native(&Value::Object(Rc::clone(&wso)), presence);
+                        return;
+                    }
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!("server never got join");
+        });
+
+        thread::sleep(Duration::from_millis(100));
+        let url = format!("ws://127.0.0.1:{}/", port);
+        let client = web_socket_client(&[Value::String(url.into())]);
+        assert!(!matches!(client, Value::Null), "client connect failed");
+
+        let Value::Object(co) = client else {
+            panic!("client not object");
+        };
+        let send = co.borrow().get(&Arc::from("send")).cloned().unwrap();
+        let Value::Function(send_f) = send else {
+            panic!("no send");
+        };
+        let join_msg = r#"{"type":"join","sessionId":"default","role":"agent","laneId":"ai-a"}"#;
+        let _ = send_f(&[Value::String(join_msg.into())]);
+
+        // Client uses receiveTimeout like the agent
+        let recv_timeout = co.borrow().get(&Arc::from("receiveTimeout")).cloned().unwrap();
+        let Value::Function(recv_timeout_f) = recv_timeout else {
+            panic!("no receiveTimeout");
+        };
+        let timeout_arg = Value::Number(2000.0);
+
+        let got1 = recv_timeout_f(&[timeout_arg.clone()]);
+        let Value::Object(ev1) = got1 else {
+            panic!("first recv: expected object, got {:?}", got1);
+        };
+        let data1 = ev1
+            .borrow()
+            .get(&Arc::from("data"))
+            .map(|v| v.to_display_string())
+            .unwrap_or_default();
+        assert!(data1.contains("\"type\":\"joined\""), "expected joined, got {}", data1);
+
+        let got2 = recv_timeout_f(&[timeout_arg]);
+        let Value::Object(ev2) = got2 else {
+            panic!("second recv: expected object, got {:?}", got2);
+        };
+        let data2 = ev2
+            .borrow()
+            .get(&Arc::from("data"))
+            .map(|v| v.to_display_string())
+            .unwrap_or_default();
+        assert!(data2.contains("\"type\":\"presence\""), "expected presence, got {}", data2);
 
         let _ = server.join();
     }

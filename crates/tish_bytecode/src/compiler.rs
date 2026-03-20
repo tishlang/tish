@@ -1190,12 +1190,19 @@ impl<'a> Compiler<'a> {
             Expr::JsxFragment { children, .. } => {
                 self.compile_jsx_fragment(children)?;
             }
-            Expr::LogicalAssign { .. } | Expr::Await { .. } => {
+            Expr::Await { operand, .. } => {
+                // await expr => LoadNativeExport("tish:http","await"), compile(operand), Call(1)
+                let spec_idx = self.constant_idx(Constant::String(Arc::from("tish:http")));
+                let await_idx = self.constant_idx(Constant::String(Arc::from("await")));
+                self.emit(Opcode::LoadNativeExport);
+                self.chunk.write_u16(spec_idx);
+                self.chunk.write_u16(await_idx);
+                self.compile_expr(operand)?;
+                self.emit_u16(Opcode::Call, 1);
+            }
+            Expr::LogicalAssign { .. } => {
                 return Err(CompileError {
-                    message: format!(
-                        "Expression not yet supported in bytecode: {:?}",
-                        std::mem::discriminant(expr)
-                    ),
+                    message: "Logical assignment (&&=, ||=, ??=) not yet supported in bytecode".to_string(),
                 });
             }
         }
