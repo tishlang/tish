@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use lazy_static::lazy_static;
@@ -100,28 +100,99 @@ fn conn_receive(id: u32) -> Option<String> {
 }
 
 /// Block for up to timeout_ms; returns Some(msg) or None on timeout/disconnect.
-/// If connection is already closed (id not in CONNS), sleeps for timeout_ms so the process doesn't spin.
+/// Uses try_recv in a loop to avoid holding CONNS lock while blocking (prevents deadlock
+/// when connection closes and tokio task needs to unregister).
 fn conn_receive_timeout(id: u32, timeout_ms: u64) -> Option<String> {
     let timeout_ms = timeout_ms.min(3600_000);
-    let dur = Duration::from_millis(timeout_ms);
-    let guard = match CONNS.lock() {
-        Ok(g) => g,
-        Err(_) => return None,
-    };
-    if !guard.contains_key(&id) {
-        drop(guard);
-        std::thread::sleep(dur);
-        return None;
-    }
-    match guard.get(&id).unwrap().recv_rx.recv_timeout(dur) {
-        Ok(s) => Some(s),
-        Err(_) => None,
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let poll_interval = Duration::from_millis(50);
+    loop {
+        let result = {
+            let guard = match CONNS.lock() {
+                Ok(g) => g,
+                Err(_) => return None,
+            };
+            if !guard.contains_key(&id) {
+                drop(guard);
+                std::thread::sleep(Duration::from_millis(50));
+                return None;
+            }
+            guard.get(&id).unwrap().recv_rx.try_recv()
+        };
+        match result {
+            Ok(s) => return Some(s),
+            Err(mpsc::TryRecvError::Disconnected) => return None,
+            Err(mpsc::TryRecvError::Empty) => {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(poll_interval);
+            }
+        }
     }
 }
 
-/// Build connection object: { send, close, readyState, receive }. JS-like.
+/// Native send: avoids method-call path. Takes conn object (with _id) and string data.
+pub fn ws_send_native(conn: &Value, data: &str) -> bool {
+    let id = conn_id_from_value(conn);
+    match id {
+        Some(id) => conn_send(id, data.to_string()),
+        None => false,
+    }
+}
+
+/// Extract connection id from conn object { _id, send, ... } or wrapper { ws: conn, ... }.
+fn conn_id_from_value(v: &Value) -> Option<u32> {
+    match v {
+        Value::Object(o) => {
+            let b = o.borrow();
+            // Direct conn: { _id, send, ... }
+            if let Some(idv) = b.get(&Arc::from("_id")) {
+                if let Value::Number(n) = idv {
+                    if n.is_finite() && *n >= 0.0 {
+                        return Some(*n as u32);
+                    }
+                }
+            }
+            // Wrapper: { ws: conn, ... }
+            if let Some(ws) = b.get(&Arc::from("ws")) {
+                return conn_id_from_value(ws);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Native broadcast: send data to all conns in array except `except`. Avoids Tish-side method calls.
+pub fn ws_broadcast_native(args: &[Value]) -> Value {
+    let conns = match args.get(0) {
+        Some(Value::Array(a)) => a.borrow().clone(),
+        _ => return Value::Null,
+    };
+    let except = args.get(1).cloned().unwrap_or(Value::Null);
+    let data = args
+        .get(2)
+        .map(|v| v.to_display_string())
+        .unwrap_or_default();
+    let mut n = 0u32;
+    for c in conns {
+        if c.strict_eq(&except) {
+            continue;
+        }
+        if let Some(id) = conn_id_from_value(&c) {
+            if conn_send(id, data.clone()) {
+                n += 1;
+            }
+        }
+    }
+    Value::Number(n as f64)
+}
+
+/// Build connection object: { _id, send, close, readyState, receive }. JS-like.
 fn conn_object(id: u32) -> Value {
     let mut obj: HashMap<Arc<str>, Value> = HashMap::new();
+    obj.insert(Arc::from("_id"), Value::Number(id as f64));
     obj.insert(Arc::from("readyState"), Value::Number(1.0)); // OPEN
     obj.insert(
         Arc::from("send"),
@@ -202,7 +273,10 @@ pub fn web_socket_client(args: &[Value]) -> Value {
     let id = with_ws_client_rt(|rt| {
         rt.block_on(async move {
             let (ws_stream, _) = match tokio_tungstenite::connect_async(&url).await {
-                Ok(x) => x,
+                Ok(x) => {
+                    eprintln!("[tish ws] client connected (handshake OK): {}", url);
+                    x
+                }
                 Err(e) => {
                     let hint = if e.to_string().contains("200 OK") {
                         " Another process may be using the port (not the WebSocket gateway). With gateway running, run: lsof -i :8765"
@@ -216,12 +290,14 @@ pub fn web_socket_client(args: &[Value]) -> Value {
             let id = register(send_tx, recv_rx);
             let (mut write, mut read) = ws_stream.split();
             let recv_tx = Arc::clone(&recv_tx);
+            let url_closed = url.clone();
             tokio::spawn(async move {
                 while let Some(Ok(msg)) = read.next().await {
                     if let tokio_tungstenite::tungstenite::Message::Text(t) = msg {
                         let _ = recv_tx.send(t);
                     }
                 }
+                eprintln!("[tish ws] client connection closed (stream ended): {}", url_closed);
                 unregister(id);
             });
             tokio::spawn(async move {
@@ -286,7 +362,10 @@ pub fn web_socket_server_listen(args: &[Value]) -> Value {
                     Err(_) => break,
                 };
                 let ws_stream = match tokio_tungstenite::accept_async(stream).await {
-                    Ok(ws) => ws,
+                    Ok(ws) => {
+                        eprintln!("[tish ws] server accepted connection (handshake OK): port {}", port);
+                        ws
+                    }
                     Err(e) => {
                         eprintln!("[tish ws] server accept_async failed: {} (port {})", e, port);
                         continue;

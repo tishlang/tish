@@ -3,12 +3,15 @@
   "version": "0.1.0",
   "description": "Scaffold a new Tish project",
   "license": "SEE LICENSE IN ../../../LICENSE",
-  "repository": "https://github.com/tishlang/tish",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tishlang/tish.git"
+  },
   "publishConfig": {
     "access": "public"
   },
   "bin": {
-    "create-tish-app": "./index.js"
+    "create-tish-app": "index.js"
   },
   "engines": {
     "node": ">=14"

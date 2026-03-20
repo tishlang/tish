@@ -100,6 +100,14 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
             "Server" => Some(Value::Function(Rc::new(|args: &[Value]| {
                 tish_runtime::web_socket_server_construct(args)
             }))),
+            "wsSend" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                let conn = args.first().unwrap_or(&Value::Null);
+                let data = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
+                Value::Bool(tish_runtime::ws_send_native(conn, &data))
+            }))),
+            "wsBroadcast" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tish_runtime::ws_broadcast_native(args)
+            }))),
             _ => None,
         };
     }

@@ -680,6 +680,7 @@ mod ws;
 #[cfg(feature = "ws")]
 pub use ws::{
     web_socket_client, web_socket_server_accept, web_socket_server_construct, web_socket_server_listen,
+    ws_broadcast_native, ws_send_native,
 };
 
 #[cfg(feature = "http")]

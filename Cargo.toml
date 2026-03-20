@@ -16,6 +16,7 @@ members = [
     "crates/tish_jsx_web",
     "crates/tish_compile_js",
     "crates/tish_bytecode",
+    "crates/tish_compiler_wasm",
     "crates/tish_vm",
     "crates/tish_llvm",
     "crates/tish_native",

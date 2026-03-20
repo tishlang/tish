@@ -2625,6 +2625,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tish_compiler_wasm"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "tish_bytecode",
+ "tish_compile_js",
+ "tish_opt",
+ "tish_parser",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "tish_core"
 version = "0.1.0"
 dependencies = [

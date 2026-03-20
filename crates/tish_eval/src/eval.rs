@@ -618,6 +618,8 @@ impl Evaluator {
                     let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
                     exports.insert("WebSocket".into(), Value::Native(Self::ws_web_socket_native));
                     exports.insert("Server".into(), Value::Native(Self::ws_server_native));
+                    exports.insert("wsSend".into(), Value::Native(Self::ws_send_native));
+                    exports.insert("wsBroadcast".into(), Value::Native(Self::ws_broadcast_native));
                     return Ok(Value::Object(Rc::new(RefCell::new(exports))));
                 }
                 #[cfg(not(feature = "ws"))]
@@ -3105,6 +3107,23 @@ impl Evaluator {
             cv.push(crate::value_convert::eval_to_core(a)?);
         }
         Ok(crate::value_convert::core_to_eval(tish_runtime::web_socket_server_construct(&cv)))
+    }
+
+    #[cfg(feature = "ws")]
+    fn ws_send_native(args: &[Value]) -> Result<Value, String> {
+        let conn = args.first().ok_or("wsSend(conn, data) requires conn")?;
+        let conn_core = crate::value_convert::eval_to_core(conn)?;
+        let data = args.get(1).map(|v| v.to_string()).unwrap_or_default();
+        Ok(Value::Bool(tish_runtime::ws_send_native(&conn_core, &data)))
+    }
+
+    #[cfg(feature = "ws")]
+    fn ws_broadcast_native(args: &[Value]) -> Result<Value, String> {
+        let mut cv = Vec::new();
+        for a in args {
+            cv.push(crate::value_convert::eval_to_core(a)?);
+        }
+        Ok(crate::value_convert::core_to_eval(tish_runtime::ws_broadcast_native(&cv)))
     }
 
     #[cfg(feature = "http")]

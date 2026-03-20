@@ -84,6 +84,13 @@ compile INPUT OUTPUT:
 compile-secure INPUT OUTPUT:
     cargo run --release --no-default-features -- compile {{INPUT}} -o {{OUTPUT}}
 
+# Build compiler WASM (for playground, REPL, try-it). Output: tish_compiler.js, tish_compiler_bg.wasm
+# Requires: rustup target add wasm32-unknown-unknown, cargo install wasm-bindgen-cli
+build-compiler-wasm OUT_DIR:
+    mkdir -p "{{OUT_DIR}}"
+    cargo build -p tish_compiler_wasm --target wasm32-unknown-unknown --release
+    wasm-bindgen target/wasm32-unknown-unknown/release/tish_compiler_wasm.wasm --out-dir "{{OUT_DIR}}" --out-name tish_compiler --target web
+
 # Compile to WebAssembly (browser) - produces .wasm, .js, .html
 # Requires: rustup target add wasm32-unknown-unknown, cargo install wasm-bindgen-cli
 compile-wasm INPUT OUTPUT:

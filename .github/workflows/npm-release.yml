@@ -13,6 +13,8 @@ jobs:
     # Only run when this is a full release (not a prerelease)
     if: github.event.release.prerelease == false
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - name: Checkout (for create-tish-app)
         uses: actions/checkout@v4
@@ -38,17 +40,14 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: Publish @tishlang/tish from tarball
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish tish-npm-package.tgz --access public
 
       - name: Sync version and publish create-tish-app
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           TAG="${{ github.event.release.tag_name }}"
           VERSION="${TAG#v}"
-          cd npm/create-tish-app
+          # Publish from a clean dir outside workspace to avoid "ignoring workspace config" auth issues
+          cp -r npm/create-tish-app /tmp/create-tish-app-publish
+          cd /tmp/create-tish-app-publish
           npm version $VERSION --no-git-tag-version --allow-same-version
-          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > .npmrc
           npm publish --access public

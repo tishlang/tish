@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::Write;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -114,8 +115,12 @@ where
     for mut request in server.incoming_requests() {
         let req_value = request_to_value(&mut request);
         let response_value = handler(&[req_value]);
-        let (status, headers, body) = value_to_response(&response_value);
-        send_response(request, status, headers, body);
+        if let Some((status, headers, file_path)) = extract_file_from_response(&response_value) {
+            send_file_response(request, status, headers, file_path);
+        } else {
+            let (status, headers, body) = value_to_response(&response_value);
+            send_response(request, status, headers, body);
+        }
         count += 1;
         if max_requests.map(|m| count >= m).unwrap_or(false) {
             break;
@@ -219,6 +224,58 @@ pub fn value_to_response(value: &Value) -> (u16, Vec<(String, String)>, String) 
     };
 
     (status, headers, body)
+}
+
+/// If the response value has a "file" key, extract (status, headers, file_path) for streaming.
+/// Used for binary files (e.g. .wasm) where readFile/body would fail.
+fn extract_file_from_response(value: &Value) -> Option<(u16, Vec<(String, String)>, String)> {
+    let Value::Object(obj) = value else { return None };
+    let obj_ref = obj.borrow();
+    let Value::String(file_path) = obj_ref.get(&Arc::from("file"))? else { return None };
+    let file_path = file_path.to_string();
+    let status = obj_ref
+        .get(&Arc::from("status"))
+        .and_then(|v| match v { Value::Number(n) => Some(*n as u16), _ => None })
+        .unwrap_or(200);
+    let headers = obj_ref
+        .get(&Arc::from("headers"))
+        .and_then(|v| match v {
+            Value::Object(h) => Some(
+                h.borrow()
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_display_string()))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    Some((status, headers, file_path))
+}
+
+fn send_file_response(
+    request: tiny_http::Request,
+    status: u16,
+    headers: Vec<(String, String)>,
+    file_path: String,
+) {
+    let file = match File::open(&file_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to open file {}: {}", file_path, e);
+            let fallback = tiny_http::Response::from_string(format!("File not found: {}", file_path))
+                .with_status_code(tiny_http::StatusCode(500));
+            let _ = request.respond(fallback);
+            return;
+        }
+    };
+    let status_code = tiny_http::StatusCode(status);
+    let mut response = tiny_http::Response::from_file(file).with_status_code(status_code);
+    for (key, value) in headers {
+        if let Ok(header) = tiny_http::Header::from_bytes(key.as_bytes(), value.as_bytes()) {
+            response = response.with_header(header);
+        }
+    }
+    let _ = request.respond(response);
 }
 
 pub fn send_response(

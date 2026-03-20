@@ -1,0 +1,17 @@
+[package]
+name = "tish_compiler_wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Tish compiler as WASM for browser (parse + bytecode + JS)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = "0.22"
+wasm-bindgen = "0.2"
+
+tish_bytecode = { path = "../tish_bytecode" }
+tish_compile_js = { path = "../tish_compile_js" }
+tish_opt = { path = "../tish_opt" }
+tish_parser = { path = "../tish_parser" }

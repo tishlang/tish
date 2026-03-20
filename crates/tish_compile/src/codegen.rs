@@ -541,6 +541,8 @@ impl Codegen {
             "tish:ws" if self.has_feature("ws") => match export_name {
                     "WebSocket" => Some("Value::Function(Rc::new(|args: &[Value]| tish_ws_client(args)))"),
                     "Server" => Some("Value::Function(Rc::new(|args: &[Value]| tish_ws_server_construct(args)))"),
+                    "wsSend" => Some("Value::Function(Rc::new(|args: &[Value]| Value::Bool(tish_runtime::ws_send_native(args.first().unwrap_or(&Value::Null), &args.get(1).map(|v| v.to_display_string()).unwrap_or_default()))))"),
+                    "wsBroadcast" => Some("Value::Function(Rc::new(|args: &[Value]| tish_runtime::ws_broadcast_native(args)))"),
                     _ => None,
                 },
             _ => return None,
