@@ -26,6 +26,10 @@ struct RunArgs {
     file: String,
     #[arg(long, default_value = "vm")]
     backend: String,
+    /// Enable capabilities (http, fs, process, regex, ws). Must match how tish was built.
+    /// E.g. cargo run -p tish --features http,fs -- run script.tish --feature http,fs
+    #[arg(long = "feature", action = clap::ArgAction::Append)]
+    features: Vec<String>,
     /// Disable AST and bytecode optimizations (for debugging)
     #[arg(long)]
     no_optimize: bool,
@@ -80,7 +84,7 @@ fn main() {
         .map(|v| v == "1" || v == "true" || v == "yes")
         .unwrap_or(false);
     let result = match cli.command {
-        Some(Commands::Run(a)) => run_file(&a.file, &a.backend, a.no_optimize || no_opt_env),
+        Some(Commands::Run(a)) => run_file(&a.file, &a.backend, &a.features, a.no_optimize || no_opt_env),
         Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env),
         Some(Commands::Compile(a)) => compile_file(
             &a.file,
@@ -101,7 +105,7 @@ fn main() {
     }
 }
 
-fn run_file(path: &str, backend: &str, no_optimize: bool) -> Result<(), String> {
+fn run_file(path: &str, backend: &str, _features: &[String], no_optimize: bool) -> Result<(), String> {
     let path = Path::new(path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", path, e))?;
     let project_root = path.parent().and_then(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {

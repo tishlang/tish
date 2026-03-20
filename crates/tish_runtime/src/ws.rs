@@ -129,7 +129,7 @@ fn conn_receive_timeout(id: u32, timeout_ms: u64) -> Option<String> {
                 if Instant::now() >= deadline {
                     return None;
                 }
-                std::thread::sleep(poll_interval);
+                crate::timers::sleep_with_drain(poll_interval.as_millis() as u64);
             }
         }
     }

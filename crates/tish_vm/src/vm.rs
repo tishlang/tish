@@ -54,6 +54,12 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
                     Value::Null
                 }
             }))),
+            "setTimeout" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tish_runtime::timer_set_timeout(args)
+            }))),
+            "clearTimeout" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tish_runtime::timer_clear_timeout(args)
+            }))),
             _ => None,
         };
     }
@@ -376,6 +382,33 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     let mut document_obj = HashMap::new();
     document_obj.insert("body".into(), Value::Null);
     g.insert("document".into(), Value::Object(Rc::new(RefCell::new(document_obj))));
+
+    // Feature-gated globals (Node-style: process, serve, fetch, etc.)
+    #[cfg(feature = "process")]
+    if let Some(process_val) = get_builtin_export("tish:process", "process") {
+        g.insert("process".into(), process_val);
+    }
+    #[cfg(feature = "http")]
+    {
+        if let Some(v) = get_builtin_export("tish:http", "serve") {
+            g.insert("serve".into(), v);
+        }
+        if let Some(v) = get_builtin_export("tish:http", "fetch") {
+            g.insert("fetch".into(), v);
+        }
+        if let Some(v) = get_builtin_export("tish:http", "fetchAll") {
+            g.insert("fetchAll".into(), v);
+        }
+        if let Some(v) = get_builtin_export("tish:http", "await") {
+            g.insert("await".into(), v);
+        }
+        if let Some(v) = get_builtin_export("tish:http", "setTimeout") {
+            g.insert("setTimeout".into(), v);
+        }
+        if let Some(v) = get_builtin_export("tish:http", "clearTimeout") {
+            g.insert("clearTimeout".into(), v);
+        }
+    }
 
     g
 }

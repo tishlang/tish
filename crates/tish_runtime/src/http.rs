@@ -103,7 +103,10 @@ where
 
     let server = match create_server(port) {
         Ok(s) => s,
-        Err(e) => return build_error_response(&e),
+        Err(e) => {
+            eprintln!("[tish http] Failed to bind: {}", e);
+            return build_error_response(&e);
+        }
     };
 
     println!("Server listening on http://0.0.0.0:{}", port);

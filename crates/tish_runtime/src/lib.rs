@@ -665,7 +665,7 @@ mod http;
 #[cfg(feature = "http")]
 mod http_fetch;
 
-#[cfg(feature = "http")]
+#[cfg(any(feature = "http", feature = "ws"))]
 mod timers;
 
 #[cfg(feature = "http")]
@@ -690,7 +690,7 @@ pub use http::{
     serve as http_serve,
 };
 
-#[cfg(feature = "http")]
+#[cfg(any(feature = "http", feature = "ws"))]
 pub use timers::{set_timeout as timer_set_timeout, clear_timeout as timer_clear_timeout};
 
 #[cfg(feature = "http")]
