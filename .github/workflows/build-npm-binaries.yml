@@ -320,6 +320,25 @@ jobs:
           git checkout -B "$BRANCH"
           git push origin "$BRANCH" --force
 
+      - name: Generate release notes from commits
+        id: changelog
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LAST_TAG" ]; then
+            CHANGELOG=$(git log "$LAST_TAG..HEAD" --pretty=format:"- %s (%h)" --no-merges 2>/dev/null || echo "")
+          else
+            CHANGELOG=$(git log -30 --pretty=format:"- %s (%h)" --no-merges 2>/dev/null || echo "")
+          fi
+          [ -z "$CHANGELOG" ] && CHANGELOG="- No commits to list"
+          {
+            echo "## Changes"
+            echo ""
+            echo "$CHANGELOG"
+            echo ""
+            echo "---"
+            echo "Pre-release. Attach any extra artifacts, then use **Set as latest release** to publish. That will trigger the npm release workflow."
+          } > release-body.md
+
       - name: Create or update GitHub prerelease via API
         id: create_release
         env:
@@ -328,7 +347,7 @@ jobs:
         run: |
           TAG="v${VERSION}"
           BRANCH="release/v${VERSION}"
-          BODY="Pre-release. Attach any extra artifacts, then use **Set as latest release** to publish. That will trigger the npm release workflow."
+          BODY=$(cat release-body.md)
           # Create or update release (idempotent: PATCH if tag exists)
           RESP=$(curl -s -w "\n%{http_code}" -X POST \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
