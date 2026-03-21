@@ -55,8 +55,8 @@ struct CompileArgs {
     features: Vec<String>,
     #[arg(long)]
     no_optimize: bool,
-    /// JS target only: `tishact` (default), `legacy` (__h preamble), `vdom` (vnode + patch).
-    #[arg(long = "jsx", value_name = "MODE", default_value = "tishact")]
+    /// JS target only: `lattish` (default), `vdom` (vnode + patch; use with Lattish createRoot).
+    #[arg(long = "jsx", value_name = "MODE", default_value = "lattish")]
     jsx_mode: String,
     #[arg(required = true)]
     file: String,
@@ -338,11 +338,19 @@ fn tish_history_path() -> Option<PathBuf> {
     home.map(|h| PathBuf::from(h).join(".tish_history"))
 }
 
-fn parse_jsx_mode(s: &str) -> tish_compile_js::JsxMode {
+fn parse_jsx_mode(s: &str) -> Result<tish_compile_js::JsxMode, String> {
     match s {
-        "legacy" => tish_compile_js::JsxMode::LegacyDom,
-        "vdom" => tish_compile_js::JsxMode::Vdom,
-        _ => tish_compile_js::JsxMode::TishactH,
+        "legacy" => Err(
+            "--jsx legacy was removed. Use --jsx lattish (default) with lattish merged into your \
+             bundle, or --jsx vdom with Lattish's createRoot."
+                .to_string(),
+        ),
+        "vdom" => Ok(tish_compile_js::JsxMode::Vdom),
+        "lattish" => Ok(tish_compile_js::JsxMode::LattishH),
+        other => Err(format!(
+            "Unknown --jsx {:?}: use lattish (default) or vdom.",
+            other
+        )),
     }
 }
 
@@ -352,7 +360,7 @@ fn compile_to_js(
     optimize: bool,
     jsx: &str,
 ) -> Result<(), String> {
-    let jsx_mode = parse_jsx_mode(jsx);
+    let jsx_mode = parse_jsx_mode(jsx)?;
     let project_root = input_path.parent().and_then(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
             p.parent()
@@ -373,12 +381,7 @@ fn compile_to_js(
         } else {
             program
         };
-        let jsx_standalone = if jsx_mode == tish_compile_js::JsxMode::Vdom {
-            tish_compile_js::JsxMode::Vdom
-        } else {
-            tish_compile_js::JsxMode::LegacyDom
-        };
-        tish_compile_js::compile_with_jsx(&p, optimize, jsx_standalone).map_err(|e| format!("{}", e))?
+        tish_compile_js::compile_with_jsx(&p, optimize, jsx_mode).map_err(|e| format!("{}", e))?
     } else if input_path.extension().map(|e| e == "js") == Some(true) {
         let source = fs::read_to_string(input_path).map_err(|e| format!("{}", e))?;
         let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
@@ -535,7 +538,7 @@ mod cli_tests {
     use super::{Cli, Commands};
 
     #[test]
-    fn compile_jsx_defaults_to_tishact() {
+    fn compile_jsx_defaults_to_lattish() {
         let cli = Cli::try_parse_from([
             "tish",
             "compile",
@@ -547,19 +550,27 @@ mod cli_tests {
         ])
         .unwrap();
         match cli.command {
-            Some(Commands::Compile(a)) => assert_eq!(a.jsx_mode.as_str(), "tishact"),
+            Some(Commands::Compile(a)) => assert_eq!(a.jsx_mode.as_str(), "lattish"),
             _ => panic!("expected Compile"),
         }
     }
 
     #[test]
-    fn compile_jsx_flag_legacy() {
+    fn compile_jsx_flag_vdom() {
         let cli = Cli::try_parse_from([
-            "tish", "compile", "a.tish", "--target", "js", "--jsx", "legacy",
+            "tish",
+            "compile",
+            "a.tish",
+            "--target",
+            "js",
+            "--jsx",
+            "vdom",
+            "-o",
+            "x.js",
         ])
         .unwrap();
         match cli.command {
-            Some(Commands::Compile(a)) => assert_eq!(a.jsx_mode.as_str(), "legacy"),
+            Some(Commands::Compile(a)) => assert_eq!(a.jsx_mode.as_str(), "vdom"),
             _ => panic!("expected Compile"),
         }
     }

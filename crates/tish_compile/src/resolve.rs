@@ -304,11 +304,48 @@ pub fn native_spec_to_feature(spec: &str) -> Option<String> {
     canonical.strip_prefix("tish:").map(|s| s.to_string())
 }
 
-/// Resolve an import specifier (e.g. "./foo.tish", "../lib/utils") to an absolute path.
+/// Resolve a bare specifier (e.g. "lattish") to a path via node_modules.
+fn resolve_bare_spec(spec: &str, from_dir: &Path, _project_root: &Path) -> Option<PathBuf> {
+    let mut search = from_dir.to_path_buf();
+    loop {
+        let node_mod = search.join("node_modules").join(spec);
+        let pkg_json = node_mod.join("package.json");
+        if pkg_json.exists() {
+            if let Some(name) = read_package_name(&pkg_json) {
+                if name == spec {
+                    let content = std::fs::read_to_string(&pkg_json).ok()?;
+                    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+                    let entry = json
+                        .get("tish")
+                        .and_then(|t| t.get("module"))
+                        .and_then(|m| m.as_str())
+                        .or_else(|| json.get("main").and_then(|m| m.as_str()));
+                    let entry = entry.unwrap_or("index.tish");
+                    let entry_clean = entry.trim_start_matches("./");
+                    let resolved = node_mod.join(entry_clean);
+                    if resolved.exists() {
+                        return resolved.canonicalize().ok();
+                    }
+                }
+            }
+        }
+        if let Some(parent) = search.parent() {
+            if parent == search {
+                break;
+            }
+            search = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+/// Resolve an import specifier (e.g. "./foo.tish", "../lib/utils", "lattish") to an absolute path.
 fn resolve_import_path(
     spec: &str,
     from_dir: &Path,
-    _project_root: &Path,
+    project_root: &Path,
 ) -> Result<PathBuf, String> {
     if is_native_import(spec) {
         return Err(format!(
@@ -317,9 +354,12 @@ fn resolve_import_path(
         ));
     }
     if !spec.starts_with("./") && !spec.starts_with("../") {
+        if let Some(path) = resolve_bare_spec(spec, from_dir, project_root) {
+            return Ok(path);
+        }
         return Err(format!(
-            "Only relative imports (./, ../) or native imports (tish:*, @scope/pkg) are supported. Got: {}",
-            spec
+            "Package '{}' not found in node_modules. Install it with: npm install {}",
+            spec, spec
         ));
     }
     let base = from_dir.join(spec);

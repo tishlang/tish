@@ -6,5 +6,8 @@
   },
   "tish": {
     "source": "./src/App.tish"
+  },
+  "dependencies": {
+    "lattish": "file:../../../lattish"
   }
 }

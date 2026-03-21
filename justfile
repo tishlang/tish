@@ -167,6 +167,11 @@ check-all:
     cargo check --features full
     @echo "All feature combinations compile successfully!"
 
+# Refresh tish_jsx_web vendor from lattish (sibling package in repo)
+refresh-lattish:
+    cp ../lattish/src/Lattish.tish crates/tish_jsx_web/vendor/Lattish.tish
+    @echo "Vendor Lattish.tish refreshed from lattish"
+
 # Clean build artifacts
 clean:
     cargo clean

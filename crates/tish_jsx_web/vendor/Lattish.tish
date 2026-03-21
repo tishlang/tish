@@ -1,18 +1,17 @@
-// Upstream: tish-midi `src/zishact/Zishact.zish` — refresh this copy when releasing.
-// Tishact: hooks + h() JSX-like DOM. See Tish repo docs / tish-midi docs/TISHACT.md.
+// Lattish: Lattish runtime for compiled JSX. Publish to npm; consumed by tish and tish-playground.
 // With `tish compile --target js --jsx vdom`, the compiler injects a prelude that sets
-// window.__TISH_JSX_VDOM and __tishactVdomPatch; createRoot then reconciles vnodes.
+// window.__LATTISH_JSX_VDOM and __lattishVdomPatch; createRoot then reconciles vnodes.
 
-export let Fragment = Symbol("Tishact.Fragment")
+export let Fragment = Symbol("Lattish.Fragment")
 
-fn __tishactAppend(parent, c) {
+fn __lattishAppend(parent, c) {
   if (c === null || c === undefined) {
     return
   }
   if (Array.isArray(c)) {
     let i = 0
     while (i < c.length) {
-      __tishactAppend(parent, c[i])
+      __lattishAppend(parent, c[i])
       i = i + 1
     }
     return
@@ -32,35 +31,47 @@ export fn h(tag, props, children) {
     let f = document.createDocumentFragment()
     let i = 0
     while (i < children.length) {
-      __tishactAppend(f, children[i])
+      __lattishAppend(f, children[i])
       i = i + 1
     }
     return f
   }
   let el = document.createElement(tag)
+  let refVal = null
   if (props && props !== null) {
     let keys = Object.keys(props)
     let ki = 0
     while (ki < keys.length) {
       let k = keys[ki]
       let v = props[k]
-      if (v === true) {
-        el.setAttribute(k, k)
+      if (k === "ref") {
+        refVal = v
       } else {
-        if (v !== false && v !== null && v !== undefined) {
-          if (k === "class" || k === "className") {
-            el.className = v
-          } else {
-            if (k.length >= 2 && k[0] === "o" && k[1] === "n" && typeof v === "function") {
-              el[k.toLowerCase()] = v
+        if (k === "disabled") {
+          el.disabled = !!v
+        } else {
+        if (v === true) {
+          el.setAttribute(k, k)
+        } else {
+          if (v !== false && v !== null && v !== undefined) {
+            if (k === "class" || k === "className") {
+              el.className = v
             } else {
-              if (k === "value" && (tag === "input" || tag === "textarea")) {
-                el.value = v
+              if (k.length >= 3 && k[0] === "o" && k[1] === "n" && typeof v === "function") {
+                let eventType = k.slice(2).toLowerCase()
+                el.addEventListener(eventType, v)
               } else {
-                el.setAttribute(k, String(v))
+                if (k === "value" && (tag === "input" || tag === "textarea")) {
+                  el.value = v
+                } else {
+                  if (k !== "ref") {
+                    el.setAttribute(k, String(v))
+                  }
+                }
               }
             }
           }
+        }
         }
       }
       ki = ki + 1
@@ -68,8 +79,11 @@ export fn h(tag, props, children) {
   }
   let ci = 0
   while (ci < children.length) {
-    __tishactAppend(el, children[ci])
+    __lattishAppend(el, children[ci])
     ci = ci + 1
+  }
+  if (refVal !== null && refVal !== undefined && typeof refVal === "object") {
+    refVal.current = el
   }
   return el
 }
@@ -199,7 +213,7 @@ export fn useEffect(effect, deps) {
 }
 
 fn __usingVdom() {
-  return typeof window !== "undefined" && window.__TISH_JSX_VDOM && window.__tishactVdomPatch
+  return typeof window !== "undefined" && window.__LATTISH_JSX_VDOM && window.__lattishVdomPatch
 }
 
 fn __flushRender() {
@@ -207,7 +221,7 @@ fn __flushRender() {
   if (__container && __App) {
     if (__usingVdom()) {
       let newTree = __App()
-      window.__tishactVdomPatch(__container, __rootVnode, newTree)
+      window.__lattishVdomPatch(__container, __rootVnode, newTree)
       __rootVnode = newTree
     } else {
       let el = __App()
@@ -294,8 +308,11 @@ export fn useMemo(deps, factory) {
 export fn useRef(initial) {
   let i = __cursor
   __cursor = __cursor + 1
-  if (i >= __refSlots.length) {
-    __refSlots.push({ current: initial })
+  while (i >= __refSlots.length) {
+    __refSlots.push(null)
+  }
+  if (__refSlots[i] === null) {
+    __refSlots[i] = { current: initial }
   }
   return __refSlots[i]
 }
@@ -317,7 +334,7 @@ export fn createRoot(container) {
     __rootVnode = null
     if (__usingVdom()) {
       __rootVnode = App()
-      window.__tishactVdomPatch(container, null, __rootVnode)
+      window.__lattishVdomPatch(container, null, __rootVnode)
     } else {
       let el = App()
       container.replaceChildren(el)

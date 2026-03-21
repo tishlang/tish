@@ -335,7 +335,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     string_static.insert(Arc::from("__call"), string_convert_fn);
     g.insert("String".into(), Value::Object(Rc::new(RefCell::new(string_static))));
 
-    // JSX / Tishact: stubs for bytecode VM when no DOM (e.g. console). Override via set_global in browser.
+    // JSX / Lattish: stubs for bytecode VM when no DOM (e.g. console). Override via set_global in browser.
     g.insert(
         "h".into(),
         Value::Function(Rc::new(|_args: &[Value]| Value::Null)),

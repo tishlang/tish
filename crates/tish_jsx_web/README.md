@@ -2,19 +2,17 @@
 
 Web-only crate for the Tish JS backend:
 
-- **`LEGACY_DOM_PREAMBLE`** — historical `__h` runtime (standalone `.jsx` or `--jsx legacy`).
-- **`VDOM_PRELUDE`** — vnode helpers + `window.__tishactVdomPatch` + `window.__TISH_JSX_VDOM` for `--jsx vdom`.
+- **`VDOM_PRELUDE`** — vnode helpers + `window.__lattishVdomPatch` + `window.__LATTISH_JSX_VDOM` for `--jsx vdom`.
 
 Native / non-JS compiler targets must not depend on this crate; only `tish_compile_js` pulls it in.
 
 ## Vendor runtime
 
-`vendor/Tishact.tish` is a snapshot of the Tishact module from **tish-midi**. Refresh when releasing so CLI-built apps can pin the same runtime.
+`vendor/Lattish.tish` is a copy refreshed from the **lattish** npm package. Run `just refresh-lattish` to update from the sibling lattish package.
 
-## Migration from `__h`
+## JSX modes (`--jsx`)
 
 | Mode | JSX lowers to | Preamble |
 |------|----------------|----------|
-| `tishact` (default) | `h(tag, props, [children])` | none — import `h`/`Fragment` from your Tishact module |
-| `legacy` | `__h(...)` | full `__h` runtime |
-| `vdom` | `__vdom_h(...)` | VDOM prelude; Tishact `createRoot` patches the tree when `window.__TISH_JSX_VDOM` is set |
+| `lattish` (default) | Lattish-style JSX lowering | none — merge `Lattish.tish` by importing any export you need (or `import {} from "lattish"` for JSX-only) |
+| `vdom` | `__vdom_h(...)` | VDOM prelude; Lattish `createRoot` patches the tree when `window.__LATTISH_JSX_VDOM` is set |

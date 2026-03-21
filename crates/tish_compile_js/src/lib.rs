@@ -11,9 +11,11 @@ mod tests_jsx;
 pub use codegen::{compile_project_with_jsx, compile_with_jsx, JsxMode};
 pub use error::CompileError;
 
-/// Default entry: Tishact `h(tag, props, [children])` (import `h` + `Fragment` from Tishact.tish; entry should import Tishact before other UI).
+/// Default JSX mode lowers to Lattish-style calls (implementation detail). Import what you use from
+/// `lattish` (e.g. `useState`, `createRoot`); the merged bundle includes the JSX runtime from that
+/// module. JSX-only files can use `import {} from "lattish"` to pull it in without bindings.
 pub fn compile(program: &tish_ast::Program, optimize: bool) -> Result<String, CompileError> {
-    compile_with_jsx(program, optimize, JsxMode::TishactH)
+    compile_with_jsx(program, optimize, JsxMode::LattishH)
 }
 
 pub fn compile_project(
@@ -21,5 +23,5 @@ pub fn compile_project(
     project_root: Option<&std::path::Path>,
     optimize: bool,
 ) -> Result<String, CompileError> {
-    compile_project_with_jsx(entry_path, project_root, optimize, JsxMode::TishactH)
+    compile_project_with_jsx(entry_path, project_root, optimize, JsxMode::LattishH)
 }

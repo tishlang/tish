@@ -1,42 +1,8 @@
 //! Web-only JSX helpers for `tish compile --target js`.
 //! Native and WASM native paths must not depend on this crate.
 
-/// Legacy immediate-DOM `__h` preamble (replaced by Tishact `h` in default mode).
-pub const LEGACY_DOM_PREAMBLE: &str = r#"const __Fragment = Symbol('Fragment');
-function __hAppend(parent, c) {
-  if (c == null) return;
-  if (Array.isArray(c)) {
-    for (let i = 0; i < c.length; i++) __hAppend(parent, c[i]);
-    return;
-  }
-  parent.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
-}
-function __h(tag, props, ...children) {
-  if (tag === __Fragment) {
-    const f = document.createDocumentFragment();
-    for (let i = 0; i < children.length; i++) __hAppend(f, children[i]);
-    return f;
-  }
-  const el = document.createElement(tag);
-  if (props && props !== null) {
-    for (const k of Object.keys(props)) {
-      const v = props[k];
-      if (v === true) el.setAttribute(k, k);
-      else if (v !== false && v != null) {
-        if (k === 'class' || k === 'className') el.className = v;
-        else if (k.startsWith('on') && typeof v === 'function') el[k.toLowerCase()] = v;
-        else if (k === 'value' && (tag === 'input' || tag === 'textarea')) el.value = v;
-        else el.setAttribute(k, String(v));
-      }
-    }
-  }
-  for (let i = 0; i < children.length; i++) __hAppend(el, children[i]);
-  return el;
-}
-"#;
-
-/// VDOM: vnode `__vdom_h` + `window.__tishactVdomPatch` for Tishact batched flush.
-pub const VDOM_PRELUDE: &str = r#"window.__TISH_JSX_VDOM = true;
+/// VDOM: vnode `__vdom_h` + `window.__lattishVdomPatch` for Lattish batched flush.
+pub const VDOM_PRELUDE: &str = r#"window.__LATTISH_JSX_VDOM = true;
 const __Fragment = Symbol('Fragment');
 function __vdom_h(tag, props, children) {
   if (children === undefined || children === null) children = [];
@@ -161,7 +127,7 @@ function __vdomPatchEl(el, ov, nv) {
   }
   return true;
 }
-window.__tishactVdomPatch = function(container, oldTree, newTree) {
+window.__lattishVdomPatch = function(container, oldTree, newTree) {
   try {
     if (oldTree == null) {
       container.replaceChildren(__vdom_mount(newTree));
@@ -180,11 +146,11 @@ window.__tishactVdomPatch = function(container, oldTree, newTree) {
       container.replaceChildren(__vdom_mount(newTree));
     }
   } catch (err) {
-    console.warn('Tishact VDOM patch failed, full remount', err);
+    console.warn('Lattish VDOM patch failed, full remount', err);
     try {
       container.replaceChildren(__vdom_mount(newTree));
     } catch (e2) {
-      console.error('Tishact VDOM remount failed', e2);
+      console.error('Lattish VDOM remount failed', e2);
     }
   }
 };
