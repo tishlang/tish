@@ -5,5 +5,5 @@ edition = "2021"
 description = "Vanilla JavaScript to Tish AST converter"
 
 [dependencies]
-oxc = { version = "0.117", features = ["semantic"] }
+oxc = { version = "0.121", features = ["semantic"] }
 tish_ast = { path = "../tish_ast" }

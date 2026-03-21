@@ -297,7 +297,7 @@ pub fn web_socket_client(args: &[Value]) -> Value {
             tokio::spawn(async move {
                 while let Some(Ok(msg)) = read.next().await {
                     if let tokio_tungstenite::tungstenite::Message::Text(t) = msg {
-                        let _ = recv_tx.send(t);
+                        let _ = recv_tx.send(t.to_string());
                     }
                 }
                 eprintln!("[tish ws] client connection closed (stream ended): {}", url_closed);
@@ -306,7 +306,7 @@ pub fn web_socket_client(args: &[Value]) -> Value {
             tokio::spawn(async move {
                 while let Some(text) = send_rx.recv().await {
                     let _ = write
-                        .send(tokio_tungstenite::tungstenite::Message::Text(text))
+                        .send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
                         .await;
                 }
             });
@@ -383,7 +383,7 @@ pub fn web_socket_server_listen(args: &[Value]) -> Value {
                 tokio::spawn(async move {
                     while let Some(Ok(msg)) = read.next().await {
                         if let tokio_tungstenite::tungstenite::Message::Text(t) = msg {
-                            let _ = recv_tx_task.send(t);
+                            let _ = recv_tx_task.send(t.to_string());
                         }
                     }
                     unregister(id);
@@ -391,7 +391,7 @@ pub fn web_socket_server_listen(args: &[Value]) -> Value {
                 tokio::spawn(async move {
                     while let Some(text) = send_rx.recv().await {
                         let _ = write
-                            .send(tokio_tungstenite::tungstenite::Message::Text(text))
+                            .send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
                             .await;
                     }
                 });

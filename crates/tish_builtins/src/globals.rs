@@ -47,6 +47,12 @@ pub fn array_is_array(args: &[Value]) -> Value {
     Value::Bool(matches!(args.first(), Some(Value::Array(_))))
 }
 
+/// String(value) — convert value to string (JS String constructor as function).
+pub fn string_convert(args: &[Value]) -> Value {
+    let v = args.first().unwrap_or(&Value::Null);
+    Value::String(v.to_display_string().into())
+}
+
 /// String.fromCharCode(...codes)
 pub fn string_from_char_code(args: &[Value]) -> Value {
     let s: String = args

@@ -11,6 +11,6 @@ name = "tish-fmt"
 path = "src/bin/tish-fmt.rs"
 
 [dependencies]
-clap = { version = "4.5.60", features = ["derive"] }
+clap = { version = "4.6.0", features = ["derive"] }
 tish_ast = { path = "../tish_ast" }
 tish_parser = { path = "../tish_parser" }

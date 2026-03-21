@@ -38,7 +38,7 @@ tish_wasm = { path = "../tish_wasm" }
 tish_runtime = { path = "../tish_runtime" }
 tish_core = { path = "../tish_core" }
 js_to_tish = { path = "../js_to_tish" }
-clap = { version = "4.5.60", features = ["derive"] }
+clap = { version = "4.6.0", features = ["derive"] }
 
 [dev-dependencies]
-rayon = "1.10"
+rayon = "1.11"

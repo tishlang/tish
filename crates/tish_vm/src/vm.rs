@@ -328,12 +328,11 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     );
     g.insert("Array".into(), Value::Object(Rc::new(RefCell::new(array_static))));
 
-    // String.fromCharCode
+    // String(value) as callable + String.fromCharCode
+    let string_convert_fn = Value::Function(Rc::new(|args: &[Value]| globals_builtins::string_convert(args)));
     let mut string_static = HashMap::new();
-    string_static.insert(
-        "fromCharCode".into(),
-        Value::Function(Rc::new(|args: &[Value]| globals_builtins::string_from_char_code(args))),
-    );
+    string_static.insert("fromCharCode".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::string_from_char_code(args))));
+    string_static.insert(Arc::from("__call"), string_convert_fn);
     g.insert("String".into(), Value::Object(Rc::new(RefCell::new(string_static))));
 
     // JSX / Tishact: stubs for bytecode VM when no DOM (e.g. console). Override via set_global in browser.
@@ -662,10 +661,17 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow: no callee".to_string())?;
-                    match &callee {
-                        Value::Function(f) => {
-                            let result = f(&args);
-                            self.stack.push(result);
+                    let f = match &callee {
+                        Value::Function(f) => Rc::clone(f),
+                        Value::Object(o) => {
+                            if let Some(Value::Function(call_fn)) = o.borrow().get(&Arc::from("__call")) {
+                                Rc::clone(call_fn)
+                            } else {
+                                return Err(format!(
+                                    "Call of non-function: {}",
+                                    callee.type_name()
+                                ));
+                            }
                         }
                         _ => {
                             return Err(format!(
@@ -673,7 +679,9 @@ impl Vm {
                                 callee.type_name()
                             ));
                         }
-                    }
+                    };
+                    let result = f(&args);
+                    self.stack.push(result);
                 }
                 Opcode::CallSpread => {
                     let callee = self
@@ -693,10 +701,17 @@ impl Vm {
                             ));
                         }
                     };
-                    match &callee {
-                        Value::Function(f) => {
-                            let result = f(&args);
-                            self.stack.push(result);
+                    let f = match &callee {
+                        Value::Function(f) => Rc::clone(f),
+                        Value::Object(o) => {
+                            if let Some(Value::Function(call_fn)) = o.borrow().get(&Arc::from("__call")) {
+                                Rc::clone(call_fn)
+                            } else {
+                                return Err(format!(
+                                    "Call of non-function: {}",
+                                    callee.type_name()
+                                ));
+                            }
                         }
                         _ => {
                             return Err(format!(
@@ -704,7 +719,9 @@ impl Vm {
                                 callee.type_name()
                             ));
                         }
-                    }
+                    };
+                    let result = f(&args);
+                    self.stack.push(result);
                 }
                 Opcode::Return => {
                     let v = self.stack.pop().unwrap_or(Value::Null);

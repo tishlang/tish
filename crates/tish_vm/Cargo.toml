@@ -21,11 +21,11 @@ tish_builtins = { path = "../tish_builtins" }
 tish_bytecode = { path = "../tish_bytecode" }
 tish_core = { path = "../tish_core" }
 tish_runtime = { path = "../tish_runtime", optional = true }
-rand = "0.8"
+rand = "0.10"
 wasm-bindgen = { version = "0.2", optional = true }
 
 [dev-dependencies]
 tish_parser = { path = "../tish_parser" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.2", features = ["js"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
