@@ -6,6 +6,7 @@ Example applications you can run and compile with Tish. Build the CLI from the r
 
 | Example | Description | Features |
 |---------|-------------|----------|
+| [npm-usage](npm-usage/) | Uses `@tishlang/tish` from npm (`npm install`, scripts) | None |
 | [hello-world](hello-world/) | Minimal app that logs and exits | None |
 | [http-hello](http-hello/) | Basic HTTP server with routing | `http` |
 | [json-api](json-api/) | REST API with JSON responses | `http` |

@@ -298,6 +298,13 @@ jobs:
         env:
           VERSION: ${{ steps.next_version.outputs.version }}
 
+      - name: Copy workspace source for native compile (rust backend)
+        run: |
+          cp Cargo.toml npm/tish/
+          cp LICENSE npm/tish/
+          cp justfile npm/tish/
+          cp -r crates npm/tish/
+
       - name: Create npm package tarball
         run: |
           cd npm/tish && npm pack && cd ../..

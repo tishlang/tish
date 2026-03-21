@@ -84,8 +84,13 @@ To enable npm publishing: create an [npm access token](https://www.npmjs.com/set
 ## Manual publishing
 
 1. Ensure `npm/tish/platform/` contains binaries for every supported platform (from CI artifact or local builds).
-2. `npm login` and create the `@tishlang` org on npm if needed.
-3. Publish from the package directories:
+2. Copy workspace source for native compile (rust backend): from repo root, run:
+   ```bash
+   cp Cargo.toml LICENSE justfile npm/tish/
+   cp -r crates npm/tish/
+   ```
+3. `npm login` and create the `@tishlang` org on npm if needed.
+4. Publish from the package directories:
 
 ```bash
 cd npm/tish && npm publish --access public

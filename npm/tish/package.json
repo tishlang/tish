@@ -2,7 +2,7 @@
   "name": "@tishlang/tish",
   "version": "0.1.0",
   "description": "Tish - minimal TS/JS-compatible language. Run, REPL, compile to native.",
-  "license": "SEE LICENSE IN ../../LICENSE",
+  "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
     "url": "https://github.com/tishlang/tish.git"
@@ -15,7 +15,12 @@
   },
   "files": [
     "bin",
-    "platform"
+    "platform",
+    "README.md",
+    "LICENSE",
+    "Cargo.toml",
+    "crates",
+    "justfile"
   ],
   "engines": {
     "node": ">=22"

@@ -1,0 +1,4 @@
+// npm-usage — minimal example run via @tishlang/tish from npm
+
+let message = "Hello from @tishlang/tish (npm install)"
+console.log(message)

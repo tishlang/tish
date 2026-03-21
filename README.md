@@ -4,10 +4,7 @@
 
 An experimental and opinionated javascript/typescript-like multi-target native compilable language built for friends and family of the JS community.
 
-**License:** [Pay It Forward (PIF)](https://payitforwardlicense.com/) — see [LICENSE](LICENSE).
-
-
-Minimal, TS/JS-compatible language. Runs via interpreter or compiles to native. See [docs/](docs/) for spec and ECMA alignment; user-facing docs: [tish-docs](https://github.com/tishlang/tish-docs).
+See [docs/](docs/) for spec and ECMA alignment; user-facing docs: [tishlang.com/docs](https://tishlang.com/docs).
 
 ## Quick Example
 
