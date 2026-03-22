@@ -27,6 +27,21 @@ export fn h(tag, props, children) {
   if (children === undefined || children === null) {
     children = []
   }
+  if (typeof tag === "function") {
+    let p = props && props !== null ? props : {}
+    if (children.length > 0) {
+      let newProps = {}
+      let keys = Object.keys(p)
+      let i = 0
+      while (i < keys.length) {
+        newProps[keys[i]] = p[keys[i]]
+        i = i + 1
+      }
+      newProps.children = children
+      p = newProps
+    }
+    return tag(p)
+  }
   if (tag === Fragment) {
     let f = document.createDocumentFragment()
     let i = 0
