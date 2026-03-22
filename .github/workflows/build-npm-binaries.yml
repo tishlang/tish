@@ -378,8 +378,6 @@ jobs:
             echo ""
             echo "$CHANGELOG"
             echo ""
-            echo "---"
-            echo "Pre-release. Attach any extra artifacts, then use **Set as latest release** to publish. That will trigger the npm release workflow."
           } > release-body.md
 
       - name: Create or update GitHub prerelease via API

@@ -16,6 +16,6 @@ http = ["tishlang_vm/http"]
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-tishlang_bytecode = { path = "../tish_bytecode" }
-tishlang_vm = { path = "../tish_vm" }
-tishlang_core = { path = "../tish_core" }
+tishlang_bytecode = { path = "../tish_bytecode", version = ">=0.1" }
+tishlang_vm = { path = "../tish_vm", version = ">=0.1" }
+tishlang_core = { path = "../tish_core", version = ">=0.1" }

@@ -17,12 +17,12 @@ ws = ["dep:tishlang_runtime", "tishlang_runtime/ws"]
 
 [dependencies]
 rand = "0.10.0"
-tishlang_ast = { path = "../tish_ast" }
-tishlang_parser = { path = "../tish_parser" }
-tishlang_core = { path = "../tish_core" }
+tishlang_ast = { path = "../tish_ast", version = ">=0.1" }
+tishlang_parser = { path = "../tish_parser", version = ">=0.1" }
+tishlang_core = { path = "../tish_core", version = ">=0.1" }
 reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream"], optional = true }
 futures = { version = "0.3.32", optional = true }
 tiny_http = { version = "0.12.0", optional = true }
 fancy-regex = { version = "0.17.0", optional = true }
 tokio = { version = "1.50.0", features = ["rt-multi-thread", "time", "sync"], optional = true }
-tishlang_runtime = { path = "../tish_runtime", optional = true }
+tishlang_runtime = { path = "../tish_runtime", version = ">=0.1", optional = true }

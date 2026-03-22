@@ -7,7 +7,7 @@ description = "LLVM backend for Tish (bytecode → native via clang/LLVM)"
 license-file = { workspace = true }
 repository = { workspace = true }
 [dependencies]
-tishlang_bytecode = { path = "../tish_bytecode" }
-tishlang_compile = { path = "../tish_compile" }
-tishlang_cranelift = { path = "../tish_cranelift" }
-tishlang_build_utils = { path = "../tish_build_utils" }
+tishlang_bytecode = { path = "../tish_bytecode", version = ">=0.1" }
+tishlang_compile = { path = "../tish_compile", version = ">=0.1" }
+tishlang_cranelift = { path = "../tish_cranelift", version = ">=0.1" }
+tishlang_build_utils = { path = "../tish_build_utils", version = ">=0.1" }

@@ -18,16 +18,16 @@ http = ["tishlang_runtime/http"]
 ws = ["tishlang_runtime/ws"]
 
 [dependencies]
-tishlang_ast = { path = "../tish_ast" }
-tishlang_builtins = { path = "../tish_builtins" }
-tishlang_bytecode = { path = "../tish_bytecode" }
-tishlang_core = { path = "../tish_core" }
-tishlang_runtime = { path = "../tish_runtime", optional = true }
+tishlang_ast = { path = "../tish_ast", version = ">=0.1" }
+tishlang_builtins = { path = "../tish_builtins", version = ">=0.1" }
+tishlang_bytecode = { path = "../tish_bytecode", version = ">=0.1" }
+tishlang_core = { path = "../tish_core", version = ">=0.1" }
+tishlang_runtime = { path = "../tish_runtime", version = ">=0.1", optional = true }
 rand = "0.10"
 wasm-bindgen = { version = "0.2", optional = true }
 
 [dev-dependencies]
-tishlang_parser = { path = "../tish_parser" }
+tishlang_parser = { path = "../tish_parser", version = ">=0.1" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }

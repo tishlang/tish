@@ -16,8 +16,8 @@ regex = ["tishlang_core/regex"]
 ws = ["tokio", "tokio/net", "tokio/io-util", "tokio-tungstenite", "futures-util", "lazy_static"]
 
 [dependencies]
-tishlang_core = { path = "../tish_core" }
-tishlang_builtins = { path = "../tish_builtins" }
+tishlang_core = { path = "../tish_core", version = ">=0.1" }
+tishlang_builtins = { path = "../tish_builtins", version = ">=0.1" }
 tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "time", "sync"], optional = true }
 reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream"], optional = true }
 futures = { version = "0.3.32", optional = true }

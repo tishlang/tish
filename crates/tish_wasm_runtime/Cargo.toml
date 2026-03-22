@@ -18,8 +18,8 @@ process = ["tishlang_vm/process"]
 http = ["tishlang_vm/http"]
 
 [dependencies]
-tishlang_bytecode = { path = "../tish_bytecode" }
-tishlang_vm = { path = "../tish_vm" }
+tishlang_bytecode = { path = "../tish_bytecode", version = ">=0.1" }
+tishlang_vm = { path = "../tish_vm", version = ">=0.1" }
 wasm-bindgen = { version = "0.2", optional = true }
 
 # rand_core → getrandom 0.4 needs wasm_js on wasm32-unknown-unknown (browser VM build).

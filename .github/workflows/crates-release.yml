@@ -64,7 +64,7 @@ jobs:
             tishlang
           )
           for crate in "${CRATES[@]}"; do
-            if curl -sSf -o /dev/null "https://crates.io/api/v1/crates/${crate}/${VERSION}"; then
+            if curl -sSf -o /dev/null -A "tishlang-release/1.0 (https://github.com/tishlang/tish)" "https://crates.io/api/v1/crates/${crate}/${VERSION}"; then
               echo "Skipping $crate v${VERSION} (already published)"
             else
               echo "Publishing $crate v${VERSION}..."

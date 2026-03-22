@@ -9,7 +9,7 @@ license-file = { workspace = true }
 repository = { workspace = true }
 [dependencies]
 rand = "0.10.0"
-tishlang_core = { path = "../tish_core" }
+tishlang_core = { path = "../tish_core", version = ">=0.1" }
 
 [features]
 default = []

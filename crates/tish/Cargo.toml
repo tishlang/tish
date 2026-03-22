@@ -1,6 +1,6 @@
 [package]
 name = "tishlang"
-version = "1.0.12"
+version = "0.0.0-dev"
 edition = "2021"
 description = "Tish CLI - run, REPL, compile to native"
 license-file = { workspace = true }
@@ -23,21 +23,21 @@ regex = ["tishlang_eval/regex", "tishlang_runtime/regex", "tishlang_compile/rege
 ws = ["tishlang_eval/ws", "tishlang_runtime/ws", "tishlang_compile/ws", "tishlang_vm/ws"]
 [dependencies]
 rustyline = { version = "17", features = ["with-file-history"] }
-tishlang_lexer = { path = "../tish_lexer" }
-tishlang_ast = { path = "../tish_ast" }
-tishlang_parser = { path = "../tish_parser" }
-tishlang_eval = { path = "../tish_eval" }
-tishlang_compile = { path = "../tish_compile" }
-tishlang_compile_js = { path = "../tish_compile_js" }
-tishlang_bytecode = { path = "../tish_bytecode" }
-tishlang_opt = { path = "../tish_opt" }
-tishlang_vm = { path = "../tish_vm" }
-tishlang_native = { path = "../tish_native" }
-tishlang_llvm = { path = "../tish_llvm" }
-tishlang_wasm = { path = "../tish_wasm" }
-tishlang_runtime = { path = "../tish_runtime" }
-tishlang_core = { path = "../tish_core" }
-tishlang_js_to_tish = { path = "../js_to_tish" }
+tishlang_lexer = { path = "../tish_lexer", version = ">=0.1" }
+tishlang_ast = { path = "../tish_ast", version = ">=0.1" }
+tishlang_parser = { path = "../tish_parser", version = ">=0.1" }
+tishlang_eval = { path = "../tish_eval", version = ">=0.1" }
+tishlang_compile = { path = "../tish_compile", version = ">=0.1" }
+tishlang_compile_js = { path = "../tish_compile_js", version = ">=0.1" }
+tishlang_bytecode = { path = "../tish_bytecode", version = ">=0.1" }
+tishlang_opt = { path = "../tish_opt", version = ">=0.1" }
+tishlang_vm = { path = "../tish_vm", version = ">=0.1" }
+tishlang_native = { path = "../tish_native", version = ">=0.1" }
+tishlang_llvm = { path = "../tish_llvm", version = ">=0.1" }
+tishlang_wasm = { path = "../tish_wasm", version = ">=0.1" }
+tishlang_runtime = { path = "../tish_runtime", version = ">=0.1" }
+tishlang_core = { path = "../tish_core", version = ">=0.1" }
+tishlang_js_to_tish = { path = "../js_to_tish", version = ">=0.1" }
 clap = { version = "4.6.0", features = ["derive"] }
 
 [dev-dependencies]
