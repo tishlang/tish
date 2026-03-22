@@ -187,6 +187,8 @@ Run any test file: `tish run tests/core/<name>.tish`
 
 ## Releasing
 
+**→ [How to release (step-by-step)](docs/RELEASE.md)**
+
 Releases are **GitHub-led** and do not modify `main`. The main CI does not push to `main`; it creates a **release branch** and a **GitHub prerelease**.
 
 1. **On push to `main`** (with [conventional commits](#conventional-commits) that trigger a release): CI runs semantic-release in dry-run to get the next version, creates/updates a branch `release/vX.Y.Z`, and creates a **prerelease** on GitHub via the API (with the platform zip attached). There is no version bump or tag on `main`.
@@ -194,7 +196,7 @@ Releases are **GitHub-led** and do not modify `main`. The main CI does not push 
 3. **Publish workflows** (run when a full release is published or edited to no longer be a prerelease):
    - **NPM**: Publishes `@tishlang/tish` and `@tishlang/create-tish-app` to npm.
    - **Crates.io**: Publishes all `tishlang_*` crates to [crates.io](https://crates.io/crates/tishlang).
-   - **Homebrew**: Updates the formula in the [homebrew-tish](https://github.com/tishlang/homebrew-tish) tap.
+   - **Homebrew**: Updates `Formula/tish.rb` in this repo (tap = this repo).
 
 This gives time for the pipeline (or you) to attach the right binaries; publishing only occurs when the release is promoted.
 
@@ -204,9 +206,7 @@ This gives time for the pipeline (or you) to attach the right binaries; publishi
 |--------|---------|---------|
 | `NPM_TOKEN` | NPM release | Publish to npm |
 | `CARGO_REGISTRY_TOKEN` | Crates.io release | Publish crates |
-| `HOMEBREW_TAP_TOKEN` | Homebrew release | Push formula updates to homebrew-tish tap |
-
-For Homebrew, the `homebrew-tish` repo must exist under the same org. See `.github/workflows/brew-release.yml` for setup details.
+No extra secrets for Homebrew — it pushes `Formula/tish.rb` to this repo using `GITHUB_TOKEN`.
 
 ### Conventional commits
 
