@@ -1,9 +1,10 @@
 //! Verify && and || short-circuit (JumpIfFalse before evaluating right side).
+//! Moved from tish_bytecode to break publish cycle (bytecode dev-depends on vm, vm depends on bytecode).
 use std::path::Path;
 use tishlang_bytecode::{compile, compile_unoptimized, Opcode};
 use tishlang_compile::{merge_modules, resolve_project};
-use tishlang_parser::parse;
 use tishlang_opt;
+use tishlang_parser::parse;
 use tishlang_vm;
 
 #[test]

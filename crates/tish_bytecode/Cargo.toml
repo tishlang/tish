@@ -14,4 +14,3 @@ tishlang_core = { path = "../tish_core", version = ">=0.1" }
 tishlang_compile = { path = "../tish_compile", version = ">=0.1" }
 tishlang_parser = { path = "../tish_parser", version = ">=0.1" }
 tishlang_opt = { path = "../tish_opt", version = ">=0.1" }
-tishlang_vm = { path = "../tish_vm", version = ">=0.1" }
