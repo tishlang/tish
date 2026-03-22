@@ -64,8 +64,12 @@ jobs:
             tishlang
           )
           for crate in "${CRATES[@]}"; do
-            echo "Publishing $crate v${VERSION}..."
-            cargo publish -p "$crate" --token "$CARGO_REGISTRY_TOKEN" --no-verify --allow-dirty
+            if curl -sSf -o /dev/null "https://crates.io/api/v1/crates/${crate}/${VERSION}"; then
+              echo "Skipping $crate v${VERSION} (already published)"
+            else
+              echo "Publishing $crate v${VERSION}..."
+              cargo publish -p "$crate" --token "$CARGO_REGISTRY_TOKEN" --no-verify --allow-dirty
+            fi
           done
 
       - name: Update release description with crates.io URL
