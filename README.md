@@ -89,6 +89,13 @@ wasmtime app.wasm
 
 ## Installing Tish
 
+### Homebrew (macOS & Linux)
+
+```bash
+brew tap tishlang/tish
+brew install tish
+```
+
 ### Via npx (no install)
 
 ```bash
@@ -184,9 +191,22 @@ Releases are **GitHub-led** and do not modify `main`. The main CI does not push 
 
 1. **On push to `main`** (with [conventional commits](#conventional-commits) that trigger a release): CI runs semantic-release in dry-run to get the next version, creates/updates a branch `release/vX.Y.Z`, and creates a **prerelease** on GitHub via the API (with the platform zip attached). There is no version bump or tag on `main`.
 2. **When you’re ready**: In GitHub, open the prerelease, attach any extra artifacts if needed, then use **Set as latest release** (uncheck “Set as a pre-release”). That promotes the prerelease to a full release.
-3. **NPM publish**: The “NPM release” workflow runs when a full release is published (or when a release is edited to no longer be a prerelease). It checks out the release tag, sets the package version from the tag, and publishes `@tishlang/tish` and `@tishlang/create-tish-app` to npm.
+3. **Publish workflows** (run when a full release is published or edited to no longer be a prerelease):
+   - **NPM**: Publishes `@tishlang/tish` and `@tishlang/create-tish-app` to npm.
+   - **Crates.io**: Publishes all `tishlang_*` crates to [crates.io](https://crates.io/crates/tishlang).
+   - **Homebrew**: Updates the formula in the [homebrew-tish](https://github.com/tishlang/homebrew-tish) tap.
 
-This gives time for the pipeline (or you) to attach the right binaries and only publishes to npm when the release is promoted.
+This gives time for the pipeline (or you) to attach the right binaries; publishing only occurs when the release is promoted.
+
+### Required secrets
+
+| Secret | Used by | Purpose |
+|--------|---------|---------|
+| `NPM_TOKEN` | NPM release | Publish to npm |
+| `CARGO_REGISTRY_TOKEN` | Crates.io release | Publish crates |
+| `HOMEBREW_TAP_TOKEN` | Homebrew release | Push formula updates to homebrew-tish tap |
+
+For Homebrew, the `homebrew-tish` repo must exist under the same org. See `.github/workflows/brew-release.yml` for setup details.
 
 ### Conventional commits
 
