@@ -2,7 +2,7 @@
 //!
 //! This module defines the interpreter's `Value` type, which includes variants
 //! like `Function`, `Native`, and `Serve` that hold AST or interpreter-specific
-//! data. The compiled runtime uses `tish_core::Value` instead, which has a
+//! data. The compiled runtime uses `tishlang_core::Value` instead, which has a
 //! different shape (no AST-carrying variants). The split is intentional.
 
 use std::cell::RefCell;
@@ -10,12 +10,12 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tish_ast::{Expr, Statement};
+use tishlang_ast::{Expr, Statement};
 #[cfg(any(feature = "http", feature = "ws"))]
-use tish_core::NativeFn as CoreNativeFn;
+use tishlang_core::NativeFn as CoreNativeFn;
 #[cfg(feature = "http")]
-use tish_core::TishPromise;
-use tish_core::TishOpaque;
+use tishlang_core::TishPromise;
+use tishlang_core::TishOpaque;
 
 #[cfg(feature = "http")]
 pub use crate::promise::PromiseResolver;
@@ -62,10 +62,10 @@ pub enum Value {
     /// Timer builtins: setTimeout, setInterval. Need evaluator for callback.
     #[cfg(feature = "http")]
     TimerBuiltin(std::sync::Arc<str>),
-    /// Native `tish_core` Promise (fetch / reader.read / response.text).
+    /// Native `tishlang_core` Promise (fetch / reader.read / response.text).
     #[cfg(feature = "http")]
     CorePromise(Arc<dyn TishPromise>),
-    /// `tish_core::Value::Function` (e.g. response.text/json, ws send/receive) callable from eval.
+    /// `tishlang_core::Value::Function` (e.g. response.text/json, ws send/receive) callable from eval.
     #[cfg(any(feature = "http", feature = "ws"))]
     CoreFn(CoreNativeFn),
     /// Opaque handle to a native Rust type (e.g. Polars DataFrame).

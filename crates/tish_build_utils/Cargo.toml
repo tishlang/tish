@@ -1,5 +1,7 @@
 [package]
-name = "tish_build_utils"
+name = "tishlang_build_utils"
 version = "0.1.0"
 edition = "2021"
 description = "Shared build utilities for Tish (workspace discovery, path resolution)"
+license-file = { workspace = true }
+repository = { workspace = true }

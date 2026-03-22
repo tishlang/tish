@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tish_ast::{ExportDeclaration, Expr, ImportSpecifier, Program, Statement};
+use tishlang_ast::{ExportDeclaration, Expr, ImportSpecifier, Program, Statement};
 
 /// Resolved native module: crate path and init expression.
 #[derive(Debug, Clone)]
@@ -37,14 +37,14 @@ pub fn normalize_builtin_spec(spec: &str) -> Option<String> {
         .map(|(_, canonical)| (*canonical).to_string())
 }
 
-/// Built-in modules that come from tish_runtime, not from package.json.
+/// Built-in modules that come from tishlang_runtime, not from package.json.
 pub fn is_builtin_native_spec(spec: &str) -> bool {
     matches!(spec, "tish:fs" | "tish:http" | "tish:process" | "tish:ws")
         || matches!(spec, "fs" | "http" | "process" | "ws")
 }
 
 /// Resolve all native imports in a merged program via package.json lookup.
-/// Built-in modules (tish:fs, tish:http, tish:process) are skipped - they use tish_runtime directly.
+/// Built-in modules (tish:fs, tish:http, tish:process) are skipped - they use tishlang_runtime directly.
 pub fn resolve_native_modules(program: &Program, project_root: &Path) -> Result<Vec<ResolvedNativeModule>, String> {
     let root_canon = project_root
         .canonicalize()
@@ -59,7 +59,7 @@ pub fn resolve_native_modules(program: &Program, project_root: &Path) -> Result<
         {
             let s = spec.as_ref();
             if is_builtin_native_spec(s) {
-                continue; // Built-ins use tish_runtime, no package.json lookup
+                continue; // Built-ins use tishlang_runtime, no package.json lookup
             }
             if !seen.insert(s.to_string()) {
                 continue;
@@ -152,7 +152,7 @@ fn read_package_name(pkg_path: &Path) -> Option<String> {
 }
 
 /// Extract Cargo feature names from native imports in a merged program.
-/// Used to enable tish_runtime features based on `import { x } from 'tish:egui'` etc.
+/// Used to enable tishlang_runtime features based on `import { x } from 'tish:egui'` etc.
 pub fn extract_native_import_features(program: &Program) -> Vec<String> {
     let mut features = std::collections::HashSet::new();
     for stmt in &program.statements {
@@ -260,7 +260,7 @@ fn load_module_recursive(
 
     let source = std::fs::read_to_string(&canonical)
         .map_err(|e| format!("Cannot read {}: {}", canonical.display(), e))?;
-    let program = tish_parser::parse(&source)
+    let program = tishlang_parser::parse(&source)
         .map_err(|e| format!("Parse error in {}: {}", canonical.display(), e))?;
 
     // Collect imports and load dependencies first (skip native imports)
@@ -568,7 +568,7 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
                             ImportSpecifier::Namespace(ns) => {
                                 let mut props = Vec::new();
                                 for (k, v) in dep_exports {
-                                    props.push(tish_ast::ObjectProp::KeyValue(
+                                    props.push(tishlang_ast::ObjectProp::KeyValue(
                                         Arc::from(k.clone()),
                                         Expr::Ident {
                                             name: Arc::from(v.clone()),

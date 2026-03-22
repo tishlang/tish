@@ -5,13 +5,13 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tish_ast::{BinOp, UnaryOp};
-use tish_builtins::array as arr_builtins;
-use tish_builtins::string as str_builtins;
-use tish_builtins::globals as globals_builtins;
-use tish_builtins::math as math_builtins;
-use tish_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
-use tish_core::Value;
+use tishlang_ast::{BinOp, UnaryOp};
+use tishlang_builtins::array as arr_builtins;
+use tishlang_builtins::string as str_builtins;
+use tishlang_builtins::globals as globals_builtins;
+use tishlang_builtins::math as math_builtins;
+use tishlang_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
+use tishlang_core::Value;
 
 type ArrayMethodFn = Rc<dyn Fn(&[Value]) -> Value>;
 
@@ -25,12 +25,12 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
     #[cfg(feature = "fs")]
     if spec == "tish:fs" {
         return match export_name {
-            "readFile" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::read_file(args)))),
-            "writeFile" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::write_file(args)))),
-            "fileExists" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::file_exists(args)))),
-            "isDir" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::is_dir(args)))),
-            "readDir" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::read_dir(args)))),
-            "mkdir" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::mkdir(args)))),
+            "readFile" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::read_file(args)))),
+            "writeFile" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::write_file(args)))),
+            "fileExists" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::file_exists(args)))),
+            "isDir" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::is_dir(args)))),
+            "readDir" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::read_dir(args)))),
+            "mkdir" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::mkdir(args)))),
             _ => None,
         };
     }
@@ -38,15 +38,15 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
     if spec == "tish:http" {
         return match export_name {
             "fetch" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                tish_runtime::fetch_promise(args.to_vec())
+                tishlang_runtime::fetch_promise(args.to_vec())
             }))),
             "fetchAll" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                tish_runtime::fetch_all_promise(args.to_vec())
+                tishlang_runtime::fetch_all_promise(args.to_vec())
             }))),
             "serve" => Some(Value::Function(Rc::new(|args: &[Value]| {
                 let handler = args.get(1).cloned().unwrap_or(Value::Null);
                 if let Value::Function(f) = handler {
-                    tish_runtime::http_serve(args, move |req_args| f(req_args))
+                    tishlang_runtime::http_serve(args, move |req_args| f(req_args))
                 } else {
                     Value::Null
                 }
@@ -57,9 +57,9 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
     #[cfg(feature = "process")]
     if spec == "tish:process" {
         return match export_name {
-            "exit" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exit(args)))),
-            "cwd" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_cwd(args)))),
-            "exec" => Some(Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exec(args)))),
+            "exit" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exit(args)))),
+            "cwd" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_cwd(args)))),
+            "exec" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exec(args)))),
             "argv" => Some(Value::Array(Rc::new(RefCell::new(
                 std::env::args().map(|s| Value::String(s.into())).collect(),
             )))),
@@ -70,9 +70,9 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
             )))),
             "process" => {
                 let mut m = HashMap::new();
-                m.insert("exit".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exit(args))));
-                m.insert("cwd".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_cwd(args))));
-                m.insert("exec".into(), Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exec(args))));
+                m.insert("exit".into(), Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exit(args))));
+                m.insert("cwd".into(), Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_cwd(args))));
+                m.insert("exec".into(), Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exec(args))));
                 m.insert(
                     "argv".into(),
                     Value::Array(Rc::new(RefCell::new(
@@ -96,19 +96,19 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
     if spec == "tish:ws" {
         return match export_name {
             "WebSocket" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                tish_runtime::web_socket_client(args)
+                tishlang_runtime::web_socket_client(args)
             }))),
             "Server" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                tish_runtime::web_socket_server_construct(args)
+                tishlang_runtime::web_socket_server_construct(args)
             }))),
             "wsSend" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                Value::Bool(tish_runtime::ws_send_native(
+                Value::Bool(tishlang_runtime::ws_send_native(
                     args.first().unwrap_or(&Value::Null),
                     &args.get(1).map(|v| v.to_display_string()).unwrap_or_default(),
                 ))
             }))),
             "wsBroadcast" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                tish_runtime::ws_broadcast_native(args)
+                tishlang_runtime::ws_broadcast_native(args)
             }))),
             _ => None,
         };
@@ -152,7 +152,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     console.insert(
         "debug".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            let s = tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log(&s);
             Value::Null
         })),
@@ -160,7 +160,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     console.insert(
         "log".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            let s = tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log(&s);
             Value::Null
         })),
@@ -168,7 +168,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     console.insert(
         "info".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            let s = tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log(&s);
             Value::Null
         })),
@@ -176,7 +176,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     console.insert(
         "warn".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            let s = tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log_err(&s);
             Value::Null
         })),
@@ -184,7 +184,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     console.insert(
         "error".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s = tish_core::format_values_for_console(args, tish_core::use_console_colors());
+            let s = tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log_err(&s);
             Value::Null
         })),
@@ -262,14 +262,14 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
         "parse".into(),
         Value::Function(Rc::new(|args: &[Value]| {
             let s = args.first().map(|v| v.to_display_string()).unwrap_or_default();
-            tish_core::json_parse(&s).unwrap_or(Value::Null)
+            tishlang_core::json_parse(&s).unwrap_or(Value::Null)
         })),
     );
     json.insert(
         "stringify".into(),
         Value::Function(Rc::new(|args: &[Value]| {
             let v = args.first().unwrap_or(&Value::Null);
-            Value::String(tish_core::json_stringify(v).into())
+            Value::String(tishlang_core::json_stringify(v).into())
         })),
     );
     g.insert("JSON".into(), Value::Object(Rc::new(RefCell::new(json))));
@@ -305,7 +305,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     );
     g.insert("Date".into(), Value::Object(Rc::new(RefCell::new(date))));
 
-    // Object methods - delegate to tish_builtins::globals
+    // Object methods - delegate to tishlang_builtins::globals
     let mut object_methods = HashMap::new();
     object_methods.insert(
         "assign".into(),
@@ -372,15 +372,15 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
         let mut process_obj = HashMap::new();
         process_obj.insert(
             "exit".into(),
-            Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exit(args))),
+            Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exit(args))),
         );
         process_obj.insert(
             "cwd".into(),
-            Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_cwd(args))),
+            Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_cwd(args))),
         );
         process_obj.insert(
             "exec".into(),
-            Value::Function(Rc::new(|args: &[Value]| tish_runtime::process_exec(args))),
+            Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exec(args))),
         );
         process_obj.insert(
             "argv".into(),
@@ -406,7 +406,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
             Value::Function(Rc::new(|args: &[Value]| {
                 let handler = args.get(1).cloned().unwrap_or(Value::Null);
                 if let Value::Function(f) = handler {
-                    tish_runtime::http_serve(args, move |req_args| f(req_args))
+                    tishlang_runtime::http_serve(args, move |req_args| f(req_args))
                 } else {
                     Value::Null
                 }
@@ -1113,8 +1113,8 @@ impl Default for Vm {
 }
 
 fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
-    use tish_ast::BinOp::*;
-    use tish_core::Value::*;
+    use tishlang_ast::BinOp::*;
+    use tishlang_core::Value::*;
     let ln = l.as_number().unwrap_or(f64::NAN);
     let rn = r.as_number().unwrap_or(f64::NAN);
     match op {
@@ -1165,8 +1165,8 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
 }
 
 fn eval_unary(op: UnaryOp, o: &Value) -> Result<Value, String> {
-    use tish_ast::UnaryOp::*;
-    use tish_core::Value::*;
+    use tishlang_ast::UnaryOp::*;
+    use tishlang_core::Value::*;
     match op {
         Not => Ok(Bool(!o.is_truthy())),
         Neg => Ok(Number(-o.as_number().unwrap_or(f64::NAN))),

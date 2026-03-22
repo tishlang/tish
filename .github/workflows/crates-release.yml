@@ -1,0 +1,95 @@
+# Publish all tishlang_* crates to crates.io when a GitHub release is promoted from prerelease to full release.
+# Runs in parallel with the NPM release workflow.
+
+name: Crates.io release
+
+on:
+  release:
+    types: [published, edited]
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    if: github.event.release.prerelease == false
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set version in all Cargo.toml
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          find crates -name "Cargo.toml" -exec sed -i.bak "s/^version = .*/version = \"$VERSION\"/" {} \;
+          find crates -name "Cargo.toml.bak" -delete
+
+      - name: Publish crates (dependency order)
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          CRATES=(
+            tishlang_build_utils
+            tishlang_core
+            tishlang_ast
+            tishlang_lexer
+            tishlang_jsx_web
+            tishlang_builtins
+            tishlang_parser
+            tishlang_opt
+            tishlang_bytecode
+            tishlang_js_to_tish
+            tishlang_compile
+            tishlang_runtime
+            tishlang_cranelift
+            tishlang_eval
+            tishlang_vm
+            tishlang_compile_js
+            tishlang_llvm
+            tishlang_native
+            tishlang_wasm
+            tishlang_compiler_wasm
+            tishlang_cranelift_runtime
+            tishlang_wasm_runtime
+            tishlang_fmt
+            tishlang_lint
+            tishlang_lsp
+            tishlang
+          )
+          for crate in "${CRATES[@]}"; do
+            echo "Publishing $crate v${VERSION}..."
+            cargo publish -p "$crate" --token "$CARGO_REGISTRY_TOKEN" --no-verify
+          done
+
+      - name: Update release description with crates.io URL
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          CRATES_URL="https://crates.io/crates/tishlang/${VERSION}"
+          RELEASE_ID="${{ github.event.release.id }}"
+          REPO="${{ github.repository }}"
+          CURRENT_BODY=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}" | jq -r '.body // ""')
+          if [[ "$CURRENT_BODY" == *"crates.io"* ]]; then
+            echo "Release body already has crates.io link"
+          else
+            NEW_BODY="${CURRENT_BODY}
+
+          ---
+          Published to crates.io: ${CRATES_URL}"
+            curl -s -X PATCH \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}" \
+              -d "$(printf '%s' "$NEW_BODY" | jq -Rs '{body: .}')"
+          fi

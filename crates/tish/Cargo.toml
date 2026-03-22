@@ -1,5 +1,5 @@
 [package]
-name = "tish"
+name = "tishlang"
 version = "1.0.12"
 edition = "2021"
 description = "Tish CLI - run, REPL, compile to native"
@@ -16,28 +16,28 @@ default = []
 # Full: all capabilities enabled (for development/trusted environments)
 full = ["http", "fs", "process", "regex", "ws"]
 # Individual capability flags
-http = ["tish_eval/http", "tish_runtime/http", "tish_compile/http", "tish_vm/http"]
-fs = ["tish_eval/fs", "tish_runtime/fs", "tish_compile/fs", "tish_vm/fs"]
-process = ["tish_eval/process", "tish_runtime/process", "tish_compile/process", "tish_vm/process"]
-regex = ["tish_eval/regex", "tish_runtime/regex", "tish_compile/regex", "tish_vm/regex"]
-ws = ["tish_eval/ws", "tish_runtime/ws", "tish_compile/ws", "tish_vm/ws"]
+http = ["tishlang_eval/http", "tishlang_runtime/http", "tishlang_compile/http", "tishlang_vm/http"]
+fs = ["tishlang_eval/fs", "tishlang_runtime/fs", "tishlang_compile/fs", "tishlang_vm/fs"]
+process = ["tishlang_eval/process", "tishlang_runtime/process", "tishlang_compile/process", "tishlang_vm/process"]
+regex = ["tishlang_eval/regex", "tishlang_runtime/regex", "tishlang_compile/regex", "tishlang_vm/regex"]
+ws = ["tishlang_eval/ws", "tishlang_runtime/ws", "tishlang_compile/ws", "tishlang_vm/ws"]
 [dependencies]
 rustyline = { version = "17", features = ["with-file-history"] }
-tish_lexer = { path = "../tish_lexer" }
-tish_ast = { path = "../tish_ast" }
-tish_parser = { path = "../tish_parser" }
-tish_eval = { path = "../tish_eval" }
-tish_compile = { path = "../tish_compile" }
-tish_compile_js = { path = "../tish_compile_js" }
-tish_bytecode = { path = "../tish_bytecode" }
-tish_opt = { path = "../tish_opt" }
-tish_vm = { path = "../tish_vm" }
-tish_native = { path = "../tish_native" }
-tish_llvm = { path = "../tish_llvm" }
-tish_wasm = { path = "../tish_wasm" }
-tish_runtime = { path = "../tish_runtime" }
-tish_core = { path = "../tish_core" }
-js_to_tish = { path = "../js_to_tish" }
+tishlang_lexer = { path = "../tish_lexer" }
+tishlang_ast = { path = "../tish_ast" }
+tishlang_parser = { path = "../tish_parser" }
+tishlang_eval = { path = "../tish_eval" }
+tishlang_compile = { path = "../tish_compile" }
+tishlang_compile_js = { path = "../tish_compile_js" }
+tishlang_bytecode = { path = "../tish_bytecode" }
+tishlang_opt = { path = "../tish_opt" }
+tishlang_vm = { path = "../tish_vm" }
+tishlang_native = { path = "../tish_native" }
+tishlang_llvm = { path = "../tish_llvm" }
+tishlang_wasm = { path = "../tish_wasm" }
+tishlang_runtime = { path = "../tish_runtime" }
+tishlang_core = { path = "../tish_core" }
+tishlang_js_to_tish = { path = "../js_to_tish" }
 clap = { version = "4.6.0", features = ["derive"] }
 
 [dev-dependencies]

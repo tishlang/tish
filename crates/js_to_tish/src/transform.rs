@@ -7,7 +7,7 @@ use oxc::allocator::Allocator;
 use oxc::parser::Parser;
 use oxc::semantic::SemanticBuilder;
 use oxc::span::SourceType;
-use tish_ast::Program;
+use tishlang_ast::Program;
 
 use crate::error::{ConvertError, ConvertErrorKind};
 use crate::transform::stmt::convert_statements;

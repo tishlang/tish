@@ -2,8 +2,8 @@
 //!
 //! Provides tish_run_chunk(ptr, len) which deserializes and runs bytecode.
 
-use tish_bytecode::deserialize;
-use tish_vm::Vm;
+use tishlang_bytecode::deserialize;
+use tishlang_vm::Vm;
 
 /// Serialization format:
 /// - u64: code len

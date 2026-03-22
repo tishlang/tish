@@ -32,8 +32,8 @@ switch (k) {
         fn f(a, b, ...rest) { return rest.length; }
         console.log(f(1,2,3,4));
 "#;
-        let program = tish_parser::parse(src).expect("parse");
-        let chunk = tish_bytecode::compile(&program).expect("compile");
+        let program = tishlang_parser::parse(src).expect("parse");
+        let chunk = tishlang_bytecode::compile(&program).expect("compile");
         let _ = run(&chunk).expect("run");
     }
 }

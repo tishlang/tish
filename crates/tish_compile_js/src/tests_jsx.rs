@@ -2,7 +2,7 @@
 mod tests {
     use std::io::Write;
 
-    use tish_parser::parse;
+    use tishlang_parser::parse;
 
     use crate::{compile_project_with_jsx, compile_with_jsx, JsxMode};
 
@@ -53,7 +53,7 @@ mod tests {
 
     #[test]
     fn jsx_text_whitespace_via_compile_project() {
-        let dir = std::env::temp_dir().join("tish_compile_project_test");
+        let dir = std::env::temp_dir().join("tishlang_compile_project_test");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("test.tish");
         let src = "fn App() {\n  return <p>First paragraph</p>\n}";

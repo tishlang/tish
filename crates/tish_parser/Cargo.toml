@@ -1,9 +1,11 @@
 [package]
-name = "tish_parser"
+name = "tishlang_parser"
 version = "0.1.0"
 edition = "2021"
 description = "Tish recursive descent parser"
 
+license-file = { workspace = true }
+repository = { workspace = true }
 [dependencies]
-tish_lexer = { path = "../tish_lexer" }
-tish_ast = { path = "../tish_ast" }
+tishlang_lexer = { path = "../tish_lexer" }
+tishlang_ast = { path = "../tish_ast" }

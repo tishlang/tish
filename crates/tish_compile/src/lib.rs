@@ -1,6 +1,6 @@
 //! Native compiler backend for Tish.
 //!
-//! Emits Rust source that links to tish_runtime.
+//! Emits Rust source that links to tishlang_runtime.
 
 mod codegen;
 mod resolve;
@@ -21,7 +21,7 @@ pub use types::{RustType, TypeContext};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tish_parser::parse;
+    use tishlang_parser::parse;
 
     #[test]
     fn typed_assign_conversion() {

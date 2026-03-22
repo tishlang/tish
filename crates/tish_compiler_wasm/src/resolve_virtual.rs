@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tish_ast::{ExportDeclaration, Expr, ImportSpecifier, Program, Statement};
+use tishlang_ast::{ExportDeclaration, Expr, ImportSpecifier, Program, Statement};
 
 /// A resolved module: virtual path and its parsed program.
 #[derive(Debug, Clone)]
@@ -150,7 +150,7 @@ fn load_module_recursive(
     let source = files.get(module_path).ok_or_else(|| {
         format!("Module '{}' not in virtual file map", module_path)
     })?;
-    let program = tish_parser::parse(source.trim())
+    let program = tishlang_parser::parse(source.trim())
         .map_err(|e| format!("Parse error in {}: {}", module_path, e))?;
 
     let from_dir = parent_dir(module_path);
@@ -374,7 +374,7 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                             ImportSpecifier::Namespace(ns) => {
                                 let mut props = Vec::new();
                                 for (k, v) in dep_exports {
-                                    props.push(tish_ast::ObjectProp::KeyValue(
+                                    props.push(tishlang_ast::ObjectProp::KeyValue(
                                         Arc::from(k.clone()),
                                         Expr::Ident {
                                             name: Arc::from(v.clone()),

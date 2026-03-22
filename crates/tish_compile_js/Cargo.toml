@@ -1,16 +1,18 @@
 [package]
-name = "tish_compile_js"
+name = "tishlang_compile_js"
 version = "0.1.0"
 edition = "2021"
 description = "Tish to JavaScript transpiler backend"
 
+license-file = { workspace = true }
+repository = { workspace = true }
 [features]
 default = []
 
 [dependencies]
-tish_jsx_web = { path = "../tish_jsx_web" }
+tishlang_jsx_web = { path = "../tish_jsx_web" }
 
-tish_ast = { path = "../tish_ast" }
-tish_compile = { path = "../tish_compile" }
-tish_opt = { path = "../tish_opt" }
-tish_parser = { path = "../tish_parser" }
+tishlang_ast = { path = "../tish_ast" }
+tishlang_compile = { path = "../tish_compile" }
+tishlang_opt = { path = "../tish_opt" }
+tishlang_parser = { path = "../tish_parser" }

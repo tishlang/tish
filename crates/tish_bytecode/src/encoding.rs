@@ -1,11 +1,11 @@
 //! Canonical u8 encoding for AST operators in bytecode.
 //! Single source of truth: compiler encodes with *\_to_u8, VM decodes with u8_to\_*.
 
-use tish_ast::{BinOp, CompoundOp, UnaryOp};
+use tishlang_ast::{BinOp, CompoundOp, UnaryOp};
 
 /// Encode BinOp for bytecode operand. Used by compiler.
 pub fn binop_to_u8(op: BinOp) -> u8 {
-    use tish_ast::BinOp::*;
+    use tishlang_ast::BinOp::*;
     match op {
         Add => 0,
         Sub => 1,
@@ -34,7 +34,7 @@ pub fn binop_to_u8(op: BinOp) -> u8 {
 
 /// Decode bytecode operand to BinOp. Used by VM.
 pub fn u8_to_binop(b: u8) -> Option<BinOp> {
-    use tish_ast::BinOp::*;
+    use tishlang_ast::BinOp::*;
     Some(match b {
         0 => Add,
         1 => Sub,
@@ -64,7 +64,7 @@ pub fn u8_to_binop(b: u8) -> Option<BinOp> {
 
 /// Encode CompoundOp for bytecode (same numeric subset as BinOp: Add,Sub,Mul,Div,Mod).
 pub fn compound_op_to_u8(op: CompoundOp) -> u8 {
-    use tish_ast::CompoundOp::*;
+    use tishlang_ast::CompoundOp::*;
     match op {
         Add => 0,
         Sub => 1,
@@ -76,7 +76,7 @@ pub fn compound_op_to_u8(op: CompoundOp) -> u8 {
 
 /// Encode UnaryOp for bytecode operand. Used by compiler.
 pub fn unaryop_to_u8(op: UnaryOp) -> u8 {
-    use tish_ast::UnaryOp::*;
+    use tishlang_ast::UnaryOp::*;
     match op {
         Not => 0,
         Neg => 1,
@@ -88,7 +88,7 @@ pub fn unaryop_to_u8(op: UnaryOp) -> u8 {
 
 /// Decode bytecode operand to UnaryOp. Used by VM.
 pub fn u8_to_unaryop(b: u8) -> Option<UnaryOp> {
-    use tish_ast::UnaryOp::*;
+    use tishlang_ast::UnaryOp::*;
     Some(match b {
         0 => Not,
         1 => Neg,

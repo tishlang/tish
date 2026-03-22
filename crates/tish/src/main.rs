@@ -117,42 +117,42 @@ fn run_file(path: &str, backend: &str, _features: &[String], no_optimize: bool) 
     });
 
     let program = if path.extension().map(|e| e == "js") == Some(true) {
-        let prog = js_to_tish::convert(&fs::read_to_string(&path).map_err(|e| format!("{}", e))?)
+        let prog = tishlang_js_to_tish::convert(&fs::read_to_string(&path).map_err(|e| format!("{}", e))?)
             .map_err(|e| format!("{}", e))?;
         if no_optimize {
             prog
         } else {
-            tish_opt::optimize(&prog)
+            tishlang_opt::optimize(&prog)
         }
     } else {
-        let modules = tish_compile::resolve_project(&path, project_root)?;
-        tish_compile::detect_cycles(&modules)?;
-        let prog = tish_compile::merge_modules(modules)?;
+        let modules = tishlang_compile::resolve_project(&path, project_root)?;
+        tishlang_compile::detect_cycles(&modules)?;
+        let prog = tishlang_compile::merge_modules(modules)?;
         if no_optimize {
             prog
         } else {
-            tish_opt::optimize(&prog)
+            tishlang_opt::optimize(&prog)
         }
     };
 
     if backend == "interp" {
-        let mut eval = tish_eval::Evaluator::new();
+        let mut eval = tishlang_eval::Evaluator::new();
         let value = eval.eval_program(&program)?;
-        if !matches!(value, tish_eval::Value::Null) {
-            println!("{}", tish_eval::format_value_for_console(&value, tish_core::use_console_colors()));
+        if !matches!(value, tishlang_eval::Value::Null) {
+            println!("{}", tishlang_eval::format_value_for_console(&value, tishlang_core::use_console_colors()));
         }
         return Ok(());
     }
 
     // VM backend (bytecode) - supports native imports when built with fs/http/process features
     let chunk = if no_optimize {
-        tish_bytecode::compile_unoptimized(&program).map_err(|e| e.to_string())?
+        tishlang_bytecode::compile_unoptimized(&program).map_err(|e| e.to_string())?
     } else {
-        tish_bytecode::compile(&program).map_err(|e| e.to_string())?
+        tishlang_bytecode::compile(&program).map_err(|e| e.to_string())?
     };
-    let value = tish_vm::run(&chunk)?;
-    if !matches!(value, tish_core::Value::Null) {
-        println!("{}", tish_core::format_value_styled(&value, tish_core::use_console_colors()));
+    let value = tishlang_vm::run(&chunk)?;
+    if !matches!(value, tishlang_core::Value::Null) {
+        println!("{}", tishlang_core::format_value_styled(&value, tishlang_core::use_console_colors()));
     }
     Ok(())
 }
@@ -162,7 +162,7 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
     let mut buffer = String::new();
 
     if backend == "interp" {
-        let mut eval = tish_eval::Evaluator::new();
+        let mut eval = tishlang_eval::Evaluator::new();
         let mut multiline = String::new();
         loop {
             let prompt = repl_prompt(multiline.is_empty());
@@ -171,7 +171,7 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
             buffer.clear();
             if io::stdin().read_line(&mut buffer).map_err(|e| e.to_string())? == 0 {
                 if !multiline.is_empty() {
-                    let _ = tish_parser::parse(multiline.trim());
+                    let _ = tishlang_parser::parse(multiline.trim());
                 }
                 break;
             }
@@ -185,12 +185,12 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
                 multiline.push('\n');
                 multiline.push_str(line);
             }
-            match tish_parser::parse(multiline.trim()) {
+            match tishlang_parser::parse(multiline.trim()) {
                 Ok(program) => {
                     match eval.eval_program(&program) {
                         Ok(v) => {
-                            if !matches!(v, tish_eval::Value::Null) {
-                                println!("{}", tish_eval::format_value_for_console(&v, tish_core::use_console_colors()));
+                            if !matches!(v, tishlang_eval::Value::Null) {
+                                println!("{}", tishlang_eval::format_value_for_console(&v, tishlang_core::use_console_colors()));
                             }
                         }
                         Err(e) => eprintln!("{}", e),
@@ -214,7 +214,7 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
     if !std::io::stdin().is_terminal() {
         eprintln!("Note: Tab completion and grey preview require an interactive terminal (TTY).");
     }
-    let vm = Rc::new(RefCell::new(tish_vm::Vm::new()));
+    let vm = Rc::new(RefCell::new(tishlang_vm::Vm::new()));
     let completer = repl_completion::ReplCompleter {
         vm: Rc::clone(&vm),
         no_optimize,
@@ -246,12 +246,12 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
                 if buffer.is_empty() {
                     break;
                 }
-                match tish_parser::parse(buffer.trim()) {
+                match tishlang_parser::parse(buffer.trim()) {
                     Ok(program) => {
                         let compile_fn = if no_optimize {
-                            tish_bytecode::compile_for_repl_unoptimized
+                            tishlang_bytecode::compile_for_repl_unoptimized
                         } else {
-                            tish_bytecode::compile_for_repl
+                            tishlang_bytecode::compile_for_repl
                         };
                         if let Ok(chunk) = compile_fn(&program) {
                             let _ = vm.borrow_mut().run(&chunk);
@@ -277,19 +277,19 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
             buffer.push('\n');
             buffer.push_str(line);
         }
-        match tish_parser::parse(buffer.trim()) {
+        match tishlang_parser::parse(buffer.trim()) {
             Ok(program) => {
                 let compile_fn = if no_optimize {
-                    tish_bytecode::compile_for_repl_unoptimized
+                    tishlang_bytecode::compile_for_repl_unoptimized
                 } else {
-                    tish_bytecode::compile_for_repl
+                    tishlang_bytecode::compile_for_repl
                 };
                 match compile_fn(&program) {
                     Ok(chunk) => {
                         match vm.borrow_mut().run(&chunk) {
                             Ok(v) => {
-                                if !matches!(v, tish_core::Value::Null) {
-                                    println!("{}", tish_core::format_value_styled(&v, tish_core::use_console_colors()));
+                                if !matches!(v, tishlang_core::Value::Null) {
+                                    println!("{}", tishlang_core::format_value_styled(&v, tishlang_core::use_console_colors()));
                                 }
                             }
                             Err(e) => eprintln!("{}", e),
@@ -319,7 +319,7 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
 
 /// REPL prompt with green caret when stdout is a TTY (platform-style).
 fn repl_prompt(primary: bool) -> String {
-    if tish_core::use_console_colors() {
+    if tishlang_core::use_console_colors() {
         if primary {
             "\x1b[32m> \x1b[0m".to_string()
         } else {
@@ -339,15 +339,15 @@ fn tish_history_path() -> Option<PathBuf> {
     home.map(|h| PathBuf::from(h).join(".tish_history"))
 }
 
-fn parse_jsx_mode(s: &str) -> Result<tish_compile_js::JsxMode, String> {
+fn parse_jsx_mode(s: &str) -> Result<tishlang_compile_js::JsxMode, String> {
     match s {
         "legacy" => Err(
             "--jsx legacy was removed. Use --jsx lattish (default) with lattish merged into your \
              bundle, or --jsx vdom with Lattish's createRoot."
                 .to_string(),
         ),
-        "vdom" => Ok(tish_compile_js::JsxMode::Vdom),
-        "lattish" => Ok(tish_compile_js::JsxMode::LattishH),
+        "vdom" => Ok(tishlang_compile_js::JsxMode::Vdom),
+        "lattish" => Ok(tishlang_compile_js::JsxMode::LattishH),
         other => Err(format!(
             "Unknown --jsx {:?}: use lattish (default) or vdom.",
             other
@@ -375,20 +375,20 @@ fn compile_to_js(
             "export fn __TishJsxRoot() {{\n  return (\n{}\n  )\n}}",
             source.trim()
         );
-        let program = tish_parser::parse(&wrapped)
+        let program = tishlang_parser::parse(&wrapped)
             .map_err(|e| format!("JSX wrapper parse: {}", e))?;
         let p = if optimize {
-            tish_opt::optimize(&program)
+            tishlang_opt::optimize(&program)
         } else {
             program
         };
-        tish_compile_js::compile_with_jsx(&p, optimize, jsx_mode).map_err(|e| format!("{}", e))?
+        tishlang_compile_js::compile_with_jsx(&p, optimize, jsx_mode).map_err(|e| format!("{}", e))?
     } else if input_path.extension().map(|e| e == "js") == Some(true) {
         let source = fs::read_to_string(input_path).map_err(|e| format!("{}", e))?;
-        let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        tish_compile_js::compile_with_jsx(&program, optimize, jsx_mode).map_err(|e| format!("{}", e))?
+        let program = tishlang_js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
+        tishlang_compile_js::compile_with_jsx(&program, optimize, jsx_mode).map_err(|e| format!("{}", e))?
     } else {
-        tish_compile_js::compile_project_with_jsx(input_path, project_root, optimize, jsx_mode)
+        tishlang_compile_js::compile_project_with_jsx(input_path, project_root, optimize, jsx_mode)
             .map_err(|e| format!("{}", e))?
     };
 
@@ -432,8 +432,8 @@ fn compile_file(
 
     if target == "wasm" && is_js {
         let source = fs::read_to_string(&input_path).map_err(|e| format!("{}", e))?;
-        let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        return tish_wasm::compile_program_to_wasm(&program, Path::new(output_path), optimize)
+        let program = tishlang_js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
+        return tishlang_wasm::compile_program_to_wasm(&program, Path::new(output_path), optimize)
             .map_err(|e| format!("{}", e));
     }
 
@@ -445,7 +445,7 @@ fn compile_file(
                 Some(p)
             }
         });
-        return tish_wasm::compile_to_wasm(&input_path, project_root, Path::new(output_path), optimize)
+        return tishlang_wasm::compile_to_wasm(&input_path, project_root, Path::new(output_path), optimize)
             .map_err(|e| e.to_string());
     }
 
@@ -457,7 +457,7 @@ fn compile_file(
                 Some(p)
             }
         });
-        return tish_wasm::compile_to_wasi(&input_path, project_root, Path::new(output_path), optimize)
+        return tishlang_wasm::compile_to_wasi(&input_path, project_root, Path::new(output_path), optimize)
             .map_err(|e| e.to_string());
     }
 
@@ -495,8 +495,8 @@ fn compile_file(
 
     if is_js {
         let source = fs::read_to_string(&input_path).map_err(|e| format!("{}", e))?;
-        let program = js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        tish_native::compile_program_to_native(
+        let program = tishlang_js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
+        tishlang_native::compile_program_to_native(
             &program,
             project_root,
             Path::new(output_path),
@@ -506,7 +506,7 @@ fn compile_file(
         )
         .map_err(|e| e.to_string())?;
     } else {
-        tish_native::compile_to_native(
+        tishlang_native::compile_to_native(
             &input_path,
             project_root,
             Path::new(output_path),
@@ -580,7 +580,7 @@ mod cli_tests {
 fn dump_ast(path: &str) -> Result<(), String> {
     let source =
         fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
-    let program = tish_parser::parse(&source)?;
+    let program = tishlang_parser::parse(&source)?;
     println!("{:#?}", program);
     Ok(())
 }

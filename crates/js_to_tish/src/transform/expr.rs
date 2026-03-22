@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use oxc::ast::ast::Expression as OxcExpr;
 use oxc::semantic::Semantic;
-use tish_ast::{
+use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CompoundOp, DestructPattern, Expr, Literal, LogicalAssignOp,
     MemberProp, ObjectProp, TypedParam,
 };
@@ -155,7 +155,7 @@ pub fn convert_expr(expr: &OxcExpr<'_>, ctx: &Ctx<'_>) -> Result<Expr, ConvertEr
                 ArrowBody::Expr(Box::new(convert_expr(e, ctx)?))
             } else {
                 let stmts = super::stmt::convert_statements(&arrow.body.statements, ctx.0, ctx.1)?;
-                ArrowBody::Block(Box::new(tish_ast::Statement::Block {
+                ArrowBody::Block(Box::new(tishlang_ast::Statement::Block {
                     statements: stmts,
                     span: span_util::oxc_span_to_tish(ctx.1, &*arrow.body),
                 }))
@@ -205,7 +205,7 @@ pub fn convert_expr(expr: &OxcExpr<'_>, ctx: &Ctx<'_>) -> Result<Expr, ConvertEr
             let body = match &f.body {
                 Some(fb) => {
                     let stmts = super::stmt::convert_statements(&fb.statements, ctx.0, ctx.1)?;
-                    ArrowBody::Block(Box::new(tish_ast::Statement::Block {
+                    ArrowBody::Block(Box::new(tishlang_ast::Statement::Block {
                         statements: stmts,
                         span: span_util::oxc_span_to_tish(ctx.1, fb.as_ref()),
                     }))
@@ -233,7 +233,7 @@ pub fn convert_expr(expr: &OxcExpr<'_>, ctx: &Ctx<'_>) -> Result<Expr, ConvertEr
 fn convert_chain_element(
     ce: &oxc::ast::ast::ChainElement<'_>,
     ctx: &Ctx<'_>,
-    span: tish_ast::Span,
+    span: tishlang_ast::Span,
 ) -> Result<Expr, ConvertError> {
     match ce {
         oxc::ast::ast::ChainElement::StaticMemberExpression(m) => {
@@ -273,15 +273,15 @@ fn convert_chain_element(
 fn convert_call_arg(
     arg: &oxc::ast::ast::Argument<'_>,
     ctx: &Ctx<'_>,
-) -> Result<tish_ast::CallArg, ConvertError> {
+) -> Result<tishlang_ast::CallArg, ConvertError> {
     if arg.is_spread() {
         if let oxc::ast::ast::Argument::SpreadElement(s) = arg {
-            Ok(tish_ast::CallArg::Spread(convert_expr(&s.argument, ctx)?))
+            Ok(tishlang_ast::CallArg::Spread(convert_expr(&s.argument, ctx)?))
         } else {
             unreachable!()
         }
     } else if let Some(e) = arg.as_expression() {
-        Ok(tish_ast::CallArg::Expr(convert_expr(e, ctx)?))
+        Ok(tishlang_ast::CallArg::Expr(convert_expr(e, ctx)?))
     } else {
         Err(ConvertError::new(ConvertErrorKind::Unsupported {
             what: "call argument".into(),
@@ -340,7 +340,7 @@ fn convert_object_prop(
 fn convert_assignment(
     a: &oxc::ast::ast::AssignmentExpression<'_>,
     ctx: &Ctx<'_>,
-    span: tish_ast::Span,
+    span: tishlang_ast::Span,
 ) -> Result<Expr, ConvertError> {
     let (left, right) = (&a.left, &a.right);
     if let Some(oxc::ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id)) =
@@ -435,7 +435,7 @@ fn convert_assignment(
 fn convert_update_expr(
     u: &oxc::ast::ast::UpdateExpression<'_>,
     _ctx: &Ctx<'_>,
-    span: tish_ast::Span,
+    span: tishlang_ast::Span,
 ) -> Result<Expr, ConvertError> {
     let name: Arc<str> = match &u.argument {
         oxc::ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
@@ -498,13 +498,13 @@ fn convert_bin_op(
 
 fn convert_unary_op(
     op: &oxc::ast::ast::UnaryOperator,
-) -> Result<tish_ast::UnaryOp, ConvertError> {
+) -> Result<tishlang_ast::UnaryOp, ConvertError> {
     Ok(match op {
-        oxc::ast::ast::UnaryOperator::LogicalNot => tish_ast::UnaryOp::Not,
-        oxc::ast::ast::UnaryOperator::UnaryNegation => tish_ast::UnaryOp::Neg,
-        oxc::ast::ast::UnaryOperator::UnaryPlus => tish_ast::UnaryOp::Pos,
-        oxc::ast::ast::UnaryOperator::BitwiseNot => tish_ast::UnaryOp::BitNot,
-        oxc::ast::ast::UnaryOperator::Void => tish_ast::UnaryOp::Void,
+        oxc::ast::ast::UnaryOperator::LogicalNot => tishlang_ast::UnaryOp::Not,
+        oxc::ast::ast::UnaryOperator::UnaryNegation => tishlang_ast::UnaryOp::Neg,
+        oxc::ast::ast::UnaryOperator::UnaryPlus => tishlang_ast::UnaryOp::Pos,
+        oxc::ast::ast::UnaryOperator::BitwiseNot => tishlang_ast::UnaryOp::BitNot,
+        oxc::ast::ast::UnaryOperator::Void => tishlang_ast::UnaryOp::Void,
         _ => {
             return Err(ConvertError::new(ConvertErrorKind::Unsupported {
                 what: format!("unary operator: {op:?}"),

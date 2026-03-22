@@ -1,23 +1,25 @@
 [package]
-name = "tish_wasm_runtime"
+name = "tishlang_wasm_runtime"
 version = "0.1.0"
 edition = "2021"
 description = "Tish VM compiled to WebAssembly (browser + Wasmtime/WASI)"
+license-file = { workspace = true }
+repository = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [features]
 # For wasm32-unknown-unknown (browser): wasm-bindgen, console output
-browser = ["dep:wasm-bindgen", "tish_vm/wasm"]
+browser = ["dep:wasm-bindgen", "tishlang_vm/wasm"]
 # Built-in modules for WASI (wasm32-wasip1): file I/O, process, http
-fs = ["tish_vm/fs"]
-process = ["tish_vm/process"]
-http = ["tish_vm/http"]
+fs = ["tishlang_vm/fs"]
+process = ["tishlang_vm/process"]
+http = ["tishlang_vm/http"]
 
 [dependencies]
-tish_bytecode = { path = "../tish_bytecode" }
-tish_vm = { path = "../tish_vm" }
+tishlang_bytecode = { path = "../tish_bytecode" }
+tishlang_vm = { path = "../tish_vm" }
 wasm-bindgen = { version = "0.2", optional = true }
 
 # rand_core → getrandom 0.4 needs wasm_js on wasm32-unknown-unknown (browser VM build).

@@ -1,6 +1,6 @@
 //! Pretty-print Tish AST to source. Style: 2-space indent, braces for blocks, trailing newline.
 
-use tish_ast::{
+use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
     ExportDeclaration, Expr, ImportSpecifier, JsxAttrValue, JsxChild, JsxProp,
     Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Statement, TypeAnnotation,
@@ -9,7 +9,7 @@ use tish_ast::{
 
 /// Format Tish source. On parse error, returns the parser message.
 pub fn format_source(source: &str) -> Result<String, String> {
-    let program = tish_parser::parse(source)?;
+    let program = tishlang_parser::parse(source)?;
     Ok(format_program(&program))
 }
 
@@ -879,6 +879,6 @@ mod tests {
     fn round_trip_simple() {
         let src = "fn add(a, b) {\n  return a + b\n}\n";
         let out = format_source(src).unwrap();
-        let _ = tish_parser::parse(&out).unwrap();
+        let _ = tishlang_parser::parse(&out).unwrap();
     }
 }

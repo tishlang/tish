@@ -1,11 +1,13 @@
 [package]
-name = "tish_llvm"
+name = "tishlang_llvm"
 version = "0.1.0"
 edition = "2021"
 description = "LLVM backend for Tish (bytecode → native via clang/LLVM)"
 
+license-file = { workspace = true }
+repository = { workspace = true }
 [dependencies]
-tish_bytecode = { path = "../tish_bytecode" }
-tish_compile = { path = "../tish_compile" }
-tish_cranelift = { path = "../tish_cranelift" }
-tish_build_utils = { path = "../tish_build_utils" }
+tishlang_bytecode = { path = "../tish_bytecode" }
+tishlang_compile = { path = "../tish_compile" }
+tishlang_cranelift = { path = "../tish_cranelift" }
+tishlang_build_utils = { path = "../tish_build_utils" }

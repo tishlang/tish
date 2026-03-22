@@ -1,5 +1,5 @@
 [package]
-name = "tish_fmt"
+name = "tishlang_fmt"
 version = "0.1.0"
 edition = "2021"
 description = "Opinionated formatter for Tish source (parse → pretty-print)"
@@ -12,5 +12,5 @@ path = "src/bin/tish-fmt.rs"
 
 [dependencies]
 clap = { version = "4.6.0", features = ["derive"] }
-tish_ast = { path = "../tish_ast" }
-tish_parser = { path = "../tish_parser" }
+tishlang_ast = { path = "../tish_ast" }
+tishlang_parser = { path = "../tish_parser" }

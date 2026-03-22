@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use tish_ast::{ArrowBody, BinOp, Expr, Literal, Program, Statement, UnaryOp};
+use tishlang_ast::{ArrowBody, BinOp, Expr, Literal, Program, Statement, UnaryOp};
 
 /// Optimize a Tish program. Returns a new program with transformations applied.
 pub fn optimize(program: &Program) -> Program {
@@ -333,8 +333,8 @@ fn optimize_expr(expr: &Expr) -> Expr {
             args: args
                 .iter()
                 .map(|a| match a {
-                    tish_ast::CallArg::Expr(e) => tish_ast::CallArg::Expr(optimize_expr(e)),
-                    tish_ast::CallArg::Spread(e) => tish_ast::CallArg::Spread(optimize_expr(e)),
+                    tishlang_ast::CallArg::Expr(e) => tishlang_ast::CallArg::Expr(optimize_expr(e)),
+                    tishlang_ast::CallArg::Spread(e) => tishlang_ast::CallArg::Spread(optimize_expr(e)),
                 })
                 .collect(),
             span: *span,
@@ -347,9 +347,9 @@ fn optimize_expr(expr: &Expr) -> Expr {
         } => {
             let opt_obj = optimize_expr(object);
             let opt_prop = match prop {
-                tish_ast::MemberProp::Name(n) => tish_ast::MemberProp::Name(Arc::clone(n)),
-                tish_ast::MemberProp::Expr(e) => {
-                    tish_ast::MemberProp::Expr(Box::new(optimize_expr(e)))
+                tishlang_ast::MemberProp::Name(n) => tishlang_ast::MemberProp::Name(Arc::clone(n)),
+                tishlang_ast::MemberProp::Expr(e) => {
+                    tishlang_ast::MemberProp::Expr(Box::new(optimize_expr(e)))
                 }
             };
             Expr::Member {
@@ -392,11 +392,11 @@ fn optimize_expr(expr: &Expr) -> Expr {
             elements: elements
                 .iter()
                 .map(|e| match e {
-                    tish_ast::ArrayElement::Expr(ex) => {
-                        tish_ast::ArrayElement::Expr(optimize_expr(ex))
+                    tishlang_ast::ArrayElement::Expr(ex) => {
+                        tishlang_ast::ArrayElement::Expr(optimize_expr(ex))
                     }
-                    tish_ast::ArrayElement::Spread(ex) => {
-                        tish_ast::ArrayElement::Spread(optimize_expr(ex))
+                    tishlang_ast::ArrayElement::Spread(ex) => {
+                        tishlang_ast::ArrayElement::Spread(optimize_expr(ex))
                     }
                 })
                 .collect(),
@@ -406,11 +406,11 @@ fn optimize_expr(expr: &Expr) -> Expr {
             props: props
                 .iter()
                 .map(|p| match p {
-                    tish_ast::ObjectProp::KeyValue(k, v) => {
-                        tish_ast::ObjectProp::KeyValue(Arc::clone(k), optimize_expr(v))
+                    tishlang_ast::ObjectProp::KeyValue(k, v) => {
+                        tishlang_ast::ObjectProp::KeyValue(Arc::clone(k), optimize_expr(v))
                     }
-                    tish_ast::ObjectProp::Spread(e) => {
-                        tish_ast::ObjectProp::Spread(optimize_expr(e))
+                    tishlang_ast::ObjectProp::Spread(e) => {
+                        tishlang_ast::ObjectProp::Spread(optimize_expr(e))
                     }
                 })
                 .collect(),
@@ -556,7 +556,7 @@ fn try_algebraic_simplify(
     op: BinOp,
     left: &Expr,
     right: &Expr,
-    span: tish_ast::Span,
+    span: tishlang_ast::Span,
 ) -> Option<Expr> {
     use BinOp::*;
     fn num_is_zero(n: f64) -> bool {
@@ -720,7 +720,7 @@ mod tests {
     use super::*;
 
     fn program_from_source(src: &str) -> Program {
-        tish_parser::parse(src).expect("parse")
+        tishlang_parser::parse(src).expect("parse")
     }
 
     fn has_literal_number(expr: &Expr, n: f64) -> bool {
@@ -740,7 +740,7 @@ mod tests {
         let program = program_from_source("1 + 2");
         let opt = optimize(&program);
         let expr = match &opt.statements[..] {
-            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            [tishlang_ast::Statement::ExprStmt { expr, .. }] => expr,
             _ => panic!("expected single expr stmt"),
         };
         assert!(has_literal_number(expr, 3.0), "expected 3, got {:?}", expr);
@@ -751,7 +751,7 @@ mod tests {
         let program = program_from_source("-42");
         let opt = optimize(&program);
         let expr = match &opt.statements[..] {
-            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            [tishlang_ast::Statement::ExprStmt { expr, .. }] => expr,
             _ => panic!("expected single expr stmt"),
         };
         assert!(has_literal_number(expr, -42.0), "expected -42, got {:?}", expr);
@@ -762,7 +762,7 @@ mod tests {
         let program = program_from_source("false && foo");
         let opt = optimize(&program);
         let expr = match &opt.statements[..] {
-            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            [tishlang_ast::Statement::ExprStmt { expr, .. }] => expr,
             _ => panic!("expected single expr stmt"),
         };
         assert!(
@@ -777,7 +777,7 @@ mod tests {
         let program = program_from_source("true ? 1 : 2");
         let opt = optimize(&program);
         let expr = match &opt.statements[..] {
-            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            [tishlang_ast::Statement::ExprStmt { expr, .. }] => expr,
             _ => panic!("expected single expr stmt"),
         };
         assert!(has_literal_number(expr, 1.0), "expected 1, got {:?}", expr);
@@ -789,7 +789,7 @@ mod tests {
         let program = program_from_source("x + 0");
         let opt = optimize(&program);
         let expr = match &opt.statements[..] {
-            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            [tishlang_ast::Statement::ExprStmt { expr, .. }] => expr,
             _ => panic!("expected single expr stmt"),
         };
         assert!(
@@ -804,7 +804,7 @@ mod tests {
         let program = program_from_source("x * 1");
         let opt = optimize(&program);
         let expr = match &opt.statements[..] {
-            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            [tishlang_ast::Statement::ExprStmt { expr, .. }] => expr,
             _ => panic!("expected single expr stmt"),
         };
         assert!(
@@ -820,7 +820,7 @@ mod tests {
         let program = program_from_source("x * (1 + 0)");
         let opt = optimize(&program);
         let expr = match &opt.statements[..] {
-            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            [tishlang_ast::Statement::ExprStmt { expr, .. }] => expr,
             _ => panic!("expected single expr stmt"),
         };
         assert!(
@@ -835,7 +835,7 @@ mod tests {
         let program = program_from_source("x ** 1");
         let opt = optimize(&program);
         let expr = match &opt.statements[..] {
-            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            [tishlang_ast::Statement::ExprStmt { expr, .. }] => expr,
             _ => panic!("expected single expr stmt"),
         };
         assert!(
@@ -850,7 +850,7 @@ mod tests {
         let program = program_from_source("x ** 0");
         let opt = optimize(&program);
         let expr = match &opt.statements[..] {
-            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            [tishlang_ast::Statement::ExprStmt { expr, .. }] => expr,
             _ => panic!("expected single expr stmt"),
         };
         assert!(has_literal_number(expr, 1.0), "expected 1, got {:?}", expr);
@@ -861,7 +861,7 @@ mod tests {
         let program = program_from_source("1 ** x");
         let opt = optimize(&program);
         let expr = match &opt.statements[..] {
-            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            [tishlang_ast::Statement::ExprStmt { expr, .. }] => expr,
             _ => panic!("expected single expr stmt"),
         };
         assert!(has_literal_number(expr, 1.0), "expected 1, got {:?}", expr);
@@ -872,7 +872,7 @@ mod tests {
         let program = program_from_source("null ?? x");
         let opt = optimize(&program);
         let expr = match &opt.statements[..] {
-            [tish_ast::Statement::ExprStmt { expr, .. }] => expr,
+            [tishlang_ast::Statement::ExprStmt { expr, .. }] => expr,
             _ => panic!("expected single expr stmt"),
         };
         assert!(

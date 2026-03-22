@@ -8,7 +8,7 @@
 /// # Example
 ///
 /// ```ignore
-/// use tish_core::{tish_module, Value};
+/// use tishlang_core::{tish_module, Value};
 ///
 /// pub fn my_object() -> Value {
 ///     tish_module! {

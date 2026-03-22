@@ -12,14 +12,14 @@ pub fn link_to_binary(
     output_path: &Path,
     features: &[String],
 ) -> Result<(), CraneliftError> {
-    let workspace_root = tish_build_utils::find_workspace_root().map_err(|e| CraneliftError {
+    let workspace_root = tishlang_build_utils::find_workspace_root().map_err(|e| CraneliftError {
         message: e,
     })?;
     let out_name = output_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("tish_out");
-    let build_dir = tish_build_utils::create_build_dir("tish_cranelift_build", out_name)
+    let build_dir = tishlang_build_utils::create_build_dir("tishlang_cranelift_build", out_name)
         .map_err(|e| CraneliftError { message: e })?;
 
     let object_path_str = object_path
@@ -31,13 +31,13 @@ pub fn link_to_binary(
         .to_string()
         .replace('\\', "/");
 
-    // tish_cranelift_runtime path (workspace/crates/tish_cranelift_runtime)
+    // tishlang_cranelift_runtime path (workspace/crates/tishlang_cranelift_runtime)
     let runtime_path = workspace_root
         .join("crates")
-        .join("tish_cranelift_runtime")
+        .join("tishlang_cranelift_runtime")
         .canonicalize()
         .map_err(|e| CraneliftError {
-            message: format!("Cannot find tish_cranelift_runtime: {}", e),
+            message: format!("Cannot find tishlang_cranelift_runtime: {}", e),
         })?
         .display()
         .to_string()
@@ -57,7 +57,7 @@ pub fn link_to_binary(
     };
     let cargo_toml_fixed = format!(
         r#"[package]
-name = "tish_cranelift_out"
+name = "tishlang_cranelift_out"
 version = "0.1.0"
 edition = "2021"
 
@@ -66,7 +66,7 @@ name = "{}"
 path = "src/main.rs"
 
 [dependencies]
-tish_cranelift_runtime = {{ path = {:?}{} }}
+tishlang_cranelift_runtime = {{ path = {:?}{} }}
 "#,
         out_name, runtime_path, features_str
     );
@@ -80,7 +80,7 @@ extern "C" {
 fn main() {
     let len = unsafe { tish_chunk_len } as usize;
     let ptr = unsafe { tish_chunk_data.as_ptr() };
-    let exit_code = tish_cranelift_runtime::tish_run_chunk(ptr, len);
+    let exit_code = tishlang_cranelift_runtime::tish_run_chunk(ptr, len);
     std::process::exit(exit_code);
 }
 "#;
@@ -104,14 +104,14 @@ fn main() {{
         message: format!("Cannot write build.rs: {}", e),
     })?;
 
-    tish_build_utils::run_cargo_build(&build_dir, None).map_err(|e| CraneliftError { message: e })?;
+    tishlang_build_utils::run_cargo_build(&build_dir, None).map_err(|e| CraneliftError { message: e })?;
 
     let binary_dir = build_dir.join("target").join("release");
     let binary =
-        tish_build_utils::find_release_binary(&binary_dir, out_name)
+        tishlang_build_utils::find_release_binary(&binary_dir, out_name)
             .map_err(|e| CraneliftError { message: e })?;
-    let target = tish_build_utils::resolve_output_path(output_path, out_name);
-    tish_build_utils::copy_binary_to_output(&binary, &target)
+    let target = tishlang_build_utils::resolve_output_path(output_path, out_name);
+    tishlang_build_utils::copy_binary_to_output(&binary, &target)
         .map_err(|e| CraneliftError { message: e })?;
 
     Ok(())

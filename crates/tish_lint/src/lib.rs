@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use tish_ast::{Expr, ObjectProp, Program, Statement};
+use tishlang_ast::{Expr, ObjectProp, Program, Statement};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Severity {
@@ -32,7 +32,7 @@ pub fn lint_program(program: &Program) -> Vec<LintDiagnostic> {
 
 /// Lint source: parse then lint. Parse errors are not reported here.
 pub fn lint_source(source: &str) -> Result<Vec<LintDiagnostic>, String> {
-    let program = tish_parser::parse(source)?;
+    let program = tishlang_parser::parse(source)?;
     Ok(lint_program(&program))
 }
 
@@ -104,7 +104,7 @@ fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
         }
         Statement::DoWhile { body, .. } => lint_stmt(body, out),
         Statement::Export { declaration, .. } => {
-            if let tish_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
+            if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
                 lint_stmt(inner, out);
             }
         }
@@ -137,7 +137,7 @@ fn stmt_span(s: &Statement) -> (u32, u32) {
     let sp = match s {
         Statement::Block { span, .. } => *span,
         Statement::Try { span, .. } => *span,
-        _ => tish_ast::Span {
+        _ => tishlang_ast::Span {
             start: (1, 1),
             end: (1, 1),
         },
@@ -175,8 +175,8 @@ fn lint_expr(e: &Expr, out: &mut Vec<LintDiagnostic>) {
             lint_expr(callee, out);
             for a in args {
                 match a {
-                    tish_ast::CallArg::Expr(x) => lint_expr(x, out),
-                    tish_ast::CallArg::Spread(x) => lint_expr(x, out),
+                    tishlang_ast::CallArg::Expr(x) => lint_expr(x, out),
+                    tishlang_ast::CallArg::Spread(x) => lint_expr(x, out),
                 }
             }
         }
@@ -204,8 +204,8 @@ fn lint_expr(e: &Expr, out: &mut Vec<LintDiagnostic>) {
         Expr::Array { elements, .. } => {
             for el in elements {
                 match el {
-                    tish_ast::ArrayElement::Expr(x) => lint_expr(x, out),
-                    tish_ast::ArrayElement::Spread(x) => lint_expr(x, out),
+                    tishlang_ast::ArrayElement::Expr(x) => lint_expr(x, out),
+                    tishlang_ast::ArrayElement::Spread(x) => lint_expr(x, out),
                 }
             }
         }
@@ -227,8 +227,8 @@ fn lint_expr(e: &Expr, out: &mut Vec<LintDiagnostic>) {
             lint_expr(value, out);
         }
         Expr::ArrowFunction { body, .. } => match body {
-            tish_ast::ArrowBody::Expr(x) => lint_expr(x, out),
-            tish_ast::ArrowBody::Block(b) => lint_stmt(b, out),
+            tishlang_ast::ArrowBody::Expr(x) => lint_expr(x, out),
+            tishlang_ast::ArrowBody::Block(b) => lint_stmt(b, out),
         },
         Expr::TemplateLiteral { exprs, .. } => {
             for x in exprs {
@@ -240,23 +240,23 @@ fn lint_expr(e: &Expr, out: &mut Vec<LintDiagnostic>) {
         Expr::JsxElement { props, children, .. } => {
             for pr in props {
                 match pr {
-                    tish_ast::JsxProp::Attr { value, .. } => {
-                        if let tish_ast::JsxAttrValue::Expr(x) = value {
+                    tishlang_ast::JsxProp::Attr { value, .. } => {
+                        if let tishlang_ast::JsxAttrValue::Expr(x) = value {
                             lint_expr(x, out);
                         }
                     }
-                    tish_ast::JsxProp::Spread(x) => lint_expr(x, out),
+                    tishlang_ast::JsxProp::Spread(x) => lint_expr(x, out),
                 }
             }
             for ch in children {
-                if let tish_ast::JsxChild::Expr(x) = ch {
+                if let tishlang_ast::JsxChild::Expr(x) = ch {
                     lint_expr(x, out);
                 }
             }
         }
         Expr::JsxFragment { children, .. } => {
             for ch in children {
-                if let tish_ast::JsxChild::Expr(x) = ch {
+                if let tishlang_ast::JsxChild::Expr(x) = ch {
                     lint_expr(x, out);
                 }
             }

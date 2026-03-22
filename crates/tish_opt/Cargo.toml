@@ -1,11 +1,13 @@
 [package]
-name = "tish_opt"
+name = "tishlang_opt"
 version = "0.1.0"
 edition = "2021"
 description = "AST optimization pass for Tish (constant folding, short-circuit, etc.)"
 
+license-file = { workspace = true }
+repository = { workspace = true }
 [dependencies]
-tish_ast = { path = "../tish_ast" }
+tishlang_ast = { path = "../tish_ast" }
 
 [dev-dependencies]
-tish_parser = { path = "../tish_parser" }
+tishlang_parser = { path = "../tish_parser" }

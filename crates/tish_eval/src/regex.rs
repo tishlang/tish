@@ -1,13 +1,13 @@
 //! JavaScript-compatible regular expression support for Tish.
 //!
-//! Re-exports core types from tish_core and provides interpreter-specific functionality.
+//! Re-exports core types from tishlang_core and provides interpreter-specific functionality.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub use tish_core::{RegExpFlags, TishRegExp};
+pub use tishlang_core::{RegExpFlags, TishRegExp};
 
 use crate::value::Value;
 

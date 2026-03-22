@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use tish_core::Value;
+use tishlang_core::Value;
 
 /// Normalize an array index, handling negative indices.
 /// Returns a valid index within bounds or the default value.

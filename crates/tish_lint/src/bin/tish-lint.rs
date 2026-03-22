@@ -43,15 +43,15 @@ fn run(paths: &[String]) -> Result<(), String> {
     let mut errors = 0;
     for f in files {
         let src = fs::read_to_string(&f).map_err(|e| format!("{}: {}", f.display(), e))?;
-        match tish_lint::lint_source(&src) {
+        match tishlang_lint::lint_source(&src) {
             Ok(diags) => {
                 for d in diags {
                     let sev = match d.severity {
-                        tish_lint::Severity::Error => {
+                        tishlang_lint::Severity::Error => {
                             errors += 1;
                             "error"
                         }
-                        tish_lint::Severity::Warning => "warning",
+                        tishlang_lint::Severity::Warning => "warning",
                     };
                     println!(
                         "{}:{}:{}: {} [{}] {}",

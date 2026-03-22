@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tish_core::Value;
+use tishlang_core::Value;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 

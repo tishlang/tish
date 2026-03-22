@@ -45,7 +45,7 @@ jobs:
 
       # Build test suite only (no run). Test and build jobs restore this cache and use cached cargo.
       - name: Build tests
-        run: cargo nextest run --no-run -p tish --features full --profile ci
+        run: cargo nextest run --no-run -p tishlang --features full --profile ci
 
   version:
     name: Get version
@@ -157,7 +157,7 @@ jobs:
       # Restore cache from compile job, then run tests and coverage.
       - name: Run tests and coverage
         run: |
-          cargo llvm-cov nextest -p tish --features full --no-fail-fast --profile ci \
+          cargo llvm-cov nextest -p tishlang --features full --no-fail-fast --profile ci \
             --lcov --output-path lcov.info
           mkdir -p test-results
           cp target/nextest/ci/junit.xml test-results/junit.xml
@@ -232,13 +232,13 @@ jobs:
 
       - name: Build (native / rustup target)
         if: ${{ !matrix.use_cross }}
-        run: cargo build --release -p tish --target ${{ matrix.target }}
+        run: cargo build --release -p tishlang --target ${{ matrix.target }}
 
       - name: Install cross and build (Linux ARM64)
         if: ${{ matrix.use_cross }}
         run: |
           cargo install cross
-          cross build --target ${{ matrix.target }} -p tish --release
+          cross build --target ${{ matrix.target }} -p tishlang --release
 
       - name: Stage binary for upload
         shell: bash

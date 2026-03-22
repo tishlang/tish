@@ -1,5 +1,5 @@
 //! Tish to JavaScript transpiler backend.
-//! Uses shared resolve from tish_compile for unified pipeline.
+//! Uses shared resolve from tishlang_compile for unified pipeline.
 
 mod codegen;
 mod error;
@@ -14,7 +14,7 @@ pub use error::CompileError;
 /// Default JSX mode lowers to Lattish-style calls (implementation detail). Import what you use from
 /// `lattish` (e.g. `useState`, `createRoot`); the merged bundle includes the JSX runtime from that
 /// module. JSX-only files can use `import {} from "lattish"` to pull it in without bindings.
-pub fn compile(program: &tish_ast::Program, optimize: bool) -> Result<String, CompileError> {
+pub fn compile(program: &tishlang_ast::Program, optimize: bool) -> Result<String, CompileError> {
     compile_with_jsx(program, optimize, JsxMode::LattishH)
 }
 

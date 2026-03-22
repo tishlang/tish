@@ -1,4 +1,4 @@
-//! HTTP server for the Tish interpreter. Client `fetch` uses `tish_runtime` from eval.
+//! HTTP server for the Tish interpreter. Client `fetch` uses `tishlang_runtime` from eval.
 
 use crate::value::Value;
 use std::collections::HashMap;

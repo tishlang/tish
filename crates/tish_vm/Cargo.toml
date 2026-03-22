@@ -1,31 +1,33 @@
 [package]
-name = "tish_vm"
+name = "tishlang_vm"
 version = "0.1.0"
 edition = "2021"
 description = "Bytecode VM for Tish"
 
+license-file = { workspace = true }
+repository = { workspace = true }
 [features]
 default = []
-regex = ["tish_core/regex"]
+regex = ["tishlang_core/regex"]
 # For wasm32 target: use web_sys console for output
 wasm = ["dep:wasm-bindgen"]
 # Built-in modules: fs, http, process (for bytecode LoadNativeExport)
-fs = ["tish_runtime/fs"]
-process = ["tish_runtime/process"]
-http = ["tish_runtime/http"]
-ws = ["tish_runtime/ws"]
+fs = ["tishlang_runtime/fs"]
+process = ["tishlang_runtime/process"]
+http = ["tishlang_runtime/http"]
+ws = ["tishlang_runtime/ws"]
 
 [dependencies]
-tish_ast = { path = "../tish_ast" }
-tish_builtins = { path = "../tish_builtins" }
-tish_bytecode = { path = "../tish_bytecode" }
-tish_core = { path = "../tish_core" }
-tish_runtime = { path = "../tish_runtime", optional = true }
+tishlang_ast = { path = "../tish_ast" }
+tishlang_builtins = { path = "../tish_builtins" }
+tishlang_bytecode = { path = "../tish_bytecode" }
+tishlang_core = { path = "../tish_core" }
+tishlang_runtime = { path = "../tish_runtime", optional = true }
 rand = "0.10"
 wasm-bindgen = { version = "0.2", optional = true }
 
 [dev-dependencies]
-tish_parser = { path = "../tish_parser" }
+tishlang_parser = { path = "../tish_parser" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }

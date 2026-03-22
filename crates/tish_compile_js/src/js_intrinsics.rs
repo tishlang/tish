@@ -1,7 +1,7 @@
 //! JS-only call sites that require `new` (Tish has no `new`).
 //! Intrinsic names, validation, and runtime preamble live here — main codegen only dispatches.
 
-use tish_ast::{CallArg, Expr};
+use tishlang_ast::{CallArg, Expr};
 
 use crate::error::CompileError;
 

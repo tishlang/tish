@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use tish_compile::ResolvedNativeModule;
+use tishlang_compile::ResolvedNativeModule;
 
 pub fn build_via_cargo(
     rust_code: &str,
@@ -15,9 +15,9 @@ pub fn build_via_cargo(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("tish_out");
-    let build_dir = tish_build_utils::create_build_dir("tish_build", out_name)?;
+    let build_dir = tishlang_build_utils::create_build_dir("tish_build", out_name)?;
 
-    let runtime_path = tish_build_utils::find_runtime_path()?;
+    let runtime_path = tishlang_build_utils::find_runtime_path()?;
 
     let runtime_features: Vec<&str> = features
         .iter()
@@ -63,7 +63,7 @@ codegen-units = 1
 lto = "thin"
 
 [dependencies]
-tish_runtime = {{ path = {:?}{} }}{}{}
+tishlang_runtime = {{ path = {:?}{} }}{}{}
 "#,
         out_name,
         runtime_path,
@@ -91,11 +91,11 @@ tish_runtime = {{ path = {:?}{} }}{}{}
         .map(|t| t.join("release"))
         .unwrap_or_else(|| build_dir.join("target").join("release"));
 
-    tish_build_utils::run_cargo_build(&build_dir, target_dir.as_deref())?;
+    tishlang_build_utils::run_cargo_build(&build_dir, target_dir.as_deref())?;
 
-    let binary = tish_build_utils::find_release_binary(&binary_dir, out_name)?;
-    let target = tish_build_utils::resolve_output_path(output_path, out_name);
-    tish_build_utils::copy_binary_to_output(&binary, &target)?;
+    let binary = tishlang_build_utils::find_release_binary(&binary_dir, out_name)?;
+    let target = tishlang_build_utils::resolve_output_path(output_path, out_name);
+    tishlang_build_utils::copy_binary_to_output(&binary, &target)?;
 
     Ok(())
 }

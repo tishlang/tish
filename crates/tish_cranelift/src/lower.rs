@@ -1,7 +1,7 @@
 //! Bytecode to Cranelift IR lowering.
 //!
 //! Emits object file with tish_chunk_data and tish_chunk_len symbols.
-//! The link step builds a Rust binary that reads these and runs via tish_vm.
+//! The link step builds a Rust binary that reads these and runs via tishlang_vm.
 
 use std::path::Path;
 
@@ -10,7 +10,7 @@ use cranelift::codegen::settings;
 use cranelift_module::{DataDescription, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
-use tish_bytecode::{serialize, Chunk};
+use tishlang_bytecode::{serialize, Chunk};
 
 use crate::CraneliftError;
 
@@ -28,7 +28,7 @@ pub fn lower_and_emit(chunk: &Chunk, object_path: &Path) -> Result<(), Cranelift
         message: format!("Failed to finish ISA: {}", e),
     })?;
 
-    let object_builder = ObjectBuilder::new(isa, "tish_cranelift", cranelift_module::default_libcall_names())
+    let object_builder = ObjectBuilder::new(isa, "tishlang_cranelift", cranelift_module::default_libcall_names())
         .map_err(|e| CraneliftError {
             message: format!("Failed to create ObjectBuilder: {}", e),
         })?;

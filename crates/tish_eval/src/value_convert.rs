@@ -1,11 +1,11 @@
-//! Conversion between tish_eval::Value and tish_core::Value for opaque method calls.
+//! Conversion between tishlang_eval::Value and tishlang_core::Value for opaque method calls.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tish_core::Value as CoreValue;
+use tishlang_core::Value as CoreValue;
 
 use crate::value::Value;
 
@@ -68,7 +68,7 @@ pub fn core_to_eval(v: CoreValue) -> Value {
         CoreValue::Function(f) => Value::CoreFn(Rc::clone(&f)),
         #[cfg(not(any(feature = "http", feature = "ws")))]
         CoreValue::Function(_) => Value::Null,
-        // tish_core gets regex from http or regex features; handle RegExp when it exists
+        // tishlang_core gets regex from http or regex features; handle RegExp when it exists
         #[cfg(any(feature = "http", feature = "regex"))]
         CoreValue::RegExp(re) => {
             #[cfg(feature = "regex")]

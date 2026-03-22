@@ -1,7 +1,7 @@
 //! Shared build utilities for Tish.
 //!
 //! Provides workspace discovery, path resolution, and Cargo build orchestration
-//! used by tish_wasm, tish_cranelift, tish_native, and the tish CLI.
+//! used by tishlang_wasm, tishlang_cranelift, tishlang_native, and the tish CLI.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,7 +29,7 @@ pub fn find_workspace_root() -> Result<PathBuf, String> {
         if let Some(mut current) = exe.parent() {
             for _ in 0..15 {
                 let crates_dir = current.join("crates");
-                if crates_dir.join("tish_runtime").exists() || crates_dir.join("tish_cranelift_runtime").exists() {
+                if crates_dir.join("tishlang_runtime").exists() || crates_dir.join("tishlang_cranelift_runtime").exists() {
                     return Ok(current.to_path_buf());
                 }
                 if let Some(p) = current.parent() {
@@ -53,7 +53,7 @@ pub fn find_workspace_root() -> Result<PathBuf, String> {
                 }
                 // Fallback: check for crates dir with known crates
                 let crates_dir = current.join("crates");
-                if crates_dir.join("tish_runtime").exists() {
+                if crates_dir.join("tishlang_runtime").exists() {
                     return Ok(current);
                 }
             }
@@ -66,24 +66,24 @@ pub fn find_workspace_root() -> Result<PathBuf, String> {
     Err("Cannot find Tish workspace root. Run from workspace root or use cargo run.".to_string())
 }
 
-/// Find the path to the tish_runtime crate.
+/// Find the path to the tishlang_runtime crate.
 ///
 /// Returns a canonical path string suitable for Cargo.toml path dependencies.
 pub fn find_runtime_path() -> Result<String, String> {
     let workspace = find_workspace_root()?;
-    let runtime = workspace.join("crates").join("tish_runtime");
+    let runtime = workspace.join("crates").join("tishlang_runtime");
     if !runtime.exists() {
-        return Err("tish_runtime crate not found".to_string());
+        return Err("tishlang_runtime crate not found".to_string());
     }
     runtime
         .canonicalize()
-        .map_err(|e| format!("Cannot canonicalize tish_runtime: {}", e))
+        .map_err(|e| format!("Cannot canonicalize tishlang_runtime: {}", e))
         .map(|p| p.display().to_string().replace('\\', "/"))
 }
 
 /// Find the path to a crate within the workspace by name.
 ///
-/// e.g. `find_crate_path("tish_cranelift_runtime")` returns the path to crates/tish_cranelift_runtime.
+/// e.g. `find_crate_path("tishlang_cranelift_runtime")` returns the path to crates/tishlang_cranelift_runtime.
 pub fn find_crate_path(crate_name: &str) -> Result<PathBuf, String> {
     let workspace = find_workspace_root()?;
     let crate_path = workspace.join("crates").join(crate_name);

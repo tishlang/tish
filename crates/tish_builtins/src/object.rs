@@ -1,13 +1,13 @@
 //! Object builtin methods.
 //!
 //! This module will contain shared object method implementations.
-//! Functions will be migrated here from tish_runtime and tish_eval.
+//! Functions will be migrated here from tishlang_runtime and tishlang_eval.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use tish_core::Value;
+use tishlang_core::Value;
 
 /// Create a new empty object Value.
 pub fn new() -> Value {

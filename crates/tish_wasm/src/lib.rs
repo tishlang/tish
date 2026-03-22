@@ -8,9 +8,9 @@ use std::process::Command;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
-use tish_ast::Program;
-use tish_bytecode::{serialize, Chunk};
-use tish_compile::{
+use tishlang_ast::Program;
+use tishlang_bytecode::{serialize, Chunk};
+use tishlang_compile::{
     detect_cycles, extract_native_import_features, has_external_native_imports, merge_modules,
     resolve_project,
 };
@@ -47,40 +47,40 @@ fn resolve_and_compile_to_chunk(
             message: e.to_string(),
         })?;
         if optimize {
-            tish_opt::optimize(&prog)
+            tishlang_opt::optimize(&prog)
         } else {
             prog
         }
     };
     let chunk = if optimize {
-        tish_bytecode::compile(&program).map_err(|e| WasmError {
+        tishlang_bytecode::compile(&program).map_err(|e| WasmError {
             message: e.to_string(),
         })?
     } else {
-        tish_bytecode::compile_unoptimized(&program).map_err(|e| WasmError {
+        tishlang_bytecode::compile_unoptimized(&program).map_err(|e| WasmError {
             message: e.to_string(),
         })?
     };
     Ok((chunk, program))
 }
 
-/// Compile a single Program (e.g. from js_to_tish) for WebAssembly.
+/// Compile a single Program (e.g. from tishlang_js_to_tish) for WebAssembly.
 pub fn compile_program_to_wasm(
     program: &Program,
     output_path: &Path,
     optimize: bool,
 ) -> Result<(), WasmError> {
     let program = if optimize {
-        tish_opt::optimize(program)
+        tishlang_opt::optimize(program)
     } else {
         program.clone()
     };
     let chunk = if optimize {
-        tish_bytecode::compile(&program).map_err(|e| WasmError {
+        tishlang_bytecode::compile(&program).map_err(|e| WasmError {
             message: e.to_string(),
         })?
     } else {
-        tish_bytecode::compile_unoptimized(&program).map_err(|e| WasmError {
+        tishlang_bytecode::compile_unoptimized(&program).map_err(|e| WasmError {
             message: e.to_string(),
         })?
     };
@@ -107,14 +107,14 @@ fn emit_wasm_from_chunk(chunk: &Chunk, output_path: &Path) -> Result<(), WasmErr
     std::fs::create_dir_all(&out_dir_abs).map_err(|e| WasmError {
         message: format!("Cannot create output directory: {}", e),
     })?;
-    let workspace_root = tish_build_utils::find_workspace_root().map_err(|e| WasmError {
+    let workspace_root = tishlang_build_utils::find_workspace_root().map_err(|e| WasmError {
         message: e,
     })?;
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let build_status = Command::new(&cargo)
         .current_dir(&workspace_root)
         .args([
-            "build", "-p", "tish_wasm_runtime",
+            "build", "-p", "tishlang_wasm_runtime",
             "--target", "wasm32-unknown-unknown",
             "--release", "--features", "browser",
         ])
@@ -127,7 +127,7 @@ fn emit_wasm_from_chunk(chunk: &Chunk, output_path: &Path) -> Result<(), WasmErr
         });
     }
     let wasm_artifact = workspace_root
-        .join("target/wasm32-unknown-unknown/release/tish_wasm_runtime.wasm");
+        .join("target/wasm32-unknown-unknown/release/tishlang_wasm_runtime.wasm");
     if !wasm_artifact.exists() {
         return Err(WasmError {
             message: format!("Wasm artifact not found: {}", wasm_artifact.display()),
@@ -233,7 +233,7 @@ pub fn compile_to_wasi(
         message: format!("Cannot create output directory: {}", e),
     })?;
 
-    let workspace_root = tish_build_utils::find_workspace_root().map_err(|e| WasmError {
+    let workspace_root = tishlang_build_utils::find_workspace_root().map_err(|e| WasmError {
         message: e,
     })?;
 
@@ -248,10 +248,10 @@ pub fn compile_to_wasi(
         message: format!("Cannot write chunk: {}", e),
     })?;
 
-    // Cargo.toml - path to tish_wasm_runtime from build_dir
+    // Cargo.toml - path to tishlang_wasm_runtime from build_dir
     let runtime_path = workspace_root
         .join("crates")
-        .join("tish_wasm_runtime");
+        .join("tishlang_wasm_runtime");
     let runtime_path_str = runtime_path
         .canonicalize()
         .unwrap_or(runtime_path)
@@ -283,7 +283,7 @@ name = "tish_wasi_{stem}"
 path = "src/main.rs"
 
 [dependencies]
-tish_wasm_runtime = {{ path = "{runtime_path_str}"{features_str} }}
+tishlang_wasm_runtime = {{ path = "{runtime_path_str}"{features_str} }}
 "#,
         stem = stem,
         runtime_path_str = runtime_path_str,
@@ -297,7 +297,7 @@ tish_wasm_runtime = {{ path = "{runtime_path_str}"{features_str} }}
     let main_rs = r#"
 fn main() {
     let chunk = include_bytes!("../chunk.bin");
-    if let Err(e) = tish_wasm_runtime::run_wasi(chunk) {
+    if let Err(e) = tishlang_wasm_runtime::run_wasi(chunk) {
         eprintln!("Runtime error: {}", e);
         std::process::exit(1);
     }

@@ -61,6 +61,7 @@ jobs:
           TAG="${{ github.event.release.tag_name }}"
           VERSION="${TAG#v}"
           NPM_URL="https://www.npmjs.com/package/@tishlang/tish/v/${VERSION}"
+          CRATES_URL="https://crates.io/crates/tishlang/${VERSION}"
           RELEASE_ID="${{ github.event.release.id }}"
           REPO="${{ github.repository }}"
           CURRENT_BODY=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -68,7 +69,7 @@ jobs:
           NEW_BODY="${CURRENT_BODY}
 
           ---
-          Published to npm: ${NPM_URL}"
+          Published to npm: ${NPM_URL} | crates.io: ${CRATES_URL}"
           curl -s -X PATCH \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \

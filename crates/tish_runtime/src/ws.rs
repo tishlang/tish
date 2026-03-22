@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use lazy_static::lazy_static;
-use tish_core::Value;
+use tishlang_core::Value;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::runtime::Runtime;
 

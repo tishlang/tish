@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tish_ast::{BinOp, CompoundOp, ExportDeclaration, Expr, ImportSpecifier, Literal, LogicalAssignOp, MemberProp, Span, Statement, UnaryOp};
+use tishlang_ast::{BinOp, CompoundOp, ExportDeclaration, Expr, ImportSpecifier, Literal, LogicalAssignOp, MemberProp, Span, Statement, UnaryOp};
 
 use crate::value::Value;
 #[cfg(any(feature = "fs", feature = "process"))]
@@ -179,7 +179,7 @@ impl Evaluator {
         *self.current_dir.borrow_mut() = dir.map(PathBuf::from);
     }
 
-    pub fn eval_program(&mut self, program: &tish_ast::Program) -> Result<Value, String> {
+    pub fn eval_program(&mut self, program: &tishlang_ast::Program) -> Result<Value, String> {
         let mut last = Value::Null;
         for stmt in &program.statements {
             last = self.eval_statement(stmt).map_err(|e| e.to_string())?;
@@ -508,7 +508,7 @@ impl Evaluator {
         let source = std::fs::read_to_string(&path).map_err(|e| {
             EvalError::Error(format!("Cannot read {}: {}", path.display(), e))
         })?;
-        let program = tish_parser::parse(&source).map_err(|e| {
+        let program = tishlang_parser::parse(&source).map_err(|e| {
             EvalError::Error(format!("Parse error in {}: {}", path.display(), e))
         })?;
         let module_scope = Scope::child(Rc::clone(&self.scope));
@@ -588,7 +588,7 @@ impl Evaluator {
                 #[cfg(not(feature = "fs"))]
                 {
                     return Err(EvalError::Error(
-                        "tish:fs requires the fs feature. Rebuild with: cargo build -p tish --features fs".into(),
+                        "tish:fs requires the fs feature. Rebuild with: cargo build -p tishlang --features fs".into(),
                     ));
                 }
             }
@@ -609,7 +609,7 @@ impl Evaluator {
                 #[cfg(not(feature = "http"))]
                 {
                     return Err(EvalError::Error(
-                        "tish:http requires the http feature. Rebuild with: cargo build -p tish --features http".into(),
+                        "tish:http requires the http feature. Rebuild with: cargo build -p tishlang --features http".into(),
                     ));
                 }
             }
@@ -626,7 +626,7 @@ impl Evaluator {
                 #[cfg(not(feature = "ws"))]
                 {
                     return Err(EvalError::Error(
-                        "tish:ws requires the ws feature. Rebuild with: cargo build -p tish --features ws".into(),
+                        "tish:ws requires the ws feature. Rebuild with: cargo build -p tishlang --features ws".into(),
                     ));
                 }
             }
@@ -657,7 +657,7 @@ impl Evaluator {
                 #[cfg(not(feature = "process"))]
                 {
                     return Err(EvalError::Error(
-                        "tish:process requires the process feature. Rebuild with: cargo build -p tish --features process".into(),
+                        "tish:process requires the process feature. Rebuild with: cargo build -p tishlang --features process".into(),
                     ));
                 }
             }
@@ -1520,10 +1520,10 @@ impl Evaluator {
                 let mut vals = Vec::with_capacity(elements.len());
                 for elem in elements {
                     match elem {
-                        tish_ast::ArrayElement::Expr(e) => {
+                        tishlang_ast::ArrayElement::Expr(e) => {
                             vals.push(self.eval_expr(e)?);
                         }
-                        tish_ast::ArrayElement::Spread(e) => {
+                        tishlang_ast::ArrayElement::Spread(e) => {
                             let spread_val = self.eval_expr(e)?;
                             if let Value::Array(arr) = spread_val {
                                 vals.extend(arr.borrow().iter().cloned());
@@ -1537,10 +1537,10 @@ impl Evaluator {
                 let mut map = HashMap::new();
                 for prop in props {
                     match prop {
-                        tish_ast::ObjectProp::KeyValue(k, v) => {
+                        tishlang_ast::ObjectProp::KeyValue(k, v) => {
                             map.insert(Arc::clone(k), self.eval_expr(v)?);
                         }
-                        tish_ast::ObjectProp::Spread(e) => {
+                        tishlang_ast::ObjectProp::Spread(e) => {
                             let spread_val = self.eval_expr(e)?;
                             if let Value::Object(obj) = spread_val {
                                 for (k, v) in obj.borrow().iter() {
@@ -1754,10 +1754,10 @@ impl Evaluator {
                 }
             }
             Expr::ArrowFunction { params, body, .. } => {
-                use tish_ast::ArrowBody;
+                use tishlang_ast::ArrowBody;
                 // Convert arrow function to regular function using Arc for cheap cloning
                 let param_names: Arc<[Arc<str>]> = params.iter().map(|p| Arc::clone(&p.name)).collect();
-                let defaults: Arc<[Option<tish_ast::Expr>]> = params.iter().map(|p| p.default.clone()).collect();
+                let defaults: Arc<[Option<tishlang_ast::Expr>]> = params.iter().map(|p| p.default.clone()).collect();
                 let body_stmt = match body {
                     ArrowBody::Expr(expr) => {
                         // Expression body: wrap in implicit return
@@ -2144,7 +2144,7 @@ impl Evaluator {
             Value::Serve => self.run_http_server(args),
             #[cfg(any(feature = "http", feature = "ws"))]
             Value::CoreFn(f) => {
-                let ca: Result<Vec<tish_core::Value>, String> =
+                let ca: Result<Vec<tishlang_core::Value>, String> =
                     args.iter().map(crate::value_convert::eval_to_core).collect();
                 let ca = ca.map_err(EvalError::Error)?;
                 Ok(crate::value_convert::core_to_eval(f(&ca)))
@@ -2161,7 +2161,7 @@ impl Evaluator {
                 let method = opaque.get_method(method_name.as_ref()).ok_or_else(|| {
                     EvalError::Error(format!("Method {} not found on {}", method_name, opaque.type_name()))
                 })?;
-                let core_args: Result<Vec<tish_core::Value>, String> =
+                let core_args: Result<Vec<tishlang_core::Value>, String> =
                     args.iter().map(crate::value_convert::eval_to_core).collect();
                 let core_args = core_args.map_err(EvalError::Error)?;
                 let result = method(&core_args);
@@ -2473,14 +2473,14 @@ impl Evaluator {
         Ok(Value::Null)
     }
 
-    fn eval_call_args(&self, args: &[tish_ast::CallArg]) -> Result<Vec<Value>, EvalError> {
+    fn eval_call_args(&self, args: &[tishlang_ast::CallArg]) -> Result<Vec<Value>, EvalError> {
         let mut result = Vec::with_capacity(args.len());
         for arg in args {
             match arg {
-                tish_ast::CallArg::Expr(e) => {
+                tishlang_ast::CallArg::Expr(e) => {
                     result.push(self.eval_expr(e)?);
                 }
-                tish_ast::CallArg::Spread(e) => {
+                tishlang_ast::CallArg::Spread(e) => {
                     let spread_val = self.eval_expr(e)?;
                     if let Value::Array(arr) = spread_val {
                         result.extend(arr.borrow().iter().cloned());
@@ -2491,9 +2491,9 @@ impl Evaluator {
         Ok(result)
     }
 
-    fn bind_destruct_pattern(&mut self, pattern: &tish_ast::DestructPattern, value: &Value, mutable: bool) -> Result<(), EvalError> {
+    fn bind_destruct_pattern(&mut self, pattern: &tishlang_ast::DestructPattern, value: &Value, mutable: bool) -> Result<(), EvalError> {
         match pattern {
-            tish_ast::DestructPattern::Array(elements) => {
+            tishlang_ast::DestructPattern::Array(elements) => {
                 let arr = match value {
                     Value::Array(a) => a.borrow().clone(),
                     _ => return Err(EvalError::Error("Cannot destructure non-array value".to_string())),
@@ -2502,15 +2502,15 @@ impl Evaluator {
                 for (i, elem) in elements.iter().enumerate() {
                     if let Some(el) = elem {
                         match el {
-                            tish_ast::DestructElement::Ident(name) => {
+                            tishlang_ast::DestructElement::Ident(name) => {
                                 let val = arr.get(i).cloned().unwrap_or(Value::Null);
                                 self.scope.borrow_mut().set(Arc::clone(name), val, mutable);
                             }
-                            tish_ast::DestructElement::Pattern(nested) => {
+                            tishlang_ast::DestructElement::Pattern(nested) => {
                                 let val = arr.get(i).cloned().unwrap_or(Value::Null);
                                 self.bind_destruct_pattern(nested, &val, mutable)?;
                             }
-                            tish_ast::DestructElement::Rest(name) => {
+                            tishlang_ast::DestructElement::Rest(name) => {
                                 let rest: Vec<Value> = arr.iter().skip(i).cloned().collect();
                                 self.scope.borrow_mut().set(Arc::clone(name), Value::Array(Rc::new(RefCell::new(rest))), mutable);
                                 break;
@@ -2519,7 +2519,7 @@ impl Evaluator {
                     }
                 }
             }
-            tish_ast::DestructPattern::Object(props) => {
+            tishlang_ast::DestructPattern::Object(props) => {
                 let obj = match value {
                     Value::Object(o) => o.borrow().clone(),
                     _ => return Err(EvalError::Error("Cannot destructure non-object value".to_string())),
@@ -2528,13 +2528,13 @@ impl Evaluator {
                 for prop in props {
                     let val = obj.get(&prop.key).cloned().unwrap_or(Value::Null);
                     match &prop.value {
-                        tish_ast::DestructElement::Ident(name) => {
+                        tishlang_ast::DestructElement::Ident(name) => {
                             self.scope.borrow_mut().set(Arc::clone(name), val, mutable);
                         }
-                        tish_ast::DestructElement::Pattern(nested) => {
+                        tishlang_ast::DestructElement::Pattern(nested) => {
                             self.bind_destruct_pattern(nested, &val, mutable)?;
                         }
-                        tish_ast::DestructElement::Rest(_) => {
+                        tishlang_ast::DestructElement::Rest(_) => {
                             return Err(EvalError::Error("Rest not supported in object destructuring".to_string()));
                         }
                     }
@@ -3098,7 +3098,7 @@ impl Evaluator {
         for a in args {
             cv.push(crate::value_convert::eval_to_core(a)?);
         }
-        Ok(crate::value_convert::core_to_eval(tish_runtime::web_socket_client(&cv)))
+        Ok(crate::value_convert::core_to_eval(tishlang_runtime::web_socket_client(&cv)))
     }
 
     #[cfg(feature = "ws")]
@@ -3107,7 +3107,7 @@ impl Evaluator {
         for a in args {
             cv.push(crate::value_convert::eval_to_core(a)?);
         }
-        Ok(crate::value_convert::core_to_eval(tish_runtime::web_socket_server_construct(&cv)))
+        Ok(crate::value_convert::core_to_eval(tishlang_runtime::web_socket_server_construct(&cv)))
     }
 
     #[cfg(feature = "ws")]
@@ -3115,7 +3115,7 @@ impl Evaluator {
         let conn = args.first().ok_or("wsSend(conn, data) requires conn")?;
         let conn_core = crate::value_convert::eval_to_core(conn)?;
         let data = args.get(1).map(|v| v.to_string()).unwrap_or_default();
-        Ok(Value::Bool(tish_runtime::ws_send_native(&conn_core, &data)))
+        Ok(Value::Bool(tishlang_runtime::ws_send_native(&conn_core, &data)))
     }
 
     #[cfg(feature = "ws")]
@@ -3124,7 +3124,7 @@ impl Evaluator {
         for a in args {
             cv.push(crate::value_convert::eval_to_core(a)?);
         }
-        Ok(crate::value_convert::core_to_eval(tish_runtime::ws_broadcast_native(&cv)))
+        Ok(crate::value_convert::core_to_eval(tishlang_runtime::ws_broadcast_native(&cv)))
     }
 
     #[cfg(feature = "http")]
@@ -3133,8 +3133,8 @@ impl Evaluator {
         for a in args {
             cv.push(crate::value_convert::eval_to_core(a)?);
         }
-        match tish_runtime::fetch_promise(cv) {
-            tish_core::Value::Promise(p) => Ok(Value::CorePromise(p)),
+        match tishlang_runtime::fetch_promise(cv) {
+            tishlang_core::Value::Promise(p) => Ok(Value::CorePromise(p)),
             _ => Err("internal: fetch did not return Promise".into()),
         }
     }
@@ -3145,8 +3145,8 @@ impl Evaluator {
         for a in args {
             cv.push(crate::value_convert::eval_to_core(a)?);
         }
-        match tish_runtime::fetch_all_promise(cv) {
-            tish_core::Value::Promise(p) => Ok(Value::CorePromise(p)),
+        match tishlang_runtime::fetch_all_promise(cv) {
+            tishlang_core::Value::Promise(p) => Ok(Value::CorePromise(p)),
             _ => Err("internal: fetchAll did not return Promise".into()),
         }
     }

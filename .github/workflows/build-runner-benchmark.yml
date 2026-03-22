@@ -78,7 +78,7 @@ jobs:
         id: build_native
         run: |
           start=$(date +%s)
-          cargo build --release -p tish --target ${{ matrix.build_target.target }}
+          cargo build --release -p tishlang --target ${{ matrix.build_target.target }}
           end=$(date +%s)
           echo "duration_sec=$((end - start))" >> "$GITHUB_OUTPUT"
           echo "Build (native / ${{ matrix.build_method }}) completed in $((end - start))s"
@@ -89,7 +89,7 @@ jobs:
         run: |
           start=$(date +%s)
           cargo install cross
-          cross build --target ${{ matrix.build_target.target }} -p tish --release
+          cross build --target ${{ matrix.build_target.target }} -p tishlang --release
           end=$(date +%s)
           echo "duration_sec=$((end - start))" >> "$GITHUB_OUTPUT"
           echo "Build (cross / ${{ matrix.build_method }}) completed in $((end - start))s"
@@ -99,7 +99,7 @@ jobs:
         id: build_wasi
         run: |
           start=$(date +%s)
-          cargo build --release -p tish --target wasm32-wasip1
+          cargo build --release -p tishlang --target wasm32-wasip1
           end=$(date +%s)
           echo "duration_sec=$((end - start))" >> "$GITHUB_OUTPUT"
           echo "Build (wasi) completed in $((end - start))s"

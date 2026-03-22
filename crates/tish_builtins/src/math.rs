@@ -1,6 +1,6 @@
 //! Math builtin functions.
 
-use tish_core::Value;
+use tishlang_core::Value;
 use crate::helpers::extract_num;
 
 macro_rules! math_unary {

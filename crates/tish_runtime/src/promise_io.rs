@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use tish_core::{Value, TishPromise};
+use tishlang_core::{Value, TishPromise};
 use tokio::sync::oneshot;
 
 fn error_value(msg: String) -> Value {

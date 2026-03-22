@@ -1,14 +1,16 @@
 [package]
-name = "tish_native"
+name = "tishlang_native"
 version = "0.1.0"
 edition = "2021"
 description = "Native code generation backend for Tish (Cranelift / direct compile)"
 
+license-file = { workspace = true }
+repository = { workspace = true }
 [dependencies]
-tish_build_utils = { path = "../tish_build_utils" }
-tish_ast = { path = "../tish_ast" }
-tish_bytecode = { path = "../tish_bytecode" }
-tish_compile = { path = "../tish_compile" }
-tish_cranelift = { path = "../tish_cranelift" }
-tish_llvm = { path = "../tish_llvm" }
-tish_opt = { path = "../tish_opt" }
+tishlang_build_utils = { path = "../tish_build_utils" }
+tishlang_ast = { path = "../tish_ast" }
+tishlang_bytecode = { path = "../tish_bytecode" }
+tishlang_compile = { path = "../tish_compile" }
+tishlang_cranelift = { path = "../tish_cranelift" }
+tishlang_llvm = { path = "../tish_llvm" }
+tishlang_opt = { path = "../tish_opt" }

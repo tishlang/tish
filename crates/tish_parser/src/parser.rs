@@ -51,13 +51,13 @@ macro_rules! binary_multi_op {
     };
 }
 
-use tish_ast::{
+use tishlang_ast::{
     ArrowBody, ArrayElement, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
     DestructProp, ExportDeclaration, Expr, ImportSpecifier, JsxAttrValue, JsxChild, JsxProp,
     Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, TypeAnnotation,
     TypedParam, UnaryOp,
 };
-use tish_lexer::{Token, TokenKind};
+use tishlang_lexer::{Token, TokenKind};
 
 pub struct Parser<'a> {
     tokens: &'a [Token],

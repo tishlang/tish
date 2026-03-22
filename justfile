@@ -144,12 +144,12 @@ test-secure:
     cargo test --no-default-features
 
 # Install tish CLI (secure mode - no dangerous features)
-install:
-    cargo install --path crates/tish --no-default-features
+install *ARGS:
+    cargo install --path crates/tish --no-default-features {{ARGS}}
 
 # Install tish CLI with all features
-install-full:
-    cargo install --path crates/tish --features full
+install-full *ARGS:
+    cargo install --path crates/tish --features full {{ARGS}}
 
 # Check compilation for all feature combinations
 check-all:

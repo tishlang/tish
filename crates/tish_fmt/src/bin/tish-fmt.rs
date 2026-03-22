@@ -24,7 +24,7 @@ fn main() {
 
 fn run(path: &str, check: bool) -> Result<(), String> {
     let source = fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
-    let formatted = tish_fmt::format_source(&source)?;
+    let formatted = tishlang_fmt::format_source(&source)?;
     if check {
         if formatted != source {
             return Err(format!(

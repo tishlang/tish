@@ -1,7 +1,7 @@
 //! Tish Core - Shared types and utilities for the Tish language.
 //!
 //! This crate provides the unified Value type and utilities used by both
-//! the interpreter (tish_eval) and compiled runtime (tish_runtime).
+//! the interpreter (tishlang_eval) and compiled runtime (tishlang_runtime).
 
 mod console_style;
 mod json;

@@ -26,7 +26,7 @@ pub trait TishNativeModule: Send + Sync {
 pub use regex::TishRegExp;
 
 pub fn run(source: &str) -> Result<Value, String> {
-    let program = tish_parser::parse(source)?;
+    let program = tishlang_parser::parse(source)?;
     let mut eval = Evaluator::new();
     let result = eval.eval_program(&program)?;
     #[cfg(feature = "http")]
@@ -38,7 +38,7 @@ pub fn run(source: &str) -> Result<Value, String> {
 /// Format an interpreter value for console output (Node/Bun-style colors when `colors` is true).
 pub fn format_value_for_console(value: &Value, colors: bool) -> String {
     match value_convert::eval_to_core(value) {
-        Ok(core_val) => tish_core::format_value_styled(&core_val, colors),
+        Ok(core_val) => tishlang_core::format_value_styled(&core_val, colors),
         Err(_) => value.to_string(),
     }
 }
@@ -49,7 +49,7 @@ pub fn run_file(path: &std::path::Path, project_root: Option<&std::path::Path>) 
         .canonicalize()
         .map_err(|e| format!("Cannot canonicalize {}: {}", path.display(), e))?;
     let source = std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {}: {}", path.display(), e))?;
-    let program = tish_parser::parse(&source)?;
+    let program = tishlang_parser::parse(&source)?;
     let mut eval = Evaluator::new();
     eval.set_current_dir(project_root.or(path.parent()));
     let result = eval.eval_program(&program)?;

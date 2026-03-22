@@ -10,21 +10,21 @@ mod resolve_virtual;
 use base64::Engine;
 use resolve_virtual::{detect_cycles_virtual, merge_modules_virtual, resolve_virtual};
 use std::collections::HashMap;
-use tish_compile_js::JsxMode;
+use tishlang_compile_js::JsxMode;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub fn compile_to_bytecode(source: &str) -> Result<String, JsValue> {
-    let program = tish_parser::parse(source.trim()).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let program = tish_opt::optimize(&program);
-    let chunk = tish_bytecode::compile(&program).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(tish_bytecode::serialize(&chunk)))
+    let program = tishlang_parser::parse(source.trim()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let program = tishlang_opt::optimize(&program);
+    let chunk = tishlang_bytecode::compile(&program).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(tishlang_bytecode::serialize(&chunk)))
 }
 
 #[wasm_bindgen]
 pub fn compile_to_js(source: &str) -> Result<String, JsValue> {
-    let program = tish_parser::parse(source.trim()).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    tish_compile_js::compile_with_jsx(&program, true, JsxMode::LattishH)
+    let program = tishlang_parser::parse(source.trim()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    tishlang_compile_js::compile_with_jsx(&program, true, JsxMode::LattishH)
         .map_err(|e| JsValue::from_str(&e.message))
 }
 
@@ -36,9 +36,9 @@ pub fn compile_to_bytecode_with_imports(entry_path: &str, files_json: &str) -> R
         .map_err(|e| JsValue::from_str(&e))?;
     detect_cycles_virtual(&modules).map_err(|e| JsValue::from_str(&e))?;
     let program = merge_modules_virtual(modules).map_err(|e| JsValue::from_str(&e))?;
-    let program = tish_opt::optimize(&program);
-    let chunk = tish_bytecode::compile(&program).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(tish_bytecode::serialize(&chunk)))
+    let program = tishlang_opt::optimize(&program);
+    let chunk = tishlang_bytecode::compile(&program).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(tishlang_bytecode::serialize(&chunk)))
 }
 
 #[wasm_bindgen]
@@ -49,7 +49,7 @@ pub fn compile_to_js_with_imports(entry_path: &str, files_json: &str) -> Result<
         .map_err(|e| JsValue::from_str(&e))?;
     detect_cycles_virtual(&modules).map_err(|e| JsValue::from_str(&e))?;
     let program = merge_modules_virtual(modules).map_err(|e| JsValue::from_str(&e))?;
-    let program = tish_opt::optimize(&program);
-    tish_compile_js::compile_with_jsx(&program, true, JsxMode::LattishH)
+    let program = tishlang_opt::optimize(&program);
+    tishlang_compile_js::compile_with_jsx(&program, true, JsxMode::LattishH)
         .map_err(|e| JsValue::from_str(&e.message))
 }

@@ -1,6 +1,6 @@
 //! Minimal runtime for Tish compiled output.
 //!
-//! Re-exports core types from tish_core and provides console, Math,
+//! Re-exports core types from tishlang_core and provides console, Math,
 //! and other builtin functions for compiled Tish programs.
 
 #[cfg(feature = "regex")]
@@ -9,14 +9,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::fmt;
 use std::sync::OnceLock;
-use tish_builtins::helpers::extract_num;
+use tishlang_builtins::helpers::extract_num;
 #[cfg(feature = "fs")]
-use tish_builtins::helpers::make_error_value;
+use tishlang_builtins::helpers::make_error_value;
 
-pub use tish_core::Value;
+pub use tishlang_core::Value;
 
-// Re-export array methods from tish_builtins
-pub use tish_builtins::array::{
+// Re-export array methods from tishlang_builtins
+pub use tishlang_builtins::array::{
     push as array_push_impl,
     pop as array_pop,
     shift as array_shift,
@@ -45,8 +45,8 @@ pub use tish_builtins::array::{
     sort_numeric_desc as array_sort_numeric_desc,
 };
 
-// Re-export string methods from tish_builtins
-pub use tish_builtins::string::{
+// Re-export string methods from tishlang_builtins
+pub use tishlang_builtins::string::{
     index_of as string_index_of_impl,
     includes as string_includes_impl,
     slice as string_slice_impl,
@@ -128,7 +128,7 @@ pub fn number_to_fixed(n: &Value, digits: &Value) -> Value {
 
 /// Operators module for compound assignment operations
 pub mod ops {
-    use tish_core::Value;
+    use tishlang_core::Value;
 
     #[inline]
     pub fn add(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
@@ -232,7 +232,7 @@ pub mod ops {
     }
 }
 
-use tish_builtins::globals::{
+use tishlang_builtins::globals::{
     array_is_array as builtins_array_is_array,
     boolean as builtins_boolean,
     decode_uri as builtins_decode_uri,
@@ -246,7 +246,7 @@ use tish_builtins::globals::{
     object_values as builtins_object_values,
     string_from_char_code as builtins_string_from_char_code,
 };
-use tish_core::{
+use tishlang_core::{
     json_parse as core_json_parse,
     json_stringify as core_json_stringify,
 };
@@ -291,7 +291,7 @@ fn get_log_level() -> LogLevel {
 }
 
 fn format_args(args: &[Value]) -> String {
-    tish_core::format_values_for_console(args, tish_core::use_console_colors())
+    tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors())
 }
 
 pub fn console_debug(args: &[Value]) {
@@ -323,11 +323,11 @@ pub fn console_error(args: &[Value]) {
 }
 
 pub fn parse_int(args: &[Value]) -> Value {
-    tish_builtins::globals::parse_int(args)
+    tishlang_builtins::globals::parse_int(args)
 }
 
 pub fn parse_float(args: &[Value]) -> Value {
-    tish_builtins::globals::parse_float(args)
+    tishlang_builtins::globals::parse_float(args)
 }
 
 pub fn is_finite(args: &[Value]) -> Value {
@@ -350,8 +350,8 @@ pub fn encode_uri(args: &[Value]) -> Value {
     builtins_encode_uri(args)
 }
 
-// Math functions - use tish_builtins::math
-pub use tish_builtins::math::{
+// Math functions - use tishlang_builtins::math
+pub use tishlang_builtins::math::{
     abs as tish_math_abs_impl,
     sqrt as tish_math_sqrt_impl,
     floor as tish_math_floor_impl,
@@ -640,7 +640,7 @@ pub fn in_operator(key: &Value, obj: &Value) -> Value {
     Value::Bool(result)
 }
 
-// Object functions - delegate to tish_builtins::globals
+// Object functions - delegate to tishlang_builtins::globals
 pub fn object_assign(args: &[Value]) -> Value {
     builtins_object_assign(args)
 }
@@ -707,7 +707,7 @@ pub use native_promise::{await_promise, fetch_all_promise, fetch_async_promise, 
 
 // RegExp Support
 #[cfg(feature = "regex")]
-pub use tish_core::{TishRegExp, RegExpFlags};
+pub use tishlang_core::{TishRegExp, RegExpFlags};
 
 #[cfg(feature = "regex")]
 pub fn regexp_new(args: &[Value]) -> Value {
@@ -753,7 +753,7 @@ pub fn regexp_exec(re: &Value, input: &Value) -> Value {
 }
 
 #[cfg(feature = "regex")]
-fn regexp_exec_impl(re: &mut tish_core::TishRegExp, input: &str) -> Value {
+fn regexp_exec_impl(re: &mut tishlang_core::TishRegExp, input: &str) -> Value {
     use std::collections::HashMap;
 
     let start = if re.flags.global || re.flags.sticky {
@@ -895,7 +895,7 @@ pub fn string_match_regex(s: &Value, regexp: &Value) -> Value {
             }
         }
         Value::String(pattern) => {
-            match tish_core::TishRegExp::new(pattern, "") {
+            match tishlang_core::TishRegExp::new(pattern, "") {
                 Ok(mut re) => regexp_exec_impl(&mut re, input),
                 Err(_) => Value::Null,
             }
@@ -987,7 +987,7 @@ pub fn string_search_regex(s: &Value, regexp: &Value) -> Value {
             }
         }
         Value::String(pattern) => {
-            match tish_core::TishRegExp::new(pattern, "") {
+            match tishlang_core::TishRegExp::new(pattern, "") {
                 Ok(re) => match re.regex.find(input) {
                     Ok(Some(m)) => {
                         let char_index = input[..m.start()].chars().count();

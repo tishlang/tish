@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use tish_core::Value;
+use tishlang_core::Value;
 use crate::helpers::normalize_index;
 
 /// Byte offset -> character index.

@@ -1,13 +1,13 @@
 //! Global builtin functions with signature (args: &[Value]) -> Value.
 //!
-//! Used by both tish_vm (bytecode) and tish_runtime (compiled). Keeps tish_vm
-//! independent of tish_runtime.
+//! Used by both tishlang_vm (bytecode) and tishlang_runtime (compiled). Keeps tishlang_vm
+//! independent of tishlang_runtime.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use tish_core::{percent_decode, percent_encode, Value};
+use tishlang_core::{percent_decode, percent_encode, Value};
 
 /// Boolean(value) - coerce to bool
 pub fn boolean(args: &[Value]) -> Value {

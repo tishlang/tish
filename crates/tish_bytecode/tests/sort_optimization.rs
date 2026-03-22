@@ -1,9 +1,9 @@
 //! Verify arr.sort((a,b)=>a-b) compiles to ArraySortNumeric (opcode 31).
 
-use tish_bytecode::{compile, Opcode};
-use tish_parser::parse;
+use tishlang_bytecode::{compile, Opcode};
+use tishlang_parser::parse;
 
-fn chunk_contains_opcode(chunk: &tish_bytecode::Chunk, op: u8) -> bool {
+fn chunk_contains_opcode(chunk: &tishlang_bytecode::Chunk, op: u8) -> bool {
     if chunk.code.contains(&op) {
         return true;
     }

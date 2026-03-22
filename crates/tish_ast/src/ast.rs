@@ -325,7 +325,7 @@ pub enum Expr {
         children: Vec<JsxChild>,
         span: Span,
     },
-    /// Native module load: import { x } from 'tish:egui' → loads from tish_runtime
+    /// Native module load: import { x } from 'tish:egui' → loads from tishlang_runtime
     NativeModuleLoad {
         spec: Arc<str>,
         export_name: Arc<str>,

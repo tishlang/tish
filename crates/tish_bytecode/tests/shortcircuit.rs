@@ -1,10 +1,10 @@
 //! Verify && and || short-circuit (JumpIfFalse before evaluating right side).
 use std::path::Path;
-use tish_bytecode::{compile, compile_unoptimized, Opcode};
-use tish_compile::{merge_modules, resolve_project};
-use tish_parser::parse;
-use tish_opt;
-use tish_vm;
+use tishlang_bytecode::{compile, compile_unoptimized, Opcode};
+use tishlang_compile::{merge_modules, resolve_project};
+use tishlang_parser::parse;
+use tishlang_opt;
+use tishlang_vm;
 
 #[test]
 fn test_and_shortcircuit_emits_jump() {
@@ -21,7 +21,7 @@ fn test_and_shortcircuit_runs_unoptimized() {
     let source = "let x = null; let y = x != null && x.foo;";
     let program = parse(source).expect("parse");
     let chunk = compile_unoptimized(&program).expect("compile");
-    let result = tish_vm::run(&chunk);
+    let result = tishlang_vm::run(&chunk);
     assert!(result.is_ok(), "Should not throw (short-circuit avoids x.foo): {:?}", result.err());
 }
 
@@ -29,9 +29,9 @@ fn test_and_shortcircuit_runs_unoptimized() {
 fn test_and_shortcircuit_runs_optimized() {
     let source = "let x = null; let y = x != null && x.foo;";
     let program = parse(source).expect("parse");
-    let program = tish_opt::optimize(&program);
-    let chunk = tish_bytecode::compile(&program).expect("compile");
-    let result = tish_vm::run(&chunk);
+    let program = tishlang_opt::optimize(&program);
+    let chunk = tishlang_bytecode::compile(&program).expect("compile");
+    let result = tishlang_vm::run(&chunk);
     assert!(result.is_ok(), "Should not throw with peephole (short-circuit): {:?}", result.err());
 }
 
@@ -42,8 +42,8 @@ fn test_and_shortcircuit_via_resolve_project() {
     let project_root = path.parent().unwrap();
     let modules = resolve_project(&path, Some(project_root)).expect("resolve");
     let program = merge_modules(modules).expect("merge");
-    let program = tish_opt::optimize(&program); // Mirror CLI
+    let program = tishlang_opt::optimize(&program); // Mirror CLI
     let chunk = compile(&program).expect("compile");
-    let result = tish_vm::run(&chunk);
+    let result = tishlang_vm::run(&chunk);
     assert!(result.is_ok(), "Should not throw via resolve+merge+opt (CLI path): {:?}", result.err());
 }

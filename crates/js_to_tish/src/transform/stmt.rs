@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use oxc::ast::ast::Statement as OxcStmt;
 use oxc::semantic::Semantic;
-use tish_ast::{Statement, Span};
+use tishlang_ast::{Statement, Span};
 
 use super::expr;
 use crate::error::{ConvertError, ConvertErrorKind};
@@ -406,18 +406,18 @@ fn convert_import(
                     } else {
                         Some(Arc::from(local_name))
                     };
-                    specifiers.push(tish_ast::ImportSpecifier::Named {
+                    specifiers.push(tishlang_ast::ImportSpecifier::Named {
                         name: Arc::from(imported_name),
                         alias,
                     });
                 }
                 oxc::ast::ast::ImportDeclarationSpecifier::ImportDefaultSpecifier(ds) => {
-                    specifiers.push(tish_ast::ImportSpecifier::Default(Arc::from(
+                    specifiers.push(tishlang_ast::ImportSpecifier::Default(Arc::from(
                         ds.local.name.as_str(),
                     )));
                 }
                 oxc::ast::ast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(ns) => {
-                    specifiers.push(tish_ast::ImportSpecifier::Namespace(Arc::from(
+                    specifiers.push(tishlang_ast::ImportSpecifier::Namespace(Arc::from(
                         ns.local.name.as_str(),
                     )));
                 }
@@ -438,10 +438,10 @@ fn convert_export_default(
 ) -> Result<Statement, ConvertError> {
     let declaration = if let Some(expr) = e.declaration.as_expression() {
         let expr = expr::convert_expr(expr, ctx)?;
-        tish_ast::ExportDeclaration::Default(expr)
+        tishlang_ast::ExportDeclaration::Default(expr)
     } else if let oxc::ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(f) = &e.declaration {
         let stmt = convert_function_decl(f.as_ref(), ctx, span_util::stub_span())?;
-        tish_ast::ExportDeclaration::Named(Box::new(stmt))
+        tishlang_ast::ExportDeclaration::Named(Box::new(stmt))
     } else {
         return Err(ConvertError::new(ConvertErrorKind::Unsupported {
             what: "export default (this form)".into(),
@@ -462,7 +462,7 @@ fn convert_export_named(
     if let Some(decl) = &e.declaration {
         let stmt = convert_declaration(decl, ctx)?;
         Ok(Statement::Export {
-            declaration: Box::new(tish_ast::ExportDeclaration::Named(Box::new(stmt))),
+            declaration: Box::new(tishlang_ast::ExportDeclaration::Named(Box::new(stmt))),
             span,
         })
     } else {

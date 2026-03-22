@@ -1,21 +1,23 @@
 [package]
-name = "tish_runtime"
+name = "tishlang_runtime"
 version = "0.1.0"
 edition = "2021"
 description = "Minimal runtime for Tish compiled output"
 
+license-file = { workspace = true }
+repository = { workspace = true }
 [features]
 default = []
-http = ["tokio", "reqwest", "futures", "bytes", "tiny_http", "tish_core/regex"]
+http = ["tokio", "reqwest", "futures", "bytes", "tiny_http", "tishlang_core/regex"]
 fs = []
 process = []
-regex = ["tish_core/regex"]
+regex = ["tishlang_core/regex"]
 # WebSocket (JS-like API). Modular: import { WebSocket, Server } from 'tish:ws'
 ws = ["tokio", "tokio/net", "tokio/io-util", "tokio-tungstenite", "futures-util", "lazy_static"]
 
 [dependencies]
-tish_core = { path = "../tish_core" }
-tish_builtins = { path = "../tish_builtins" }
+tishlang_core = { path = "../tish_core" }
+tishlang_builtins = { path = "../tish_builtins" }
 tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "time", "sync"], optional = true }
 reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream"], optional = true }
 futures = { version = "0.3.32", optional = true }

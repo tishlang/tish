@@ -1,8 +1,10 @@
 [package]
-name = "tish_core"
+name = "tishlang_core"
 version = "0.1.0"
 edition = "2021"
 
+license-file = { workspace = true }
+repository = { workspace = true }
 [features]
 default = []
 regex = ["dep:fancy-regex"]

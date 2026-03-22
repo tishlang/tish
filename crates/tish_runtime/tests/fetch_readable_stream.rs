@@ -6,8 +6,8 @@ use std::net::TcpListener;
 use std::thread;
 use std::time::Duration;
 
-use tish_core::Value;
-use tish_runtime::{await_promise, fetch_promise};
+use tishlang_core::Value;
+use tishlang_runtime::{await_promise, fetch_promise};
 
 fn chunked_body_server(listener: TcpListener) {
     let (mut stream, _) = listener.accept().expect("accept");

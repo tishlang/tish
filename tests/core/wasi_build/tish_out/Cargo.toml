@@ -10,4 +10,4 @@ name = "tish_wasi_tish_out"
 path = "src/main.rs"
 
 [dependencies]
-tish_wasm_runtime = { path = "/Users/a_/Projects/tish/tish/crates/tish_wasm_runtime" }
+tishlang_wasm_runtime = { path = "/Users/a_/Projects/tish/tish/crates/tishlang_wasm_runtime" }

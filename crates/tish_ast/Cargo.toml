@@ -1,7 +1,9 @@
 [package]
-name = "tish_ast"
+name = "tishlang_ast"
 version = "0.1.0"
 edition = "2021"
 description = "Tish AST types and span info"
 
+license-file = { workspace = true }
+repository = { workspace = true }
 [dependencies]

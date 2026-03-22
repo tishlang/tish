@@ -1,12 +1,14 @@
 [package]
-name = "tish_builtins"
+name = "tishlang_builtins"
 version = "0.1.0"
 edition = "2021"
 
+license-file = { workspace = true }
+repository = { workspace = true }
 [dependencies]
 rand = "0.10.0"
-tish_core = { path = "../tish_core" }
+tishlang_core = { path = "../tish_core" }
 
 [features]
 default = []
-regex = ["tish_core/regex"]
+regex = ["tishlang_core/regex"]

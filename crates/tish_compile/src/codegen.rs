@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use tish_ast::{ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp};
+use tishlang_ast::{ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp};
 use crate::resolve::is_builtin_native_spec;
 use crate::types::{RustType, TypeContext};
 
@@ -191,19 +191,19 @@ impl UsageAnalyzer {
             Expr::JsxElement { props, children, .. } => {
                 for p in props {
                     match p {
-                        tish_ast::JsxProp::Attr { value: tish_ast::JsxAttrValue::Expr(e), .. } | tish_ast::JsxProp::Spread(e) => self.analyze_expr(e),
+                        tishlang_ast::JsxProp::Attr { value: tishlang_ast::JsxAttrValue::Expr(e), .. } | tishlang_ast::JsxProp::Spread(e) => self.analyze_expr(e),
                         _ => {}
                     }
                 }
                 for c in children {
-                    if let tish_ast::JsxChild::Expr(e) = c {
+                    if let tishlang_ast::JsxChild::Expr(e) = c {
                         self.analyze_expr(e);
                     }
                 }
             }
             Expr::JsxFragment { children, .. } => {
                 for c in children {
-                    if let tish_ast::JsxChild::Expr(e) = c {
+                    if let tishlang_ast::JsxChild::Expr(e) = c {
                         self.analyze_expr(e);
                     }
                 }
@@ -249,7 +249,7 @@ impl std::fmt::Display for CompileError {
 impl std::error::Error for CompileError {}
 
 fn program_uses_async(program: &Program) -> bool {
-    use tish_ast::Statement;
+    use tishlang_ast::Statement;
     fn stmt_has_async(s: &Statement) -> bool {
         match s {
             Statement::FunDecl { async_, .. } if *async_ => true,
@@ -311,12 +311,12 @@ fn program_uses_async(program: &Program) -> bool {
             Expr::TemplateLiteral { exprs, .. } => exprs.iter().any(expr_has_await),
             Expr::JsxElement { props, children, .. } => {
                 props.iter().any(|p| match p {
-                    tish_ast::JsxProp::Attr { value: tish_ast::JsxAttrValue::Expr(e), .. } | tish_ast::JsxProp::Spread(e) => expr_has_await(e),
+                    tishlang_ast::JsxProp::Attr { value: tishlang_ast::JsxAttrValue::Expr(e), .. } | tishlang_ast::JsxProp::Spread(e) => expr_has_await(e),
                     _ => false,
-                }) || children.iter().any(|c| matches!(c, tish_ast::JsxChild::Expr(e) if expr_has_await(e)))
+                }) || children.iter().any(|c| matches!(c, tishlang_ast::JsxChild::Expr(e) if expr_has_await(e)))
             }
             Expr::JsxFragment { children, .. } => {
-                children.iter().any(|c| matches!(c, tish_ast::JsxChild::Expr(e) if expr_has_await(e)))
+                children.iter().any(|c| matches!(c, tishlang_ast::JsxChild::Expr(e) if expr_has_await(e)))
             }
             _ => false,
         }
@@ -412,7 +412,7 @@ pub fn compile_project_full(
 }
 
 /// Compile with explicit feature flags. When features are provided, codegen uses them
-/// to emit builtins (process, serve, etc.) regardless of tish_compile's #[cfg] build.
+/// to emit builtins (process, serve, etc.) regardless of tishlang_compile's #[cfg] build.
 pub fn compile_with_features(
     program: &Program,
     project_root: Option<&Path>,
@@ -429,7 +429,7 @@ pub fn compile_with_native_modules(
     native_modules: &[crate::resolve::ResolvedNativeModule],
     optimize: bool,
 ) -> Result<String, CompileError> {
-    let program = if optimize { tish_opt::optimize(program) } else { program.clone() };
+    let program = if optimize { tishlang_opt::optimize(program) } else { program.clone() };
     let map: std::collections::HashMap<String, (String, String)> = native_modules
         .iter()
         .map(|m| (m.spec.clone(), (m.crate_name.clone(), m.export_fn.clone())))
@@ -507,7 +507,7 @@ impl Codegen {
         })
     }
 
-    /// Rust init for built-in modules (tish:fs, tish:http, tish:process) - uses tish_runtime.
+    /// Rust init for built-in modules (tish:fs, tish:http, tish:process) - uses tishlang_runtime.
     fn builtin_native_module_rust_init(&self, spec: &str, export_name: &str) -> Option<String> {
         let init = match spec {
             "tish:fs" if self.has_feature("fs") => match export_name {
@@ -542,8 +542,8 @@ impl Codegen {
             "tish:ws" if self.has_feature("ws") => match export_name {
                     "WebSocket" => Some("Value::Function(Rc::new(|args: &[Value]| tish_ws_client(args)))"),
                     "Server" => Some("Value::Function(Rc::new(|args: &[Value]| tish_ws_server_construct(args)))"),
-                    "wsSend" => Some("Value::Function(Rc::new(|args: &[Value]| Value::Bool(tish_runtime::ws_send_native(args.first().unwrap_or(&Value::Null), &args.get(1).map(|v| v.to_display_string()).unwrap_or_default()))))"),
-                    "wsBroadcast" => Some("Value::Function(Rc::new(|args: &[Value]| tish_runtime::ws_broadcast_native(args)))"),
+                    "wsSend" => Some("Value::Function(Rc::new(|args: &[Value]| Value::Bool(tishlang_runtime::ws_send_native(args.first().unwrap_or(&Value::Null), &args.get(1).map(|v| v.to_display_string()).unwrap_or_default()))))"),
+                    "wsBroadcast" => Some("Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::ws_broadcast_native(args)))"),
                     _ => None,
                 },
             _ => return None,
@@ -724,7 +724,7 @@ impl Codegen {
     /// Detect if an expression is a numeric sort comparator: (a, b) => a - b or (a, b) => b - a
     /// Returns Some(true) for ascending, Some(false) for descending, None if not detected
     fn detect_numeric_sort_comparator(expr: &Expr) -> Option<bool> {
-        use tish_ast::ArrowBody;
+        use tishlang_ast::ArrowBody;
         
         if let Expr::ArrowFunction { params, body, .. } = expr {
             // Must have exactly 2 params
@@ -768,25 +768,25 @@ impl Codegen {
         self.write("use std::collections::HashMap;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tish_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, TishError, Value};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, TishError, Value};\n");
         if self.has_feature("process") {
-            self.write("use tish_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd, process_exec as tish_process_exec};\n");
+            self.write("use tishlang_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd, process_exec as tish_process_exec};\n");
         }
         if self.has_feature("http") {
             if self.is_async {
-                self.write("use tish_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, promise_object as tish_promise_object, await_promise as tish_await_promise};\n");
+                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, promise_object as tish_promise_object, await_promise as tish_await_promise};\n");
             } else {
-                self.write("use tish_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve};\n");
+                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve};\n");
             }
         }
         if self.has_feature("fs") {
-            self.write("use tish_runtime::{read_file as tish_read_file, write_file as tish_write_file, file_exists as tish_file_exists, is_dir as tish_is_dir, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
+            self.write("use tishlang_runtime::{read_file as tish_read_file, write_file as tish_write_file, file_exists as tish_file_exists, is_dir as tish_is_dir, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
         }
         if self.has_feature("ws") {
-            self.write("use tish_runtime::{web_socket_client as tish_ws_client, web_socket_server_construct as tish_ws_server_construct};\n");
+            self.write("use tishlang_runtime::{web_socket_client as tish_ws_client, web_socket_server_construct as tish_ws_server_construct};\n");
         }
         if self.has_feature("regex") {
-            self.write("use tish_runtime::regexp_new;\n");
+            self.write("use tishlang_runtime::regexp_new;\n");
         }
         self.write("\n");
 
@@ -1277,7 +1277,7 @@ impl Codegen {
             Statement::Throw { value, .. } => {
                 let v = self.emit_expr(value)?;
                 self.writeln(&format!(
-                    "return Err(Box::new(tish_runtime::TishError::Throw({})) as Box<dyn std::error::Error>);",
+                    "return Err(Box::new(tishlang_runtime::TishError::Throw({})) as Box<dyn std::error::Error>);",
                     v
                 ));
             }
@@ -1299,11 +1299,11 @@ impl Codegen {
                     if let Some(param) = catch_param {
                         self.writeln("if let Err(e) = _try_result {");
                         self.indent += 1;
-                        self.writeln("match e.downcast::<tish_runtime::TishError>() {");
+                        self.writeln("match e.downcast::<tishlang_runtime::TishError>() {");
                         self.indent += 1;
                         self.writeln("Ok(tish_err) => {");
                         self.indent += 1;
-                        self.writeln("if let tish_runtime::TishError::Throw(v) = *tish_err {");
+                        self.writeln("if let tishlang_runtime::TishError::Throw(v) = *tish_err {");
                         self.writeln(&format!("let {} = v.clone();", Self::escape_ident(param.as_ref())));
                         self.emit_statement(catch_stmt)?;
                         self.writeln("} else { return Err(Box::new(tish_err)); }");
@@ -1719,15 +1719,15 @@ impl Codegen {
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             return Ok(format!(
-                                "tish_runtime::array_push(&{}, &[{}])",
+                                "tishlang_runtime::array_push(&{}, &[{}])",
                                 obj_expr, args_vec
                             ));
                         }
                         "pop" => {
-                            return Ok(format!("tish_runtime::array_pop(&{})", obj_expr));
+                            return Ok(format!("tishlang_runtime::array_pop(&{})", obj_expr));
                         }
                         "shift" => {
-                            return Ok(format!("tish_runtime::array_shift(&{})", obj_expr));
+                            return Ok(format!("tishlang_runtime::array_shift(&{})", obj_expr));
                         }
                         "unshift" => {
                             let args_vec = arg_exprs.iter()
@@ -1735,7 +1735,7 @@ impl Codegen {
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             return Ok(format!(
-                                "tish_runtime::array_unshift(&{}, &[{}])",
+                                "tishlang_runtime::array_unshift(&{}, &[{}])",
                                 obj_expr, args_vec
                             ));
                         }
@@ -1743,7 +1743,7 @@ impl Codegen {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let from = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tish_runtime::array_index_of(&_obj, &{}), Value::String(_) => tish_runtime::string_index_of(&_obj, &{}, &{}), _ => Value::Number(-1.0) }} }}",
+                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tishlang_runtime::array_index_of(&_obj, &{}), Value::String(_) => tishlang_runtime::string_index_of(&_obj, &{}, &{}), _ => Value::Number(-1.0) }} }}",
                                 obj_expr, search, search, from
                             ));
                         }
@@ -1751,28 +1751,28 @@ impl Codegen {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let from = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tish_runtime::array_includes(&_obj, &{}, &{}), Value::String(_) => tish_runtime::string_includes(&_obj, &{}, &{}), _ => Value::Bool(false) }} }}",
+                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tishlang_runtime::array_includes(&_obj, &{}, &{}), Value::String(_) => tishlang_runtime::string_includes(&_obj, &{}, &{}), _ => Value::Bool(false) }} }}",
                                 obj_expr, search, from, search, from
                             ));
                         }
                         "join" => {
                             let sep = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::array_join(&{}, &{})",
+                                "tishlang_runtime::array_join(&{}, &{})",
                                 obj_expr, sep
                             ));
                         }
                         "reverse" => {
-                            return Ok(format!("tish_runtime::array_reverse(&{})", obj_expr));
+                            return Ok(format!("tishlang_runtime::array_reverse(&{})", obj_expr));
                         }
                         "shuffle" => {
-                            return Ok(format!("tish_runtime::array_shuffle(&{})", obj_expr));
+                            return Ok(format!("tishlang_runtime::array_shuffle(&{})", obj_expr));
                         }
                         "slice" => {
                             let start = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let end = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tish_runtime::array_slice(&_obj, &{}, &{}), Value::String(_) => tish_runtime::string_slice(&_obj, &{}, &{}), _ => Value::Null }} }}",
+                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tishlang_runtime::array_slice(&_obj, &{}, &{}), Value::String(_) => tishlang_runtime::string_slice(&_obj, &{}, &{}), _ => Value::Null }} }}",
                                 obj_expr, start, end, start, end
                             ));
                         }
@@ -1782,7 +1782,7 @@ impl Codegen {
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             return Ok(format!(
-                                "tish_runtime::array_concat(&{}, &[{}])",
+                                "tishlang_runtime::array_concat(&{}, &[{}])",
                                 obj_expr, args_vec
                             ));
                         }
@@ -1791,37 +1791,37 @@ impl Codegen {
                             let start = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let end = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::string_substring(&{}, &{}, &{})",
+                                "tishlang_runtime::string_substring(&{}, &{}, &{})",
                                 obj_expr, start, end
                             ));
                         }
                         "split" => {
                             let sep = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::string_split(&{}, &{})",
+                                "tishlang_runtime::string_split(&{}, &{})",
                                 obj_expr, sep
                             ));
                         }
                         "trim" => {
-                            return Ok(format!("tish_runtime::string_trim(&{})", obj_expr));
+                            return Ok(format!("tishlang_runtime::string_trim(&{})", obj_expr));
                         }
                         "toUpperCase" => {
-                            return Ok(format!("tish_runtime::string_to_upper_case(&{})", obj_expr));
+                            return Ok(format!("tishlang_runtime::string_to_upper_case(&{})", obj_expr));
                         }
                         "toLowerCase" => {
-                            return Ok(format!("tish_runtime::string_to_lower_case(&{})", obj_expr));
+                            return Ok(format!("tishlang_runtime::string_to_lower_case(&{})", obj_expr));
                         }
                         "startsWith" => {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             return Ok(format!(
-                                "tish_runtime::string_starts_with(&{}, &{})",
+                                "tishlang_runtime::string_starts_with(&{}, &{})",
                                 obj_expr, search
                             ));
                         }
                         "endsWith" => {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             return Ok(format!(
-                                "tish_runtime::string_ends_with(&{}, &{})",
+                                "tishlang_runtime::string_ends_with(&{}, &{})",
                                 obj_expr, search
                             ));
                         }
@@ -1829,7 +1829,7 @@ impl Codegen {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             let replacement = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             return Ok(format!(
-                                "tish_runtime::string_replace(&{}, &{}, &{})",
+                                "tishlang_runtime::string_replace(&{}, &{}, &{})",
                                 obj_expr, search, replacement
                             ));
                         }
@@ -1837,35 +1837,35 @@ impl Codegen {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             let replacement = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             return Ok(format!(
-                                "tish_runtime::string_replace_all(&{}, &{}, &{})",
+                                "tishlang_runtime::string_replace_all(&{}, &{}, &{})",
                                 obj_expr, search, replacement
                             ));
                         }
                         "match" if cfg!(feature = "regex") => {
                             let regexp = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::string_match_regex(&{}, &{})",
+                                "tishlang_runtime::string_match_regex(&{}, &{})",
                                 obj_expr, regexp
                             ));
                         }
                         "charAt" => {
                             let idx = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             return Ok(format!(
-                                "tish_runtime::string_char_at(&{}, &{})",
+                                "tishlang_runtime::string_char_at(&{}, &{})",
                                 obj_expr, idx
                             ));
                         }
                         "charCodeAt" => {
                             let idx = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             return Ok(format!(
-                                "tish_runtime::string_char_code_at(&{}, &{})",
+                                "tishlang_runtime::string_char_code_at(&{}, &{})",
                                 obj_expr, idx
                             ));
                         }
                         "repeat" => {
                             let count = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             return Ok(format!(
-                                "tish_runtime::string_repeat(&{}, &{})",
+                                "tishlang_runtime::string_repeat(&{}, &{})",
                                 obj_expr, count
                             ));
                         }
@@ -1873,7 +1873,7 @@ impl Codegen {
                             let target_len = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let pad = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::string_pad_start(&{}, &{}, &{})",
+                                "tishlang_runtime::string_pad_start(&{}, &{}, &{})",
                                 obj_expr, target_len, pad
                             ));
                         }
@@ -1881,7 +1881,7 @@ impl Codegen {
                             let target_len = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let pad = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::string_pad_end(&{}, &{}, &{})",
+                                "tishlang_runtime::string_pad_end(&{}, &{}, &{})",
                                 obj_expr, target_len, pad
                             ));
                         }
@@ -1889,7 +1889,7 @@ impl Codegen {
                         "toFixed" => {
                             let digits = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             return Ok(format!(
-                                "tish_runtime::number_to_fixed(&{}, &{})",
+                                "tishlang_runtime::number_to_fixed(&{}, &{})",
                                 obj_expr, digits
                             ));
                         }
@@ -1897,14 +1897,14 @@ impl Codegen {
                         "map" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::array_map(&{}, &{})",
+                                "tishlang_runtime::array_map(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "filter" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::array_filter(&{}, &{})",
+                                "tishlang_runtime::array_filter(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
@@ -1912,42 +1912,42 @@ impl Codegen {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let initial = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::array_reduce(&{}, &{}, &{})",
+                                "tishlang_runtime::array_reduce(&{}, &{}, &{})",
                                 obj_expr, callback, initial
                             ));
                         }
                         "forEach" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::array_for_each(&{}, &{})",
+                                "tishlang_runtime::array_for_each(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "find" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::array_find(&{}, &{})",
+                                "tishlang_runtime::array_find(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "findIndex" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::array_find_index(&{}, &{})",
+                                "tishlang_runtime::array_find_index(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "some" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::array_some(&{}, &{})",
+                                "tishlang_runtime::array_some(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "every" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::array_every(&{}, &{})",
+                                "tishlang_runtime::array_every(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
@@ -1957,12 +1957,12 @@ impl Codegen {
                                 if let Some(ascending) = Self::detect_numeric_sort_comparator(comparator_expr) {
                                     if ascending {
                                         return Ok(format!(
-                                            "tish_runtime::array_sort_numeric_asc(&{})",
+                                            "tishlang_runtime::array_sort_numeric_asc(&{})",
                                             obj_expr
                                         ));
                                     } else {
                                         return Ok(format!(
-                                            "tish_runtime::array_sort_numeric_desc(&{})",
+                                            "tishlang_runtime::array_sort_numeric_desc(&{})",
                                             obj_expr
                                         ));
                                     }
@@ -1971,7 +1971,7 @@ impl Codegen {
                             // General case: use the callback
                             let comparator = arg_exprs.first().map(|c| format!("Some(&{})", c)).unwrap_or_else(|| "None".to_string());
                             return Ok(format!(
-                                "tish_runtime::array_sort(&{}, {})",
+                                "tishlang_runtime::array_sort(&{}, {})",
                                 obj_expr, comparator
                             ));
                         }
@@ -1988,21 +1988,21 @@ impl Codegen {
                                 "&[]".to_string()
                             };
                             return Ok(format!(
-                                "tish_runtime::array_splice(&{}, &{}, {}, {})",
+                                "tishlang_runtime::array_splice(&{}, &{}, {}, {})",
                                 obj_expr, start, delete_count, items
                             ));
                         }
                         "flat" => {
                             let depth = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(1.0)".to_string());
                             return Ok(format!(
-                                "tish_runtime::array_flat(&{}, &{})",
+                                "tishlang_runtime::array_flat(&{}, &{})",
                                 obj_expr, depth
                             ));
                         }
                         "flatMap" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tish_runtime::array_flat_map(&{}, &{})",
+                                "tishlang_runtime::array_flat_map(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
@@ -2056,11 +2056,11 @@ impl Codegen {
                 if *optional {
                     format!(
                         "{{ let o = {}.clone(); if matches!(o, Value::Null) {{ Value::Null }} else {{ \
-                         tish_runtime::get_prop(&o, {}) }} }}",
+                         tishlang_runtime::get_prop(&o, {}) }} }}",
                         obj, key
                     )
                 } else {
-                    format!("tish_runtime::get_prop(&{}, {})", obj, key)
+                    format!("tishlang_runtime::get_prop(&{}, {})", obj, key)
                 }
             }
             Expr::Index {
@@ -2074,11 +2074,11 @@ impl Codegen {
                 if *optional {
                     format!(
                         "{{ let o = {}.clone(); if matches!(o, Value::Null) {{ Value::Null }} else {{ \
-                         tish_runtime::get_index(&o, &{}) }} }}",
+                         tishlang_runtime::get_index(&o, &{}) }} }}",
                         obj, idx
                     )
                 } else {
-                    format!("tish_runtime::get_index(&{}, &{})", obj, idx)
+                    format!("tishlang_runtime::get_index(&{}, &{})", obj, idx)
                 }
             }
             Expr::Conditional {
@@ -2264,12 +2264,12 @@ impl Codegen {
                 };
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     format!(
-                        "{{ let _rhs = ({}).clone(); *{}.borrow_mut() = tish_runtime::ops::{}(&*{}.borrow(), &_rhs)?; (*{}.borrow()).clone() }}",
+                        "{{ let _rhs = ({}).clone(); *{}.borrow_mut() = tishlang_runtime::ops::{}(&*{}.borrow(), &_rhs)?; (*{}.borrow()).clone() }}",
                         val, n, op_fn, n, n
                     )
                 } else {
                     format!(
-                        "{{ let _rhs = ({}).clone(); {} = tish_runtime::ops::{}(&{}, &_rhs)?; {}.clone() }}",
+                        "{{ let _rhs = ({}).clone(); {} = tishlang_runtime::ops::{}(&{}, &_rhs)?; {}.clone() }}",
                         val, n, op_fn, n, n
                     )
                 }
@@ -2321,7 +2321,7 @@ impl Codegen {
                 let obj = self.emit_expr(object)?;
                 let val = self.emit_expr(value)?;
                 format!(
-                    "tish_runtime::set_prop(&({}), \"{}\", ({}).clone())",
+                    "tishlang_runtime::set_prop(&({}), \"{}\", ({}).clone())",
                     obj,
                     prop.as_ref(),
                     val
@@ -2332,7 +2332,7 @@ impl Codegen {
                 let idx = self.emit_expr(index)?;
                 let val = self.emit_expr(value)?;
                 format!(
-                    "tish_runtime::set_index(&({}), &({}), ({}).clone())",
+                    "tishlang_runtime::set_index(&({}), &({}), ({}).clone())",
                     obj,
                     idx,
                     val
@@ -2476,19 +2476,19 @@ impl Codegen {
             Expr::JsxElement { props, children, .. } => {
                 for p in props {
                     match p {
-                        tish_ast::JsxProp::Attr { value: tish_ast::JsxAttrValue::Expr(e), .. } | tish_ast::JsxProp::Spread(e) => Self::collect_expr_idents(e, idents),
+                        tishlang_ast::JsxProp::Attr { value: tishlang_ast::JsxAttrValue::Expr(e), .. } | tishlang_ast::JsxProp::Spread(e) => Self::collect_expr_idents(e, idents),
                         _ => {}
                     }
                 }
                 for c in children {
-                    if let tish_ast::JsxChild::Expr(e) = c {
+                    if let tishlang_ast::JsxChild::Expr(e) = c {
                         Self::collect_expr_idents(e, idents);
                     }
                 }
             }
             Expr::JsxFragment { children, .. } => {
                 for c in children {
-                    if let tish_ast::JsxChild::Expr(e) = c {
+                    if let tishlang_ast::JsxChild::Expr(e) = c {
                         Self::collect_expr_idents(e, idents);
                     }
                 }
@@ -2664,25 +2664,25 @@ impl Codegen {
             Expr::JsxElement { props, children, .. } => {
                 for p in props {
                     match p {
-                        tish_ast::JsxProp::Attr {
-                            value: tish_ast::JsxAttrValue::Expr(e),
+                        tishlang_ast::JsxProp::Attr {
+                            value: tishlang_ast::JsxAttrValue::Expr(e),
                             ..
                         }
-                        | tish_ast::JsxProp::Spread(e) => {
+                        | tishlang_ast::JsxProp::Spread(e) => {
                             Self::collect_assigned_idents_in_expr(e, names);
                         }
                         _ => {}
                     }
                 }
                 for c in children {
-                    if let tish_ast::JsxChild::Expr(e) = c {
+                    if let tishlang_ast::JsxChild::Expr(e) = c {
                         Self::collect_assigned_idents_in_expr(e, names);
                     }
                 }
             }
             Expr::JsxFragment { children, .. } => {
                 for c in children {
-                    if let tish_ast::JsxChild::Expr(e) = c {
+                    if let tishlang_ast::JsxChild::Expr(e) = c {
                         Self::collect_assigned_idents_in_expr(e, names);
                     }
                 }
@@ -2725,7 +2725,7 @@ impl Codegen {
     /// Collect variable names that are both captured and mutated by a closure body.
     /// block_vars: vars declared in the enclosing block (candidates for mutation).
     fn collect_mutated_captures_from_closure(
-        params: &[tish_ast::TypedParam],
+        params: &[tishlang_ast::TypedParam],
         body: &Statement,
         block_vars: &HashSet<String>,
         result: &mut HashSet<String>,
@@ -2754,7 +2754,7 @@ impl Codegen {
     }
 
     fn collect_mutated_captures_from_arrow(
-        params: &[tish_ast::TypedParam],
+        params: &[tishlang_ast::TypedParam],
         body: &ArrowBody,
         block_vars: &HashSet<String>,
         result: &mut HashSet<String>,
@@ -3055,8 +3055,8 @@ impl Codegen {
 
     fn emit_arrow_function(
         &mut self,
-        params: &[tish_ast::TypedParam],
-        body: &tish_ast::ArrowBody,
+        params: &[tishlang_ast::TypedParam],
+        body: &tishlang_ast::ArrowBody,
     ) -> Result<String, CompileError> {
         // Build the arrow function as a Value::Function closure
         let mut code = String::new();
@@ -3186,11 +3186,11 @@ impl Codegen {
 
         // Emit body based on type
         match body {
-            tish_ast::ArrowBody::Expr(expr) => {
+            tishlang_ast::ArrowBody::Expr(expr) => {
                 let expr_code = self.emit_expr(expr)?;
                 code.push_str(&format!("        {}\n", expr_code));
             }
-            tish_ast::ArrowBody::Block(block_stmt) => {
+            tishlang_ast::ArrowBody::Block(block_stmt) => {
                 // For block bodies, emit the block statement
                 self.function_scope_stack.push(Vec::new());
                 
@@ -3284,11 +3284,11 @@ impl Codegen {
         span: Span,
     ) -> Result<String, CompileError> {
         Ok(match op {
-            BinOp::Add => format!("tish_runtime::ops::add(&{}, &{}).unwrap_or(Value::Null)", l, r),
-            BinOp::Sub => format!("tish_runtime::ops::sub(&{}, &{}).unwrap_or(Value::Null)", l, r),
-            BinOp::Mul => format!("tish_runtime::ops::mul(&{}, &{}).unwrap_or(Value::Null)", l, r),
-            BinOp::Div => format!("tish_runtime::ops::div(&{}, &{}).unwrap_or(Value::Null)", l, r),
-            BinOp::Mod => format!("tish_runtime::ops::modulo(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Add => format!("tishlang_runtime::ops::add(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Sub => format!("tishlang_runtime::ops::sub(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Mul => format!("tishlang_runtime::ops::mul(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Div => format!("tishlang_runtime::ops::div(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Mod => format!("tishlang_runtime::ops::modulo(&{}, &{}).unwrap_or(Value::Null)", l, r),
             BinOp::Pow => format!(
                 "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
                  let Value::Number(b) = &({}) else {{ panic!() }}; a.powf(*b) }})",
@@ -3296,10 +3296,10 @@ impl Codegen {
             ),
             BinOp::StrictEq => format!("Value::Bool({}.strict_eq(&{}))", l, r),
             BinOp::StrictNe => format!("Value::Bool(!{}.strict_eq(&{}))", l, r),
-            BinOp::Lt => format!("tish_runtime::ops::lt(&{}, &{})", l, r),
-            BinOp::Le => format!("tish_runtime::ops::le(&{}, &{})", l, r),
-            BinOp::Gt => format!("tish_runtime::ops::gt(&{}, &{})", l, r),
-            BinOp::Ge => format!("tish_runtime::ops::ge(&{}, &{})", l, r),
+            BinOp::Lt => format!("tishlang_runtime::ops::lt(&{}, &{})", l, r),
+            BinOp::Le => format!("tishlang_runtime::ops::le(&{}, &{})", l, r),
+            BinOp::Gt => format!("tishlang_runtime::ops::gt(&{}, &{})", l, r),
+            BinOp::Ge => format!("tishlang_runtime::ops::ge(&{}, &{})", l, r),
             BinOp::And => format!("Value::Bool({}.is_truthy() && {}.is_truthy())", l, r),
             BinOp::Or => format!("Value::Bool({}.is_truthy() || {}.is_truthy())", l, r),
             BinOp::BitAnd => Self::emit_bitwise_binop(l, r, "&"),

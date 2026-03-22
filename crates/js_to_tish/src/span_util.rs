@@ -1,7 +1,7 @@
 //! Span conversion from OXC offsets to Tish (line, col).
 
 use oxc::span::GetSpan;
-use tish_ast::Span;
+use tishlang_ast::Span;
 
 /// Convert OXC span (byte start/end) to Tish Span (line, col).
 /// Uses source text to compute line/column from offsets.

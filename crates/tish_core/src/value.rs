@@ -151,7 +151,7 @@ pub enum Value {
     Function(NativeFn),
     #[cfg(feature = "regex")]
     RegExp(Rc<RefCell<TishRegExp>>),
-    /// Promise (for native compile). Interpreter uses tish_eval::Value::Promise.
+    /// Promise (for native compile). Interpreter uses tishlang_eval::Value::Promise.
     Promise(Arc<dyn TishPromise>),
     /// Opaque handle to a native Rust type (e.g. Polars DataFrame).
     Opaque(Arc<dyn TishOpaque>),

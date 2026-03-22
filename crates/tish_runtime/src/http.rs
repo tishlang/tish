@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::Write;
 use std::rc::Rc;
 use std::sync::Arc;
-use tish_core::Value;
+use tishlang_core::Value;
 use tokio::runtime::Runtime;
 
 thread_local! {

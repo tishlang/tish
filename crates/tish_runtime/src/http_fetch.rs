@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use futures::Stream;
 use futures::StreamExt;
-use tish_core::{NativeFn, TishOpaque, TishPromise, Value};
+use tishlang_core::{NativeFn, TishOpaque, TishPromise, Value};
 
 use crate::http::{build_error_response, extract_body, extract_headers, extract_method};
 
@@ -115,7 +115,7 @@ impl TishPromise for JsonTextPromise {
         if let Some(rx) = rx {
             let r = crate::http::block_on_http(rx);
             match r {
-                Ok(Ok(s)) => match tish_core::json_parse(&s) {
+                Ok(Ok(s)) => match tishlang_core::json_parse(&s) {
                     Ok(v) => Ok(v),
                     Err(e) => Err({
                         let mut obj = HashMap::new();

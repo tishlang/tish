@@ -4,9 +4,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use tish_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, TishError, Value};
-use tish_runtime::{read_file as tish_read_file, write_file as tish_write_file, file_exists as tish_file_exists, read_dir as tish_read_dir, mkdir as tish_mkdir};
-use tish_runtime::regexp_new;
+use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, TishError, Value};
+use tishlang_runtime::{read_file as tish_read_file, write_file as tish_write_file, file_exists as tish_file_exists, read_dir as tish_read_dir, mkdir as tish_mkdir};
+use tishlang_runtime::regexp_new;
 
 fn main() {
     if let Err(e) = run() {
@@ -83,17 +83,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         match f { Value::Function(cb) => cb(&[Value::String("content".into()).clone()]), _ => panic!("Not a function") }
     });
     ({
-        let f = &tish_runtime::get_prop(&console, "log");
+        let f = &tishlang_runtime::get_prop(&console, "log");
         match f { Value::Function(cb) => cb(&[Value::String("files:".into()).clone(), files.clone()]), _ => panic!("Not a function") }
     });
     {
         let mut i = Value::Number(0_f64);
 'for_loop_0: loop {
-            if !Value::Bool({ let Value::Number(a) = &(i) else { panic!("cmp: expected number left") }; let Value::Number(b) = &(tish_runtime::get_prop(&files, "length")) else { panic!("cmp: expected number right") }; *a < *b }).is_truthy() { break; }
+            if !Value::Bool({ let Value::Number(a) = &(i) else { panic!("cmp: expected number left") }; let Value::Number(b) = &(tishlang_runtime::get_prop(&files, "length")) else { panic!("cmp: expected number right") }; *a < *b }).is_truthy() { break; }
             {
-                let mut f = (tish_runtime::get_index(&files, &i)).clone();
+                let mut f = (tishlang_runtime::get_index(&files, &i)).clone();
                 ({
-                    let f = &tish_runtime::get_prop(&console, "log");
+                    let f = &tishlang_runtime::get_prop(&console, "log");
                     match f { Value::Function(cb) => cb(&[Value::String("f:".into()).clone(), f.clone()]), _ => panic!("Not a function") }
                 });
                 let mut raw = ({
@@ -105,13 +105,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 } }.clone()]), _ => panic!("Not a function") }
                 });
                 ({
-                    let f = &tish_runtime::get_prop(&console, "log");
+                    let f = &tishlang_runtime::get_prop(&console, "log");
                     match f { Value::Function(cb) => cb(&[Value::String("raw is string:".into()).clone(), Value::String(match &raw { Value::Number(_) => "number".into(), Value::String(_) => "string".into(), Value::Bool(_) => "boolean".into(), Value::Null => "object".into(), Value::Array(_) => "object".into(), Value::Object(_) => "object".into(), Value::Function(_) => "function".into(), _ => "object".into() }).clone()]), _ => panic!("Not a function") }
                 });
-                let mut parts = tish_runtime::string_split(&raw, &Value::String("---".into()));
+                let mut parts = tishlang_runtime::string_split(&raw, &Value::String("---".into()));
                 ({
-                    let f = &tish_runtime::get_prop(&console, "log");
-                    match f { Value::Function(cb) => cb(&[Value::String("parts.length:".into()).clone(), tish_runtime::get_prop(&parts, "length").clone()]), _ => panic!("Not a function") }
+                    let f = &tishlang_runtime::get_prop(&console, "log");
+                    match f { Value::Function(cb) => cb(&[Value::String("parts.length:".into()).clone(), tishlang_runtime::get_prop(&parts, "length").clone()]), _ => panic!("Not a function") }
                 });
                 break 'for_loop_0;
             }

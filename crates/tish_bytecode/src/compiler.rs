@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tish_ast::{
+use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, DestructElement, DestructPattern, Expr,
     JsxAttrValue, JsxChild, JsxProp, Literal, MemberProp, ObjectProp, Program, Span, Statement,
 };

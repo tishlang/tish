@@ -1,7 +1,7 @@
 //! Bytecode chunk: instructions and constants.
 
 use std::sync::Arc;
-use tish_core::Value;
+use tishlang_core::Value;
 
 /// A constant in the constants table.
 #[derive(Debug, Clone)]

@@ -9,7 +9,7 @@ pub use link::link_to_binary;
 
 use std::path::Path;
 
-use tish_bytecode::Chunk;
+use tishlang_bytecode::Chunk;
 
 /// Error from Cranelift compilation.
 #[derive(Debug)]
@@ -26,7 +26,7 @@ impl std::fmt::Display for CraneliftError {
 impl std::error::Error for CraneliftError {}
 
 /// Compile a bytecode chunk to a native binary.
-/// `features` are passed to tish_cranelift_runtime (e.g. fs, process, http for built-in modules).
+/// `features` are passed to tishlang_cranelift_runtime (e.g. fs, process, http for built-in modules).
 pub fn compile_chunk_to_native(
     chunk: &Chunk,
     output_path: &Path,

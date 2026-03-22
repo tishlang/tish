@@ -68,12 +68,12 @@ fn diag_range(line: u32, col: u32, text: &str) -> Range {
 
 fn publish_parse_and_lint(client: &Client, uri: Url, text: &str) {
     let mut diags = Vec::new();
-    match tish_parser::parse(text) {
+    match tishlang_parser::parse(text) {
         Ok(program) => {
-            for d in tish_lint::lint_program(&program) {
+            for d in tishlang_lint::lint_program(&program) {
                 let sev = match d.severity {
-                    tish_lint::Severity::Error => DiagnosticSeverity::ERROR,
-                    tish_lint::Severity::Warning => DiagnosticSeverity::WARNING,
+                    tishlang_lint::Severity::Error => DiagnosticSeverity::ERROR,
+                    tishlang_lint::Severity::Warning => DiagnosticSeverity::WARNING,
                 };
                 diags.push(Diagnostic {
                     range: diag_range(d.line.saturating_sub(1), d.col.saturating_sub(1), text),
@@ -200,17 +200,17 @@ impl LanguageServer for Backend {
             })
             .collect();
 
-        if let Ok(program) = tish_parser::parse(&text) {
+        if let Ok(program) = tishlang_parser::parse(&text) {
             for s in &program.statements {
                 match s {
-                    tish_ast::Statement::FunDecl { name, .. } => {
+                    tishlang_ast::Statement::FunDecl { name, .. } => {
                         items.push(CompletionItem {
                             label: name.to_string(),
                             kind: Some(CompletionItemKind::FUNCTION),
                             ..Default::default()
                         });
                     }
-                    tish_ast::Statement::VarDecl { name, .. } => {
+                    tishlang_ast::Statement::VarDecl { name, .. } => {
                         items.push(CompletionItem {
                             label: name.to_string(),
                             kind: Some(CompletionItemKind::VARIABLE),
@@ -247,7 +247,7 @@ impl LanguageServer for Backend {
         let Some(text) = text else {
             return Ok(None);
         };
-        let Ok(program) = tish_parser::parse(&text) else {
+        let Ok(program) = tishlang_parser::parse(&text) else {
             return Ok(None);
         };
 
@@ -274,7 +274,7 @@ impl LanguageServer for Backend {
         let Some(text) = text else {
             return Ok(None);
         };
-        let Ok(program) = tish_parser::parse(&text) else {
+        let Ok(program) = tishlang_parser::parse(&text) else {
             return Ok(None);
         };
 
@@ -293,7 +293,7 @@ impl LanguageServer for Backend {
 
         if let Some(ref base) = path {
             for s in &program.statements {
-                if let tish_ast::Statement::Import {
+                if let tishlang_ast::Statement::Import {
                     specifiers,
                     from,
                     ..
@@ -301,10 +301,10 @@ impl LanguageServer for Backend {
                 {
                     for sp in specifiers {
                         let (imported, local) = match sp {
-                            tish_ast::ImportSpecifier::Named { name, alias } => {
+                            tishlang_ast::ImportSpecifier::Named { name, alias } => {
                                 (name.as_ref(), alias.as_ref().map(|a| a.as_ref()).unwrap_or(name.as_ref()))
                             }
-                            tish_ast::ImportSpecifier::Default(n) => (n.as_ref(), n.as_ref()),
+                            tishlang_ast::ImportSpecifier::Default(n) => (n.as_ref(), n.as_ref()),
                             _ => continue,
                         };
                         if local != word.as_str() {
@@ -324,7 +324,7 @@ impl LanguageServer for Backend {
                         if let Ok(can) = target.canonicalize() {
                             if let Ok(u) = Url::from_file_path(&can) {
                                 if let Ok(src) = std::fs::read_to_string(&can) {
-                                    if let Ok(prog) = tish_parser::parse(&src) {
+                                    if let Ok(prog) = tishlang_parser::parse(&src) {
                                         if let Some(loc) =
                                             find_export(&prog, imported, &u, &src)
                                         {
@@ -351,7 +351,7 @@ impl LanguageServer for Backend {
         let Some(text) = text else {
             return Ok(None);
         };
-        match tish_fmt::format_source(&text) {
+        match tishlang_fmt::format_source(&text) {
             Ok(formatted) => {
                 let lines = text.lines().count() as u32;
                 let last_line = text.lines().last().map(|l| l.len() as u32).unwrap_or(0);
@@ -396,7 +396,7 @@ impl LanguageServer for Backend {
                 let Ok(src) = std::fs::read_to_string(path) else {
                     continue;
                 };
-                let Ok(program) = tish_parser::parse(&src) else {
+                let Ok(program) = tishlang_parser::parse(&src) else {
                     continue;
                 };
                 let Ok(uri) = Url::from_file_path(path) else {
@@ -412,14 +412,14 @@ impl LanguageServer for Backend {
 }
 
 fn collect_workspace_syms(
-    s: &tish_ast::Statement,
+    s: &tishlang_ast::Statement,
     text: &str,
     uri: &Url,
     query: &str,
     out: &mut Vec<SymbolInformation>,
 ) {
     match s {
-        tish_ast::Statement::FunDecl { name, span, .. } => {
+        tishlang_ast::Statement::FunDecl { name, span, .. } => {
             if name.to_lowercase().contains(query) {
                 out.push(SymbolInformation {
                     name: name.to_string(),
@@ -434,7 +434,7 @@ fn collect_workspace_syms(
                 });
             }
         }
-        tish_ast::Statement::VarDecl { name, span, .. } => {
+        tishlang_ast::Statement::VarDecl { name, span, .. } => {
             if name.to_lowercase().contains(query) {
                 out.push(SymbolInformation {
                     name: name.to_string(),
@@ -449,7 +449,7 @@ fn collect_workspace_syms(
                 });
             }
         }
-        tish_ast::Statement::Block { statements, .. } => {
+        tishlang_ast::Statement::Block { statements, .. } => {
             for x in statements {
                 collect_workspace_syms(x, text, uri, query, out);
             }
@@ -459,27 +459,27 @@ fn collect_workspace_syms(
 }
 
 fn find_export(
-    program: &tish_ast::Program,
+    program: &tishlang_ast::Program,
     name: &str,
     uri: &Url,
     text: &str,
 ) -> Option<Location> {
     for s in &program.statements {
         match s {
-            tish_ast::Statement::FunDecl { name: n, span, .. } if n.as_ref() == name => {
+            tishlang_ast::Statement::FunDecl { name: n, span, .. } if n.as_ref() == name => {
                 return Some(Location {
                     uri: uri.clone(),
                     range: span_to_range(span, text),
                 });
             }
-            tish_ast::Statement::VarDecl { name: n, span, .. } if n.as_ref() == name => {
+            tishlang_ast::Statement::VarDecl { name: n, span, .. } if n.as_ref() == name => {
                 return Some(Location {
                     uri: uri.clone(),
                     range: span_to_range(span, text),
                 });
             }
-            tish_ast::Statement::Export { declaration, .. } => match declaration.as_ref() {
-                tish_ast::ExportDeclaration::Named(inner) => {
+            tishlang_ast::Statement::Export { declaration, .. } => match declaration.as_ref() {
+                tishlang_ast::ExportDeclaration::Named(inner) => {
                     if let Some(loc) = find_decl_in_stmt(inner, name, uri, text) {
                         return Some(loc);
                     }
@@ -493,21 +493,21 @@ fn find_export(
 }
 
 fn find_decl_in_stmt(
-    s: &tish_ast::Statement,
+    s: &tishlang_ast::Statement,
     word: &str,
     uri: &Url,
     text: &str,
 ) -> Option<Location> {
     match s {
-        tish_ast::Statement::FunDecl { name, span, .. } if name.as_ref() == word => Some(Location {
+        tishlang_ast::Statement::FunDecl { name, span, .. } if name.as_ref() == word => Some(Location {
             uri: uri.clone(),
             range: span_to_range(span, text),
         }),
-        tish_ast::Statement::VarDecl { name, span, .. } if name.as_ref() == word => Some(Location {
+        tishlang_ast::Statement::VarDecl { name, span, .. } if name.as_ref() == word => Some(Location {
             uri: uri.clone(),
             range: span_to_range(span, text),
         }),
-        tish_ast::Statement::Block { statements, .. } => {
+        tishlang_ast::Statement::Block { statements, .. } => {
             for x in statements {
                 if let Some(l) = find_decl_in_stmt(x, word, uri, text) {
                     return Some(l);
@@ -519,7 +519,7 @@ fn find_decl_in_stmt(
     }
 }
 
-fn span_to_range(span: &tish_ast::Span, _text: &str) -> Range {
+fn span_to_range(span: &tishlang_ast::Span, _text: &str) -> Range {
     Range {
         start: pos(span.start.0.saturating_sub(1) as u32, span.start.1.saturating_sub(1) as u32),
         end: pos(span.end.0.saturating_sub(1) as u32, span.end.1.saturating_sub(1) as u32),
@@ -550,12 +550,12 @@ fn is_ident_char(c: char) -> bool {
 }
 
 fn doc_symbol_stmt(
-    s: &tish_ast::Statement,
+    s: &tishlang_ast::Statement,
     text: &str,
     out: &mut Vec<tower_lsp::lsp_types::DocumentSymbol>,
 ) {
     match s {
-        tish_ast::Statement::FunDecl {
+        tishlang_ast::Statement::FunDecl {
             name,
             span,
             body,
@@ -578,7 +578,7 @@ fn doc_symbol_stmt(
                 },
             });
         }
-        tish_ast::Statement::VarDecl { name, span, .. } => {
+        tishlang_ast::Statement::VarDecl { name, span, .. } => {
             out.push(tower_lsp::lsp_types::DocumentSymbol {
                 name: name.to_string(),
                 detail: None,
@@ -590,7 +590,7 @@ fn doc_symbol_stmt(
                 children: None,
             });
         }
-        tish_ast::Statement::Block { statements, .. } => {
+        tishlang_ast::Statement::Block { statements, .. } => {
             for x in statements {
                 doc_symbol_stmt(x, text, out);
             }
@@ -600,12 +600,12 @@ fn doc_symbol_stmt(
 }
 
 fn collect_child_syms(
-    s: &tish_ast::Statement,
+    s: &tishlang_ast::Statement,
     text: &str,
     out: &mut Vec<tower_lsp::lsp_types::DocumentSymbol>,
 ) {
     match s {
-        tish_ast::Statement::Block { statements, .. } => {
+        tishlang_ast::Statement::Block { statements, .. } => {
             for x in statements {
                 doc_symbol_stmt(x, text, out);
             }

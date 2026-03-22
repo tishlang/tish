@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tish_ast::TypeAnnotation;
+use tishlang_ast::TypeAnnotation;
 
 /// Concrete Rust type representation for code generation.
 #[derive(Debug, Clone, PartialEq)]

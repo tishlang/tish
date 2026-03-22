@@ -167,7 +167,7 @@ fn tish_bin() -> PathBuf {
 #[test]
 fn test_tish_version_flag() {
     let bin = tish_bin();
-    assert!(bin.exists(), "tish binary not found. Run `cargo build -p tish` first.");
+    assert!(bin.exists(), "tish binary not found. Run `cargo build -p tishlang` first.");
     let out = Command::new(&bin).arg("-V").output().expect("run tish -V");
     assert!(out.status.success(), "tish -V failed: {}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -189,7 +189,7 @@ fn test_async_await_parse() {
     let path = workspace_root().join("examples").join("async-await").join("src").join("main.tish");
     if path.exists() {
         let source = std::fs::read_to_string(&path).unwrap();
-        let result = tish_parser::parse(&source);
+        let result = tishlang_parser::parse(&source);
         assert!(result.is_ok(), "Parse failed for {}: {:?}", path.display(), result.err());
     }
 }
@@ -279,8 +279,8 @@ fn test_async_parallel_vs_sequential_timing() {
     );
 }
 
-/// Run async-await example via tish_eval (same path as `tish run`).
-/// Ignored: tish_eval::run() is synchronous and does not run the event loop.
+/// Run async-await example via tishlang_eval (same path as `tish run`).
+/// Ignored: tishlang_eval::run() is synchronous and does not run the event loop.
 #[test]
 #[cfg(feature = "http")]
 #[ignore = "requires async runtime; use test_async_await_compile_via_binary for CI"]
@@ -288,13 +288,13 @@ fn test_async_await_run() {
     let path = workspace_root().join("examples").join("async-await").join("src").join("main.tish");
     if path.exists() {
         let source = std::fs::read_to_string(&path).unwrap();
-        let result = tish_eval::run(&source);
+        let result = tishlang_eval::run(&source);
         assert!(result.is_ok(), "Run failed for {}: {:?}", path.display(), result.err());
     }
 }
 
 /// Run Promise and setTimeout module tests (require http feature).
-/// Ignored: tish_eval::run() does not run the event loop.
+/// Ignored: tishlang_eval::run() does not run the event loop.
 #[test]
 #[cfg(feature = "http")]
 #[ignore = "requires async runtime"]
@@ -303,7 +303,7 @@ fn test_promise_and_settimeout() {
         let path = workspace_root().join("tests").join("modules").join(format!("{}.tish", name));
         if path.exists() {
             let source = std::fs::read_to_string(&path).unwrap();
-            let result = tish_eval::run(&source);
+            let result = tishlang_eval::run(&source);
             assert!(
                 result.is_ok(),
                 "Failed to run {}: {:?}",
@@ -315,7 +315,7 @@ fn test_promise_and_settimeout() {
 }
 
 /// Combined validation: async/await + Promise + setTimeout + multiple HTTP requests.
-/// Ignored: tish_eval::run() does not run the event loop.
+/// Ignored: tishlang_eval::run() does not run the event loop.
 #[test]
 #[cfg(feature = "http")]
 #[ignore = "requires async runtime"]
@@ -326,7 +326,7 @@ fn test_async_promise_settimeout_combined() {
         .join("async_promise_settimeout.tish");
     if path.exists() {
         let source = std::fs::read_to_string(&path).unwrap();
-        let result = tish_eval::run(&source);
+        let result = tishlang_eval::run(&source);
         assert!(
             result.is_ok(),
             "Failed to run async_promise_settimeout: {:?}",
@@ -343,11 +343,11 @@ fn test_vm_date_now() {
         return;
     }
     // Library path
-    let modules = tish_compile::resolve_project(&path, path.parent()).expect("resolve");
-    tish_compile::detect_cycles(&modules).expect("cycles");
-    let program = tish_compile::merge_modules(modules).expect("merge");
-    let chunk = tish_bytecode::compile(&program).expect("compile");
-    let result = tish_vm::run(&chunk);
+    let modules = tishlang_compile::resolve_project(&path, path.parent()).expect("resolve");
+    tishlang_compile::detect_cycles(&modules).expect("cycles");
+    let program = tishlang_compile::merge_modules(modules).expect("merge");
+    let chunk = tishlang_bytecode::compile(&program).expect("compile");
+    let result = tishlang_vm::run(&chunk);
     assert!(result.is_ok(), "VM run (library) failed: {:?}", result.err());
     // Binary path - same flow as `tish run <file>`
     let bin = tish_bin();
@@ -370,9 +370,9 @@ fn test_vm_date_now() {
 #[test]
 fn test_vm_index_assign_direct() {
     let source = r#"let arr = [1, 2, 3]; arr[1] = 99; console.log(arr[1]);"#;
-    let program = tish_parser::parse(source).expect("parse");
-    let chunk = tish_bytecode::compile(&program).expect("compile");
-    let result = tish_vm::run(&chunk);
+    let program = tishlang_parser::parse(source).expect("parse");
+    let chunk = tishlang_bytecode::compile(&program).expect("compile");
+    let result = tishlang_vm::run(&chunk);
     assert!(result.is_ok(), "VM IndexAssign failed: {:?}", result.err());
 }
 
@@ -380,11 +380,11 @@ fn test_vm_index_assign_direct() {
 #[test]
 fn test_vm_index_assign_via_resolve() {
     let path = workspace_root().join("tests").join("core").join("array_sort_minimal.tish");
-    let modules = tish_compile::resolve_project(&path, path.parent()).expect("resolve");
-    tish_compile::detect_cycles(&modules).expect("cycles");
-    let program = tish_compile::merge_modules(modules).expect("merge");
-    let chunk = tish_bytecode::compile(&program).expect("compile");
-    let result = tish_vm::run(&chunk);
+    let modules = tishlang_compile::resolve_project(&path, path.parent()).expect("resolve");
+    tishlang_compile::detect_cycles(&modules).expect("cycles");
+    let program = tishlang_compile::merge_modules(modules).expect("merge");
+    let chunk = tishlang_bytecode::compile(&program).expect("compile");
+    let result = tishlang_vm::run(&chunk);
     assert!(result.is_ok(), "VM IndexAssign via resolve failed: {:?}", result.err());
 }
 
@@ -422,7 +422,7 @@ fn test_full_stack_parse() {
         let path = entry.unwrap().path();
         if path.extension().map(|e| e == "tish").unwrap_or(false) {
             let source = std::fs::read_to_string(&path).unwrap();
-            let result = tish_parser::parse(&source);
+            let result = tishlang_parser::parse(&source);
             assert!(
                 result.is_ok(),
                 "Parse failed for {}: {:?}",
@@ -484,7 +484,7 @@ fn test_mvp_programs_interpreter() {
     let bin = tish_bin();
     assert!(
         bin.exists(),
-        "tish binary not found at {}. Run `cargo build -p tish` first.",
+        "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
     let regenerate = std::env::var("REGENERATE_EXPECTED").as_deref() == Ok("1");
@@ -527,7 +527,7 @@ fn test_mvp_programs_native() {
     let bin = tish_bin();
     assert!(
         bin.exists(),
-        "tish binary not found at {}. Run `cargo build -p tish` first.",
+        "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
     let errors: Vec<String> = MVP_TEST_FILES
@@ -594,7 +594,7 @@ fn test_mvp_programs_cranelift() {
     let bin = tish_bin();
     assert!(
         bin.exists(),
-        "tish binary not found at {}. Run `cargo build -p tish` first.",
+        "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
     let errors: Vec<String> = CRANELIFT_TEST_FILES
@@ -650,7 +650,7 @@ fn test_mvp_programs_wasi() {
     let bin = tish_bin();
     assert!(
         bin.exists(),
-        "tish binary not found at {}. Run `cargo build -p tish` first.",
+        "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
     let errors: Vec<String> = CRANELIFT_TEST_FILES
@@ -709,7 +709,7 @@ fn test_mvp_programs_js() {
     let bin = tish_bin();
     assert!(
         bin.exists(),
-        "tish binary not found at {}. Run `cargo build -p tish` first.",
+        "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
     for name in MVP_TEST_FILES {

@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use tish_core::Value;
+use tishlang_core::Value;
 use crate::helpers::normalize_index;
 
 /// Create a new array Value from a Vec of Values.
@@ -203,7 +203,7 @@ pub fn flat(arr: &Value, depth: &Value) -> Value {
 }
 
 // Higher-order array methods require a callback function.
-// These take NativeFn from tish_core::Value::Function
+// These take NativeFn from tishlang_core::Value::Function
 
 pub fn map(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {

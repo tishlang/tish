@@ -1250,14 +1250,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "js_to_tish"
-version = "0.1.0"
-dependencies = [
- "oxc",
- "tish_ast",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2521,101 +2513,101 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
-name = "tish"
+name = "tishlang"
 version = "1.0.12"
 dependencies = [
  "clap",
- "js_to_tish",
  "rayon",
  "rustyline",
- "tish_ast",
- "tish_bytecode",
- "tish_compile",
- "tish_compile_js",
- "tish_core",
- "tish_eval",
- "tish_lexer",
- "tish_llvm",
- "tish_native",
- "tish_opt",
- "tish_parser",
- "tish_runtime",
- "tish_vm",
- "tish_wasm",
+ "tishlang_ast",
+ "tishlang_bytecode",
+ "tishlang_compile",
+ "tishlang_compile_js",
+ "tishlang_core",
+ "tishlang_eval",
+ "tishlang_js_to_tish",
+ "tishlang_lexer",
+ "tishlang_llvm",
+ "tishlang_native",
+ "tishlang_opt",
+ "tishlang_parser",
+ "tishlang_runtime",
+ "tishlang_vm",
+ "tishlang_wasm",
 ]
 
 [[package]]
-name = "tish_ast"
+name = "tishlang_ast"
 version = "0.1.0"
 
 [[package]]
-name = "tish_build_utils"
+name = "tishlang_build_utils"
 version = "0.1.0"
 
 [[package]]
-name = "tish_builtins"
+name = "tishlang_builtins"
 version = "0.1.0"
 dependencies = [
  "rand 0.10.0",
- "tish_core",
+ "tishlang_core",
 ]
 
 [[package]]
-name = "tish_bytecode"
+name = "tishlang_bytecode"
 version = "0.1.0"
 dependencies = [
- "tish_ast",
- "tish_compile",
- "tish_core",
- "tish_opt",
- "tish_parser",
- "tish_vm",
+ "tishlang_ast",
+ "tishlang_compile",
+ "tishlang_core",
+ "tishlang_opt",
+ "tishlang_parser",
+ "tishlang_vm",
 ]
 
 [[package]]
-name = "tish_compile"
+name = "tishlang_compile"
 version = "0.1.0"
 dependencies = [
  "serde_json",
- "tish_ast",
- "tish_opt",
- "tish_parser",
+ "tishlang_ast",
+ "tishlang_opt",
+ "tishlang_parser",
 ]
 
 [[package]]
-name = "tish_compile_js"
+name = "tishlang_compile_js"
 version = "0.1.0"
 dependencies = [
- "tish_ast",
- "tish_compile",
- "tish_jsx_web",
- "tish_opt",
- "tish_parser",
+ "tishlang_ast",
+ "tishlang_compile",
+ "tishlang_jsx_web",
+ "tishlang_opt",
+ "tishlang_parser",
 ]
 
 [[package]]
-name = "tish_compiler_wasm"
+name = "tishlang_compiler_wasm"
 version = "0.1.0"
 dependencies = [
  "base64",
  "serde_json",
- "tish_ast",
- "tish_bytecode",
- "tish_compile_js",
- "tish_opt",
- "tish_parser",
+ "tishlang_ast",
+ "tishlang_bytecode",
+ "tishlang_compile_js",
+ "tishlang_opt",
+ "tishlang_parser",
  "wasm-bindgen",
 ]
 
 [[package]]
-name = "tish_core"
+name = "tishlang_core"
 version = "0.1.0"
 dependencies = [
  "fancy-regex",
 ]
 
 [[package]]
-name = "tish_cranelift"
+name = "tishlang_cranelift"
 version = "0.1.0"
 dependencies = [
  "cranelift",
@@ -2625,22 +2617,22 @@ dependencies = [
  "cranelift-native",
  "cranelift-object",
  "target-lexicon",
- "tish_build_utils",
- "tish_bytecode",
- "tish_core",
+ "tishlang_build_utils",
+ "tishlang_bytecode",
+ "tishlang_core",
 ]
 
 [[package]]
-name = "tish_cranelift_runtime"
+name = "tishlang_cranelift_runtime"
 version = "0.1.0"
 dependencies = [
- "tish_bytecode",
- "tish_core",
- "tish_vm",
+ "tishlang_bytecode",
+ "tishlang_core",
+ "tishlang_vm",
 ]
 
 [[package]]
-name = "tish_eval"
+name = "tishlang_eval"
 version = "0.1.0"
 dependencies = [
  "fancy-regex",
@@ -2648,96 +2640,104 @@ dependencies = [
  "rand 0.10.0",
  "reqwest",
  "tiny_http",
- "tish_ast",
- "tish_core",
- "tish_parser",
- "tish_runtime",
+ "tishlang_ast",
+ "tishlang_core",
+ "tishlang_parser",
+ "tishlang_runtime",
  "tokio",
 ]
 
 [[package]]
-name = "tish_fmt"
+name = "tishlang_fmt"
 version = "0.1.0"
 dependencies = [
  "clap",
- "tish_ast",
- "tish_parser",
+ "tishlang_ast",
+ "tishlang_parser",
 ]
 
 [[package]]
-name = "tish_jsx_web"
+name = "tishlang_js_to_tish"
+version = "0.1.0"
+dependencies = [
+ "oxc",
+ "tishlang_ast",
+]
+
+[[package]]
+name = "tishlang_jsx_web"
 version = "0.1.0"
 
 [[package]]
-name = "tish_lexer"
+name = "tishlang_lexer"
 version = "0.1.0"
 
 [[package]]
-name = "tish_lint"
+name = "tishlang_lint"
 version = "0.1.0"
 dependencies = [
  "clap",
- "tish_ast",
- "tish_parser",
+ "tishlang_ast",
+ "tishlang_parser",
  "walkdir",
 ]
 
 [[package]]
-name = "tish_llvm"
+name = "tishlang_llvm"
 version = "0.1.0"
 dependencies = [
- "tish_build_utils",
- "tish_bytecode",
- "tish_compile",
- "tish_cranelift",
+ "tishlang_build_utils",
+ "tishlang_bytecode",
+ "tishlang_compile",
+ "tishlang_cranelift",
 ]
 
 [[package]]
-name = "tish_lsp"
+name = "tishlang_lsp"
 version = "0.1.0"
 dependencies = [
  "regex",
  "serde_json",
- "tish_ast",
- "tish_fmt",
- "tish_lint",
- "tish_parser",
+ "tishlang_ast",
+ "tishlang_fmt",
+ "tishlang_lint",
+ "tishlang_parser",
  "tokio",
  "tower-lsp",
  "walkdir",
 ]
 
 [[package]]
-name = "tish_native"
+name = "tishlang_native"
 version = "0.1.0"
 dependencies = [
- "tish_ast",
- "tish_build_utils",
- "tish_bytecode",
- "tish_compile",
- "tish_cranelift",
- "tish_llvm",
- "tish_opt",
+ "tishlang_ast",
+ "tishlang_build_utils",
+ "tishlang_bytecode",
+ "tishlang_compile",
+ "tishlang_cranelift",
+ "tishlang_llvm",
+ "tishlang_opt",
 ]
 
 [[package]]
-name = "tish_opt"
+name = "tishlang_opt"
 version = "0.1.0"
 dependencies = [
- "tish_ast",
- "tish_parser",
+ "tishlang_ast",
+ "tishlang_parser",
 ]
 
 [[package]]
-name = "tish_parser"
+name = "tishlang_parser"
 version = "0.1.0"
 dependencies = [
- "tish_ast",
- "tish_lexer",
+ "tishlang_ast",
+ "tishlang_lexer",
 ]
 
 [[package]]
-name = "tish_runtime"
+name = "tishlang_runtime"
 version = "0.1.0"
 dependencies = [
  "bytes",
@@ -2746,46 +2746,46 @@ dependencies = [
  "lazy_static",
  "reqwest",
  "tiny_http",
- "tish_builtins",
- "tish_core",
+ "tishlang_builtins",
+ "tishlang_core",
  "tokio",
  "tokio-tungstenite",
 ]
 
 [[package]]
-name = "tish_vm"
+name = "tishlang_vm"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.4.2",
  "rand 0.10.0",
- "tish_ast",
- "tish_builtins",
- "tish_bytecode",
- "tish_core",
- "tish_parser",
- "tish_runtime",
+ "tishlang_ast",
+ "tishlang_builtins",
+ "tishlang_bytecode",
+ "tishlang_core",
+ "tishlang_parser",
+ "tishlang_runtime",
  "wasm-bindgen",
 ]
 
 [[package]]
-name = "tish_wasm"
+name = "tishlang_wasm"
 version = "0.1.0"
 dependencies = [
  "base64",
- "tish_ast",
- "tish_build_utils",
- "tish_bytecode",
- "tish_compile",
- "tish_opt",
+ "tishlang_ast",
+ "tishlang_build_utils",
+ "tishlang_bytecode",
+ "tishlang_compile",
+ "tishlang_opt",
 ]
 
 [[package]]
-name = "tish_wasm_runtime"
+name = "tishlang_wasm_runtime"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.4.2",
- "tish_bytecode",
- "tish_vm",
+ "tishlang_bytecode",
+ "tishlang_vm",
  "wasm-bindgen",
 ]
 

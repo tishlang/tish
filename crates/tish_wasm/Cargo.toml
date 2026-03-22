@@ -1,13 +1,15 @@
 [package]
-name = "tish_wasm"
+name = "tishlang_wasm"
 version = "0.1.0"
 edition = "2021"
 description = "WebAssembly backend for Tish - compiles to real .wasm"
 
+license-file = { workspace = true }
+repository = { workspace = true }
 [dependencies]
-tish_build_utils = { path = "../tish_build_utils" }
-tish_ast = { path = "../tish_ast" }
-tish_compile = { path = "../tish_compile" }
-tish_bytecode = { path = "../tish_bytecode" }
-tish_opt = { path = "../tish_opt" }
+tishlang_build_utils = { path = "../tish_build_utils" }
+tishlang_ast = { path = "../tish_ast" }
+tishlang_compile = { path = "../tish_compile" }
+tishlang_bytecode = { path = "../tish_bytecode" }
+tishlang_opt = { path = "../tish_opt" }
 base64 = "0.22"

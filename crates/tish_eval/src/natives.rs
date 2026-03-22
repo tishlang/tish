@@ -96,12 +96,12 @@ pub fn boolean_native(args: &[Value]) -> Result<Value, String> {
 
 pub fn decode_uri(args: &[Value]) -> Result<Value, String> {
     let s = args.first().map(|v| v.to_string()).unwrap_or_default();
-    Ok(Value::String(tish_core::percent_decode(&s).unwrap_or(s).into()))
+    Ok(Value::String(tishlang_core::percent_decode(&s).unwrap_or(s).into()))
 }
 
 pub fn encode_uri(args: &[Value]) -> Result<Value, String> {
     let s = args.first().map(|v| v.to_string()).unwrap_or_default();
-    Ok(Value::String(tish_core::percent_encode(&s).into()))
+    Ok(Value::String(tishlang_core::percent_encode(&s).into()))
 }
 
 pub fn math_abs(args: &[Value]) -> Result<Value, String> {

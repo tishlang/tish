@@ -1,7 +1,9 @@
 [package]
-name = "tish_lexer"
+name = "tishlang_lexer"
 version = "0.1.0"
 edition = "2021"
 description = "Tish lexer with indent normalization and tab/space handling"
 
+license-file = { workspace = true }
+repository = { workspace = true }
 [dependencies]

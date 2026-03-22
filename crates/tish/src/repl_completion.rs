@@ -12,9 +12,9 @@ use rustyline::validate::Validator;
 use rustyline::Context;
 use rustyline::Helper;
 
-use tish_bytecode::{compile_for_repl, compile_for_repl_unoptimized};
-use tish_parser;
-use tish_vm::Vm;
+use tishlang_bytecode::{compile_for_repl, compile_for_repl_unoptimized};
+use tishlang_parser;
+use tishlang_vm::Vm;
 
 /// Tish keywords for bare-word completion (Python-style).
 const KEYWORDS: &[&str] = &[
@@ -79,7 +79,7 @@ impl ReplCompleter {
         }
         let member_prefix = line_before_cursor[last_dot + 1..].trim();
 
-        let program = tish_parser::parse(prefix_expr).ok()?;
+        let program = tishlang_parser::parse(prefix_expr).ok()?;
         let compile_fn = if self.no_optimize {
             compile_for_repl_unoptimized
         } else {
