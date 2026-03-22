@@ -2,6 +2,7 @@
 name = "tishlang_core"
 version = "0.1.0"
 edition = "2021"
+description = "Shared Value type and utilities for Tish (used by interpreter and runtime)"
 
 license-file = { workspace = true }
 repository = { workspace = true }

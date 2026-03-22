@@ -2,6 +2,8 @@
 name = "tishlang_builtins"
 version = "0.1.0"
 edition = "2021"
+description = "Shared builtin implementations for Tish (array, string, object, math)"
+
 
 license-file = { workspace = true }
 repository = { workspace = true }
