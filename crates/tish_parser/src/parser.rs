@@ -1561,6 +1561,17 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Push text child, merging with previous Text if any (preserves spaces between tokens).
+    fn push_or_merge_text(&self, children: &mut Vec<JsxChild>, s: Arc<str>) {
+        if let Some(JsxChild::Text(prev)) = children.last() {
+            let merged = format!("{} {}", prev.as_ref(), s.as_ref());
+            let last = children.len() - 1;
+            children[last] = JsxChild::Text(Arc::from(merged.as_str()));
+        } else {
+            children.push(JsxChild::Text(s));
+        }
+    }
+
     /// Parse JSX children until </Tag> or </>
     fn parse_jsx_children(&mut self, close_tag: &str) -> Result<Vec<JsxChild>, String> {
         let mut children = Vec::new();
@@ -1601,7 +1612,7 @@ impl<'a> Parser<'a> {
                     let t = self.advance().unwrap();
                     let s = t.literal.clone().unwrap_or_default();
                     if !s.is_empty() {
-                        children.push(JsxChild::Text(s));
+                        self.push_or_merge_text(&mut children, s);
                     }
                 }
                 Some(TokenKind::Ident) => {
@@ -1609,7 +1620,7 @@ impl<'a> Parser<'a> {
                     let t = self.advance().unwrap();
                     let s = t.literal.clone().unwrap_or_default();
                     if !s.is_empty() {
-                        children.push(JsxChild::Text(s));
+                        self.push_or_merge_text(&mut children, s);
                     }
                 }
                 _ => {
@@ -1659,7 +1670,14 @@ impl<'a> Parser<'a> {
                     let t = self.advance().unwrap();
                     let s = t.literal.clone().unwrap_or_default();
                     if !s.is_empty() {
-                        children.push(JsxChild::Text(s));
+                        self.push_or_merge_text(&mut children, s);
+                    }
+                }
+                Some(TokenKind::Ident) => {
+                    let t = self.advance().unwrap();
+                    let s = t.literal.clone().unwrap_or_default();
+                    if !s.is_empty() {
+                        self.push_or_merge_text(&mut children, s);
                     }
                 }
                 _ => return Err(format!("Unexpected token in JSX fragment: {:?}", self.peek_kind())),
