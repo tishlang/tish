@@ -1,0 +1,177 @@
+# Publish to Homebrew tap when a GitHub release is promoted from prerelease to full release.
+# Updates the formula in the homebrew-tish tap with new version and SHA256 checksums.
+# Runs in parallel with NPM and Crates.io release workflows.
+#
+# Required setup:
+# 1. Create repo homebrew-tish under the same org (e.g. tishlang/homebrew-tish) with a README
+# 2. Add HOMEBREW_TAP_TOKEN secret: a PAT with repo scope for pushing to the tap
+
+name: Homebrew release
+
+on:
+  release:
+    types: [published, edited]
+
+jobs:
+  publish:
+    name: Publish to Homebrew tap
+    if: github.event.release.prerelease == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # read release assets, update release body via API
+    steps:
+      - name: Download release binaries and compute SHA256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        id: shas
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          REPO="${{ github.repository }}"
+          BASE="https://github.com/${REPO}/releases/download/${TAG}"
+          ASSETS='${{ toJSON(github.event.release.assets) }}'
+
+          get_asset_url() {
+            echo "$ASSETS" | jq -r ".[] | select(.name == \"$1\") | .url"
+          }
+          download_and_sha() {
+            local name="$1"
+            local url
+            url=$(get_asset_url "$name")
+            if [ -z "$url" ] || [ "$url" = "null" ]; then
+              echo "Release has no asset $name"
+              exit 1
+            fi
+            curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$url" -o "$name"
+            sha256sum "$name" | awk '{print $1}'
+          }
+
+          SHA_ARM=$(download_and_sha "tish-darwin-arm64")
+          SHA_X64=$(download_and_sha "tish-darwin-x64")
+          SHA_LINUX_X64=$(download_and_sha "tish-linux-x64")
+          SHA_LINUX_ARM=$(download_and_sha "tish-linux-arm64")
+
+          echo "sha_darwin_arm64=$SHA_ARM" >> $GITHUB_OUTPUT
+          echo "sha_darwin_x64=$SHA_X64" >> $GITHUB_OUTPUT
+          echo "sha_linux_x64=$SHA_LINUX_X64" >> $GITHUB_OUTPUT
+          echo "sha_linux_arm64=$SHA_LINUX_ARM" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/homebrew-tish
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Generate and push formula
+        env:
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.shas.outputs.version }}
+          SHA_ARM: ${{ steps.shas.outputs.sha_darwin_arm64 }}
+          SHA_X64: ${{ steps.shas.outputs.sha_darwin_x64 }}
+          SHA_LINUX_X64: ${{ steps.shas.outputs.sha_linux_x64 }}
+          SHA_LINUX_ARM: ${{ steps.shas.outputs.sha_linux_arm64 }}
+          REPO: ${{ github.repository }}
+        run: |
+          TAG="v${VERSION}"
+          BASE="https://github.com/${REPO}/releases/download/${TAG}"
+          mkdir -p tap/Formula
+          cat > tap/Formula/tish.rb << 'FORMULA'
+          # typed: false
+          # frozen_string_literal: true
+
+          class Tish < Formula
+            desc "Tish - minimal TS/JS-compatible language. Run, REPL, compile to native."
+            homepage "https://github.com/tishlang/tish"
+            version "VERSION_PLACEHOLDER"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "BASE_PLACEHOLDER/tish-darwin-arm64"
+                sha256 "SHA_ARM_PLACEHOLDER"
+
+                def install
+                  bin.install "tish-darwin-arm64" => "tish"
+                end
+              end
+              if Hardware::CPU.intel?
+                url "BASE_PLACEHOLDER/tish-darwin-x64"
+                sha256 "SHA_X64_PLACEHOLDER"
+
+                def install
+                  bin.install "tish-darwin-x64" => "tish"
+                end
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "BASE_PLACEHOLDER/tish-linux-arm64"
+                sha256 "SHA_LINUX_ARM_PLACEHOLDER"
+
+                def install
+                  bin.install "tish-linux-arm64" => "tish"
+                end
+              end
+              if Hardware::CPU.intel?
+                url "BASE_PLACEHOLDER/tish-linux-x64"
+                sha256 "SHA_LINUX_X64_PLACEHOLDER"
+
+                def install
+                  bin.install "tish-linux-x64" => "tish"
+                end
+              end
+            end
+
+            test do
+              assert_match(/^\d+\.\d+\.\d+/, shell_output("#{bin}/tish --version"))
+            end
+          end
+          FORMULA
+          sed -i.bak \
+            -e "s|VERSION_PLACEHOLDER|${VERSION}|g" \
+            -e "s|BASE_PLACEHOLDER|${BASE}|g" \
+            -e "s|SHA_ARM_PLACEHOLDER|${SHA_ARM}|g" \
+            -e "s|SHA_X64_PLACEHOLDER|${SHA_X64}|g" \
+            -e "s|SHA_LINUX_X64_PLACEHOLDER|${SHA_LINUX_X64}|g" \
+            -e "s|SHA_LINUX_ARM_PLACEHOLDER|${SHA_LINUX_ARM}|g" \
+            tap/Formula/tish.rb
+          rm -f tap/Formula/tish.rb.bak
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/tish.rb
+          if git diff --staged --quiet; then
+            echo "No formula changes (version may already be published)"
+          else
+            git commit -m "tish ${VERSION}"
+            git push
+          fi
+
+      - name: Update release description with Homebrew install
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          RELEASE_ID="${{ github.event.release.id }}"
+          REPO="${{ github.repository }}"
+          BREW_LINE="Homebrew: \`brew tap ${OWNER}/tish && brew install tish\`"
+          CURRENT_BODY=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}" | jq -r '.body // ""')
+          if [[ "$CURRENT_BODY" == *"brew install"* ]]; then
+            echo "Release body already has Homebrew install"
+          else
+            NEW_BODY="${CURRENT_BODY}
+
+          ---
+          ${BREW_LINE}"
+            curl -s -X PATCH \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}" \
+              -d "$(printf '%s' "$NEW_BODY" | jq -Rs '{body: .}')"
+          fi

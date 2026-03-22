@@ -44,9 +44,9 @@ jobs:
             tishlang_builtins
             tishlang_parser
             tishlang_opt
+            tishlang_compile
             tishlang_bytecode
             tishlang_js_to_tish
-            tishlang_compile
             tishlang_runtime
             tishlang_cranelift
             tishlang_eval
