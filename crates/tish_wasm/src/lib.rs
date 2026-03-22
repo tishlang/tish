@@ -248,10 +248,10 @@ pub fn compile_to_wasi(
         message: format!("Cannot write chunk: {}", e),
     })?;
 
-    // Cargo.toml - path to tishlang_wasm_runtime from build_dir
+    // Cargo.toml - path to tishlang_wasm_runtime (crate in crates/tish_wasm_runtime)
     let runtime_path = workspace_root
         .join("crates")
-        .join("tishlang_wasm_runtime");
+        .join("tish_wasm_runtime");
     let runtime_path_str = runtime_path
         .canonicalize()
         .unwrap_or(runtime_path)

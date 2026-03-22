@@ -31,10 +31,10 @@ pub fn link_to_binary(
         .to_string()
         .replace('\\', "/");
 
-    // tishlang_cranelift_runtime path (workspace/crates/tishlang_cranelift_runtime)
+    // tishlang_cranelift_runtime crate lives in crates/tish_cranelift_runtime
     let runtime_path = workspace_root
         .join("crates")
-        .join("tishlang_cranelift_runtime")
+        .join("tish_cranelift_runtime")
         .canonicalize()
         .map_err(|e| CraneliftError {
             message: format!("Cannot find tishlang_cranelift_runtime: {}", e),
