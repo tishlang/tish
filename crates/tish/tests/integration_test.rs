@@ -163,6 +163,26 @@ fn tish_bin() -> PathBuf {
     default
 }
 
+/// tish -V and --version print the version.
+#[test]
+fn test_tish_version_flag() {
+    let bin = tish_bin();
+    assert!(bin.exists(), "tish binary not found. Run `cargo build -p tish` first.");
+    let out = Command::new(&bin).arg("-V").output().expect("run tish -V");
+    assert!(out.status.success(), "tish -V failed: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "tish -V should print version {}; got: {}",
+        env!("CARGO_PKG_VERSION"),
+        stdout
+    );
+    let out2 = Command::new(&bin).arg("--version").output().expect("run tish --version");
+    assert!(out2.status.success());
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(stdout2.contains(env!("CARGO_PKG_VERSION")), "tish --version should print version");
+}
+
 /// Parse async-await example (validates async fn parsing).
 #[test]
 fn test_async_await_parse() {

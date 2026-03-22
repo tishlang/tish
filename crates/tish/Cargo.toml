@@ -1,6 +1,6 @@
 [package]
 name = "tish"
-version = "0.1.0"
+version = "1.0.12"
 edition = "2021"
 description = "Tish CLI - run, REPL, compile to native"
 license-file = { workspace = true }

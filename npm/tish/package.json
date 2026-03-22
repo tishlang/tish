@@ -1,6 +1,6 @@
 {
   "name": "@tishlang/tish",
-  "version": "0.1.0",
+  "version": "1.0.12",
   "description": "Tish - minimal TS/JS-compatible language. Run, REPL, compile to native.",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {

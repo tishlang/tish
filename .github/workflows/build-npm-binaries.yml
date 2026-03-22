@@ -47,6 +47,41 @@ jobs:
       - name: Build tests
         run: cargo nextest run --no-run -p tish --features full --profile ci
 
+  version:
+    name: Get version
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      version: ${{ steps.set_version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version
+        id: set_version
+        env:
+          REPO_URL: ${{ format('{0}/{1}.git', github.server_url, github.repository) }}
+        run: |
+          VER=""
+          if [ "${{ github.ref }}" = "refs/heads/main" ] && [ "${{ github.event_name }}" = "push" ]; then
+            npm install --prefix npm/tish --omit=optional 2>/dev/null || true
+            node -e "
+              const fs = require('fs');
+              const p = require('./npm/tish/package.json');
+              p.repository = { type: 'git', url: process.env.REPO_URL };
+              fs.writeFileSync('./npm/tish/package.json', JSON.stringify(p, null, 2));
+            "
+            VER=$(cd npm/tish && npx semantic-release --dry-run --extends ../../.releaserc.json 2>&1 | sed -n 's/.*Published release \([0-9.]*\).*/\1/p' | head -1)
+          fi
+          if [ -z "$VER" ]; then
+            VER=$(grep '^version' crates/tish/Cargo.toml | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+            echo "Using Cargo.toml version: $VER"
+          else
+            echo "Using semantic-release version: $VER"
+          fi
+          echo "version=$VER" >> $GITHUB_OUTPUT
+
   release_check:
     name: Release check (semantic-release dry-run)
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -141,7 +176,7 @@ jobs:
           path: lcov.info
 
   build:
-    needs: [compile]
+    needs: [compile, version]
     strategy:
       fail-fast: false
       matrix:
@@ -174,6 +209,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set Cargo version for binary
+        shell: bash
+        run: |
+          sed -i.bak "s/^version = .*/version = \"${{ needs.version.outputs.version }}\"/" crates/tish/Cargo.toml
+          rm -f crates/tish/Cargo.toml.bak
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -304,6 +345,8 @@ jobs:
           cp LICENSE npm/tish/
           cp justfile npm/tish/
           cp -r crates npm/tish/
+          sed -i.bak "s/^version = .*/version = \"${{ steps.next_version.outputs.version }}\"/" npm/tish/crates/tish/Cargo.toml
+          rm -f npm/tish/crates/tish/Cargo.toml.bak
 
       - name: Create npm package tarball
         run: |

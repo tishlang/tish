@@ -14,6 +14,7 @@ use rustyline::{Behavior, ColorMode, CompletionType, Config, Editor};
 #[derive(Parser)]
 #[command(name = "tish")]
 #[command(about = "Tish - minimal TS/JS-compatible language")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(after_help = "To disable optimizations: TISH_NO_OPTIMIZE=1")]
 pub(crate) struct Cli {
     #[command(subcommand)]
