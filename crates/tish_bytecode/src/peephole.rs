@@ -133,11 +133,7 @@ fn chain_jumps(code: &mut [u8]) {
                 if let Some(final_target) = final_jump_target(code, ip) {
                     if final_target != current_target {
                         let new_offset = final_target as i32 - (ip + 3) as i32;
-                        let bytes = (new_offset as i16).to_be_bytes();
-                        if ip + 2 < code.len() {
-                            code[ip + 1] = bytes[0];
-                            code[ip + 2] = bytes[1];
-                        }
+                        write_u16(code, ip + 1, (new_offset as i16) as u16);
                     }
                 }
             }
