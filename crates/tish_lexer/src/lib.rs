@@ -24,6 +24,13 @@ pub struct Lexer<'a> {
     at_line_start: bool,
     pending_dedents: VecDeque<Token>,
     template_brace_stack: Vec<usize>,
+    jsx_after_gt: bool,
+    jsx_in_opening_tag: bool,
+    jsx_saw_slash_before_gt: bool,
+    jsx_brace_depth: i32,
+    jsx_depth: i32,
+    jsx_child_brace_depth: i32,
+    jsx_in_closing_tag: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -37,6 +44,29 @@ impl<'a> Lexer<'a> {
             at_line_start: true,
             pending_dedents: VecDeque::new(),
             template_brace_stack: Vec::new(),
+            jsx_after_gt: false,
+            jsx_in_opening_tag: false,
+            jsx_saw_slash_before_gt: false,
+            jsx_brace_depth: 0,
+            jsx_depth: 0,
+            jsx_child_brace_depth: 0,
+            jsx_in_closing_tag: false,
+        }
+    }
+
+    fn read_jsx_text(&mut self, start: (usize, usize)) -> Result<Option<Token>, String> {
+        let mut s = String::new();
+        loop {
+            match self.peek() {
+                None | Some('{') | Some('<') => break,
+                Some(c) => { self.advance(); s.push(c); }
+            }
+        }
+        if s.is_empty() {
+            Ok(None)
+        } else {
+            let end = self.span_start();
+            Ok(Some(Token { kind: TokenKind::JsxText, span: Span { start, end }, literal: Some(s.into()) }))
         }
     }
 
@@ -227,6 +257,16 @@ impl<'a> Lexer<'a> {
             return Ok(Some(tok));
         }
 
+        if self.jsx_after_gt {
+            self.jsx_after_gt = false;
+            if !matches!(self.peek(), Some('{') | Some('<') | None) {
+                let start = self.span_start();
+                if let Some(tok) = self.read_jsx_text(start)? {
+                    return Ok(Some(tok));
+                }
+            }
+        }
+
         if self.at_line_start {
             self.at_line_start = false;
             let level = self.read_indent_level();
@@ -265,10 +305,19 @@ impl<'a> Lexer<'a> {
             '(' => TokenKind::LParen,
             ')' => TokenKind::RParen,
             '{' => {
-                if let Some(depth) = self.template_brace_stack.last_mut() { *depth += 1; }
+                if self.jsx_in_opening_tag { self.jsx_brace_depth += 1; }
+                else if self.jsx_depth > 0 { self.jsx_child_brace_depth += 1; }
+                if let Some(depth) = self.template_brace_stack.last_mut() {
+                    *depth += 1;
+                }
                 TokenKind::LBrace
             }
             '}' => {
+                if self.jsx_brace_depth > 0 { self.jsx_brace_depth -= 1; }
+                else if self.jsx_child_brace_depth > 0 {
+                    self.jsx_child_brace_depth -= 1;
+                    if self.jsx_child_brace_depth == 0 { self.jsx_after_gt = true; }
+                }
                 if let Some(depth) = self.template_brace_stack.last_mut() {
                     *depth -= 1;
                     if *depth == 0 {
@@ -306,12 +355,28 @@ impl<'a> Lexer<'a> {
             '<' => {
                 if self.peek() == Some('=') { self.advance(); TokenKind::Le }
                 else if self.peek() == Some('<') { self.advance(); TokenKind::Shl }
-                else { TokenKind::Lt }
+                else if self.peek() == Some('/') { self.jsx_in_closing_tag = true; TokenKind::Lt }
+                else if self.peek() == Some('>') || self.peek().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) {
+                    self.jsx_depth += 1;
+                    self.jsx_in_opening_tag = true;
+                    TokenKind::Lt
+                } else { TokenKind::Lt }
             }
             '>' => {
                 if self.peek() == Some('=') { self.advance(); TokenKind::Ge }
                 else if self.peek() == Some('>') { self.advance(); TokenKind::Shr }
-                else { TokenKind::Gt }
+                else {
+                    if self.jsx_in_opening_tag && self.jsx_brace_depth == 0 && !self.jsx_saw_slash_before_gt {
+                        self.jsx_after_gt = true;
+                    }
+                    if self.jsx_in_closing_tag || (self.jsx_in_opening_tag && self.jsx_saw_slash_before_gt) {
+                        self.jsx_depth = (self.jsx_depth - 1).max(0);
+                    }
+                    self.jsx_in_opening_tag = false;
+                    self.jsx_in_closing_tag = false;
+                    self.jsx_saw_slash_before_gt = false;
+                    TokenKind::Gt
+                }
             }
             '^' => TokenKind::BitXor,
             '~' => TokenKind::BitNot,
@@ -334,7 +399,10 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('/') { self.advance(); self.skip_line_comment(); return self.next_token(); }
                 else if self.peek() == Some('*') { self.advance(); self.skip_block_comment()?; return self.next_token(); }
                 else if self.peek() == Some('=') { self.advance(); TokenKind::SlashAssign }
-                else { TokenKind::Slash }
+                else {
+                    if self.jsx_in_opening_tag { self.jsx_saw_slash_before_gt = true; }
+                    TokenKind::Slash
+                }
             }
             '%' => {
                 if self.peek() == Some('=') { self.advance(); TokenKind::PercentAssign }

@@ -115,6 +115,8 @@ pub enum TokenKind {
     TemplateHead,    // `text${  (start with interpolation)
     TemplateMiddle,  // }text${  (middle part)
     TemplateTail,    // }text`   (end part)
+
+    JsxText,  // Raw text in JSX children (emojis, etc.); only {}<> are special
 }
 
 impl TokenKind {

@@ -52,6 +52,23 @@ mod tests {
     }
 
     #[test]
+    fn jsx_text_punctuation_no_space() {
+        // Punctuation (e.g. !) concatenates without space: "work!" not "work !"
+        let src = r#"fn X() { return <p>work!</p> }"#;
+        let program = parse(src).unwrap();
+        let js = compile_with_jsx(&program, false, JsxMode::LattishH).unwrap();
+        assert!(js.contains(r#""work!""#), "expected 'work!', got: {}", &js[..400.min(js.len())]);
+    }
+
+    #[test]
+    fn jsx_text_emojis() {
+        let src = r#"fn X() { return <p>hello 😔</p> }"#;
+        let program = parse(src).unwrap();
+        let js = compile_with_jsx(&program, false, JsxMode::LattishH).unwrap();
+        assert!(js.contains("😔"), "expected emoji, got: {}", &js[..400.min(js.len())]);
+    }
+
+    #[test]
     fn jsx_text_whitespace_via_compile_project() {
         let dir = std::env::temp_dir().join("tishlang_compile_project_test");
         let _ = std::fs::create_dir_all(&dir);

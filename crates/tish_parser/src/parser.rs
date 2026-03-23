@@ -1561,10 +1561,54 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Push text child, merging with previous Text if any (preserves spaces between tokens).
-    fn push_or_merge_text(&self, children: &mut Vec<JsxChild>, s: Arc<str>) {
+    fn token_as_jsx_text(kind: TokenKind) -> Option<&'static str> {
+        use TokenKind::*;
+        match kind {
+            Not => Some("!"),
+            Question => Some("?"),
+            Dot => Some("."),
+            Comma => Some(","),
+            Colon => Some(":"),
+            Semicolon => Some(";"),
+            Plus => Some("+"),
+            Minus => Some("-"),
+            Star => Some("*"),
+            Slash => Some("/"),
+            Percent => Some("%"),
+            Eq | Assign => Some("="),
+            Gt => Some(">"),
+            Le => Some("<="),
+            Ge => Some(">="),
+            Ne => Some("!="),
+            StrictEq => Some("==="),
+            StrictNe => Some("!=="),
+            BitAnd => Some("&"),
+            BitOr => Some("|"),
+            BitXor => Some("^"),
+            BitNot => Some("~"),
+            And => Some("&&"),
+            Or => Some("||"),
+            LParen => Some("("),
+            RParen => Some(")"),
+            LBracket => Some("["),
+            RBracket => Some("]"),
+            PlusPlus => Some("++"),
+            MinusMinus => Some("--"),
+            StarStar => Some("**"),
+            Arrow => Some("=>"),
+            OptionalChain => Some("?."),
+            NullishCoalesce => Some("??"),
+            Shl => Some("<<"),
+            Shr => Some(">>"),
+            _ => None,
+        }
+    }
+
+    /// Merge text. Add space between words (Ident/Number/String); no space before/after punctuation.
+    fn push_or_merge_text(&self, children: &mut Vec<JsxChild>, s: Arc<str>, is_punctuation: bool) {
         if let Some(JsxChild::Text(prev)) = children.last() {
-            let merged = format!("{} {}", prev.as_ref(), s.as_ref());
+            let sep = if is_punctuation { "" } else { " " };
+            let merged = format!("{}{}{}", prev.as_ref(), sep, s.as_ref());
             let last = children.len() - 1;
             children[last] = JsxChild::Text(Arc::from(merged.as_str()));
         } else {
@@ -1608,23 +1652,41 @@ impl<'a> Parser<'a> {
                     self.expect(TokenKind::RBrace)?; // }
                     children.push(JsxChild::Expr(expr));
                 }
+                Some(TokenKind::JsxText) => {
+                    let t = self.advance().unwrap();
+                    let s = t.literal.clone().unwrap_or_default();
+                    if !s.is_empty() {
+                        self.push_or_merge_text(&mut children, s, false);
+                    }
+                }
                 Some(TokenKind::String) => {
                     let t = self.advance().unwrap();
                     let s = t.literal.clone().unwrap_or_default();
                     if !s.is_empty() {
-                        self.push_or_merge_text(&mut children, s);
+                        self.push_or_merge_text(&mut children, s, false);
                     }
                 }
-                Some(TokenKind::Ident) => {
-                    // Bare identifiers in JSX are text (e.g. "hello" in <div>hello</div>)
+                Some(TokenKind::Number) => {
                     let t = self.advance().unwrap();
                     let s = t.literal.clone().unwrap_or_default();
                     if !s.is_empty() {
-                        self.push_or_merge_text(&mut children, s);
+                        self.push_or_merge_text(&mut children, s, false);
                     }
                 }
-                _ => {
-                    return Err(format!("Unexpected token in JSX children: {:?}", self.peek_kind()));
+                Some(TokenKind::Ident) => {
+                    let t = self.advance().unwrap();
+                    let s = t.literal.clone().unwrap_or_default();
+                    if !s.is_empty() {
+                        self.push_or_merge_text(&mut children, s, false);
+                    }
+                }
+                Some(k) => {
+                    if let Some(s) = Self::token_as_jsx_text(k) {
+                        self.advance();
+                        self.push_or_merge_text(&mut children, Arc::from(s), true);
+                    } else {
+                        return Err(format!("Unexpected token in JSX children: {:?}", k));
+                    }
                 }
             }
         }
@@ -1666,21 +1728,42 @@ impl<'a> Parser<'a> {
                     self.expect(TokenKind::RBrace)?;
                     children.push(JsxChild::Expr(expr));
                 }
+                Some(TokenKind::JsxText) => {
+                    let t = self.advance().unwrap();
+                    let s = t.literal.clone().unwrap_or_default();
+                    if !s.is_empty() {
+                        self.push_or_merge_text(&mut children, s, false);
+                    }
+                }
                 Some(TokenKind::String) => {
                     let t = self.advance().unwrap();
                     let s = t.literal.clone().unwrap_or_default();
                     if !s.is_empty() {
-                        self.push_or_merge_text(&mut children, s);
+                        self.push_or_merge_text(&mut children, s, false);
+                    }
+                }
+                Some(TokenKind::Number) => {
+                    let t = self.advance().unwrap();
+                    let s = t.literal.clone().unwrap_or_default();
+                    if !s.is_empty() {
+                        self.push_or_merge_text(&mut children, s, false);
                     }
                 }
                 Some(TokenKind::Ident) => {
                     let t = self.advance().unwrap();
                     let s = t.literal.clone().unwrap_or_default();
                     if !s.is_empty() {
-                        self.push_or_merge_text(&mut children, s);
+                        self.push_or_merge_text(&mut children, s, false);
                     }
                 }
-                _ => return Err(format!("Unexpected token in JSX fragment: {:?}", self.peek_kind())),
+                Some(k) => {
+                    if let Some(s) = Self::token_as_jsx_text(k) {
+                        self.advance();
+                        self.push_or_merge_text(&mut children, Arc::from(s), true);
+                    } else {
+                        return Err(format!("Unexpected token in JSX fragment: {:?}", k));
+                    }
+                }
             }
         }
     }
