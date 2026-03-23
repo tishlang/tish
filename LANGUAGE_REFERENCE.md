@@ -34,7 +34,7 @@ Numbers, strings `"`/`'`, arrays `[]`, objects `{}`, template literals `` `Hello
 
 ### Functions
 
-```tish
+```javascript
 fn add(a, b) { return a + b }
 fn double(x) = x * 2          // single-expr, implicit return
 let f = (a, b) => a + b       // arrow
@@ -95,7 +95,7 @@ tish compile main.tish -o app --target js   # JS transpile
 
 ### Hello + fn
 
-```tish
+```javascript
 let name = "World"
 console.log(`Hello, ${name}!`)
 
@@ -105,7 +105,7 @@ console.log(`1 + 2 = ${add(1, 2)}`)
 
 ### HTTP server
 
-```tish
+```javascript
 import { serve } from 'http'
 
 fn handleRequest(req) {
@@ -123,7 +123,7 @@ serve(8080, handleRequest)
 
 ### Async fetch
 
-```tish
+```javascript
 import { fetchAll } from 'http'
 
 let urls = ["https://httpbin.org/get", "https://httpbin.org/uuid"]
@@ -150,7 +150,7 @@ console.log("ok:", results.every(r => r.ok))
 
 ## 7. Native modules (imports)
 
-```tish
+```javascript
 import { serve, fetch, fetchAll } from 'http'
 import { readFile, writeFile } from 'tish:fs'
 import { process } from 'tish:process'

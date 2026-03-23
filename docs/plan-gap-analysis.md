@@ -6,7 +6,7 @@ Audit of plan vs implementation. Last updated: 2026-02-27.
 
 As of 2026-02-26, the `any` keyword has been replaced with `let`/`const` to align with JavaScript:
 
-```tish
+```javascript
 // Old (deprecated)
 any x = 5
 
@@ -204,7 +204,7 @@ Gaps discovered when porting JS patterns (e.g. mdx-docs). See [tish-docs JS Comp
 ### Arrow Functions and Higher-Order Methods (2026-02-27)
 
 **Arrow function syntax:**
-```tish
+```javascript
 // Single param, expression body
 let doubled = nums.map(x => x * 2)
 
@@ -244,7 +244,7 @@ Note: Arrow functions work in interpreter mode. Compiler mode requires named fun
 | `Object.entries(obj)` | Array of [key, value] pairs |
 
 **Template literals with interpolation:**
-```tish
+```javascript
 let name = "World"
 console.log(`Hello, ${name}!`)
 
@@ -311,7 +311,7 @@ All methods work in both interpreter and compiled modes.
 
 Property and index assignment now work:
 
-```tish
+```javascript
 // Object property assignment
 let obj = { x: 1 }
 obj.x = 10
@@ -337,7 +337,7 @@ data["key"] = "value"
 
 Added optional TypeScript-style type annotations. Types are parsed and stored in the AST but not enforced during evaluation (gradual typing).
 
-```tish
+```javascript
 let x: number = 42
 const name: string = "hello"
 let nums: number[] = [1, 2, 3]

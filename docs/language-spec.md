@@ -55,7 +55,7 @@ Blocks: `{ stmt; stmt }` or indentation (Indent/Dedent tokens).
 
 ### Functions
 
-```tish
+```javascript
 fn name(a, b) { return a + b }
 fn double(x) = x * 2   // single-expression, implicit return
 
@@ -137,7 +137,7 @@ Tish supports optional TypeScript-style type annotations. Types are parsed but n
 
 ### Syntax
 
-```tish
+```javascript
 // Variable declarations
 let x: number = 42
 const name: string = "hello"
