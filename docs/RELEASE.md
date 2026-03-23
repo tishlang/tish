@@ -67,7 +67,7 @@ This runs the NPM, Crates.io, and Homebrew release workflows. They run automatic
 
 - **npm**: `npm view @tishlang/tish version`
 - **crates.io**: https://crates.io/crates/tishlang
-- **Homebrew**: `brew tap tishlang/tish && brew install tish`
+- **Homebrew**: `brew tap tishlang/tish https://github.com/tishlang/tish && brew install tish`
 
 ---
 

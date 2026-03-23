@@ -1,6 +1,6 @@
 # Publish to Homebrew when a GitHub release is promoted from prerelease to full release.
 # Updates Formula/tish.rb in this repo (monorepo tap). No separate homebrew-tish repo needed.
-# Users: brew tap tishlang/tish && brew install tish
+# Users: brew tap tishlang/tish https://github.com/tishlang/tish && brew install tish
 
 name: Homebrew release
 
@@ -151,7 +151,7 @@ jobs:
           OWNER="${{ github.repository_owner }}"
           RELEASE_ID="${{ github.event.release.id }}"
           REPO="${{ github.repository }}"
-          BREW_LINE="Homebrew: \`brew tap ${OWNER}/tish && brew install tish\`"
+          BREW_LINE="Homebrew: \`brew tap ${OWNER}/tish https://github.com/${OWNER}/tish && brew install tish\`"
           CURRENT_BODY=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
             "https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}" | jq -r '.body // ""')
           if [[ "$CURRENT_BODY" == *"brew install"* ]]; then

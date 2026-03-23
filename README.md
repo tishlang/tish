@@ -92,7 +92,7 @@ wasmtime app.wasm
 ### Homebrew (macOS & Linux)
 
 ```bash
-brew tap tishlang/tish
+brew tap tishlang/tish https://github.com/tishlang/tish
 brew install tish
 ```
 

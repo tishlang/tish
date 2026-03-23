@@ -227,7 +227,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.target }}-${{ needs.version.outputs.version }}
           cache-workspace-crates: "true"
 
       - name: Build (native / rustup target)
