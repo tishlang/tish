@@ -733,7 +733,24 @@ impl Codegen {
     fn emit_jsx_child(&mut self, child: &JsxChild) -> Result<String, CompileError> {
         match child {
             JsxChild::Text(s) => Ok(format!("{:?}", s.as_ref())),
-            JsxChild::Expr(e) => self.emit_expr(e),
+            JsxChild::Expr(e) => {
+                let inner = self.emit_expr(e)?;
+                let needs_string = !matches!(
+                    e,
+                    Expr::Literal {
+                        value: Literal::String(_),
+                        ..
+                    }
+                    | Expr::TemplateLiteral { .. }
+                    | Expr::JsxElement { .. }
+                    | Expr::JsxFragment { .. }
+                );
+                Ok(if needs_string {
+                    format!("String({})", inner)
+                } else {
+                    inner
+                })
+            }
         }
     }
 }
