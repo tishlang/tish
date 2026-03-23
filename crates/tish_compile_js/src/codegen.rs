@@ -735,15 +735,14 @@ impl Codegen {
             JsxChild::Text(s) => Ok(format!("{:?}", s.as_ref())),
             JsxChild::Expr(e) => {
                 let inner = self.emit_expr(e)?;
-                let needs_string = !matches!(
+                // Only wrap literals we know are primitives (number, bool, null). Never wrap:
+                // string/template (already strings), JSX (elements), Call (components), Array/Ident (may hold elements).
+                let needs_string = matches!(
                     e,
                     Expr::Literal {
-                        value: Literal::String(_),
+                        value: Literal::Number(_) | Literal::Bool(_) | Literal::Null,
                         ..
                     }
-                    | Expr::TemplateLiteral { .. }
-                    | Expr::JsxElement { .. }
-                    | Expr::JsxFragment { .. }
                 );
                 Ok(if needs_string {
                     format!("String({})", inner)

@@ -96,4 +96,71 @@ mod tests {
         assert!(js.contains("__vdom_h(\"p\", null, [])"), "{}", &js[..600.min(js.len())]);
         assert!(js.contains("__lattishVdomPatch"));
     }
+
+    /// Component calls like {Panel()} return DOM elements. Wrapping in String() produces [object HTMLDivElement].
+    #[test]
+    fn jsx_component_call_not_wrapped_in_string() {
+        let src = r#"
+fn Panel() { return <div class="p">content</div> }
+fn App() { return <div>{Panel()}</div> }
+"#;
+        let program = parse(src).unwrap();
+        let js = compile_with_jsx(&program, false, JsxMode::LattishH).unwrap();
+        assert!(
+            js.contains("Panel()"),
+            "component call should appear as Panel(), got: {}",
+            &js[..500.min(js.len())]
+        );
+        assert!(
+            !js.contains("String(Panel()"),
+            "component calls must NOT be wrapped in String() - causes [object HTMLDivElement]. got: {}",
+            &js[..600.min(js.len())]
+        );
+    }
+
+    /// Nested JSX elements must not be String()'d or they render as [object HTMLDivElement].
+    #[test]
+    fn jsx_nested_element_not_wrapped_in_string() {
+        let src = r#"fn X() { return <div><span>inner</span></div> }"#;
+        let program = parse(src).unwrap();
+        let js = compile_with_jsx(&program, false, JsxMode::LattishH).unwrap();
+        assert!(
+            !js.contains("String(h("),
+            "nested JSX elements must NOT be wrapped in String(). got: {}",
+            &js[..500.min(js.len())]
+        );
+    }
+
+    /// Literal number/bool/null get String() for display. Idents (e.g. {items}) are NOT wrapped—they may hold elements.
+    #[test]
+    fn jsx_literal_number_wrapped_in_string() {
+        let src = r#"fn X() { return <span>{42}</span> }"#;
+        let program = parse(src).unwrap();
+        let js = compile_with_jsx(&program, false, JsxMode::LattishH).unwrap();
+        assert!(
+            js.contains("String(42)"),
+            "literal number in JSX should be wrapped in String(). got: {}",
+            &js[..500.min(js.len())]
+        );
+    }
+
+    /// Array/ident like {items} (array of buttons) must NOT be String()'d or we get [object HTMLButtonElement].
+    #[test]
+    fn jsx_array_of_elements_not_wrapped_in_string() {
+        let src = r#"
+fn FileList() {
+  let items = []
+  items.push(<button>a</button>)
+  items.push(<button>b</button>)
+  return <div>{items}</div>
+}
+"#;
+        let program = parse(src).unwrap();
+        let js = compile_with_jsx(&program, false, JsxMode::LattishH).unwrap();
+        assert!(
+            !js.contains("String(items)"),
+            "array/ident in JSX must NOT be wrapped in String() - causes [object HTMLButtonElement]. got: {}",
+            &js[..600.min(js.len())]
+        );
+    }
 }
