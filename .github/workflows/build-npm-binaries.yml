@@ -230,6 +230,9 @@ jobs:
           key: ${{ matrix.target }}-${{ needs.version.outputs.version }}
           cache-workspace-crates: "true"
 
+      - name: Clean tishlang to force rebuild (version is compile-time)
+        run: cargo clean -p tishlang
+
       - name: Build (native / rustup target)
         if: ${{ !matrix.use_cross }}
         run: cargo build --release -p tishlang --target ${{ matrix.target }}
