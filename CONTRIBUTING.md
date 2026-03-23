@@ -44,7 +44,7 @@ Thanks for your interest in contributing. Tish is licensed under the [Pay It For
 ## Docs and design
 
 - **In-repo (contributor) docs**: [docs/](docs/) — language spec, ECMA alignment, gap analysis, architecture, tooling.
-- **User-facing docs**: [tish-docs](https://github.com/tishlang/tish-docs) — installation, guides, reference.
+- **User-facing docs**: [tish-docs](https://tishlang.com/docs) — installation, guides, reference.
 
 ## Pull requests
 
