@@ -155,3 +155,54 @@ window.__lattishVdomPatch = function(container, oldTree, newTree) {
   }
 };
 "#;
+
+#[cfg(test)]
+mod documented_behavior_tests {
+    //! Guardrails for docs that describe `--jsx lattish` vs `--jsx vdom` + Lattish createRoot.
+
+    const VENDOR_LATTISH: &str = include_str!("../vendor/Lattish.tish");
+
+    #[test]
+    fn vdom_prelude_defines_flag_vdom_h_and_patch() {
+        assert!(
+            super::VDOM_PRELUDE.contains("window.__LATTISH_JSX_VDOM"),
+            "prelude must flip Lattish into vnode mode"
+        );
+        assert!(
+            super::VDOM_PRELUDE.contains("function __vdom_h("),
+            "prelude must define __vdom_h"
+        );
+        assert!(
+            super::VDOM_PRELUDE.contains("window.__lattishVdomPatch"),
+            "prelude must assign __lattishVdomPatch"
+        );
+        assert!(
+            super::VDOM_PRELUDE.contains("__vdomPatchEl"),
+            "prelude should reconcile DOM (incremental patch path)"
+        );
+    }
+
+    #[test]
+    fn vendor_lattish_routes_flush_through_patch_or_replace_children() {
+        assert!(
+            VENDOR_LATTISH.contains("fn __usingVdom()"),
+            "vendor Lattish should gate on __usingVdom()"
+        );
+        assert!(
+            VENDOR_LATTISH.contains("window.__lattishVdomPatch(__container, __rootVnode, newTree)"),
+            "when VDOM is on, flush should call __lattishVdomPatch(old, new)"
+        );
+        assert!(
+            VENDOR_LATTISH.contains("__container.replaceChildren(el)"),
+            "when VDOM is off, flush should replaceChildren(App()) — full root swap per docs"
+        );
+        assert!(
+            VENDOR_LATTISH.contains("window.__lattishVdomPatch(container, null, __rootVnode)"),
+            "createRoot + VDOM should initial patch from null"
+        );
+        assert!(
+            VENDOR_LATTISH.contains("container.replaceChildren(el)"),
+            "createRoot without VDOM should mount via replaceChildren"
+        );
+    }
+}

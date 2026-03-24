@@ -97,6 +97,54 @@ mod tests {
         assert!(js.contains("__lattishVdomPatch"));
     }
 
+    /// Docs: `--jsx lattish` → `h(...)`, no VDOM prelude; `--jsx vdom` → `__vdom_h` + prelude.
+    /// This locks the contract so README / LATTISH.md stay honest.
+    #[test]
+    fn jsx_lattish_vs_vdom_compile_output_matches_documentation() {
+        let src = r#"fn X() { return <div class="x">{"a"}</div> }"#;
+        let program = parse(src).unwrap();
+
+        let lattish = compile_with_jsx(&program, false, JsxMode::LattishH).unwrap();
+        assert!(
+            lattish.contains("h(\"div\", { class: \"x\" }"),
+            "lattish mode should emit h(tag, props, …), got: {}",
+            &lattish[..500.min(lattish.len())]
+        );
+        assert!(
+            !lattish.contains("__vdom_h"),
+            "lattish mode must not emit __vdom_h"
+        );
+        assert!(
+            !lattish.contains("window.__LATTISH_JSX_VDOM"),
+            "lattish mode must not inject VDOM prelude flag"
+        );
+
+        let vdom = compile_with_jsx(&program, false, JsxMode::Vdom).unwrap();
+        assert!(
+            vdom.contains("__vdom_h(\"div\", { class: \"x\" }"),
+            "vdom mode should emit __vdom_h(…), got: {}",
+            &vdom[..700.min(vdom.len())]
+        );
+        assert!(
+            vdom.contains("window.__LATTISH_JSX_VDOM"),
+            "vdom mode must set __LATTISH_JSX_VDOM so Lattish createRoot uses patch"
+        );
+        assert!(
+            vdom.contains("__lattishVdomPatch"),
+            "vdom prelude must define __lattishVdomPatch"
+        );
+        // `__vdom_h("div", …)` contains the substring `h("div", …)` — require the real callee prefix.
+        let needle = "(\"div\", { class: \"x\" }";
+        let pos = vdom.find(needle).expect("expected div+class in vdom output");
+        let ctx_start = pos.saturating_sub(30);
+        let ctx_end = (pos + needle.len() + 8).min(vdom.len());
+        assert!(
+            vdom[..pos].ends_with("__vdom_h"),
+            "opening tag should be __vdom_h(\"div\", …), not h(\"div\", …); got {:?}",
+            &vdom[ctx_start..ctx_end]
+        );
+    }
+
     /// Component calls like {Panel()} return DOM elements. Wrapping in String() produces [object HTMLDivElement].
     #[test]
     fn jsx_component_call_not_wrapped_in_string() {
