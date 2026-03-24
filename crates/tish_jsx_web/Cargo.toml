@@ -2,7 +2,7 @@
 name = "tishlang_jsx_web"
 version = "0.1.0"
 edition = "2021"
-description = "JSX / DOM runtime snippets for Tish JS target only (not used by native)"
+description = "Workspace placeholder; Lattish runtime is the lattish npm/git repo (not vendored here)"
 
 license-file = { workspace = true }
 repository = { workspace = true }

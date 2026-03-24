@@ -2579,7 +2579,6 @@ version = "0.1.0"
 dependencies = [
  "tishlang_ast",
  "tishlang_compile",
- "tishlang_jsx_web",
  "tishlang_opt",
  "tishlang_parser",
 ]

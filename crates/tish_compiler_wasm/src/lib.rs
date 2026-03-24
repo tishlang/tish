@@ -10,7 +10,6 @@ mod resolve_virtual;
 use base64::Engine;
 use resolve_virtual::{detect_cycles_virtual, merge_modules_virtual, resolve_virtual};
 use std::collections::HashMap;
-use tishlang_compile_js::JsxMode;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -24,7 +23,7 @@ pub fn compile_to_bytecode(source: &str) -> Result<String, JsValue> {
 #[wasm_bindgen]
 pub fn compile_to_js(source: &str) -> Result<String, JsValue> {
     let program = tishlang_parser::parse(source.trim()).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    tishlang_compile_js::compile_with_jsx(&program, true, JsxMode::LattishH)
+    tishlang_compile_js::compile_with_jsx(&program, true)
         .map_err(|e| JsValue::from_str(&e.message))
 }
 
@@ -50,6 +49,6 @@ pub fn compile_to_js_with_imports(entry_path: &str, files_json: &str) -> Result<
     detect_cycles_virtual(&modules).map_err(|e| JsValue::from_str(&e))?;
     let program = merge_modules_virtual(modules).map_err(|e| JsValue::from_str(&e))?;
     let program = tishlang_opt::optimize(&program);
-    tishlang_compile_js::compile_with_jsx(&program, true, JsxMode::LattishH)
+    tishlang_compile_js::compile_with_jsx(&program, true)
         .map_err(|e| JsValue::from_str(&e.message))
 }

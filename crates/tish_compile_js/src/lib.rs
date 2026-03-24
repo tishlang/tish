@@ -8,14 +8,12 @@ mod js_intrinsics;
 #[cfg(test)]
 mod tests_jsx;
 
-pub use codegen::{compile_project_with_jsx, compile_with_jsx, JsxMode};
+pub use codegen::{compile_project_with_jsx, compile_with_jsx};
 pub use error::CompileError;
 
-/// Default JSX mode lowers to Lattish-style calls (implementation detail). Import what you use from
-/// `lattish` (e.g. `useState`, `createRoot`); the merged bundle includes the JSX runtime from that
-/// module. JSX-only files can use `import {} from "lattish"` to pull it in without bindings.
+/// JSX lowers to `h` / `Fragment`; merge the `lattish` runtime for hooks and DOM.
 pub fn compile(program: &tishlang_ast::Program, optimize: bool) -> Result<String, CompileError> {
-    compile_with_jsx(program, optimize, JsxMode::LattishH)
+    compile_with_jsx(program, optimize)
 }
 
 pub fn compile_project(
@@ -23,5 +21,5 @@ pub fn compile_project(
     project_root: Option<&std::path::Path>,
     optimize: bool,
 ) -> Result<String, CompileError> {
-    compile_project_with_jsx(entry_path, project_root, optimize, JsxMode::LattishH)
+    compile_project_with_jsx(entry_path, project_root, optimize)
 }

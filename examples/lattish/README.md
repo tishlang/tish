@@ -4,7 +4,7 @@ Compiles Tish + JSX to plain JavaScript using **Lattish** (the [lattish](https:/
 
 ## Features Used
 
-- **JSX** — Only when compiling to JavaScript (`tish compile --target js`; default `--jsx lattish`)
+- **JSX** — Only when compiling to JavaScript (`tish compile --target js`); lowers to `h` / `Fragment` (merge `lattish`)
 - **Lattish** — Import `useState`, `createRoot`, etc. from `lattish`; the merged bundle includes the JSX runtime.
 
 ## What It Does

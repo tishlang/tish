@@ -56,9 +56,6 @@ struct CompileArgs {
     features: Vec<String>,
     #[arg(long)]
     no_optimize: bool,
-    /// JS target only: `lattish` (default), `vdom` (vnode + patch; use with Lattish createRoot).
-    #[arg(long = "jsx", value_name = "MODE", default_value = "lattish")]
-    jsx_mode: String,
     #[arg(required = true)]
     file: String,
 }
@@ -94,7 +91,6 @@ fn main() {
             &a.native_backend,
             &a.features,
             a.no_optimize || no_opt_env,
-            &a.jsx_mode,
         ),
         Some(Commands::DumpAst { file }) => dump_ast(&file),
         None => run_repl("vm", false), // No args = REPL
@@ -339,29 +335,7 @@ fn tish_history_path() -> Option<PathBuf> {
     home.map(|h| PathBuf::from(h).join(".tish_history"))
 }
 
-fn parse_jsx_mode(s: &str) -> Result<tishlang_compile_js::JsxMode, String> {
-    match s {
-        "legacy" => Err(
-            "--jsx legacy was removed. Use --jsx lattish (default) with lattish merged into your \
-             bundle, or --jsx vdom with Lattish's createRoot."
-                .to_string(),
-        ),
-        "vdom" => Ok(tishlang_compile_js::JsxMode::Vdom),
-        "lattish" => Ok(tishlang_compile_js::JsxMode::LattishH),
-        other => Err(format!(
-            "Unknown --jsx {:?}: use lattish (default) or vdom.",
-            other
-        )),
-    }
-}
-
-fn compile_to_js(
-    input_path: &Path,
-    output_path: &str,
-    optimize: bool,
-    jsx: &str,
-) -> Result<(), String> {
-    let jsx_mode = parse_jsx_mode(jsx)?;
+fn compile_to_js(input_path: &Path, output_path: &str, optimize: bool) -> Result<(), String> {
     let project_root = input_path.parent().and_then(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
             p.parent()
@@ -382,13 +356,13 @@ fn compile_to_js(
         } else {
             program
         };
-        tishlang_compile_js::compile_with_jsx(&p, optimize, jsx_mode).map_err(|e| format!("{}", e))?
+        tishlang_compile_js::compile_with_jsx(&p, optimize).map_err(|e| format!("{}", e))?
     } else if input_path.extension().map(|e| e == "js") == Some(true) {
         let source = fs::read_to_string(input_path).map_err(|e| format!("{}", e))?;
         let program = tishlang_js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        tishlang_compile_js::compile_with_jsx(&program, optimize, jsx_mode).map_err(|e| format!("{}", e))?
+        tishlang_compile_js::compile_with_jsx(&program, optimize).map_err(|e| format!("{}", e))?
     } else {
-        tishlang_compile_js::compile_project_with_jsx(input_path, project_root, optimize, jsx_mode)
+        tishlang_compile_js::compile_project_with_jsx(input_path, project_root, optimize)
             .map_err(|e| format!("{}", e))?
     };
 
@@ -418,7 +392,6 @@ fn compile_file(
     native_backend: &str,
     cli_features: &[String],
     no_optimize: bool,
-    jsx: &str,
 ) -> Result<(), String> {
     let optimize = !no_optimize;
     let input_path =
@@ -427,7 +400,7 @@ fn compile_file(
     let is_js = input_path.extension().map(|e| e == "js") == Some(true);
 
     if target == "js" {
-        return compile_to_js(&input_path, output_path, optimize, jsx.trim());
+        return compile_to_js(&input_path, output_path, optimize);
     }
 
     if target == "wasm" && is_js {
@@ -539,7 +512,7 @@ mod cli_tests {
     use super::{Cli, Commands};
 
     #[test]
-    fn compile_jsx_defaults_to_lattish() {
+    fn compile_js_target_parses() {
         let cli = Cli::try_parse_from([
             "tish",
             "compile",
@@ -551,27 +524,7 @@ mod cli_tests {
         ])
         .unwrap();
         match cli.command {
-            Some(Commands::Compile(a)) => assert_eq!(a.jsx_mode.as_str(), "lattish"),
-            _ => panic!("expected Compile"),
-        }
-    }
-
-    #[test]
-    fn compile_jsx_flag_vdom() {
-        let cli = Cli::try_parse_from([
-            "tish",
-            "compile",
-            "a.tish",
-            "--target",
-            "js",
-            "--jsx",
-            "vdom",
-            "-o",
-            "x.js",
-        ])
-        .unwrap();
-        match cli.command {
-            Some(Commands::Compile(a)) => assert_eq!(a.jsx_mode.as_str(), "vdom"),
+            Some(Commands::Compile(a)) => assert_eq!(a.file, "m.tish"),
             _ => panic!("expected Compile"),
         }
     }
