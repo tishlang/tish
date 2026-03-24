@@ -163,4 +163,50 @@ fn FileList() {
             &js[..600.min(js.len())]
         );
     }
+
+    /// `>` inside `{ ... }` attribute values must be a comparison operator, not end of opening tag.
+    #[test]
+    fn jsx_gt_comparison_inside_attribute_expression() {
+        let src = r#"fn X() {
+  return <button
+    type="button"
+    onclick={() => {
+      let nm = "a"
+      if (nm && nm.length > 0) { print(nm) }
+    }}
+  >{"ok"}</button>
+}"#;
+        let program = parse(src).expect("parse multi-line JSX with > comparison in attr");
+        let js = compile_with_jsx(&program, false, JsxMode::LattishH).expect("compile");
+        assert!(
+            js.contains("length > 0") || js.contains("length>0"),
+            "expected compiled JS to preserve greater-than comparison, got: {}",
+            &js[..800.min(js.len())]
+        );
+    }
+
+    /// Nested JSX inside an attribute callback must still close inner `<tag>` correctly.
+    #[test]
+    fn jsx_nested_element_inside_attribute_expression() {
+        let src = r#"fn X() {
+  return <button
+    onclick={() => {
+      let x = <span>{"inner"}</span>
+      print(x)
+    }}
+  >{"outer"}</button>
+}"#;
+        let program = parse(src).expect("parse nested JSX inside onclick");
+        let js = compile_with_jsx(&program, false, JsxMode::LattishH).expect("compile");
+        assert!(
+            js.contains("\"inner\""),
+            "expected nested span text in output, got: {}",
+            &js[..900.min(js.len())]
+        );
+        assert!(
+            js.contains("\"outer\""),
+            "expected button child text in output, got: {}",
+            &js[..900.min(js.len())]
+        );
+    }
 }

@@ -14,6 +14,16 @@ use std::str::Chars;
 const INDENT_WIDTH: usize = 2;
 const TAB_AS_LEVELS: usize = 1;
 
+/// One JSX element on the stack: tracks whether we are still in its opening tag (`<Tag ...`)
+/// and how many `{` are open inside that element's **attribute values** (embedded JS).
+/// This lets `>` be a comparison operator inside `{...}` while still closing `<span>` when
+/// `attr_value_braces == 0` for the innermost element (React-like).
+#[derive(Debug, Clone)]
+struct JsxEl {
+    in_opener: bool,
+    attr_value_braces: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Lexer<'a> {
     chars: Peekable<Chars<'a>>,
@@ -27,7 +37,7 @@ pub struct Lexer<'a> {
     jsx_after_gt: bool,
     jsx_in_opening_tag: bool,
     jsx_saw_slash_before_gt: bool,
-    jsx_brace_depth: i32,
+    jsx_stack: Vec<JsxEl>,
     jsx_depth: i32,
     jsx_child_brace_depth: i32,
     jsx_in_closing_tag: bool,
@@ -47,11 +57,16 @@ impl<'a> Lexer<'a> {
             jsx_after_gt: false,
             jsx_in_opening_tag: false,
             jsx_saw_slash_before_gt: false,
-            jsx_brace_depth: 0,
+            jsx_stack: Vec::new(),
             jsx_depth: 0,
             jsx_child_brace_depth: 0,
             jsx_in_closing_tag: false,
         }
+    }
+
+    #[inline]
+    fn jsx_sync_in_opening_tag(&mut self) {
+        self.jsx_in_opening_tag = self.jsx_stack.last().map(|e| e.in_opener).unwrap_or(false);
     }
 
     fn read_jsx_text(&mut self, start: (usize, usize)) -> Result<Option<Token>, String> {
@@ -305,18 +320,33 @@ impl<'a> Lexer<'a> {
             '(' => TokenKind::LParen,
             ')' => TokenKind::RParen,
             '{' => {
-                if self.jsx_in_opening_tag { self.jsx_brace_depth += 1; }
-                else if self.jsx_depth > 0 { self.jsx_child_brace_depth += 1; }
+                if self.jsx_in_opening_tag {
+                    if let Some(top) = self.jsx_stack.last_mut() {
+                        top.attr_value_braces += 1;
+                    }
+                } else if self.jsx_depth > 0 {
+                    self.jsx_child_brace_depth += 1;
+                }
                 if let Some(depth) = self.template_brace_stack.last_mut() {
                     *depth += 1;
                 }
                 TokenKind::LBrace
             }
             '}' => {
-                if self.jsx_brace_depth > 0 { self.jsx_brace_depth -= 1; }
-                else if self.jsx_child_brace_depth > 0 {
+                let mut handled = false;
+                if let Some(top) = self.jsx_stack.last() {
+                    if top.in_opener && top.attr_value_braces > 0 {
+                        if let Some(top) = self.jsx_stack.last_mut() {
+                            top.attr_value_braces -= 1;
+                        }
+                        handled = true;
+                    }
+                }
+                if !handled && self.jsx_child_brace_depth > 0 {
                     self.jsx_child_brace_depth -= 1;
-                    if self.jsx_child_brace_depth == 0 { self.jsx_after_gt = true; }
+                    if self.jsx_child_brace_depth == 0 {
+                        self.jsx_after_gt = true;
+                    }
                 }
                 if let Some(depth) = self.template_brace_stack.last_mut() {
                     *depth -= 1;
@@ -358,6 +388,10 @@ impl<'a> Lexer<'a> {
                 else if self.peek() == Some('/') { self.jsx_in_closing_tag = true; TokenKind::Lt }
                 else if self.peek() == Some('>') || self.peek().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) {
                     self.jsx_depth += 1;
+                    self.jsx_stack.push(JsxEl {
+                        in_opener: true,
+                        attr_value_braces: 0,
+                    });
                     self.jsx_in_opening_tag = true;
                     TokenKind::Lt
                 } else { TokenKind::Lt }
@@ -366,13 +400,23 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('=') { self.advance(); TokenKind::Ge }
                 else if self.peek() == Some('>') { self.advance(); TokenKind::Shr }
                 else {
-                    if self.jsx_in_opening_tag && self.jsx_brace_depth == 0 && !self.jsx_saw_slash_before_gt {
-                        self.jsx_after_gt = true;
-                    }
-                    if self.jsx_in_closing_tag || (self.jsx_in_opening_tag && self.jsx_saw_slash_before_gt) {
+                    if self.jsx_in_closing_tag {
                         self.jsx_depth = (self.jsx_depth - 1).max(0);
+                        self.jsx_stack.pop();
+                        self.jsx_sync_in_opening_tag();
+                    } else if self.jsx_in_opening_tag && self.jsx_saw_slash_before_gt {
+                        self.jsx_depth = (self.jsx_depth - 1).max(0);
+                        self.jsx_stack.pop();
+                        self.jsx_sync_in_opening_tag();
+                    } else if let Some(top) = self.jsx_stack.last_mut() {
+                        if top.in_opener && top.attr_value_braces > 0 {
+                            // `>` is a comparison (or shift) token inside `{ ... }`, not end of opening tag.
+                        } else if top.in_opener && !self.jsx_saw_slash_before_gt {
+                            top.in_opener = false;
+                            self.jsx_after_gt = true;
+                            self.jsx_sync_in_opening_tag();
+                        }
                     }
-                    self.jsx_in_opening_tag = false;
                     self.jsx_in_closing_tag = false;
                     self.jsx_saw_slash_before_gt = false;
                     TokenKind::Gt
