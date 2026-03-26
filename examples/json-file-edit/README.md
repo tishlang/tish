@@ -20,7 +20,7 @@ Run from this directory (tish repo is `../..`). File I/O requires the `fs` featu
 
 ```bash
 # Run with interpreter (fs feature required for readFile/writeFile)
-cargo run -p tish --manifest-path ../../Cargo.toml --release --features fs -- run src/main.tish --backend interp
+cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features fs -- run src/main.tish --backend interp
 
 # Or with tish installed
 tish run src/main.tish --backend interp
@@ -30,7 +30,7 @@ tish run src/main.tish --backend interp
 To compile to a native binary (includes fs when built with full):
 
 ```bash
-cargo run -p tish --manifest-path ../../Cargo.toml --release --features full -- compile src/main.tish -o json-file-edit
+cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features full -- compile src/main.tish -o json-file-edit
 ./json-file-edit
 ```
 

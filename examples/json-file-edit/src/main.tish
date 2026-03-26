@@ -1,7 +1,7 @@
 // JSON File Edit Example
 // Demonstrates: readFile, JSON.parse, JSON.stringify, writeFile
 // Run from this dir: tish run src/main.tish --backend interp
-// Build tish with: cargo build -p tish --release --features fs
+// Build tish with: cargo build -p tishlang--release --features fs
 import { readFile, writeFile } from 'tish:fs'
 
 let filePath = "data.json"

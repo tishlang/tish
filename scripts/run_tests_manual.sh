@@ -4,7 +4,7 @@
 
 set -e
 cd "$(dirname "$0")/.."
-tish_bin="cargo run -p tish -q --"
+tish_bin="cargo run -p tishlang-q --"
 
 core_dir="tests/core"
 run_native=false

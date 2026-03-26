@@ -20,7 +20,7 @@ tish run src/build.tish --features fs,regex
 Or with tish from the repo:
 
 ```bash
-cargo run -p tish --manifest-path ../../Cargo.toml --release --features full -- run src/build.tish
+cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features full -- run src/build.tish
 ```
 
 ## Run

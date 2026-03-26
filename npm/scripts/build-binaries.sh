@@ -43,7 +43,7 @@ esac
 
 OUT="$PLATFORM_DIR/$PLATFORM/$BIN"
 echo "Building tish for $TARGET..."
-cargo build --release -p tish --target "$TARGET"
+cargo build --release -p tishlang--target "$TARGET"
 mkdir -p "$PLATFORM_DIR/$PLATFORM"
 cp "target/$TARGET/release/$BIN" "$OUT"
 echo "Copied to $OUT"

@@ -18,10 +18,10 @@ Run without installing tish (from this directory; tish repo is `../..`):
 
 ```bash
 # Run with interpreter
-cargo run -p tish --manifest-path ../../Cargo.toml --release -- run src/main.tish
+cargo run -p tishlang--manifest-path ../../Cargo.toml --release -- run src/main.tish
 
 # Compile and run
-cargo run -p tish --manifest-path ../../Cargo.toml --release --features full -- compile src/main.tish -o hello
+cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features full -- compile src/main.tish -o hello
 ./hello
 ```
 

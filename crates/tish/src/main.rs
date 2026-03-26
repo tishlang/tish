@@ -28,7 +28,7 @@ struct RunArgs {
     #[arg(long, default_value = "vm")]
     backend: String,
     /// Enable capabilities (http, fs, process, regex, ws). Must match how tish was built.
-    /// E.g. cargo run -p tish --features http,fs -- run script.tish --feature http,fs
+    /// E.g. cargo run -p tishlang--features http,fs -- run script.tish --feature http,fs
     #[arg(long = "feature", action = clap::ArgAction::Append)]
     features: Vec<String>,
     /// Disable AST and bytecode optimizations (for debugging)

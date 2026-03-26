@@ -114,9 +114,9 @@ rel_flag=""
 [[ "$profile" == "release" ]] && rel_flag="--release"
 # Always build tish so we use latest codegen (cargo skips if unchanged)
 echo "Building tish ($profile)..."
-cargo build -p tish $rel_flag --features full --target-dir "$target_dir" -q 2>/dev/null || true
+cargo build -p tishlang$rel_flag --features full --target-dir "$target_dir" -q 2>/dev/null || true
 if [[ ! -x "$tish_bin" ]]; then
-  tish_bin="cargo run -p tish $rel_flag --features full --target-dir $target_dir -q --"
+  tish_bin="cargo run -p tishlang$rel_flag --features full --target-dir $target_dir -q --"
 fi
 
 # Directory for compiled outputs - use cache or temp

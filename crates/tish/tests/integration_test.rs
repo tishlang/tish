@@ -1,8 +1,8 @@
 //! Full-stack integration tests: run .tish files with interpreter or each backend and compare
 //! stdout to static expected files (e.g. `fn_any.tish.expected`).
 //!
-//! - Run: `cargo test -p tish` (or `cargo nextest run -p tish`).
-//! - Generate/update expected files: `REGENERATE_EXPECTED=1 cargo test -p tish test_mvp_programs_interpreter`
+//! - Run: `cargo test -p tishlang` (or `cargo nextest run -p tishlang`).
+//! - Generate/update expected files: `REGENERATE_EXPECTED=1 cargo test -p tishlangtest_mvp_programs_interpreter`
 //!   then commit the new/updated `tests/core/*.tish.expected` files.
 //! - Compiled outputs are cached under `target/integration_compile_cache/` per backend.
 
@@ -232,7 +232,7 @@ fn test_async_await_compile_via_binary() {
 /// Uses httpbin.org/delay/1 (1s each). 3 parallel ≈ 1s, 3 sequential ≈ 3s.
 #[test]
 #[cfg(feature = "http")]
-#[ignore = "timing and network sensitive; run manually: cargo test test_async_parallel_vs_sequential_timing -p tish --features http -- --ignored"]
+#[ignore = "timing and network sensitive; run manually: cargo test test_async_parallel_vs_sequential_timing -p tishlang--features http -- --ignored"]
 fn test_async_parallel_vs_sequential_timing() {
     let bin = tish_bin();
     let parallel_src = workspace_root().join("examples").join("async-await").join("src").join("parallel.tish");

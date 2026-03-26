@@ -113,7 +113,7 @@ cd my-app && npx @tishlang/tish run src/main.tish
 ### From source
 
 ```bash
-cargo build --release -p tish
+cargo build --release -p tishlang
 ```
 
 The binary is `target/release/tish`. Add it to your PATH or run directly.
@@ -175,7 +175,7 @@ Default: **no features** (secure mode). Use `--features full` for development.
 ## Test
 
 ```bash
-cargo test -p tish
+cargo test -p tishlang
 ```
 
 Tests:

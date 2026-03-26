@@ -37,7 +37,7 @@ Run without installing tish (from this directory; tish repo is `../..`):
 
 ```bash
 # Run with interpreter
-cargo run -p tish --manifest-path ../../Cargo.toml --release --features http -- run src/main.tish --features http
+cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features http -- run src/main.tish --features http
 
 # Then test: curl http://localhost:3000/users
 ```

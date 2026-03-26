@@ -6,13 +6,13 @@ Thanks for your interest in contributing. Tish is licensed under the [Pay It For
 
 - **Build** (from repo root):
   ```bash
-  cargo build --release -p tish
+  cargo build --release -p tishlang
   ```
   The binary is `target/release/tish`. Add it to your PATH or run directly.
 
 - **Test**:
   ```bash
-  cargo test -p tish
+  cargo test -p tishlang
   ```
   Covers parsing, interpreter, and interpreter-vs-native parity.
 
@@ -31,14 +31,14 @@ Thanks for your interest in contributing. Tish is licensed under the [Pay It For
 ## Code style
 
 - Format: `cargo fmt`
-- Lint: `cargo clippy -p tish` (and the crate you changed)
+- Lint: `cargo clippy -p tishlang` (and the crate you changed)
 
 ## Tooling (separate from `tish` CLI)
 
 - **Compiler CLI**: `tish` — run, repl, compile, dump-ast only.
-- **Formatter**: `cargo build -p tish_fmt` → **`tish-fmt`** binary. Library: `crates/tish_fmt`.
-- **Linter**: `cargo build -p tish_lint` → **`tish-lint`** binary. Library: `crates/tish_lint`.
-- **LSP**: `cargo build -p tish_lsp` → **`tish-lsp`** (uses `tish_fmt` + `tish_lint` as deps). See [docs/tooling.md](docs/tooling.md).
+- **Formatter**: `cargo build -p tishlang_fmt` → **`tish-fmt`** binary. Library: `crates/tish_fmt`.
+- **Linter**: `cargo build -p tishlang_lint` → **`tish-lint`** binary. Library: `crates/tish_lint`.
+- **LSP**: `cargo build -p tishlang_lsp` → **`tish-lsp`** (uses `tish_fmt` + `tish_lint` as deps). See [docs/tooling.md](docs/tooling.md).
 - **User docs** in **tish-docs**; update when behavior changes.
 
 ## Docs and design

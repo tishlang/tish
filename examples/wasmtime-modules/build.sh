@@ -5,7 +5,7 @@ cd "$SCRIPT_DIR"
 # Use workspace tish when run from tish/examples/wasmtime-modules (has wasi support)
 TISH_MF="../../Cargo.toml"
 if [ -f "$TISH_MF" ]; then
-  TISH="cargo run -p tish --manifest-path $TISH_MF --"
+  TISH="cargo run -p tishlang--manifest-path $TISH_MF --"
 else
   TISH="tish"
 fi

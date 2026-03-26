@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Generate tests/core/*.tish.expected from interpreter output.
-# Run from repo root after building: cargo build -p tish && ./scripts/generate_expected.sh
+# Run from repo root after building: cargo build -p tishlang&& ./scripts/generate_expected.sh
 
 set -e
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

@@ -15,8 +15,8 @@ script="tests/modules/async_promise_settimeout.tish"
 
 # Build tish with http feature
 echo "Building tish (http feature)..."
-cargo build -p tish --features http --target-dir "$target_dir" -q 2>/dev/null || \
-  cargo build -p tish --features http --target-dir "$target_dir"
+cargo build -p tishlang--features http --target-dir "$target_dir" -q 2>/dev/null || \
+  cargo build -p tishlang--features http --target-dir "$target_dir"
 
 if [[ ! -x "$tish_bin" ]]; then
   echo "Error: tish binary not found at $tish_bin"

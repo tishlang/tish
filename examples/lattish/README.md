@@ -23,7 +23,7 @@ tish compile --target js src/App.tish -o dist/App
 Or with tish from the repo:
 
 ```bash
-cargo run -p tish --manifest-path ../../Cargo.toml --release --features full -- compile --target js src/App.tish -o dist/App
+cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features full -- compile --target js src/App.tish -o dist/App
 ```
 
 Or use the npm script: `npm run build`

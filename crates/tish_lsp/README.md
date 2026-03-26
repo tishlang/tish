@@ -5,7 +5,7 @@ Language Server Protocol implementation for [Tish](https://github.com/tishlang/t
 ## Build
 
 ```bash
-cargo build --release -p tish_lsp
+cargo build --release -p tishlang_lsp
 ```
 
 Binary: `target/release/tish-lsp` (stdio LSP).

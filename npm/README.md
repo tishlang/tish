@@ -36,23 +36,23 @@ Example for all platforms (run the appropriate line on each machine or in CI):
 
 ```bash
 # macOS ARM64
-cargo build --release -p tish --target aarch64-apple-darwin
+cargo build --release -p tishlang--target aarch64-apple-darwin
 cp target/aarch64-apple-darwin/release/tish npm/tish/platform/darwin-arm64/tish
 
 # macOS x64
-cargo build --release -p tish --target x86_64-apple-darwin
+cargo build --release -p tishlang--target x86_64-apple-darwin
 cp target/x86_64-apple-darwin/release/tish npm/tish/platform/darwin-x64/tish
 
 # Linux x64
-cargo build --release -p tish --target x86_64-unknown-linux-gnu
+cargo build --release -p tishlang--target x86_64-unknown-linux-gnu
 cp target/x86_64-unknown-linux-gnu/release/tish npm/tish/platform/linux-x64/tish
 
 # Linux ARM64
-cargo build --release -p tish --target aarch64-unknown-linux-gnu
+cargo build --release -p tishlang--target aarch64-unknown-linux-gnu
 cp target/aarch64-unknown-linux-gnu/release/tish npm/tish/platform/linux-arm64/tish
 
 # Windows x64
-cargo build --release -p tish --target x86_64-pc-windows-msvc
+cargo build --release -p tishlang--target x86_64-pc-windows-msvc
 cp target/x86_64-pc-windows-msvc/release/tish.exe npm/tish/platform/win32-x64/tish.exe
 ```
 
@@ -60,7 +60,7 @@ cp target/x86_64-pc-windows-msvc/release/tish.exe npm/tish/platform/win32-x64/ti
 
 The workflow [`.github/workflows/build-npm-binaries.yml`](../.github/workflows/build-npm-binaries.yml) runs on push and PR to `main`. It:
 
-- **Test & coverage** (Ubuntu): runs `cargo nextest run -p tish --features full`, publishes **test results** (JUnit) to the Actions summary, and generates **code coverage** via `cargo llvm-cov`. Artifacts: `coverage-lcov` (lcov.info), `coverage-html` (browsable report).
+- **Test & coverage** (Ubuntu): runs `cargo nextest run -p tishlang--features full`, publishes **test results** (JUnit) to the Actions summary, and generates **code coverage** via `cargo llvm-cov`. Artifacts: `coverage-lcov` (lcov.info), `coverage-html` (browsable report).
 - **Build**: builds the CLI for
   - `linux-x64`, `linux-arm64` (Ubuntu; ARM64 via [cross](https://github.com/cross-rs/cross))
   - `darwin-arm64`, `darwin-x64` (macOS 14)

@@ -9,7 +9,7 @@
 set -e
 cd "$(dirname "$0")/.."
 
-TISH_BIN="cargo run -p tish -q --features full --"
+TISH_BIN="cargo run -p tishlang-q --features full --"
 TEST262_DIR="tests/test262"
 HARNESS="$TEST262_DIR/harness.js"
 

@@ -51,7 +51,7 @@ Run without installing tish (from this directory; tish repo is `../..`):
 
 ```bash
 # Run with interpreter
-cargo run -p tish --manifest-path ../../Cargo.toml --release --features http -- run src/main.tish --features http
+cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features http -- run src/main.tish --features http
 
 # Test incrementing
 curl -X POST http://localhost:3000/counter/test/increment

@@ -1,5 +1,5 @@
 // Promises and async/await example
-// Run: cargo run -p tish --features http -- run examples/async-await/src/promises.tish --backend interp
+// Run: cargo run -p tishlang--features http -- run examples/async-await/src/promises.tish --backend interp
 
 import { fetch } from 'http'
 

@@ -13,7 +13,7 @@
 ## Running LSP locally
 
 ```bash
-cargo run -p tish_lsp
+cargo run -p tishlang_lsp
 # Blocks on stdin — editors spawn this; for raw debug, use a client or trace in VS Code (tish.trace.server).
 ```
 

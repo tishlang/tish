@@ -128,8 +128,8 @@ normalize_timing() {
 # Build tish
 if [[ ! -x "$tish_bin" ]]; then
   echo "Building tish ($profile)..."
-  cargo build -p tish --target-dir "$target_dir" -q 2>/dev/null || true
-  [[ ! -x "$tish_bin" ]] && tish_bin="cargo run -p tish --target-dir $target_dir -q --"
+  cargo build -p tishlang--target-dir "$target_dir" -q 2>/dev/null || true
+  [[ ! -x "$tish_bin" ]] && tish_bin="cargo run -p tishlang--target-dir $target_dir -q --"
 fi
 
 echo "=== Tish Parity Compare ==="

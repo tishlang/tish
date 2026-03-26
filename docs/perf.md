@@ -553,4 +553,4 @@ Legend: Green = <150% | Yellow = 200-500% | Red = >500%
 ./scripts/run_benchmark_granular_profile.sh; \
 
 ./scripts/run_object_stress_profile.sh --instrument; \
-TISH_PROFILE=1 cargo run -p tish --features "full,profile" -- run tests/core/benchmark_granular_04_nested_fn.tish
+TISH_PROFILE=1 cargo run -p tishlang--features "full,profile" -- run tests/core/benchmark_granular_04_nested_fn.tish

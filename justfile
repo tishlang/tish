@@ -125,15 +125,15 @@ test *ARGS:
 
 # Run only tish package tests (same as CI: integration tests only)
 test-tish *ARGS:
-    cargo nextest run -p tish --features full -- {{ARGS}}
+    cargo nextest run -p tishlang--features full -- {{ARGS}}
 
 # Skip slow backend tests (native/cranelift/wasi) for fast local iteration
 test-quick:
-    cargo nextest run -p tish --features full -- --skip test_mvp_programs_native --skip test_mvp_programs_cranelift --skip test_mvp_programs_wasi
+    cargo nextest run -p tishlang--features full -- --skip test_mvp_programs_native --skip test_mvp_programs_cranelift --skip test_mvp_programs_wasi
 
 # Run tests with coverage (requires llvm-tools: rustup component add llvm-tools-preview)
 test-coverage:
-    cargo llvm-cov nextest -p tish --features full --lcov --output-path lcov.info --html coverage-html
+    cargo llvm-cov nextest -p tishlang--features full --lcov --output-path lcov.info --html coverage-html
 
 # Plain cargo test (whole workspace)
 test-cargo:

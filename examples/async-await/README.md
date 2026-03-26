@@ -9,7 +9,7 @@ Demonstrates **non-blocking** async/await with **`await fetchAll`** for parallel
 ## Definitive Validation
 
 ```bash
-cargo test -p tish test_async_parallel_vs_sequential_timing --features http
+cargo test -p tishlangtest_async_parallel_vs_sequential_timing --features http
 ```
 
 Compiles `parallel.tish` (`await fetchAll`) and `sequential.tish` (`await fetch` in loop), runs both, and **asserts parallel < 60% of sequential time**. Uses httpbin.org/delay/1 (~1s per request): 3 parallel ≈ 1s, 3 sequential ≈ 3s.
@@ -17,7 +17,7 @@ Compiles `parallel.tish` (`await fetchAll`) and `sequential.tish` (`await fetch`
 ## Local Development
 
 ```bash
-cargo run -p tish --features http -- compile examples/async-await/src/main.tish -o async_demo
+cargo run -p tishlang--features http -- compile examples/async-await/src/main.tish -o async_demo
 ./async_demo
 ```
 

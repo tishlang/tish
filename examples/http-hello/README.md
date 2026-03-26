@@ -20,7 +20,7 @@ Run without installing tish (from this directory; tish repo is `../..`):
 
 ```bash
 # Run with interpreter (requires http feature)
-cargo run -p tish --manifest-path ../../Cargo.toml --release --features http -- run src/main.tish --features http
+cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features http -- run src/main.tish --features http
 
 # Then visit: http://localhost:3000/
 ```
