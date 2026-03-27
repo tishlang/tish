@@ -7,6 +7,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// True if `root` looks like the Tish language repo (has `crates/tish_runtime`).
+///
+/// Used so we do not treat unrelated workspaces (e.g. a parent `zectre-platform` repo) as Tish
+/// when `CARGO_MANIFEST_DIR` or cwd points at another Rust workspace.
+fn is_tish_workspace_root(root: &Path) -> bool {
+    root.join("crates").join("tish_runtime").is_dir()
+}
+
 /// Find the Tish workspace root using multiple strategies.
 ///
 /// Returns the directory containing the workspace Cargo.toml (with [workspace]).
@@ -18,7 +26,7 @@ pub fn find_workspace_root() -> Result<PathBuf, String> {
         // For crates/tish_*, workspace root is parent.parent()
         if let Some(root) = path.parent().and_then(|p| p.parent()) {
             let root_buf = root.to_path_buf();
-            if root_buf.join("Cargo.toml").exists() {
+            if root_buf.join("Cargo.toml").exists() && is_tish_workspace_root(&root_buf) {
                 return Ok(root_buf);
             }
         }
@@ -47,7 +55,7 @@ pub fn find_workspace_root() -> Result<PathBuf, String> {
             let cargo_toml = current.join("Cargo.toml");
             if cargo_toml.exists() {
                 if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
-                    if content.contains("[workspace]") {
+                    if content.contains("[workspace]") && is_tish_workspace_root(&current) {
                         return Ok(current);
                     }
                 }
