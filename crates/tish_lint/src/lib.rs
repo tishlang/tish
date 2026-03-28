@@ -180,6 +180,15 @@ fn lint_expr(e: &Expr, out: &mut Vec<LintDiagnostic>) {
                 }
             }
         }
+        Expr::New { callee, args, .. } => {
+            lint_expr(callee, out);
+            for a in args {
+                match a {
+                    tishlang_ast::CallArg::Expr(x) => lint_expr(x, out),
+                    tishlang_ast::CallArg::Spread(x) => lint_expr(x, out),
+                }
+            }
+        }
         Expr::Member { object, .. } => {
             lint_expr(object, out);
         }

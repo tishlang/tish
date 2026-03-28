@@ -1,10 +1,9 @@
 //! Common helper functions used across builtin implementations.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use tishlang_core::Value;
+use tishlang_core::{ObjectMap, Value};
 
 /// Normalize an array index, handling negative indices.
 /// Returns a valid index within bounds or the default value.
@@ -24,7 +23,7 @@ pub fn normalize_index(idx: &Value, len: i64, default: usize) -> usize {
 
 /// Create an error object with a single "error" field.
 pub fn make_error_value(e: impl std::fmt::Display) -> Value {
-    let mut obj = HashMap::with_capacity(1);
+    let mut obj = ObjectMap::with_capacity(1);
     obj.insert(Arc::from("error"), Value::String(e.to_string().into()));
     Value::Object(Rc::new(RefCell::new(obj)))
 }

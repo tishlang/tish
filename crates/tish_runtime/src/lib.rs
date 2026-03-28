@@ -13,7 +13,14 @@ use tishlang_builtins::helpers::extract_num;
 #[cfg(feature = "fs")]
 use tishlang_builtins::helpers::make_error_value;
 
+pub use tishlang_core::ObjectMap;
 pub use tishlang_core::Value;
+
+pub use tishlang_builtins::construct::{
+    audio_context_constructor_value as tish_audio_context_constructor,
+    construct as tish_construct,
+    uint8_array_constructor_value as tish_uint8_array_constructor,
+};
 
 // Re-export array methods from tishlang_builtins
 pub use tishlang_builtins::array::{
@@ -754,7 +761,7 @@ pub fn regexp_exec(re: &Value, input: &Value) -> Value {
 
 #[cfg(feature = "regex")]
 fn regexp_exec_impl(re: &mut tishlang_core::TishRegExp, input: &str) -> Value {
-    use std::collections::HashMap;
+    use tishlang_core::ObjectMap;
 
     let start = if re.flags.global || re.flags.sticky {
         re.last_index
@@ -785,7 +792,7 @@ fn regexp_exec_impl(re: &mut tishlang_core::TishRegExp, input: &str) -> Value {
             let match_byte_start = byte_start + full_match.start();
             let match_char_index = input[..match_byte_start].chars().count();
 
-            let mut obj: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+            let mut obj: ObjectMap = ObjectMap::default();
             obj.insert(Arc::from("0"), Value::String(full_match.as_str().into()));
             for i in 1..caps.len() {
                 let val = match caps.get(i) {

@@ -3,11 +3,12 @@
 //! Re-exports core types from tishlang_core and provides interpreter-specific functionality.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 pub use tishlang_core::{RegExpFlags, TishRegExp};
+
+use crate::value::PropMap;
 
 use crate::value::Value;
 
@@ -42,7 +43,7 @@ pub fn regexp_exec(re: &mut TishRegExp, input: &str) -> Value {
             let match_byte_start = byte_start + full_match.start();
             let match_char_index = input[..match_byte_start].chars().count();
 
-            let mut obj: HashMap<Arc<str>, Value> = HashMap::new();
+            let mut obj: PropMap = PropMap::default();
             obj.insert(Arc::from("0"), Value::String(full_match.as_str().into()));
             for i in 1..caps.len() {
                 let val = match caps.get(i) {

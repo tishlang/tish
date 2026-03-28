@@ -1,10 +1,9 @@
 //! Promise static methods for compiled Tish (resolve, reject, all, race).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use tishlang_core::Value;
+use tishlang_core::{ObjectMap, Value};
 
 /// Promise.resolve(value) - returns the value (immediate resolve).
 pub fn promise_resolve(args: &[Value]) -> Value {
@@ -56,7 +55,7 @@ pub fn promise_race(args: &[Value]) -> Value {
 
 /// Build the Promise object with resolve, reject, all, race static methods.
 pub fn promise_object() -> Value {
-    let mut map: HashMap<Arc<str>, Value> = HashMap::new();
+    let mut map: ObjectMap = ObjectMap::default();
     map.insert(
         Arc::from("resolve"),
         Value::Function(Rc::new(|args: &[Value]| promise_resolve(args))),

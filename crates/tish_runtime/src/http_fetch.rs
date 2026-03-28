@@ -1,7 +1,6 @@
 //! Web Fetch–aligned Response, ReadableStream, reader.read(), text()/json().
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -9,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use futures::Stream;
 use futures::StreamExt;
-use tishlang_core::{NativeFn, TishOpaque, TishPromise, Value};
+use tishlang_core::{NativeFn, ObjectMap, TishOpaque, TishPromise, Value};
 
 use crate::http::{build_error_response, extract_body, extract_headers, extract_method};
 
@@ -77,14 +76,14 @@ impl TishPromise for ReadChunkPromise {
             let r = crate::http::block_on_http(rx);
             match r {
                 Ok(Ok(ReadChunk::Done)) => {
-                    let mut o = HashMap::new();
+                    let mut o = ObjectMap::default();
                     o.insert(Arc::from("done"), Value::Bool(true));
                     o.insert(Arc::from("value"), Value::Null);
                     Ok(Value::Object(Rc::new(RefCell::new(o))))
                 }
                 Ok(Ok(ReadChunk::Bytes(b))) => {
                     let arr: Vec<Value> = b.iter().map(|u| Value::Number(*u as f64)).collect();
-                    let mut o = HashMap::new();
+                    let mut o = ObjectMap::default();
                     o.insert(Arc::from("done"), Value::Bool(false));
                     o.insert(
                         Arc::from("value"),
@@ -93,7 +92,7 @@ impl TishPromise for ReadChunkPromise {
                     Ok(Value::Object(Rc::new(RefCell::new(o))))
                 }
                 Ok(Err(e)) => Err({
-                    let mut obj = HashMap::new();
+                    let mut obj = ObjectMap::default();
                     obj.insert(Arc::from("error"), Value::String(e.into()));
                     Value::Object(Rc::new(RefCell::new(obj)))
                 }),
@@ -118,13 +117,13 @@ impl TishPromise for JsonTextPromise {
                 Ok(Ok(s)) => match tishlang_core::json_parse(&s) {
                     Ok(v) => Ok(v),
                     Err(e) => Err({
-                        let mut obj = HashMap::new();
+                        let mut obj = ObjectMap::default();
                         obj.insert(Arc::from("error"), Value::String(e.into()));
                         Value::Object(Rc::new(RefCell::new(obj)))
                     }),
                 },
                 Ok(Err(e)) => Err({
-                    let mut obj = HashMap::new();
+                    let mut obj = ObjectMap::default();
                     obj.insert(Arc::from("error"), Value::String(e.into()));
                     Value::Object(Rc::new(RefCell::new(obj)))
                 }),
@@ -226,7 +225,7 @@ impl TishOpaque for HttpReadableStream {
                 }))
             }
             Err(e) => {
-                let mut m = HashMap::new();
+                let mut m = ObjectMap::default();
                 m.insert(Arc::from("error"), Value::String(e.into()));
                 Value::Object(Rc::new(RefCell::new(m)))
             }
@@ -283,7 +282,7 @@ impl TishOpaque for HttpStreamReader {
 }
 
 fn headers_to_value(headers: &reqwest::header::HeaderMap) -> Value {
-    let mut headers_obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(headers.len());
+    let mut headers_obj: ObjectMap = ObjectMap::with_capacity(headers.len());
     for (key, value) in headers.iter() {
         if let Ok(v) = value.to_str() {
             headers_obj.insert(Arc::from(key.as_str()), Value::String(v.into()));
@@ -327,7 +326,7 @@ pub fn response_value_from_reqwest(response: reqwest::Response) -> Value {
             rx: Mutex::new(Some(rx)),
         }))
     });
-    let mut obj: HashMap<Arc<str>, Value> = HashMap::new();
+    let mut obj: ObjectMap = ObjectMap::default();
     obj.insert(Arc::from("status"), Value::Number(status));
     obj.insert(Arc::from("ok"), Value::Bool(ok));
     obj.insert(Arc::from("headers"), headers_val);

@@ -1,12 +1,11 @@
 //! HTTP server + shared request parsing. Client `fetch` lives in `http_fetch.rs`.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::rc::Rc;
 use std::sync::Arc;
-use tishlang_core::Value;
+use tishlang_core::{ObjectMap, Value};
 use tokio::runtime::Runtime;
 
 thread_local! {
@@ -80,7 +79,7 @@ pub(crate) fn extract_body(options: Option<&Value>) -> Option<String> {
 }
 
 pub(crate) fn build_error_response(error: &str) -> Value {
-    let mut obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(2);
+    let mut obj: ObjectMap = ObjectMap::with_capacity(2);
     obj.insert(Arc::from("error"), Value::String(error.into()));
     obj.insert(Arc::from("ok"), Value::Bool(false));
     Value::Object(Rc::new(RefCell::new(obj)))
@@ -147,7 +146,7 @@ pub fn create_server(port: u16) -> Result<tiny_http::Server, String> {
 }
 
 pub fn request_to_value(request: &mut tiny_http::Request) -> Value {
-    let mut obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(6);
+    let mut obj: ObjectMap = ObjectMap::with_capacity(6);
 
     obj.insert(
         Arc::from("method"),
@@ -164,7 +163,7 @@ pub fn request_to_value(request: &mut tiny_http::Request) -> Value {
     let query_string = request.url().split('?').nth(1).unwrap_or("");
     obj.insert(Arc::from("query"), Value::String(query_string.into()));
 
-    let mut headers_obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(request.headers().len());
+    let mut headers_obj: ObjectMap = ObjectMap::with_capacity(request.headers().len());
     for header in request.headers() {
         headers_obj.insert(
             Arc::from(header.field.as_str().as_str()),

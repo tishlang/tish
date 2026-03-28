@@ -1,7 +1,6 @@
 //! HTTP server for the Tish interpreter. Client `fetch` uses `tishlang_runtime` from eval.
 
-use crate::value::Value;
-use std::collections::HashMap;
+use crate::value::{PropMap, Value};
 use std::sync::Arc;
 
 use tokio::runtime::Runtime;
@@ -22,7 +21,7 @@ pub fn create_server(port: u16) -> Result<tiny_http::Server, String> {
 
 /// Convert a tiny_http::Request into a Tish Value object.
 pub fn request_to_value(request: &mut tiny_http::Request) -> Value {
-    let mut obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(6);
+    let mut obj: PropMap = PropMap::with_capacity(6);
 
     obj.insert(
         Arc::from("method"),
@@ -39,7 +38,7 @@ pub fn request_to_value(request: &mut tiny_http::Request) -> Value {
     let query_string = request.url().split('?').nth(1).unwrap_or("");
     obj.insert(Arc::from("query"), Value::String(query_string.into()));
 
-    let mut headers_obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(request.headers().len());
+    let mut headers_obj: PropMap = PropMap::with_capacity(request.headers().len());
     for header in request.headers() {
         headers_obj.insert(
             Arc::from(header.field.as_str().as_str()),

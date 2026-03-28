@@ -339,6 +339,21 @@ fn optimize_expr(expr: &Expr) -> Expr {
                 .collect(),
             span: *span,
         },
+        Expr::New {
+            callee,
+            args,
+            span,
+        } => Expr::New {
+            callee: Box::new(optimize_expr(callee)),
+            args: args
+                .iter()
+                .map(|a| match a {
+                    tishlang_ast::CallArg::Expr(e) => tishlang_ast::CallArg::Expr(optimize_expr(e)),
+                    tishlang_ast::CallArg::Spread(e) => tishlang_ast::CallArg::Spread(optimize_expr(e)),
+                })
+                .collect(),
+            span: *span,
+        },
         Expr::Member {
             object,
             prop,

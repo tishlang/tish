@@ -1,17 +1,17 @@
 //! Stack-based bytecode VM.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use tishlang_ast::{BinOp, UnaryOp};
 use tishlang_builtins::array as arr_builtins;
+use tishlang_builtins::construct as construct_builtin;
 use tishlang_builtins::string as str_builtins;
 use tishlang_builtins::globals as globals_builtins;
 use tishlang_builtins::math as math_builtins;
 use tishlang_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
-use tishlang_core::Value;
+use tishlang_core::{ObjectMap, Value};
 
 type ArrayMethodFn = Rc<dyn Fn(&[Value]) -> Value>;
 
@@ -69,7 +69,7 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
                     .collect(),
             )))),
             "process" => {
-                let mut m = HashMap::new();
+                let mut m = ObjectMap::default();
                 m.insert("exit".into(), Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exit(args))));
                 m.insert("cwd".into(), Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_cwd(args))));
                 m.insert("exec".into(), Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exec(args))));
@@ -145,10 +145,10 @@ fn vm_log_err(s: &str) {
 }
 
 /// Initialize default globals (console, Math, JSON, etc.)
-fn init_globals() -> HashMap<Arc<str>, Value> {
-    let mut g = HashMap::new();
+fn init_globals() -> ObjectMap {
+    let mut g = ObjectMap::default();
 
-    let mut console = HashMap::new();
+    let mut console = ObjectMap::default();
     console.insert(
         "debug".into(),
         Value::Function(Rc::new(|args: &[Value]| {
@@ -191,7 +191,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     );
     g.insert("console".into(), Value::Object(Rc::new(RefCell::new(console))));
 
-    let mut math = HashMap::new();
+    let mut math = ObjectMap::default();
     math.insert(
         "abs".into(),
         Value::Function(Rc::new(|args: &[Value]| {
@@ -257,7 +257,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     math.insert("E".into(), Value::Number(std::f64::consts::E));
     g.insert("Math".into(), Value::Object(Rc::new(RefCell::new(math))));
 
-    let mut json = HashMap::new();
+    let mut json = ObjectMap::default();
     json.insert(
         "parse".into(),
         Value::Function(Rc::new(|args: &[Value]| {
@@ -292,7 +292,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     );
 
     // Date - at minimum Date.now() for timing
-    let mut date = HashMap::new();
+    let mut date = ObjectMap::default();
     date.insert(
         "now".into(),
         Value::Function(Rc::new(|_args: &[Value]| {
@@ -305,8 +305,17 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     );
     g.insert("Date".into(), Value::Object(Rc::new(RefCell::new(date))));
 
+    g.insert(
+        "Uint8Array".into(),
+        construct_builtin::uint8_array_constructor_value(),
+    );
+    g.insert(
+        "AudioContext".into(),
+        construct_builtin::audio_context_constructor_value(),
+    );
+
     // Object methods - delegate to tishlang_builtins::globals
-    let mut object_methods = HashMap::new();
+    let mut object_methods = ObjectMap::default();
     object_methods.insert(
         "assign".into(),
         Value::Function(Rc::new(|args: &[Value]| globals_builtins::object_assign(args))),
@@ -321,7 +330,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     g.insert("Object".into(), Value::Object(Rc::new(RefCell::new(object_methods))));
 
     // Array.isArray
-    let mut array_static = HashMap::new();
+    let mut array_static = ObjectMap::default();
     array_static.insert(
         "isArray".into(),
         Value::Function(Rc::new(|args: &[Value]| globals_builtins::array_is_array(args))),
@@ -330,7 +339,7 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
 
     // String(value) as callable + String.fromCharCode
     let string_convert_fn = Value::Function(Rc::new(|args: &[Value]| globals_builtins::string_convert(args)));
-    let mut string_static = HashMap::new();
+    let mut string_static = ObjectMap::default();
     string_static.insert("fromCharCode".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::string_from_char_code(args))));
     string_static.insert(Arc::from("__call"), string_convert_fn);
     g.insert("String".into(), Value::Object(Rc::new(RefCell::new(string_static))));
@@ -342,12 +351,12 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
     );
     g.insert(
         "Fragment".into(),
-        Value::Object(Rc::new(RefCell::new(HashMap::new()))),
+        Value::Object(Rc::new(RefCell::new(ObjectMap::default()))),
     );
     g.insert(
         "createRoot".into(),
         Value::Function(Rc::new(|_args: &[Value]| {
-            let mut render_obj = HashMap::new();
+            let mut render_obj = ObjectMap::default();
             render_obj.insert(
                 "render".into(),
                 Value::Function(Rc::new(|_args: &[Value]| Value::Null)),
@@ -363,13 +372,13 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
             Value::Array(Rc::new(RefCell::new(arr)))
         })),
     );
-    let mut document_obj = HashMap::new();
+    let mut document_obj = ObjectMap::default();
     document_obj.insert("body".into(), Value::Null);
     g.insert("document".into(), Value::Object(Rc::new(RefCell::new(document_obj))));
 
     #[cfg(feature = "process")]
     {
-        let mut process_obj = HashMap::new();
+        let mut process_obj = ObjectMap::default();
         process_obj.insert(
             "exit".into(),
             Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exit(args))),
@@ -418,21 +427,21 @@ fn init_globals() -> HashMap<Arc<str>, Value> {
 }
 
 /// Shared scope for closure capture (parent frame's locals).
-type ScopeMap = Rc<RefCell<HashMap<Arc<str>, Value>>>;
+type ScopeMap = Rc<RefCell<ObjectMap>>;
 
 pub struct Vm {
     stack: Vec<Value>,
-    scope: HashMap<Arc<str>, Value>,
+    scope: ObjectMap,
     /// Enclosing scope for closures (captured parent frame locals).
     enclosing: Option<ScopeMap>,
-    globals: Rc<RefCell<HashMap<Arc<str>, Value>>>,
+    globals: Rc<RefCell<ObjectMap>>,
 }
 
 impl Vm {
     pub fn new() -> Self {
         Self {
             stack: Vec::new(),
-            scope: HashMap::new(),
+            scope: ObjectMap::default(),
             enclosing: None,
             globals: Rc::new(RefCell::new(init_globals())),
         }
@@ -477,7 +486,7 @@ impl Vm {
         let names = &chunk.names;
 
         let mut ip = 0;
-        let local_scope: ScopeMap = Rc::new(RefCell::new(HashMap::new()));
+        let local_scope: ScopeMap = Rc::new(RefCell::new(ObjectMap::default()));
         {
             let mut ls = local_scope.borrow_mut();
             let param_count = chunk.param_count as usize;
@@ -538,7 +547,7 @@ impl Vm {
                             Value::Function(Rc::new(move |args: &[Value]| {
                                 let mut vm = Vm {
                                     stack: Vec::new(),
-                                    scope: HashMap::new(),
+                                    scope: ObjectMap::default(),
                                     enclosing: enclosing.clone(),
                                     globals: Rc::clone(&globals),
                                 };
@@ -723,6 +732,45 @@ impl Vm {
                     let result = f(&args);
                     self.stack.push(result);
                 }
+                Opcode::Construct => {
+                    let argc = Self::read_u16(code, &mut ip) as usize;
+                    let mut args = Vec::with_capacity(argc);
+                    for _ in 0..argc {
+                        args.push(
+                            self.stack
+                                .pop()
+                                .ok_or_else(|| "Stack underflow in construct".to_string())?,
+                        );
+                    }
+                    args.reverse();
+                    let callee = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow: no callee for construct".to_string())?;
+                    let result = construct_builtin::construct(&callee, &args);
+                    self.stack.push(result);
+                }
+                Opcode::ConstructSpread => {
+                    let callee = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow: callee in ConstructSpread".to_string())?;
+                    let args_array = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow in ConstructSpread".to_string())?;
+                    let args: Vec<Value> = match &args_array {
+                        Value::Array(a) => a.borrow().clone(),
+                        _ => {
+                            return Err(format!(
+                                "ConstructSpread: args must be array, got {}",
+                                args_array.to_display_string()
+                            ));
+                        }
+                    };
+                    let result = construct_builtin::construct(&callee, &args);
+                    self.stack.push(result);
+                }
                 Opcode::Return => {
                     let v = self.stack.pop().unwrap_or(Value::Null);
                     return Ok(v);
@@ -861,7 +909,7 @@ impl Vm {
                 }
                 Opcode::NewObject => {
                     let n = Self::read_u16(code, &mut ip) as usize;
-                    let mut map = HashMap::new();
+                    let mut map = ObjectMap::with_capacity(n.max(1));
                     for _ in 0..n {
                         let val = self
                             .stack
@@ -926,7 +974,11 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    let mut merged: HashMap<Arc<str>, Value> = HashMap::new();
+                    let cap = match (&left, &right) {
+                        (Value::Object(l), Value::Object(r)) => l.borrow().len() + r.borrow().len(),
+                        _ => 0,
+                    };
+                    let mut merged: ObjectMap = ObjectMap::with_capacity(cap.max(8));
                     if let Value::Object(l) = &left {
                         merged.extend(l.borrow().iter().map(|(k, v)| (Arc::clone(k), v.clone())));
                     } else {
@@ -1112,6 +1164,40 @@ impl Default for Vm {
     }
 }
 
+/// Rough byte capacity for string coercion (matches hot paths like `"x" + n + "ms"`).
+fn estimate_string_concat_len(v: &Value) -> usize {
+    match v {
+        Value::String(s) => s.len(),
+        Value::Number(_) => 24,
+        Value::Bool(_) => 5,
+        Value::Null => 4,
+        _ => 32,
+    }
+}
+
+/// Append JS-style string conversion without an intermediate `String` per operand (unlike
+/// `format!("{}{}", a.to_display_string(), b.to_display_string())`, which triple-allocates).
+fn append_value_for_string_concat(out: &mut String, v: &Value) {
+    use std::fmt::Write;
+    match v {
+        Value::Number(n) => {
+            if n.is_nan() {
+                out.push_str("NaN");
+            } else if *n == f64::INFINITY {
+                out.push_str("Infinity");
+            } else if *n == f64::NEG_INFINITY {
+                out.push_str("-Infinity");
+            } else {
+                let _ = write!(out, "{n}");
+            }
+        }
+        Value::String(s) => out.push_str(s.as_ref()),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Null => out.push_str("null"),
+        _ => out.push_str(&v.to_display_string()),
+    }
+}
+
 fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
     use tishlang_ast::BinOp::*;
     use tishlang_core::Value::*;
@@ -1120,7 +1206,11 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
     match op {
         Add => {
             if matches!(l, Value::String(_)) || matches!(r, Value::String(_)) {
-                Ok(String(format!("{}{}", l.to_display_string(), r.to_display_string()).into()))
+                let cap = estimate_string_concat_len(l) + estimate_string_concat_len(r);
+                let mut buf = std::string::String::with_capacity(cap);
+                append_value_for_string_concat(&mut buf, l);
+                append_value_for_string_concat(&mut buf, r);
+                Ok(String(buf.into()))
             } else {
                 Ok(Number(ln + rn))
             }
@@ -1146,9 +1236,13 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
         Shl => Ok(Number(((ln as i32) << (rn as i32)) as f64)),
         Shr => Ok(Number(((ln as i32) >> (rn as i32)) as f64)),
         In => {
-            let key_s: Arc<str> = l.to_display_string().into();
+            let key_s: Arc<str> = match l {
+                Value::String(s) => Arc::clone(s),
+                Value::Number(n) => n.to_string().into(),
+                _ => l.to_display_string().into(),
+            };
             Ok(Bool(match r {
-                Value::Object(m) => m.borrow().contains_key(&key_s),
+                Value::Object(m) => m.borrow().contains_key(key_s.as_ref()),
                 Value::Array(a) => {
                     if key_s.as_ref() == "length" {
                         true

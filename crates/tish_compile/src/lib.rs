@@ -54,6 +54,41 @@ for (let i = 0; i < 5; i = i + 1) {
     }
 
     #[test]
+    fn new_expression_lowers_to_construct_on_native() {
+        let src = "fn f() { return new Uint8Array(4) }";
+        let program = parse(src).unwrap();
+        let rust = compile(&program).unwrap();
+        assert!(
+            rust.contains("tish_construct"),
+            "expected new to lower to tish_construct, got snippet missing it"
+        );
+    }
+
+    /// User-defined constructor name: `new ClassName(...)` must compile natively (host `construct`)
+    /// and is the same surface syntax as the JS target (`new` in emitted JavaScript).
+    #[test]
+    fn new_class_name_compiles_native_via_tish_construct() {
+        let src = r#"
+fn ClassName(x) {
+    return x
+}
+fn factory() {
+    return new ClassName(42)
+}
+"#;
+        let program = parse(src).unwrap();
+        let rust = compile(&program).unwrap();
+        assert!(
+            rust.contains("tish_construct"),
+            "expected new ClassName to lower to tish_construct"
+        );
+        assert!(
+            rust.contains("ClassName"),
+            "expected emitted Rust to reference ClassName callable"
+        );
+    }
+
+    #[test]
     fn loop_var_decl_clone_via_project_full() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let bench = manifest.join("../../tests/core/benchmark_granular.tish").canonicalize().unwrap();

@@ -1,9 +1,14 @@
 //! Unified Value type for Tish runtime values.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+
+use ahash::AHashMap;
+
+/// Property map for objects and other `Arc<str>` → `Value` tables (VM globals, scopes).
+/// Uses a faster hasher than `std::collections::HashMap` for string-heavy workloads.
+pub type ObjectMap = AHashMap<Arc<str>, Value>;
 
 #[cfg(feature = "regex")]
 use fancy_regex::Regex;
@@ -147,7 +152,7 @@ pub enum Value {
     Bool(bool),
     Null,
     Array(Rc<RefCell<Vec<Value>>>),
-    Object(Rc<RefCell<HashMap<Arc<str>, Value>>>),
+    Object(Rc<RefCell<ObjectMap>>),
     Function(NativeFn),
     #[cfg(feature = "regex")]
     RegExp(Rc<RefCell<TishRegExp>>),
@@ -256,8 +261,8 @@ impl Value {
         Value::Array(Rc::new(RefCell::new(items)))
     }
 
-    /// Create a new object Value from a HashMap.
-    pub fn object(map: HashMap<Arc<str>, Value>) -> Self {
+    /// Create a new object Value from a property map.
+    pub fn object(map: ObjectMap) -> Self {
         Value::Object(Rc::new(RefCell::new(map)))
     }
 
@@ -268,7 +273,7 @@ impl Value {
 
     /// Create an empty object Value.
     pub fn empty_object() -> Self {
-        Value::Object(Rc::new(RefCell::new(HashMap::new())))
+        Value::Object(Rc::new(RefCell::new(ObjectMap::default())))
     }
 
     /// Extract the number value, if this is a Number.

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use lazy_static::lazy_static;
-use tishlang_core::Value;
+use tishlang_core::{ObjectMap, Value};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::runtime::Runtime;
 
@@ -194,7 +194,7 @@ pub fn ws_broadcast_native(args: &[Value]) -> Value {
 
 /// Build connection object: { _id, send, close, readyState, receive }. JS-like.
 fn conn_object(id: u32) -> Value {
-    let mut obj: HashMap<Arc<str>, Value> = HashMap::new();
+    let mut obj: ObjectMap = ObjectMap::default();
     obj.insert(Arc::from("_id"), Value::Number(id as f64));
     obj.insert(Arc::from("readyState"), Value::Number(1.0)); // OPEN
     obj.insert(
@@ -216,7 +216,7 @@ fn conn_object(id: u32) -> Value {
         Value::Function(Rc::new(move |_args: &[Value]| {
             match conn_receive(id) {
                 Some(s) => {
-                    let mut ev: HashMap<Arc<str>, Value> = HashMap::new();
+                    let mut ev: ObjectMap = ObjectMap::default();
                     ev.insert(Arc::from("data"), Value::String(s.into()));
                     Value::Object(Rc::new(RefCell::new(ev)))
                 }
@@ -237,7 +237,7 @@ fn conn_object(id: u32) -> Value {
                 .unwrap_or(1000);
             match conn_receive_timeout(id_timeout, timeout_ms) {
                 Some(s) => {
-                    let mut ev: HashMap<Arc<str>, Value> = HashMap::new();
+                    let mut ev: ObjectMap = ObjectMap::default();
                     ev.insert(Arc::from("data"), Value::String(s.into()));
                     Value::Object(Rc::new(RefCell::new(ev)))
                 }
@@ -529,7 +529,7 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
         ws
     });
 
-    let mut m: HashMap<Arc<str>, Value> = HashMap::new();
+    let mut m: ObjectMap = ObjectMap::default();
     m.insert(Arc::from("_handle"), handle_val);
     m.insert(Arc::from("_onConnection"), Value::Null);
     m.insert(Arc::from("clients"), Value::Array(clients));
@@ -549,7 +549,7 @@ mod tests {
     fn ws_echo_roundtrip() {
         let port: u16 = 18_742;
         let opts = {
-            let mut m: HashMap<Arc<str>, Value> = HashMap::new();
+            let mut m: ObjectMap = ObjectMap::default();
             m.insert(Arc::from("port"), Value::Number(port as f64));
             Value::Object(Rc::new(RefCell::new(m)))
         };
@@ -632,7 +632,7 @@ mod tests {
     fn ws_gateway_agent_flow() {
         let port: u16 = 18_743;
         let opts = {
-            let mut m: HashMap<Arc<str>, Value> = HashMap::new();
+            let mut m: ObjectMap = ObjectMap::default();
             m.insert(Arc::from("port"), Value::Number(port as f64));
             Value::Object(Rc::new(RefCell::new(m)))
         };

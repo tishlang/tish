@@ -3,7 +3,6 @@
 
 mod codegen;
 mod error;
-mod js_intrinsics;
 
 #[cfg(test)]
 mod tests_jsx;

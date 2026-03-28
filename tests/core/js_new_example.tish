@@ -1,0 +1,5 @@
+// Minimal `new` snippet used from tests. Full runnable example: examples/new-expression/
+// `new` compiles on all targets. JS emits real `new`; native/VM/eval use `construct` + stubs.
+fn makeBuf(n) {
+  return new Uint8Array(n)
+}

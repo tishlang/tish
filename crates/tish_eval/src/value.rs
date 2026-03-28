@@ -6,13 +6,15 @@
 //! different shape (no AST-carrying variants). The split is intentional.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use ahash::AHashMap;
 use tishlang_ast::{Expr, Statement};
-#[cfg(any(feature = "http", feature = "ws"))]
 use tishlang_core::NativeFn as CoreNativeFn;
+
+/// Property map for interpreter `Value::Object` (uses `eval::Value`, not `tishlang_core::Value`).
+pub type PropMap = AHashMap<Arc<str>, Value>;
 #[cfg(feature = "http")]
 use tishlang_core::TishPromise;
 use tishlang_core::TishOpaque;
@@ -32,7 +34,7 @@ pub enum Value {
     Bool(bool),
     Null,
     Array(Rc<RefCell<Vec<Value>>>),
-    Object(Rc<RefCell<HashMap<Arc<str>, Value>>>),
+    Object(Rc<RefCell<PropMap>>),
     /// User-defined function with AST body
     Function {
         params: Arc<[Arc<str>]>,
@@ -65,8 +67,7 @@ pub enum Value {
     /// Native `tishlang_core` Promise (fetch / reader.read / response.text).
     #[cfg(feature = "http")]
     CorePromise(Arc<dyn TishPromise>),
-    /// `tishlang_core::Value::Function` (e.g. response.text/json, ws send/receive) callable from eval.
-    #[cfg(any(feature = "http", feature = "ws"))]
+    /// `tishlang_core::Value::Function` (native callbacks, `new` constructors, fetch/ws when enabled).
     CoreFn(CoreNativeFn),
     /// Opaque handle to a native Rust type (e.g. Polars DataFrame).
     Opaque(Arc<dyn TishOpaque>),
@@ -99,7 +100,6 @@ impl std::fmt::Debug for Value {
             Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => write!(f, "[Function]"),
             #[cfg(feature = "http")]
             Value::CorePromise(_) => write!(f, "Promise"),
-            #[cfg(any(feature = "http", feature = "ws"))]
             Value::CoreFn(_) => write!(f, "CoreFn"),
             Value::Opaque(o) => write!(f, "{}(opaque)", o.type_name()),
             Value::OpaqueMethod(_, _) => write!(f, "[Function]"),
@@ -155,7 +155,6 @@ impl std::fmt::Display for Value {
             Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => write!(f, "[Function]"),
             #[cfg(feature = "http")]
             Value::CorePromise(_) => write!(f, "[Promise]"),
-            #[cfg(any(feature = "http", feature = "ws"))]
             Value::CoreFn(_) => write!(f, "[Function]"),
             Value::Opaque(o) => write!(f, "[object {}]", o.type_name()),
             Value::OpaqueMethod(_, _) => write!(f, "[Function]"),
@@ -199,8 +198,8 @@ impl Value {
         Value::Array(Rc::new(RefCell::new(items)))
     }
 
-    /// Create a new object Value from a HashMap.
-    pub fn object(map: HashMap<Arc<str>, Value>) -> Self {
+    /// Create a new object Value from a property map.
+    pub fn object(map: PropMap) -> Self {
         Value::Object(Rc::new(RefCell::new(map)))
     }
 
@@ -211,7 +210,7 @@ impl Value {
 
     /// Create an empty object Value.
     pub fn empty_object() -> Self {
-        Value::Object(Rc::new(RefCell::new(HashMap::new())))
+        Value::Object(Rc::new(RefCell::new(PropMap::default())))
     }
 
     /// Extract the number value, if this is a Number.

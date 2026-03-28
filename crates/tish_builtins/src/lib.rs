@@ -10,5 +10,6 @@ pub mod object;
 pub mod math;
 pub mod helpers;
 pub mod globals;
+pub mod construct;
 
 pub use tishlang_core::Value;

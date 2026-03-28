@@ -120,6 +120,14 @@ impl UsageAnalyzer {
                     }
                 }
             }
+            Expr::New { callee, args, .. } => {
+                self.analyze_expr(callee);
+                for arg in args {
+                    match arg {
+                        CallArg::Expr(e) | CallArg::Spread(e) => self.analyze_expr(e),
+                    }
+                }
+            }
             Expr::Member { object, prop, .. } => {
                 self.analyze_expr(object);
                 if let MemberProp::Expr(e) = prop {
@@ -279,6 +287,11 @@ fn program_uses_async(program: &Program) -> bool {
             Expr::Binary { left, right, .. } => expr_has_await(left) || expr_has_await(right),
             Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } => expr_has_await(operand),
             Expr::Call { callee, args, .. } => {
+                expr_has_await(callee) || args.iter().any(|a| match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => expr_has_await(e),
+                })
+            }
+            Expr::New { callee, args, .. } => {
                 expr_has_await(callee) || args.iter().any(|a| match a {
                     CallArg::Expr(e) | CallArg::Spread(e) => expr_has_await(e),
                 })
@@ -536,7 +549,7 @@ impl Codegen {
                     "exec" => Some("Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args)))"),
                     "argv" => Some("Value::Array(Rc::new(RefCell::new(std::env::args().map(|s| Value::String(s.into())).collect())))"),
                     "env" => Some("Value::Object(Rc::new(RefCell::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect())))"),
-                    "process" => Some("{ let mut m = HashMap::new(); m.insert(Arc::from(\"exit\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args)))); m.insert(Arc::from(\"cwd\"), Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args)))); m.insert(Arc::from(\"exec\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args)))); m.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(std::env::args().map(|s| Value::String(s.into())).collect())))); m.insert(Arc::from(\"env\"), Value::Object(Rc::new(RefCell::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect())))); Value::Object(Rc::new(RefCell::new(m))) }"),
+                    "process" => Some("{ let mut m = ObjectMap::default(); m.insert(Arc::from(\"exit\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args)))); m.insert(Arc::from(\"cwd\"), Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args)))); m.insert(Arc::from(\"exec\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args)))); m.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(std::env::args().map(|s| Value::String(s.into())).collect())))); m.insert(Arc::from(\"env\"), Value::Object(Rc::new(RefCell::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect::<ObjectMap>())))); Value::Object(Rc::new(RefCell::new(m))) }"),
                     _ => None,
                 },
             "tish:ws" if self.has_feature("ws") => match export_name {
@@ -634,6 +647,7 @@ impl Codegen {
                 | Expr::Array { .. }
                 | Expr::Object { .. }
                 | Expr::Call { .. }
+                | Expr::New { .. }
                 | Expr::Await { .. }
                 | Expr::ArrowFunction { .. }
                 | Expr::Binary { .. }
@@ -765,10 +779,9 @@ impl Codegen {
         self.is_async = program_uses_async(program);
         self.write("#![allow(unused, non_snake_case)]\n\n");
         self.write("use std::cell::RefCell;\n");
-        self.write("use std::collections::HashMap;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, TishError, Value};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value};\n");
         if self.has_feature("process") {
             self.write("use tishlang_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd, process_exec as tish_process_exec};\n");
         }
@@ -818,7 +831,7 @@ impl Codegen {
         self.indent += 1;
 
         // Initialize builtins
-        self.writeln("let mut console = Value::Object(Rc::new(RefCell::new(HashMap::from([");
+        self.writeln("let mut console = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"debug\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_debug(args); Value::Null }))),");
         self.writeln("(Arc::from(\"info\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_info(args); Value::Null }))),");
@@ -836,7 +849,7 @@ impl Codegen {
         self.writeln("let isNaN = Value::Function(Rc::new(|args: &[Value]| tish_is_nan(args)));");
         self.writeln("let Infinity = Value::Number(f64::INFINITY);");
         self.writeln("let NaN = Value::Number(f64::NAN);");
-        self.writeln("let Math = Value::Object(Rc::new(RefCell::new(HashMap::from([");
+        self.writeln("let Math = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"abs\"), Value::Function(Rc::new(|args: &[Value]| tish_math_abs(args)))),");
         self.writeln("(Arc::from(\"sqrt\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sqrt(args)))),");
@@ -858,32 +871,32 @@ impl Codegen {
         self.writeln("(Arc::from(\"E\"), Value::Number(std::f64::consts::E)),");
         self.indent -= 1;
         self.writeln("]))));");
-        self.writeln("let JSON = Value::Object(Rc::new(RefCell::new(HashMap::from([");
+        self.writeln("let JSON = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"parse\"), Value::Function(Rc::new(|args: &[Value]| tish_json_parse(args)))),");
         self.writeln("(Arc::from(\"stringify\"), Value::Function(Rc::new(|args: &[Value]| tish_json_stringify(args)))),");
         self.indent -= 1;
         self.writeln("]))));");
 
-        self.writeln("let Array = Value::Object(Rc::new(RefCell::new(HashMap::from([");
+        self.writeln("let Array = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"isArray\"), Value::Function(Rc::new(|args: &[Value]| tish_array_is_array(args)))),");
         self.indent -= 1;
         self.writeln("]))));");
 
-        self.writeln("let String = Value::Object(Rc::new(RefCell::new(HashMap::from([");
+        self.writeln("let String = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"fromCharCode\"), Value::Function(Rc::new(|args: &[Value]| tish_string_from_char_code(args)))),");
         self.indent -= 1;
         self.writeln("]))));");
 
-        self.writeln("let Date = Value::Object(Rc::new(RefCell::new(HashMap::from([");
+        self.writeln("let Date = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"now\"), Value::Function(Rc::new(|args: &[Value]| tish_date_now(args)))),");
         self.indent -= 1;
         self.writeln("]))));");
 
-        self.writeln("let Object = Value::Object(Rc::new(RefCell::new(HashMap::from([");
+        self.writeln("let Object = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"assign\"), Value::Function(Rc::new(|args: &[Value]| tish_object_assign(args)))),");
         self.writeln("(Arc::from(\"keys\"), Value::Function(Rc::new(|args: &[Value]| tish_object_keys(args)))),");
@@ -893,16 +906,19 @@ impl Codegen {
         self.indent -= 1;
         self.writeln("]))));");
 
+        self.writeln("let Uint8Array = tish_uint8_array_constructor();");
+        self.writeln("let AudioContext = tish_audio_context_constructor();");
+
         if self.has_feature("process") {
             self.writeln("let process = Value::Object(Rc::new(RefCell::new({");
             self.indent += 1;
-            self.writeln("let mut p = HashMap::new();");
+            self.writeln("let mut p = ObjectMap::default();");
             self.writeln("p.insert(Arc::from(\"exit\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args))));");
             self.writeln("p.insert(Arc::from(\"cwd\"), Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args))));");
             self.writeln("p.insert(Arc::from(\"exec\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args))));");
             self.writeln("let argv: Vec<Value> = std::env::args().map(|s| Value::String(s.into())).collect();");
             self.writeln("p.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(argv))));");
-            self.writeln("let mut env_obj = HashMap::new();");
+            self.writeln("let mut env_obj = ObjectMap::default();");
             self.writeln("for (key, value) in std::env::vars() {");
             self.indent += 1;
             self.writeln("env_obj.insert(Arc::from(key.as_str()), Value::String(value.into()));");
@@ -1418,7 +1434,7 @@ impl Codegen {
                     self.writeln(&format!("let {} = {}.clone();", param_escaped, param_escaped));
                 }
                 // Only clone builtins that are actually referenced (clone so outer scope can still use them, e.g. process for PORT before serve)
-                for builtin in &["Boolean", "console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp", "Polars"] {
+                for builtin in &["Boolean", "console", "Math", "JSON", "Date", "Uint8Array", "AudioContext", "process", "setTimeout", "clearTimeout", "Promise", "RegExp", "Polars"] {
                     if referenced.contains(*builtin) {
                         self.writeln(&format!("let {} = {}.clone();", builtin, builtin));
                     }
@@ -2164,7 +2180,7 @@ impl Codegen {
                             }
                         }
                     }
-                    format!("{{ let mut _obj: HashMap<Arc<str>, Value> = HashMap::new(); {} Value::Object(Rc::new(RefCell::new(_obj))) }}", parts.join(" "))
+                    format!("{{ let mut _obj: ObjectMap = ObjectMap::default(); {} Value::Object(Rc::new(RefCell::new(_obj))) }}", parts.join(" "))
                 } else {
                     let mut parts = Vec::new();
                     for prop in props {
@@ -2178,7 +2194,7 @@ impl Codegen {
                         }
                     }
                     format!(
-                        "Value::Object(Rc::new(RefCell::new(HashMap::from([{}]))))",
+                        "Value::Object(Rc::new(RefCell::new(ObjectMap::from([{}]))))",
                         parts.join(", ")
                     )
                 }
@@ -2358,6 +2374,29 @@ impl Codegen {
             Expr::JsxElement { .. } | Expr::JsxFragment { .. } => {
                 return Err(CompileError { message: "JSX is only supported when compiling to JavaScript (tish compile --target js).".to_string(), span: None });
             }
+            Expr::New { callee, args, .. } => {
+                let callee_expr = self.emit_expr(callee)?;
+                let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
+                if has_spread {
+                    let args_code = self.emit_call_args(args)?;
+                    return Ok(format!(
+                        "{{ let _callee = ({}).clone(); let _spread_args = {}; tish_construct(&_callee, &_spread_args[..]) }}",
+                        callee_expr, args_code
+                    ));
+                }
+                let arg_exprs: Result<Vec<_>, _> =
+                    args.iter().map(|a| self.emit_call_arg(a)).collect();
+                let arg_exprs = arg_exprs?;
+                let args_vec = arg_exprs
+                    .iter()
+                    .map(|a| format!("{}.clone()", a))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "tish_construct(&({}).clone(), &[{}])",
+                    callee_expr, args_vec
+                )
+            }
             Expr::NativeModuleLoad { spec, export_name, .. } => {
                 self.native_module_rust_init(spec.as_ref(), export_name.as_ref())
                     .ok_or_else(|| CompileError {
@@ -2403,6 +2442,14 @@ impl Codegen {
             }
             Expr::Unary { operand, .. } => Self::collect_expr_idents(operand, idents),
             Expr::Call { callee, args, .. } => {
+                Self::collect_expr_idents(callee, idents);
+                for arg in args {
+                    match arg {
+                        CallArg::Expr(e) | CallArg::Spread(e) => Self::collect_expr_idents(e, idents),
+                    }
+                }
+            }
+            Expr::New { callee, args, .. } => {
                 Self::collect_expr_idents(callee, idents);
                 for arg in args {
                     match arg {
@@ -2613,6 +2660,16 @@ impl Codegen {
                     }
                 }
             }
+            Expr::New { callee, args, .. } => {
+                Self::collect_assigned_idents_in_expr(callee, names);
+                for arg in args {
+                    match arg {
+                        CallArg::Expr(e) | CallArg::Spread(e) => {
+                            Self::collect_assigned_idents_in_expr(e, names);
+                        }
+                    }
+                }
+            }
             Expr::Member { object, prop, .. } => {
                 Self::collect_assigned_idents_in_expr(object, names);
                 if let MemberProp::Expr(e) = prop {
@@ -2799,6 +2856,16 @@ impl Codegen {
                 Self::collect_mutated_captures_from_arrow(params, body, block_vars, result);
             }
             Expr::Call { callee, args, .. } => {
+                Self::collect_mutated_captures_from_expr(callee, block_vars, result);
+                for arg in args {
+                    match arg {
+                        CallArg::Expr(e) | CallArg::Spread(e) => {
+                            Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                        }
+                    }
+                }
+            }
+            Expr::New { callee, args, .. } => {
                 Self::collect_mutated_captures_from_expr(callee, block_vars, result);
                 for arg in args {
                     match arg {
@@ -3120,7 +3187,7 @@ impl Codegen {
             }
         }
         // Only clone builtins that are actually referenced (clone so outer scope can still use, e.g. process for PORT)
-        for builtin in &["console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp", "Polars"] {
+        for builtin in &["console", "Math", "JSON", "Date", "Uint8Array", "AudioContext", "process", "setTimeout", "clearTimeout", "Promise", "RegExp", "Polars"] {
             if referenced.contains(*builtin) {
                 code.push_str(&format!("    let {} = {}.clone();\n", builtin, builtin));
             }

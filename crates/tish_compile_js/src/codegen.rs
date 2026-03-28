@@ -7,13 +7,11 @@ use tishlang_ast::{
 };
 
 use crate::error::CompileError;
-use crate::js_intrinsics::{JsIntrinsic, JsIntrinsics};
 
 struct Codegen {
     output: String,
     indent: usize,
     in_async: bool,
-    intrinsics: JsIntrinsics,
 }
 
 fn stmt_terminates_switch(stmt: Option<&Statement>) -> bool {
@@ -29,7 +27,6 @@ impl Codegen {
             output: String::new(),
             indent: 0,
             in_async: false,
-            intrinsics: JsIntrinsics::new(),
         }
     }
 
@@ -61,9 +58,6 @@ impl Codegen {
         for stmt in &program.statements {
             self.emit_statement(stmt)?;
         }
-        self.output = self
-            .intrinsics
-            .prepend_runtime_preamble(std::mem::take(&mut self.output));
         Ok(())
     }
 
@@ -421,22 +415,19 @@ impl Codegen {
                 }
             }
             Expr::Call { callee, args, .. } => {
-                if let Some(kind) =
-                    JsIntrinsics::classify_call(callee.as_ref(), args)?
-                {
-                    self.intrinsics.mark(kind);
-                    if kind == JsIntrinsic::Uint8Array {
-                        let n = self.emit_call_arg(&args[0])?;
-                        return Ok(JsIntrinsics::emit_expr(kind, &n));
-                    }
-                    return Ok(JsIntrinsics::emit_expr(kind, ""));
-                }
                 let c = self.emit_expr(callee)?;
                 let arg_strs: Result<Vec<_>, _> =
                     args.iter().map(|a| self.emit_call_arg(a)).collect();
                 let arg_strs = arg_strs?.join(", ");
                 // Tish uses null for undefined (e.g. empty array pop/shift)
                 format!("({}({}) ?? null)", c, arg_strs)
+            }
+            Expr::New { callee, args, .. } => {
+                let c = self.emit_expr(callee)?;
+                let arg_strs: Result<Vec<_>, _> =
+                    args.iter().map(|a| self.emit_call_arg(a)).collect();
+                let arg_strs = arg_strs?.join(", ");
+                format!("(new {}({}) ?? null)", c, arg_strs)
             }
             Expr::Member {
                 object,

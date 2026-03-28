@@ -551,6 +551,26 @@ impl Printer {
                 }
                 self.buf.push(')');
             }
+            Expr::New { callee, args, .. } => {
+                self.buf.push_str("new ");
+                self.expr(callee);
+                if !args.is_empty() {
+                    self.buf.push('(');
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 {
+                            self.buf.push_str(", ");
+                        }
+                        match a {
+                            CallArg::Expr(ex) => self.expr(ex),
+                            CallArg::Spread(ex) => {
+                                self.buf.push_str("...");
+                                self.expr(ex);
+                            }
+                        }
+                    }
+                    self.buf.push(')');
+                }
+            }
             Expr::Member {
                 object,
                 prop,

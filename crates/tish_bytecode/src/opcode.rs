@@ -80,13 +80,17 @@ pub enum Opcode {
     ArrayFilterBinOp = 35,
     /// Load built-in module export. Operands: u16 spec_const_idx, u16 export_name_const_idx. Pushes Value.
     LoadNativeExport = 36,
+    /// `new callee(...args)` (operand: u16 arg count). Stack: callee, then args — same as Call.
+    Construct = 37,
+    /// `new callee(...spread)` — stack: args array, then callee (same order as CallSpread).
+    ConstructSpread = 38,
 }
 
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=36 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=38 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 36 {
+        if b <= 38 {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None
@@ -97,7 +101,7 @@ impl Opcode {
     pub fn instruction_size(self, code: &[u8], ip: usize) -> Option<usize> {
         let size = match self {
             Opcode::Nop | Opcode::Pop | Opcode::Dup | Opcode::Return | Opcode::ExitTry
-            | Opcode::ArrayMapIdentity => 1,
+            | Opcode::ArrayMapIdentity | Opcode::CallSpread | Opcode::ConstructSpread => 1,
             Opcode::ArraySortByProperty | Opcode::ArrayMapBinOp | Opcode::ArrayFilterBinOp
             | Opcode::LoadNativeExport => 5,
             _ => 3,

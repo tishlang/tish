@@ -4,10 +4,9 @@
 //! independent of tishlang_runtime.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use tishlang_core::{percent_decode, percent_encode, Value};
+use tishlang_core::{percent_decode, percent_encode, ObjectMap, Value};
 
 /// Boolean(value) - coerce to bool
 pub fn boolean(args: &[Value]) -> Value {
@@ -174,8 +173,7 @@ pub fn parse_float(args: &[Value]) -> Value {
 pub fn object_from_entries(args: &[Value]) -> Value {
     if let Some(Value::Array(entries)) = args.first() {
         let entries_borrow = entries.borrow();
-        let mut obj: HashMap<Arc<str>, Value> =
-            HashMap::with_capacity(entries_borrow.len());
+        let mut obj: ObjectMap = ObjectMap::with_capacity(entries_borrow.len());
 
         for entry in entries_borrow.iter() {
             if let Value::Array(pair) = entry {
@@ -192,6 +190,6 @@ pub fn object_from_entries(args: &[Value]) -> Value {
 
         Value::Object(Rc::new(RefCell::new(obj)))
     } else {
-        Value::Object(Rc::new(RefCell::new(HashMap::new())))
+        Value::Object(Rc::new(RefCell::new(ObjectMap::default())))
     }
 }

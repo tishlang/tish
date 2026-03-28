@@ -1,0 +1,54 @@
+// Run after JS compile only: validates that emitted `new` matches Node/Bun builtins.
+//   tish compile src/node-bun-new-patterns.tish --target js -o dist/node-bun-new.js
+//   node dist/node-bun-new.js
+//   bun dist/node-bun-new.js
+//
+// (Do not `tish run` this file: native/VM use stubs; this file targets real JS runtimes.)
+
+// --- Time / errors (everyday Node & Bun) ---
+let epoch = new Date(0)
+console.log("new Date(0) getTime===0", epoch.getTime() === 0)
+
+let err = new Error("expected-message")
+console.log("new Error().message", err.message === "expected-message")
+
+// --- Collections ---
+let m = new Map()
+m.set("k", 1)
+console.log("new Map set/get", m.get("k") === 1)
+
+let st = new Set()
+st.add(42)
+console.log("new Set has", st.has(42))
+
+// --- URL (very common in Node: file URLs, join with base) ---
+let abs = new URL("https://example.com/a/b")
+console.log("new URL abs pathname", abs.pathname === "/a/b")
+
+let joined = new URL("/z", "https://example.com/base/c")
+console.log("new URL with base", joined.origin === "https://example.com" && joined.pathname === "/z")
+
+// --- Binary & text (streams, fetch bodies, crypto adjacency) ---
+let ab = new ArrayBuffer(8)
+console.log("new ArrayBuffer byteLength", ab.byteLength === 8)
+
+let u8 = new Uint8Array(5)
+console.log("new Uint8Array length", u8.length === 5)
+
+let enc = new TextEncoder()
+let encoded = enc.encode("xy")
+console.log("new TextEncoder encode length", encoded.length === 2)
+
+// --- RegExp ---
+let re = new RegExp("bar", "i")
+console.log("new RegExp test", re.test("BAR"))
+
+// --- Spread in `new` (ES2018; Node 10+ / Bun) ---
+let dims = [3]
+let spreadBuf = new Uint8Array(...dims)
+console.log("new Uint8Array(...[3])", spreadBuf.length === 3)
+
+// --- Fetch-related globals (Node 18+ undici; always in Bun) ---
+let h = new Headers()
+h.set("x-test", "1")
+console.log("new Headers get", h.get("x-test") === "1")

@@ -54,6 +54,7 @@ pub enum TokenKind {
     In,
     Async,
     Await,
+    New,
     Import,
     Export,
 
@@ -149,6 +150,7 @@ impl TokenKind {
             "in" => TokenKind::In,
             "async" => TokenKind::Async,
             "await" => TokenKind::Await,
+            "new" => TokenKind::New,
             "import" => TokenKind::Import,
             "export" => TokenKind::Export,
             _ => TokenKind::Ident,

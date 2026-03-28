@@ -73,6 +73,15 @@ pub fn convert_expr(expr: &OxcExpr<'_>, ctx: &Ctx<'_>) -> Result<Expr, ConvertEr
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Expr::Call { callee, args, span })
         }
+        OxcExpr::NewExpression(n) => {
+            let callee = Box::new(convert_expr(&n.callee, ctx)?);
+            let args = n
+                .arguments
+                .iter()
+                .map(|a| convert_call_arg(a, ctx))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Expr::New { callee, args, span })
+        }
         OxcExpr::StaticMemberExpression(s) => {
             let object = Box::new(convert_expr(&s.object, ctx)?);
             Ok(Expr::Member {

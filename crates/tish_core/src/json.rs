@@ -2,7 +2,6 @@
 
 use crate::Value;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -260,7 +259,7 @@ fn parse_array(input: &str) -> Result<(Value, &str), String> {
 
 fn parse_object(input: &str) -> Result<(Value, &str), String> {
     let mut input = &input[1..]; // skip '{'
-    let mut map = HashMap::new();
+    let mut map = crate::ObjectMap::default();
 
     input = input.trim_start();
     if let Some(rest) = input.strip_prefix('}') {

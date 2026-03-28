@@ -1205,6 +1205,35 @@ impl<'a> Compiler<'a> {
                     message: "Logical assignment (&&=, ||=, ??=) not yet supported in bytecode".to_string(),
                 });
             }
+            Expr::New { callee, args, .. } => {
+                let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
+                if has_spread {
+                    self.emit_u16(Opcode::NewArray, 0);
+                    for arg in args {
+                        match arg {
+                            CallArg::Expr(e) => {
+                                self.compile_expr(e)?;
+                                self.emit_u16(Opcode::NewArray, 1);
+                                self.emit(Opcode::ConcatArray);
+                            }
+                            CallArg::Spread(expr) => {
+                                self.compile_expr(expr)?;
+                                self.emit(Opcode::ConcatArray);
+                            }
+                        }
+                    }
+                    self.compile_expr(callee)?;
+                    self.emit(Opcode::ConstructSpread);
+                } else {
+                    self.compile_expr(callee)?;
+                    for arg in args {
+                        if let CallArg::Expr(e) = arg {
+                            self.compile_expr(e)?;
+                        }
+                    }
+                    self.emit_u16(Opcode::Construct, args.len() as u16);
+                }
+            }
         }
         Ok(())
     }

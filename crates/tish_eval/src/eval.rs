@@ -10,12 +10,12 @@ use std::sync::Arc;
 
 use tishlang_ast::{BinOp, CompoundOp, ExportDeclaration, Expr, ImportSpecifier, Literal, LogicalAssignOp, MemberProp, Span, Statement, UnaryOp};
 
-use crate::value::Value;
+use crate::value::{PropMap, Value};
 #[cfg(any(feature = "fs", feature = "process"))]
 use crate::natives;
 
 struct Scope {
-    vars: HashMap<Arc<str>, Value>,
+    vars: PropMap,
     consts: std::collections::HashSet<Arc<str>>,
     parent: Option<Rc<std::cell::RefCell<Scope>>>,
 }
@@ -23,7 +23,7 @@ struct Scope {
 impl Scope {
     fn new() -> Rc<std::cell::RefCell<Self>> {
         Rc::new(std::cell::RefCell::new(Self {
-            vars: HashMap::new(),
+            vars: PropMap::default(),
             consts: std::collections::HashSet::new(),
             parent: None,
         }))
@@ -31,7 +31,7 @@ impl Scope {
 
     fn child(parent: Rc<std::cell::RefCell<Scope>>) -> Rc<std::cell::RefCell<Self>> {
         Rc::new(std::cell::RefCell::new(Self {
-            vars: HashMap::new(),
+            vars: PropMap::default(),
             consts: std::collections::HashSet::new(),
             parent: Some(parent),
         }))
@@ -85,7 +85,7 @@ impl Evaluator {
         let scope = Scope::new();
         {
             let mut s = scope.borrow_mut();
-            let mut console = HashMap::with_capacity(5);
+            let mut console = PropMap::with_capacity(5);
             console.insert("debug".into(), Value::Native(natives::console_debug));
             console.insert("info".into(), Value::Native(natives::console_info));
             console.insert("log".into(), Value::Native(natives::console_log));
@@ -101,7 +101,7 @@ impl Evaluator {
             s.set("isNaN".into(), Value::Native(natives::is_nan), true);
             s.set("Infinity".into(), Value::Number(f64::INFINITY), true);
             s.set("NaN".into(), Value::Number(f64::NAN), true);
-            let mut math = HashMap::with_capacity(18);
+            let mut math = PropMap::with_capacity(18);
             math.insert("abs".into(), Value::Native(natives::math_abs));
             math.insert("sqrt".into(), Value::Native(natives::math_sqrt));
             math.insert("min".into(), Value::Native(natives::math_min));
@@ -122,12 +122,12 @@ impl Evaluator {
             math.insert("E".into(), Value::Number(std::f64::consts::E));
             s.set("Math".into(), Value::Object(Rc::new(RefCell::new(math))), true);
 
-            let mut json = HashMap::with_capacity(2);
+            let mut json = PropMap::with_capacity(2);
             json.insert("parse".into(), Value::Native(Self::json_parse_native));
             json.insert("stringify".into(), Value::Native(Self::json_stringify_native));
             s.set("JSON".into(), Value::Object(Rc::new(RefCell::new(json))), true);
 
-            let mut object = HashMap::with_capacity(5);
+            let mut object = PropMap::with_capacity(5);
             object.insert("keys".into(), Value::Native(Self::object_keys));
             object.insert("values".into(), Value::Native(Self::object_values));
             object.insert("entries".into(), Value::Native(Self::object_entries));
@@ -135,17 +135,32 @@ impl Evaluator {
             object.insert("fromEntries".into(), Value::Native(Self::object_from_entries));
             s.set("Object".into(), Value::Object(Rc::new(RefCell::new(object))), true);
 
-            let mut array_obj = HashMap::with_capacity(1);
+            let mut array_obj = PropMap::with_capacity(1);
             array_obj.insert("isArray".into(), Value::Native(natives::array_is_array));
             s.set("Array".into(), Value::Object(Rc::new(RefCell::new(array_obj))), true);
 
-            let mut string_obj = HashMap::with_capacity(1);
+            let mut string_obj = PropMap::with_capacity(1);
             string_obj.insert("fromCharCode".into(), Value::Native(natives::string_from_char_code));
             s.set("String".into(), Value::Object(Rc::new(RefCell::new(string_obj))), true);
 
-            let mut date = HashMap::with_capacity(1);
+            let mut date = PropMap::with_capacity(1);
             date.insert("now".into(), Value::Native(natives::date_now));
             s.set("Date".into(), Value::Object(Rc::new(RefCell::new(date))), true);
+
+            s.set(
+                "Uint8Array".into(),
+                crate::value_convert::core_to_eval(
+                    tishlang_builtins::construct::uint8_array_constructor_value(),
+                ),
+                true,
+            );
+            s.set(
+                "AudioContext".into(),
+                crate::value_convert::core_to_eval(
+                    tishlang_builtins::construct::audio_context_constructor_value(),
+                ),
+                true,
+            );
 
             #[cfg(feature = "regex")]
             {
@@ -536,7 +551,7 @@ impl Evaluator {
                 let _ = self.eval_statement(stmt);
             }
         }
-        let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
+        let mut exports: PropMap = PropMap::default();
         for name in export_names {
             if let Some(v) = module_scope.borrow().get(&name) {
                 exports.insert(Arc::from(name.as_str()), v);
@@ -576,7 +591,7 @@ impl Evaluator {
             "tish:fs" => {
                 #[cfg(feature = "fs")]
                 {
-                    let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
+                    let mut exports: PropMap = PropMap::default();
                     exports.insert("readFile".into(), Value::Native(natives::read_file));
                     exports.insert("writeFile".into(), Value::Native(natives::write_file));
                     exports.insert("fileExists".into(), Value::Native(natives::file_exists));
@@ -595,7 +610,7 @@ impl Evaluator {
             "tish:http" => {
                 #[cfg(feature = "http")]
                 {
-                    let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
+                    let mut exports: PropMap = PropMap::default();
                     exports.insert("fetch".into(), Value::Native(Self::fetch_native));
                     exports.insert("fetchAll".into(), Value::Native(Self::fetch_all_native));
                     exports.insert("serve".into(), Value::Serve);
@@ -616,7 +631,7 @@ impl Evaluator {
             "tish:ws" => {
                 #[cfg(feature = "ws")]
                 {
-                    let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
+                    let mut exports: PropMap = PropMap::default();
                     exports.insert("WebSocket".into(), Value::Native(Self::ws_web_socket_native));
                     exports.insert("Server".into(), Value::Native(Self::ws_server_native));
                     exports.insert("wsSend".into(), Value::Native(Self::ws_send_native));
@@ -633,7 +648,7 @@ impl Evaluator {
             "tish:process" => {
                 #[cfg(feature = "process")]
                 {
-                    let mut exports: HashMap<Arc<str>, Value> = HashMap::new();
+                    let mut exports: PropMap = PropMap::default();
                     exports.insert("exit".into(), Value::Native(natives::process_exit));
                     exports.insert("cwd".into(), Value::Native(natives::process_cwd));
                     exports.insert("exec".into(), Value::Native(natives::process_exec));
@@ -641,11 +656,11 @@ impl Evaluator {
                         .map(|s| Value::String(s.into()))
                         .collect();
                     exports.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv.clone()))));
-                    let env_obj: HashMap<Arc<str>, Value> = std::env::vars()
+                    let env_obj: PropMap = std::env::vars()
                         .map(|(key, value)| (Arc::from(key.as_str()), Value::String(value.into())))
                         .collect();
                     exports.insert("env".into(), Value::Object(Rc::new(RefCell::new(env_obj.clone()))));
-                    let mut process_obj = HashMap::new();
+                    let mut process_obj = PropMap::default();
                     process_obj.insert("exit".into(), Value::Native(natives::process_exit));
                     process_obj.insert("cwd".into(), Value::Native(natives::process_cwd));
                     process_obj.insert("exec".into(), Value::Native(natives::process_exec));
@@ -1534,7 +1549,7 @@ impl Evaluator {
                 Ok(Value::Array(Rc::new(RefCell::new(vals))))
             }
             Expr::Object { props, .. } => {
-                let mut map = HashMap::new();
+                let mut map = PropMap::default();
                 for prop in props {
                     match prop {
                         tishlang_ast::ObjectProp::KeyValue(k, v) => {
@@ -1561,6 +1576,11 @@ impl Evaluator {
                 }
             }
             Expr::Await { operand, .. } => self.eval_await(operand),
+            Expr::New { callee, args, .. } => {
+                let c = self.eval_expr(callee)?;
+                let arg_vals = self.eval_call_args(args)?;
+                self.construct_value(&c, &arg_vals)
+            }
             Expr::JsxElement { .. } | Expr::JsxFragment { .. } => Err(EvalError::Error(
                 "JSX is not supported in the interpreter. Use 'tish compile --target js' to compile to JavaScript.".to_string(),
             )),
@@ -1577,7 +1597,6 @@ impl Evaluator {
                     Value::Array(_) => "object".into(),
                     Value::Object(_) => "object".into(),
                     Value::Function { .. } | Value::Native(_) => "function".into(),
-                    #[cfg(any(feature = "http", feature = "ws"))]
                     Value::CoreFn(_) => "function".into(),
                     #[cfg(feature = "http")]
                     Value::CorePromise(_) => "object".into(),
@@ -2078,6 +2097,27 @@ impl Evaluator {
         }
     }
 
+    /// Host `new`: `__construct` on objects; otherwise same callables as `call_func`, else null.
+    fn construct_value(&self, callee: &Value, args: &[Value]) -> Result<Value, EvalError> {
+        if let Value::Object(o) = callee {
+            if let Some(ctor) = o.borrow().get(&Arc::from("__construct")) {
+                return self.call_func(ctor, args);
+            }
+        }
+        match callee {
+            Value::Native(_) | Value::Function { .. } | Value::CoreFn(_) => {
+                self.call_func(callee, args)
+            }
+            #[cfg(feature = "http")]
+            Value::PromiseConstructor
+            | Value::Serve
+            | Value::BoundPromiseMethod(_, _)
+            | Value::TimerBuiltin(_) => self.call_func(callee, args),
+            Value::OpaqueMethod(_, _) => self.call_func(callee, args),
+            _ => Ok(Value::Null),
+        }
+    }
+
     fn call_func(&self, f: &Value, args: &[Value]) -> Result<Value, EvalError> {
         match f {
             Value::Native(native_fn) => {
@@ -2142,7 +2182,6 @@ impl Evaluator {
             }
             #[cfg(feature = "http")]
             Value::Serve => self.run_http_server(args),
-            #[cfg(any(feature = "http", feature = "ws"))]
             Value::CoreFn(f) => {
                 let ca: Result<Vec<tishlang_core::Value>, String> =
                     args.iter().map(crate::value_convert::eval_to_core).collect();
@@ -2449,13 +2488,13 @@ impl Evaluator {
             let response_value = match self.call_func(&handler, &[req_value]) {
                 Ok(v) => v,
                 Err(EvalError::Throw(v)) => {
-                    let mut err_obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(2);
+                    let mut err_obj: PropMap = PropMap::with_capacity(2);
                     err_obj.insert(Arc::from("status"), Value::Number(500.0));
                     err_obj.insert(Arc::from("body"), Value::String(v.to_string().into()));
                     Value::Object(Rc::new(RefCell::new(err_obj)))
                 }
                 Err(e) => {
-                    let mut err_obj: HashMap<Arc<str>, Value> = HashMap::with_capacity(2);
+                    let mut err_obj: PropMap = PropMap::with_capacity(2);
                     err_obj.insert(Arc::from("status"), Value::Number(500.0));
                     err_obj.insert(Arc::from("body"), Value::String(e.to_string().into()));
                     Value::Object(Rc::new(RefCell::new(err_obj)))
@@ -2745,9 +2784,9 @@ impl Evaluator {
     fn json_parse_object(s: &str) -> Result<Value, ()> {
         let s = s[1..].trim_start();
         if s.starts_with('}') {
-            return Ok(Value::Object(Rc::new(RefCell::new(HashMap::new()))));
+            return Ok(Value::Object(Rc::new(RefCell::new(PropMap::default()))));
         }
-        let mut map = HashMap::new();
+        let mut map = PropMap::default();
         let mut rest = s;
         loop {
             if !rest.starts_with('"') {
@@ -2873,7 +2912,6 @@ impl Evaluator {
             Value::Function { .. } | Value::Native(_) => "null".to_string(),
             #[cfg(feature = "http")]
             Value::CorePromise(_) => "null".to_string(),
-            #[cfg(any(feature = "http", feature = "ws"))]
             Value::CoreFn(_) => "null".to_string(),
             #[cfg(feature = "http")]
             Value::Serve
@@ -2949,7 +2987,7 @@ impl Evaluator {
 
     fn object_from_entries(args: &[Value]) -> Result<Value, String> {
         if let Some(Value::Array(arr)) = args.first() {
-            let mut map = HashMap::new();
+            let mut map = PropMap::default();
             for entry in arr.borrow().iter() {
                 if let Value::Array(pair) = entry {
                     let pair = pair.borrow();
@@ -2961,7 +2999,7 @@ impl Evaluator {
             }
             Ok(Value::Object(Rc::new(RefCell::new(map))))
         } else {
-            Ok(Value::Object(Rc::new(RefCell::new(HashMap::new()))))
+            Ok(Value::Object(Rc::new(RefCell::new(PropMap::default()))))
         }
     }
 

@@ -1117,8 +1117,97 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_postfix(&mut self) -> Result<Expr, String> {
+    /// Member chain (`.`, `?.`, `[]`) without consuming a call `(...)`.
+    fn parse_member_expression_no_call(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_primary()?;
+        while let Some(kind) = self.peek_kind() {
+            match kind {
+                TokenKind::Dot | TokenKind::OptionalChain => {
+                    let optional = kind == TokenKind::OptionalChain;
+                    self.advance();
+                    let prop = self
+                        .expect(TokenKind::Ident)?
+                        .literal
+                        .clone()
+                        .ok_or("Expected property name")?;
+                    let start = expr.span().start;
+                    let end = self.peek().map(|x| x.span.start).unwrap_or(start);
+                    expr = Expr::Member {
+                        object: Box::new(expr),
+                        prop: MemberProp::Name(prop),
+                        optional,
+                        span: Span { start, end },
+                    };
+                }
+                TokenKind::LBracket => {
+                    self.advance();
+                    let index = self.parse_expr()?;
+                    self.expect(TokenKind::RBracket)?;
+                    let start = expr.span().start;
+                    let end = self.peek().map(|x| x.span.start).unwrap_or(start);
+                    expr = Expr::Index {
+                        object: Box::new(expr),
+                        index: Box::new(index),
+                        optional: false,
+                        span: Span { start, end },
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(expr)
+    }
+
+    /// ECMAScript `NewExpression`: `new` chains, then member expression without call, optional `(...)`.
+    fn parse_new_expression(&mut self) -> Result<Expr, String> {
+        if matches!(self.peek_kind(), Some(TokenKind::New)) {
+            let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
+            self.advance();
+            let callee = Box::new(self.parse_new_expression()?);
+            let args = if matches!(self.peek_kind(), Some(TokenKind::LParen)) {
+                self.advance();
+                let mut args = Vec::new();
+                while !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+                    if matches!(self.peek_kind(), Some(TokenKind::Spread)) {
+                        self.advance();
+                        let arg_expr = self.parse_expr()?;
+                        args.push(CallArg::Spread(arg_expr));
+                    } else {
+                        let arg_expr = self.parse_expr()?;
+                        args.push(CallArg::Expr(arg_expr));
+                    }
+                    if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+                        self.expect(TokenKind::Comma)?;
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+                args
+            } else {
+                Vec::new()
+            };
+            let end = self
+                .peek()
+                .map(|x| x.span.start)
+                .unwrap_or(callee.as_ref().span().end);
+            Ok(Expr::New {
+                callee,
+                args,
+                span: Span {
+                    start: span_start,
+                    end,
+                },
+            })
+        } else {
+            self.parse_member_expression_no_call()
+        }
+    }
+
+    fn parse_postfix(&mut self) -> Result<Expr, String> {
+        let mut expr = if matches!(self.peek_kind(), Some(TokenKind::New)) {
+            self.parse_new_expression()?
+        } else {
+            self.parse_primary()?
+        };
         while let Some(kind) = self.peek_kind() {
             match kind {
                 TokenKind::LParen => {
@@ -1787,6 +1876,7 @@ impl ExprSpan for Expr {
             Expr::Binary { span, .. } => *span,
             Expr::Unary { span, .. } => *span,
             Expr::Call { span, .. } => *span,
+            Expr::New { span, .. } => *span,
             Expr::Member { span, .. } => *span,
             Expr::Index { span, .. } => *span,
             Expr::Conditional { span, .. } => *span,

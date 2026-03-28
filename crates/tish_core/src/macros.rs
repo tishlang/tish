@@ -24,11 +24,10 @@
 macro_rules! tish_module {
     ($($name:expr => $fn:expr),* $(,)?) => {{
         use std::cell::RefCell;
-        use std::collections::HashMap;
         use std::rc::Rc;
         use std::sync::Arc;
-        use $crate::Value;
-        let mut map = HashMap::new();
+        use $crate::{ObjectMap, Value};
+        let mut map = ObjectMap::default();
         $(
             map.insert(Arc::from($name), Value::Function(Rc::new($fn)));
         )*

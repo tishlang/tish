@@ -214,6 +214,12 @@ pub enum Expr {
         args: Vec<CallArg>,
         span: Span,
     },
+    /// `new` expression (JavaScript target). `callee` is the constructor reference; `args` may be empty.
+    New {
+        callee: Box<Expr>,
+        args: Vec<CallArg>,
+        span: Span,
+    },
     Member {
         object: Box<Expr>,
         prop: MemberProp,
@@ -374,6 +380,7 @@ impl Expr {
             Expr::Binary { span, .. } => *span,
             Expr::Unary { span, .. } => *span,
             Expr::Call { span, .. } => *span,
+            Expr::New { span, .. } => *span,
             Expr::Member { span, .. } => *span,
             Expr::Index { span, .. } => *span,
             Expr::Conditional { span, .. } => *span,

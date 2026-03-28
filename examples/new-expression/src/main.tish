@@ -1,0 +1,26 @@
+// Example: JavaScript-style `new` in Tish.
+//
+// - `tish run` / native compile / bytecode: `new` lowers to host `construct`
+//   with stub `Uint8Array` and `AudioContext` (approximate; not real Web Audio / bytes).
+// - `tish compile --target js`: emits real `new` for browser APIs.
+// - For Node/Bun runtime checks (Date, URL, Map, Headers, …), see node-bun-new-patterns.tish.
+
+fn demoUint8Array() {
+  let buf = new Uint8Array(4)
+  console.log("new Uint8Array(4): length =", buf.length)
+}
+
+fn demoAudioContext() {
+  let ctx = new AudioContext()
+  console.log("new AudioContext(): sampleRate =", ctx.sampleRate)
+}
+
+fn demoNewWithSpread() {
+  let dims = [4]
+  let buf = new Uint8Array(...dims)
+  console.log("new Uint8Array(...[4]): length =", buf.length)
+}
+
+demoUint8Array()
+demoAudioContext()
+demoNewWithSpread()

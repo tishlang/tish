@@ -211,4 +211,72 @@ fn FileList() {
             &js[..900.min(js.len())]
         );
     }
+
+    #[test]
+    fn new_date_global_emits_valid_js_with_and_without_optimize() {
+        let src = "let epoch = new Date(0)\nconsole.log(epoch.getTime())";
+        let program = parse(src).expect("parse");
+        for optimize in [false, true] {
+            let js = compile_with_jsx(&program, optimize).expect("compile");
+            assert!(
+                js.contains("new Date(0)"),
+                "optimize={optimize}: expected `new Date(0)` in JS output:\n{js}"
+            );
+            assert!(
+                !js.contains("let epoch = new;"),
+                "optimize={optimize}: broken `new` emission (missing constructor):\n{js}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_uint8array_emits_direct_new_no_preamble() {
+        let src = "fn f(n) { return new Uint8Array(n) }";
+        let program = parse(src).expect("parse");
+        let js = compile_with_jsx(&program, false).expect("compile");
+        assert!(
+            js.contains("new Uint8Array("),
+            "expected direct new Uint8Array, got: {}",
+            &js[..500.min(js.len())]
+        );
+        assert!(
+            !js.contains("__tishUint8Array"),
+            "should not emit legacy intrinsic helper"
+        );
+    }
+
+    #[test]
+    fn new_audio_context_emits_direct_new_no_preamble() {
+        let src = "fn f() { return new AudioContext() }";
+        let program = parse(src).expect("parse");
+        let js = compile_with_jsx(&program, false).expect("compile");
+        assert!(
+            js.contains("new AudioContext("),
+            "expected new AudioContext, got: {}",
+            &js[..500.min(js.len())]
+        );
+        assert!(
+            !js.contains("__tishWebAudioCreateContext"),
+            "should not emit legacy intrinsic helper"
+        );
+    }
+
+    #[test]
+    fn new_class_name_emits_direct_new_js() {
+        let src = r#"
+fn ClassName(x) {
+    return x
+}
+fn factory() {
+    return new ClassName(42)
+}
+"#;
+        let program = parse(src).expect("parse");
+        let js = compile_with_jsx(&program, false).expect("compile");
+        assert!(
+            js.contains("new ClassName("),
+            "expected new ClassName( in JS output, got: {}",
+            &js[..800.min(js.len())]
+        );
+    }
 }

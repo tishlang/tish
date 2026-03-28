@@ -1,13 +1,12 @@
 //! Conversion between tishlang_eval::Value and tishlang_core::Value for opaque method calls.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tishlang_core::Value as CoreValue;
+use tishlang_core::{ObjectMap, Value as CoreValue};
 
-use crate::value::Value;
+use crate::value::{PropMap, Value};
 
 /// Convert interpreter Value to core Value. Fails for interpreter-only variants.
 pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
@@ -24,7 +23,7 @@ pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
             Ok(CoreValue::Array(Rc::new(RefCell::new(out))))
         }
         Value::Object(map) => {
-            let mut out = HashMap::new();
+            let mut out = ObjectMap::default();
             for (k, v) in map.borrow().iter() {
                 out.insert(Arc::clone(k), eval_to_core(v)?);
             }
@@ -53,7 +52,7 @@ pub fn core_to_eval(v: CoreValue) -> Value {
             Value::Array(Rc::new(RefCell::new(out)))
         }
         CoreValue::Object(map) => {
-            let mut out = HashMap::new();
+            let mut out = PropMap::default();
             for (k, v) in map.borrow().iter() {
                 out.insert(Arc::clone(k), core_to_eval(v.clone()));
             }
@@ -64,10 +63,7 @@ pub fn core_to_eval(v: CoreValue) -> Value {
         CoreValue::Promise(p) => Value::CorePromise(Arc::clone(&p)),
         #[cfg(not(feature = "http"))]
         CoreValue::Promise(_) => Value::Null,
-        #[cfg(any(feature = "http", feature = "ws"))]
         CoreValue::Function(f) => Value::CoreFn(Rc::clone(&f)),
-        #[cfg(not(any(feature = "http", feature = "ws")))]
-        CoreValue::Function(_) => Value::Null,
         // tishlang_core gets regex from http or regex features; handle RegExp when it exists
         #[cfg(any(feature = "http", feature = "regex"))]
         CoreValue::RegExp(re) => {

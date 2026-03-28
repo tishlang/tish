@@ -4,8 +4,11 @@
 //! booleans, null, and object structure are easier to scan.
 
 use std::io::IsTerminal;
+use std::sync::OnceLock;
 
 use crate::Value;
+
+static CONSOLE_USES_COLORS: OnceLock<bool> = OnceLock::new();
 
 /// ANSI escape codes (standard 4-bit + bright black for dim).
 const RESET: &str = "\x1b[0m";
@@ -25,8 +28,11 @@ const PUNCT: &str = "\x1b[90m";
 const SPECIAL: &str = "\x1b[90m";
 
 /// Returns whether console output should use colors (stdout is a TTY).
+///
+/// Cached for the process lifetime. `is_terminal()` is a syscall; benchmarks and
+/// scripts with many `console.log` calls must not pay it on every line.
 pub fn use_console_colors() -> bool {
-    std::io::stdout().is_terminal()
+    *CONSOLE_USES_COLORS.get_or_init(|| std::io::stdout().is_terminal())
 }
 
 /// Format a single value for console with optional ANSI colors (Node/Bun-style).
