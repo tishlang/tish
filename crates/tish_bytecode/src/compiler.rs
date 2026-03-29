@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, DestructElement, DestructPattern, Expr,
-    JsxAttrValue, JsxChild, JsxProp, Literal, MemberProp, ObjectProp, Program, Span, Statement,
+    FunParam, JsxAttrValue, JsxChild, JsxProp, Literal, MemberProp, ObjectProp, Program, Span,
+    Statement,
 };
 
 use crate::chunk::{Chunk, Constant};
@@ -137,8 +138,14 @@ impl<'a> Compiler<'a> {
             if params.len() != 2 {
                 return None;
             }
-            let param_a = params[0].name.as_ref();
-            let param_b = params[1].name.as_ref();
+            let (param_a, param_b) = match (&params[0], &params[1]) {
+                (FunParam::Simple(a), FunParam::Simple(b))
+                    if a.default.is_none() && b.default.is_none() =>
+                {
+                    (a.name.as_ref(), b.name.as_ref())
+                }
+                _ => return None,
+            };
             let body_expr = match body {
                 ArrowBody::Expr(e) => e.as_ref(),
                 ArrowBody::Block(stmt) => {
@@ -184,8 +191,14 @@ impl<'a> Compiler<'a> {
             if params.len() != 2 {
                 return None;
             }
-            let param_a = params[0].name.as_ref();
-            let param_b = params[1].name.as_ref();
+            let (param_a, param_b) = match (&params[0], &params[1]) {
+                (FunParam::Simple(a), FunParam::Simple(b))
+                    if a.default.is_none() && b.default.is_none() =>
+                {
+                    (a.name.as_ref(), b.name.as_ref())
+                }
+                _ => return None,
+            };
             let body_expr = match body {
                 ArrowBody::Expr(e) => e.as_ref(),
                 ArrowBody::Block(stmt) => {
@@ -228,7 +241,10 @@ impl<'a> Compiler<'a> {
         if params.len() != 1 {
             return None;
         }
-        let param_name = params[0].name.as_ref();
+        let param_name = match &params[0] {
+            FunParam::Simple(tp) if tp.default.is_none() => tp.name.as_ref(),
+            _ => return None,
+        };
         let expr_ref: &Expr = match body {
             ArrowBody::Expr(e) => e.as_ref(),
             ArrowBody::Block(stmt) => {
@@ -277,7 +293,10 @@ impl<'a> Compiler<'a> {
         if params.len() != 1 {
             return None;
         }
-        let param_name = params[0].name.as_ref();
+        let param_name = match &params[0] {
+            FunParam::Simple(tp) if tp.default.is_none() => tp.name.as_ref(),
+            _ => return None,
+        };
         let expr_ref: &Expr = match body {
             ArrowBody::Expr(e) => e.as_ref(),
             ArrowBody::Block(stmt) => {
@@ -550,9 +569,22 @@ impl<'a> Compiler<'a> {
                 async_: _,
                 ..
             } => {
+                for p in params {
+                    if matches!(p, FunParam::Destructure { .. }) {
+                        return Err(CompileError {
+                            message: "Destructuring parameters are not supported in bytecode"
+                                .to_string(),
+                        });
+                    }
+                }
                 let mut inner = Chunk::new();
-                let mut param_names: Vec<Arc<str>> =
-                    params.iter().map(|p| Arc::clone(&p.name)).collect();
+                let mut param_names: Vec<Arc<str>> = params
+                    .iter()
+                    .map(|p| match p {
+                        FunParam::Simple(tp) => Arc::clone(&tp.name),
+                        _ => unreachable!(),
+                    })
+                    .collect();
                 if let Some(rp) = rest_param {
                     param_names.push(rp.name.clone());
                     inner.rest_param_index = (param_names.len() as u16).saturating_sub(1);
@@ -1061,9 +1093,22 @@ impl<'a> Compiler<'a> {
                 self.emit_u16(Opcode::Call, 1);
             }
             Expr::ArrowFunction { params, body, .. } => {
+                for p in params {
+                    if matches!(p, FunParam::Destructure { .. }) {
+                        return Err(CompileError {
+                            message: "Destructuring parameters are not supported in bytecode"
+                                .to_string(),
+                        });
+                    }
+                }
                 let mut inner = Chunk::new();
-                let param_names: Vec<Arc<str>> =
-                    params.iter().map(|p| Arc::clone(&p.name)).collect();
+                let param_names: Vec<Arc<str>> = params
+                    .iter()
+                    .map(|p| match p {
+                        FunParam::Simple(tp) => Arc::clone(&tp.name),
+                        _ => unreachable!(),
+                    })
+                    .collect();
                 for p in &param_names {
                     inner.add_name(Arc::clone(p));
                 }

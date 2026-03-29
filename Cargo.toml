@@ -13,6 +13,7 @@ members = [
     "crates/tish_eval",
     "crates/tish_runtime",
     "crates/tish_compile",
+    "crates/tish_ui",
     "crates/tish_jsx_web",
     "crates/tish_compile_js",
     "crates/tish_bytecode",

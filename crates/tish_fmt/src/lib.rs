@@ -2,7 +2,7 @@
 
 use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
-    ExportDeclaration, Expr, ImportSpecifier, JsxAttrValue, JsxChild, JsxProp,
+    ExportDeclaration, Expr, FunParam, ImportSpecifier, JsxAttrValue, JsxChild, JsxProp,
     Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Statement, TypeAnnotation,
     TypedParam, UnaryOp,
 };
@@ -385,19 +385,38 @@ impl Printer {
         self.buf.push_str(" }");
     }
 
-    fn param_list(&mut self, params: &[TypedParam], rest: &Option<TypedParam>) {
+    fn param_list(&mut self, params: &[FunParam], rest: &Option<TypedParam>) {
         for (i, p) in params.iter().enumerate() {
             if i > 0 {
                 self.buf.push_str(", ");
             }
-            self.buf.push_str(p.name.as_ref());
-            if let Some(t) = &p.type_ann {
-                self.buf.push_str(": ");
-                self.type_ann(t);
-            }
-            if let Some(e) = &p.default {
-                self.buf.push_str(" = ");
-                self.expr(e);
+            match p {
+                FunParam::Simple(tp) => {
+                    self.buf.push_str(tp.name.as_ref());
+                    if let Some(t) = &tp.type_ann {
+                        self.buf.push_str(": ");
+                        self.type_ann(t);
+                    }
+                    if let Some(e) = &tp.default {
+                        self.buf.push_str(" = ");
+                        self.expr(e);
+                    }
+                }
+                FunParam::Destructure {
+                    pattern,
+                    type_ann,
+                    default,
+                } => {
+                    self.destruct_pat(pattern);
+                    if let Some(t) = type_ann {
+                        self.buf.push_str(": ");
+                        self.type_ann(t);
+                    }
+                    if let Some(e) = default {
+                        self.buf.push_str(" = ");
+                        self.expr(e);
+                    }
+                }
             }
         }
         if let Some(r) = rest {

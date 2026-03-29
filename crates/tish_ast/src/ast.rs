@@ -34,6 +34,62 @@ pub struct TypedParam {
     pub default: Option<Expr>,
 }
 
+
+/// Single formal parameter: simple identifier or destructuring pattern.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FunParam {
+    Simple(TypedParam),
+    Destructure {
+        pattern: DestructPattern,
+        type_ann: Option<TypeAnnotation>,
+        default: Option<Expr>,
+    },
+}
+
+
+impl FunParam {
+    /// Variable names introduced by this formal parameter.
+    pub fn bound_names(&self) -> Vec<Arc<str>> {
+        let mut out = Vec::new();
+        match self {
+            FunParam::Simple(tp) => out.push(Arc::clone(&tp.name)),
+            FunParam::Destructure { pattern, .. } => {
+                Self::collect_pattern_binding_names(pattern, &mut out);
+            }
+        }
+        out
+    }
+
+    fn collect_pattern_binding_names(pattern: &DestructPattern, out: &mut Vec<Arc<str>>) {
+        match pattern {
+            DestructPattern::Array(elements) => {
+                for el in elements {
+                    if let Some(el) = el {
+                        match el {
+                            DestructElement::Ident(n) => out.push(Arc::clone(n)),
+                            DestructElement::Pattern(p) => {
+                                Self::collect_pattern_binding_names(p, out);
+                            }
+                            DestructElement::Rest(n) => out.push(Arc::clone(n)),
+                        }
+                    }
+                }
+            }
+            DestructPattern::Object(props) => {
+                for prop in props {
+                    match &prop.value {
+                        DestructElement::Ident(n) => out.push(Arc::clone(n)),
+                        DestructElement::Pattern(p) => {
+                            Self::collect_pattern_binding_names(p, out);
+                        }
+                        DestructElement::Rest(n) => out.push(Arc::clone(n)),
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Destructuring pattern for array or object destructuring
 #[derive(Debug, Clone, PartialEq)]
 pub enum DestructPattern {
@@ -149,7 +205,7 @@ pub enum Statement {
     FunDecl {
         async_: bool,
         name: Arc<str>,
-        params: Vec<TypedParam>,
+        params: Vec<FunParam>,
         rest_param: Option<TypedParam>,
         return_type: Option<TypeAnnotation>,
         body: Box<Statement>,
@@ -304,7 +360,7 @@ pub enum Expr {
     },
     /// Arrow function: (params) => body
     ArrowFunction {
-        params: Vec<TypedParam>,
+        params: Vec<FunParam>,
         body: ArrowBody,
         span: Span,
     },

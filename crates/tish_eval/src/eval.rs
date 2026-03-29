@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tishlang_ast::{BinOp, CompoundOp, ExportDeclaration, Expr, ImportSpecifier, Literal, LogicalAssignOp, MemberProp, Span, Statement, UnaryOp};
+use tishlang_ast::{BinOp, CompoundOp, ExportDeclaration, Expr, FunParam, ImportSpecifier, Literal, LogicalAssignOp, MemberProp, Span, Statement, UnaryOp};
 
 use crate::value::{PropMap, Value};
 #[cfg(any(feature = "fs", feature = "process"))]
@@ -338,14 +338,11 @@ impl Evaluator {
                 body,
                 ..
             } => {
-                // Extract parameter names and defaults using Arc for cheap cloning
-                let param_names: Arc<[Arc<str>]> = params.iter().map(|p| Arc::clone(&p.name)).collect();
-                let defaults: Arc<[Option<Expr>]> = params.iter().map(|p| p.default.clone()).collect();
+                let formals: Arc<[FunParam]> = Arc::from(params.clone());
                 let rest_param_name = rest_param.as_ref().map(|p| Arc::clone(&p.name));
                 let body = Arc::new(body.as_ref().clone());
                 let func = Value::Function {
-                    params: param_names,
-                    defaults,
+                    formals,
                     rest_param: rest_param_name,
                     body,
                 };
@@ -1774,9 +1771,7 @@ impl Evaluator {
             }
             Expr::ArrowFunction { params, body, .. } => {
                 use tishlang_ast::ArrowBody;
-                // Convert arrow function to regular function using Arc for cheap cloning
-                let param_names: Arc<[Arc<str>]> = params.iter().map(|p| Arc::clone(&p.name)).collect();
-                let defaults: Arc<[Option<tishlang_ast::Expr>]> = params.iter().map(|p| p.default.clone()).collect();
+                let formals: Arc<[FunParam]> = Arc::from(params.clone());
                 let body_stmt = match body {
                     ArrowBody::Expr(expr) => {
                         // Expression body: wrap in implicit return
@@ -1788,8 +1783,7 @@ impl Evaluator {
                     ArrowBody::Block(stmt) => stmt.as_ref().clone(),
                 };
                 Ok(Value::Function {
-                    params: param_names,
-                    defaults,
+                    formals,
                     rest_param: None,
                     body: Arc::new(body_stmt),
                 })
@@ -1881,18 +1875,21 @@ impl Evaluator {
     /// descending = false: checks for `(a, b) => a - b`
     /// descending = true: checks for `(a, b) => b - a`
     fn is_numeric_sort_comparator(f: &Value, descending: bool) -> bool {
-        if let Value::Function { params, body, defaults, rest_param } = f {
-            // Must have exactly 2 params, no defaults, no rest
-            if params.len() != 2 || rest_param.is_some() {
+        if let Value::Function { formals, body, rest_param, .. } = f {
+            // Must have exactly 2 simple params, no defaults, no rest
+            if formals.len() != 2 || rest_param.is_some() {
                 return false;
             }
-            if defaults.iter().any(|d| d.is_some()) {
-                return false;
-            }
+            let (param_a, param_b) = match (&formals[0], &formals[1]) {
+                (FunParam::Simple(a), FunParam::Simple(b))
+                    if a.default.is_none() && b.default.is_none() =>
+                {
+                    (&a.name, &b.name)
+                }
+                _ => return false,
+            };
 
             // Body must be a return of a - b (or b - a for descending)
-            let param_a = &params[0];
-            let param_b = &params[1];
 
             // Check for both Statement::Return and Statement::ExprStmt (arrow implicit return)
             let expr = match body.as_ref() {
@@ -1966,20 +1963,32 @@ impl Evaluator {
     /// Optimized callback invocation for array methods.
     /// Creates a reusable scope that can be updated for each iteration.
     fn create_callback_scope(&self, f: &Value) -> Option<(Rc<RefCell<Scope>>, Arc<[Arc<str>]>, Arc<Statement>)> {
-        if let Value::Function { params, body, defaults, rest_param } = f {
-            // Only optimize simple cases: no defaults used, no rest params
-            if rest_param.is_some() || defaults.iter().any(|d| d.is_some()) {
+        if let Value::Function { formals, body, rest_param, .. } = f {
+            if rest_param.is_some() {
                 return None;
             }
-            let scope = Scope::child(Rc::clone(&self.scope));
-            // Pre-initialize parameters to Null
-            {
-                let mut s = scope.borrow_mut();
-                for p in params.iter() {
-                    s.set(Arc::clone(p), Value::Null, true);
+            for fp in formals.iter() {
+                match fp {
+                    FunParam::Simple(tp) if tp.default.is_none() => {}
+                    _ => return None,
                 }
             }
-            return Some((scope, Arc::clone(params), Arc::clone(body)));
+            let scope = Scope::child(Rc::clone(&self.scope));
+            {
+                let mut s = scope.borrow_mut();
+                for fp in formals.iter() {
+                    for n in fp.bound_names() {
+                        s.set(n, Value::Null, true);
+                    }
+                }
+            }
+            let flat_names: Arc<[Arc<str>]> = Arc::from(
+                formals
+                    .iter()
+                    .flat_map(|fp| fp.bound_names())
+                    .collect::<Vec<_>>(),
+            );
+            return Some((scope, flat_names, Arc::clone(body)));
         }
         None
     }
@@ -2021,12 +2030,14 @@ impl Evaluator {
         f: &Value,
         args: &[Value],
     ) -> Option<Result<Value, EvalError>> {
-        if let Value::Function { params, body, defaults, rest_param } = f {
-            // Only optimize single-parameter functions without defaults or rest
-            if params.len() != 1 || rest_param.is_some() || defaults.iter().any(|d| d.is_some()) {
+        if let Value::Function { formals, body, rest_param, .. } = f {
+            if formals.len() != 1 || rest_param.is_some() {
                 return None;
             }
-            let param_name = &params[0];
+            let param_name = match &formals[0] {
+                FunParam::Simple(tp) if tp.default.is_none() => &tp.name,
+                _ => return None,
+            };
             let arg = args.first().cloned().unwrap_or(Value::Null);
 
             // Get the expression from the body
@@ -2206,15 +2217,19 @@ impl Evaluator {
                 let result = method(&core_args);
                 Ok(crate::value_convert::core_to_eval(result))
             }
-            Value::Function { params, defaults, rest_param, body } => {
+            Value::Function { formals, rest_param, body } => {
                 let scope = Scope::child(Rc::clone(&self.scope));
                 {
                     let mut s = scope.borrow_mut();
-                    for (i, p) in params.iter().enumerate() {
+                    for (i, formal) in formals.iter().enumerate() {
                         let val = match args.get(i) {
                             Some(v) => v.clone(),
                             None => {
-                                if let Some(Some(default_expr)) = defaults.get(i) {
+                                let def = match formal {
+                                    FunParam::Simple(tp) => tp.default.as_ref(),
+                                    FunParam::Destructure { default, .. } => default.as_ref(),
+                                };
+                                if let Some(default_expr) = def {
                                     drop(s);
                                     let default_val = self.eval_expr(default_expr)?;
                                     s = scope.borrow_mut();
@@ -2224,10 +2239,19 @@ impl Evaluator {
                                 }
                             }
                         };
-                        s.set(Arc::clone(p), val, true);
+                        match formal {
+                            FunParam::Simple(tp) => {
+                                s.set(Arc::clone(&tp.name), val, true);
+                            }
+                            FunParam::Destructure { pattern, .. } => {
+                                drop(s);
+                                Self::bind_destruct_pattern_scoped(&scope, pattern, &val, true)?;
+                                s = scope.borrow_mut();
+                            }
+                        }
                     }
                     if let Some(ref rest_name) = rest_param {
-                        let rest_vals: Vec<Value> = args.iter().skip(params.len()).cloned().collect();
+                        let rest_vals: Vec<Value> = args.iter().skip(formals.len()).cloned().collect();
                         s.set(Arc::clone(rest_name), Value::Array(Rc::new(RefCell::new(rest_vals))), true);
                     }
                 }
@@ -2530,28 +2554,37 @@ impl Evaluator {
         Ok(result)
     }
 
-    fn bind_destruct_pattern(&mut self, pattern: &tishlang_ast::DestructPattern, value: &Value, mutable: bool) -> Result<(), EvalError> {
+    fn bind_destruct_pattern_scoped(
+        scope: &Rc<RefCell<Scope>>,
+        pattern: &tishlang_ast::DestructPattern,
+        value: &Value,
+        mutable: bool,
+    ) -> Result<(), EvalError> {
         match pattern {
             tishlang_ast::DestructPattern::Array(elements) => {
                 let arr = match value {
                     Value::Array(a) => a.borrow().clone(),
                     _ => return Err(EvalError::Error("Cannot destructure non-array value".to_string())),
                 };
-                
+
                 for (i, elem) in elements.iter().enumerate() {
                     if let Some(el) = elem {
                         match el {
                             tishlang_ast::DestructElement::Ident(name) => {
                                 let val = arr.get(i).cloned().unwrap_or(Value::Null);
-                                self.scope.borrow_mut().set(Arc::clone(name), val, mutable);
+                                scope.borrow_mut().set(Arc::clone(name), val, mutable);
                             }
                             tishlang_ast::DestructElement::Pattern(nested) => {
                                 let val = arr.get(i).cloned().unwrap_or(Value::Null);
-                                self.bind_destruct_pattern(nested, &val, mutable)?;
+                                Self::bind_destruct_pattern_scoped(scope, nested, &val, mutable)?;
                             }
                             tishlang_ast::DestructElement::Rest(name) => {
                                 let rest: Vec<Value> = arr.iter().skip(i).cloned().collect();
-                                self.scope.borrow_mut().set(Arc::clone(name), Value::Array(Rc::new(RefCell::new(rest))), mutable);
+                                scope.borrow_mut().set(
+                                    Arc::clone(name),
+                                    Value::Array(Rc::new(RefCell::new(rest))),
+                                    mutable,
+                                );
                                 break;
                             }
                         }
@@ -2563,24 +2596,30 @@ impl Evaluator {
                     Value::Object(o) => o.borrow().clone(),
                     _ => return Err(EvalError::Error("Cannot destructure non-object value".to_string())),
                 };
-                
+
                 for prop in props {
                     let val = obj.get(&prop.key).cloned().unwrap_or(Value::Null);
                     match &prop.value {
                         tishlang_ast::DestructElement::Ident(name) => {
-                            self.scope.borrow_mut().set(Arc::clone(name), val, mutable);
+                            scope.borrow_mut().set(Arc::clone(name), val, mutable);
                         }
                         tishlang_ast::DestructElement::Pattern(nested) => {
-                            self.bind_destruct_pattern(nested, &val, mutable)?;
+                            Self::bind_destruct_pattern_scoped(scope, nested, &val, mutable)?;
                         }
                         tishlang_ast::DestructElement::Rest(_) => {
-                            return Err(EvalError::Error("Rest not supported in object destructuring".to_string()));
+                            return Err(EvalError::Error(
+                                "Rest not supported in object destructuring".to_string(),
+                            ));
                         }
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    fn bind_destruct_pattern(&mut self, pattern: &tishlang_ast::DestructPattern, value: &Value, mutable: bool) -> Result<(), EvalError> {
+        Self::bind_destruct_pattern_scoped(&self.scope, pattern, value, mutable)
     }
 
     fn get_prop(&self, obj: &Value, key: &str) -> Result<Value, String> {

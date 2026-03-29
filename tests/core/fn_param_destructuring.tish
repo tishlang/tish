@@ -1,0 +1,16 @@
+// Destructuring in function parameters (Rust / eval backends)
+
+fn takePair({ x, y }) {
+  console.log(x === 10);
+  console.log(y === 20);
+}
+
+takePair({ x: 10, y: 20 });
+
+export fn run({ name }) {
+  console.log(name === "ok");
+}
+
+run({ name: "ok" });
+
+console.log("fn param destructuring done");

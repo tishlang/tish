@@ -45,6 +45,19 @@ pub fn build_via_cargo(
         })
         .collect();
 
+    let tish_ui_path = std::path::Path::new(&runtime_path)
+        .parent()
+        .ok_or_else(|| "invalid tishlang_runtime path (no parent)".to_string())?
+        .join("tish_ui");
+    let ui_dep = if rust_code.contains("tishlang_ui") {
+        format!(
+            "\ntishlang_ui = {{ path = {:?}, default-features = false, features = [\"runtime\"] }}\n",
+            tish_ui_path.display().to_string().replace('\\', "/")
+        )
+    } else {
+        String::new()
+    };
+
     let cargo_toml = format!(
         r#"[package]
 name = "tish_output"
@@ -63,7 +76,7 @@ codegen-units = 1
 lto = "thin"
 
 [dependencies]
-tishlang_runtime = {{ path = {:?}{} }}{}{}
+tishlang_runtime = {{ path = {:?}{} }}{}{}{}
 "#,
         out_name,
         runtime_path,
@@ -73,7 +86,8 @@ tishlang_runtime = {{ path = {:?}{} }}{}{}
             String::new()
         } else {
             format!("\n{}", native_deps)
-        }
+        },
+        ui_dep
     );
 
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)

@@ -6,7 +6,7 @@ use oxc::ast::ast::Expression as OxcExpr;
 use oxc::semantic::Semantic;
 use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CompoundOp, DestructPattern, Expr, Literal, LogicalAssignOp,
-    MemberProp, ObjectProp, TypedParam,
+    FunParam, MemberProp, ObjectProp, TypedParam,
 };
 
 use crate::error::{ConvertError, ConvertErrorKind};
@@ -527,7 +527,7 @@ fn convert_unary_op(
 pub fn convert_params(
     params: &oxc::ast::ast::FormalParameters<'_>,
     ctx: &Ctx<'_>,
-) -> Result<(Vec<TypedParam>, Option<TypedParam>), ConvertError> {
+) -> Result<(Vec<FunParam>, Option<TypedParam>), ConvertError> {
     let mut typed_params = Vec::new();
     let mut rest_param = None;
     for (i, p) in params.items.iter().enumerate() {
@@ -567,11 +567,11 @@ pub fn convert_params(
                     .as_ref()
                     .map(|e| convert_expr(e, ctx))
                     .transpose()?;
-                typed_params.push(TypedParam {
+                typed_params.push(FunParam::Simple(TypedParam {
                     name: Arc::from(name),
                     type_ann: None,
                     default,
-                });
+                }));
         }
     }
     if rest_param.is_none() {
@@ -598,10 +598,10 @@ pub fn convert_params(
 fn convert_arrow_params(
     params: &oxc::ast::ast::FormalParameters<'_>,
     ctx: &Ctx<'_>,
-) -> Result<Vec<TypedParam>, ConvertError> {
+) -> Result<Vec<FunParam>, ConvertError> {
     let (mut ps, rest) = convert_params(params, ctx)?;
     if let Some(r) = rest {
-        ps.push(r);
+        ps.push(FunParam::Simple(r));
     }
     Ok(ps)
 }

@@ -2,8 +2,7 @@
 
 use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr,
-    JsxAttrValue, JsxChild, JsxProp, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program,
-    Statement, UnaryOp,
+    FunParam, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Statement, UnaryOp,
 };
 
 use crate::error::CompileError;
@@ -298,20 +297,34 @@ impl Codegen {
 
     fn emit_params(
         &mut self,
-        params: &[tishlang_ast::TypedParam],
+        params: &[FunParam],
         rest_param: Option<&tishlang_ast::TypedParam>,
     ) -> Result<String, CompileError> {
-        let mut parts: Vec<String> = params
-            .iter()
-            .map(|p| {
-                let n = Self::escape_ident(p.name.as_ref());
-                if let Some(ref d) = p.default {
-                    format!("{} = {}", n, self.emit_expr(d).unwrap())
-                } else {
-                    n
+        let mut parts: Vec<String> = Vec::new();
+        for p in params {
+            match p {
+                FunParam::Simple(tp) => {
+                    let n = Self::escape_ident(tp.name.as_ref());
+                    let s = if let Some(ref d) = tp.default {
+                        format!("{} = {}", n, self.emit_expr(d)?)
+                    } else {
+                        n
+                    };
+                    parts.push(s);
                 }
-            })
-            .collect();
+                FunParam::Destructure {
+                    pattern,
+                    type_ann: _,
+                    default,
+                } => {
+                    let mut s = self.emit_destruct_pattern(pattern)?;
+                    if let Some(ref d) = default {
+                        s = format!("{} = {}", s, self.emit_expr(d)?);
+                    }
+                    parts.push(s);
+                }
+            }
+        }
         if let Some(rest) = rest_param {
             parts.push(format!("...{}", Self::escape_ident(rest.name.as_ref())));
         }
@@ -616,23 +629,11 @@ impl Codegen {
                 let o = self.emit_expr(operand)?;
                 format!("(await {})", o)
             }
-            Expr::JsxElement { tag, props, children, .. } => {
-                let tag_str = if tag.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                    tag.as_ref().to_string()
-                } else {
-                    format!("{:?}", tag.as_ref())
-                };
-                let props_str = self.emit_jsx_props(props)?;
-                let children_strs: Result<Vec<_>, _> =
-                    children.iter().map(|c| self.emit_jsx_child(c)).collect();
-                let children_str = children_strs?.join(", ");
-                format!("h({}, {}, [{}])", tag_str, props_str, children_str)
-            }
-            Expr::JsxFragment { children, .. } => {
-                let children_strs: Result<Vec<_>, _> =
-                    children.iter().map(|c| self.emit_jsx_child(c)).collect();
-                let children_str = children_strs?.join(", ");
-                format!("h(Fragment, null, [{}])", children_str)
+            Expr::JsxElement { .. } | Expr::JsxFragment { .. } => {
+                tishlang_ui::jsx::emit_jsx_js(expr, &mut |e| {
+                    self.emit_expr(e).map_err(|ce| ce.message)
+                })
+                .map_err(|m| CompileError { message: m })?
             }
             Expr::NativeModuleLoad { spec, .. } => {
                 return Err(CompileError {
@@ -652,54 +653,6 @@ impl Codegen {
         }
     }
 
-    fn emit_jsx_props(&mut self, props: &[JsxProp]) -> Result<String, CompileError> {
-        if props.is_empty() {
-            return Ok("null".to_string());
-        }
-        let parts: Result<Vec<_>, _> = props
-            .iter()
-            .map(|p| match p {
-                JsxProp::Attr { name, value } => {
-                    let val = match value {
-                        JsxAttrValue::String(s) => format!("{:?}", s.as_ref()),
-                        JsxAttrValue::Expr(e) => self.emit_expr(e)?,
-                        JsxAttrValue::ImplicitTrue => "true".to_string(),
-                    };
-                    let key = name.as_ref();
-                    Ok(if key.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                        format!("{}: {}", key, val)
-                    } else {
-                        format!("{:?}: {}", key, val)
-                    })
-                }
-                JsxProp::Spread(e) => Ok(format!("...{}", self.emit_expr(e)?)),
-            })
-            .collect();
-        Ok(format!("{{ {} }}", parts?.join(", ")))
-    }
-
-    fn emit_jsx_child(&mut self, child: &JsxChild) -> Result<String, CompileError> {
-        match child {
-            JsxChild::Text(s) => Ok(format!("{:?}", s.as_ref())),
-            JsxChild::Expr(e) => {
-                let inner = self.emit_expr(e)?;
-                // Only wrap literals we know are primitives (number, bool, null). Never wrap:
-                // string/template (already strings), JSX (elements), Call (components), Array/Ident (may hold elements).
-                let needs_string = matches!(
-                    e,
-                    Expr::Literal {
-                        value: Literal::Number(_) | Literal::Bool(_) | Literal::Null,
-                        ..
-                    }
-                );
-                Ok(if needs_string {
-                    format!("String({})", inner)
-                } else {
-                    inner
-                })
-            }
-        }
-    }
 }
 
 /// Compile a single program (no imports) to JavaScript. JSX lowers to `h` / `Fragment` (Lattish).

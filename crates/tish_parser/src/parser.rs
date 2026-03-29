@@ -53,9 +53,9 @@ macro_rules! binary_multi_op {
 
 use tishlang_ast::{
     ArrowBody, ArrayElement, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
-    DestructProp, ExportDeclaration, Expr, ImportSpecifier, JsxAttrValue, JsxChild, JsxProp,
-    Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, TypeAnnotation,
-    TypedParam, UnaryOp,
+    DestructProp, ExportDeclaration, Expr, FunParam, ImportSpecifier, JsxAttrValue, JsxChild,
+    JsxProp, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement,
+    TypeAnnotation, TypedParam, UnaryOp,
 };
 use tishlang_lexer::{Token, TokenKind};
 
@@ -363,6 +363,55 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::RBrace)?;
         Ok(DestructPattern::Object(props))
     }
+
+    /// One formal parameter: `name`, `name: T`, `name = expr`, or a destructuring pattern.
+    fn parse_fun_param(&mut self) -> Result<FunParam, String> {
+        if matches!(
+            self.peek_kind(),
+            Some(TokenKind::LBracket | TokenKind::LBrace)
+        ) {
+            let pattern = self.parse_destruct_pattern()?;
+            let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+                self.advance();
+                Some(self.parse_type_annotation()?)
+            } else {
+                None
+            };
+            let default = if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
+                self.advance();
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            return Ok(FunParam::Destructure {
+                pattern,
+                type_ann,
+                default,
+            });
+        }
+        let param_name = self
+            .expect(TokenKind::Ident)?
+            .literal
+            .clone()
+            .ok_or("Expected param name")?;
+        let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+            self.advance();
+            Some(self.parse_type_annotation()?)
+        } else {
+            None
+        };
+        let default = if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        Ok(FunParam::Simple(TypedParam {
+            name: param_name,
+            type_ann,
+            default,
+        }))
+    }
     
     /// Parse a type annotation (number, string, T[], {a: T}, etc.)
     fn parse_type_annotation(&mut self) -> Result<TypeAnnotation, String> {
@@ -480,26 +529,7 @@ impl<'a> Parser<'a> {
                 }
                 break;
             }
-            let param_name = self
-                .expect(TokenKind::Ident)?
-                .literal
-                .clone()
-                .ok_or("Expected param name")?;
-            // Optional type annotation
-            let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
-                self.advance();
-                Some(self.parse_type_annotation()?)
-            } else {
-                None
-            };
-            // Optional default value
-            let default = if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
-                self.advance();
-                Some(self.parse_expr()?)
-            } else {
-                None
-            };
-            params.push(TypedParam { name: param_name, type_ann, default });
+            params.push(self.parse_fun_param()?);
             if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
                 self.expect(TokenKind::Comma)?;
             }
@@ -1332,7 +1362,11 @@ impl<'a> Parser<'a> {
                     let body = self.parse_arrow_body()?;
                     let end = self.previous_span_end();
                     return Ok(Expr::ArrowFunction {
-                        params: vec![TypedParam { name: name.clone(), type_ann: None, default: None }],
+                        params: vec![FunParam::Simple(TypedParam {
+                            name: name.clone(),
+                            type_ann: None,
+                            default: None,
+                        })],
                         body,
                         span: Span { start: span.start, end },
                     });
@@ -1507,39 +1541,26 @@ impl<'a> Parser<'a> {
                 is_arrow = true;
             }
         } else {
-            // Try to parse params: (x, y, z) or (x: Type, y: Type)
+            // Try to parse params: (x, y), ({ a }), ([a, b]), with optional types/defaults
+            let mut params_ok = true;
             loop {
-                if !matches!(self.peek_kind(), Some(TokenKind::Ident)) {
-                    break; // Not a valid arrow function param list
+                if matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+                    break;
                 }
-                let name = self.advance().unwrap().literal.clone().ok_or("Expected param name")?;
-                
-                // Optional type annotation
-                let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
-                    self.advance();
-                    Some(self.parse_type_annotation()?)
-                } else {
-                    None
-                };
-                
-                // Optional default value
-                let default = if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
-                    self.advance();
-                    Some(self.parse_expr()?)
-                } else {
-                    None
-                };
-                
-                params.push(TypedParam { name, type_ann, default });
-                
+                match self.parse_fun_param() {
+                    Ok(param) => params.push(param),
+                    Err(_) => {
+                        params_ok = false;
+                        break;
+                    }
+                }
                 if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
                     self.advance();
                 } else {
                     break;
                 }
             }
-            
-            if matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+            if params_ok && matches!(self.peek_kind(), Some(TokenKind::RParen)) {
                 self.advance(); // consume )
                 if matches!(self.peek_kind(), Some(TokenKind::Arrow)) {
                     self.advance(); // consume =>

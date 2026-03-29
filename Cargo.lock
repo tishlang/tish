@@ -2584,6 +2584,7 @@ dependencies = [
  "tishlang_ast",
  "tishlang_opt",
  "tishlang_parser",
+ "tishlang_ui",
 ]
 
 [[package]]
@@ -2594,6 +2595,7 @@ dependencies = [
  "tishlang_compile",
  "tishlang_opt",
  "tishlang_parser",
+ "tishlang_ui",
 ]
 
 [[package]]
@@ -2764,6 +2766,14 @@ dependencies = [
  "tishlang_core",
  "tokio",
  "tokio-tungstenite",
+]
+
+[[package]]
+name = "tishlang_ui"
+version = "0.1.0"
+dependencies = [
+ "tishlang_ast",
+ "tishlang_core",
 ]
 
 [[package]]

@@ -474,6 +474,7 @@ const MVP_TEST_FILES: &[&str] = &[
     "types.tish",
     "logical_assign.tish",
     "spread.tish",
+    "fn_param_destructuring.tish",
 ];
 
 /// Run each .tish file with interpreter and compare stdout to static expected.

@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use tishlang_ast::{ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp};
+use tishlang_ast::{ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr, FunParam, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp};
 use crate::resolve::is_builtin_native_spec;
 use crate::types::{RustType, TypeContext};
 
@@ -481,6 +481,8 @@ struct Codegen {
     usage_analyzer: Option<UsageAnalyzer>,
     /// Type context for tracking variable types (for static typing)
     type_context: TypeContext,
+    /// Program uses JSX; emit `tishlang_ui` imports and `h` / `Fragment` globals.
+    program_has_jsx: bool,
 }
 
 impl Codegen {
@@ -506,6 +508,7 @@ impl Codegen {
             refcell_wrapped_vars: std::collections::HashSet::new(),
             usage_analyzer: None,
             type_context: TypeContext::new(),
+            program_has_jsx: false,
         }
     }
 
@@ -516,7 +519,12 @@ impl Codegen {
             return self.builtin_native_module_rust_init(spec, export_name);
         }
         self.native_module_map.get(spec).map(|(crate_name, export_fn)| {
-            format!("{}::{}()", crate_name, export_fn)
+            // Native modules return a namespace object (like an ES module).
+            // Named imports extract the field from that namespace: `import { foo } from "pkg"` → `ns.foo`.
+            format!(
+                "{{ let _ns = {}::{}(); match _ns {{ Value::Object(ref _o) => _o.borrow().get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }} }}",
+                crate_name, export_fn, export_name
+            )
         })
     }
 
@@ -741,12 +749,17 @@ impl Codegen {
         use tishlang_ast::ArrowBody;
         
         if let Expr::ArrowFunction { params, body, .. } = expr {
-            // Must have exactly 2 params
             if params.len() != 2 {
                 return None;
             }
-            let param_a = params[0].name.as_ref();
-            let param_b = params[1].name.as_ref();
+            let (param_a, param_b) = match (&params[0], &params[1]) {
+                (FunParam::Simple(a), FunParam::Simple(b))
+                    if a.default.is_none() && b.default.is_none() =>
+                {
+                    (a.name.as_ref(), b.name.as_ref())
+                }
+                _ => return None,
+            };
             
             // Body must be a single expression that's a subtraction
             let body_expr = match body {
@@ -777,11 +790,15 @@ impl Codegen {
 
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
         self.is_async = program_uses_async(program);
+        self.program_has_jsx = tishlang_ui::jsx::program_contains_jsx(program);
         self.write("#![allow(unused, non_snake_case)]\n\n");
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
         self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value};\n");
+        if self.program_has_jsx {
+            self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
+        }
         if self.has_feature("process") {
             self.write("use tishlang_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd, process_exec as tish_process_exec};\n");
         }
@@ -968,6 +985,15 @@ impl Codegen {
             self.writeln("let RegExp = Value::Function(Rc::new(|args: &[Value]| regexp_new(args)));");
         }
 
+        if self.program_has_jsx {
+            self.writeln("install_thread_local_host(Box::new(HeadlessHost::default()));");
+            self.writeln("let Fragment = fragment_value();");
+            self.writeln("let h = Value::Function(Rc::new(|args: &[Value]| ui_h(args)));");
+            self.writeln("let text = Value::Function(Rc::new(|args: &[Value]| ui_text(args)));");
+            self.writeln("let useState = Value::Function(Rc::new(|args: &[Value]| native_use_state(args)));");
+            self.writeln("let createRoot = Value::Function(Rc::new(|args: &[Value]| native_create_root(args)));");
+        }
+
         // Polars, Egui etc. are emitted via VarDecl from import { X } from 'tish:...'
 
         // Pre-scan for top-level function declarations and create cells (for mutual recursion)
@@ -1094,11 +1120,8 @@ impl Codegen {
                 let expr = self.emit_expr(init)?;
                 let mutability = if *mutable { "let mut" } else { "let" };
                 let clone_suffix = if Self::needs_clone(init) { ".clone()" } else { "" };
-                self.writeln(&format!("{{ let _destruct_val = ({}){};", expr, clone_suffix));
-                self.indent += 1;
+                self.writeln(&format!("let _destruct_val = ({}){};", expr, clone_suffix));
                 self.emit_destruct_bindings(pattern, "_destruct_val", mutability, *span)?;
-                self.indent -= 1;
-                self.writeln("}");
             }
             Statement::ExprStmt { expr, .. } => {
                 let e = self.emit_expr(expr)?;
@@ -1342,7 +1365,7 @@ impl Codegen {
                     self.emit_statement(finally_stmt)?;
                 }
             }
-            Statement::FunDecl { name, params, rest_param, body, .. } => {
+            Statement::FunDecl { name, params, rest_param, body, span, .. } => {
                 // Use Rc<RefCell<>> pattern to allow recursive function calls
                 // The function can reference itself through the cell
                 let name_raw = name.as_ref();
@@ -1359,7 +1382,11 @@ impl Codegen {
                 // Analyze body to find which identifiers are actually referenced
                 let mut referenced = HashSet::new();
                 Self::collect_stmt_idents(body, &mut referenced);
-                let param_names: HashSet<String> = params.iter().map(|p| p.name.to_string()).collect();
+                let param_names: HashSet<String> = params
+                    .iter()
+                    .flat_map(|p| p.bound_names())
+                    .map(|n| n.to_string())
+                    .collect();
                 
                 // Collect all outer parameters that need to be captured (only those referenced)
                 let outer_params: Vec<String> = self.outer_params_stack
@@ -1461,13 +1488,30 @@ impl Codegen {
                     self.writeln(&format!("let {} = (*{}_ref.borrow()).clone();", sibling_escaped, sibling_escaped));
                 }
                 // Extract just the parameter names (type annotations are parsed but not used in codegen yet)
-                let current_param_names: Vec<String> = params.iter().map(|p| p.name.to_string()).collect();
+                let current_param_names: Vec<String> = params
+                    .iter()
+                    .flat_map(|p| p.bound_names())
+                    .map(|n| n.to_string())
+                    .collect();
+                let formal_span = *span;
                 for (i, p) in params.iter().enumerate() {
-                    self.writeln(&format!(
-                        "let mut {} = args.get({}).cloned().unwrap_or(Value::Null);",
-                        Self::escape_ident(p.name.as_ref()),
-                        i
-                    ));
+                    match p {
+                        FunParam::Simple(tp) => {
+                            self.writeln(&format!(
+                                "let mut {} = args.get({}).cloned().unwrap_or(Value::Null);",
+                                Self::escape_ident(tp.name.as_ref()),
+                                i
+                            ));
+                        }
+                        FunParam::Destructure { pattern, .. } => {
+                            let tmp = format!("_formal_{}", i);
+                            self.writeln(&format!(
+                                "let {} = args.get({}).cloned().unwrap_or(Value::Null);",
+                                tmp, i
+                            ));
+                            self.emit_destruct_bindings(pattern, &tmp, "let mut", formal_span)?;
+                        }
+                    }
                 }
                 if let Some(rest) = rest_param {
                     self.writeln(&format!(
@@ -1578,58 +1622,71 @@ impl Codegen {
     }
 
     fn emit_destruct_bindings(&mut self, pattern: &DestructPattern, value_expr: &str, mutability: &str, span: Span) -> Result<(), CompileError> {
+        // Flat `let` bindings so names stay in scope for the rest of the function (e.g. JSX).
         match pattern {
             DestructPattern::Array(elements) => {
-                self.writeln(&format!("if let Value::Array(ref _arr) = {} {{", value_expr));
-                self.indent += 1;
-                self.writeln("let _arr_borrow = _arr.borrow();");
                 for (i, elem) in elements.iter().enumerate() {
                     if let Some(el) = elem {
                         match el {
                             DestructElement::Ident(name) => {
-                                self.writeln(&format!("{} {} = _arr_borrow.get({}).cloned().unwrap_or(Value::Null);", 
-                                    mutability, Self::escape_ident(name.as_ref()), i));
+                                self.writeln(&format!(
+                                    "{} {} = match &({}) {{ Value::Array(ref _a) => _a.borrow().get({}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
+                                    mutability,
+                                    Self::escape_ident(name.as_ref()),
+                                    value_expr,
+                                    i
+                                ));
                             }
                             DestructElement::Pattern(nested) => {
-                                let nested_var = format!("_nested_{}", i);
-                                self.writeln(&format!("let {} = _arr_borrow.get({}).cloned().unwrap_or(Value::Null);", 
-                                    nested_var, i));
+                                let nested_var = format!("_nested_arr_{}", i);
+                                self.writeln(&format!(
+                                    "let {} = match &({}) {{ Value::Array(ref _a) => _a.borrow().get({}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
+                                    nested_var, value_expr, i
+                                ));
                                 self.emit_destruct_bindings(nested, &nested_var, mutability, span)?;
                             }
                             DestructElement::Rest(name) => {
-                                self.writeln(&format!("{} {} = Value::Array(Rc::new(RefCell::new(_arr_borrow.iter().skip({}).cloned().collect())));", 
-                                    mutability, Self::escape_ident(name.as_ref()), i));
+                                self.writeln(&format!(
+                                    "{} {} = match &({}) {{ Value::Array(ref _a) => {{ let _b = _a.borrow(); Value::Array(Rc::new(RefCell::new(_b.iter().skip({}).cloned().collect()))) }}, _ => Value::Array(Rc::new(RefCell::new(Vec::new()))) }};",
+                                    mutability,
+                                    Self::escape_ident(name.as_ref()),
+                                    value_expr,
+                                    i
+                                ));
                             }
                         }
                     }
                 }
-                self.indent -= 1;
-                self.writeln("}");
             }
             DestructPattern::Object(props) => {
-                self.writeln(&format!("if let Value::Object(ref _obj) = {} {{", value_expr));
-                self.indent += 1;
-                self.writeln("let _obj_borrow = _obj.borrow();");
                 for prop in props {
                     let key = prop.key.as_ref();
                     match &prop.value {
                         DestructElement::Ident(name) => {
-                            self.writeln(&format!("{} {} = _obj_borrow.get({:?}).cloned().unwrap_or(Value::Null);", 
-                                mutability, Self::escape_ident(name.as_ref()), key));
+                            self.writeln(&format!(
+                                "{} {} = match &({}) {{ Value::Object(ref _o) => _o.borrow().get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
+                                mutability,
+                                Self::escape_ident(name.as_ref()),
+                                value_expr,
+                                key
+                            ));
                         }
                         DestructElement::Pattern(nested) => {
-                            let nested_var = format!("_nested_{}", key);
-                            self.writeln(&format!("let {} = _obj_borrow.get({:?}).cloned().unwrap_or(Value::Null);", 
-                                nested_var, key));
+                            let nested_var = format!("_nested_obj_{}", key);
+                            self.writeln(&format!(
+                                "let {} = match &({}) {{ Value::Object(ref _o) => _o.borrow().get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
+                                nested_var, value_expr, key
+                            ));
                             self.emit_destruct_bindings(nested, &nested_var, mutability, span)?;
                         }
                         DestructElement::Rest(_) => {
-                            return Err(CompileError::new("Rest in object destructuring not supported", Some(span)));
+                            return Err(CompileError::new(
+                                "Rest in object destructuring not supported",
+                                Some(span),
+                            ));
                         }
                     }
                 }
-                self.indent -= 1;
-                self.writeln("}");
             }
         }
         Ok(())
@@ -2354,8 +2411,8 @@ impl Codegen {
                     val
                 )
             }
-            Expr::ArrowFunction { params, body, .. } => {
-                self.emit_arrow_function(params, body)?
+            Expr::ArrowFunction { params, body, span, .. } => {
+                self.emit_arrow_function(params, body, *span)?
             }
             Expr::TemplateLiteral { quasis, exprs, .. } => {
                 // Build the template string
@@ -2372,7 +2429,10 @@ impl Codegen {
                 format!("Value::String([{}].concat().into())", parts.join(", "))
             }
             Expr::JsxElement { .. } | Expr::JsxFragment { .. } => {
-                return Err(CompileError { message: "JSX is only supported when compiling to JavaScript (tish compile --target js).".to_string(), span: None });
+                tishlang_ui::jsx::emit_jsx_rust(expr, &mut |e| {
+                    self.emit_expr(e).map_err(|ce| ce.message)
+                })
+                .map_err(|m| CompileError::new(m, None))?
             }
             Expr::New { callee, args, .. } => {
                 let callee_expr = self.emit_expr(callee)?;
@@ -2782,12 +2842,16 @@ impl Codegen {
     /// Collect variable names that are both captured and mutated by a closure body.
     /// block_vars: vars declared in the enclosing block (candidates for mutation).
     fn collect_mutated_captures_from_closure(
-        params: &[tishlang_ast::TypedParam],
+        params: &[FunParam],
         body: &Statement,
         block_vars: &HashSet<String>,
         result: &mut HashSet<String>,
     ) {
-        let param_names: HashSet<String> = params.iter().map(|p| p.name.to_string()).collect();
+        let param_names: HashSet<String> = params
+            .iter()
+            .flat_map(|p| p.bound_names())
+            .map(|n| n.to_string())
+            .collect();
         let mut local_var_names = HashSet::new();
         Self::collect_local_var_names(body, &mut local_var_names);
         let mut referenced = HashSet::new();
@@ -2811,12 +2875,16 @@ impl Codegen {
     }
 
     fn collect_mutated_captures_from_arrow(
-        params: &[tishlang_ast::TypedParam],
+        params: &[FunParam],
         body: &ArrowBody,
         block_vars: &HashSet<String>,
         result: &mut HashSet<String>,
     ) {
-        let param_names: HashSet<String> = params.iter().map(|p| p.name.to_string()).collect();
+        let param_names: HashSet<String> = params
+            .iter()
+            .flat_map(|p| p.bound_names())
+            .map(|n| n.to_string())
+            .collect();
         let mut local_var_names = HashSet::new();
         match body {
             ArrowBody::Expr(_) => {}
@@ -3122,8 +3190,9 @@ impl Codegen {
 
     fn emit_arrow_function(
         &mut self,
-        params: &[tishlang_ast::TypedParam],
+        params: &[FunParam],
         body: &tishlang_ast::ArrowBody,
+        span: Span,
     ) -> Result<String, CompileError> {
         // Build the arrow function as a Value::Function closure
         let mut code = String::new();
@@ -3132,7 +3201,11 @@ impl Codegen {
         // Find which identifiers are actually referenced in the body
         let referenced = Self::collect_referenced_idents(body);
         // Exclude the arrow's own parameters - they're not outer captures
-        let param_names: HashSet<String> = params.iter().map(|p| p.name.to_string()).collect();
+        let param_names: HashSet<String> = params
+            .iter()
+            .flat_map(|p| p.bound_names())
+            .map(|n| n.to_string())
+            .collect();
 
         // Exclude variables declared inside the arrow body (locals)
         let mut local_var_names = HashSet::new();
@@ -3231,13 +3304,35 @@ impl Codegen {
         }
 
         // Extract parameters from args
-        let current_param_names: Vec<String> = params.iter().map(|p| p.name.to_string()).collect();
+        let current_param_names: Vec<String> = params
+            .iter()
+            .flat_map(|p| p.bound_names())
+            .map(|n| n.to_string())
+            .collect();
         for (i, p) in params.iter().enumerate() {
-            code.push_str(&format!(
-                "        let mut {} = args.get({}).cloned().unwrap_or(Value::Null);\n",
-                Self::escape_ident(p.name.as_ref()),
-                i
-            ));
+            match p {
+                FunParam::Simple(tp) => {
+                    code.push_str(&format!(
+                        "        let mut {} = args.get({}).cloned().unwrap_or(Value::Null);\n",
+                        Self::escape_ident(tp.name.as_ref()),
+                        i
+                    ));
+                }
+                FunParam::Destructure { pattern, .. } => {
+                    let tmp = format!("_formal_{}", i);
+                    code.push_str(&format!(
+                        "        let {} = args.get({}).cloned().unwrap_or(Value::Null);\n",
+                        tmp, i
+                    ));
+                    let saved = std::mem::take(&mut self.output);
+                    let saved_indent = self.indent;
+                    self.indent = 8;
+                    self.emit_destruct_bindings(pattern, &tmp, "let mut", span)?;
+                    let frag = std::mem::replace(&mut self.output, saved);
+                    self.indent = saved_indent;
+                    code.push_str(&frag);
+                }
+            }
         }
 
         // Push current params for potential nested arrows

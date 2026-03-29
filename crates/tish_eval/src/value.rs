@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use ahash::AHashMap;
-use tishlang_ast::{Expr, Statement};
+use tishlang_ast::{FunParam, Statement};
 use tishlang_core::NativeFn as CoreNativeFn;
 
 /// Property map for interpreter `Value::Object` (uses `eval::Value`, not `tishlang_core::Value`).
@@ -37,8 +37,7 @@ pub enum Value {
     Object(Rc<RefCell<PropMap>>),
     /// User-defined function with AST body
     Function {
-        params: Arc<[Arc<str>]>,
-        defaults: Arc<[Option<Expr>]>,
+        formals: Arc<[FunParam]>,
         rest_param: Option<Arc<str>>,
         body: Arc<Statement>,
     },

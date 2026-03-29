@@ -1,0 +1,17 @@
+[package]
+name = "tishlang_ui"
+version = "0.1.0"
+edition = "2021"
+description = "Shared JSX lowering and UI runtime (vnode, hooks, host protocol) for Tish"
+
+license-file = { workspace = true }
+repository = { workspace = true }
+
+[features]
+default = ["runtime"]
+compiler = ["dep:tishlang_ast"]
+runtime = ["dep:tishlang_core"]
+
+[dependencies]
+tishlang_ast = { path = "../tish_ast", version = ">=0.1", optional = true }
+tishlang_core = { path = "../tish_core", version = ">=0.1", optional = true }
