@@ -2618,6 +2618,7 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "fancy-regex",
+ "getrandom 0.3.4",
 ]
 
 [[package]]
