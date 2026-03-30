@@ -14,6 +14,7 @@ pub mod regex;
 mod value;
 
 pub use eval::Evaluator;
+pub use value::PropMap;
 pub use value::Value;
 
 /// Trait for pluggable native modules (e.g. Polars). Implement to register
@@ -21,6 +22,12 @@ pub use value::Value;
 pub trait TishNativeModule: Send + Sync {
     fn name(&self) -> &'static str;
     fn register(&self) -> std::collections::HashMap<std::sync::Arc<str>, Value>;
+
+    /// Virtual `tish:*` modules for `import { x } from 'tish:…'` (e.g. `tish:polars`).
+    /// Return `(specifier, exports_object)` pairs. Default: none.
+    fn virtual_builtin_modules(&self) -> Vec<(&'static str, Value)> {
+        vec![]
+    }
 }
 #[cfg(feature = "regex")]
 pub use regex::TishRegExp;

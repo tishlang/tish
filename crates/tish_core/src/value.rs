@@ -25,6 +25,9 @@ pub trait TishOpaque: Send + Sync {
 
     /// Get a method by name. Returns a native function if the method exists.
     fn get_method(&self, name: &str) -> Option<NativeFn>;
+
+    /// For downcasting `Arc<dyn TishOpaque>` in native crates (e.g. Polars → `DataFrame`).
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Trait for Promise-like values that can be awaited (block until settled).

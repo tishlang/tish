@@ -211,6 +211,10 @@ impl TishOpaque for HttpReadableStream {
         "ReadableStream"
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn get_method(&self, name: &str) -> Option<NativeFn> {
         if name != "getReader" {
             return None;
@@ -245,6 +249,10 @@ pub struct HttpStreamReader {
 impl TishOpaque for HttpStreamReader {
     fn type_name(&self) -> &'static str {
         "ReadableStreamDefaultReader"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn get_method(&self, name: &str) -> Option<NativeFn> {

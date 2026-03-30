@@ -75,6 +75,8 @@ pub struct Evaluator {
     module_cache: Rc<RefCell<HashMap<PathBuf, Value>>>,
     /// Directory of the file currently being evaluated (for resolving relative imports)
     current_dir: RefCell<Option<PathBuf>>,
+    /// Extra `tish:*` builtins from `TishNativeModule::virtual_builtin_modules` (shared across nested evaluators).
+    virtual_builtins: Rc<RefCell<HashMap<Arc<str>, Value>>>,
 }
 
 impl Evaluator {
@@ -173,6 +175,7 @@ impl Evaluator {
             scope,
             module_cache: Rc::new(RefCell::new(HashMap::new())),
             current_dir: RefCell::new(None),
+            virtual_builtins: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -184,6 +187,14 @@ impl Evaluator {
             for module in modules {
                 for (name, value) in module.register() {
                     s.set(name, value, true);
+                }
+            }
+        }
+        {
+            let mut vb = eval.virtual_builtins.borrow_mut();
+            for module in modules {
+                for (spec, value) in module.virtual_builtin_modules() {
+                    vb.insert(Arc::from(spec), value);
                 }
             }
         }
@@ -502,7 +513,7 @@ impl Evaluator {
     /// Load and evaluate a module, returning its exports object. Uses cache.
     fn load_module(&mut self, from: &str) -> Result<Value, EvalError> {
         if from.starts_with("tish:") {
-            return Self::load_builtin_module(from);
+            return self.load_builtin_module(from);
         }
         let dir = self.current_dir.borrow().clone().ok_or_else(|| {
             EvalError::Error("Cannot resolve imports: no current file directory (use run_file)".to_string())
@@ -582,8 +593,11 @@ impl Evaluator {
         Ok(path)
     }
 
-    /// Load built-in module (tish:fs, tish:http, tish:process). Features auto-enabled when imported.
-    fn load_builtin_module(spec: &str) -> Result<Value, EvalError> {
+    /// Load built-in module (tish:fs, tish:http, tish:process, …) or a virtual module from native crates.
+    fn load_builtin_module(&self, spec: &str) -> Result<Value, EvalError> {
+        if let Some(v) = self.virtual_builtins.borrow().get(spec) {
+            return Ok(v.clone());
+        }
         match spec {
             "tish:fs" => {
                 #[cfg(feature = "fs")]
@@ -675,15 +689,15 @@ impl Evaluator {
             }
             _ => {
                 return Err(EvalError::Error(format!(
-                    "Unknown built-in module: {}. Supported: tish:fs, tish:http, tish:process, tish:ws",
+                    "Unknown built-in module: {}. Supported: tish:fs, tish:http, tish:process, tish:ws (plus any registered by native modules)",
                     spec
                 )));
             }
         }
     }
 
-    fn load_builtin_export(spec: &str, export_name: &str) -> Result<Value, EvalError> {
-        let module = Self::load_builtin_module(spec)?;
+    fn load_builtin_export(&self, spec: &str, export_name: &str) -> Result<Value, EvalError> {
+        let module = self.load_builtin_module(spec)?;
         let exports = match &module {
             Value::Object(m) => m.borrow().clone(),
             _ => return Err(EvalError::Error("Built-in module must be object".into())),
@@ -1582,7 +1596,7 @@ impl Evaluator {
                 "JSX is not supported in the interpreter. Use 'tish compile --target js' to compile to JavaScript.".to_string(),
             )),
             Expr::NativeModuleLoad { spec, export_name, .. } => {
-                Self::load_builtin_export(spec.as_ref(), export_name.as_ref())
+                self.load_builtin_export(spec.as_ref(), export_name.as_ref())
             }
             Expr::TypeOf { operand, .. } => {
                 let v = self.eval_expr(operand)?;
@@ -2015,6 +2029,7 @@ impl Evaluator {
             scope: Rc::clone(scope),
             module_cache: Rc::clone(&self.module_cache),
             current_dir: RefCell::new(self.current_dir.borrow().clone()),
+            virtual_builtins: Rc::clone(&self.virtual_builtins),
         };
         match eval.eval_statement(body) {
             Ok(v) => Ok(v),
@@ -2259,6 +2274,7 @@ impl Evaluator {
                     scope,
                     module_cache: Rc::clone(&self.module_cache),
                     current_dir: RefCell::new(self.current_dir.borrow().clone()),
+                    virtual_builtins: Rc::clone(&self.virtual_builtins),
                 };
                 match eval.eval_statement(body) {
                     Ok(v) => Ok(v),
