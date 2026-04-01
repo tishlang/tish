@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tishlang_ast::{BinOp, CompoundOp, ExportDeclaration, Expr, FunParam, ImportSpecifier, Literal, LogicalAssignOp, MemberProp, Span, Statement, UnaryOp};
 
 use crate::value::{PropMap, Value};
-#[cfg(any(feature = "fs", feature = "process", feature = "metal", feature = "mlx"))]
+#[cfg(any(feature = "fs", feature = "process"))]
 use crate::natives;
 
 struct Scope {
@@ -687,40 +687,9 @@ impl Evaluator {
                     ));
                 }
             }
-            "tish:metal" => {
-                #[cfg(feature = "metal")]
-                {
-                    let mut exports = PropMap::default();
-                    exports.insert("matmul_f32".into(),  Value::Native(natives::metal_matmul_f32));
-                    exports.insert("device_name".into(), Value::Native(natives::metal_device_name));
-                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
-                }
-                #[cfg(not(feature = "metal"))]
-                {
-                    return Err(EvalError::Error(
-                        "tish:metal requires the metal feature. Rebuild with: cargo build -p tishlang --features metal".into(),
-                    ));
-                }
-            }
-            "tish:mlx" => {
-                #[cfg(feature = "mlx")]
-                {
-                    let mut exports = PropMap::default();
-                    exports.insert("matmul_f32".into(),  Value::Native(natives::mlx_matmul_f32));
-                    exports.insert("device_name".into(), Value::Native(natives::mlx_device_name));
-                    exports.insert("version".into(),     Value::Native(natives::mlx_version));
-                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
-                }
-                #[cfg(not(feature = "mlx"))]
-                {
-                    return Err(EvalError::Error(
-                        "tish:mlx requires the mlx feature. Rebuild with: cargo build -p tishlang --features mlx".into(),
-                    ));
-                }
-            }
             _ => {
                 return Err(EvalError::Error(format!(
-                    "Unknown built-in module: {}. Supported: tish:fs, tish:http, tish:process, tish:ws, tish:metal, tish:mlx (plus any registered by native modules)",
+                    "Unknown built-in module: {}. Supported: tish:fs, tish:http, tish:process, tish:ws (plus any registered by native modules)",
                     spec
                 )));
             }

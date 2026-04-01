@@ -1,0 +1,9 @@
+{
+  "name": "tish-mlx",
+  "version": "0.1.0",
+  "tish": {
+    "module": true,
+    "crate": "tish-mlx",
+    "export": "mlx_object"
+  }
+}

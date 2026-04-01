@@ -1,21 +1,11 @@
-// Metal GPU matrix multiply — Apple Silicon.
+// Metal GPU matmul — uses tish:metal from examples/matmul/tish-metal/
 //
-// Uses `tish:metal`, a native Tish module backed by the `metal` Rust crate.
-//
-// Run (interpreter):
-//   tish run src/matmul_gpu.tish --feature metal
-//
-// Run (native binary — Tish + Metal kernel both in the same executable):
-//   tish compile src/matmul_gpu.tish \
-//     -o examples/matmul/matmul-gpu \
-//     --native-backend rust --feature metal
-//   ./examples/matmul/matmul-gpu
-//
-// Requirements:
-//   macOS 13+  ·  Apple Silicon (or any Metal GPU)
-//   Xcode Command Line Tools: xcode-select --install
+// Compile:
+//   tish compile src/matmul_gpu.tish -o matmul-gpu --native-backend rust
+// Run:
+//   ./matmul-gpu
 
-import { matmul_f32, device_name } from 'tish:metal'
+import { matmul_f32, run_f32, device_name } from 'tish:metal'
 
 console.log("=== Metal GPU matmul (f32, tiled MSL compute) ===")
 console.log("device:", device_name())

@@ -1,0 +1,9 @@
+{
+  "name": "tish-metal",
+  "version": "0.1.0",
+  "tish": {
+    "module": true,
+    "crate": "tish-metal",
+    "export": "metal_object"
+  }
+}

@@ -1,0 +1,11 @@
+[package]
+name    = "matmul_mlx"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "matmul-mlx"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mlx-rs = { version = "0.25", features = ["metal"] }

@@ -20,8 +20,7 @@ members = [
     "crates/tish_compiler_wasm",
     "crates/tish_vm",
     "crates/tish_llvm",
-    "crates/tish_metal",
-    "crates/tish_mlx",
+
     "crates/tish_native",
     "crates/tish_wasm",
     "crates/tish",

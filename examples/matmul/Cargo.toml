@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "tish-metal",
+    "tish-mlx",
+    "crates/matmul_gpu",
+    "crates/matmul_mlx",
+]
+resolver = "2"

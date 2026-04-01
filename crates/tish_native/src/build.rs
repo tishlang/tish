@@ -21,7 +21,7 @@ pub fn build_via_cargo(
 
     let runtime_features: Vec<&str> = features
         .iter()
-        .filter(|f| ["http", "fs", "process", "regex", "ws", "metal", "mlx"].contains(&f.as_str()))
+        .filter(|f| ["http", "fs", "process", "regex", "ws"].contains(&f.as_str()))
         .map(String::as_str)
         .collect();
     let features_str = if runtime_features.is_empty() {

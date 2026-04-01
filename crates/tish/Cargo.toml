@@ -22,8 +22,6 @@ process = ["tishlang_eval/process", "tishlang_runtime/process", "tishlang_compil
 regex   = ["tishlang_eval/regex",   "tishlang_runtime/regex",   "tishlang_compile/regex",   "tishlang_vm/regex"]
 ws      = ["tishlang_eval/ws",      "tishlang_runtime/ws",      "tishlang_compile/ws",      "tishlang_vm/ws"]
 # GPU compute — Apple Silicon only
-metal   = ["tishlang_eval/metal",   "tishlang_runtime/metal",   "tishlang_compile/metal",   "tishlang_vm/metal"]
-mlx     = ["tishlang_eval/mlx",     "tishlang_runtime/mlx",     "tishlang_compile/mlx",     "tishlang_vm/mlx"]
 [dependencies]
 rustyline = { version = "17", features = ["with-file-history"] }
 tishlang_lexer = { path = "../tish_lexer", version = ">=0.1" }

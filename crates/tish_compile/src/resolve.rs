@@ -24,8 +24,6 @@ const BUILTIN_ALIASES: &[(&str, &str)] = &[
     ("http", "tish:http"),
     ("process", "tish:process"),
     ("ws", "tish:ws"),
-    ("metal", "tish:metal"),
-    ("mlx", "tish:mlx"),
 ];
 
 /// Normalize built-in spec to canonical form. E.g. "fs" -> "tish:fs".
@@ -41,8 +39,8 @@ pub fn normalize_builtin_spec(spec: &str) -> Option<String> {
 
 /// Built-in modules that come from tishlang_runtime, not from package.json.
 pub fn is_builtin_native_spec(spec: &str) -> bool {
-    matches!(spec, "tish:fs" | "tish:http" | "tish:process" | "tish:ws" | "tish:metal" | "tish:mlx")
-        || matches!(spec, "fs" | "http" | "process" | "ws" | "metal" | "mlx")
+    matches!(spec, "tish:fs" | "tish:http" | "tish:process" | "tish:ws")
+        || matches!(spec, "fs" | "http" | "process" | "ws")
 }
 
 /// Resolve all native imports in a merged program via package.json lookup.

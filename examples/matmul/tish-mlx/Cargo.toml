@@ -1,0 +1,17 @@
+[package]
+name    = "tish-mlx"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "tish_mlx"
+path = "src/lib.rs"
+
+[dependencies]
+tishlang_core = { path = "../../../crates/tish_core" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mlx-rs = { version = "0.25", features = ["metal"] }
+
+[build-dependencies]
+# (none needed — version is hardcoded from Cargo.lock via build.rs)
