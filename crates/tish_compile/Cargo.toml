@@ -18,7 +18,7 @@ ws = []
 tishlang_ast = { path = "../tish_ast", version = ">=0.1" }
 tishlang_opt = { path = "../tish_opt", version = ">=0.1" }
 tishlang_parser = { path = "../tish_parser", version = ">=0.1" }
-tishlang_ui = { path = "../tish_ui", default-features = false, features = ["compiler"] }
+tishlang_ui = { path = "../tish_ui", version = ">=0.1", default-features = false, features = ["compiler"] }
 serde_json = "1.0"
 
 [dev-dependencies]
