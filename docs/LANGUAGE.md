@@ -94,6 +94,9 @@ Build: `cargo build --features full`. Compile: `tish compile … --feature http`
 
 ```bash
 tish run main.tish
+echo 'console.log(1)' | tish run -   # stdin (like `node -`)
+echo 'console.log(1)' | tish         # stdin when piped (like `bun`)
+echo 'console.log(1)' | tish -      # same; `-` before clap (not a subcommand)
 tish compile main.tish -o app
 tish compile main.tish -o app --native-backend cranelift
 tish compile main.tish -o app --target wasm | wasi | js

@@ -1,6 +1,6 @@
 # Tish Docs (in-repo)
 
-Internal and contributor-facing docs. User-facing docs live in the **[tishlang-web](https://github.com/tishlang/tishlang-web)** repo.
+Internal and contributor-facing docs. User-facing docs live in the **[tishlang.com](https://github.com/tishlang/tishlang.com)** repo.
 
 | File | Purpose |
 |------|---------|

@@ -242,6 +242,59 @@ pub fn resolve_project(
         .collect())
 }
 
+/// Resolve modules when the entry program is read from stdin (`tish run -`).
+/// Relative file imports resolve from `project_root` (typically [`std::env::current_dir()`]).
+/// The synthetic entry path `<stdin>` is not a real file; dependencies load from disk as usual.
+pub fn resolve_project_from_stdin(
+    source: &str,
+    project_root: &Path,
+) -> Result<Vec<ResolvedModule>, String> {
+    let root_canon = project_root
+        .canonicalize()
+        .map_err(|e| format!("Cannot canonicalize project root {}: {}", project_root.display(), e))?;
+
+    let stdin_path = root_canon.join("<stdin>");
+    let program = tishlang_parser::parse(source)
+        .map_err(|e| format!("Parse error (stdin): {}", e))?;
+
+    let mut visited = HashSet::new();
+    let mut path_to_module: HashMap<PathBuf, Program> = HashMap::new();
+    let mut load_order: Vec<PathBuf> = Vec::new();
+
+    let from_dir = stdin_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+
+    for stmt in &program.statements {
+        if let Statement::Import { from, .. } = stmt {
+            if is_native_import(from) {
+                continue;
+            }
+            let dep_path = resolve_import_path(from, from_dir, &root_canon)?;
+            if !path_to_module.contains_key(&dep_path) {
+                load_module_recursive(
+                    &dep_path,
+                    &root_canon,
+                    &mut visited,
+                    &mut path_to_module,
+                    &mut load_order,
+                )?;
+            }
+        }
+    }
+
+    path_to_module.insert(stdin_path.clone(), program);
+    load_order.push(stdin_path);
+
+    Ok(load_order
+        .into_iter()
+        .map(|p| {
+            let program = path_to_module.remove(&p).unwrap();
+            ResolvedModule { path: p, program }
+        })
+        .collect())
+}
+
 fn load_module_recursive(
     module_path: &Path,
     project_root: &Path,

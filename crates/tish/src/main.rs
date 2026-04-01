@@ -4,7 +4,7 @@ mod repl_completion;
 
 use std::cell::RefCell;
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -23,7 +23,8 @@ pub(crate) struct Cli {
 
 #[derive(Parser)]
 struct RunArgs {
-    #[arg(required = true)]
+    /// Path to a `.tish` file, or `-` to read the program from stdin (like `node -`).
+    #[arg(required = true, allow_hyphen_values = true)]
     file: String,
     #[arg(long, default_value = "vm")]
     backend: String,
@@ -77,10 +78,22 @@ pub(crate) enum Commands {
 }
 
 fn main() {
-    let cli = Cli::parse();
     let no_opt_env = std::env::var_os("TISH_NO_OPTIMIZE")
         .map(|v| v == "1" || v == "true" || v == "yes")
         .unwrap_or(false);
+
+    // `tish -` (like `node -` / `bun -`); clap would treat `-` as an invalid subcommand.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.len() == 2 && argv[1] == "-" {
+        let result = run_stdin_pipe("vm", &[], no_opt_env, true);
+        if let Err(e) = result {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let cli = Cli::parse();
     let result = match cli.command {
         Some(Commands::Run(a)) => run_file(&a.file, &a.backend, &a.features, a.no_optimize || no_opt_env),
         Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env),
@@ -93,7 +106,14 @@ fn main() {
             a.no_optimize || no_opt_env,
         ),
         Some(Commands::DumpAst { file }) => dump_ast(&file),
-        None => run_repl("vm", false), // No args = REPL
+        None => {
+            if io::stdin().is_terminal() {
+                run_repl("vm", no_opt_env)
+            } else {
+                // `echo '...' | tish` — run script from stdin (Bun-style)
+                run_stdin_pipe("vm", &[], no_opt_env, false)
+            }
+        }
     };
 
     if let Err(e) = result {
@@ -102,49 +122,97 @@ fn main() {
     }
 }
 
-fn run_file(path: &str, backend: &str, _features: &[String], no_optimize: bool) -> Result<(), String> {
-    let path = Path::new(path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", path, e))?;
-    let project_root = path.parent().and_then(|p| {
-        if p.file_name().and_then(|n| n.to_str()) == Some("src") {
-            p.parent()
-        } else {
-            Some(p)
+/// Read stdin and run as Tish. If `fail_on_empty`, `tish run -` / `tish -` get an error; if false, empty stdin exits 0.
+fn run_stdin_pipe(
+    backend: &str,
+    features: &[String],
+    no_optimize: bool,
+    fail_on_empty: bool,
+) -> Result<(), String> {
+    let mut source = String::new();
+    io::stdin()
+        .read_to_string(&mut source)
+        .map_err(|e| format!("Cannot read stdin: {}", e))?;
+    if source.trim().is_empty() {
+        if fail_on_empty {
+            return Err(
+                "No source on stdin. Example: echo 'console.log(1)' | tish   or   tish run -".into(),
+            );
         }
-    });
+        return Ok(());
+    }
+    run_stdin_source(&source, backend, features, no_optimize)
+}
 
-    let program = if path.extension().map(|e| e == "js") == Some(true) {
-        let prog = tishlang_js_to_tish::convert(&fs::read_to_string(&path).map_err(|e| format!("{}", e))?)
-            .map_err(|e| format!("{}", e))?;
-        if no_optimize {
-            prog
-        } else {
-            tishlang_opt::optimize(&prog)
-        }
+fn run_stdin_source(
+    source: &str,
+    backend: &str,
+    _features: &[String],
+    no_optimize: bool,
+) -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let modules = tishlang_compile::resolve_project_from_stdin(source, &cwd)?;
+    tishlang_compile::detect_cycles(&modules)?;
+    let prog = tishlang_compile::merge_modules(modules)?;
+    let program = if no_optimize {
+        prog
     } else {
-        let modules = tishlang_compile::resolve_project(&path, project_root)?;
-        tishlang_compile::detect_cycles(&modules)?;
-        let prog = tishlang_compile::merge_modules(modules)?;
-        if no_optimize {
-            prog
+        tishlang_opt::optimize(&prog)
+    };
+    run_program(&program, backend, no_optimize)
+}
+
+fn run_file(path: &str, backend: &str, features: &[String], no_optimize: bool) -> Result<(), String> {
+    let program = if path == "-" {
+        return run_stdin_pipe(backend, features, no_optimize, true);
+    } else {
+        let path =
+            Path::new(path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", path, e))?;
+        let project_root = path.parent().and_then(|p| {
+            if p.file_name().and_then(|n| n.to_str()) == Some("src") {
+                p.parent()
+            } else {
+                Some(p)
+            }
+        });
+
+        if path.extension().map(|e| e == "js") == Some(true) {
+            let prog = tishlang_js_to_tish::convert(&fs::read_to_string(&path).map_err(|e| format!("{}", e))?)
+                .map_err(|e| format!("{}", e))?;
+            if no_optimize {
+                prog
+            } else {
+                tishlang_opt::optimize(&prog)
+            }
         } else {
-            tishlang_opt::optimize(&prog)
+            let modules = tishlang_compile::resolve_project(&path, project_root)?;
+            tishlang_compile::detect_cycles(&modules)?;
+            let prog = tishlang_compile::merge_modules(modules)?;
+            if no_optimize {
+                prog
+            } else {
+                tishlang_opt::optimize(&prog)
+            }
         }
     };
 
+    run_program(&program, backend, no_optimize)
+}
+
+fn run_program(program: &tishlang_ast::Program, backend: &str, no_optimize: bool) -> Result<(), String> {
     if backend == "interp" {
         let mut eval = tishlang_eval::Evaluator::new();
-        let value = eval.eval_program(&program)?;
+        let value = eval.eval_program(program)?;
         if !matches!(value, tishlang_eval::Value::Null) {
             println!("{}", tishlang_eval::format_value_for_console(&value, tishlang_core::use_console_colors()));
         }
         return Ok(());
     }
 
-    // VM backend (bytecode) - supports native imports when built with fs/http/process features
     let chunk = if no_optimize {
-        tishlang_bytecode::compile_unoptimized(&program).map_err(|e| e.to_string())?
+        tishlang_bytecode::compile_unoptimized(program).map_err(|e| e.to_string())?
     } else {
-        tishlang_bytecode::compile(&program).map_err(|e| e.to_string())?
+        tishlang_bytecode::compile(program).map_err(|e| e.to_string())?
     };
     let value = tishlang_vm::run(&chunk)?;
     if !matches!(value, tishlang_core::Value::Null) {
@@ -526,6 +594,15 @@ mod cli_tests {
         match cli.command {
             Some(Commands::Compile(a)) => assert_eq!(a.file, "m.tish"),
             _ => panic!("expected Compile"),
+        }
+    }
+
+    #[test]
+    fn run_stdin_marker_parses_as_file() {
+        let cli = Cli::try_parse_from(["tish", "run", "-"]).unwrap();
+        match cli.command {
+            Some(Commands::Run(a)) => assert_eq!(a.file, "-"),
+            _ => panic!("expected Run"),
         }
     }
 }
