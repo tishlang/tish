@@ -201,7 +201,7 @@ impl RustType {
         match self {
             RustType::Value => native_expr.to_string(),
             RustType::F64 => format!("Value::Number({})", native_expr),
-            RustType::String => format!("Value::String({}.into())", native_expr),
+            RustType::String => format!("Value::String({}.clone().into())", native_expr),
             RustType::Bool => format!("Value::Bool({})", native_expr),
             RustType::Unit => "Value::Null".to_string(),
             RustType::Vec(inner) => {

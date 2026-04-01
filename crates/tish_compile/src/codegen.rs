@@ -2390,8 +2390,65 @@ impl Codegen {
             Expr::PrefixInc { name, .. } => self.emit_inc_dec(name.as_ref(), true, "+ 1.0", "++"),
             Expr::PrefixDec { name, .. } => self.emit_inc_dec(name.as_ref(), true, "- 1.0", "--"),
             Expr::CompoundAssign { name, op, value, .. } => {
-                let val = self.emit_expr(value)?;
                 let n = Self::escape_ident(name.as_ref());
+                let is_refcell = self.refcell_wrapped_vars.contains(name.as_ref());
+                let var_type = self.type_context.get_type(name.as_ref());
+
+                // ── native f64 fast path: direct arithmetic operators ─────────
+                // emit_expr must return a Value expression; wrap the result back.
+                if !is_refcell && var_type == RustType::F64 {
+                    let (rhs_code, rhs_ty) = self.emit_typed_expr(value)?;
+                    let rhs_f64 = if rhs_ty == RustType::F64 {
+                        rhs_code
+                    } else {
+                        // rhs is Value or another native: unbox to f64
+                        let rhs_val = if rhs_ty.is_native() {
+                            rhs_ty.to_value_expr(&rhs_code)
+                        } else {
+                            rhs_code
+                        };
+                        format!("(match &({}) {{ Value::Number(n) => *n, v => panic!(\"compound assign: expected number, got {{:?}}\", v) }})", rhs_val)
+                    };
+                    let op_str = match op {
+                        CompoundOp::Add => "+=",
+                        CompoundOp::Sub => "-=",
+                        CompoundOp::Mul => "*=",
+                        CompoundOp::Div => "/=",
+                        CompoundOp::Mod => "%=",
+                    };
+                    // Wrap in Value::Number so the expression is a valid Value
+                    return Ok(format!("{{ {} {} {}; Value::Number({}) }}", n, op_str, rhs_f64, n));
+                }
+
+                // ── native String += fast path: push_str ─────────────────────
+                if !is_refcell && var_type == RustType::String && matches!(op, CompoundOp::Add) {
+                    let (rhs_code, rhs_ty) = self.emit_typed_expr(value)?;
+                    let rhs_str = if rhs_ty == RustType::String {
+                        rhs_code
+                    } else {
+                        // Convert rhs Value to display string inline
+                        let rhs_val = if rhs_ty.is_native() {
+                            rhs_ty.to_value_expr(&rhs_code)
+                        } else {
+                            rhs_code
+                        };
+                        format!(
+                            "match &({}) {{ \
+                             Value::String(s) => s.to_string(), \
+                             Value::Number(n) => {{ let i = *n as i64; if (*n - i as f64).abs() < f64::EPSILON {{ i.to_string() }} else {{ n.to_string() }} }}, \
+                             Value::Bool(b) => b.to_string(), \
+                             Value::Null => \"null\".to_string(), \
+                             other => format!(\"{{:?}}\", other) }}",
+                            rhs_val
+                        )
+                    };
+                    // Wrap in Value::String so the expression is a valid Value
+                    return Ok(format!("{{ {}.push_str(&({})); Value::String({}.clone().into()) }}", n, rhs_str, n));
+                }
+
+                // ── fallback: Value path ──────────────────────────────────────
+                // If the variable is native, wrap it as Value before calling ops::
+                let val = self.emit_expr(value)?;
                 let op_fn = match op {
                     CompoundOp::Add => "add",
                     CompoundOp::Sub => "sub",
@@ -2399,10 +2456,19 @@ impl Codegen {
                     CompoundOp::Div => "div",
                     CompoundOp::Mod => "modulo",
                 };
-                if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                if is_refcell {
                     format!(
                         "{{ let _rhs = ({}).clone(); *{}.borrow_mut() = tishlang_runtime::ops::{}(&*{}.borrow(), &_rhs)?; (*{}.borrow()).clone() }}",
                         val, n, op_fn, n, n
+                    )
+                } else if var_type.is_native() {
+                    // Wrap native lhs as Value, run ops::, unbox result back to native
+                    let n_as_value = var_type.to_value_expr(&n);
+                    let result_native = var_type.from_value_expr("_result");
+                    let n_as_value2 = var_type.to_value_expr(&n);
+                    format!(
+                        "{{ let _lhs = {}; let _rhs = ({}).clone(); let _result = tishlang_runtime::ops::{}(&_lhs, &_rhs)?; {} = {}; {} }}",
+                        n_as_value, val, op_fn, n, result_native, n_as_value2
                     )
                 } else {
                     format!(
@@ -2415,6 +2481,35 @@ impl Codegen {
                 let val = self.emit_expr(value)?;
                 let n = Self::escape_ident(name.as_ref()).into_owned();
                 let is_refcell = self.refcell_wrapped_vars.contains(name.as_ref());
+                let var_type = self.type_context.get_type(name.as_ref());
+
+                // ── native type: wrap for condition, unbox for assignment ──────
+                if !is_refcell && var_type.is_native() {
+                    // n_as_value uses .clone() for String so we don't consume n
+                    let n_as_value = var_type.to_value_expr(&n);
+                    let val_as_native = var_type.from_value_expr("_v");
+                    let (cond, assign_and_return, else_expr) = match op {
+                        LogicalAssignOp::AndAnd => (
+                            format!("{{ let __chk = {}; __chk.is_truthy() }}", n_as_value),
+                            format!("{{ let _v = ({}).clone(); {} = {}; {} }}", val, n, val_as_native, var_type.to_value_expr(&n)),
+                            var_type.to_value_expr(&n),
+                        ),
+                        LogicalAssignOp::OrOr => (
+                            format!("!{{ let __chk = {}; __chk.is_truthy() }}", n_as_value),
+                            format!("{{ let _v = ({}).clone(); {} = {}; {} }}", val, n, val_as_native, var_type.to_value_expr(&n)),
+                            var_type.to_value_expr(&n),
+                        ),
+                        // Native types (f64, String, bool) are never null — ??= is a no-op
+                        LogicalAssignOp::Nullish => (
+                            "false".to_string(),
+                            var_type.to_value_expr(&n), // unreachable but must type-check
+                            var_type.to_value_expr(&n),
+                        ),
+                    };
+                    return Ok(format!("{{ if {} {{ {} }} else {{ {} }} }}", cond, assign_and_return, else_expr));
+                }
+
+                // ── Value / refcell path ──────────────────────────────────────
                 let (cond, assign_and_return, else_expr) = if is_refcell {
                     match op {
                         LogicalAssignOp::AndAnd => (
