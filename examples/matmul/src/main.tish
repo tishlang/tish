@@ -38,3 +38,6 @@ fn bench(N) {
 bench(128)
 bench(256)
 bench(512)
+bench(1024)
+bench(2048)
+bench(4096)

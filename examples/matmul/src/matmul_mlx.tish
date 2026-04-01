@@ -1,18 +1,39 @@
-// Apple MLX matmul — uses tish:mlx from examples/matmul/tish-mlx/
+// Apple MLX matmul — tish:mlx backend.
+//
+// Identical API to matmul_gpu.tish — swap the import line to switch backend.
 //
 // Compile:
 //   tish compile src/matmul_mlx.tish -o matmul-mlx --native-backend rust
 // Run:
 //   ./matmul-mlx
 
-import { matmul_f32, device_name, version } from 'tish:mlx'
+import { matmul, device_name, version } from 'tish:mlx'
 
 console.log("=== Apple MLX matmul (f32, Metal GPU) ===")
 console.log(`mlx-rs: ${version()}   device: ${device_name()}`)
 
-let sizes = [256, 512, 1024, 2048, 4096]
-for (let i = 0; i < sizes.length; i++) {
-  let N: number = sizes[i]
-  let result = matmul_f32(N)
-  console.log(`mlx-metal  ${N}x${N}  ms=${result.ms}  check=${result.check}`)
+fn bench(N: number) {
+  let len: number = N * N
+  let a: number[] = []
+  let b: number[] = []
+  for (let i: number = 0; i < len; i++) {
+    a.push((i % 997) / 997)
+    b.push((i % 991) / 991)
+  }
+
+  matmul(a, b, N, N, N)  // warm-up: JIT-compiles MLX Metal kernel for this shape
+
+  let t0: number = Date.now()
+  let c = matmul(a, b, N, N, N)
+  let t1: number = Date.now()
+
+  let check = c[0] + c[N - 1] + c[(N - 1) * N] + c[len - 1]
+  console.log(`mlx-metal  ${N}x${N}  ms=${t1 - t0}  check=${check}`)
 }
+
+bench(128)
+bench(256)
+bench(512)
+bench(1024)
+bench(2048)
+bench(4096)

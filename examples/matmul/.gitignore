@@ -3,6 +3,7 @@ matmul-cpu
 matmul-rust
 matmul-cl
 matmul-gpu
+matmul-main
 matmul-mlx
 matmul*.js
 matmul*.wasm

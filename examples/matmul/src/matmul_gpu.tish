@@ -1,18 +1,41 @@
-// Metal GPU matmul — uses tish:metal from examples/matmul/tish-metal/
+// Metal GPU matmul — tish:metal backend.
+//
+// Identical API to matmul_mlx.tish — swap the import line to switch backend.
+// The GEMM shader is internal to tish:metal; run_f32 is available separately
+// for dispatching custom MSL kernels.
 //
 // Compile:
 //   tish compile src/matmul_gpu.tish -o matmul-gpu --native-backend rust
 // Run:
 //   ./matmul-gpu
 
-import { matmul_f32, run_f32, device_name } from 'tish:metal'
+import { matmul, device_name } from 'tish:metal'
 
 console.log("=== Metal GPU matmul (f32, tiled MSL compute) ===")
 console.log("device:", device_name())
 
-let sizes = [512, 1024, 2048, 4096]
-for (let i = 0; i < sizes.length; i++) {
-  let N: number = sizes[i]
-  let result = matmul_f32(N)
-  console.log(`metal  ${N}x${N}  ms=${result.ms}  check=${result.check}`)
+fn bench(N: number) {
+  let len: number = N * N
+  let a: number[] = []
+  let b: number[] = []
+  for (let i: number = 0; i < len; i++) {
+    a.push((i % 997) / 997)
+    b.push((i % 991) / 991)
+  }
+
+  matmul(a, b, N, N, N)  // warm-up: compiles MSL pipeline
+
+  let t0: number = Date.now()
+  let c = matmul(a, b, N, N, N)
+  let t1: number = Date.now()
+
+  let check = c[0] + c[N - 1] + c[(N - 1) * N] + c[len - 1]
+  console.log(`metal  ${N}x${N}  ms=${t1 - t0}  check=${check}`)
 }
+
+bench(128)
+bench(256)
+bench(512)
+bench(1024)
+bench(2048)
+bench(4096)
