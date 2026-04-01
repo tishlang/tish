@@ -443,6 +443,9 @@ pub fn compile_with_native_modules(
     optimize: bool,
 ) -> Result<String, CompileError> {
     let program = if optimize { tishlang_opt::optimize(program) } else { program.clone() };
+    // Type-inference pass: fills in `type_ann` on unannotated VarDecl nodes where
+    // the type is unambiguous (literals, arithmetic of typed vars, etc.).
+    let program = crate::infer::infer_program(&program);
     let map: std::collections::HashMap<String, (String, String)> = native_modules
         .iter()
         .map(|m| (m.spec.clone(), (m.crate_name.clone(), m.export_fn.clone())))
@@ -706,7 +709,18 @@ impl Codegen {
     fn emit_inc_dec(&self, name: &str, is_prefix: bool, delta: &str, op_name: &str) -> String {
         let n = Self::escape_ident(name);
         let is_wrapped = self.refcell_wrapped_vars.contains(name);
-        
+        let var_type = self.type_context.get_type(name);
+
+        // Native fast path: f64 variable → avoid boxing/unboxing.
+        if !is_wrapped && var_type == RustType::F64 {
+            let op_assign = if delta.contains('+') { "+=" } else { "-=" };
+            return if is_prefix {
+                format!("{{ {n} {op_assign} 1.0_f64; Value::Number({n}) }}")
+            } else {
+                format!("{{ let _prev = {n}; {n} {op_assign} 1.0_f64; Value::Number(_prev) }}")
+            };
+        }
+
         if is_prefix {
             if is_wrapped {
                 format!(
@@ -717,16 +731,14 @@ impl Codegen {
                     "{{ {n} = Value::Number(match &{n} {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); {n}.clone() }}"
                 )
             }
+        } else if is_wrapped {
+            format!(
+                "{{ let _v = (*{n}.borrow()).clone(); *{n}.borrow_mut() = Value::Number(match &_v {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); _v }}"
+            )
         } else {
-            if is_wrapped {
-                format!(
-                    "{{ let _v = (*{n}.borrow()).clone(); *{n}.borrow_mut() = Value::Number(match &_v {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); _v }}"
-                )
-            } else {
-                format!(
-                    "{{ let _v = {n}.clone(); {n} = Value::Number(match &_v {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); _v }}"
-                )
-            }
+            format!(
+                "{{ let _v = {n}.clone(); {n} = Value::Number(match &_v {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); _v }}"
+            )
         }
     }
 
@@ -1133,8 +1145,8 @@ impl Codegen {
                 else_branch,
                 ..
             } => {
-                let c = self.emit_expr(cond)?;
-                self.write(&format!("if {}.is_truthy() {{\n", c));
+                let c = self.emit_cond_expr(cond)?;
+                self.write(&format!("if {} {{\n", c));
                 self.indent += 1;
                 self.emit_statement(then_branch)?;
                 self.indent -= 1;
@@ -1147,11 +1159,11 @@ impl Codegen {
                 self.writeln("}");
             }
             Statement::While { cond, body, .. } => {
-                let c = self.emit_expr(cond)?;
+                let c = self.emit_cond_expr(cond)?;
                 let label = format!("'while_loop_{}", self.loop_label_index);
                 self.loop_label_index += 1;
                 self.loop_stack.push((label.clone(), None));
-                self.write(&format!("{}: while {}.is_truthy() {{\n", label, c));
+                self.write(&format!("{}: while {} {{\n", label, c));
                 self.indent += 1;
                 self.emit_statement(body)?;
                 self.loop_stack.pop();
@@ -1209,7 +1221,7 @@ impl Codegen {
                 self.loop_label_index += 1;
                 let cond_expr = cond
                     .as_ref()
-                    .map(|c| format!("{}.is_truthy()", self.emit_expr(c).unwrap()))
+                    .map(|c| self.emit_cond_expr(c).unwrap())
                     .unwrap_or_else(|| "true".to_string());
                 let update_code = update.as_ref().map(|u| {
                     let ue = self.emit_expr(u).unwrap();
@@ -1301,14 +1313,14 @@ impl Codegen {
                 self.writeln("}");
             }
             Statement::DoWhile { body, cond, .. } => {
-                let c = self.emit_expr(cond)?;
+                let c = self.emit_cond_expr(cond)?;
                 let label = format!("'dowhile_loop_{}", self.loop_label_index);
                 self.loop_label_index += 1;
                 self.loop_stack.push((label.clone(), None));
                 self.write(&format!("{}: loop {{\n", label));
                 self.indent += 1;
                 self.emit_statement(body)?;
-                self.write(&format!("if !{}.is_truthy() {{ break; }}\n", c));
+                self.write(&format!("if !{} {{ break; }}\n", c));
                 self.loop_stack.pop();
                 self.indent -= 1;
                 self.writeln("}");
@@ -1715,10 +1727,10 @@ impl Codegen {
                     }
                 }
             }
-            Expr::Binary { left, op, right, span, .. } => {
-                let l = self.emit_expr(left)?;
-                let r = self.emit_expr(right)?;
-                self.emit_binop(&l, *op, &r, *span)?
+            Expr::Binary { .. } => {
+                // Delegate to emit_typed_expr; wrap the native result in Value.
+                let (code, ty) = self.emit_typed_expr(expr)?;
+                if ty.is_native() { ty.to_value_expr(&code) } else { code }
             }
             Expr::Unary { op, operand, .. } => {
                 let o = self.emit_expr(operand)?;
@@ -1779,6 +1791,37 @@ impl Codegen {
 
                 // Check for built-in method calls on arrays/strings
                 if let Expr::Member { object, prop: MemberProp::Name(method_name), .. } = callee.as_ref() {
+                    // ── native Vec<T> push fast path ──────────────────────────────
+                    if method_name.as_ref() == "push" {
+                        if let Expr::Ident { name, .. } = object.as_ref() {
+                            if !self.refcell_wrapped_vars.contains(name.as_ref()) {
+                                let obj_type = self.type_context.get_type(name.as_ref());
+                                if let RustType::Vec(elem_type) = obj_type {
+                                    let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
+                                    // Collect push arguments as native values.
+                                    let mut push_stmts: Vec<String> = Vec::new();
+                                    for a in args {
+                                        if let CallArg::Expr(e) = a {
+                                            let (val_code, val_ty) = self.emit_typed_expr(e)?;
+                                            let native_val = if val_ty == *elem_type {
+                                                val_code
+                                            } else if val_ty == RustType::Value {
+                                                elem_type.from_value_expr(&val_code)
+                                            } else {
+                                                val_code
+                                            };
+                                            push_stmts.push(format!("{}.push({});", esc_obj, native_val));
+                                        }
+                                    }
+                                    return Ok(format!(
+                                        "{{ {} Value::Null }}",
+                                        push_stmts.join(" ")
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
                     let obj_expr = self.emit_expr(object)?;
                     let arg_exprs: Result<Vec<_>, _> =
                         args.iter().map(|a| self.emit_call_arg(a)).collect();
@@ -2136,23 +2179,24 @@ impl Codegen {
                     format!("tishlang_runtime::get_prop(&{}, {})", obj, key)
                 }
             }
+            Expr::Index { optional, .. } if !optional => {
+                // Try native Vec<T> fast path via emit_typed_expr; wrap result.
+                let (code, ty) = self.emit_typed_expr(expr)?;
+                if ty.is_native() { ty.to_value_expr(&code) } else { code }
+            }
             Expr::Index {
                 object,
                 index,
-                optional,
                 ..
             } => {
+                // optional chaining: always use runtime path
                 let obj = self.emit_expr(object)?;
                 let idx = self.emit_expr(index)?;
-                if *optional {
-                    format!(
-                        "{{ let o = {}.clone(); if matches!(o, Value::Null) {{ Value::Null }} else {{ \
-                         tishlang_runtime::get_index(&o, &{}) }} }}",
-                        obj, idx
-                    )
-                } else {
-                    format!("tishlang_runtime::get_index(&{}, &{})", obj, idx)
-                }
+                format!(
+                    "{{ let o = {}.clone(); if matches!(o, Value::Null) {{ Value::Null }} else {{ \
+                     tishlang_runtime::get_index(&o, &{}) }} }}",
+                    obj, idx
+                )
             }
             Expr::Conditional {
                 cond,
@@ -2257,8 +2301,29 @@ impl Codegen {
                 }
             }
             Expr::Assign { name, value, .. } => {
-                let val = self.emit_expr(value)?;
                 let escaped = Self::escape_ident(name.as_ref());
+                // Native fast path: if the target is a scalar native type, emit
+                // a direct assignment without boxing/unboxing through Value.
+                if !self.refcell_wrapped_vars.contains(name.as_ref()) {
+                    let rust_type = self.type_context.get_type(name.as_ref());
+                    if rust_type.is_native() && matches!(rust_type, RustType::F64 | RustType::Bool | RustType::String) {
+                        let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                        let native_val = if val_ty == rust_type {
+                            val_code
+                        } else if val_ty == RustType::Value {
+                            rust_type.from_value_expr(&val_code)
+                        } else {
+                            val_code
+                        };
+                        let return_val = rust_type.to_value_expr(&escaped);
+                        return Ok(format!(
+                            "{{ {} = {}; {} }}",
+                            escaped, native_val, return_val
+                        ));
+                    }
+                }
+                // Fallback: Value path
+                let val = self.emit_expr(value)?;
                 let needs_outer_clone = self.should_clone(value);
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     if needs_outer_clone {
@@ -2267,7 +2332,6 @@ impl Codegen {
                         format!("{{ let _v = {}; *{}.borrow_mut() = _v.clone(); _v }}", val, escaped)
                     }
                 } else {
-                    // Use type_context: typed vars need from_value_expr; Value needs .clone() (we return _v)
                     let rust_type = self.type_context.get_type(name.as_ref());
                     let assign_rhs = if matches!(rust_type, RustType::Value) {
                         "_v.clone()".to_string()
@@ -2401,6 +2465,43 @@ impl Codegen {
                 )
             }
             Expr::IndexAssign { object, index, value, .. } => {
+                // Native fast path: Vec<T>[i] = v
+                if let Expr::Ident { name, .. } = object.as_ref() {
+                    if !self.refcell_wrapped_vars.contains(name.as_ref()) {
+                        let obj_type = self.type_context.get_type(name.as_ref());
+                        if let RustType::Vec(elem_type) = obj_type {
+                            let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
+                            let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
+                            let idx_usize = if idx_ty == RustType::F64 {
+                                format!("({}) as usize", idx_code)
+                            } else {
+                                let iv = if idx_ty.is_native() {
+                                    idx_ty.to_value_expr(&idx_code)
+                                } else {
+                                    idx_code
+                                };
+                                format!(
+                                    "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
+                                    iv
+                                )
+                            };
+                            let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                            let native_val = if val_ty == *elem_type {
+                                val_code
+                            } else if val_ty == RustType::Value {
+                                elem_type.from_value_expr(&val_code)
+                            } else {
+                                // both native but different type — best effort
+                                val_code
+                            };
+                            return Ok(format!(
+                                "{{ {}[{}] = {}; Value::Null }}",
+                                esc_obj, idx_usize, native_val
+                            ));
+                        }
+                    }
+                }
+                // Fallback: runtime set_index
                 let obj = self.emit_expr(object)?;
                 let idx = self.emit_expr(index)?;
                 let val = self.emit_expr(value)?;
@@ -3436,6 +3537,146 @@ impl Codegen {
         // Fall back to emit_expr + conversion
         let value_expr = self.emit_expr(expr)?;
         Ok(target_type.from_value_expr(&value_expr))
+    }
+
+    /// Emit an expression and return `(code, type)`.
+    ///
+    /// When `type` is a native type (`F64`, `Bool`, `String`, `Vec<T>`, …), `code`
+    /// evaluates to a Rust value of that type directly — **not** a `Value`.
+    /// When `type` is `RustType::Value`, `code` evaluates to a `Value`.
+    ///
+    /// This is the fast-path used by callers that want to propagate native types
+    /// through arithmetic, indexing, and assignments.  For any expression this
+    /// function cannot handle natively, it falls back to `emit_expr` and returns
+    /// `RustType::Value`.
+    fn emit_typed_expr(&mut self, expr: &Expr) -> Result<(String, RustType), CompileError> {
+        match expr {
+            // ── literals ─────────────────────────────────────────────────────────
+            Expr::Literal { value, .. } => match value {
+                Literal::Number(n) => Ok((format!("{}_f64", n), RustType::F64)),
+                Literal::String(s) => Ok((format!("{:?}.to_string()", s.as_ref()), RustType::String)),
+                Literal::Bool(b) => Ok((format!("{}", b), RustType::Bool)),
+                Literal::Null => Ok(("Value::Null".to_string(), RustType::Value)),
+            },
+
+            // ── identifiers ──────────────────────────────────────────────────────
+            Expr::Ident { name, .. } => {
+                let escaped = Self::escape_ident(name.as_ref());
+                if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                    // RefCell-wrapped: unwrap via borrow and return Value
+                    Ok((format!("(*{}.borrow()).clone()", escaped), RustType::Value))
+                } else {
+                    let var_type = self.type_context.get_type(name.as_ref());
+                    if var_type.is_native() {
+                        Ok((escaped.into_owned(), var_type))
+                    } else {
+                        Ok((escaped.into_owned(), RustType::Value))
+                    }
+                }
+            }
+
+            // ── binary expressions ───────────────────────────────────────────────
+            Expr::Binary { left, op, right, span, .. } => {
+                let (l, lt) = self.emit_typed_expr(left)?;
+                let (r, rt) = self.emit_typed_expr(right)?;
+
+                if let Some(result_ty) = RustType::result_type_of_binop(*op, &lt, &rt) {
+                    // Both sides are compatible native types → emit native op.
+                    let code = match op {
+                        BinOp::Add => format!("({} + {})", l, r),
+                        BinOp::Sub => format!("({} - {})", l, r),
+                        BinOp::Mul => format!("({} * {})", l, r),
+                        BinOp::Div => format!("({} / {})", l, r),
+                        BinOp::Mod => format!("({} % {})", l, r),
+                        BinOp::Pow => format!("({}).powf({})", l, r),
+                        BinOp::Lt => format!("({} < {})", l, r),
+                        BinOp::Le => format!("({} <= {})", l, r),
+                        BinOp::Gt => format!("({} > {})", l, r),
+                        BinOp::Ge => format!("({} >= {})", l, r),
+                        BinOp::StrictEq => format!("({} == {})", l, r),
+                        BinOp::StrictNe => format!("({} != {})", l, r),
+                        BinOp::And => format!("({} && {})", l, r),
+                        BinOp::Or => format!("({} || {})", l, r),
+                        _ => unreachable!("result_type_of_binop covers all handled ops"),
+                    };
+                    return Ok((code, result_ty));
+                }
+
+                // Fall back: convert both sides to Value and use the runtime.
+                let lv = if lt.is_native() { lt.to_value_expr(&l) } else { l };
+                let rv = if rt.is_native() { rt.to_value_expr(&r) } else { r };
+                let result = self.emit_binop(&lv, *op, &rv, *span)?;
+                Ok((result, RustType::Value))
+            }
+
+            // ── array indexing ───────────────────────────────────────────────────
+            Expr::Index { object, index, optional, .. } => {
+                // Native fast path: `vec[i]` where vec is Vec<T> and i is numeric.
+                if !optional {
+                    if let Expr::Ident { name, .. } = object.as_ref() {
+                        if !self.refcell_wrapped_vars.contains(name.as_ref()) {
+                            let obj_type = self.type_context.get_type(name.as_ref());
+                            if let RustType::Vec(elem_type) = &obj_type {
+                                let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
+                                let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
+                                let idx_usize = if idx_ty == RustType::F64 {
+                                    format!("({}) as usize", idx_code)
+                                } else {
+                                    let iv = if idx_ty.is_native() {
+                                        idx_ty.to_value_expr(&idx_code)
+                                    } else {
+                                        idx_code
+                                    };
+                                    format!(
+                                        "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
+                                        iv
+                                    )
+                                };
+                                let elem_ty = *elem_type.clone();
+                                return Ok((format!("{}[{}]", esc_obj, idx_usize), elem_ty));
+                            }
+                        }
+                    }
+                }
+                // Value fallback: emit runtime code directly to avoid cycles
+                // (emit_expr for !optional Index delegates here, so we must not call emit_expr(expr))
+                let obj = self.emit_expr(object)?;
+                let idx = self.emit_expr(index)?;
+                let result = if *optional {
+                    format!(
+                        "{{ let o = {}.clone(); if matches!(o, Value::Null) {{ Value::Null }} else {{ \
+                         tishlang_runtime::get_index(&o, &{}) }} }}",
+                        obj, idx
+                    )
+                } else {
+                    format!("tishlang_runtime::get_index(&{}, &{})", obj, idx)
+                };
+                Ok((result, RustType::Value))
+            }
+
+            // ── everything else: delegate to emit_expr ───────────────────────────
+            _ => {
+                let result = self.emit_expr(expr)?;
+                Ok((result, RustType::Value))
+            }
+        }
+    }
+
+    /// Emit a condition expression as a Rust `bool`.
+    ///
+    /// Returns a `bool`-typed Rust expression when the condition can be
+    /// determined to be native (e.g. `i < N` where both are `f64`), otherwise
+    /// falls back to `{value}.is_truthy()`.
+    fn emit_cond_expr(&mut self, expr: &Expr) -> Result<String, CompileError> {
+        let (code, ty) = self.emit_typed_expr(expr)?;
+        if ty == RustType::Bool {
+            Ok(code)
+        } else if ty.is_native() {
+            // Non-bool native type: convert to Value and use is_truthy
+            Ok(format!("{}.is_truthy()", ty.to_value_expr(&code)))
+        } else {
+            Ok(format!("{}.is_truthy()", code))
+        }
     }
 
     fn emit_binop(

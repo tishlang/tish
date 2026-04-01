@@ -1,33 +1,37 @@
 // Naive dense matrix multiply (row-major flat arrays).
 // Numbers are IEEE doubles (standard Tish `number`), not packed f32.
 //
+// Type annotations on the hot variables tell the Rust backend to emit native
+// f64 arithmetic and direct Vec<f64> indexing rather than boxed Value ops.
+// Without annotations the behaviour is identical but slower (Value path).
+//
 // Change N for workload size: 1024 matches the landing-page scenario for
 // native-compiled runs; the bytecode VM and tree interpreter are much slower
 // at large N — try 128–256 there first.
 
-let N = 256
-let len = N * N
+let N: number = 256
+let len: number = N * N
 
-let a = []
-let b = []
-let c = []
-for (let i = 0; i < len; i++) {
+let a: number[] = []
+let b: number[] = []
+let c: number[] = []
+for (let i: number = 0; i < len; i++) {
   a.push((i % 997) / 997)
   b.push((i % 991) / 991)
   c.push(0)
 }
 
-let t0 = Date.now()
-for (let i = 0; i < N; i++) {
-  for (let j = 0; j < N; j++) {
-    let sum = 0
-    for (let k = 0; k < N; k++) {
+let t0: number = Date.now()
+for (let i: number = 0; i < N; i++) {
+  for (let j: number = 0; j < N; j++) {
+    let sum: number = 0
+    for (let k: number = 0; k < N; k++) {
       sum = sum + a[i * N + k] * b[k * N + j]
     }
     c[i * N + j] = sum
   }
 }
-let t1 = Date.now()
+let t1: number = Date.now()
 
 // Cheap checksum so the work stays observable across backends
 let check = c[0] + c[N - 1] + c[(N - 1) * N] + c[len - 1]

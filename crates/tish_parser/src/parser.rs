@@ -627,6 +627,12 @@ impl<'a> Parser<'a> {
                     span: self.span_end(span_start),
                 });
             }
+            let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+                self.advance();
+                Some(self.parse_type_annotation()?)
+            } else {
+                None
+            };
             let init_expr = if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
                 self.advance();
                 Some(self.parse_expr()?)
@@ -639,7 +645,7 @@ impl<'a> Parser<'a> {
             Some(Box::new(Statement::VarDecl {
                 name,
                 mutable,
-                type_ann: None, // For-loop variables don't have type annotations (yet)
+                type_ann,
                 init: init_expr,
                 span: self.span_end(var_span_start),
             }))

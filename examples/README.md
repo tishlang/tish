@@ -25,13 +25,13 @@ From the repo root, run any example with the interpreter:
 
 ```bash
 cd examples/http-hello
-tish run src/main.tish --features http
+tish run src/main.tish --feature http
 ```
 
 Or compile to a native binary:
 
 ```bash
-tish compile src/main.tish -o server --features http
+tish compile src/main.tish -o server --feature http
 ./server
 ```
 

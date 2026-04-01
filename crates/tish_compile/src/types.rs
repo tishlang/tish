@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tishlang_ast::TypeAnnotation;
+use tishlang_ast::{BinOp, TypeAnnotation};
 
 /// Concrete Rust type representation for code generation.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +87,38 @@ impl RustType {
     /// Check if this type is a native Rust type (not Value).
     pub fn is_native(&self) -> bool {
         !matches!(self, RustType::Value)
+    }
+
+    /// Check if this type is numeric (f64).
+    pub fn is_numeric(&self) -> bool {
+        matches!(self, RustType::F64)
+    }
+
+    /// Infer the result type of a binary operation given the operand types.
+    /// Returns `None` if native code cannot be emitted (fall back to Value path).
+    pub fn result_type_of_binop(op: BinOp, lhs: &RustType, rhs: &RustType) -> Option<RustType> {
+        if lhs == &RustType::F64 && rhs == &RustType::F64 {
+            match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow => {
+                    Some(RustType::F64)
+                }
+                BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+                | BinOp::StrictEq
+                | BinOp::StrictNe => Some(RustType::Bool),
+                _ => None,
+            }
+        } else if lhs == &RustType::Bool && rhs == &RustType::Bool {
+            match op {
+                BinOp::And | BinOp::Or => Some(RustType::Bool),
+                BinOp::StrictEq | BinOp::StrictNe => Some(RustType::Bool),
+                _ => None,
+            }
+        } else {
+            None
+        }
     }
 
     /// Get the Rust type string for code generation.
@@ -173,10 +205,15 @@ impl RustType {
             RustType::Bool => format!("Value::Bool({})", native_expr),
             RustType::Unit => "Value::Null".to_string(),
             RustType::Vec(inner) => {
-                let inner_to_value = inner.to_value_expr("v");
+                // Use iter()/copied()/cloned() to avoid moving the vector.
+                let (iter_suffix, val_expr) = match inner.as_ref() {
+                    RustType::F64 => (".iter().copied()", "Value::Number(v)".to_string()),
+                    RustType::Bool => (".iter().copied()", "Value::Bool(v)".to_string()),
+                    _ => (".iter().cloned()", inner.to_value_expr("v")),
+                };
                 format!(
-                    "Value::Array(Rc::new(RefCell::new({}.into_iter().map(|v| {}).collect())))",
-                    native_expr, inner_to_value
+                    "Value::Array(Rc::new(RefCell::new({}{}.map(|v| {}).collect())))",
+                    native_expr, iter_suffix, val_expr
                 )
             }
             RustType::Option(inner) => {

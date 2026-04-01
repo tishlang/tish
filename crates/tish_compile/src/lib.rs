@@ -3,6 +3,7 @@
 //! Emits Rust source that links to tishlang_runtime.
 
 mod codegen;
+mod infer;
 mod resolve;
 mod types;
 
@@ -25,6 +26,9 @@ mod tests {
 
     #[test]
     fn typed_assign_conversion() {
+        // With the inference pass and native emit, `total: number = 0` becomes f64.
+        // Assignment `total = total + n` (where n comes from ForOf over a Value::Array)
+        // emits a native f64 assignment that unboxes the Value result via from_value_expr.
         let src = r#"
 fn sum(...args: number[]): number {
     let total: number = 0
@@ -34,11 +38,16 @@ fn sum(...args: number[]): number {
 "#;
         let program = parse(src).unwrap();
         let rust = compile(&program).unwrap();
-        assert!(rust.contains("match &_v { Value::Number(n) => *n"), "expected typed assign conversion");
+        // total should be declared as f64
+        assert!(rust.contains("let mut total: f64"), "expected total: f64");
+        // The return value of run() should convert total back to Value
+        assert!(rust.contains("Value::Number(total)"), "expected Value::Number(total) wrapping");
     }
 
     #[test]
     fn loop_var_decl_clone_outer_var() {
+        // With inference, outerVar = 42 gets inferred as f64. f64 is Copy, so no clone is
+        // needed — direct assignment is correct. The test verifies compilation succeeds.
         let src = r#"
 let outerVar = 42
 for (let i = 0; i < 5; i = i + 1) {
@@ -47,10 +56,9 @@ for (let i = 0; i < 5; i = i + 1) {
 "#;
         let program = parse(src).unwrap();
         let rust = compile(&program).unwrap();
-        assert!(
-            rust.contains("(outerVar).clone()"),
-            "expected outerVar to be cloned in loop body"
-        );
+        // outerVar and x are f64 (inferred) — Copy assignment, no .clone() needed.
+        assert!(rust.contains("let mut outerVar: f64"), "expected outerVar: f64");
+        assert!(rust.contains("let mut x: f64"), "expected x: f64");
     }
 
     #[test]
@@ -90,6 +98,9 @@ fn factory() {
 
     #[test]
     fn loop_var_decl_clone_via_project_full() {
+        // With the inference pass, `let outerVar = 42` is inferred as f64 (Copy) — no clone needed.
+        // This test verifies the full benchmark_granular project compiles and that outerVar
+        // is emitted as the inferred f64 type rather than requiring a Value clone.
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let bench = manifest.join("../../tests/core/benchmark_granular.tish").canonicalize().unwrap();
         // Use same default features as tish CLI (http, fs, process, regex)
@@ -98,9 +109,10 @@ fn factory() {
             .map(String::from)
             .collect::<Vec<_>>();
         let (rust, _) = compile_project_full(&bench, bench.parent(), &features, true).unwrap();
+        // outerVar = 42 is inferred as f64; f64 is Copy so no .clone() is emitted.
         assert!(
-            rust.contains("(outerVar).clone()"),
-            "expected outerVar to be cloned in benchmark_granular loop"
+            rust.contains("let mut outerVar: f64"),
+            "expected outerVar to be inferred as f64 (Copy, no clone needed)"
         );
     }
 }
