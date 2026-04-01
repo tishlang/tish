@@ -39,6 +39,7 @@ jobs:
             tishlang_build_utils
             tishlang_core
             tishlang_ast
+            tishlang_ui
             tishlang_lexer
             tishlang_jsx_web
             tishlang_builtins
