@@ -2,7 +2,7 @@
 
 **Canonical spec** for tools and LLMs. Single source of truth for syntax and semantics; implementation lives in `crates/tish_lexer`, `crates/tish_parser`, `crates/tish_ast`.
 
-Tish is a minimal JS/TS-like language: same source runs in an **interpreter** or compiles to **native** (Rust or Cranelift), **WASM** (browser/WASI), or **JS**. **Secure-by-default:** network, filesystem, and process APIs are feature-gated.
+Tish is a minimal JS/TS-like language: same source runs in a **tree-walking interpreter**, a **bytecode VM**, or **compiled targets** — Rust transpilation linked to **`tishlang_runtime`**, standalone binaries that **embed bytecode and run the same VM**, **WASM/WASI**, or **JavaScript**. See **Native compile (implementation status)** for what each path does today versus the long-term goal (primitive lowering, true AOT). **Secure-by-default:** network, filesystem, and process APIs are feature-gated.
 
 **No `undefined`** — use `null`. **`typeof null`** is `"null"` (not `"object"`). **Strict equality only:** `===` / `!==`. **`let` / `const` only** (no `var`). **No `this`**, prototypes, or `class` / `super`. Plain objects and arrays. **`?.` yields `null`**, not undefined. Parser also accepts **`new`** expressions (no class syntax; uncommon in idiomatic Tish).
 
@@ -71,7 +71,22 @@ Requires **`http` feature**. **`fetch(url, opts?)`** → Promise → response `{
 
 Build: `cargo build --features full`. Compile: `tish compile … --feature http` (etc.).
 
-**Cranelift** backend: pure Tish, no native imports. **Rust** backend: `tish:*`, npm-style imports; needs `rustc` / Cargo / workspace layout.
+---
+
+## Native compile (implementation status)
+
+**Runtime model today:** Values are **dynamically tagged** (`Value` in Rust). Optional type annotations are **parsed only** — they do not yet drive codegen or checked types.
+
+| Route | What you get |
+|-------|----------------|
+| `tish compile --native-backend rust` (default) | Rust source emitted by `tishlang_compile` that calls **`tishlang_runtime`** (`get_index`, `set_index`, arithmetic on `Value`, etc.). `cargo build --release` optimizes the **glue**, not “the Tish program as a flat `f64` kernel.” |
+| `tish compile --native-backend cranelift` | Native binary that loads **embedded serialized bytecode** and runs **`tishlang_vm`** (`tish_cranelift_runtime`). Cranelift is used only to build a tiny object file holding the blob; **bytecode is not lowered to CLIF**. Throughput is **VM-class** (similar order to `tish run --backend vm`), not “rustc/LLVM on numeric loops.” |
+| `tish compile --native-backend llvm` | Same **embedded bytecode + VM** link pattern as Cranelift (see `tishlang_llvm` + `tishlang_cranelift_runtime`). |
+| `tish compile --target js` | Emitted JavaScript; the host (V8, etc.) may **JIT** tight loops. |
+
+**Interop:** `tish:*` and npm-style native imports require **`--native-backend rust`**. The Cranelift/LLVM native-binary paths are **pure Tish** only (no external native modules).
+
+**Direction (in progress):** Where semantics allow, lower to **Rust or machine primitives** (e.g. `Vec<f64>`, `f32`/`f64` buffers, fixed layouts) instead of universal `Value`; use optional types and **inference** to choose representations; add **real bytecode → Cranelift IR** (or similar) for AOT hot paths. The syntax resembles JS/TS; **compiled output is not intended to stay a boxed dynamic VM forever.**
 
 ---
 

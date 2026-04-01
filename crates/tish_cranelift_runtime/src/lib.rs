@@ -1,6 +1,8 @@
-//! Runtime for Cranelift-compiled Tish programs.
+//! Runtime linked into the `tish compile --native-backend cranelift` executable.
 //!
-//! Provides tish_run_chunk(ptr, len) which deserializes and runs bytecode.
+//! **`tish_run_chunk`** deserializes embedded bytecode and runs **`tishlang_vm`** — the same
+//! execution engine as `tish run --backend vm`. The crate name is historical; this is not
+//! running CLIF-emitted machine code for each Tish opcode.
 
 use tishlang_bytecode::deserialize;
 use tishlang_vm::Vm;

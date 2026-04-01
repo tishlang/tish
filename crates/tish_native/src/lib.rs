@@ -1,14 +1,13 @@
 //! Native code generation backend for Tish.
 //!
-//! Target architecture (per plan):
-//! - Phase 2: Bytecode -> Cranelift IR -> .o -> link with minimal runtime
-//! - Current: Delegates to tishlang_compile (Rust codegen) + cargo build as interim path
+//! - **`rust`:** `tishlang_compile` emits Rust calling **`tishlang_runtime`** (`Value`, etc.),
+//!   then `cargo build --release` links the user binary.
+//! - **`cranelift`:** Embeds serialized bytecode in an object file and links **`tishlang_cranelift_runtime`**
+//!   — the executable runs **`tishlang_vm`** on that chunk (same as `tish run --backend vm`), not CLIF lowering.
+//! - **`llvm`:** Same embedded-bytecode + VM link path via `tishlang_llvm` / shared linker.
 //!
-//! Once Cranelift backend is implemented, this crate will:
-//! 1. Take Chunk (bytecode) as input
-//! 2. Lower to Cranelift IR
-//! 3. Emit .o via cranelift-object
-//! 4. Link against prebuilt tishlang_runtime staticlib
+//! **Future:** Lower bytecode (or typed IR) through Cranelift/LLVM to real machine code where semantics allow;
+//! emit Rust using `Vec<f64>` / fixed primitives instead of `Value` on hot paths.
 
 mod build;
 
@@ -31,9 +30,9 @@ impl std::error::Error for NativeError {}
 
 /// Compile a Tish project to a native binary.
 ///
-/// - `native_backend == "rust"`: Full Rust codegen + cargo build (supports native imports).
-/// - `native_backend == "cranelift"`: Bytecode -> Cranelift -> native (pure Tish only).
-/// - `native_backend == "llvm"`: Experimental LLVM backend (not implemented yet).
+/// - `native_backend == "rust"`: Rust source + `tishlang_runtime` + cargo (native imports).
+/// - `native_backend == "cranelift"`: Embedded bytecode + VM binary (pure Tish only); not opcode AOT yet.
+/// - `native_backend == "llvm"`: Embedded bytecode + VM via LLVM/clang link path.
 pub fn compile_to_native(
     entry_path: &Path,
     project_root: Option<&Path>,

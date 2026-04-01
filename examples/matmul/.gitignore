@@ -1,0 +1,6 @@
+# Local compile outputs from README commands
+matmul-rust
+matmul-cl
+matmul.js
+matmul.wasm
+tish_wasi_*/

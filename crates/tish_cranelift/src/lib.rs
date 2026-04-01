@@ -1,6 +1,8 @@
-//! Bytecode to native via Cranelift.
+//! Standalone native binary: embedded bytecode + VM (Cranelift used as object builder).
 //!
-//! Compiles Tish bytecode to native object files and links with a minimal runtime.
+//! Produces an executable that runs **`tishlang_vm`** on serialized bytecode embedded in
+//! the binary — not lowering of Tish opcodes to CLIF/machine code (see module docs in
+//! `lower.rs`). For Rust transpile + `tishlang_runtime`, use `--native-backend rust`.
 
 mod link;
 mod lower;
@@ -25,8 +27,8 @@ impl std::fmt::Display for CraneliftError {
 
 impl std::error::Error for CraneliftError {}
 
-/// Compile a bytecode chunk to a native binary.
-/// `features` are passed to tishlang_cranelift_runtime (e.g. fs, process, http for built-in modules).
+/// Build a native binary that embeds `chunk` and runs it with the bytecode VM.
+/// `features` are passed to `tishlang_cranelift_runtime` (e.g. fs, process, http).
 pub fn compile_chunk_to_native(
     chunk: &Chunk,
     output_path: &Path,

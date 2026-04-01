@@ -1,7 +1,9 @@
-//! Bytecode to Cranelift IR lowering.
+//! Embed serialized bytecode in an object file for the standalone native binary.
 //!
-//! Emits object file with tish_chunk_data and tish_chunk_len symbols.
-//! The link step builds a Rust binary that reads these and runs via tishlang_vm.
+//! **This is not AOT compilation of Tish into Cranelift IR.** The chunk is stored as
+//! read-only data (`tish_chunk_data`, `tish_chunk_len`). The link step produces an
+//! executable that **deserializes the chunk and runs `tishlang_vm`** — same VM as
+//! `tish run --backend vm`. Cranelift is only the object-file emitter for that blob.
 
 use std::path::Path;
 

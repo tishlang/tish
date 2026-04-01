@@ -3,6 +3,9 @@
                                     (sorted by Tish(run)/Node ratio, slowest first)
 ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+Column meanings (see `LANGUAGE.md` → *Native compile (implementation status)*):
+**rust** = transpiled Rust + `tishlang_runtime` (`Value`). **cranelift** / **wasi** = embedded bytecode + **`tishlang_vm`** (not CLIF lowering of opcodes).
+
 Test                      run     rust cranelift     wasi     Node      Bun     Deno  QuickJS  run/Node%
 ──────────────────── ────── ────── ────── ────── ────── ────── ────── ────── ──────────
 array_stress            10012       26    10011    10010       41       23       36       67     24419%

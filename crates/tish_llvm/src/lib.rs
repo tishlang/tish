@@ -1,8 +1,8 @@
-//! LLVM backend for Tish.
+//! LLVM/clang link path for the **embedded-bytecode + VM** native binary.
 //!
-//! Compiles Tish bytecode to native binary using clang (LLVM toolchain).
-//! Emits a C file with embedded bytecode, compiles with clang to object code,
-//! then links with tishlang_cranelift_runtime.
+//! Emits a C file that only holds the serialized chunk as bytes; clang produces `chunk.o`,
+//! then links with **`tishlang_cranelift_runtime`** (same `tish_run_chunk` + `tishlang_vm`
+//! entry as `--native-backend cranelift`). This is **not** LLVM IR lowering of Tish opcodes.
 
 use std::fs;
 use std::path::Path;
