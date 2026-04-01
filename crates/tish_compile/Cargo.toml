@@ -13,6 +13,8 @@ fs = []
 process = []
 regex = []
 ws = []
+metal = []
+mlx   = []
 
 [dependencies]
 tishlang_ast = { path = "../tish_ast", version = ">=0.1" }

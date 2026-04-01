@@ -1,6 +1,9 @@
 # Local compile outputs from README commands
+matmul-cpu
 matmul-rust
 matmul-cl
-matmul.js
-matmul.wasm
+matmul-gpu
+matmul-mlx
+matmul*.js
+matmul*.wasm
 tish_wasi_*/

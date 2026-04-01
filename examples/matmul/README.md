@@ -1,86 +1,97 @@
-# Matrix multiply (benchmark-shaped)
+# matmul — dense matrix multiply benchmark
 
-Dense N×N multiply with a naive triple loop: flat row-major arrays, `Date.now()` timing, and a small checksum printed to stdout. Uses ordinary Tish numbers (IEEE **double**). Typed `f32` buffers and primitive lowering are **goals** (see `docs/LANGUAGE.md` → *Native compile (implementation status)*), not what the compilers emit for this program yet.
+Three Tish programs that exercise the same workload on different compute targets.
 
-**Default `N` is 256** in `src/main.tish` so the VM and interpreter finish in reasonable time. For **1024×1024**, expect very long runs until true AOT / primitive arrays exist; use smaller `N` for day-to-day timing.
+| File | Target | Requires |
+|------|--------|----------|
+| `src/main.tish`       | CPU — f64 native Rust loop | — |
+| `src/matmul_gpu.tish` | Metal GPU — tiled 16×16 MSL compute kernel | `--feature metal` |
+| `src/matmul_mlx.tish` | Apple MLX (Metal) — mlx-rs lazy graph | `--feature mlx` |
 
-## What the numbers mean (why Cranelift can look “worst”)
+Both GPU variants compile to a **single native binary** that calls directly into
+Metal via Rust FFI — no subprocess, no Python, no WebGPU.
 
-| Artifact | Engine | Typical story |
-|----------|--------|----------------|
-| `tish run` | Bytecode **VM** | Baseline VM. |
-| `matmul-cl` (`--native-backend cranelift`) | **Same VM**, bytecode **embedded** in the binary | Cranelift is only used to emit an object file holding the chunk; **`tishlang_vm` runs it**. Throughput is VM-class — often **similar to or a bit worse than** `tish run` (startup, layout). |
-| `matmul-rust` (`--native-backend rust`) | Rust + **`tishlang_runtime`** (`Value`, `get_index`, …) | Inner loop still goes through the dynamic runtime, but **less dispatch than the VM** — often **faster than `matmul-cl`**, still usually **slower than Node/Bun** on this loop because V8 **JITs** tight `number` math. |
-| `matmul.js` + Node/Deno/Bun | Host JS engine | **JIT** can win big on this microbenchmark. |
+---
 
-So: **neither native backend is “pure Rust matmul” today.** The long-term objective is **primitive lowering** (e.g. `f64`/`f32` buffers, inferred or annotated types) and **real AOT** (bytecode → Cranelift IR or typed Rust), not boxed `Value` everywhere — see the language reference.
+## CPU (`main.tish`)
 
-## Features used
+```sh
+# Bytecode VM
+tish run src/main.tish
 
-None (secure mode).
+# Native binary (f64 hot loop, no Value boxing)
+tish compile src/main.tish -o matmul-cpu --native-backend rust
+./matmul-cpu
 
-## Run from the Tish repo root
-
-Replace `cargo run -p tishlang --release --` with your installed `tish` if you already have it on `PATH`.
-
-### 1. Bytecode VM (default)
-
-```bash
-cargo run -p tishlang --release -- run examples/matmul/src/main.tish
+# JavaScript
+tish compile src/main.tish -o matmul.js --target js
+node matmul.js
 ```
 
-### 2. Tree-walking interpreter
+Sweeps N = 128, 256, 512. The `number` / `number[]` type annotations lower the
+hot inner loop to `f64` / `Vec<f64>` in the generated Rust — no `Value` boxing.
 
-```bash
-cargo run -p tishlang --release -- run examples/matmul/src/main.tish --backend interp
+---
+
+## Metal GPU (`matmul_gpu.tish`)
+
+Uses `tish:metal` — a native Tish module backed by the [`metal`](https://crates.io/crates/metal)
+Rust crate. A 16×16 shared-memory tiled MSL compute kernel runs directly on the
+GPU. The timed pass is preceded by a warm-up pass so shader compilation is not
+included in the reported time.
+
+**Requirements:** macOS 13+ · any Metal-capable GPU (Apple Silicon recommended)
+```sh
+xcode-select --install   # Xcode Command Line Tools
 ```
 
-### 3. Native binary — Rust backend (default; `tishlang_runtime`)
+```sh
+# Interpreter
+tish run src/matmul_gpu.tish --feature metal
 
-Requires `rustc` / Cargo. Use when you need **`tish:*` / npm native modules**. Not peak numeric throughput vs V8.
-
-```bash
-cargo run -p tishlang --release -- compile examples/matmul/src/main.tish -o examples/matmul/matmul-rust
-./examples/matmul/matmul-rust
+# Native binary (Tish compiled to Rust, Metal kernel inline)
+tish compile src/matmul_gpu.tish \
+  -o matmul-gpu --native-backend rust --feature metal
+./matmul-gpu
 ```
 
-### 4. Native binary — “Cranelift” (embedded bytecode + VM)
+Sweeps N = 512, 1024, 2048, 4096.
 
-No `rustc` for *your* program. Produces a **standalone** binary that still runs **`tishlang_vm`**. Useful for **shipping** a single executable without a `tish` install — **not** for “fastest matmul.”
+---
 
-```bash
-cargo run -p tishlang --release -- compile examples/matmul/src/main.tish -o examples/matmul/matmul-cl --native-backend cranelift
-./examples/matmul/matmul-cl
+## Apple MLX (`matmul_mlx.tish`)
+
+Uses `tish:mlx` — a native Tish module backed by the
+[`mlx-rs`](https://crates.io/crates/mlx-rs) Rust crate (oxideai/mlx-rs),
+which wraps Apple's MLX C library. MLX uses lazy evaluation: the matmul graph
+is built then dispatched to Metal via `eval()`. Unified memory means no
+host↔device copy on Apple Silicon.
+
+**Requirements:** Apple Silicon Mac · macOS 14+ · Xcode Command Line Tools
+
+`mlx-rs` (via `mlx-sys`) vendors the MLX C source and builds it from source
+via CMake — no `brew install mlx` or Python needed. Cargo handles everything.
+
+```sh
+# Interpreter
+tish run src/matmul_mlx.tish --feature mlx
+
+# Native binary
+tish compile src/matmul_mlx.tish \
+  -o matmul-mlx --native-backend rust --feature mlx
+./matmul-mlx
 ```
 
-### 5. JavaScript (`--target js`) — same emitted file with Node, Deno, or Bun
+Sweeps N = 256, 512, 1024, 2048, 4096.
 
-```bash
-cargo run -p tishlang --release -- compile examples/matmul/src/main.tish -o examples/matmul/matmul --target js
-```
+---
 
-```bash
-node examples/matmul/matmul.js
-deno run examples/matmul/matmul.js
-bun examples/matmul/matmul.js
-```
+## What the numbers mean
 
-### 6. WASI WebAssembly + Wasmtime
-
-```bash
-cd examples/matmul
-cargo run -p tishlang --release --manifest-path ../../Cargo.toml -- compile src/main.tish -o matmul --target wasi
-wasmtime matmul.wasm
-```
-
-### Compare with hand-written Node (same algorithm)
-
-`compare/matmul.mjs` mirrors the loop and default `N`. Keep `N` aligned with `src/main.tish` when timing.
-
-```bash
-node examples/matmul/compare/matmul.mjs
-```
-
-## Deploy
-
-This example is local benchmarking only. For platform deploy patterns, see the other examples and [Deploy Overview](https://tishlang.github.io/tish-docs/deploy/overview/).
+| Backend | What runs on GPU? | Value boxing? |
+|---------|------------------|---------------|
+| CPU (Rust)   | nothing — SIMD via LLVM | none — `f64` / `Vec<f64>` |
+| Metal        | full matmul kernel (tiled MSL) | none — native Rust ↔ Metal buffers |
+| MLX          | full matmul (MLX lazy graph → Metal) | none — mlx-rs `Array` types |
+| Bytecode VM  | nothing | yes — `Value` enum throughout |
+| `--target js`| nothing (JIT in V8/JSC) | JS engine handles it |

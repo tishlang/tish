@@ -92,6 +92,23 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
             _ => None,
         };
     }
+    #[cfg(feature = "metal")]
+    if spec == "tish:metal" {
+        return match export_name {
+            "matmul_f32"  => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::metal_matmul_f32(args)))),
+            "device_name" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::metal_device_name(args)))),
+            _ => None,
+        };
+    }
+    #[cfg(feature = "mlx")]
+    if spec == "tish:mlx" {
+        return match export_name {
+            "matmul_f32"  => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::mlx_matmul_f32(args)))),
+            "device_name" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::mlx_device_name(args)))),
+            "version"     => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::mlx_version(args)))),
+            _ => None,
+        };
+    }
     #[cfg(feature = "ws")]
     if spec == "tish:ws" {
         return match export_name {

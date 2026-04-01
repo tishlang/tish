@@ -16,11 +16,14 @@ default = []
 # Full: all capabilities enabled (for development/trusted environments)
 full = ["http", "fs", "process", "regex", "ws"]
 # Individual capability flags
-http = ["tishlang_eval/http", "tishlang_runtime/http", "tishlang_compile/http", "tishlang_vm/http"]
-fs = ["tishlang_eval/fs", "tishlang_runtime/fs", "tishlang_compile/fs", "tishlang_vm/fs"]
+http    = ["tishlang_eval/http",    "tishlang_runtime/http",    "tishlang_compile/http",    "tishlang_vm/http"]
+fs      = ["tishlang_eval/fs",      "tishlang_runtime/fs",      "tishlang_compile/fs",      "tishlang_vm/fs"]
 process = ["tishlang_eval/process", "tishlang_runtime/process", "tishlang_compile/process", "tishlang_vm/process"]
-regex = ["tishlang_eval/regex", "tishlang_runtime/regex", "tishlang_compile/regex", "tishlang_vm/regex"]
-ws = ["tishlang_eval/ws", "tishlang_runtime/ws", "tishlang_compile/ws", "tishlang_vm/ws"]
+regex   = ["tishlang_eval/regex",   "tishlang_runtime/regex",   "tishlang_compile/regex",   "tishlang_vm/regex"]
+ws      = ["tishlang_eval/ws",      "tishlang_runtime/ws",      "tishlang_compile/ws",      "tishlang_vm/ws"]
+# GPU compute — Apple Silicon only
+metal   = ["tishlang_eval/metal",   "tishlang_runtime/metal",   "tishlang_compile/metal",   "tishlang_vm/metal"]
+mlx     = ["tishlang_eval/mlx",     "tishlang_runtime/mlx",     "tishlang_compile/mlx",     "tishlang_vm/mlx"]
 [dependencies]
 rustyline = { version = "17", features = ["with-file-history"] }
 tishlang_lexer = { path = "../tish_lexer", version = ">=0.1" }

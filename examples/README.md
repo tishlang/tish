@@ -8,7 +8,7 @@ Example applications you can run and compile with Tish. Build the CLI from the r
 |---------|-------------|----------|
 | [npm-usage](npm-usage/) | Uses `@tishlang/tish` from npm (`npm install`, scripts) | None |
 | [hello-world](hello-world/) | Minimal app that logs and exits | None |
-| [matmul](matmul/) | Dense matrix multiply: VM, Rust+runtime native, embedded-VM binary, JS, WASI | None |
+| [matmul](matmul/) | Dense matrix multiply across backends: CPU (f64 native), Metal GPU (MPS via Swift), Apple MLX (Metal via Python) | `fs`, `process` (GPU/MLX variants) |
 | [new-expression](new-expression/) | `new Uint8Array` / `new AudioContext` on every target; real `new` on `--target js` | None |
 | [http-hello](http-hello/) | Basic HTTP server with routing | `http` |
 | [json-api](json-api/) | REST API with JSON responses | `http` |

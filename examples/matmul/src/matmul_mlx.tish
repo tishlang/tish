@@ -1,0 +1,32 @@
+// Apple MLX matrix multiply — Metal GPU via mlx-rs.
+//
+// Uses `tish:mlx`, a native Tish module backed by the `mlx-rs` Rust crate
+// (oxideai/mlx-rs, wrapping Apple's MLX C library).
+// All computation dispatches to the Metal GPU through MLX's lazy evaluation
+// engine — unified memory, zero copy.  No Python, no subprocess.
+//
+// Run (interpreter):
+//   tish run src/matmul_mlx.tish --feature mlx
+//
+// Run (native binary):
+//   tish compile src/matmul_mlx.tish \
+//     -o examples/matmul/matmul-mlx \
+//     --native-backend rust --feature mlx
+//   ./examples/matmul/matmul-mlx
+//
+// Requirements:
+//   Apple Silicon Mac  ·  macOS 14+
+//   Xcode Command Line Tools only — mlx-rs (via mlx-sys) vendors and builds
+//   the MLX C library from source. No brew/pip install needed.
+
+import { matmul_f32, device_name, version } from 'tish:mlx'
+
+console.log("=== Apple MLX matmul (f32, Metal GPU) ===")
+console.log(`mlx-rs: ${version()}   device: ${device_name()}`)
+
+let sizes = [256, 512, 1024, 2048, 4096]
+for (let i = 0; i < sizes.length; i++) {
+  let N: number = sizes[i]
+  let result = matmul_f32(N)
+  console.log(`mlx-metal  ${N}x${N}  ms=${result.ms}  check=${result.check}`)
+}

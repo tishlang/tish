@@ -1,38 +1,40 @@
-// Naive dense matrix multiply (row-major flat arrays).
-// Numbers are IEEE doubles (standard Tish `number`), not packed f32.
+// CPU naive dense matrix multiply — row-major flat f64 arrays.
 //
-// Type annotations on the hot variables tell the Rust backend to emit native
-// f64 arithmetic and direct Vec<f64> indexing rather than boxed Value ops.
-// Without annotations the behaviour is identical but slower (Value path).
+// `: number` / `: number[]` annotations lower hot variables to
+// f64 / Vec<f64> on `--native-backend rust` (no boxed Value in the inner loop).
 //
-// Change N for workload size: 1024 matches the landing-page scenario for
-// native-compiled runs; the bytecode VM and tree interpreter are much slower
-// at large N — try 128–256 there first.
+// Sweep: 128 / 256 / 512.  For larger matrices:
+//   src/matmul_gpu.tish  — Metal MPS (Apple GPU, via swiftc)
+//   src/matmul_mlx.tish  — Apple MLX (Metal, via python3)
 
-let N: number = 256
-let len: number = N * N
+fn bench(N) {
+  let len: number = N * N
 
-let a: number[] = []
-let b: number[] = []
-let c: number[] = []
-for (let i: number = 0; i < len; i++) {
-  a.push((i % 997) / 997)
-  b.push((i % 991) / 991)
-  c.push(0)
-}
-
-let t0: number = Date.now()
-for (let i: number = 0; i < N; i++) {
-  for (let j: number = 0; j < N; j++) {
-    let sum: number = 0
-    for (let k: number = 0; k < N; k++) {
-      sum = sum + a[i * N + k] * b[k * N + j]
-    }
-    c[i * N + j] = sum
+  let a: number[] = []
+  let b: number[] = []
+  let c: number[] = []
+  for (let i: number = 0; i < len; i++) {
+    a.push((i % 997) / 997)
+    b.push((i % 991) / 991)
+    c.push(0)
   }
-}
-let t1: number = Date.now()
 
-// Cheap checksum so the work stays observable across backends
-let check = c[0] + c[N - 1] + c[(N - 1) * N] + c[len - 1]
-console.log(`matmul ${N}x${N} ms=${t1 - t0} check=${check}`)
+  let t0: number = Date.now()
+  for (let i: number = 0; i < N; i++) {
+    for (let j: number = 0; j < N; j++) {
+      let sum: number = 0
+      for (let k: number = 0; k < N; k++) {
+        sum = sum + a[i * N + k] * b[k * N + j]
+      }
+      c[i * N + j] = sum
+    }
+  }
+  let t1: number = Date.now()
+
+  let check = c[0] + c[N - 1] + c[(N - 1) * N] + c[len - 1]
+  console.log(`cpu ${N}x${N} ms=${t1 - t0} check=${check}`)
+}
+
+bench(128)
+bench(256)
+bench(512)

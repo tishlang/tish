@@ -570,6 +570,17 @@ impl Codegen {
                     "wsBroadcast" => Some("Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::ws_broadcast_native(args)))"),
                     _ => None,
                 },
+            "tish:metal" if self.has_feature("metal") => match export_name {
+                    "matmul_f32"  => Some("Value::Function(Rc::new(|args: &[Value]| tish_metal_matmul_f32(args)))"),
+                    "device_name" => Some("Value::Function(Rc::new(|args: &[Value]| tish_metal_device_name(args)))"),
+                    _ => None,
+                },
+            "tish:mlx" if self.has_feature("mlx") => match export_name {
+                    "matmul_f32"  => Some("Value::Function(Rc::new(|args: &[Value]| tish_mlx_matmul_f32(args)))"),
+                    "device_name" => Some("Value::Function(Rc::new(|args: &[Value]| tish_mlx_device_name(args)))"),
+                    "version"     => Some("Value::Function(Rc::new(|args: &[Value]| tish_mlx_version(args)))"),
+                    _ => None,
+                },
             _ => return None,
         };
         init.map(String::from)
@@ -826,6 +837,12 @@ impl Codegen {
         }
         if self.has_feature("ws") {
             self.write("use tishlang_runtime::{web_socket_client as tish_ws_client, web_socket_server_construct as tish_ws_server_construct};\n");
+        }
+        if self.has_feature("metal") {
+            self.write("use tishlang_runtime::{metal_matmul_f32 as tish_metal_matmul_f32, metal_device_name as tish_metal_device_name};\n");
+        }
+        if self.has_feature("mlx") {
+            self.write("use tishlang_runtime::{mlx_matmul_f32 as tish_mlx_matmul_f32, mlx_device_name as tish_mlx_device_name, mlx_version as tish_mlx_version};\n");
         }
         if self.has_feature("regex") {
             self.write("use tishlang_runtime::regexp_new;\n");
