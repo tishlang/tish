@@ -1,0 +1,2 @@
+let cmd = "a"
+if (cmd === "a" || cmd === "b") { console.log("hit") } else { console.log("miss") }

@@ -152,4 +152,4 @@ serve(8080, handleRequest)
 
 No `==`, `var`, `this`, `class`, prototypes, `instanceof`, `delete`, `for..in`, generators, `Symbol`, `BigInt`, `Map`, `Set` (as in spec); prefer Tish docs and tests under `examples/` and `tests/` for edge cases.
 
-**VM note:** The default bytecode VM applies peephole optimizations on jumps. A historical bug chained through `JumpIfFalse` like an unconditional jump and broke `===` combined with `||` in some positions (interpreter / `--no-optimize` were unaffected). See [ecma-alignment.md — Bytecode VM: jump peephole](ecma-alignment.md#bytecode-vm-jump-peephole-implementation).
+**VM note:** The default bytecode VM applies peephole jump chaining. An implementation bug (fixed) once followed `JumpIfFalse` like an unconditional `Jump`, which miscompiled `===` with `||` when nested as an outer `if` condition. See [ecma-alignment.md — Bytecode VM: jump peephole](ecma-alignment.md#bytecode-vm-jump-peephole-implementation).
