@@ -54,9 +54,17 @@ Tish is a minimal JS/TS-like language: same source runs in a **tree-walking inte
 
 ## HTTP (`import { … } from 'http'`)
 
-Requires **`http` feature**. **`fetch(url, opts?)`** → Promise → response `{ status, ok, headers, body, text, json }`. Body: stream **or** `text`/`json` — **one consumer** (second use throws). **`fetchAll(requests[])`**, **`serve(port, handler)`**.
+Requires **`http` feature**.
 
-**Top-level `await`:** interpreter `tish run … --backend interp`. **Native compile:** `async fn main()` + `await` inside.
+- **`fetch(url, opts?)`** → **`Promise`** → response object: **`status`**, **`ok`**, **`headers`**, **`body`**, **`text`**, **`json`**.
+- **`body`** (client response): opaque **`ReadableStream`**, **not** a string. Use **`body.getReader()`** and loop **`await reader.read()`** → **`{ done, value: number[] }`** (raw UTF-8 bytes). Or consume the whole body with **`await res.text()`** or **`await res.json()`** (each returns a **`Promise`**).
+- **Single-consumer rule:** after **`getReader()`**, do not use **`await res.text()`** / **`await res.json()`** on the same response (body is locked / consumed).
+- **`fetchAll(requests[])`** → **`Promise`** array of the same response shape.
+- **`serve(port, handler)`** — server **`req.body`** / response **`body`** are **strings** (not the client stream shape).
+
+**Top-level `await`:** interpreter `tish run …` (module programs). **Native compile:** `async fn main()` + `await` inside.
+
+**See also:** [`tish_runtime/tests/fetch_readable_stream.rs`](https://github.com/tishlang/tish/blob/main/crates/tish_runtime/tests/fetch_readable_stream.rs) (chunked client body over `getReader()`).
 
 ---
 
@@ -143,3 +151,5 @@ serve(8080, handleRequest)
 ## Omitted vs typical JS
 
 No `==`, `var`, `this`, `class`, prototypes, `instanceof`, `delete`, `for..in`, generators, `Symbol`, `BigInt`, `Map`, `Set` (as in spec); prefer Tish docs and tests under `examples/` and `tests/` for edge cases.
+
+**VM note:** The default bytecode VM applies peephole optimizations on jumps. A historical bug chained through `JumpIfFalse` like an unconditional jump and broke `===` combined with `||` in some positions (interpreter / `--no-optimize` were unaffected). See [ecma-alignment.md — Bytecode VM: jump peephole](ecma-alignment.md#bytecode-vm-jump-peephole-implementation).

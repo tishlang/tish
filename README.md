@@ -1,8 +1,6 @@
 # Tish
 
-> 🚧 Experimental
-
-A highly experimental and opinionated javascript/typescript-like multi-target native compilable language built for friends and family of the JS community.
+An opinionated javascript/typescript-like memory-safe blazingly fast native compilable language.
 
 See [docs/](docs/) for spec and ECMA alignment; user-facing docs: [tishlang.com/docs](https://tishlang.com/docs).
 

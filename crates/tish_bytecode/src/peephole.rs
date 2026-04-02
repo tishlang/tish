@@ -34,10 +34,10 @@ fn instruction_size(code: &[u8], ip: usize) -> Option<usize> {
     opcode.instruction_size(code, ip)
 }
 
-/// For a Jump or JumpIfFalse at `ip`, return the final target IP after following
-/// a chain of jumps (Jump -> Jump -> ... -> non-jump).
-fn final_jump_target(code: &[u8], jump_ip: usize) -> Option<usize> {
-    let mut ip = jump_ip;
+/// After a branch lands at `ip`, follow only **unconditional** `Jump` instructions.
+/// Must not follow `JumpIfFalse`: that opcode is conditional; treating it like `Jump`
+/// breaks short-circuit codegen (e.g. `a === 1 || b === 2` inside `if (...)`).
+fn skip_unconditional_jump_chain(code: &[u8], mut ip: usize) -> Option<usize> {
     let mut visited = 0u32;
     const MAX_CHAIN: u32 = 1000;
     loop {
@@ -45,20 +45,35 @@ fn final_jump_target(code: &[u8], jump_ip: usize) -> Option<usize> {
             return None;
         }
         visited += 1;
+        if ip > code.len() {
+            return None;
+        }
+        if ip == code.len() {
+            return Some(ip);
+        }
         let _ = instruction_size(code, ip)?;
         let op = Opcode::from_u8(code[ip])?;
-        match op {
-            Opcode::Jump => {
-                let offset = read_i16(code, ip + 1) as isize;
-                ip = (ip as isize + 3 + offset).max(0) as usize;
-            }
-            Opcode::JumpIfFalse => {
-                let offset = read_i16(code, ip + 1) as isize;
-                ip = (ip as isize + 3 + offset).max(0) as usize;
-            }
-            _ => return Some(ip),
+        if op != Opcode::Jump {
+            return Some(ip);
         }
+        let offset = read_i16(code, ip + 1) as isize;
+        ip = (ip as isize + 3 + offset).max(0) as usize;
     }
+}
+
+/// For a `Jump` or `JumpIfFalse` at `jump_ip`, return the final IP after resolving the
+/// taken branch and then skipping through any **unconditional** `Jump` chain only.
+fn final_jump_target(code: &[u8], jump_ip: usize) -> Option<usize> {
+    let _ = instruction_size(code, jump_ip)?;
+    let op = Opcode::from_u8(code[jump_ip])?;
+    let first_target = match op {
+        Opcode::Jump | Opcode::JumpIfFalse => {
+            let offset = read_i16(code, jump_ip + 1) as isize;
+            (jump_ip as isize + 3 + offset).max(0) as usize
+        }
+        _ => return Some(jump_ip),
+    };
+    skip_unconditional_jump_chain(code, first_target)
 }
 
 /// Replace instruction at [ip..ip+len) with Nops (preserves length, no offset updates).

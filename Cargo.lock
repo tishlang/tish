@@ -2787,6 +2787,7 @@ dependencies = [
  "tishlang_builtins",
  "tishlang_bytecode",
  "tishlang_core",
+ "tishlang_opt",
  "tishlang_parser",
  "tishlang_runtime",
  "wasm-bindgen",

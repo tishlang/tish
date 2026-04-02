@@ -28,6 +28,7 @@ wasm-bindgen = { version = "0.2", optional = true }
 
 [dev-dependencies]
 tishlang_parser = { path = "../tish_parser", version = ">=0.1" }
+tishlang_opt = { path = "../tish_opt", version = ">=0.1" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }

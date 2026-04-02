@@ -104,3 +104,11 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 7. **No `eval`, `with`** — Omitted for security and compileability.
 8. **No `var`** — Block-scoped `any` only.
 9. **`new` expressions** — Supported syntactically; semantics are host-dependent and not full ECMA `[[Construct]]` except on JavaScript compile output.
+
+## Bytecode VM: jump peephole (implementation)
+
+Default `tish run` uses the bytecode VM (`tishlang_vm`), not the tree-walking interpreter. Post-compile **peephole jump chaining** (`crates/tish_bytecode/src/peephole.rs`) may rewrite `Jump` / `JumpIfFalse` offsets to skip chains of jumps.
+
+**Constraint (matches ECMA control flow, not a language deviation):** chaining must follow only **unconditional** `Jump` instructions after the branch target. Treating **`JumpIfFalse` as part of that chain** was incorrect: the falsy target of `||` short-circuit can land immediately before an outer `if` condition’s `JumpIfFalse`, and “following through” that opcode rewrote jumps to the wrong bytecode offset. Symptom: expressions like `a === 1 || b === 2` evaluated correctly under `--backend interp` or `--no-optimize`, but wrongly under the default VM with peephole enabled. **Fixed** by resolving chains with `skip_unconditional_jump_chain` only. Regression: `crates/tish_vm/tests/peephole_jump_chain_logical_or.rs`.
+
+This was **not** a lexer/parser bug; the parser and AST were fine.
