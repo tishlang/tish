@@ -38,4 +38,4 @@ console.log("mutable:", mutable)
 fn greet(name) {
   return "Hello, " + name
 }
-console.log(greet("World"))
+console.log(greet("Universe"))

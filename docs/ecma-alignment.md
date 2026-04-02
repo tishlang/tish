@@ -10,12 +10,12 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 | §6 Types | Follow | Undefined→Null; `typeof null` is `"null"`. Boolean, Number, String, Object. No Symbol/BigInt in MVP. |
 | §7 Type conversion | Simplify | ToBoolean, ToNumber, ToString only as needed. No loose equality. |
 | §7.2 Testing | Follow | Strict Equality only |
-| §7.3 Operations on objects | Simplify | GetV, HasProperty, Call, CreateDataProperty. No Construct/private in MVP. |
+| §7.3 Operations on objects | Simplify | GetV, HasProperty, Call, CreateDataProperty. `new` is parsed and lowered to host `construct` (not full ECMA `[[Construct]]` on VM / interpreter / native Rust; JS compile target emits native `new`). |
 | §8 Executable code | Follow | Lexical envs, execution context. Omit Realms, RunJobs. |
 | §9 Ordinary/exotic objects | Simplify | Ordinary only; no Proxy |
 | §10 Source code | Follow | + indent/tab normalization |
 | §11 Lexical grammar | Follow | + `fn`/`function`, optional braces |
-| §12–15 Expressions, Statements | Follow subset | No `this`, `with`, `class` |
+| §12–15 Expressions, Statements | Follow subset | No `this`, `with`, `class`. `new` expression: Simplify (see §7.3). |
 | §16 Errors | Follow | throw, try/catch |
 | §17 Literals | Follow | number, string, boolean, null, [], {}. Omit template/BigInt. |
 | §18 Global | Follow | Single global |
@@ -57,8 +57,10 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **typeof** — Follow; `typeof null` returns `"null"` (not `"object"`) since Tish has no undefined
 - **async, await** — Follow (simplify); `await` works on Promises (`fetch`, `fetchAll`, user `Promise`, etc.)
 - **generators, yield** — Omit
-- **class, new, super, this** — Omit
+- **class, super, this** — Omit
+- **new** — Simplify (host `construct` on VM / interpreter / native Rust; native `new` on JS emit); see [LANGUAGE.md](LANGUAGE.md) “Semantics” and the site doc [Tish vs JavaScript](https://tishlang.com/docs/language/vs-javascript)
 - **delete, in, instanceof** — Omit or Simplify
+- **static import / export** — Simplify (builtins, `tish:*`, multi-file resolver); not arbitrary npm on all targets
 - **dynamic-import, import.meta** — Omit
 - **tagged-template, template-literal** — Omit
 
@@ -101,3 +103,4 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 6. **Strict equality only** — No `==` or implicit coercion.
 7. **No `eval`, `with`** — Omitted for security and compileability.
 8. **No `var`** — Block-scoped `any` only.
+9. **`new` expressions** — Supported syntactically; semantics are host-dependent and not full ECMA `[[Construct]]` except on JavaScript compile output.

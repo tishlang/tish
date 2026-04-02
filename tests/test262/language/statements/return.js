@@ -16,7 +16,7 @@ assert.sameValue(double(5), 10, "return with expression");
 function greet(name) {
     return "Hello, " + name;
 }
-assert.sameValue(greet("World"), "Hello, World", "return string");
+assert.sameValue(greet("Universe"), "Hello, Universe", "return string");
 
 // Early return
 function earlyReturn(x) {

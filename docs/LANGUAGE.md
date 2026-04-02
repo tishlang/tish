@@ -10,7 +10,7 @@ Tish is a minimal JS/TS-like language: same source runs in a **tree-walking inte
 
 ## Syntax (compact)
 
-**Keywords:** `fn` / `function`, `let`, `const`, `if` `else`, `while`, `do` `while`, `for`, `switch` `case` `default`, `return` `break` `continue`, `try` `catch` `throw`, `async` `await`, `import` `export`, `typeof`, `void`, `true` `false` `null`.
+**Keywords:** `fn` / `function`, `let`, `const`, `if` `else`, `while`, `do` `while`, `for`, `switch` `case` `default`, `return` `break` `continue`, `try` `catch` `throw`, `async` `await`, `import` `export`, `new`, `typeof`, `void`, `true` `false` `null`.
 
 **Literals:** numbers; strings `"`/`'` (escapes `\n` `\r` `\t` `\\` `\"` `\'`); arrays `[]`; objects `{ k: v }` (fixed keys at parse time); template literals `` `x ${e} y` ``; JSX supported in lexer.
 
@@ -34,6 +34,7 @@ Tish is a minimal JS/TS-like language: same source runs in a **tree-walking inte
 - `const` cannot be reassigned (runtime error).
 - Closures; lexical scope.
 - `void expr` evaluates `expr` and returns `null`.
+- **`new`:** Parsed like JavaScript (`new` chains, optional `(...)` with spread). On **VM**, **interpreter**, and **native Rust** output, construction uses host **`construct`** / `__construct` (not full ECMA `[[Construct]]`: no `this`, no prototypes). **`tish compile --target js`** emits the engine’s **`new`**. There is still **no `class`**, so idiomatic Tish rarely uses `new`; see [ecma-alignment.md](ecma-alignment.md) and the [Tish vs JavaScript](https://tishlang.com/docs/language/vs-javascript) site page for limitations.
 
 ---
 
@@ -116,6 +117,8 @@ For         := 'for' '(' init ';' cond ';' update ')' Stmt
             |  'for' '(' ('let'|'const') Ident 'of' Expr ')' Stmt
 TypeAnn     := ':' Type
 Type        := Ident | Type '[]' | '{' … '}' | Type '|' Type | '(' … ')' '=>' Type
+Expr        := … | NewExpression
+NewExpression := 'new' NewExpression | MemberExprNoCall ('(' CallArgs? ')')?
 ```
 
 ---
