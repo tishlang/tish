@@ -34,7 +34,7 @@ Tish is a minimal JS/TS-like language: same source runs in a **tree-walking inte
 - `const` cannot be reassigned (runtime error).
 - Closures; lexical scope.
 - `void expr` evaluates `expr` and returns `null`.
-- **`new`:** Parsed like JavaScript (`new` chains, optional `(...)` with spread). On **VM**, **interpreter**, and **native Rust** output, construction uses host **`construct`** / `__construct` (not full ECMA `[[Construct]]`: no `this`, no prototypes). **`tish compile --target js`** emits the engine’s **`new`**. There is still **no `class`**, so idiomatic Tish rarely uses `new`; see [ecma-alignment.md](ecma-alignment.md) and the [Tish vs JavaScript](https://tishlang.com/docs/language/vs-javascript) site page for limitations.
+- **`new`:** Parsed like JavaScript (`new` chains, optional `(...)` with spread). On **VM**, **interpreter**, and **native Rust** output, construction uses host **`construct`** / `__construct` (not full ECMA `[[Construct]]`: no `this`, no prototypes). **`tish build --target js`** emits the engine’s **`new`**. There is still **no `class`**, so idiomatic Tish rarely uses `new`; see [ecma-alignment.md](ecma-alignment.md) and the [Tish vs JavaScript](https://tishlang.com/docs/language/vs-javascript) site page for limitations.
 
 ---
 
@@ -70,7 +70,7 @@ Requires **`http` feature**. **`fetch(url, opts?)`** → Promise → response `{
 | `regex` | `RegExp` |
 | `full` | all of the above |
 
-Build: `cargo build --features full`. Compile: `tish compile … --feature http` (etc.).
+Build: `cargo build --features full`. CLI artifact output: `tish build … --feature http` (etc.).
 
 ---
 
@@ -80,10 +80,10 @@ Build: `cargo build --features full`. Compile: `tish compile … --feature http`
 
 | Route | What you get |
 |-------|----------------|
-| `tish compile --native-backend rust` (default) | Rust source emitted by `tishlang_compile` that calls **`tishlang_runtime`** (`get_index`, `set_index`, arithmetic on `Value`, etc.). `cargo build --release` optimizes the **glue**, not “the Tish program as a flat `f64` kernel.” |
-| `tish compile --native-backend cranelift` | Native binary that loads **embedded serialized bytecode** and runs **`tishlang_vm`** (`tish_cranelift_runtime`). Cranelift is used only to build a tiny object file holding the blob; **bytecode is not lowered to CLIF**. Throughput is **VM-class** (similar order to `tish run --backend vm`), not “rustc/LLVM on numeric loops.” |
-| `tish compile --native-backend llvm` | Same **embedded bytecode + VM** link pattern as Cranelift (see `tishlang_llvm` + `tishlang_cranelift_runtime`). |
-| `tish compile --target js` | Emitted JavaScript; the host (V8, etc.) may **JIT** tight loops. |
+| `tish build --native-backend rust` (default) | Rust source emitted by `tishlang_compile` that calls **`tishlang_runtime`** (`get_index`, `set_index`, arithmetic on `Value`, etc.). `cargo build --release` optimizes the **glue**, not “the Tish program as a flat `f64` kernel.” |
+| `tish build --native-backend cranelift` | Native binary that loads **embedded serialized bytecode** and runs **`tishlang_vm`** (`tish_cranelift_runtime`). Cranelift is used only to build a tiny object file holding the blob; **bytecode is not lowered to CLIF**. Throughput is **VM-class** (similar order to `tish run --backend vm`), not “rustc/LLVM on numeric loops.” |
+| `tish build --native-backend llvm` | Same **embedded bytecode + VM** link pattern as Cranelift (see `tishlang_llvm` + `tishlang_cranelift_runtime`). |
+| `tish build --target js` | Emitted JavaScript; the host (V8, etc.) may **JIT** tight loops. |
 
 **Interop:** `tish:*` and npm-style native imports require **`--native-backend rust`**. The Cranelift/LLVM native-binary paths are **pure Tish** only (no external native modules).
 
@@ -98,9 +98,9 @@ tish run main.tish
 echo 'console.log(1)' | tish run -   # stdin (like `node -`)
 echo 'console.log(1)' | tish         # stdin when piped (like `bun`)
 echo 'console.log(1)' | tish -      # same; `-` before clap (not a subcommand)
-tish compile main.tish -o app
-tish compile main.tish -o app --native-backend cranelift
-tish compile main.tish -o app --target wasm | wasi | js
+tish build main.tish -o app
+tish build main.tish -o app --native-backend cranelift
+tish build main.tish -o app --target wasm | wasi | js
 ```
 
 ---

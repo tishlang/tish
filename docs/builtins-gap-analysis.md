@@ -12,7 +12,7 @@ Integration tests in `crates/tish/tests/integration_test.rs` run each backend (i
 
 - **Name:** `test_mvp_programs_cranelift`
 - **Location:** `crates/tish/tests/integration_test.rs`
-- **What it runs:** For each file in the curated list: run interpreter (`tish run <file> --backend interp`), compile with `tish compile <file> -o <temp> --native-backend cranelift`, run the binary, assert stdout equality.
+- **What it runs:** For each file in the curated list: run interpreter (`tish run <file> --backend interp`), compile with `tish build <file> -o <temp> --native-backend cranelift`, run the binary, assert stdout equality.
 - **Test files (curated):** `fn_any`, `strict_equality`, `switch`, `do_while`, `typeof`, `try_catch`, `json`, `math`, `builtins`, `uri`, `inc_dec`, `exponentiation`, `void`, `rest_params`, `arrow_functions`, `array_methods`, `types`. Many other files cause stack-underflow or scope bugs in the Cranelift backend and are excluded until fixed.
 - **Maintenance:** When adding new pure-Tish tests that work with Cranelift, add them to the list in the test.
 
@@ -20,7 +20,7 @@ Integration tests in `crates/tish/tests/integration_test.rs` run each backend (i
 
 - **Name:** `test_mvp_programs_wasi`
 - **Location:** `crates/tish/tests/integration_test.rs`
-- **What it runs:** For each file in the curated list: run interpreter, compile with `tish compile <file> -o <temp> --target wasi`, run with `wasmtime <temp>.wasm`, assert stdout equality.
+- **What it runs:** For each file in the curated list: run interpreter, compile with `tish build <file> -o <temp> --target wasi`, run with `wasmtime <temp>.wasm`, assert stdout equality.
 - **Test files:** Same as Cranelift (WASI uses bytecode VM; same programs work).
 - **Skip behavior:** The test **skips** if `wasmtime` is not available (`wasmtime --version` check). If the `wasm32-wasip1` target is not installed, compile fails and that file is skipped with an informative message. CI without wasmtime still passes.
 

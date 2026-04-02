@@ -19,7 +19,7 @@ if (!fs.existsSync(binPath)) {
 
 // Convenience: "npx @tishlang/tish FILE [args]" → "tish run FILE [args]"
 const args = process.argv.slice(2);
-const subcommands = ['run', 'repl', 'compile', 'dump-ast'];
+const subcommands = ['run', 'repl', 'build', 'dump-ast'];
 const first = args[0];
 const looksLikeFile = first && !first.startsWith('-') && !subcommands.includes(first);
 

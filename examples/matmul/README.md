@@ -26,7 +26,7 @@ compiler via the `package.json` / sibling-directory lookup in the native module 
 ### CPU (Tish native compilation — f64 primitives)
 
 ```sh
-tish compile src/main.tish -o matmul-cpu --native-backend rust
+tish build src/main.tish -o matmul-cpu --native-backend rust
 ./matmul-cpu
 ```
 
@@ -34,7 +34,7 @@ tish compile src/main.tish -o matmul-cpu --native-backend rust
 
 ```sh
 # From examples/matmul/
-tish compile src/matmul_gpu.tish -o matmul-gpu --native-backend rust
+tish build src/matmul_gpu.tish -o matmul-gpu --native-backend rust
 ./matmul-gpu
 ```
 
@@ -45,7 +45,7 @@ First build takes a few minutes while CMake compiles MLX from source.
 
 ```sh
 # From examples/matmul/
-tish compile src/matmul_mlx.tish -o matmul-mlx --native-backend rust
+tish build src/matmul_mlx.tish -o matmul-mlx --native-backend rust
 ./matmul-mlx
 ```
 

@@ -2,7 +2,7 @@
 //
 // - `tish run` / native compile / bytecode: `new` lowers to host `construct`
 //   with stub `Uint8Array` and `AudioContext` (approximate; not real Web Audio / bytes).
-// - `tish compile --target js`: emits real `new` for browser APIs.
+// - `tish build --target js`: emits real `new` for browser APIs.
 // - For Node/Bun runtime checks (Date, URL, Map, Headers, …), see node-bun-new-patterns.tish.
 
 fn demoUint8Array() {

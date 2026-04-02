@@ -1593,7 +1593,7 @@ impl Evaluator {
                 self.construct_value(&c, &arg_vals)
             }
             Expr::JsxElement { .. } | Expr::JsxFragment { .. } => Err(EvalError::Error(
-                "JSX is not supported in the interpreter. Use 'tish compile --target js' to compile to JavaScript.".to_string(),
+                "JSX is not supported in the interpreter. Use 'tish build --target js' to compile to JavaScript.".to_string(),
             )),
             Expr::NativeModuleLoad { spec, export_name, .. } => {
                 self.load_builtin_export(spec.as_ref(), export_name.as_ref())

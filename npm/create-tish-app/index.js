@@ -74,10 +74,10 @@ npx @tishlang/tish run src/main.tish
 # or after installing: tish run src/main.tish
 \`\`\`
 
-## Compile to native
+## Build to native
 
 \`\`\`bash
-npx @tishlang/tish compile src/main.tish -o app
+npx @tishlang/tish build src/main.tish -o app
 ./app
 \`\`\`
 `,
@@ -92,7 +92,7 @@ npx @tishlang/tish compile src/main.tish -o app
   console.log('Next steps:');
   console.log(`  cd ${name}`);
   console.log('  npx @tishlang/tish run src/main.tish');
-  console.log('  # or: npx @tishlang/tish compile src/main.tish -o app && ./app');
+  console.log('  # or: npx @tishlang/tish build src/main.tish -o app && ./app');
 }
 
 main().catch(err => {

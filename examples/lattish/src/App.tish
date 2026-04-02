@@ -1,4 +1,4 @@
-// Compile with: tish compile --target js src/App.tish -o dist/App
+// Build with: tish build --target js src/App.tish -o dist/App
 // Stateful form with useState and hooks - vanilla DOM, no 3rd party libs
 
 import { useState, createRoot } from 'lattish'

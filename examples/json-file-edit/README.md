@@ -30,7 +30,7 @@ tish run src/main.tish --backend interp
 To compile to a native binary (includes fs when built with full):
 
 ```bash
-cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features full -- compile src/main.tish -o json-file-edit
+cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features full -- build src/main.tish -o json-file-edit
 ./json-file-edit
 ```
 

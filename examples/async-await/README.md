@@ -17,7 +17,7 @@ Compiles `parallel.tish` (`await fetchAll`) and `sequential.tish` (`await fetch`
 ## Local Development
 
 ```bash
-cargo run -p tishlang--features http -- compile examples/async-await/src/main.tish -o async_demo
+cargo run -p tishlang--features http -- build examples/async-await/src/main.tish -o async_demo
 ./async_demo
 ```
 

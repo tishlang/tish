@@ -1,5 +1,5 @@
 //! `new` lowering for non-JS targets: `construct(callee, args)` approximates JS `[[Construct]]`.
-//! Browser-exact behavior remains on `tish compile --target js`.
+//! Browser-exact behavior remains on `tish build --target js`.
 
 use std::cell::RefCell;
 use std::rc::Rc;

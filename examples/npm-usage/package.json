@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "start": "tish run src/main.tish",
-    "compile": "tish compile src/main.tish -o app",
+    "compile": "tish build src/main.tish -o app",
     "repl": "tish repl",
     "which": "which tish"
 

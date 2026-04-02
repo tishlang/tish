@@ -1,7 +1,7 @@
 {
   "name": "@tishlang/tish",
   "version": "1.0.12",
-  "description": "Tish - minimal TS/JS-compatible language. Run, REPL, compile to native.",
+  "description": "Tish - minimal TS/JS-compatible language. Run, REPL, build to native or other targets.",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",

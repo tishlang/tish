@@ -1,6 +1,6 @@
 # @tishlang/tish
 
-[Tish](https://github.com/tishlang/tish) is a minimal TypeScript/JavaScript–compatible language: run with an interpreter, use a REPL, or compile to native binaries.
+[Tish](https://github.com/tishlang/tish) is a minimal TypeScript/JavaScript–compatible language: run with an interpreter, use a REPL, or build native binaries and other targets.
 
 This npm package ships the **Tish CLI** for Node.js **22+**. It includes platform-specific native binaries; the `tish` command picks the right one for your OS and CPU.
 
@@ -25,14 +25,14 @@ npx @tishlang/tish hello.tish
 npx @tishlang/tish run src/main.tish
 ```
 
-Compile to a native executable:
+Build a native executable:
 
 ```bash
-npx @tishlang/tish compile app.tish -o app
+npx @tishlang/tish build app.tish -o app
 ./app
 ```
 
-Native compilation uses the Rust backend by default (requires [Rust](https://rustup.rs) and `cargo` on your PATH). The package includes the Tish workspace source (`Cargo.toml`, `crates/`, `justfile`) so `tish compile` can run `cargo build` for your program. For pure Tish without native imports, use `--native-backend cranelift` (no Rust toolchain needed).
+Native builds use the Rust backend by default (requires [Rust](https://rustup.rs) and `cargo` on your PATH). The package includes the Tish workspace source (`Cargo.toml`, `crates/`, `justfile`) so `tish build` can run `cargo build` for your program. For pure Tish without native imports, use `--native-backend cranelift` (no Rust toolchain needed).
 
 Start the REPL:
 

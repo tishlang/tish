@@ -1,13 +1,13 @@
-#tish compile src/matmul_mlx.tish -o matmul-mlx --native-backend rust
-#tish compile src/matmul_gpu.tish -o matmul-gpu --native-backend rust
-#tish compile src/main.tish -o matmul-main --native-backend rust
+#tish build src/matmul_mlx.tish -o matmul-mlx --native-backend rust
+#tish build src/matmul_gpu.tish -o matmul-gpu --native-backend rust
+#tish build src/main.tish -o matmul-main --native-backend rust
 
 build-mlx:
-    cargo run --release -p tishlang --manifest-path ../../Cargo.toml -- compile src/matmul_mlx.tish -o matmul-mlx --native-backend rust
+    cargo run --release -p tishlang --manifest-path ../../Cargo.toml -- build src/matmul_mlx.tish -o matmul-mlx --native-backend rust
 build-gpu:
-    cargo run --release -p tishlang --manifest-path ../../Cargo.toml -- compile src/matmul_gpu.tish -o matmul-gpu --native-backend rust
+    cargo run --release -p tishlang --manifest-path ../../Cargo.toml -- build src/matmul_gpu.tish -o matmul-gpu --native-backend rust
 build-main:
-    cargo run --release -p tishlang --manifest-path ../../Cargo.toml -- compile src/main.tish -o matmul-main --native-backend rust
+    cargo run --release -p tishlang --manifest-path ../../Cargo.toml -- build src/main.tish -o matmul-main --native-backend rust
 
 run-mlx:
     ./matmul-mlx

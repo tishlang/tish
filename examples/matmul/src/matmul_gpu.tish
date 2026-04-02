@@ -5,7 +5,7 @@
 // for dispatching custom MSL kernels.
 //
 // Compile:
-//   tish compile src/matmul_gpu.tish -o matmul-gpu --native-backend rust
+//   tish build src/matmul_gpu.tish -o matmul-gpu --native-backend rust
 // Run:
 //   ./matmul-gpu
 

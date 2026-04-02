@@ -5,7 +5,7 @@ Publish Tish so users can run it via **npx**:
 ```bash
 npx @tishlang/tish hello.tish
 npx @tishlang/tish run src/main.tish
-npx @tishlang/tish compile app.tish -o app
+npx @tishlang/tish build app.tish -o app
 npx @tishlang/create-tish-app my-app
 ```
 

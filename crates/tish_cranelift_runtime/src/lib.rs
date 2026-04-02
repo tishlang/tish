@@ -1,4 +1,4 @@
-//! Runtime linked into the `tish compile --native-backend cranelift` executable.
+//! Runtime linked into the `tish build --native-backend cranelift` executable.
 //!
 //! **`tish_run_chunk`** deserializes embedded bytecode and runs **`tishlang_vm`** — the same
 //! execution engine as `tish run --backend vm`. The crate name is historical; this is not

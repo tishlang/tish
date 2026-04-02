@@ -1,4 +1,4 @@
-//! Tish CLI - run, REPL, compile to native.
+//! Tish CLI - run, REPL, build to native or other targets.
 
 mod repl_completion;
 
@@ -46,7 +46,7 @@ struct ReplArgs {
 }
 
 #[derive(Parser)]
-struct CompileArgs {
+struct BuildArgs {
     #[arg(short, long, default_value = "tish_out")]
     output: String,
     #[arg(long, default_value = "native")]
@@ -67,8 +67,8 @@ pub(crate) enum Commands {
     Run(RunArgs),
     /// Interactive REPL
     Repl(ReplArgs),
-    /// Compile to native binary or JavaScript
-    Compile(CompileArgs),
+    /// Build native binary, wasm, wasi, or JavaScript output
+    Build(BuildArgs),
     /// Parse and dump AST
     #[command(name = "dump-ast")]
     DumpAst {
@@ -97,7 +97,7 @@ fn main() {
     let result = match cli.command {
         Some(Commands::Run(a)) => run_file(&a.file, &a.backend, &a.features, a.no_optimize || no_opt_env),
         Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env),
-        Some(Commands::Compile(a)) => compile_file(
+        Some(Commands::Build(a)) => build_file(
             &a.file,
             &a.output,
             &a.target,
@@ -453,7 +453,7 @@ fn compile_to_js(input_path: &Path, output_path: &str, optimize: bool) -> Result
 }
 
 #[allow(clippy::vec_init_then_push)]
-fn compile_file(
+fn build_file(
     input_path: &str,
     output_path: &str,
     target: &str,
@@ -580,10 +580,10 @@ mod cli_tests {
     use super::{Cli, Commands};
 
     #[test]
-    fn compile_js_target_parses() {
+    fn build_js_target_parses() {
         let cli = Cli::try_parse_from([
             "tish",
-            "compile",
+            "build",
             "m.tish",
             "--target",
             "js",
@@ -592,8 +592,8 @@ mod cli_tests {
         ])
         .unwrap();
         match cli.command {
-            Some(Commands::Compile(a)) => assert_eq!(a.file, "m.tish"),
-            _ => panic!("expected Compile"),
+            Some(Commands::Build(a)) => assert_eq!(a.file, "m.tish"),
+            _ => panic!("expected Build"),
         }
     }
 

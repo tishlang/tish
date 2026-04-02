@@ -21,11 +21,11 @@ Run without installing tish (from this directory; tish repo is `../..`):
 cargo run -p tishlang--manifest-path ../../Cargo.toml --release -- run src/main.tish
 
 # Compile and run
-cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features full -- compile src/main.tish -o hello
+cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features full -- build src/main.tish -o hello
 ./hello
 ```
 
-Or with tish installed: `tish run src/main.tish` and `tish compile src/main.tish -o hello`
+Or with tish installed: `tish run src/main.tish` and `tish build src/main.tish -o hello`
 
 ## Deploy
 

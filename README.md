@@ -38,7 +38,7 @@ Best for: development, scripting, quick iteration.
 Compile `.tish` files to standalone native executables:
 
 ```bash
-tish compile hello.tish -o hello
+tish build hello.tish -o hello
 ./hello
 # Hello, World!
 # 1 + 2 = 3
@@ -56,8 +56,8 @@ The compiled binary is **fully standalone** — no Tish or Rust runtime needed t
 | **cranelift** | `--native-backend cranelift` | Pure Tish only; faster build, no cargo; errors if native imports present |
 
 ```bash
-tish compile hello.tish -o hello                    # default: rust backend
-tish compile hello.tish -o hello --native-backend cranelift   # cranelift (pure Tish only)
+tish build hello.tish -o hello                    # default: rust backend
+tish build hello.tish -o hello --native-backend cranelift   # cranelift (pure Tish only)
 ```
 
 ### WebAssembly (browser)
@@ -65,7 +65,7 @@ tish compile hello.tish -o hello --native-backend cranelift   # cranelift (pure 
 Compile to real `.wasm` for the browser:
 
 ```bash
-tish compile hello.tish -o app --target wasm
+tish build hello.tish -o app --target wasm
 # Produces: app_bg.wasm, app.js, app.html
 ```
 
@@ -80,7 +80,7 @@ For JavaScript transpilation (no WASM), use `--target js` instead.
 Compile to a single `.wasm` for [Wasmtime](https://wasmtime.dev) or any WASI runtime:
 
 ```bash
-tish compile hello.tish -o app --target wasi
+tish build hello.tish -o app --target wasi
 wasmtime app.wasm
 # Hello, World!
 ```
@@ -100,7 +100,7 @@ brew install tish
 
 ```bash
 npx @tishlang/tish run hello.tish
-npx @tishlang/tish compile hello.tish -o hello
+npx @tishlang/tish build hello.tish -o hello
 ```
 
 Or create a new project:
@@ -118,15 +118,15 @@ cargo build --release -p tishlang
 
 The binary is `target/release/tish`. Add it to your PATH or run directly.
 
-**Note**: Compiling to native (`tish compile`) requires `rustc` and must be run from the workspace root (needs access to `crates/tish_runtime`).
+**Note**: Compiling to native (`tish build`) requires `rustc` and must be run from the workspace root (needs access to `crates/tish_runtime`).
 
 ## Developer tooling
 
-Editor tooling is **separate from the compiler** (`tish` = run / repl / compile / dump-ast only).
+Editor tooling is **separate from the compiler** (`tish` = run / repl / build / dump-ast only).
 
 | Tool | Purpose |
 |------|---------|
-| **`tish`** | Run, REPL, compile, `dump-ast` — the language implementation. |
+| **`tish`** | Run, REPL, build, `dump-ast` — the language implementation. |
 | **`tish-fmt`** | Formatter (`cargo build --release -p tish_fmt` → `tish-fmt`). |
 | **`tish-lint`** | Linter (`cargo build --release -p tish_lint` → `tish-lint`). |
 | **`tish-lsp`** | Language server — links `tish_fmt` / `tish_lint` as libraries for editor integration. |

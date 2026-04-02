@@ -24,8 +24,8 @@ Run without installing tish (from this directory; tish repo is parent):
 cargo run -p tishlang--manifest-path ../../Cargo.toml --release -- run src/main.tish
 
 # Compile and run
-cargo run -p tishlang--manifest-path ../../Cargo.toml --release -- compile src/main.tish -o data-processing
+cargo run -p tishlang--manifest-path ../../Cargo.toml --release -- build src/main.tish -o data-processing
 ./data-processing
 ```
 
-Or with tish installed: `tish run src/main.tish` and `tish compile src/main.tish -o data-processing`
+Or with tish installed: `tish run src/main.tish` and `tish build src/main.tish -o data-processing`

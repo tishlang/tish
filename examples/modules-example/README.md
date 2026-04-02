@@ -19,7 +19,7 @@ tish run src/main.tish
 ## Compile
 
 ```bash
-tish compile src/main.tish -o hello
+tish build src/main.tish -o hello
 ./hello
 ```
 

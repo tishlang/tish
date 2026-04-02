@@ -4,7 +4,7 @@ Compiles Tish + JSX to plain JavaScript using **Lattish** (the [lattish](https:/
 
 ## Features Used
 
-- **JSX** — Only when compiling to JavaScript (`tish compile --target js`); lowers to `h` / `Fragment` (merge `lattish`)
+- **JSX** — Only when compiling to JavaScript (`tish build --target js`); lowers to `h` / `Fragment` (merge `lattish`)
 - **Lattish** — Import `useState`, `createRoot`, etc. from `lattish`; the merged bundle includes the JSX runtime.
 
 ## What It Does
@@ -17,13 +17,13 @@ Compiles Tish + JSX to plain JavaScript using **Lattish** (the [lattish](https:/
 
 ```bash
 npm install   # installs lattish
-tish compile --target js src/App.tish -o dist/App
+tish build --target js src/App.tish -o dist/App
 ```
 
 Or with tish from the repo:
 
 ```bash
-cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features full -- compile --target js src/App.tish -o dist/App
+cargo run -p tishlang--manifest-path ../../Cargo.toml --release --features full -- build --target js src/App.tish -o dist/App
 ```
 
 Or use the npm script: `npm run build`

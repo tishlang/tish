@@ -30,11 +30,11 @@ For **browser-accurate** behavior, compile with **`--target js`** so the output 
 | `new Uint8Array(...array)` | Spread in `new` (ES2018) |
 | `new Headers()` | Undici/fetch stack (Node 18+, Bun) |
 
-After `tish compile … --target js`, run **`node dist/node-bun-new.js`** or **`bun dist/node-bun-new.js`**; each line should end with `true`.
+After `tish build … --target js`, run **`node dist/node-bun-new.js`** or **`bun dist/node-bun-new.js`**; each line should end with `true`.
 
 ```bash
 mkdir -p dist
-tish compile src/node-bun-new-patterns.tish --target js -o dist/node-bun-new.js
+tish build src/node-bun-new-patterns.tish --target js -o dist/node-bun-new.js
 node dist/node-bun-new.js
 ```
 
@@ -53,14 +53,14 @@ From this directory (Tish repo root is `../..`):
 cargo run -p tishlang --manifest-path ../../Cargo.toml --release -- run src/main.tish
 
 # Native binary
-cargo run -p tishlang --manifest-path ../../Cargo.toml --release -- compile src/main.tish -o new-demo
+cargo run -p tishlang --manifest-path ../../Cargo.toml --release -- build src/main.tish -o new-demo
 ./new-demo
 
 # JavaScript (real `new` in output)
-cargo run -p tishlang --manifest-path ../../Cargo.toml --release -- compile src/main.tish --target js -o new-demo.js
+cargo run -p tishlang --manifest-path ../../Cargo.toml --release -- build src/main.tish --target js -o new-demo.js
 ```
 
-With the `tish` CLI installed: `tish run src/main.tish`, `tish compile src/main.tish -o new-demo`, and `tish compile src/main.tish --target js -o new-demo.js`.
+With the `tish` CLI installed: `tish run src/main.tish`, `tish build src/main.tish -o new-demo`, and `tish build src/main.tish --target js -o new-demo.js`.
 
 ## Deploy
 

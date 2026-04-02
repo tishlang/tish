@@ -25,7 +25,7 @@ Thanks for your interest in contributing. Tish is licensed under the [Pay It For
 
 - **Using just** (recommended): Install [just](https://github.com/casey/just), then run `just --list` for recipes. Examples:
   - `just run run hello.tish` — run via interpreter (full features)
-  - `just compile hello.tish hello` — compile to native binary
+  - `just compile hello.tish hello` — build native binary (`tish build` via just recipe)
   - `just run-secure run file.tish` — run with no network/fs/process
 
 ## Code style
@@ -35,7 +35,7 @@ Thanks for your interest in contributing. Tish is licensed under the [Pay It For
 
 ## Tooling (separate from `tish` CLI)
 
-- **Compiler CLI**: `tish` — run, repl, compile, dump-ast only.
+- **Compiler CLI**: `tish` — run, repl, build, dump-ast only.
 - **Formatter**: `cargo build -p tishlang_fmt` → **`tish-fmt`** binary. Library: `crates/tish_fmt`.
 - **Linter**: `cargo build -p tishlang_lint` → **`tish-lint`** binary. Library: `crates/tish_lint`.
 - **LSP**: `cargo build -p tishlang_lsp` → **`tish-lsp`** (uses `tish_fmt` + `tish_lint` as deps). See [docs/tooling.md](docs/tooling.md).

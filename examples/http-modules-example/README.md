@@ -21,7 +21,7 @@ tish run src/main.tish
 Or compile:
 
 ```bash
-tish compile src/main.tish -o server --feature http --feature process
+tish build src/main.tish -o server --feature http --feature process
 ./server
 ```
 

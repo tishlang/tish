@@ -40,7 +40,7 @@ fn target_dir() -> PathBuf {
         .unwrap_or_else(|_| workspace_root().join("target"))
 }
 
-/// Cache dir for tish compile outputs (under target/ so CI rust-cache restores it).
+/// Cache dir for tish build outputs (under target/ so CI rust-cache restores it).
 fn integration_compile_cache_dir() -> PathBuf {
     target_dir().join("integration_compile_cache")
 }
@@ -56,7 +56,7 @@ fn file_content_hash(path: &Path) -> u64 {
 }
 
 /// Compile a .tish file with the given backend, using a persistent cache so we only run
-/// `tish compile` when the file or backend changed. Returns path to the compiled artifact
+/// `tish build` when the file or backend changed. Returns path to the compiled artifact
 /// (binary, .js, or .wasm) in a temp dir; caller may run it and then delete it.
 ///
 /// Cache is keyed by backend (native, cranelift, js, wasi) so e.g. cranelift and wasi
@@ -73,7 +73,7 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
             let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
             let cached = cache_base.join(format!("{}_{}{}", stem, hash8, ext));
             let args = vec![
-                OsString::from("compile"),
+                OsString::from("build"),
                 OsString::from(path),
                 OsString::from("-o"),
                 OsString::from(&cached),
@@ -84,7 +84,7 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
             let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
             let cached = cache_base.join(format!("{}_{}{}", stem, hash8, ext));
             let args = vec![
-                OsString::from("compile"),
+                OsString::from("build"),
                 OsString::from(path),
                 OsString::from("-o"),
                 OsString::from(&cached),
@@ -96,7 +96,7 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
         "js" => {
             let cached = cache_base.join(format!("{}_{}.js", stem, hash8));
             let args = vec![
-                OsString::from("compile"),
+                OsString::from("build"),
                 OsString::from(path),
                 OsString::from("--target"),
                 OsString::from("js"),
@@ -109,7 +109,7 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
             let out_base = cache_base.join(format!("{}_{}", stem, hash8));
             let artifact = out_base.with_extension("wasm");
             let args = vec![
-                OsString::from("compile"),
+                OsString::from("build"),
                 OsString::from(path),
                 OsString::from("-o"),
                 OsString::from(&out_base),
@@ -126,7 +126,7 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
             .args(compile_args)
             .current_dir(workspace_root())
             .output()
-            .expect("run tish compile");
+            .expect("run tish build");
         assert!(
             out.status.success(),
             "Compile failed for {} ({}): {}",
@@ -203,13 +203,13 @@ fn test_async_await_compile_via_binary() {
     if path.exists() && bin.exists() {
         let out = std::env::temp_dir().join("tish_async_test_out");
         let compile_result = Command::new(&bin)
-            .args(["compile", path.to_string_lossy().as_ref(), "-o", out.to_string_lossy().as_ref()])
+            .args(["build", path.to_string_lossy().as_ref(), "-o", out.to_string_lossy().as_ref()])
             .current_dir(workspace_root())
             .output();
-        let compile_out = compile_result.expect("run tish compile");
+        let compile_out = compile_result.expect("run tish build");
         assert!(
             compile_out.status.success(),
-            "tish compile failed: {}",
+            "tish build failed: {}",
             String::from_utf8_lossy(&compile_out.stderr)
         );
         // Run compiled binary to validate non-blocking fetchAll executes correctly
@@ -245,13 +245,13 @@ fn test_async_parallel_vs_sequential_timing() {
 
     // Compile both
     let compile_par = Command::new(&bin)
-        .args(["compile", parallel_src.to_string_lossy().as_ref(), "-o", out_parallel.to_string_lossy().as_ref()])
+        .args(["build", parallel_src.to_string_lossy().as_ref(), "-o", out_parallel.to_string_lossy().as_ref()])
         .current_dir(workspace_root())
         .output();
     assert!(compile_par.as_ref().unwrap().status.success(), "compile parallel: {}", String::from_utf8_lossy(&compile_par.as_ref().unwrap().stderr));
 
     let compile_seq = Command::new(&bin)
-        .args(["compile", sequential_src.to_string_lossy().as_ref(), "-o", out_sequential.to_string_lossy().as_ref()])
+        .args(["build", sequential_src.to_string_lossy().as_ref(), "-o", out_sequential.to_string_lossy().as_ref()])
         .current_dir(workspace_root())
         .output();
     assert!(compile_seq.as_ref().unwrap().status.success(), "compile sequential: {}", String::from_utf8_lossy(&compile_seq.as_ref().unwrap().stderr));

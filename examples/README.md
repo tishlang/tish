@@ -31,7 +31,7 @@ tish run src/main.tish --feature http
 Or compile to a native binary:
 
 ```bash
-tish compile src/main.tish -o server --feature http
+tish build src/main.tish -o server --feature http
 ./server
 ```
 

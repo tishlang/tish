@@ -3,7 +3,7 @@
 // Identical API to matmul_gpu.tish — swap the import line to switch backend.
 //
 // Compile:
-//   tish compile src/matmul_mlx.tish -o matmul-mlx --native-backend rust
+//   tish build src/matmul_mlx.tish -o matmul-mlx --native-backend rust
 // Run:
 //   ./matmul-mlx
 

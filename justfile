@@ -9,8 +9,8 @@
 #      just run run hello.tish           # runs via interpreter
 #      tish run hello.tish               # if tish is in PATH
 #
-# 2. BUILD (Compile to Native) - Create standalone executable:
-#      just run compile hello.tish -o hello   # compiles to native binary
+# 2. BUILD (native binary) - Create standalone executable:
+#      just run build hello.tish -o hello   # builds native binary
 #      ./hello                                 # run the standalone binary
 #
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -72,17 +72,17 @@ run-regex *ARGS:
     cargo run --release --no-default-features --features regex -- {{ARGS}}
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# COMPILE TISH PROGRAMS TO NATIVE BINARIES
+# BUILD TISH PROGRAMS TO NATIVE BINARIES (just recipe name: compile → invokes `tish build`)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Compile a .tish file to native binary (with all features)
+# Build a .tish file to native binary (with all features)
 # Usage: just compile hello.tish hello
 compile INPUT OUTPUT:
-    cargo run --release --features full -- compile {{INPUT}} -o {{OUTPUT}}
+    cargo run --release --features full -- build {{INPUT}} -o {{OUTPUT}}
 
 # Compile with secure mode (no dangerous features)
 compile-secure INPUT OUTPUT:
-    cargo run --release --no-default-features -- compile {{INPUT}} -o {{OUTPUT}}
+    cargo run --release --no-default-features -- build {{INPUT}} -o {{OUTPUT}}
 
 # Build compiler WASM (for playground, REPL, try-it). Output: tish_compiler.js, tish_compiler_bg.wasm
 # Requires: rustup target add wasm32-unknown-unknown, cargo install wasm-bindgen-cli
@@ -94,17 +94,17 @@ build-compiler-wasm OUT_DIR:
 # Compile to WebAssembly (browser) - produces .wasm, .js, .html
 # Requires: rustup target add wasm32-unknown-unknown, cargo install wasm-bindgen-cli
 compile-wasm INPUT OUTPUT:
-    cargo run --release -- compile {{INPUT}} -o {{OUTPUT}} --target wasm
+    cargo run --release -- build {{INPUT}} -o {{OUTPUT}} --target wasm
 
 # Compile to WebAssembly (Wasmtime/WASI) - single .wasm, run with: wasmtime OUTPUT.wasm
 # Requires: rustup target add wasm32-wasip1, wasmtime (curl -sSf https://wasmtime.dev/install.sh | bash)
 compile-wasi INPUT OUTPUT:
-    cargo run --release -- compile {{INPUT}} -o {{OUTPUT}} --target wasi
+    cargo run --release -- build {{INPUT}} -o {{OUTPUT}} --target wasi
 
 # Compile with specific features
 # Usage: just compile-with "http fs" hello.tish hello
 compile-with FEATURES INPUT OUTPUT:
-    cargo run --release --no-default-features --features "{{FEATURES}}" -- compile {{INPUT}} -o {{OUTPUT}}
+    cargo run --release --no-default-features --features "{{FEATURES}}" -- build {{INPUT}} -o {{OUTPUT}}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TESTS
