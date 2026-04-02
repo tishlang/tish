@@ -2,7 +2,7 @@
   "name": "@tishlang/create-tish-app",
   "version": "0.1.0",
   "description": "Scaffold a new Tish project",
-  "license": "SEE LICENSE IN ../../../LICENSE",
+  "license": "PIF",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tishlang/tish.git"
