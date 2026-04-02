@@ -77,7 +77,7 @@ On **push to `main`**, the CI workflow runs a **release** job that:
    - `feat:` or `feat(scope):` → minor
    - `BREAKING CHANGE:` or `feat!:` / `fix!:` → major
 2. **GitHub release** — Creates a GitHub release with generated notes and attaches **tish-platform-binaries.zip** (all platform binaries).
-3. **npm publish** — When **`NPM_TOKEN`** is configured as a repository secret, publishes `@tishlang/tish`, `@tishlang/create-tish-app`, and unscoped `create-tish-app` to the npm registry.
+3. **npm publish** — When **`NPM_TOKEN`** is configured as a repository secret, publishes `@tishlang/tish` and `@tishlang/create-tish-app`. The workflow also **attempts** to publish the unscoped package **`create-tish-app`** (so `npx create-tish-app` works without a scope). That second publish is **non-fatal**: npm often returns **403** if the token is a **granular** token limited to the `@tishlang` scope, or if your npm account does not own the unscoped package name. Fix by using a token with publish rights on **`create-tish-app`**, or by transferring/claiming that package on npm under the same maintainer as `@tishlang`.
 
 To enable npm publishing: create an [npm access token](https://www.npmjs.com/settings/~/tokens) (automation type), then add it as a secret named **`NPM_TOKEN`** in the repo (Settings → Secrets and variables → Actions). The release job will skip npm publish if the secret is missing (GitHub release still runs).
 

@@ -44,15 +44,22 @@ jobs:
       - name: Publish @tishlang/tish from tarball
         run: npm publish tish-npm-package.tgz --access public
 
-      - name: Sync version and publish create-tish-app (@tishlang + unscoped)
+      # Scoped package: token must have publish on @tishlang (granular tokens usually include this).
+      - name: Publish @tishlang/create-tish-app
         run: |
           TAG="${{ github.event.release.tag_name }}"
           VERSION="${TAG#v}"
-          # Publish from a clean dir outside workspace to avoid "ignoring workspace config" auth issues
           cp -r npm/create-tish-app /tmp/create-tish-app-publish
           cd /tmp/create-tish-app-publish
           npm version $VERSION --no-git-tag-version --allow-same-version
           npm publish --access public
+
+      # Unscoped name requires the same npm user/org to own https://www.npmjs.com/package/create-tish-app
+      # and a token with permission to that package. Granular tokens scoped only to @tishlang get E403 here.
+      - name: Publish unscoped create-tish-app (optional)
+        continue-on-error: true
+        run: |
+          cd /tmp/create-tish-app-publish
           node -e "
             const fs = require('fs');
             const p = require('./package.json');
