@@ -4,17 +4,6 @@
 const fs = require('fs');
 const path = require('path');
 
-const projectName = process.argv[2] || getProjectNameFromCwd();
-
-function getProjectNameFromCwd() {
-  const cwd = process.cwd();
-  const base = path.basename(cwd);
-  if (base && base !== '.' && !fs.existsSync(path.join(cwd, 'src'))) {
-    return base;
-  }
-  return null;
-}
-
 function prompt(question) {
   const readline = require('readline');
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -27,13 +16,23 @@ function prompt(question) {
 }
 
 async function main() {
-  let name = projectName;
+  let name = (process.argv[2] && String(process.argv[2]).trim()) || '';
   if (!name) {
     name = await prompt('Project name: ');
-    if (!name) {
-      console.error('Please provide a project name: npx @tishlang/create-tish-app my-app');
-      process.exit(1);
-    }
+    name = name.trim();
+  }
+  if (!name) {
+    console.error('Please provide a project name (argument or when prompted). Example: npx @tishlang/create-tish-app my-app');
+    process.exit(1);
+  }
+
+  if (name.includes(path.sep) || name.includes('/') || name.includes('\\')) {
+    console.error('Project name must be a single folder name, not a path.');
+    process.exit(1);
+  }
+  if (name === '.' || name === '..') {
+    console.error('Invalid project name.');
+    process.exit(1);
   }
 
   const dir = path.resolve(process.cwd(), name);
