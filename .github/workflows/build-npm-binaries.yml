@@ -44,8 +44,10 @@ jobs:
           tool: nextest
 
       # Build test suite only (no run). Test and build jobs restore this cache and use cached cargo.
+      # - tishlang: CLI integration tests (e.g. run_optimize_stdout_parity) need --features full (process, etc.).
+      # - tishlang_vm: bytecode peephole regressions (peephole_jump_chain_logical_or).
       - name: Build tests
-        run: cargo nextest run --no-run -p tishlang --features full --profile ci
+        run: cargo nextest run --no-run -p tishlang -p tishlang_vm --features full --profile ci
 
   version:
     name: Get version
@@ -157,7 +159,7 @@ jobs:
       # Restore cache from compile job, then run tests and coverage.
       - name: Run tests and coverage
         run: |
-          cargo llvm-cov nextest -p tishlang --features full --no-fail-fast --profile ci \
+          cargo llvm-cov nextest -p tishlang -p tishlang_vm --features full --no-fail-fast --profile ci \
             --lcov --output-path lcov.info
           mkdir -p test-results
           cp target/nextest/ci/junit.xml test-results/junit.xml

@@ -172,8 +172,12 @@ Default: **no features** (secure mode). Use `--features full` for development.
 
 ## Test
 
+CI (`.github/workflows/build-npm-binaries.yml`) runs `cargo nextest` on **`tishlang`** and **`tishlang_vm`** with `--features full` (see workflow for exact command).
+
 ```bash
-cargo test -p tishlang
+cargo nextest run -p tishlang -p tishlang_vm --features full --profile ci
+# or without nextest:
+cargo test -p tishlang -p tishlang_vm --features full
 ```
 
 Tests:
