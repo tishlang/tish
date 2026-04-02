@@ -4,21 +4,21 @@
 class Tish < Formula
   desc "Tish - minimal TS/JS-compatible language. Run, REPL, compile to native."
   homepage "https://github.com/tishlang/tish"
-  version "1.3.0"
+  version "1.3.1"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/tishlang/tish/releases/download/v1.3.0/tish-darwin-arm64"
-      sha256 "b9ff55dd773d0c9995b242c8d03cdc48dd66e7995f09dfd8e7e62d2c7f89063c"
+      url "https://github.com/tishlang/tish/releases/download/v1.3.1/tish-darwin-arm64"
+      sha256 "988b6785c5b6fc07136dd259e941246039d8ae11ac24e61d6af17aefd32df7fb"
 
       def install
         bin.install "tish-darwin-arm64" => "tish"
       end
     end
     if Hardware::CPU.intel?
-      url "https://github.com/tishlang/tish/releases/download/v1.3.0/tish-darwin-x64"
-      sha256 "cbf2e80ad844e2857981937eab2f7039ba5ca34c9a697891d6d890fcb460f925"
+      url "https://github.com/tishlang/tish/releases/download/v1.3.1/tish-darwin-x64"
+      sha256 "cb44cbf99373dc6e733505f4c96d9c34d4258d3a8cae82d09123c0e6d3667a7d"
 
       def install
         bin.install "tish-darwin-x64" => "tish"
@@ -28,16 +28,16 @@ class Tish < Formula
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/tishlang/tish/releases/download/v1.3.0/tish-linux-arm64"
-      sha256 "e0a9ca4ea4aeec149a7443e8bd87a1ccf36856feadd02d59053dacee9a3130a5"
+      url "https://github.com/tishlang/tish/releases/download/v1.3.1/tish-linux-arm64"
+      sha256 "80cbfd4166bd7c2b8deb162cb5a75f38c8b3d657b9d70a43023154a84f2a52c9"
 
       def install
         bin.install "tish-linux-arm64" => "tish"
       end
     end
     if Hardware::CPU.intel?
-      url "https://github.com/tishlang/tish/releases/download/v1.3.0/tish-linux-x64"
-      sha256 "4c9328e793eb66433c1ea71fb184c5d4dac49ffdcd30c9005c5cddd6d6b55a80"
+      url "https://github.com/tishlang/tish/releases/download/v1.3.1/tish-linux-x64"
+      sha256 "8d87cd59ff8396ad92818eeff65e890931d63c0944c001025425b42dbc49f339"
 
       def install
         bin.install "tish-linux-x64" => "tish"
