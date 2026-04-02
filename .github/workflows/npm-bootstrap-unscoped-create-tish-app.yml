@@ -1,0 +1,55 @@
+# One-time (or rare): create the unscoped npm package `create-tish-app` using the same NPM_TOKEN as CI.
+# npm creates a package on first successful publish. Granular tokens often cannot publish a name until it
+# exists under your account — run this once with a token that may publish new public packages (classic
+# "Automation" token, or granular token configured to allow new packages), then add `create-tish-app` to
+# the token's package list for day-to-day releases if you use granular tokens.
+#
+# Actions → this workflow → Run workflow → choose a version (e.g. match your next release).
+
+name: Bootstrap unscoped create-tish-app on npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Semver to publish (e.g. 1.3.2). Must not already exist on npm for create-tish-app."
+        required: true
+        type: string
+
+jobs:
+  publish:
+    name: Publish create-tish-app (unscoped)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish unscoped package (creates package on first run)
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.version }}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
+            echo "Version must look like semver (e.g. 1.3.2)"
+            exit 1
+          fi
+          cp -r npm/create-tish-app /tmp/create-tish-app-bootstrap
+          cd /tmp/create-tish-app-bootstrap
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          node -e "
+            const fs = require('fs');
+            const p = require('./package.json');
+            p.name = 'create-tish-app';
+            fs.writeFileSync('./package.json', JSON.stringify(p, null, 2));
+          "
+          npm publish --access public
+          echo "Published create-tish-app@$VERSION. npx create-tish-app should work for this version."

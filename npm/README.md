@@ -81,6 +81,16 @@ On **push to `main`**, the CI workflow runs a **release** job that:
 
 To enable npm publishing: create an [npm access token](https://www.npmjs.com/settings/~/tokens) (automation type), then add it as a secret named **`NPM_TOKEN`** in the repo (Settings → Secrets and variables → Actions). The release job will skip npm publish if the secret is missing (GitHub release still runs).
 
+### First-time unscoped package `create-tish-app`
+
+The unscoped name **`create-tish-app`** is a **separate** npm package from **`@tishlang/create-tish-app`**. npm **creates** it on the **first successful publish** of that name under your account.
+
+1. Use an **`NPM_TOKEN`** that is allowed to **publish new public packages** for your npm user (a **classic** [automation token](https://docs.npmjs.com/creating-and-viewing-access-tokens) is the usual choice for the first publish). Some **granular** tokens only list existing packages and return **403** until the package exists — chicken and egg.
+2. In GitHub: **Actions** → workflow **“Bootstrap unscoped create-tish-app on npm”** → **Run workflow** → enter a **version** (e.g. `1.3.2`) that is **not** already published for `create-tish-app`.
+3. After the package exists, you can switch to a **granular** token that explicitly includes **`create-tish-app`** if you prefer; the normal [NPM release](../.github/workflows/npm-release.yml) job will then publish both scoped and unscoped packages.
+
+If the name is already owned by another npm user, you cannot claim it with your token — keep using **`npx @tishlang/create-tish-app`** only.
+
 ## Manual publishing
 
 1. Ensure `npm/tish/platform/` contains binaries for every supported platform (from CI artifact or local builds).

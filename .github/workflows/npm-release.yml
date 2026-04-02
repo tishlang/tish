@@ -56,8 +56,8 @@ jobs:
 
       # Unscoped name requires the same npm user/org to own https://www.npmjs.com/package/create-tish-app
       # and a token with permission to that package. Granular tokens scoped only to @tishlang get E403 here.
+      # This step always exits 0 so the release job stays green; use ::warning:: for visibility in the log.
       - name: Publish unscoped create-tish-app (optional)
-        continue-on-error: true
         run: |
           cd /tmp/create-tish-app-publish
           node -e "
@@ -66,7 +66,11 @@ jobs:
             p.name = 'create-tish-app';
             fs.writeFileSync('./package.json', JSON.stringify(p, null, 2));
           "
-          npm publish --access public
+          if npm publish --access public; then
+            echo "Published unscoped create-tish-app (npx create-tish-app)."
+          else
+            echo "::warning::Unscoped create-tish-app publish failed (usually E403: NPM_TOKEN cannot publish that package). Scoped package @tishlang/create-tish-app is already published — use npx @tishlang/create-tish-app. To fix: grant the token publish access to https://www.npmjs.com/package/create-tish-app"
+          fi
 
       - name: Update release description with npm URL
         env:
