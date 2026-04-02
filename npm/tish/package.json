@@ -11,10 +11,14 @@
     "access": "public"
   },
   "bin": {
-    "tish": "./bin/tish.js"
+    "tish": "./bin/tish"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install-bin.js"
   },
   "files": [
     "bin",
+    "scripts/install-bin.js",
     "platform",
     "README.md",
     "LICENSE",

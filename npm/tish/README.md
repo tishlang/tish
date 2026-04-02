@@ -2,7 +2,7 @@
 
 [Tish](https://github.com/tishlang/tish) is a minimal TypeScript/JavaScript–compatible language: run with an interpreter, use a REPL, or build native binaries and other targets.
 
-This npm package ships the **Tish CLI** for Node.js **22+**. It includes platform-specific native binaries; the `tish` command picks the right one for your OS and CPU.
+This npm package ships the **Tish CLI**. It includes platform-specific native binaries under `platform/`; **`npm install`** runs `postinstall`, which copies the correct binary to `bin/tish`. That file is what runs when you invoke `tish` — the CLI itself is native, not Node. Node **22+** is required for install scripts and tooling (e.g. semantic-release in this repo); the `tish` binary has no Node runtime dependency.
 
 ## Install
 

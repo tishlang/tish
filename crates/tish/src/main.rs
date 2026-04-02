@@ -77,6 +77,20 @@ pub(crate) enum Commands {
     },
 }
 
+/// `tish script.tish` → insert `run` so it matches `tish run script.tish` (npx / npm UX).
+fn argv_with_implicit_run(mut argv: Vec<String>) -> Vec<String> {
+    if argv.len() >= 2 {
+        let first = argv[1].as_str();
+        const SUBCOMMANDS: &[&str] = &["run", "repl", "build", "dump-ast"];
+        let looks_like_file =
+            !first.starts_with('-') && !SUBCOMMANDS.iter().any(|&s| s == first);
+        if looks_like_file {
+            argv.insert(1, "run".to_string());
+        }
+    }
+    argv
+}
+
 fn main() {
     let no_opt_env = std::env::var_os("TISH_NO_OPTIMIZE")
         .map(|v| v == "1" || v == "true" || v == "yes")
@@ -93,7 +107,8 @@ fn main() {
         return;
     }
 
-    let cli = Cli::parse();
+    let argv = argv_with_implicit_run(argv);
+    let cli = Cli::parse_from(argv);
     let result = match cli.command {
         Some(Commands::Run(a)) => run_file(&a.file, &a.backend, &a.features, a.no_optimize || no_opt_env),
         Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env),
@@ -577,7 +592,30 @@ fn build_file(
 mod cli_tests {
     use clap::Parser;
 
-    use super::{Cli, Commands};
+    use super::{argv_with_implicit_run, Cli, Commands};
+
+    #[test]
+    fn implicit_run_inserts_run_before_file() {
+        let argv = argv_with_implicit_run(vec![
+            "tish".to_string(),
+            "hello.tish".to_string(),
+        ]);
+        let cli = Cli::try_parse_from(argv).unwrap();
+        match cli.command {
+            Some(Commands::Run(a)) => assert_eq!(a.file, "hello.tish"),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn explicit_subcommand_not_treated_as_file() {
+        let argv = argv_with_implicit_run(vec![
+            "tish".to_string(),
+            "repl".to_string(),
+        ]);
+        let cli = Cli::try_parse_from(argv).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Repl(_))));
+    }
 
     #[test]
     fn build_js_target_parses() {

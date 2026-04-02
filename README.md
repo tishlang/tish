@@ -194,7 +194,7 @@ Releases are **GitHub-led** and do not modify `main`. The main CI does not push 
 1. **On push to `main`** (with [conventional commits](#conventional-commits) that trigger a release): CI runs semantic-release in dry-run to get the next version, creates/updates a branch `release/vX.Y.Z`, and creates a **prerelease** on GitHub via the API (with the platform zip attached). There is no version bump or tag on `main`.
 2. **When you’re ready**: In GitHub, open the prerelease, attach any extra artifacts if needed, then use **Set as latest release** (uncheck “Set as a pre-release”). That promotes the prerelease to a full release.
 3. **Publish workflows** (run when a full release is published or edited to no longer be a prerelease):
-   - **NPM**: Publishes `@tishlang/tish` and `@tishlang/create-tish-app` to npm.
+   - **NPM**: Publishes `@tishlang/tish`, `@tishlang/create-tish-app`, and unscoped `create-tish-app` (same contents as the scoped scaffold package) to npm.
    - **Crates.io**: Publishes all `tishlang_*` crates to [crates.io](https://crates.io/crates/tishlang).
    - **Homebrew**: Updates `Formula/tish.rb` in this repo (tap = this repo).
 

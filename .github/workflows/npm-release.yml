@@ -44,7 +44,7 @@ jobs:
       - name: Publish @tishlang/tish from tarball
         run: npm publish tish-npm-package.tgz --access public
 
-      - name: Sync version and publish create-tish-app
+      - name: Sync version and publish create-tish-app (@tishlang + unscoped)
         run: |
           TAG="${{ github.event.release.tag_name }}"
           VERSION="${TAG#v}"
@@ -52,6 +52,13 @@ jobs:
           cp -r npm/create-tish-app /tmp/create-tish-app-publish
           cd /tmp/create-tish-app-publish
           npm version $VERSION --no-git-tag-version --allow-same-version
+          npm publish --access public
+          node -e "
+            const fs = require('fs');
+            const p = require('./package.json');
+            p.name = 'create-tish-app';
+            fs.writeFileSync('./package.json', JSON.stringify(p, null, 2));
+          "
           npm publish --access public
 
       - name: Update release description with npm URL
@@ -61,6 +68,8 @@ jobs:
           TAG="${{ github.event.release.tag_name }}"
           VERSION="${TAG#v}"
           NPM_URL="https://www.npmjs.com/package/@tishlang/tish/v/${VERSION}"
+          CTA_SCOPED="https://www.npmjs.com/package/@tishlang/create-tish-app/v/${VERSION}"
+          CTA_UNSCOPED="https://www.npmjs.com/package/create-tish-app/v/${VERSION}"
           CRATES_URL="https://crates.io/crates/tishlang/${VERSION}"
           RELEASE_ID="${{ github.event.release.id }}"
           REPO="${{ github.repository }}"
@@ -69,7 +78,7 @@ jobs:
           NEW_BODY="${CURRENT_BODY}
 
           ---
-          Published to npm: ${NPM_URL} | crates.io: ${CRATES_URL}"
+          Published to npm: ${NPM_URL} | create-tish-app: ${CTA_SCOPED} · ${CTA_UNSCOPED} | crates.io: ${CRATES_URL}"
           curl -s -X PATCH \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \

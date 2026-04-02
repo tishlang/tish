@@ -16,7 +16,7 @@ npx @tishlang/create-tish-app my-app
 | `tish/` | Main CLI — single package with binaries for all platforms in `platform/<os>-<arch>/` |
 | `create-tish-app/` | Scaffolds a new Tish project |
 
-The main `@tishlang/tish` package ships one npm artifact. It contains a Node wrapper (`bin/tish.js`) and a `platform/` directory with a binary per supported platform (e.g. `platform/darwin-arm64/tish`, `platform/win32-x64/tish.exe`). The wrapper picks the right binary at runtime.
+The main `@tishlang/tish` package ships one npm artifact. It includes a `platform/` directory with a binary per supported platform (e.g. `platform/darwin-arm64/tish`, `platform/win32-x64/tish.exe`). On **`npm install`**, `postinstall` copies the binary for your OS/arch to `bin/tish`, which is the `tish` command — no Node process per invocation. If you use **`npm install --ignore-scripts`**, run `node scripts/install-bin.js` inside the package or `bin/tish` will be missing. When developing the repo without running `./npm/scripts/build-binaries.sh` first, `postinstall` skips copying and prints a warning (install still succeeds); run `build-binaries.sh` then `node npm/tish/scripts/install-bin.js` to materialize `bin/tish`.
 
 ## Building binaries
 
@@ -77,7 +77,7 @@ On **push to `main`**, the CI workflow runs a **release** job that:
    - `feat:` or `feat(scope):` → minor
    - `BREAKING CHANGE:` or `feat!:` / `fix!:` → major
 2. **GitHub release** — Creates a GitHub release with generated notes and attaches **tish-platform-binaries.zip** (all platform binaries).
-3. **npm publish** — When **`NPM_TOKEN`** is configured as a repository secret, publishes `@tishlang/tish` and `@tishlang/create-tish-app` to the npm registry.
+3. **npm publish** — When **`NPM_TOKEN`** is configured as a repository secret, publishes `@tishlang/tish`, `@tishlang/create-tish-app`, and unscoped `create-tish-app` to the npm registry.
 
 To enable npm publishing: create an [npm access token](https://www.npmjs.com/settings/~/tokens) (automation type), then add it as a secret named **`NPM_TOKEN`** in the repo (Settings → Secrets and variables → Actions). The release job will skip npm publish if the secret is missing (GitHub release still runs).
 
@@ -95,6 +95,9 @@ To enable npm publishing: create an [npm access token](https://www.npmjs.com/set
 ```bash
 cd npm/tish && npm publish --access public
 cd ../create-tish-app && npm publish --access public
+node -e "const fs=require('fs');const p=require('./package.json');p.name='create-tish-app';fs.writeFileSync('package.json',JSON.stringify(p,null,2));"
+npm publish --access public
+git checkout package.json
 ```
 
 ## Local test
@@ -103,7 +106,8 @@ After running `./npm/scripts/build-binaries.sh` (so your platform’s binary exi
 
 ```bash
 cd npm/tish
-node bin/tish.js run /path/to/hello.tish
+node scripts/install-bin.js
+./bin/tish run /path/to/hello.tish
 ```
 
 Or link and use npx:

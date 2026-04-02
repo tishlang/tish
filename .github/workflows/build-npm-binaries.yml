@@ -352,7 +352,10 @@ jobs:
           rm -f npm/tish/crates/tish/Cargo.toml.bak
 
       - name: Create npm package tarball
+        env:
+          TISH_NPM_PACK_REQUIRE: "1"
         run: |
+          node npm/tish/scripts/install-bin.js
           cd npm/tish && npm pack && cd ../..
           mv npm/tish/tishlang-tish-*.tgz tish-npm-package.tgz
 
