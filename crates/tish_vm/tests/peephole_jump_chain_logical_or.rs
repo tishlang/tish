@@ -15,6 +15,39 @@ fn run_chunk(chunk: &tishlang_bytecode::Chunk) -> Value {
     tishlang_vm::run(chunk).expect("vm run")
 }
 
+/// `tish run` ends with trailing `null` when the last statement is not a REPL-style expr; use
+/// `compile_for_repl` so the VM return value reflects the `||` result (catches peephole/AST bugs).
+#[test]
+fn string_strict_eq_logical_or_repl_last_expr_is_true() {
+    let src = "let cmd = \"a\"\ncmd === \"a\" || cmd === \"b\"";
+    let opt = tishlang_opt::optimize(&tishlang_parser::parse(src).expect("parse"));
+    let v_peep = run_chunk(&compile_for_repl(&opt).expect("compile repl"));
+    let v_unopt = run_chunk(&compile_for_repl_unoptimized(&opt).expect("compile repl unopt"));
+    assert!(
+        v_peep.strict_eq(&v_unopt),
+        "peephole vs unopt repl: peep={v_peep:?} unopt={v_unopt:?}"
+    );
+    assert!(
+        matches!(&v_peep, Value::Bool(true)),
+        "expected true for cmd===a||cmd===b with cmd=a, got {v_peep:?}"
+    );
+}
+
+/// `?:` uses different codegen than `if`; both must agree with unoptimized bytecode.
+#[test]
+fn string_strict_eq_logical_or_inside_ternary_repl_last_expr() {
+    // Statement boundary: without `;` or `;`-like ASI, the parser can tie the `(` line to `let`.
+    let src = "let cmd = \"a\"\n;(cmd === \"a\" || cmd === \"b\") ? 1 : 0";
+    let opt = tishlang_opt::optimize(&tishlang_parser::parse(src).expect("parse"));
+    let v_peep = run_chunk(&compile_for_repl(&opt).expect("compile repl"));
+    let v_unopt = run_chunk(&compile_for_repl_unoptimized(&opt).expect("compile repl unopt"));
+    assert!(v_peep.strict_eq(&v_unopt), "peep={v_peep:?} unopt={v_unopt:?}");
+    assert!(
+        matches!(&v_peep, Value::Number(n) if *n == 1.0),
+        "expected 1, got {v_peep:?}"
+    );
+}
+
 #[test]
 fn logical_or_strict_eq_peephole_matches_unoptimized() {
     let src = "let a = 1\nlet b = 2\na === 1 || b === 2";
@@ -91,5 +124,20 @@ fn merged_module_program_bytecode_matches_parse_for_string_or_fixture() {
     assert_eq!(
         c_m.code, c_f.code,
         "merge_modules vs parse produced different bytecode"
+    );
+}
+
+/// `if (cmd === "a" || cmd === "b")` must match unoptimized VM semantics (Nop padding from other
+/// peepholes must not confuse `chain_jumps`).
+#[test]
+fn string_eq_or_in_if_stmt_matches_unoptimized_repl() {
+    let src = "let cmd = \"a\"\nlet ok = false\nif (cmd === \"a\" || cmd === \"b\") { ok = true } else { ok = false }\nok";
+    let program = tishlang_opt::optimize(&tishlang_parser::parse(src).expect("parse"));
+    let v_peep = run_chunk(&compile_for_repl(&program).expect("compile repl"));
+    let v_raw = run_chunk(&compile_for_repl_unoptimized(&program).expect("compile repl unopt"));
+    assert!(v_peep.strict_eq(&v_raw), "peep={v_peep:?} raw={v_raw:?}");
+    assert!(
+        matches!(&v_peep, Value::Bool(true)),
+        "expected ok=true, got {v_peep:?}"
     );
 }

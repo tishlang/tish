@@ -34,10 +34,22 @@ fn instruction_size(code: &[u8], ip: usize) -> Option<usize> {
     opcode.instruction_size(code, ip)
 }
 
+/// Advance past `Nop` bytes left by other peepholes (`Dup`+`Pop` → `Nop`+`Nop`, etc.).
+/// Jump resolution must not treat a `Nop` run as the end of a chain, or we leave a jump
+/// targeting the middle of padding while `chain_jumps` redirects another jump past it —
+/// that misaligns `||` short-circuit when nested in an outer `if`.
+fn skip_leading_nops(code: &[u8], mut ip: usize) -> usize {
+    while ip < code.len() && Opcode::from_u8(code[ip]) == Some(Opcode::Nop) {
+        ip += 1;
+    }
+    ip
+}
+
 /// After a branch lands at `ip`, follow only **unconditional** `Jump` instructions.
 /// Must not follow `JumpIfFalse`: that opcode is conditional; treating it like `Jump`
 /// breaks short-circuit codegen (e.g. `a === 1 || b === 2` inside `if (...)`).
 fn skip_unconditional_jump_chain(code: &[u8], mut ip: usize) -> Option<usize> {
+    ip = skip_leading_nops(code, ip);
     let mut visited = 0u32;
     const MAX_CHAIN: u32 = 1000;
     loop {
@@ -58,6 +70,7 @@ fn skip_unconditional_jump_chain(code: &[u8], mut ip: usize) -> Option<usize> {
         }
         let offset = read_i16(code, ip + 1) as isize;
         ip = (ip as isize + 3 + offset).max(0) as usize;
+        ip = skip_leading_nops(code, ip);
     }
 }
 
@@ -73,6 +86,7 @@ fn final_jump_target(code: &[u8], jump_ip: usize) -> Option<usize> {
         }
         _ => return Some(jump_ip),
     };
+    let first_target = skip_leading_nops(code, first_target);
     skip_unconditional_jump_chain(code, first_target)
 }
 
