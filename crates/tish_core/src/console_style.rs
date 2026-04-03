@@ -2,6 +2,9 @@
 //!
 //! Use for REPL, console.log, and any terminal output so numbers, strings,
 //! booleans, null, and object structure are easier to scan.
+//!
+//! `console.log` prints string arguments without surrounding quotes (like Node); nested
+//! strings inside arrays/objects stay quoted. The REPL still quotes string results for clarity.
 
 use std::io::IsTerminal;
 use std::sync::OnceLock;
@@ -40,10 +43,12 @@ pub fn format_value_styled(value: &Value, colors: bool) -> String {
     if !colors {
         return value.to_display_string();
     }
-    format_value_styled_inner(value, colors)
+    format_value_styled_inner(value, colors, true)
 }
 
-fn format_value_styled_inner(value: &Value, colors: bool) -> String {
+/// `quote_strings`: when true (REPL / inspect), strings render as quoted literals. When false
+/// (top-level `console.log` arguments), strings render raw like Node.
+fn format_value_styled_inner(value: &Value, colors: bool, quote_strings: bool) -> String {
     match value {
         Value::Number(n) => {
             let s = if n.is_nan() {
@@ -58,8 +63,12 @@ fn format_value_styled_inner(value: &Value, colors: bool) -> String {
             format!("{NUMBER}{s}{RESET}")
         }
         Value::String(s) => {
-            let escaped = escape_string_for_display(s);
-            format!("{STRING}\"{escaped}\"{RESET}")
+            if quote_strings {
+                let escaped = escape_string_for_display(s);
+                format!("{STRING}\"{escaped}\"{RESET}")
+            } else {
+                format!("{STRING}{}{RESET}", s.as_ref())
+            }
         }
         Value::Bool(b) => format!("{BOOLEAN}{b}{RESET}"),
         Value::Null => format!("{NULL}null{RESET}"),
@@ -67,7 +76,7 @@ fn format_value_styled_inner(value: &Value, colors: bool) -> String {
             let inner: Vec<String> = arr
                 .borrow()
                 .iter()
-                .map(|v| format_value_styled_inner(v, colors))
+                .map(|v| format_value_styled_inner(v, colors, true))
                 .collect();
             let sep = format!("{PUNCT}, {RESET}");
             format!("{PUNCT}[{RESET}{}{PUNCT}]{RESET}", inner.join(&sep))
@@ -80,7 +89,7 @@ fn format_value_styled_inner(value: &Value, colors: bool) -> String {
                     format!(
                         "{KEY}{}{RESET}{PUNCT}: {RESET}{}",
                         k.as_ref(),
-                        format_value_styled_inner(v, colors)
+                        format_value_styled_inner(v, colors, true)
                     )
                 })
                 .collect();
@@ -123,10 +132,18 @@ pub fn format_values_for_console(values: &[Value], colors: bool) -> String {
     match iter.next() {
         None => String::new(),
         Some(first) => {
-            let mut result = format_value_styled(first, colors);
+            let mut result = if colors {
+                format_value_styled_inner(first, colors, false)
+            } else {
+                first.to_display_string()
+            };
             for v in iter {
                 result.push(' ');
-                result.push_str(&format_value_styled(v, colors));
+                if colors {
+                    result.push_str(&format_value_styled_inner(v, colors, false));
+                } else {
+                    result.push_str(&v.to_display_string());
+                }
             }
             result
         }

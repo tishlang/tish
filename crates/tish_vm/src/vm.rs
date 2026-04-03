@@ -37,6 +37,10 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
     #[cfg(feature = "http")]
     if spec == "tish:http" {
         return match export_name {
+            // Bytecode compiler lowers `await expr` to `tish:http.await(promise)` (see tish_bytecode compiler).
+            "await" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tishlang_runtime::await_promise(args.first().cloned().unwrap_or(Value::Null))
+            }))),
             "fetch" => Some(Value::Function(Rc::new(|args: &[Value]| {
                 tishlang_runtime::fetch_promise(args.to_vec())
             }))),
