@@ -1,3 +1,7 @@
+<picture>
+  <img alt="Tishlang" src="https://tishlang.com/banner.png">
+</picture>
+
 # Tish
 
 <p>
