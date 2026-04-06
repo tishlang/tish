@@ -1,4 +1,4 @@
-// HTTP Hello - Simple HTTP server example
+// HTTP + process.env — PORT, TEST, DEPLOYMENT_ID (see README.md)
 
 fn handleRequest(req) {
     console.log("Request:", req.method, req.path)
@@ -13,7 +13,7 @@ fn handleRequest(req) {
             status: 200,
             headers: { contentType: "application/json" },
             body: JSON.stringify({
-                message: "Hello from Tish HTTP Server test 10!",
+                message: "Hello from Tish (http + env vars example)",
                 env_var_test: process.env.TEST,
                 deployment_id: deploymentId
             })
@@ -27,5 +27,5 @@ fn handleRequest(req) {
 }
 
 let port = "PORT" in process.env ? parseInt(process.env.PORT) : 8080
-console.log(`Starting http-hello on port ${port}...`)
+console.log(`Starting http-env-var-example on port ${port}...`)
 serve(port, handleRequest)

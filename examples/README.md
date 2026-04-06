@@ -11,6 +11,7 @@ Example applications you can run and compile with Tish. Build the CLI from the r
 | [matmul](matmul/) | Dense matrix multiply across backends: CPU (f64 native), Metal GPU (MPS via Swift), Apple MLX (Metal via Python) | `fs`, `process` (GPU/MLX variants) |
 | [new-expression](new-expression/) | `new Uint8Array` / `new AudioContext` on every target; real `new` on `--target js` | None |
 | [http-hello](http-hello/) | Basic HTTP server with routing | `http` |
+| [http-env-var-example](http-env-var-example/) | HTTP server reading `PORT`, `TEST`, `DEPLOYMENT_ID` from `process.env` | `http`, `process` |
 | [json-api](json-api/) | REST API with JSON responses | `http` |
 | [echo-server](echo-server/) | Echoes request details back | `http` |
 | [counter-api](counter-api/) | Stateful counter service | `http` |
