@@ -13,7 +13,7 @@
 
 </p>
 
-Tish is a TypeScript- and JavaScript-compatible language implemented in Rust. It is aimed at teams who want a familiar surface syntax, predictable semantics, and the option to ship either interpreted scripts or **native binaries**.
+Tish is a TypeScript- and JavaScript-compatible language implemented in Rust. It is aimed at teams who want a familiar surface syntax, predictable semantics, and the option to ship either interpreted scripts or runtime free **native binaries**.
 
 The same source can run on a tree-walking interpreter, a bytecode VM, or compiled targets (native, WASM/WASI, and others). Network, filesystem, and process APIs are **feature-gated** so defaults stay safe. For the full syntax and semantics, see the canonical spec in-repo; for tutorials and reference, see [tishlang.com/docs](https://tishlang.com/docs).
 

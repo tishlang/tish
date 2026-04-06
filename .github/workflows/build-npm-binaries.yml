@@ -130,7 +130,8 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2204
     permissions:
       contents: read
-      checks: write   # required for publish-unit-test-result-action (create check runs)
+      checks: write   # publish-unit-test-result-action: create check runs
+      pull-requests: write   # same action: PR comments (omission caused 403 on Dependabot/normal PRs)
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
