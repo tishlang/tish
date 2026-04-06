@@ -1,40 +1,102 @@
 # Tish
 
-An opinionated javascript/typescript-like memory-safe blazingly fast native compilable language.
+<p>
+  <a href="https://npmjs.com/package/@tishlang/tish?activeTab=readme"><img src="https://img.shields.io/npm/v/@tishlang/tish?style=flat-square&colorA=1C1C1C&colorB=B688FF" alt="npm version" /></a>
+  <a href="https://npmcharts.com/compare/@tishlang/tish"><img src="https://img.shields.io/npm/dm/@tishlang/tish.svg?style=flat-square&colorA=1C1C1C&colorB=B688FF" alt="downloads" /></a>
+  <a href="https://nodejs.org/en/about/previous-releases"><img src="https://img.shields.io/node/v/@tishlang/tish.svg?style=flat-square&colorA=1C1C1C&colorB=B688FF" alt="node version"></a>
+  <a href="https://crates.io/crates/tishlang"><img src="https://img.shields.io/crates/v/tishlang?style=flat-square&colorA=1C1C1C&colorB=B688FF" alt="crate version" /></a>
+  <a href="https://github.com/tishlang/tish/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-PIF-blue.svg?style=flat-square&colorA=1C1C1C&colorB=B688FF" alt="license" /></a>
 
-See repo [docs/](docs/) for spec and ECMA alignment; user-facing docs: [tishlang.com/docs](https://tishlang.com/docs).
+</p>
 
-## Installation
+Tish is a TypeScript- and JavaScript-compatible language implemented in Rust. It is aimed at teams who want a familiar surface syntax, predictable semantics, and the option to ship either interpreted scripts or **native binaries**.
 
-Install globally
+The same source can run on a tree-walking interpreter, a bytecode VM, or compiled targets (native, WASM/WASI, and others). Network, filesystem, and process APIs are **feature-gated** so defaults stay safe. For the full syntax and semantics, see the canonical spec in-repo; for tutorials and reference, see [tishlang.com/docs](https://tishlang.com/docs).
+
+## 🔥 Features
+
+- **JS-like surface** — `let` / `const`, `fn`, arrows, template literals, async/await, modules, and a large slice of familiar builtins (`console`, `Math`, `JSON`, arrays, strings, objects).
+- **Two ways to run** — interpret for fast iteration (`tish run`, REPL); compile to native or WASM for distribution and performance (`tish build`).
+- **Memory-safe implementation** — Rust-hosted runtime and compiler pipeline; no GC in the host language for the toolchain itself.
+- **Secure by default** — I/O and platform APIs (`http`, `fs`, `process`, etc.) are opt-in via features.
+- **No `undefined`** — `null` only where JS would use undefined; strict equality (`===` / `!==`) without loose coercion.
+- **Optional types** — TypeScript-style annotations are parsed for tooling and future checking; see the language reference for status.
+
+Full specification: [docs/LANGUAGE.md](docs/LANGUAGE.md). Implementation status, gaps, and JS compatibility: [docs/plan-gap-analysis.md](docs/plan-gap-analysis.md).
+
+## 📚 Documentation
+
+User-facing guides and reference:
+
+| Section | Description |
+|---------|-------------|
+| [Getting started](https://tishlang.com/docs/getting-started/installation/) | Install Tish, build your first app |
+| [First app](https://tishlang.com/docs/getting-started/first-app/) | Run and build workflows, targets |
+| [Editor & IDE](https://tishlang.com/docs/getting-started/editor/) | VS Code, LSP, tasks, Neovim |
+| [Language server](https://tishlang.com/docs/reference/language-server/) | `tish-lsp` capabilities |
+| [Formatting](https://tishlang.com/docs/reference/formatting/) | `tish-fmt` |
+| [Linting](https://tishlang.com/docs/reference/linting/) | `tish-lint` |
+| [Interactive REPL](https://tishlang.com/docs/getting-started/repl/) | Multi-line input, completion, history |
+| [Language overview](https://tishlang.com/docs/language/overview/) | Syntax, keywords, semantics |
+| [Tish vs JavaScript](https://tishlang.com/docs/language/vs-javascript/) | Differences and additions from JS |
+| [Builtins](https://tishlang.com/docs/builtins/overview/) | Console, Math, JSON, Array, String, Object |
+| [Features (APIs)](https://tishlang.com/docs/features/http/) | `http`, `fs`, `process`, `regex` — feature-gated |
+| [Native backend](https://tishlang.com/docs/reference/native-backend/) | Rust, Cranelift, LLVM compilation |
+| [WASM targets](https://tishlang.com/docs/reference/wasm-targets/) | Web and WASI |
+| [Deploy](https://tishlang.com/docs/deploy/overview/) | Platform and hosting |
+
+### In-repo docs
+
+Contributor- and spec-oriented material in [docs/](docs/):
+
+| File | Purpose |
+|------|---------|
+| [LANGUAGE.md](docs/LANGUAGE.md) | Canonical language reference (syntax, semantics, builtins) |
+| [ecma-alignment.md](docs/ecma-alignment.md) | ECMA-262 / test262 mapping |
+| [plan-gap-analysis.md](docs/plan-gap-analysis.md) | Implementation audit, MVP checklist |
+| [architecture-next-steps.md](docs/architecture-next-steps.md) | Crate layout, design decisions |
+| [builtins-gap-analysis.md](docs/builtins-gap-analysis.md) | Builtins across Rust vs bytecode VM (Cranelift/WASI) |
+
+## 🛠️ Toolchain
+
+| Tool | Purpose |
+|------|---------|
+| **`tish`** | CLI — `run`, `repl`, `build`, `dump-ast` |
+| **`tish-fmt`** | Formatter |
+| **`tish-lint`** | Linter |
+| **`tish-lsp`** | Language server; uses `tish_fmt` / `tish_lint` as libraries |
+| **VS Code extension** | [tish-vscode](https://github.com/tishlang/tish-vscode) — grammar, snippets, LSP client, tasks |
+
+Related docs on [tishlang.com](https://tishlang.com/docs): [Editor & IDE](https://tishlang.com/docs/getting-started/editor/), [Language server](https://tishlang.com/docs/reference/language-server/), [Formatting](https://tishlang.com/docs/reference/formatting/), [Linting](https://tishlang.com/docs/reference/linting/).
+
+## 📦 Installation
+
+Install globally:
+
 ```sh
 brew tap tishlang/tish https://github.com/tishlang/tish
 brew install tish
 ```
 
-or locally with NPM
+Or locally with npm:
+
 ```sh
 npm install @tishlang/tish
 ```
 
-See [tishlang.com/docs/getting-started/installation](https://tishlang.com/docs/getting-started/installation) for other installation options.
+More options: [Installation](https://tishlang.com/docs/getting-started/installation/).
 
-## Quick start
+## ⚡ Quick start
+
 ```sh
 npx @tishlang/create-tish-app my-app
 cd my-app
 npx @tishlang/tish run src/main.tish
 ```
 
-## Building and running tish applications
+## ▶️ Run and build
 
-Tish supports **multiple execution modes** with multiple backends:
-
-### RUN (Interpreter)
-
-Execute `.tish` files directly without a build step. Best for: development, scripting, quick iteration. backends: [vm](https://tishlang.com/docs/getting-started/repl), [interp](https://tishlang.com/docs/getting-started/repl) and [repl](https://tishlang.com/docs/getting-started/repl).
-
-```javascript
+```tish
 // hello.tish
 fn greeting(name) = `Hello, ${name}!`
 console.log(greeting("World"))
@@ -43,116 +105,28 @@ console.log(greeting("World"))
 ```bash
 tish run hello.tish
 # Hello, World!
-```
 
-### BUILD (Compile to Native)
-
-Compile `.tish` files to standalone native executables. Best for: distribution, performance, deploying without Tish installed. Backends:  [rust](https://tishlang.com/docs/reference/native-backend), [cranelift](https://tishlang.com/docs/reference/native-backend), [llvm](https://tishlang.com/docs/reference/native-backend), [wasm web](https://tishlang.com/docs/reference/wasm-targets), [wasi (wasmtime)](https://tishlang.com/docs/reference/wasm-targets), 
-
-```bash
 tish build hello.tish -o hello
 ./hello
 # Hello, World!
 ```
 
-The compiled binary is **fully standalone** — no Tish or Rust runtime needed to run it.
+Native binaries are standalone (no Tish or Rust runtime required on the machine that runs them). Backends, flags, and WASM are covered in [First app](https://tishlang.com/docs/getting-started/first-app/), [Native backend](https://tishlang.com/docs/reference/native-backend/), and [WASM targets](https://tishlang.com/docs/reference/wasm-targets/).
 
-See more details for other targets and run methods in the [tishlang.com/docs/getting-started/first-app](https://tishlang.com/docs/getting-started/first-app) doc.
+## 🤝 Contribution
 
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for building, testing, and code style. Tish is licensed under the [Pay It Forward License (PIF)](https://payitforwardlicense.com/).
 
+## 💪 Performance
 
-## Developer tooling
-
-Editor tooling is **separate from the compiler** (`tish` = run / repl / build / dump-ast only).
-
-| Tool | Purpose |
-|------|---------|
-| **`tish`** | Language - `run`, `repl`, `build`, `dump-ast` |
-| **`tish-fmt`** | Formatter |
-| **`tish-lint`** | Linter |
-| **`tish-lsp`** | Language server — links `tish_fmt` / `tish_lint` as libraries for editor integration. |
-| **VS Code extension** | [tish-vscode](https://github.com/tishlang/tish-vscode) — grammar, snippets, LSP client, tasks. |
-
-User-facing docs: [Editor & IDE](https://tishlang.github.io/tish-docs/getting-started/editor/), [Language server](https://tishlang.github.io/tish-docs/reference/language-server/), [Formatting](https://tishlang.github.io/tish-docs/reference/formatting/), [Linting](https://tishlang.github.io/tish-docs/reference/linting/).
-
-
-## Development
-
-### Using just (Recommended)
-
-The project includes a `justfile` for common tasks:
-
-```bash
-# Run a tish file (interpreter, all features)
-just run run hello.tish
-
-# Compile to native binary
-just compile hello.tish hello
-./hello
-
-# Compile to WebAssembly (Wasmtime)
-just compile-wasi hello.tish hello
-wasmtime hello.wasm
-
-# Run in secure mode (no network/fs/process access)
-just run-secure run hello.tish
-```
-
-See `just --list` for all available recipes.
-
-## Feature Flags
-
-Tish has compile-time feature flags for security:
-
-| Flag | Enables |
-|------|---------|
-| `http` | Network access (`fetch`, `fetchAll`, `serve`) — Fetch-style Promises + ReadableStream |
-| `fs` | File system (`readFile`, `writeFile`, `mkdir`, etc.) |
-| `process` | Process control (`process.exit`, `process.env`, etc.) |
-| `regex` | Regular expressions (`RegExp`, `String.match`, etc.) |
-| `full` | All features |
-
-Default: **no features** (secure mode). Use `--features full` for development.
-
-**Log levels**: Control output with `TISH_LOG_LEVEL=debug|info|log|warn|error`
-
-## Test
-
-CI (`.github/workflows/build-npm-binaries.yml`) runs `cargo nextest` on **`tishlang`** and **`tishlang_vm`** with `--features full` (see workflow for exact command).
-
-```bash
-cargo nextest run -p tishlang -p tishlang_vm --features full --profile ci
-# or without nextest:
-cargo test -p tishlang -p tishlang_vm --features full
-```
-
-Tests:
-- `test_full_stack_parse` – lex + parse each .tish file
-- `test_mvp_programs_interpreter` – run via interpreter
-- `test_mvp_programs_native` – compile to native, run, compare stdout to static expected (`*.tish.expected`)
-
-Run any test file: `tish run tests/core/<name>.tish`
-
-## Performance Comparison
-
-JavaScript equivalents in `tests/core/*.js`. Compare Tish vs Node.js/Bun:
+JavaScript equivalents live in `tests/core/*.js`. Compare Tish with Node.js or Bun:
 
 ```bash
 ./scripts/run_performance_manual.sh
 ```
 
-## Features
+Details: [docs/perf.md](docs/perf.md).
 
-- **Variables**: `let` (mutable), `const` (immutable)
-- **Functions**: `fn name(a, b) { ... }` or `fn name(a) = expr`
-- **Async/await**: `await fetch` / `await fetchAll` (native); interpreter: `--backend interp` for top-level `await`
-- **Arrow functions**: `x => x * 2`, `(a, b) => a + b`
-- **Template literals**: `` `Hello, ${name}!` ``
-- **Control flow**: `if/else`, `while`, `for`, `for..of`, `switch`
-- **Operators**: `+`, `-`, `*`, `/`, `%`, `**`, `===`, `!==`, `&&`, `||`, `??`, `?.`
-- **Data**: Arrays `[]`, Objects `{}`, with mutation support
-- **Built-ins**: `console.log`, `Math.*`, `JSON.*`, `Object.keys/values/entries`
-- **Array methods**: `map`, `filter`, `reduce`, `find`, `forEach`, `push`, `pop`, etc.
-- **String methods**: `slice`, `split`, `trim`, `toUpperCase`, `includes`, etc.
+## 📝 License
 
-See `docs/plan-gap-analysis.md` for full feature list and JS compatibility.
+Tish is licensed under the [Pay It Forward License (PIF)](https://payitforwardlicense.com/). See [LICENSE](LICENSE).

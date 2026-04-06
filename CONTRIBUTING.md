@@ -94,3 +94,63 @@ Use these commit message formats so semantic-release can determine the next vers
 | Breaking | `feat!: change API` or body `BREAKING CHANGE:` | **Major** (1.0.0 → 2.0.0) |
 
 **Format:** `<type>(<scope>): <description>`, e.g. `fix(vm): handle empty array`.
+
+
+
+## Development
+
+### Using just (Recommended)
+
+The project includes a `justfile` for common tasks:
+
+```bash
+# Run a tish file (interpreter, all features)
+just run run hello.tish
+
+# Compile to native binary
+just compile hello.tish hello
+./hello
+
+# Compile to WebAssembly (Wasmtime)
+just compile-wasi hello.tish hello
+wasmtime hello.wasm
+
+# Run in secure mode (no network/fs/process access)
+just run-secure run hello.tish
+```
+
+See `just --list` for all available recipes.
+
+## Feature Flags
+
+Tish has compile-time feature flags for security:
+
+| Flag | Enables |
+|------|---------|
+| `http` | Network access (`fetch`, `fetchAll`, `serve`) — Fetch-style Promises + ReadableStream |
+| `fs` | File system (`readFile`, `writeFile`, `mkdir`, etc.) |
+| `process` | Process control (`process.exit`, `process.env`, etc.) |
+| `regex` | Regular expressions (`RegExp`, `String.match`, etc.) |
+| `full` | All features |
+
+Default: **no features** (secure mode). Use `--features full` for development.
+
+**Log levels**: Control output with `TISH_LOG_LEVEL=debug|info|log|warn|error`
+
+## Test
+
+CI (`.github/workflows/build-npm-binaries.yml`) runs `cargo nextest` on **`tishlang`** and **`tishlang_vm`** with `--features full` (see workflow for exact command).
+
+
+```bash
+cargo nextest run -p tishlang -p tishlang_vm --features full --profile ci
+# or without nextest:
+cargo test -p tishlang -p tishlang_vm --features full
+```
+
+Tests:
+- `test_full_stack_parse` – lex + parse each .tish file
+- `test_mvp_programs_interpreter` – run via interpreter
+- `test_mvp_programs_native` – compile to native, run, compare stdout to static expected (`*.tish.expected`)
+
+Run any test file: `tish run tests/core/<name>.tish`
