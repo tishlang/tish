@@ -55,3 +55,42 @@ Thanks for your interest in contributing. Tish is licensed under the [Pay It For
 ## Questions and discussion
 
 Open an issue for bugs, feature ideas, or questions. We encourage paying it forward: docs, tutorials, and feedback all count.
+
+
+## Releasing
+
+**→ [How to release (step-by-step)](docs/RELEASE.md)**
+
+Releases are **GitHub-led** and do not modify `main`. The main CI does not push to `main`; it creates a **release branch** and a **GitHub prerelease**.
+
+1. **On push to `main`** (with [conventional commits](#conventional-commits) that trigger a release): CI runs semantic-release in dry-run to get the next version, creates/updates a branch `release/vX.Y.Z`, and creates a **prerelease** on GitHub via the API (with the platform zip attached). There is no version bump or tag on `main`.
+2. **When you’re ready**: In GitHub, open the prerelease, attach any extra artifacts if needed, then use **Set as latest release** (uncheck “Set as a pre-release”). That promotes the prerelease to a full release.
+3. **Publish workflows** (run when a full release is published or edited to no longer be a prerelease):
+   - **NPM**: Publishes `@tishlang/tish`, `@tishlang/create-tish-app`, and unscoped `create-tish-app` (same contents as the scoped scaffold package) to npm.
+   - **Crates.io**: Publishes all `tishlang_*` crates to [crates.io](https://crates.io/crates/tishlang).
+   - **Homebrew**: Updates `Formula/tish.rb` in this repo (tap = this repo).
+
+This gives time for the pipeline (or you) to attach the right binaries; publishing only occurs when the release is promoted.
+
+### Required secrets
+
+| Secret | Used by | Purpose |
+|--------|---------|---------|
+| `NPM_TOKEN` | NPM release | Publish to npm |
+| `CARGO_REGISTRY_TOKEN` | Crates.io release | Publish crates |
+No extra secrets for Homebrew — it pushes `Formula/tish.rb` to this repo using `GITHUB_TOKEN`.
+
+### Conventional commits
+
+Use these commit message formats so semantic-release can determine the next version:
+
+| Type     | Example                    | Release impact |
+|----------|----------------------------|----------------|
+| `feat:`  | `feat: add optional chaining` | **Minor** (1.0.0 → 1.1.0) |
+| `fix:`   | `fix: correct loop bound`  | **Patch** (1.0.0 → 1.0.1) |
+| `perf:`  | `perf: faster parser`      | **Patch** (1.0.0 → 1.0.1) |
+| `docs:`  | `docs: update README`      | No release by default |
+| `chore:` | `chore: bump deps`        | No release by default |
+| Breaking | `feat!: change API` or body `BREAKING CHANGE:` | **Major** (1.0.0 → 2.0.0) |
+
+**Format:** `<type>(<scope>): <description>`, e.g. `fix(vm): handle empty array`.
