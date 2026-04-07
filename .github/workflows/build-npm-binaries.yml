@@ -181,6 +181,8 @@ jobs:
 
   build:
     needs: [compile, version]
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
