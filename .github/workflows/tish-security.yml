@@ -56,14 +56,21 @@ jobs:
           cache: npm
           cache-dependency-path: tree-sitter-tish/package-lock.json
 
+      # `--config-path` on `parse`/`test` points at a *grammar project dir* (expects tree-sitter.json inside),
+      # not a global CLI config file — so we use the standard agent config for parser-directories.
+      - name: Tree-sitter CLI config (parser directories)
+        run: |
+          mkdir -p "$HOME/.config/tree-sitter"
+          printf '%s\n' "{\"parser-directories\":[\"$GITHUB_WORKSPACE/tree-sitter-tish\"]}" > "$HOME/.config/tree-sitter/config.json"
+
       - name: Generate grammar + parse sample
         working-directory: tree-sitter-tish
-        env:
-          TS_CONFIG: tree-sitter-ci-config.json
         run: |
+          # Remove legacy filename if present: a *file* named tree-sitter-ci-config.json makes the
+          # CLI try tree-sitter-ci-config.json/tree-sitter.json and warn (os error 20).
+          rm -f tree-sitter-ci-config.json
           npm ci
           npx tree-sitter generate
-          # --config-path avoids "You have not configured any parser directories" on fresh CI agents
-          npx tree-sitter test --config-path "$TS_CONFIG"
-          # Subset grammar: use in-grammar smoke file (not full examples/*.tish)
-          npx tree-sitter parse --config-path "$TS_CONFIG" examples/smoke.tish
+          npx tree-sitter test
+          # Subset grammar: smoke file only (full examples/*.tish may not parse yet)
+          npx tree-sitter parse examples/smoke.tish
