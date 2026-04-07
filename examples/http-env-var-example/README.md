@@ -48,4 +48,4 @@ tish run src/main.tish --features http,process
 
 ## Deploy
 
-Includes [`tish.yaml`](./tish.yaml): HTTP app, `/health` check, two replicas, rolling strategy. Deploy with Zectre from this directory. See [Deploy overview](https://tishlang.github.io/tish-docs/deploy/overview/).
+Includes [`tish.yaml`](./tish.yaml): HTTP app, `/health` check, two replicas, rolling strategy. Deploy with Zectre from this directory. See [Deploy overview](https://tishlang.com/docs/deploy/overview/).

@@ -57,4 +57,4 @@ mdx-docs/
 
 ## Deploy
 
-Deploy with Zectre. Run the build step before compiling so `dist/` exists (or run `build.tish` in CI and bundle the output). See [Deploy Overview](https://tishlang.github.io/tish-docs/deploy/overview/) for details.
+Deploy with Zectre. Run the build step before compiling so `dist/` exists (or run `build.tish` in CI and bundle the output). See [Deploy Overview](https://tishlang.com/docs/deploy/overview/) for details.

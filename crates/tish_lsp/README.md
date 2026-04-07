@@ -19,7 +19,7 @@ Binary: `target/release/tish-lsp` (stdio LSP).
 
 ## Client configuration
 
-See the [Tish docs — Language server](https://tishlang.github.io/tish-docs/reference/language-server/) and [Editor setup](https://tishlang.github.io/tish-docs/getting-started/editor/).
+See the [Tish docs — Language server](https://tishlang.com/docs/reference/language-server/) and [Editor setup](https://tishlang.com/docs/getting-started/editor/).
 
 ## Developing
 

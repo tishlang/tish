@@ -29,4 +29,4 @@ Then visit `http://localhost:8080` for JSON response with the greeting.
 
 ## Deploy
 
-Use the **zectre** CLI from this directory. See [Deploy Overview](https://tishlang.github.io/tish-docs/deploy/overview/) for details.
+Use the **zectre** CLI from this directory. See [Deploy Overview](https://tishlang.com/docs/deploy/overview/) for details.

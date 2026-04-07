@@ -40,7 +40,7 @@ Use the same pattern for other examples; enable the features they need (e.g. `ht
 
 ## Deploy
 
-Use the **zectre** CLI from an example directory. See [Deploy Overview](https://tishlang.github.io/tish-docs/deploy/overview/) for details. Prerequisites: built `tish` binary and platform config pointing at this repo.
+Use the **zectre** CLI from an example directory. See [Deploy Overview](https://tishlang.com/docs/deploy/overview/) for details. Prerequisites: built `tish` binary and platform config pointing at this repo.
 
 ## Project structure
 
