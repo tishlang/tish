@@ -173,6 +173,7 @@ jobs:
           fail_ci_if_error: false
           handle_no_reports_found: true
           token: ${{ secrets.CODECOV_TOKEN }}
+          slug: tishlang/tish
 
       # Integrations → Coverage in Codacy repo settings → Project API token → CODACY_PROJECT_TOKEN secret.
       # continue-on-error: forks / missing secret should not fail the job (same idea as Codecov fail_ci_if_error: false).
