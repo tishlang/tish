@@ -60,22 +60,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Next version (semantic-release dry-run, main push only)
+        id: semantic
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: cycjimmy/semantic-release-action@v4
+        with:
+          dry_run: true
+          semantic_version: 25
+          working_directory: npm/tish
+          extra_plugins: |
+            @semantic-release/commit-analyzer@^13.0.0
+            @semantic-release/release-notes-generator@^14.1.0
+        env:
+          TISH_SEMANTIC_RELEASE_CI: "1"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Get version
         id: set_version
-        env:
-          REPO_URL: ${{ format('{0}/{1}.git', github.server_url, github.repository) }}
         run: |
-          VER=""
-          if [ "${{ github.ref }}" = "refs/heads/main" ] && [ "${{ github.event_name }}" = "push" ]; then
-            npm install --prefix npm/tish --omit=optional 2>/dev/null || true
-            node -e "
-              const fs = require('fs');
-              const p = require('./npm/tish/package.json');
-              p.repository = { type: 'git', url: process.env.REPO_URL };
-              fs.writeFileSync('./npm/tish/package.json', JSON.stringify(p, null, 2));
-            "
-            VER=$(cd npm/tish && npx semantic-release --dry-run --extends ../../.releaserc.json 2>&1 | sed -n 's/.*Published release \([0-9.]*\).*/\1/p' | head -1)
-          fi
+          VER="${{ steps.semantic.outputs.new_release_version }}"
           if [ -z "$VER" ]; then
             VER=$(grep '^version' crates/tish/Cargo.toml | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
             echo "Using Cargo.toml version: $VER"
@@ -94,31 +97,25 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      # semantic-release + plugins are installed by the action (no npm/tish devDependencies).
+      # release.config.cjs + TISH_SEMANTIC_RELEASE_CI uses file:// + analyzer only (no git push / NPM_TOKEN).
+      - name: Dry-run (read-only config)
+        id: semantic
+        uses: cycjimmy/semantic-release-action@v4
         with:
-          node-version: "22"
-
-      - name: Install npm deps (semantic-release and plugins)
-        run: npm install --prefix npm/tish
-
-      - name: Set repository URL for current repo (supports fork)
-        run: |
-          node -e "
-          const fs = require('fs');
-          const p = require('./npm/tish/package.json');
-          p.repository = { type: 'git', url: process.env.REPO_URL };
-          fs.writeFileSync('./npm/tish/package.json', JSON.stringify(p, null, 2));
-          "
+          dry_run: true
+          semantic_version: 25
+          working_directory: npm/tish
+          extra_plugins: |
+            @semantic-release/commit-analyzer@^13.0.0
+            @semantic-release/release-notes-generator@^14.1.0
         env:
-          REPO_URL: ${{ format('{0}/{1}.git', github.server_url, github.repository) }}
-
-      - name: Require incremental release (same logic as semantic-release)
-        env:
+          TISH_SEMANTIC_RELEASE_CI: "1"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Require incremental release
         run: |
-          cd npm/tish && npx semantic-release --dry-run --extends ../../.releaserc.json 2>&1 | tee release-check.log
-          if grep -q "There are no relevant changes, so no new version is released." release-check.log; then
+          if [ "${{ steps.semantic.outputs.new_release_published }}" != "true" ]; then
             echo "No incremental release would be triggered. Push commits that trigger a release (feat/fix/perf/BREAKING CHANGE per conventional commits)."
             exit 1
           fi
@@ -309,29 +306,26 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install npm deps (semantic-release and plugins)
-        run: npm install --prefix npm/tish
-
-      - name: Set repository URL for current repo (supports fork)
-        run: |
-          node -e "
-          const fs = require('fs');
-          const p = require('./npm/tish/package.json');
-          p.repository = { type: 'git', url: process.env.REPO_URL };
-          fs.writeFileSync('./npm/tish/package.json', JSON.stringify(p, null, 2));
-          "
-        env:
-          REPO_URL: ${{ format('{0}/{1}.git', github.server_url, github.repository) }}
-
       - name: Get next version (semantic-release dry-run)
-        id: next_version
+        id: next_version_semantic
+        uses: cycjimmy/semantic-release-action@v4
+        with:
+          dry_run: true
+          semantic_version: 25
+          working_directory: npm/tish
+          extra_plugins: |
+            @semantic-release/commit-analyzer@^13.0.0
+            @semantic-release/release-notes-generator@^14.1.0
         env:
+          TISH_SEMANTIC_RELEASE_CI: "1"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Export next version for release steps
+        id: next_version
         run: |
-          cd npm/tish && npx semantic-release --dry-run --extends ../../.releaserc.json 2>&1 | tee release.log
-          VERSION=$(sed -n 's/.*Published release \([0-9.]*\).*/\1/p' release.log | head -1)
+          VERSION="${{ steps.next_version_semantic.outputs.new_release_version }}"
           if [ -z "$VERSION" ]; then
-            echo "Could not determine next version from semantic-release output"
+            echo "Could not determine next version from semantic-release"
             exit 1
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
