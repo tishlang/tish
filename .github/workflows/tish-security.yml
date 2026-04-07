@@ -75,6 +75,8 @@ jobs:
   # compiles that C on the host — we skip that in CI so no apt/gcc and no “update packages” step.
   tree-sitter-tish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
