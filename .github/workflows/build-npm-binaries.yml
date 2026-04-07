@@ -98,7 +98,7 @@ jobs:
           fetch-depth: 0
 
       # semantic-release + plugins are installed by the action (no npm/tish devDependencies).
-      # release.config.cjs + TISH_SEMANTIC_RELEASE_CI uses file:// + analyzer only (no git push / NPM_TOKEN).
+      # npm/tish/release.config.cjs is found before parent configs; TISH_SEMANTIC_RELEASE_CI=1 → file:// + analyzer only (no push / NPM_TOKEN).
       - name: Dry-run (read-only config)
         id: semantic
         uses: cycjimmy/semantic-release-action@v4

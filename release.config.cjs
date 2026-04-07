@@ -1,13 +1,16 @@
 /**
- * Semantic-release entrypoint (picked up before .releaserc.json).
- * - Local / full release: same as .releaserc.json (npm + GitHub plugins, real remote).
- * - CI version preview: TISH_SEMANTIC_RELEASE_CI=1 uses a local file:// repo + analyzer only
- *   so dry-runs never need git push or NPM_TOKEN (see workflow).
+ * Semantic-release config (cosmiconfig name: "release").
+ *
+ * cosmiconfig prefers `.releaserc.json` over `release.config.cjs` in the same directory,
+ * so the full plugin list lives in `release.full.config.json` (not auto-discovered).
+ *
+ * - TISH_SEMANTIC_RELEASE_CI=1: file:// repo + analyzer only (CI dry-runs, no git push / NPM_TOKEN).
+ * - Otherwise: full config (npm + GitHub plugins, real remote).
  */
 const path = require("path");
 const { execSync } = require("child_process");
 
-const full = require(path.join(__dirname, ".releaserc.json"));
+const full = require(path.join(__dirname, "release.full.config.json"));
 
 function readOnlyCi() {
   const root = execSync("git rev-parse --show-toplevel", { encoding: "utf8" }).trim();
