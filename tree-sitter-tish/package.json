@@ -1,0 +1,25 @@
+{
+  "name": "tree-sitter-tish",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for the Tish language",
+  "license": "PIF",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tishlang/tish"
+  },
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.25.8"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.tish",
+      "file-types": ["tish"],
+      "highlights": "queries/highlights.scm",
+      "injection-language": "tish"
+    }
+  ]
+}

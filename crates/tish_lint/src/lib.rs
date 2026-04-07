@@ -246,7 +246,9 @@ fn lint_expr(e: &Expr, out: &mut Vec<LintDiagnostic>) {
         }
         Expr::Await { operand, .. } => lint_expr(operand, out),
         Expr::TypeOf { operand, .. } => lint_expr(operand, out),
-        Expr::JsxElement { props, children, .. } => {
+        Expr::JsxElement {
+            props, children, ..
+        } => {
             for pr in props {
                 match pr {
                     tishlang_ast::JsxProp::Attr { value, .. } => {

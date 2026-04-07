@@ -1,0 +1,65 @@
+name: Tish security tooling
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/tish_lint/**"
+      - "tree-sitter-tish/**"
+      - "examples/**"
+      - ".github/workflows/tish-security.yml"
+  pull_request:
+    paths:
+      - "crates/tish_lint/**"
+      - "tree-sitter-tish/**"
+      - "examples/**"
+      - ".github/workflows/tish-security.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tish-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Build tish-lint
+        run: cargo build -p tishlang_lint --bin tish-lint
+
+      - name: Lint example Tish sources
+        run: |
+          ./target/debug/tish-lint \
+            examples/http-env-var-example/src \
+            examples/hello-world/src
+
+      - name: SARIF smoke (valid JSON)
+        run: |
+          ./target/debug/tish-lint --format sarif examples/http-env-var-example/src/main.tish > tish-lint.sarif
+          python3 -c "import json; json.load(open('tish-lint.sarif'))"
+
+  tree-sitter-tish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tree-sitter-tish/package-lock.json
+
+      - name: Generate grammar + parse sample
+        working-directory: tree-sitter-tish
+        run: |
+          npm ci
+          npx tree-sitter generate
+          npx tree-sitter test
+          npx tree-sitter parse ../examples/http-env-var-example/src/main.tish

@@ -1,0 +1,19 @@
+{
+  "grammars": [
+    {
+      "name": "tish",
+      "camelcase": "Tish",
+      "scope": "source.tish",
+      "path": ".",
+      "file-types": ["tish"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "PIF",
+    "description": "Tree-sitter grammar for Tish",
+    "links": {
+      "repository": "https://github.com/tishlang/tish"
+    }
+  }
+}
