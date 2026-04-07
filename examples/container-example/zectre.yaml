@@ -7,7 +7,7 @@ name: zectre-minimal-container
 #   (1) Build and tag on the same host as the Zectre agent: `just zectre-build-image`
 #   (2) Push to a registry and set image to the full ref (e.g. ghcr.io/org/name:tag)
 #
-# See ../tish-container-example/README.md and zectre-platform docs/CONTAINER_DEPLOYMENTS.md
+# See ../tish-container-example/README.md
 deploy:
   process_type: docker
   image: zectre-minimal-container:latest

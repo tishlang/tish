@@ -1,6 +1,6 @@
 # Container Example
 
-**Docker** workflows for **Tish** programs: compile `.tish` to **Linux x86_64** binaries with **glibc**, run them in **distroless**-sized images, and optionally deploy to **[Zectre](https://github.com/tishlang/zectre-platform)** as a container app.
+**Docker** workflows for **Tish** programs: compile `.tish` to **Linux x86_64** binaries with **glibc**, run them in **distroless**-sized images, and optionally deploy to **[Zectre](https://zectre.com)** as a container app.
 
 ## Prerequisites
 
@@ -57,7 +57,7 @@ See `just --list` for all recipes. The `justfile` header comments mirror this fl
 
 ## Zectre deployments
 
-Zectre agents run **`docker pull`** only if the image is **not** already present locally. A short name like `zectre-minimal-container:latest` is **not** on Docker Hub unless you publish it—see **`zectre.yaml`** comments and [Container deployments](https://github.com/tishlang/zectre-platform/blob/main/docs/CONTAINER_DEPLOYMENTS.md).
+Zectre agents run **`docker pull`** only if the image is **not** already present locally. A short name like `zectre-minimal-container:latest` is **not** on Docker Hub unless you publish it—see **`zectre.yaml`** comments and [Container deployments](https://github.com/tishlang/tish/tree/main/examples/container-example).
 
 **Local / same host as the agent**
 
@@ -68,7 +68,7 @@ just zectre-deploy --wait        # uses ZECTRE_API_URL (default http://localhost
 
 **Remote agents**
 
-Build, tag, **push** to GHCR/Docker Hub, set `deploy.image` in `zectre.yaml` to the full reference (same idea as [tish-container-example](https://github.com/tishlang/tish-container-example)).
+Build, tag, **push** to GHCR/Docker Hub, set `deploy.image` in `zectre.yaml` to the full reference (same idea as [container-example](https://github.com/tishlang/tish/tree/main/examples/container-example)).
 
 ## Environment variables (common)
 
