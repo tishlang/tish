@@ -1,0 +1,8 @@
+// Minimal smoke file for `tree-sitter parse` in CI (subset grammar).
+
+fn f() {
+  try {
+    a()
+  } catch (e) {
+  }
+}

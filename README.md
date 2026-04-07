@@ -67,8 +67,10 @@ Contributor- and spec-oriented material in [docs/](docs/):
 |------|---------|
 | **`tish`** | CLI — `run`, `repl`, `build`, `dump-ast` |
 | **`tish-fmt`** | Formatter |
-| **`tish-lint`** | Linter |
+| **`tish-lint`** | Linter (`--format sarif` for code scanning) |
 | **`tish-lsp`** | Language server; uses `tish_fmt` / `tish_lint` as libraries |
+| **`tish-security/`** (sibling repo) | Rules & CI examples — clone next to `tish/` as `../tish-security` ([OpenGrep](https://github.com/opengrep/opengrep), ast-grep, Comby, Codacy scaffold, fixtures) |
+| **`tree-sitter-tish/`** | Tree-sitter grammar (editors, ast-grep, future OpenGrep integration) |
 | **VS Code extension** | [tish-vscode](https://github.com/tishlang/tish-vscode) — grammar, snippets, LSP client, tasks |
 
 Related docs on [tishlang.com](https://tishlang.com/docs): [Editor & IDE](https://tishlang.com/docs/getting-started/editor/), [Language server](https://tishlang.com/docs/reference/language-server/), [Formatting](https://tishlang.com/docs/reference/formatting/), [Linting](https://tishlang.com/docs/reference/linting/).

@@ -2694,6 +2694,7 @@ name = "tishlang_lint"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "serde_json",
  "tishlang_ast",
  "tishlang_parser",
  "walkdir",

@@ -1,0 +1,96 @@
+name: Tish security tooling
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/tish_lint/**"
+      - "tree-sitter-tish/**"
+      - "examples/**"
+      - ".github/workflows/tish-security.yml"
+  pull_request:
+    paths:
+      - "crates/tish_lint/**"
+      - "tree-sitter-tish/**"
+      - "examples/**"
+      - ".github/workflows/tish-security.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tish-lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Build tish-lint
+        run: cargo build -p tishlang_lint --bin tish-lint
+
+      - name: Lint example Tish sources
+        run: |
+          ./target/debug/tish-lint \
+            examples/http-env-var-example/src \
+            examples/hello-world/src
+
+      - name: Generate SARIF (tish-lint)
+        run: |
+          ./target/debug/tish-lint --format sarif crates > tish-lint.sarif
+          jq -e . tish-lint.sarif >/dev/null
+
+      # POST /repos/{owner}/{repo}/code-scanning/sarifs — requires GH Advanced Security on the repo.
+      # Fork PRs: token cannot upload to upstream; skip when head repo != base repo.
+      - name: Upload SARIF (GitHub REST API — code scanning)
+        if: ${{ github.event_name != 'pull_request' || github.repository == github.event.pull_request.head.repo.full_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          api="${GITHUB_API_URL:-https://api.github.com}"
+          sarif_b64=$(gzip -c tish-lint.sarif | base64 -w0)
+          jq -n \
+            --arg sha "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg sarif "$sarif_b64" \
+            '{commit_sha: $sha, ref: $ref, sarif: $sarif}' \
+            | curl -f -sS \
+                -X POST "${api}/repos/${GITHUB_REPOSITORY}/code-scanning/sarifs" \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                -H "Content-Type: application/json" \
+                -d @-
+
+  # `tree-sitter generate` is Node-only (rewrites src/parser.c etc.). Running `tree-sitter test` / `parse`
+  # compiles that C on the host — we skip that in CI so no apt/gcc and no “update packages” step.
+  tree-sitter-tish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tree-sitter-tish/package-lock.json
+
+      - name: Regenerate parser sources and assert repo is clean
+        working-directory: tree-sitter-tish
+        run: |
+          rm -f tree-sitter-ci-config.json
+          npm ci
+          npx tree-sitter generate
+          cd ..
+          git diff --exit-code -- tree-sitter-tish/

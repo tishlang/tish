@@ -1,0 +1,64 @@
+==================
+try / catch
+==================
+
+fn f() {
+  try {
+    a()
+  } catch (e) {
+  }
+}
+
+---
+
+(source_file
+  (statement
+    (function_declaration
+      name: (identifier)
+      body: (statement_block
+        (statement
+          (try_statement
+            body: (statement_block
+              (statement
+                (expression_statement
+                  (expression
+                    (postfix_expression
+                      (postfix_expression
+                        (primary_expression
+                          (identifier)))
+                      (argument_list))))))
+            parameter: (identifier)
+            handler: (statement_block)))))))
+
+==================
+let with ternary and in
+==================
+
+let x = "a" in b ? c.d : "";
+
+---
+
+(source_file
+  (statement
+    (variable_declaration
+      name: (identifier)
+      value: (expression
+        (expression
+          (postfix_expression
+            (primary_expression
+              (string))))
+        (expression
+          (expression
+            (postfix_expression
+              (primary_expression
+                (identifier))))
+          (expression
+            (postfix_expression
+              (postfix_expression
+                (primary_expression
+                  (identifier)))
+              property: (identifier)))
+          (expression
+            (postfix_expression
+              (primary_expression
+                (string)))))))))

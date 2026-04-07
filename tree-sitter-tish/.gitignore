@@ -1,0 +1,8 @@
+node_modules/
+build/
+*.wasm
+
+# Never add a stray `tree-sitter-*.json` file here except `tree-sitter.json`:
+# the CLI treats matching names as grammar roots and looks for `<name>/tree-sitter.json`,
+# which triggers "Not a directory" if the path is a file (e.g. old `tree-sitter-ci-config.json`).
+tree-sitter-ci-config.json
