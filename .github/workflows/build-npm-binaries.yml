@@ -163,6 +163,27 @@ jobs:
           mkdir -p test-results
           cp target/nextest/ci/junit.xml test-results/junit.xml
 
+      # Add CODECOV_TOKEN in repo secrets, or enable tokenless uploads for public orgs (Codecov docs).
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        if: always()
+        with:
+          files: lcov.info
+          flags: rust
+          fail_ci_if_error: false
+          handle_no_reports_found: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      # Integrations → Coverage in Codacy repo settings → Project API token → CODACY_PROJECT_TOKEN secret.
+      # continue-on-error: forks / missing secret should not fail the job (same idea as Codecov fail_ci_if_error: false).
+      - name: Upload coverage to Codacy
+        uses: codacy/codacy-coverage-reporter-action@v1.3.0
+        if: always()
+        continue-on-error: true
+        with:
+          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          coverage-reports: lcov.info
+
       - name: Publish test results
         uses: EnricoMi/publish-unit-test-result-action@v2
         if: always()
