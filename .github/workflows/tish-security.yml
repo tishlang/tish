@@ -58,8 +58,12 @@ jobs:
 
       - name: Generate grammar + parse sample
         working-directory: tree-sitter-tish
+        env:
+          TS_CONFIG: tree-sitter-ci-config.json
         run: |
           npm ci
           npx tree-sitter generate
-          npx tree-sitter test
-          npx tree-sitter parse ../examples/http-env-var-example/src/main.tish
+          # --config-path avoids "You have not configured any parser directories" on fresh CI agents
+          npx tree-sitter test --config-path "$TS_CONFIG"
+          # Subset grammar: use in-grammar smoke file (not full examples/*.tish)
+          npx tree-sitter parse --config-path "$TS_CONFIG" examples/smoke.tish

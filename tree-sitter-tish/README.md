@@ -22,6 +22,8 @@ From this directory:
 npx tree-sitter parse path/to/file.tish
 ```
 
+If the CLI prints *You have not configured any parser directories*, either run `tree-sitter init-config` once on your machine or pass **`--config-path tree-sitter-ci-config.json`** (committed minimal config for this grammar). CI uses that flag so agents stay quiet without a global `~/.config/tree-sitter/config.json`.
+
 ## Notes
 
 - **Return:** `return` without a value must use `return;` (no implicit semicolon insertion).
