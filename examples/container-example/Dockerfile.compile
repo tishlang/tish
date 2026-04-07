@@ -1,0 +1,34 @@
+# Tish compiler container - compiles .tish files to Linux binaries
+# Uses glibc-based Rust to avoid proc-macro issues with musl
+#
+# Base must track Debian 12 (bookworm): distroless/cc-debian12 ships an older glibc than
+# rust:latest (often trixie/sid). Building on newer glibc embeds GLIBC_2.38+ symbols and the
+# binary then fails at runtime in cc-debian12 with "version `GLIBC_x.xx' not found".
+#
+# Build from tish-paas: context must be the tish language repo only (not a large monorepo parent):
+#   docker build --platform linux/amd64 -t tish-compiler -f Dockerfile.compile ../tish
+#   docker run --platform linux/amd64 --rm -v "$PWD:/work" tish-compiler /work/hello.tish -o /work/hello_out
+
+FROM rust:bookworm AS compiler
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tish
+
+# Build context = tish repo root (see justfile build-compiler)
+COPY . .
+
+# Build tish compiler with all features
+RUN cargo build --release --features full
+
+ENV PATH="/tish/target/release:${PATH}"
+
+WORKDIR /work
+
+# Default: show help
+ENTRYPOINT ["tish", "build"]
+CMD ["--help"]

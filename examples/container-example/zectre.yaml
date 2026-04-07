@@ -1,0 +1,20 @@
+# Linked project name should match `zectre link` / .zectre/*/project.json
+name: zectre-minimal-container
+
+# Docker deployments: the agent uses `docker pull` only if this image is NOT already on the
+# agent host. A short name like zectre-minimal-container:latest is NOT on Docker Hub — you get
+# "pull access denied" / 404 unless you either:
+#   (1) Build and tag on the same host as the Zectre agent: `just zectre-build-image`
+#   (2) Push to a registry and set image to the full ref (e.g. ghcr.io/org/name:tag)
+#
+# See ../tish-container-example/README.md and zectre-platform docs/CONTAINER_DEPLOYMENTS.md
+deploy:
+  process_type: docker
+  image: zectre-minimal-container:latest
+  replicas: 0
+  env:
+    PORT: "8080"
+
+networking:
+  port: 8080
+  protocol: http

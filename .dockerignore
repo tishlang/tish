@@ -1,0 +1,3 @@
+# Keep `docker build -f …/Dockerfile.compile …` (tish-paas) fast and small
+/target
+.git

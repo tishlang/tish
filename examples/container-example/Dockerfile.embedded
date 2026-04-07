@@ -1,0 +1,23 @@
+# Minimal Rust runtime with embedded binary (~20MB + binary size)
+#
+# Usage:
+#   docker build --build-arg BINARY_PATH=./tish_out -t myapp -f Dockerfile.embedded .
+#   docker run myapp
+#
+# Note: Uses distroless/cc for glibc support (required for standard Rust binaries)
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+WORKDIR /app
+
+# Binary to embed (required)
+ARG BINARY_PATH
+COPY ${BINARY_PATH} /app/binary
+
+# Metadata for operators / Zectre (HTTP server in src/main.tish uses PORT, default 8080)
+EXPOSE 8080
+
+# Run as non-root user (uid 65532, provided by distroless:nonroot)
+USER nonroot:nonroot
+
+ENTRYPOINT ["/app/binary"]

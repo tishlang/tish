@@ -1,0 +1,3 @@
+console.log("Hello from Tish running in ultra-minimal Docker!");
+console.log("Container size: ~20MB");
+console.log("Process args:", process.argv);

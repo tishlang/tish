@@ -12,7 +12,7 @@ Small HTTP server like [http-hello](../http-hello/), but reads **`process.env`**
 | Path | Description |
 |------|-------------|
 | `GET /` | JSON: greeting, `env_var_test` (`process.env.TEST`), `deployment_id` (`process.env.DEPLOYMENT_ID` or `""`) |
-| `GET /health` | Plain `OK` (used by `tish.yaml` health check) |
+| `GET /health` | Plain `OK` (used by `zectre.yaml` health check) |
 
 ## Environment variables
 
@@ -48,4 +48,4 @@ tish run src/main.tish --features http,process
 
 ## Deploy
 
-Includes [`tish.yaml`](./tish.yaml): HTTP app, `/health` check, two replicas, rolling strategy. Deploy with Zectre from this directory. See [Deploy overview](https://tishlang.com/docs/deploy/overview/).
+Includes [`zectre.yaml`](./zectre.yaml): HTTP app, `/health` check, two replicas, rolling strategy. Deploy with Zectre from this directory. See [Deploy overview](https://tishlang.com/docs/deploy/overview/).

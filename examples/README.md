@@ -48,7 +48,7 @@ Each example follows:
 
 ```
 example-name/
-├── tish.yaml        # Optional: deployment/config
+├── zectre.yaml      # Optional: Zectre deploy / build manifest
 ├── README.md        # Example-specific docs
 └── src/
     └── main.tish    # Entry point

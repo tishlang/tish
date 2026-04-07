@@ -44,7 +44,7 @@ Then open `http://localhost:3000` (or the port shown; use `PORT=3010` to overrid
 
 ```
 mdx-docs/
-├── tish.yaml
+├── zectre.yaml
 ├── src/
 │   ├── build.tish   # Pre-renders content/*.mdx → dist/
 │   └── main.tish    # HTTP server serving dist/

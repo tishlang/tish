@@ -1,0 +1,289 @@
+# Tish PaaS - Minimal Rust runtime for tish binaries
+# Install just: cargo install just OR brew install just
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# QUICK START
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#   just setup                    # Build Docker images (one-time)
+#   just run hello.tish           # Compile and run in Docker
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# WORKFLOW
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 1. Build Docker images (one-time setup):
+#      just setup
+#
+# 2. Compile a .tish program to a Linux x86_64 binary:
+#      just build hello.tish hello_out
+#
+# 3. Run in minimal Docker container (~20MB):
+#      just docker-run ./hello_out
+#
+#    HTTP server (forward a port; sets PORT inside the container):
+#      DOCKER_PORT=8080 just docker-run ./myserver
+#      Host 3000 -> container 8080: DOCKER_PORT=8080 DOCKER_PORT_HOST=3000 just docker-run ./myserver
+#
+# 4. Or compile + run in one step:
+#      just run hello.tish
+#      just run-serve 8080 src/main.tish
+#
+# 5. Or build an image with embedded binary:
+#      just docker-build-embedded ./hello_out myapp
+#      docker run --platform linux/amd64 myapp
+#
+# 6. Zectre (Docker process): agents pull only if the image is missing locally.
+#      just zectre-build-image              # compile src/main.tish + Dockerfile.embedded → ZECTRE_IMAGE
+#      just zectre-deploy --wait            # zectre deploy --api-url … --image …
+#    Remote agents: push ZECTRE_IMAGE to a registry, set deploy.image to the full ref.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Path to tish compiler repo from tish-paas (for local cargo recipes)
+TISH_PATH := "../tish"
+
+# Pin linux/amd64 so Mac/ARM hosts produce x86_64 ELF for distroless. Override: DOCKER_PLATFORM=linux/arm64 just build ...
+DOCKER_PLATFORM := env_var_or_default("DOCKER_PLATFORM", "linux/amd64")
+
+# Docker image names
+RUNTIME_IMAGE := "tish-runtime"
+COMPILER_IMAGE := "tish-compiler"
+
+# Zectre: must match deploy.image in zectre.yaml unless you override with --image or ZECTRE_IMAGE
+ZECTRE_IMAGE := env_var_or_default("ZECTRE_IMAGE", "zectre-minimal-container:latest")
+ZECTRE_API_URL := env_var_or_default("ZECTRE_API_URL", "http://localhost:47080")
+
+# Host architecture (for info only)
+ARCH := `uname -m`
+
+# Default recipe
+default: build-runtime
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DOCKER RUNTIME
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Build the minimal runtime image (~20MB with glibc)
+build-runtime:
+    docker build --platform {{DOCKER_PLATFORM}} -t {{RUNTIME_IMAGE}} -f Dockerfile .
+
+# Run a binary in the runtime container (mounted at runtime)
+# Supports both relative and absolute paths
+# Optional: DOCKER_PORT = container listen port; publishes DOCKER_PORT_HOST:DOCKER_PORT (host:container, host defaults to DOCKER_PORT)
+docker-run BINARY *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "{{BINARY}}" = /* ]]; then
+        BINARY_PATH="{{BINARY}}"
+    else
+        BINARY_PATH="$(pwd)/{{BINARY}}"
+    fi
+    PUBLISH_ARGS=()
+    if [[ -n "${DOCKER_PORT:-}" ]]; then
+        CPORT="$DOCKER_PORT"
+        HPORT="${DOCKER_PORT_HOST:-$DOCKER_PORT}"
+        PUBLISH_ARGS=( -p "${HPORT}:${CPORT}" -e "PORT=${CPORT}" )
+    fi
+    docker run --rm --platform {{DOCKER_PLATFORM}} "${PUBLISH_ARGS[@]}" -v "$BINARY_PATH:/app/binary:ro" {{RUNTIME_IMAGE}} {{ARGS}}
+
+# Run with environment variables
+# Optional: same DOCKER_PORT / DOCKER_PORT_HOST as docker-run
+docker-run-env BINARY ENV_FILE *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "{{BINARY}}" = /* ]]; then
+        BINARY_PATH="{{BINARY}}"
+    else
+        BINARY_PATH="$(pwd)/{{BINARY}}"
+    fi
+    PUBLISH_ARGS=()
+    if [[ -n "${DOCKER_PORT:-}" ]]; then
+        CPORT="$DOCKER_PORT"
+        HPORT="${DOCKER_PORT_HOST:-$DOCKER_PORT}"
+        PUBLISH_ARGS=( -p "${HPORT}:${CPORT}" -e "PORT=${CPORT}" )
+    fi
+    docker run --rm --platform {{DOCKER_PLATFORM}} "${PUBLISH_ARGS[@]}" --env-file {{ENV_FILE}} -v "$BINARY_PATH:/app/binary:ro" {{RUNTIME_IMAGE}} {{ARGS}}
+
+# Run interactively (useful for debugging)
+# Optional: same DOCKER_PORT / DOCKER_PORT_HOST as docker-run
+docker-run-it BINARY *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "{{BINARY}}" = /* ]]; then
+        BINARY_PATH="{{BINARY}}"
+    else
+        BINARY_PATH="$(pwd)/{{BINARY}}"
+    fi
+    PUBLISH_ARGS=()
+    if [[ -n "${DOCKER_PORT:-}" ]]; then
+        CPORT="$DOCKER_PORT"
+        HPORT="${DOCKER_PORT_HOST:-$DOCKER_PORT}"
+        PUBLISH_ARGS=( -p "${HPORT}:${CPORT}" -e "PORT=${CPORT}" )
+    fi
+    docker run --rm -it --platform {{DOCKER_PLATFORM}} "${PUBLISH_ARGS[@]}" -v "$BINARY_PATH:/app/binary:ro" {{RUNTIME_IMAGE}} {{ARGS}}
+
+# Build an image with embedded binary
+docker-build-embedded BINARY IMAGE_NAME:
+    docker build --platform {{DOCKER_PLATFORM}} --build-arg BINARY_PATH={{BINARY}} -t {{IMAGE_NAME}} -f Dockerfile.embedded .
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ZECTRE (docker process_type)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Compile HTTP app and build embedded image tagged as ZECTRE_IMAGE (default zectre-minimal-container:latest).
+# Run this on the Zectre agent host for local clusters, or push the image to a registry for remote nodes.
+zectre-build-image INPUT="src/main.tish" BINARY_REL="build/zectre-app":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "$(dirname "{{BINARY_REL}}")"
+    just build "{{INPUT}}" "{{BINARY_REL}}"
+    just docker-build-embedded "{{BINARY_REL}}" "{{ZECTRE_IMAGE}}"
+    @echo "Tagged: {{ZECTRE_IMAGE}} (load on agent host or push to a registry)"
+
+# Deploy to Zectre (Docker image must exist on agent or be pullable). Extra args e.g. --wait --prod
+zectre-deploy *ARGS:
+    zectre deploy --api-url {{ZECTRE_API_URL}} --image {{ZECTRE_IMAGE}} {{ARGS}}
+
+zectre-build-and-deploy *ARGS:
+    just zectre-build-image
+    just zectre-deploy {{ARGS}}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SETUP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Build both Docker images (runtime + compiler)
+setup: build-runtime build-compiler
+
+# Build the tish compiler Docker image (compiles .tish -> Linux binaries)
+# Context is {{TISH_PATH}} (tish repo only) so the daemon does not ingest a large parent directory
+build-compiler:
+    docker build --platform {{DOCKER_PLATFORM}} -t {{COMPILER_IMAGE}} -f Dockerfile.compile {{TISH_PATH}}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LINUX x86_64 BINARIES (via Docker; glibc, matches distroless/cc)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Compile a .tish file to a Linux binary using Docker (default platform: linux/amd64)
+# Usage: just build hello.tish hello_out
+build INPUT OUTPUT:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "{{INPUT}}" = /* ]]; then
+        INPUT_PATH="{{INPUT}}"
+    else
+        INPUT_PATH="$(pwd)/{{INPUT}}"
+    fi
+    if [[ "{{OUTPUT}}" = /* ]]; then
+        OUTPUT_PATH="{{OUTPUT}}"
+    else
+        OUTPUT_PATH="$(pwd)/{{OUTPUT}}"
+    fi
+    INPUT_DIR=$(dirname "$INPUT_PATH")
+    OUTPUT_DIR=$(dirname "$OUTPUT_PATH")
+    INPUT_NAME=$(basename "$INPUT_PATH")
+    OUTPUT_NAME=$(basename "$OUTPUT_PATH")
+    docker run --rm --platform {{DOCKER_PLATFORM}} \
+        -v "$INPUT_DIR:/input:ro" \
+        -v "$OUTPUT_DIR:/output" \
+        {{COMPILER_IMAGE}} \
+        "/input/$INPUT_NAME" -o "/output/$OUTPUT_NAME"
+    echo "Built Linux binary: {{OUTPUT}}"
+
+# Same as `build` but always forces linux/amd64 (explicit x86_64 pipeline)
+build-linux-amd64 INPUT OUTPUT:
+    @just --set DOCKER_PLATFORM=linux/amd64 build {{INPUT}} {{OUTPUT}}
+
+# Native macOS -> Linux cross-compile is not supported by `tish build` yet (cargo has no --target
+# in tishlang_build_utils). Use this Docker workflow or extend the tish repo.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMPILE LOCALLY (produces native binaries - macOS on Mac, Linux on Linux)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Compile using local tish (produces native binary for current OS)
+# Note: Use `just build` for Linux x86_64 binaries on macOS
+build-local INPUT OUTPUT:
+    cd {{TISH_PATH}} && cargo run --release --features full -- build "$(pwd)/../tish-paas/{{INPUT}}" -o "$(pwd)/../tish-paas/{{OUTPUT}}"
+
+# Compile in secure mode (no dangerous features)
+build-local-secure INPUT OUTPUT:
+    cd {{TISH_PATH}} && cargo run --release --no-default-features -- build "$(pwd)/../tish-paas/{{INPUT}}" -o "$(pwd)/../tish-paas/{{OUTPUT}}"
+
+# Compile with specific features
+build-local-with FEATURES INPUT OUTPUT:
+    cd {{TISH_PATH}} && cargo run --release --no-default-features --features "{{FEATURES}}" -- build "$(pwd)/../tish-paas/{{INPUT}}" -o "$(pwd)/../tish-paas/{{OUTPUT}}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FULL WORKFLOW - Compile and run in one step
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Compile and run a .tish program in Docker
+# Usage: just run hello.tish
+# With HTTP: DOCKER_PORT=8080 just run src/main.tish   or   just run-serve 8080 src/main.tish
+run INPUT *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    OUTPUT="tish_out_$(basename {{INPUT}} .tish)"
+    just build {{INPUT}} "$OUTPUT"
+    just docker-run "$OUTPUT" {{ARGS}}
+
+# Compile and run with port publish (sets DOCKER_PORT for docker-run)
+run-serve PORT INPUT *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export DOCKER_PORT="{{PORT}}"
+    OUTPUT="tish_out_$(basename {{INPUT}} .tish)"
+    just build "{{INPUT}}" "$OUTPUT"
+    just docker-run "$OUTPUT" {{ARGS}}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXAMPLES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# Run the full example: CLI sample, build, run in Docker (no port publish)
+example:
+    just build console.tish console
+    just docker-run console "arg1" "arg2"
+
+# Build src/main.tish and run HTTP server with localhost:8080 forwarded
+example-http:
+    just build src/main.tish tish-http-server
+    @echo "Listening on http://127.0.0.1:8080 (Ctrl+C to stop)"
+    DOCKER_PORT=8080 just docker-run tish-http-server
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UTILITIES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Show current architecture info
+info:
+    @echo "Host architecture: {{ARCH}}"
+    @echo ""
+    @echo "Docker platform (default): {{DOCKER_PLATFORM}} — use DOCKER_PLATFORM=... to override"
+    @echo "HTTP in Docker: set DOCKER_PORT=<container port> (optional DOCKER_PORT_HOST=<host port>)"
+
+# Show Docker image sizes
+sizes:
+    @echo "Runtime image size:"
+    @docker images {{RUNTIME_IMAGE}} --format "{{{{.Size}}}}" 2>/dev/null || echo "(not built yet)"
+
+# Check if a binary is a valid Linux executable
+check-binary BINARY:
+    @file {{BINARY}} | grep -q "ELF" && echo "✓ Valid Linux binary" || echo "✗ Not a Linux binary (must be ELF format)"
+    @file {{BINARY}}
+
+# Clean up generated binaries
+clean:
+    rm -f main*
+    rm -rf build/
+
+# Remove Docker images
+clean-docker:
+    docker rmi {{RUNTIME_IMAGE}} 2>/dev/null || true
+    docker rmi {{COMPILER_IMAGE}} 2>/dev/null || true
+
+# Full clean
+clean-all: clean clean-docker

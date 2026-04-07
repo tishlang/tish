@@ -50,7 +50,7 @@ async function main() {
 let message = "Hello, Tish!"
 console.log(message)
 `,
-    'tish.yaml': `name: ${safeName}
+    'zectre.yaml': `name: ${safeName}
 `,
     'package.json': JSON.stringify({
       name: safeName,

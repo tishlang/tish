@@ -43,7 +43,7 @@ Then visit `http://localhost:8080`.
 ```
 tishx-example/
 ├── package.json     # lattish dependency
-├── tish.yaml
+├── zectre.yaml
 ├── index.html       # Loads App.js (runs on load)
 ├── src/
 │   └── App.tish     # Form with stateful components (imports from lattish)
