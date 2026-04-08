@@ -1389,6 +1389,18 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     let from = args.get(1);
                     str_builtins::index_of(&Value::String(Arc::clone(&s_clone)), search, from)
                 }),
+                "lastIndexOf" => Rc::new(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    let position = args
+                        .get(1)
+                        .cloned()
+                        .unwrap_or(Value::Number(f64::INFINITY));
+                    str_builtins::last_index_of(
+                        &Value::String(Arc::clone(&s_clone)),
+                        search,
+                        &position,
+                    )
+                }),
                 "includes" => Rc::new(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let from = args.get(1);

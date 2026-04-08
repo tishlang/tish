@@ -363,6 +363,7 @@ impl Value {
                     "endsWith".into(),
                     "includes".into(),
                     "indexOf".into(),
+                    "lastIndexOf".into(),
                     "padEnd".into(),
                     "padStart".into(),
                     "repeat".into(),

@@ -5,15 +5,20 @@ let str = "Hello, World!"
 // indexOf
 console.log(str.indexOf("World"))
 console.log(str.indexOf("xyz"))
+console.log(str.indexOf("o", 5))
+console.log(str.indexOf("H", 1))
 
 // includes
 console.log(str.includes("World"))
 console.log(str.includes("xyz"))
+console.log(str.includes("o", 5))
+console.log(str.includes("h", -1))
 
 // slice
 console.log(str.slice(0, 5))
 console.log(str.slice(7))
 console.log(str.slice(-6))
+console.log(str.slice(0, -7))
 
 // substring
 console.log(str.substring(0, 5))
@@ -64,6 +69,19 @@ console.log("x".repeat(0))
 console.log("5".padStart(3, "0"))
 console.log("hi".padEnd(5, "!"))
 console.log("hello".padStart(3))
+
+// lastIndexOf
+let hay = "abcabc"
+console.log(hay.lastIndexOf("a"))
+console.log(hay.lastIndexOf("a", 2))
+console.log(hay.lastIndexOf("x"))
+console.log(hay.lastIndexOf(""))
+console.log(hay.lastIndexOf("", 3))
+// BMP only so Node (UTF-16 indices) matches Tish (scalar indices)
+let uni = "éaé"
+console.log(uni.lastIndexOf("a"))
+console.log(uni.lastIndexOf("é"))
+console.log("aba".lastIndexOf("a", null))
 
 // length property
 console.log("test".length)

@@ -515,6 +515,10 @@ impl Evaluator {
         if from.starts_with("tish:") {
             return self.load_builtin_module(from);
         }
+        // Scoped native modules (e.g. `@tishlang/waterui`) registered via `TishNativeModule::virtual_builtin_modules`.
+        if self.virtual_builtins.borrow().get(from).is_some() {
+            return self.load_builtin_module(from);
+        }
         let dir = self.current_dir.borrow().clone().ok_or_else(|| {
             EvalError::Error("Cannot resolve imports: no current file directory (use run_file)".to_string())
         })?;
@@ -1203,6 +1207,9 @@ impl Evaluator {
                                 });
                                 return Ok(Value::Number(found.unwrap_or(-1.0)));
                             }
+                            "lastIndexOf" => {
+                                return Ok(Self::string_last_index_of_eval(&arg_vals, s));
+                            }
                             "includes" => {
                                 let search = match arg_vals.first() {
                                     Some(Value::String(ss)) => ss.as_ref(),
@@ -1474,7 +1481,13 @@ impl Evaluator {
                         }
                     }
                     
-                    // Fall through to normal function call
+                    // Fall through to normal function call. `get_prop` only implements `length` on
+                    // strings, so method calls would otherwise become `call_func(Null)` → Not a function.
+                    if let Value::String(s) = &obj {
+                        if method_name.as_ref() == "lastIndexOf" {
+                            return Ok(Self::string_last_index_of_eval(&arg_vals, s));
+                        }
+                    }
                     let f = self.get_prop(&obj, method_name).map_err(EvalError::Error)?;
                     return self.call_func(&f, &arg_vals);
                 }
@@ -2636,6 +2649,31 @@ impl Evaluator {
 
     fn bind_destruct_pattern(&mut self, pattern: &tishlang_ast::DestructPattern, value: &Value, mutable: bool) -> Result<(), EvalError> {
         Self::bind_destruct_pattern_scoped(&self.scope, pattern, value, mutable)
+    }
+
+    /// `String.prototype.lastIndexOf` (interpreter). Kept as a helper so dispatch cannot fall
+    /// through to [`Self::get_prop`] + [`Self::call_func`] for string receivers.
+    fn string_last_index_of_eval(arg_vals: &[Value], receiver: &Arc<str>) -> Value {
+        let search = match arg_vals.first() {
+            Some(Value::String(ss)) => ss.as_ref(),
+            _ => return Value::Number(-1.0),
+        };
+        let position_core: tishlang_core::Value = match arg_vals.get(1) {
+            None => tishlang_core::Value::Number(f64::INFINITY),
+            Some(Value::Null) => tishlang_core::Value::Null,
+            Some(Value::Number(n)) => tishlang_core::Value::Number(*n),
+            Some(Value::Bool(b)) => tishlang_core::Value::Bool(*b),
+            Some(_) => tishlang_core::Value::Number(0.0),
+        };
+        let out = tishlang_builtins::string::last_index_of_str(
+            receiver.as_ref(),
+            search,
+            &position_core,
+        );
+        match out {
+            tishlang_core::Value::Number(n) => Value::Number(n),
+            _ => Value::Number(-1.0),
+        }
     }
 
     fn get_prop(&self, obj: &Value, key: &str) -> Result<Value, String> {
