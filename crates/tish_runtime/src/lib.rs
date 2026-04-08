@@ -71,6 +71,7 @@ pub use tishlang_builtins::string::{
     repeat as string_repeat_impl,
     pad_start as string_pad_start_impl,
     pad_end as string_pad_end_impl,
+    last_index_of as string_last_index_of_impl,
 };
 
 // Wrapper functions to maintain API compatibility
@@ -119,6 +120,9 @@ pub fn string_char_code_at(s: &Value, idx: &Value) -> Value { string_char_code_a
 pub fn string_repeat(s: &Value, count: &Value) -> Value { string_repeat_impl(s, count) }
 pub fn string_pad_start(s: &Value, target_len: &Value, pad: &Value) -> Value { string_pad_start_impl(s, target_len, pad) }
 pub fn string_pad_end(s: &Value, target_len: &Value, pad: &Value) -> Value { string_pad_end_impl(s, target_len, pad) }
+pub fn string_last_index_of(s: &Value, search: &Value, position: &Value) -> Value {
+    string_last_index_of_impl(s, search, position)
+}
 
 /// Number.prototype.toFixed(digits) - format number with fixed decimal places (0-20)
 pub fn number_to_fixed(n: &Value, digits: &Value) -> Value {

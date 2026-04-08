@@ -1,6 +1,6 @@
 # Tish Plan Gap Analysis
 
-Audit of plan vs implementation. Last updated: 2026-02-27.
+Audit of plan vs implementation. Last updated: 2026-04-08.
 
 ## Breaking Change: `any` → `let`/`const`
 
@@ -122,7 +122,7 @@ const y = 10    // immutable binding (error on reassignment)
 | Feature | Plan ref | Current | Gap |
 |---------|----------|---------|-----|
 | **Boolean** | 3.1.5 | bool literals | No Boolean(x) constructor |
-| **String** | 3.1.5 | strings, .length, 16 methods | ✓ indexOf, includes, slice, substring, split, trim, toUpperCase, toLowerCase, startsWith, endsWith, replace, replaceAll, charAt, charCodeAt, repeat, padStart, padEnd |
+| **String** | 3.1.5 | strings, .length, 17 instance methods | ✓ indexOf, lastIndexOf, includes, slice, substring, split, trim, toUpperCase, toLowerCase, startsWith, endsWith, replace, replaceAll, charAt, charCodeAt, repeat, padStart, padEnd |
 | **Array** | 3.1.5 | arrays, .length, 18 methods | ✓ push, pop, shift, unshift, indexOf, includes, join, reverse, slice, concat + map, filter, reduce, find, findIndex, forEach, some, every, flat |
 | **Object** | 3.1.5 | objects, dot/bracket access | ✓ Object.keys(), Object.values(), Object.entries() |
 | **Error/NativeErrors** | 3.1.5 | throw/catch work | No Error constructor, no .message |
@@ -144,8 +144,10 @@ Gaps discovered when porting JS patterns (e.g. mdx-docs). See [tish-docs JS Comp
 
 | Gap | Impact | Resolution task |
 |-----|--------|-----------------|
-| `String.indexOf` no `fromIndex` | Can't search from offset | Add optional 2nd param |
-| `indexOf` returns byte offset; `slice`/`length` use char indices | Corrupt output with UTF-8 multi-byte (em dash, etc.) | Unify index semantics (char-based) |
+| `String.indexOf` no `fromIndex` | Can't search from offset | ✓ Optional 2nd param (char index) |
+| `indexOf` returns byte offset; `slice`/`length` use char indices | Corrupt output with UTF-8 multi-byte (em dash, etc.) | ✓ Char-based indices |
+| `String.lastIndexOf` missing | JS parity for reverse search | ✓ `lastIndexOf(search, position?)`; native compile omits `position` via `Infinity` sentinel |
+| **String vs JS (astral symbols)** | Emoji etc.: one Tish char index vs two UTF-16 units in JS | Documented in LANGUAGE.md; use BMP in cross-engine golden tests |
 | `RegExp.exec()` no `index` property | Can't get match start for replacement | ✓ Added |
 | `String.replace` no function replacer | Manual iteration for custom replace | ✓ Added (interpreter) |
 
@@ -185,7 +187,7 @@ Gaps discovered when porting JS patterns (e.g. mdx-docs). See [tish-docs JS Comp
 ### High priority remaining
 8. ✓ **Property/index assignment** (`obj.x = val`, `arr[i] = val`) — Implemented
 9. ✓ **Mutable arrays** — `Rc<RefCell<Vec>>` implemented
-10. ✓ **String methods** — 16 methods implemented
+10. ✓ **String methods** — 17 instance methods implemented (incl. `lastIndexOf`)
 11. ✓ **Array methods** — 10 methods implemented
 12. **Computed property names** in object literals
 
@@ -304,8 +306,11 @@ Added comprehensive built-in methods for arrays and strings:
 | `.repeat(n)` | Repeat string n times |
 | `.padStart(len, pad)` | Pad at start |
 | `.padEnd(len, pad)` | Pad at end |
+| `.lastIndexOf(str, position?)` | Last index of substring (optional `position`; omit = search whole string; `null` → 0) |
 
 All methods work in both interpreter and compiled modes.
+
+**Remaining string / completion gaps (not implemented):** no `concat`, `trimStart`/`trimEnd`, `at`, `localeCompare`, `normalize`, `matchAll`; `startsWith`/`endsWith` lack optional length/position args from ES; **`Array.prototype.lastIndexOf`** appears in REPL completion keys but is not implemented (misleading).
 
 ### Mutable Objects and Arrays (2026-02-27)
 

@@ -13,6 +13,9 @@ while (i < iterations) {
     if (text.indexOf("lazy") > -1) {
         found = found + 1
     }
+    if (text.lastIndexOf("dog") > -1) {
+        found = found + 1
+    }
     i = i + 1
 }
 console.log(found)
