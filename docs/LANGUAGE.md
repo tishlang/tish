@@ -22,7 +22,7 @@ Tish is a minimal JS/TS-like language: same source runs in a **tree-walking inte
 
 **Blocks:** `{ … }` **or** indentation (lexer emits `Indent`/`Dedent`). **1 tab = 1 level; 2 spaces = 1 level.**
 
-**Modules:** `import { a } from 'http'`; native `tish:fs`, `tish:http`, `tish:process`, `tish:ws`, etc. (Rust backend only). **`tish:polars`** is available when the embedder registers [`tish-polars`](https://github.com/tishlang/tish-polars) via `Evaluator::with_modules` (for example the `tish-polars-run` binary); it exports `Polars` like `import { Polars } from 'tish:polars'`.
+**Modules:** `import { a } from 'http'`; native `tish:fs`, `tish:http`, `tish:process`, `tish:ws`, etc. (Rust backend only). **`tish:polars`** is available when the embedder registers [`tish-polars`](https://github.com/tishlang/tish-polars) via `Evaluator::with_modules` (for example the `tish-polars-run` binary); it exports `Polars` like `import { Polars } from 'tish:polars'`. **`@tishlang/waterui`** (and **`tish:waterui`**) register the same native module when the embedder includes [`@tishlang/waterui`](https://github.com/tishlang/tish-waterui) / `tish-waterui-run`; use `import { version } from '@tishlang/waterui'` or `from 'tish:waterui'`. Like other native crates, this applies to the **Rust native backend** / host binaries, not Cranelift-only or JS output alone.
 
 **Optional types (parsed, not enforced):** `let x: number = 1`, `fn f(a: T): R`, `T[]`, `{ k: T }`, `T | U`, rest `...args: T[]`. Function types `(T) => R` parsed for future use.
 
@@ -48,7 +48,10 @@ Tish is a minimal JS/TS-like language: same source runs in a **tree-walking inte
 - **Globals:** `Infinity`, `NaN`
 - **Number:** `n.toFixed(digits?)` → string (0–20 digits)
 - **Object:** `keys`, `values`, `entries`
-- **Array / string:** usual methods (`map`, `filter`, `reduce`, `slice`, `split`, …)
+- **Array:** usual methods (`map`, `filter`, `reduce`, `slice`, `push`, `pop`, …)
+- **String (instance):** `length`; `indexOf` / `lastIndexOf` (optional second index; character positions, see note); `includes`; `slice`; `substring`; `split`; `trim`; `toUpperCase` / `toLowerCase`; `startsWith` / `endsWith`; `replace` / `replaceAll`; `charAt` / `charCodeAt`; `repeat`; `padStart` / `padEnd`
+- **String (global):** `String.fromCharCode(…)`
+- **Note:** String indices follow **Unicode scalar values** (Rust `char`), matching **BMP** JavaScript string indices. **Astral symbols** (e.g. some emoji) are one Tish index but **two UTF-16 code units** in JS, so indices can differ from V8/Node for those characters.
 
 ---
 
