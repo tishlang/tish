@@ -7,7 +7,7 @@ use std::time::Duration;
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand};
 
-/// FIGlet-style block letters (UTF-8). On a TTY, a short expand + rainbow animation runs.
+/// FIGlet-style block letters (UTF-8). On a TTY, a short expand + palette-color animation runs.
 const TISH_BANNER_LINES: &[&str] = &[
     "████████╗██╗███████╗██╗  ██╗",
     "╚══██╔══╝██║██╔════╝██║  ██║",
@@ -17,72 +17,66 @@ const TISH_BANNER_LINES: &[&str] = &[
     "   ╚═╝   ╚═╝╚══════╝╚═╝  ╚═╝",
 ];
 
-const BANNER_ANIM_FRAMES: usize = 16;
-const BANNER_FRAME_MS: u64 = 26;
+/// Frames used for the left-to-right expand reveal.
+const BANNER_REVEAL_FRAMES: usize = 14;
+/// Extra frames of rainbow cycling after the logo is fully visible.
+const BANNER_CYCLE_FRAMES: usize = 36;
+const BANNER_FRAME_MS: u64 = 28;
+
+/// Orange → Yellow → Green → Teal → Blue → Purple → Pink (matching the brand palette).
+const PALETTE: &[(u8, u8, u8)] = &[
+    (255, 159,  64),  // Orange
+    (255, 213,  64),  // Yellow
+    ( 52, 199,  89),  // Green
+    ( 48, 209, 188),  // Teal
+    ( 10, 132, 255),  // Blue
+    (175,  82, 222),  // Purple
+    (255,  55, 148),  // Pink
+];
 
 fn ease_out_cubic(t: f32) -> f32 {
     let u = 1.0 - t.clamp(0.0, 1.0);
     1.0 - u * u * u
 }
 
-/// `h` degrees, `s`/`v` in 0..1 → sRGB 0..255.
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
-    let h = h.rem_euclid(360.0);
-    let s = s.clamp(0.0, 1.0);
-    let v = v.clamp(0.0, 1.0);
-    let c = v * s;
-    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
-    let m = v - c;
-    let (rp, gp, bp) = if h < 60.0 {
-        (c, x, 0.0)
-    } else if h < 120.0 {
-        (x, c, 0.0)
-    } else if h < 180.0 {
-        (0.0, c, x)
-    } else if h < 240.0 {
-        (0.0, x, c)
-    } else if h < 300.0 {
-        (x, 0.0, c)
-    } else {
-        (c, 0.0, x)
-    };
+/// Linearly interpolate between two palette colors.
+fn lerp_color(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
+    let t = t.clamp(0.0, 1.0);
     (
-        ((rp + m) * 255.0).round() as u8,
-        ((gp + m) * 255.0).round() as u8,
-        ((bp + m) * 255.0).round() as u8,
+        (a.0 as f32 + (b.0 as f32 - a.0 as f32) * t).round() as u8,
+        (a.1 as f32 + (b.1 as f32 - a.1 as f32) * t).round() as u8,
+        (a.2 as f32 + (b.2 as f32 - a.2 as f32) * t).round() as u8,
     )
 }
 
-fn banner_cell_index(row: usize, col: usize) -> usize {
-    let prefix: usize = TISH_BANNER_LINES[..row]
-        .iter()
-        .map(|l| l.chars().count())
-        .sum();
-    prefix + col
+/// Smooth palette sample for a given (row, col) cell and scrolling color frame.
+/// Uses column as the primary gradient axis so every row has a continuous sweep.
+/// A small per-row offset adds a gentle diagonal tilt rather than flat stripes.
+fn palette_color(row: usize, col: usize, color_frame: usize) -> (u8, u8, u8) {
+    let n = PALETTE.len();
+    // one full palette cycle every ~5 columns; row adds a slight diagonal
+    let scroll = color_frame as f32 * 0.22;
+    let pos = ((col as f32 / 5.0) + (row as f32 * 0.25) + scroll).rem_euclid(n as f32);
+    let lo = pos.floor() as usize % n;
+    let hi = (lo + 1) % n;
+    lerp_color(PALETTE[lo], PALETTE[hi], pos.fract())
 }
 
-/// Redraw the banner: left-to-right “expand” reveal + shifting rainbow on ink (non-space) cells.
-fn write_tish_banner_frame(out: &mut impl Write, frame: usize, frames: usize) {
-    let t_raw = (frame + 1) as f32 / frames as f32;
-    let t = ease_out_cubic(t_raw);
-    let hue_shift = frame as f32 * 11.0;
-
+/// Render one frame. `reveal_t` is 0..=1 (how much of each line is visible).
+/// `color_frame` is the ever-incrementing counter that drives the rainbow scroll.
+fn write_tish_banner_frame(out: &mut impl Write, reveal_t: f32, color_frame: usize) {
     for (row, line) in TISH_BANNER_LINES.iter().enumerate() {
         let chars: Vec<char> = line.chars().collect();
         let len = chars.len();
-        let visible = ((len as f32) * t).round() as usize;
+        let visible = ((len as f32) * reveal_t).round() as usize;
         let visible = visible.min(len);
 
         for col in 0..len {
             let ch = chars[col];
-            if col >= visible {
-                let _ = write!(out, " ");
-            } else if ch == ' ' {
+            if col >= visible || ch == ' ' {
                 let _ = write!(out, " ");
             } else {
-                let idx = banner_cell_index(row, col) as f32;
-                let hue = (idx * 13.5 + hue_shift) % 360.0;
-                let (r, g, b) = hsv_to_rgb(hue, 0.82, 0.98);
+                let (r, g, b) = palette_color(row, col, color_frame);
                 let _ = write!(out, "\x1b[1;38;2;{r};{g};{b}m{ch}\x1b[0m");
             }
         }
@@ -99,20 +93,26 @@ fn print_tish_banner_plain(out: &mut impl Write) {
 
 fn print_tish_banner_animated(out: &mut impl Write) {
     let n = TISH_BANNER_LINES.len();
-    let frames = BANNER_ANIM_FRAMES.max(1);
+    let total = BANNER_REVEAL_FRAMES + BANNER_CYCLE_FRAMES;
 
-    for f in 0..frames {
+    for f in 0..total {
         if f > 0 {
             let _ = write!(out, "\x1b[{n}A");
         }
-        write_tish_banner_frame(out, f, frames);
+        // Phase 1: ease-out expand.  Phase 2: fully visible, rainbow keeps scrolling.
+        let reveal_t = if f < BANNER_REVEAL_FRAMES {
+            ease_out_cubic((f + 1) as f32 / BANNER_REVEAL_FRAMES as f32)
+        } else {
+            1.0
+        };
+        write_tish_banner_frame(out, reveal_t, f);
         let _ = out.flush();
         thread::sleep(Duration::from_millis(BANNER_FRAME_MS));
     }
     let _ = writeln!(out);
 }
 
-/// Print the `TISH` tile banner to stdout (animated rainbow on a TTY; plain text otherwise).
+/// Print the `TISH` tile banner to stdout (animated palette on a TTY; plain text otherwise).
 pub fn print_tish_banner() {
     let mut out = io::stdout().lock();
     if io::stdout().is_terminal() {
