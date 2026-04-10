@@ -173,16 +173,27 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const H_PURPLE: &str = "\x1b[1;38;2;175;82;222m";
 /// ANSI: medium grey — clearly less-than-white on dark backgrounds
 const H_GREY: &str = "\x1b[38;2;150;150;150m";
+/// ANSI: pink (255, 55, 148) — used for the website URL
+const H_PINK: &str = "\x1b[38;2;255;55;148m";
 const H_RESET: &str = "\x1b[0m";
 
-/// One-line branded header.  `[purple]Tish[reset] [grey](version x)[reset]`
+/// Branded header used for subcommand help pages.
+/// Prints  `[purple]Tish[reset] [grey](version x)[reset]`
+///         `[pink]https://tishlang.com[reset]`
+/// followed by a blank line.
 fn print_small_header() {
     if io::stdout().is_terminal() {
-        println!("{H_PURPLE}Tish{H_RESET} {H_GREY}(version {VERSION}){H_RESET}\n");
+        println!("{H_PURPLE}Tish{H_RESET} {H_GREY}(version {VERSION}){H_RESET}");
+        println!("{H_PINK}https://tishlang.com{H_RESET}\n");
     } else {
-        println!("Tish (version {VERSION})\n");
+        println!("Tish (version {VERSION})");
+        println!("https://tishlang.com\n");
     }
 }
+
+/// Number of lines the main-help manual prefix takes (printed before clap output).
+/// Layout: title, description, url, blank = 4 lines.
+const MAIN_PREFIX_LINES: usize = 4;
 
 /// Print help, prefixed with the right header and (for top-level only) the
 /// animated banner.  Help is written via clap's own stdout path for full colors.
@@ -220,13 +231,16 @@ pub fn print_banner_with_help(argv: &[String]) {
 
     let n = TISH_BANNER_LINES.len();
 
-    // 1. First banner frame + "Tish (version)" prefix + full help – all visible immediately.
+    // 1. First banner frame + manual prefix + full help – all visible immediately.
     {
         let mut out = io::stdout().lock();
         write_tish_banner_frame(&mut out, 1.0, 0);
-        let _ = writeln!(out); // blank separator
-        // Branded title line (1 extra line before clap's help output)
+        let _ = writeln!(out); // blank separator  (row n+1)
+        // ── Manual prefix (MAIN_PREFIX_LINES = 4 lines) ──────────────────
         let _ = writeln!(out, "{H_PURPLE}Tish{H_RESET} {H_GREY}(version {VERSION}){H_RESET}");
+        let _ = writeln!(out, "Minimal TS/JS-ish language");
+        let _ = writeln!(out, "{H_PINK}https://tishlang.com{H_RESET}");
+        let _ = writeln!(out); // blank before Usage
         let _ = out.flush();
     }
     {
@@ -237,10 +251,10 @@ pub fn print_banner_with_help(argv: &[String]) {
     }
 
     // 2. Jump cursor back to banner top and cycle colors.
-    // Rows above cursor: n (banner) + 1 (sep) + 1 (title line) + h (clap help) = n+2+h
+    // Total rows above cursor: n + 1 (sep) + MAIN_PREFIX_LINES + h (clap)
     {
         let mut out = io::stdout().lock();
-        let _ = write!(out, "\x1b[{}A", n + 2 + h);
+        let _ = write!(out, "\x1b[{}A", n + 1 + MAIN_PREFIX_LINES + h);
         let _ = out.flush();
 
         let frames = BANNER_CYCLE_FRAMES;
@@ -253,8 +267,8 @@ pub fn print_banner_with_help(argv: &[String]) {
             thread::sleep(Duration::from_millis(BANNER_FRAME_MS));
         }
 
-        // After last frame cursor is at row n; skip sep + title + clap = 2+h rows.
-        let _ = write!(out, "\x1b[{}B", 2 + h);
+        // After last frame cursor is at row n; skip sep + prefix + clap rows.
+        let _ = write!(out, "\x1b[{}B", 1 + MAIN_PREFIX_LINES + h);
         let _ = writeln!(out);
         let _ = out.flush();
     }
@@ -397,7 +411,6 @@ Build `tish` with matching Cargo features (e.g. cargo build -p tishlang --featur
 
 #[derive(Parser)]
 #[command(name = "tish")]
-#[command(about = "  minimal TS/JS-compatible language")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(styles = cargo_help_styles())]
 pub(crate) struct Cli {
