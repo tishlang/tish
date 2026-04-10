@@ -4,7 +4,7 @@ use std::io::{self, IsTerminal, Write};
 use std::thread;
 use std::time::Duration;
 
-use clap::builder::styling::{AnsiColor, Effects, Styles};
+use clap::builder::styling::{Color, Effects, RgbColor, Style, Styles};
 use clap::{Parser, Subcommand};
 
 /// FIGlet-style block letters (UTF-8). On a TTY, a short expand + palette-color animation runs.
@@ -128,86 +128,140 @@ pub fn argv_requests_help(argv: &[String]) -> bool {
         || matches!(argv.get(1).map(String::as_str), Some("help"))
 }
 
-/// Help colors aligned with `cargo` (green section labels, cyan flags / placeholders).
-pub fn cargo_help_styles() -> Styles {
-    Styles::styled()
-        .header(AnsiColor::Green.on_default() | Effects::BOLD)
-        .usage(AnsiColor::Green.on_default() | Effects::BOLD)
-        .literal(AnsiColor::Cyan.on_default() | Effects::BOLD)
-        .placeholder(AnsiColor::Cyan.on_default() | Effects::BOLD)
+/// Build a bold true-color `Style` from the brand palette.
+fn rgb_bold(r: u8, g: u8, b: u8) -> Style {
+    Style::new().fg_color(Some(Color::Rgb(RgbColor(r, g, b)))) | Effects::BOLD
 }
 
-pub const CLI_AFTER_HELP: &str = r#"Environment variables:
-  TISH_NO_OPTIMIZE=1
+/// Help colors using the brand palette.
+/// Orange → section headers / usage.  Teal → literals (commands, flags).  Yellow → placeholders.
+pub fn cargo_help_styles() -> Styles {
+    Styles::styled()
+        .header(rgb_bold(255, 159,  64))      // Orange  – "Commands:", "Options:", "Usage:"
+        .usage(rgb_bold(255, 159,  64))       // Orange
+        .literal(rgb_bold( 48, 209, 188))     // Teal    – run, repl, --help, -V …
+        .placeholder(rgb_bold(255, 213,  64)) // Yellow  – <FILE>, <NAME>, …
+        .error(rgb_bold(255,  55, 148))       // Pink    – error messages
+        .valid(rgb_bold( 52, 199,  89))       // Green   – valid values
+        .invalid(rgb_bold(255,  55, 148))     // Pink    – invalid values
+}
+
+/// Returns the colored `after_help` text for the top-level `tish --help`.
+/// Colors are emitted only when stdout is a TTY.
+pub fn cli_after_help() -> String {
+    let (oh, t, r) = if io::stdout().is_terminal() {
+        ("\x1b[1;38;2;255;159;64m", "\x1b[1;38;2;48;209;188m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    format!(
+        "\
+{oh}Environment variables:{r}
+  {t}TISH_NO_OPTIMIZE=1{r}
           Disable AST and bytecode optimizations for run/build
 
-Run / REPL backends (--backend):
-  vm
+See {t}tish run --help{r} and {t}tish build --help{r} for backend and feature options."
+    )
+}
+
+fn capabilities_section(oh: &str, t: &str, r: &str) -> String {
+    format!(
+        "\
+{oh}Backends{r} (--backend):
+  {t}vm{r}
           Bytecode VM (default)
-  interp
+  {t}interp{r}
           Tree-walking interpreter
 
-Capabilities (--feature, repeatable; comma-separated values are split):
-  http
+{oh}Capabilities{r} (--feature, repeatable; comma-separated values are split):
+  {t}http{r}
           Network: fetch, serve, Promise / timers (native async)
-  fs
+  {t}fs{r}
           Filesystem: readFile, writeFile, fileExists, isDir, readDir, mkdir
-  process
+  {t}process{r}
           process.exit, cwd, exec, argv, env
-  regex
+  {t}regex{r}
           RegExp
-  ws
+  {t}ws{r}
           WebSocket client / server
-  full
+  {t}full{r}
           All of the above (http, fs, process, regex, ws)
 
-Omit --feature on run/repl (VM) or native build to use every capability linked into this binary.
-Build `tish` with matching Cargo features (e.g. cargo build -p tishlang --features full).
+Omit --feature to use every capability linked into this binary."
+    )
+}
 
-For --target (native, js, wasm, wasi) and --native-backend (rust, cranelift, llvm), see:
-  tish build --help"#;
+/// Returns the colored `after_help` for `tish run --help`.
+pub fn run_after_help() -> String {
+    let (oh, t, r) = if io::stdout().is_terminal() {
+        ("\x1b[1;38;2;255;159;64m", "\x1b[1;38;2;48;209;188m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    capabilities_section(oh, t, r)
+}
 
-pub const BUILD_COMMAND_AFTER_LONG_HELP: &str = r#"Build targets (--target, default: native):
-  native
+/// Returns the colored `after_help` for `tish repl --help`.
+pub fn repl_after_help() -> String {
+    let (oh, t, r) = if io::stdout().is_terminal() {
+        ("\x1b[1;38;2;255;159;64m", "\x1b[1;38;2;48;209;188m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    capabilities_section(oh, t, r)
+}
+
+/// Returns the colored `after_long_help` for `tish build --help`.
+pub fn build_after_help() -> String {
+    let (oh, t, r) = if io::stdout().is_terminal() {
+        ("\x1b[1;38;2;255;159;64m", "\x1b[1;38;2;48;209;188m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    format!(
+        "\
+{oh}Build targets{r} (--target, default: native):
+  {t}native{r}
           Native executable (see --native-backend)
-  js
+  {t}js{r}
           JavaScript bundle
-  wasm
+  {t}wasm{r}
           WebAssembly (.tish project; .js source supported on some paths)
-  wasi
+  {t}wasi{r}
           WASI WebAssembly
 
-Native backends (--native-backend, only with --target native, default: rust):
-  rust
+{oh}Native backends{r} (--native-backend, only with --target native, default: rust):
+  {t}rust{r}
           Emit Rust + link tishlang_runtime via cargo
-  cranelift
+  {t}cranelift{r}
           Embedded bytecode + Cranelift/VM runtime binary
-  llvm
+  {t}llvm{r}
           Embedded bytecode + LLVM/clang link path
 
-Capabilities (--feature, repeatable; comma-separated values are split):
-  http
+{oh}Capabilities{r} (--feature, repeatable; comma-separated values are split):
+  {t}http{r}
           Network: fetch, serve, Promise / timers (native async)
-  fs
+  {t}fs{r}
           Filesystem: readFile, writeFile, fileExists, isDir, readDir, mkdir
-  process
+  {t}process{r}
           process.exit, cwd, exec, argv, env
-  regex
+  {t}regex{r}
           RegExp
-  ws
+  {t}ws{r}
           WebSocket client / server
-  full
+  {t}full{r}
           All of the above (http, fs, process, regex, ws)
 
-Omit --feature on native build to use every capability linked into this binary.
-Build `tish` with matching Cargo features (e.g. cargo build -p tishlang --features full)."#;
+Omit --feature to use every capability linked into this binary.
+Build `tish` with matching Cargo features (e.g. cargo build -p tishlang --features full)."
+    )
+}
 
 #[derive(Parser)]
 #[command(name = "tish")]
 #[command(about = "Tish - minimal TS/JS-compatible language")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(styles = cargo_help_styles())]
-#[command(after_help = CLI_AFTER_HELP)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -289,7 +343,6 @@ pub(crate) enum Commands {
     /// Interactive REPL
     Repl(ReplArgs),
     /// Build native binary, wasm, wasi, or JavaScript output
-    #[command(after_long_help = BUILD_COMMAND_AFTER_LONG_HELP)]
     Build(BuildArgs),
     /// Parse and dump AST
     #[command(name = "dump-ast")]

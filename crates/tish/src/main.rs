@@ -10,7 +10,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use rustyline::{Behavior, ColorMode, CompletionType, Config, Editor};
 
 use cli_help::{Cli, Commands};
@@ -91,7 +91,13 @@ fn main() {
     }
 
     let argv = argv_with_implicit_run(argv);
-    let cli = Cli::parse_from(argv);
+    let matches = Cli::command()
+        .after_help(cli_help::cli_after_help())
+        .mut_subcommand("run",   |sub| sub.after_help(cli_help::run_after_help()))
+        .mut_subcommand("repl",  |sub| sub.after_help(cli_help::repl_after_help()))
+        .mut_subcommand("build", |sub| sub.after_long_help(cli_help::build_after_help()))
+        .get_matches_from(&argv);
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let result = match cli.command {
         Some(Commands::Run(a)) => run_file(&a.file, &a.backend, &a.features, a.no_optimize || no_opt_env),
         Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env, &a.features),
