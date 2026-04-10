@@ -5,10 +5,11 @@ use std::thread;
 use std::time::Duration;
 
 use clap::builder::styling::{Color, Effects, RgbColor, Style, Styles};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 /// FIGlet-style block letters (UTF-8). On a TTY, a short expand + palette-color animation runs.
 const TISH_BANNER_LINES: &[&str] = &[
+        "",
     "████████╗██╗███████╗██╗  ██╗",
     "╚══██╔══╝██║██╔════╝██║  ██║",
     "   ██║   ██║███████╗███████║",
@@ -20,8 +21,8 @@ const TISH_BANNER_LINES: &[&str] = &[
 /// Frames used for the left-to-right expand reveal.
 const BANNER_REVEAL_FRAMES: usize = 14;
 /// Extra frames of rainbow cycling after the logo is fully visible.
-const BANNER_CYCLE_FRAMES: usize = 36;
-const BANNER_FRAME_MS: u64 = 28;
+const BANNER_CYCLE_FRAMES: usize = 4;
+const BANNER_FRAME_MS: u64 = 20;
 
 /// Orange → Yellow → Green → Teal → Blue → Purple → Pink (matching the brand palette).
 const PALETTE: &[(u8, u8, u8)] = &[
@@ -119,6 +120,143 @@ pub fn print_tish_banner() {
         print_tish_banner_animated(&mut out);
     } else {
         print_tish_banner_plain(&mut out);
+    }
+}
+
+/// Build the `Command` with all colored after_help text attached.
+/// Use this instead of `Cli::command()` everywhere so the help text is consistent.
+pub fn build_command() -> clap::Command {
+    Cli::command()
+        .after_help(cli_after_help())
+        .mut_subcommand("run",   |sub| sub.after_help(run_after_help()))
+        .mut_subcommand("repl",  |sub| sub.after_help(repl_after_help()))
+        .mut_subcommand("build", |sub| sub.after_long_help(build_after_help()))
+}
+
+/// Write help text to `w` (plain bytes, used for line-counting only).
+fn count_help_lines(cmd: &mut clap::Command, sub_name: Option<&str>) -> usize {
+    let mut buf = Vec::<u8>::new();
+    if let Some(name) = sub_name {
+        if cmd.find_subcommand(name).is_some() {
+            let _ = cmd.find_subcommand_mut(name).unwrap().write_long_help(&mut buf);
+        } else {
+            let _ = cmd.write_long_help(&mut buf);
+        }
+    } else {
+        let _ = cmd.write_long_help(&mut buf);
+    }
+    buf.iter().filter(|&&b| b == b'\n').count()
+}
+
+/// Print help text directly to stdout via clap's own stdout path (guaranteed colors).
+fn print_help_to_stdout(cmd: &mut clap::Command, sub_name: Option<&str>) {
+    if let Some(name) = sub_name {
+        if cmd.find_subcommand(name).is_some() {
+            let _ = cmd.find_subcommand_mut(name).unwrap().print_long_help();
+            return;
+        }
+    }
+    let _ = cmd.print_long_help();
+}
+
+/// Detect which subcommand (if any) is being asked about from raw argv.
+fn sub_name_from_argv(argv: &[String]) -> Option<String> {
+    match argv.get(1).map(String::as_str) {
+        Some("help") => argv.get(2).map(String::to_string), // tish help run
+        Some(s) if !s.starts_with('-') => Some(s.to_string()), // tish run --help
+        _ => None,
+    }
+}
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// ANSI: bold purple (175, 82, 222)
+const H_PURPLE: &str = "\x1b[1;38;2;175;82;222m";
+/// ANSI: medium grey — clearly less-than-white on dark backgrounds
+const H_GREY: &str = "\x1b[38;2;150;150;150m";
+const H_RESET: &str = "\x1b[0m";
+
+/// One-line branded header.  `[purple]Tish[reset] [grey](version x)[reset]`
+fn print_small_header() {
+    if io::stdout().is_terminal() {
+        println!("{H_PURPLE}Tish{H_RESET} {H_GREY}(version {VERSION}){H_RESET}\n");
+    } else {
+        println!("Tish (version {VERSION})\n");
+    }
+}
+
+/// Print help, prefixed with the right header and (for top-level only) the
+/// animated banner.  Help is written via clap's own stdout path for full colors.
+pub fn print_banner_with_help(argv: &[String]) {
+    let sub_name = sub_name_from_argv(argv);
+    let sub = sub_name.as_deref();
+
+    // ── Subcommand help: compact static header, no animation ─────────────
+    if sub.is_some() {
+        print_small_header();
+        let mut cmd = build_command();
+        cmd.build();
+        print_help_to_stdout(&mut cmd, sub);
+        return;
+    }
+
+    // ── Top-level help ────────────────────────────────────────────────────
+
+    if !io::stdout().is_terminal() {
+        let mut out = io::stdout().lock();
+        print_tish_banner_plain(&mut out);
+        drop(out);
+        let mut cmd = build_command().color(clap::ColorChoice::Never);
+        cmd.build();
+        print_help_to_stdout(&mut cmd, sub);
+        return;
+    }
+
+    // Line-count pass (ANSI codes never add \n, so Never == Always count).
+    let h: usize = {
+        let mut cmd = build_command().color(clap::ColorChoice::Never);
+        cmd.build();
+        count_help_lines(&mut cmd, sub)
+    };
+
+    let n = TISH_BANNER_LINES.len();
+
+    // 1. First banner frame + "Tish (version)" prefix + full help – all visible immediately.
+    {
+        let mut out = io::stdout().lock();
+        write_tish_banner_frame(&mut out, 1.0, 0);
+        let _ = writeln!(out); // blank separator
+        // Branded title line (1 extra line before clap's help output)
+        let _ = writeln!(out, "{H_PURPLE}Tish{H_RESET} {H_GREY}(version {VERSION}){H_RESET}");
+        let _ = out.flush();
+    }
+    {
+        let mut cmd = build_command();
+        cmd.build();
+        print_help_to_stdout(&mut cmd, sub);
+        let _ = io::stdout().flush();
+    }
+
+    // 2. Jump cursor back to banner top and cycle colors.
+    // Rows above cursor: n (banner) + 1 (sep) + 1 (title line) + h (clap help) = n+2+h
+    {
+        let mut out = io::stdout().lock();
+        let _ = write!(out, "\x1b[{}A", n + 2 + h);
+        let _ = out.flush();
+
+        let frames = BANNER_CYCLE_FRAMES;
+        for f in 0..frames {
+            write_tish_banner_frame(&mut out, 1.0, f);
+            if f < frames - 1 {
+                let _ = write!(out, "\x1b[{}A", n);
+            }
+            let _ = out.flush();
+            thread::sleep(Duration::from_millis(BANNER_FRAME_MS));
+        }
+
+        // After last frame cursor is at row n; skip sep + title + clap = 2+h rows.
+        let _ = write!(out, "\x1b[{}B", 2 + h);
+        let _ = writeln!(out);
+        let _ = out.flush();
     }
 }
 
@@ -259,7 +397,7 @@ Build `tish` with matching Cargo features (e.g. cargo build -p tishlang --featur
 
 #[derive(Parser)]
 #[command(name = "tish")]
-#[command(about = "Tish - minimal TS/JS-compatible language")]
+#[command(about = "  minimal TS/JS-compatible language")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(styles = cargo_help_styles())]
 pub(crate) struct Cli {
