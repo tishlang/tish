@@ -1,6 +1,7 @@
 //! Stack-based bytecode VM.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -15,15 +16,40 @@ use tishlang_core::{ObjectMap, Value};
 
 type ArrayMethodFn = Rc<dyn Fn(&[Value]) -> Value>;
 
+/// Feature names enabled for this VM run (`tish run --feature …`). `full` enables every optional capability.
+#[cfg_attr(
+    not(any(feature = "fs", feature = "http", feature = "process", feature = "ws")),
+    allow(dead_code)
+)]
+fn cap_allows(enabled: &HashSet<String>, name: &str) -> bool {
+    enabled.contains("full") || enabled.contains(name)
+}
+
+/// Capabilities linked into this `tishlang_vm` binary (compile-time). Used by [`Vm::new`] and `run()`.
+pub fn all_compiled_capabilities() -> HashSet<String> {
+    #[allow(unused_mut)]
+    let mut s = HashSet::new();
+    #[cfg(feature = "http")]
+    s.insert("http".to_string());
+    #[cfg(feature = "fs")]
+    s.insert("fs".to_string());
+    #[cfg(feature = "process")]
+    s.insert("process".to_string());
+    #[cfg(feature = "regex")]
+    s.insert("regex".to_string());
+    #[cfg(feature = "ws")]
+    s.insert("ws".to_string());
+    s
+}
+
 /// Look up built-in module export for LoadNativeExport. Returns None if unknown or feature disabled.
-/// Parameters are only used when the corresponding feature (fs, http, process) is enabled.
 #[cfg_attr(
     not(any(feature = "fs", feature = "http", feature = "process", feature = "ws")),
     allow(unused_variables)
 )]
-fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
+fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) -> Option<Value> {
     #[cfg(feature = "fs")]
-    if spec == "tish:fs" {
+    if spec == "tish:fs" && cap_allows(enabled, "fs") {
         return match export_name {
             "readFile" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::read_file(args)))),
             "writeFile" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::write_file(args)))),
@@ -35,7 +61,7 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
         };
     }
     #[cfg(feature = "http")]
-    if spec == "tish:http" {
+    if spec == "tish:http" && cap_allows(enabled, "http") {
         return match export_name {
             // Bytecode compiler lowers `await expr` to `tish:http.await(promise)` (see tish_bytecode compiler).
             "await" => Some(Value::Function(Rc::new(|args: &[Value]| {
@@ -59,7 +85,7 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
         };
     }
     #[cfg(feature = "process")]
-    if spec == "tish:process" {
+    if spec == "tish:process" && cap_allows(enabled, "process") {
         return match export_name {
             "exit" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exit(args)))),
             "cwd" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_cwd(args)))),
@@ -97,7 +123,7 @@ fn get_builtin_export(spec: &str, export_name: &str) -> Option<Value> {
         };
     }
     #[cfg(feature = "ws")]
-    if spec == "tish:ws" {
+    if spec == "tish:ws" && cap_allows(enabled, "ws") {
         return match export_name {
             "WebSocket" => Some(Value::Function(Rc::new(|args: &[Value]| {
                 tishlang_runtime::web_socket_client(args)
@@ -149,7 +175,8 @@ fn vm_log_err(s: &str) {
 }
 
 /// Initialize default globals (console, Math, JSON, etc.)
-fn init_globals() -> ObjectMap {
+#[allow(unused_variables)]
+fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     let mut g = ObjectMap::default();
 
     let mut console = ObjectMap::default();
@@ -381,7 +408,7 @@ fn init_globals() -> ObjectMap {
     g.insert("document".into(), Value::Object(Rc::new(RefCell::new(document_obj))));
 
     #[cfg(feature = "process")]
-    {
+    if cap_allows(enabled, "process") {
         let mut process_obj = ObjectMap::default();
         process_obj.insert(
             "exit".into(),
@@ -413,7 +440,7 @@ fn init_globals() -> ObjectMap {
     }
 
     #[cfg(feature = "http")]
-    {
+    if cap_allows(enabled, "http") {
         g.insert(
             "serve".into(),
             Value::Function(Rc::new(|args: &[Value]| {
@@ -433,21 +460,44 @@ fn init_globals() -> ObjectMap {
 /// Shared scope for closure capture (parent frame's locals).
 type ScopeMap = Rc<RefCell<ObjectMap>>;
 
+/// Options for the convenience [`run_with_options`] helper (one-shot VM run from the CLI).
+#[derive(Clone, Debug, Default)]
+pub struct VmRunOptions {
+    /// When true and not inside a nested chunk (`enclosing` is `None`), top-level [`Opcode::DeclareVar`]
+    /// also writes to globals so the REPL keeps bindings across input lines.
+    pub repl_mode: bool,
+    /// Enabled capabilities for this run (e.g. `fs`, `http`, `full`). Empty = none (secure default).
+    pub capabilities: HashSet<String>,
+}
+
 pub struct Vm {
     stack: Vec<Value>,
     scope: ObjectMap,
     /// Enclosing scope for closures (captured parent frame locals).
     enclosing: Option<ScopeMap>,
     globals: Rc<RefCell<ObjectMap>>,
+    /// Capabilities for `LoadNativeExport` and globals such as `process` / `serve`.
+    capabilities: Arc<HashSet<String>>,
 }
 
 impl Vm {
+    /// VM with every capability that exists in this `tishlang_vm` build (embedders, tests, `run()`).
     pub fn new() -> Self {
+        Self::with_capabilities_arc(Arc::new(all_compiled_capabilities()))
+    }
+
+    /// VM with an explicit capability set (e.g. from `tish run --feature …`).
+    pub fn with_capabilities(capabilities: HashSet<String>) -> Self {
+        Self::with_capabilities_arc(Arc::new(capabilities))
+    }
+
+    fn with_capabilities_arc(capabilities: Arc<HashSet<String>>) -> Self {
         Self {
             stack: Vec::new(),
             scope: ObjectMap::default(),
             enclosing: None,
-            globals: Rc::new(RefCell::new(init_globals())),
+            globals: Rc::new(RefCell::new(init_globals(capabilities.as_ref()))),
+            capabilities,
         }
     }
 
@@ -476,7 +526,12 @@ impl Vm {
     }
 
     pub fn run(&mut self, chunk: &Chunk) -> Result<Value, String> {
-        self.run_chunk(chunk, &chunk.nested, &[])
+        self.run_with_options(chunk, false)
+    }
+
+    /// Run a chunk using this VM's capability set. `repl_mode` persists top-level `let` across REPL lines.
+    pub fn run_with_options(&mut self, chunk: &Chunk, repl_mode: bool) -> Result<Value, String> {
+        self.run_chunk(chunk, &chunk.nested, &[], repl_mode)
     }
 
     fn run_chunk(
@@ -484,6 +539,7 @@ impl Vm {
         chunk: &Chunk,
         nested: &[Chunk],
         args: &[Value],
+        repl_mode: bool,
     ) -> Result<Value, String> {
         let code = &chunk.code;
         let constants = &chunk.constants;
@@ -517,6 +573,7 @@ impl Vm {
             }
         }
         let mut try_handlers: Vec<(usize, usize)> = vec![];
+        let mut block_undo_stack: Vec<Vec<(Arc<str>, Option<Value>)>> = vec![];
 
         loop {
             if ip >= code.len() {
@@ -548,14 +605,16 @@ impl Vm {
                             let inner_clone = inner.clone();
                             let globals = Rc::clone(&self.globals);
                             let enclosing = Some(Rc::clone(&local_scope));
+                            let capabilities = Arc::clone(&self.capabilities);
                             Value::Function(Rc::new(move |args: &[Value]| {
                                 let mut vm = Vm {
                                     stack: Vec::new(),
                                     scope: ObjectMap::default(),
                                     enclosing: enclosing.clone(),
                                     globals: Rc::clone(&globals),
+                                    capabilities: Arc::clone(&capabilities),
                                 };
-                                vm.run_chunk(&inner_clone, &inner_clone.nested, args)
+                                vm.run_chunk(&inner_clone, &inner_clone.nested, args, false)
                                     .unwrap_or(Value::Null)
                             }))
                         }
@@ -613,6 +672,62 @@ impl Vm {
                             self.globals.borrow_mut().insert(Arc::clone(name), v);
                         } else {
                             local_scope.borrow_mut().insert(Arc::clone(name), v);
+                        }
+                    }
+                }
+                Opcode::DeclareVar => {
+                    let idx = Self::read_u16(code, &mut ip);
+                    let name = names
+                        .get(idx as usize)
+                        .ok_or_else(|| format!("Name index out of bounds: {}", idx))?;
+                    let v = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    if let Some(frame) = block_undo_stack.last_mut() {
+                        let old = local_scope.borrow().get(name.as_ref()).cloned();
+                        frame.push((Arc::clone(name), old));
+                    }
+                    // REPL: persist top-level bindings only (not block-locals shadowing globals).
+                    if repl_mode && self.enclosing.is_none() && block_undo_stack.is_empty() {
+                        self.globals
+                            .borrow_mut()
+                            .insert(Arc::clone(name), v.clone());
+                    }
+                    local_scope.borrow_mut().insert(Arc::clone(name), v);
+                }
+                Opcode::DeclareVarPlain => {
+                    let idx = Self::read_u16(code, &mut ip);
+                    let name = names
+                        .get(idx as usize)
+                        .ok_or_else(|| format!("Name index out of bounds: {}", idx))?;
+                    let v = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    if repl_mode && self.enclosing.is_none() && block_undo_stack.is_empty() {
+                        self.globals
+                            .borrow_mut()
+                            .insert(Arc::clone(name), v.clone());
+                    }
+                    local_scope.borrow_mut().insert(Arc::clone(name), v);
+                }
+                Opcode::EnterBlock => {
+                    block_undo_stack.push(Vec::new());
+                }
+                Opcode::ExitBlock => {
+                    let frame = block_undo_stack.pop().ok_or_else(|| {
+                        "ExitBlock without matching EnterBlock".to_string()
+                    })?;
+                    for (name, old) in frame.into_iter().rev() {
+                        let mut ls = local_scope.borrow_mut();
+                        match old {
+                            Some(prev) => {
+                                ls.insert(name, prev);
+                            }
+                            None => {
+                                ls.remove(name.as_ref());
+                            }
                         }
                     }
                 }
@@ -1144,9 +1259,9 @@ impl Vm {
                             return Err("LoadNativeExport: export_name constant out of bounds or not string".to_string());
                         }
                     };
-                    let v = get_builtin_export(spec, export_name).ok_or_else(|| {
+                    let v = get_builtin_export(self.capabilities.as_ref(), spec, export_name).ok_or_else(|| {
                         format!(
-                            "Built-in module '{}' does not export '{}' or feature not enabled. Rebuild with --features full (or fs, http, process, ws).",
+                            "Built-in module '{}' does not export '{}' or capability not enabled for this run. Use e.g. tish run --feature fs (or full). The tish binary must also be built with that capability linked in.",
                             spec, export_name
                         )
                     })?;
@@ -1379,6 +1494,12 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
         }
         Value::String(s) => {
             let key_s = key.as_ref();
+            if let Ok(idx) = key_s.parse::<usize>() {
+                return match s.chars().nth(idx) {
+                    Some(c) => Ok(Value::String(Arc::from(c.to_string()))),
+                    None => Err("Index out of bounds".to_string()),
+                };
+            }
             if key_s == "length" {
                 return Ok(Value::Number(s.chars().count() as f64));
             }
@@ -1502,8 +1623,14 @@ fn set_index(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
     set_member(obj, &key, val)
 }
 
-/// Run a chunk and return the result.
+/// Run a chunk with every capability linked into this `tishlang_vm` build (tests, embedders).
 pub fn run(chunk: &Chunk) -> Result<Value, String> {
     let mut vm = Vm::new();
-    vm.run(chunk)
+    vm.run_with_options(chunk, false)
+}
+
+/// Run a chunk with options (e.g. REPL persistence for top-level declarations).
+pub fn run_with_options(chunk: &Chunk, opts: VmRunOptions) -> Result<Value, String> {
+    let mut vm = Vm::with_capabilities(opts.capabilities);
+    vm.run_with_options(chunk, opts.repl_mode)
 }

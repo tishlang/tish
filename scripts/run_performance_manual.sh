@@ -219,7 +219,7 @@ else
     echo -n "  $test_id: "
     # Rust native (default backend)
     if want_runtime rust; then
-      if $tish_bin compile "$tish_file" -o "$compile_dir/${cache_key}_native" --native-backend rust >/dev/null 2>&1; then
+      if $tish_bin build "$tish_file" -o "$compile_dir/${cache_key}_native" --native-backend rust >/dev/null 2>&1; then
         echo -n "rust "
         rust_ok=$((rust_ok + 1))
       else
@@ -229,7 +229,7 @@ else
     fi
     # Cranelift (pure Tish, no native imports)
     if want_runtime cranelift; then
-      if $tish_bin compile "$tish_file" -o "$compile_dir/${cache_key}_cranelift" --native-backend cranelift >/dev/null 2>&1; then
+      if $tish_bin build "$tish_file" -o "$compile_dir/${cache_key}_cranelift" --native-backend cranelift >/dev/null 2>&1; then
         echo -n "cranelift "
         cranelift_ok=$((cranelift_ok + 1))
       else
@@ -239,7 +239,7 @@ else
     fi
     # LLVM (pure Tish, no native imports; uses clang)
     if want_runtime llvm; then
-      if $tish_bin compile "$tish_file" -o "$compile_dir/${cache_key}_llvm" --native-backend llvm >/dev/null 2>&1; then
+      if $tish_bin build "$tish_file" -o "$compile_dir/${cache_key}_llvm" --native-backend llvm >/dev/null 2>&1; then
         echo -n "llvm "
         llvm_ok=$((llvm_ok + 1))
       else
@@ -250,7 +250,7 @@ else
     # WASI (for wasmtime)
     if want_runtime wasi; then
       if $has_wasmtime; then
-        if $tish_bin compile "$tish_file" -o "$compile_dir/${cache_key}_wasi" --target wasi >/dev/null 2>&1; then
+        if $tish_bin build "$tish_file" -o "$compile_dir/${cache_key}_wasi" --target wasi >/dev/null 2>&1; then
           echo -n "wasi"
           wasi_ok=$((wasi_ok + 1))
         else

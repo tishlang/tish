@@ -108,7 +108,7 @@ fn factory() {
             .into_iter()
             .map(String::from)
             .collect::<Vec<_>>();
-        let (rust, _) = compile_project_full(&bench, bench.parent(), &features, true).unwrap();
+        let (rust, _, _) = compile_project_full(&bench, bench.parent(), &features, true).unwrap();
         // outerVar = 42 is inferred as f64; f64 is Copy so no .clone() is emitted.
         assert!(
             rust.contains("let mut outerVar: f64"),

@@ -57,7 +57,7 @@ pub fn compile_to_native(
 
     match backend {
         Backend::Rust => {
-            let (rust_code, native_modules) = tishlang_compile::compile_project_full(
+            let (rust_code, native_modules, effective_features) = tishlang_compile::compile_project_full(
                 entry_path,
                 project_root,
                 features,
@@ -67,8 +67,13 @@ pub fn compile_to_native(
                 message: e.to_string(),
             })?;
 
-            crate::build::build_via_cargo(&rust_code, native_modules, output_path, features)
-                .map_err(|e| NativeError { message: e })
+            crate::build::build_via_cargo(
+                &rust_code,
+                native_modules,
+                output_path,
+                &effective_features,
+            )
+            .map_err(|e| NativeError { message: e })
         }
         Backend::Cranelift => {
             let modules = tishlang_compile::resolve_project(entry_path, project_root)

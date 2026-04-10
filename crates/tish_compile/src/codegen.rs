@@ -393,17 +393,19 @@ pub fn compile_project(
     project_root: Option<&Path>,
     features: &[String],
 ) -> Result<String, CompileError> {
-    let (rust, _) = compile_project_full(entry_path, project_root, features, true)?;
+    let (rust, _, _) = compile_project_full(entry_path, project_root, features, true)?;
     Ok(rust)
 }
 
-/// Compile a project and return Rust code plus resolved native modules for Cargo.toml generation.
+/// Compile a project and return Rust code, resolved native modules, and the **effective** feature list
+/// (CLI features plus any inferred from `tish:fs` / `tish:http` / … imports). Pass this list to
+/// `tishlang_runtime` when linking (e.g. `build_via_cargo`) so Cargo `features` match codegen.
 pub fn compile_project_full(
     entry_path: &Path,
     project_root: Option<&Path>,
     features: &[String],
     optimize: bool,
-) -> Result<(String, Vec<crate::resolve::ResolvedNativeModule>), CompileError> {
+) -> Result<(String, Vec<crate::resolve::ResolvedNativeModule>, Vec<String>), CompileError> {
     use crate::resolve;
     let root = project_root.unwrap_or_else(|| entry_path.parent().unwrap_or(Path::new(".")));
     let modules = resolve::resolve_project(entry_path, project_root)
@@ -421,7 +423,7 @@ pub fn compile_project_full(
         }
     }
     let rust = compile_with_native_modules(&merged, project_root, &all_features, &native_modules, optimize)?;
-    Ok((rust, native_modules))
+    Ok((rust, native_modules, all_features))
 }
 
 /// Compile with explicit feature flags. When features are provided, codegen uses them
@@ -480,6 +482,9 @@ struct Codegen {
     /// Variables currently wrapped in Rc<RefCell<Value>> for mutable capture in closures
     /// These need special handling: reads via .borrow().clone(), writes via *var.borrow_mut()
     refcell_wrapped_vars: std::collections::HashSet<String>,
+    /// Scopes of names whose Rust binding is actually `Rc<RefCell<_>>` (emitted at VarDecl).
+    /// `refcell_wrapped_vars` alone is insufficient: it is set by prepasses before decl may run.
+    rc_cell_storage_scopes: Vec<std::collections::HashSet<String>>,
     /// Usage analyzer for move/clone optimization
     usage_analyzer: Option<UsageAnalyzer>,
     /// Type context for tracking variable types (for static typing)
@@ -509,9 +514,23 @@ impl Codegen {
             outer_params_stack: Vec::new(),
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
+            rc_cell_storage_scopes: vec![std::collections::HashSet::new()],
             usage_analyzer: None,
             type_context: TypeContext::new(),
             program_has_jsx: false,
+        }
+    }
+
+    fn rc_cell_storage_contains(&self, name: &str) -> bool {
+        self.rc_cell_storage_scopes
+            .iter()
+            .rev()
+            .any(|s| s.contains(name))
+    }
+
+    fn rc_cell_storage_define(&mut self, name: &str) {
+        if let Some(scope) = self.rc_cell_storage_scopes.last_mut() {
+            scope.insert(name.to_string());
         }
     }
 
@@ -576,28 +595,8 @@ impl Codegen {
     }
 
     fn has_feature(&self, name: &str) -> bool {
-        if self.features.is_empty() {
-            #[cfg(feature = "process")]
-            if name == "process" {
-                return true;
-            }
-            #[cfg(feature = "http")]
-            if name == "http" {
-                return true;
-            }
-            #[cfg(feature = "fs")]
-            if name == "fs" {
-                return true;
-            }
-            #[cfg(feature = "regex")]
-            if name == "regex" {
-                return true;
-            }
-            #[cfg(feature = "ws")]
-            if name == "ws" {
-                return true;
-            }
-            false
+        if self.features.contains("full") {
+            matches!(name, "http" | "fs" | "process" | "regex" | "ws")
         } else {
             self.features.contains(name)
         }
@@ -711,20 +710,27 @@ impl Codegen {
         let is_wrapped = self.refcell_wrapped_vars.contains(name);
         let var_type = self.type_context.get_type(name);
 
-        // Native fast path: f64 variable → avoid boxing/unboxing.
-        if !is_wrapped && var_type == RustType::F64 {
+        // Native f64 (plain or Rc<RefCell<f64>> for closure-mutated locals)
+        if var_type == RustType::F64 {
             let op_assign = if delta.contains('+') { "+=" } else { "-=" };
+            if !is_wrapped {
+                return if is_prefix {
+                    format!("{{ {n} {op_assign} 1.0_f64; Value::Number({n}) }}")
+                } else {
+                    format!("{{ let _prev = {n}; {n} {op_assign} 1.0_f64; Value::Number(_prev) }}")
+                };
+            }
             return if is_prefix {
-                format!("{{ {n} {op_assign} 1.0_f64; Value::Number({n}) }}")
+                format!("{{ *{n}.borrow_mut() {op_assign} 1.0_f64; Value::Number(*{n}.borrow()) }}")
             } else {
-                format!("{{ let _prev = {n}; {n} {op_assign} 1.0_f64; Value::Number(_prev) }}")
+                format!("{{ let _prev = *{n}.borrow(); *{n}.borrow_mut() {op_assign} 1.0_f64; Value::Number(_prev) }}")
             };
         }
 
         if is_prefix {
             if is_wrapped {
                 format!(
-                    "{{ *{n}.borrow_mut() = Value::Number(match &*{n}.borrow() {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); (*{n}.borrow()).clone() }}"
+                    "{{ let _cur = (*{n}.borrow()).clone(); *{n}.borrow_mut() = Value::Number(match &_cur {{ Value::Number(n) => n {delta}, _ => panic!(\"{op_name} needs number\") }}); (*{n}.borrow()).clone() }}"
                 )
             } else {
                 format!(
@@ -818,7 +824,7 @@ impl Codegen {
             if self.is_async {
                 self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, promise_object as tish_promise_object, await_promise as tish_await_promise};\n");
             } else {
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve};\n");
+                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout};\n");
             }
         }
         if self.has_feature("fs") {
@@ -962,9 +968,9 @@ impl Codegen {
         if self.has_feature("http") {
             self.writeln("let fetch = Value::Function(Rc::new(|args: &[Value]| tish_fetch_promise(args.to_vec())));");
             self.writeln("let fetchAll = Value::Function(Rc::new(|args: &[Value]| tish_fetch_all_promise(args.to_vec())));");
+            self.writeln("let setTimeout = Value::Function(Rc::new(|args: &[Value]| tish_timer_set_timeout(args)));");
+            self.writeln("let clearTimeout = Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_timeout(args)));");
             if self.is_async {
-                self.writeln("let setTimeout = Value::Function(Rc::new(|args: &[Value]| tish_timer_set_timeout(args)));");
-                self.writeln("let clearTimeout = Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_timeout(args)));");
                 self.writeln("let Promise = tish_promise_object();");
             }
             self.writeln("let serve = Value::Function(Rc::new(|args: &[Value]| {");
@@ -1050,6 +1056,7 @@ impl Codegen {
                 self.indent += 1;
                 self.type_context.push_scope();
                 self.outer_vars_stack.push(Vec::new());
+                self.rc_cell_storage_scopes.push(std::collections::HashSet::new());
                 // Prepass: vars that must be RefCell because nested closures capture and mutate them
                 let vars_mutated_by_nested = Self::collect_vars_mutated_by_nested_closures(statements);
                 for v in &vars_mutated_by_nested {
@@ -1068,6 +1075,7 @@ impl Codegen {
                 }
                 self.function_scope_stack.pop(); // Exit scope
                 self.outer_vars_stack.pop(); // Exit variable scope
+                self.rc_cell_storage_scopes.pop();
                 for v in &vars_mutated_by_nested {
                     self.refcell_wrapped_vars.remove(v);
                 }
@@ -1090,12 +1098,24 @@ impl Codegen {
                 
                 if rust_type.is_native() {
                     // Generate native typed variable
-                    let type_str = rust_type.to_rust_type_str();
                     let expr_str = match init.as_ref() {
                         Some(e) => self.emit_native_expr(e, &rust_type)?,
                         None => rust_type.default_value(),
                     };
-                    self.writeln(&format!("{} {}: {} = {};", mutability, escaped_name, type_str, expr_str));
+                    if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                        // Closure-mutated: same Rc<RefCell<T>> pattern as Value (assignments use borrow_mut)
+                        self.writeln(&format!(
+                            "let {} = std::rc::Rc::new(RefCell::new({}));",
+                            escaped_name, expr_str
+                        ));
+                        self.rc_cell_storage_define(name.as_ref());
+                    } else {
+                        let type_str = rust_type.to_rust_type_str();
+                        self.writeln(&format!(
+                            "{} {}: {} = {};",
+                            mutability, escaped_name, type_str, expr_str
+                        ));
+                    }
                 } else {
                     // Original Value-based codegen
                     let (expr_str, clone_needed) = match init.as_ref() {
@@ -1117,6 +1137,7 @@ impl Codegen {
                             expr_str.to_string()
                         };
                         self.writeln(&format!("let {} = std::rc::Rc::new(RefCell::new({}));", escaped_name, init_val));
+                        self.rc_cell_storage_define(name.as_ref());
                     } else if clone_needed {
                         self.writeln(&format!("{} {} = ({}).clone();", mutability, escaped_name, expr_str));
                     } else {
@@ -1436,7 +1457,7 @@ impl Codegen {
                 // If outer scope already has the var as RefCell, just clone it.
                 for outer_var in &outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
-                    if self.refcell_wrapped_vars.contains(outer_var) {
+                    if self.rc_cell_storage_contains(outer_var) {
                         self.writeln(&format!("let {}_cell = {}.clone();", var_escaped, var_escaped));
                     } else {
                         self.writeln(&format!("let {}_cell = std::rc::Rc::new(RefCell::new({}.clone()));", var_escaped, var_escaped));
@@ -1715,7 +1736,12 @@ impl Codegen {
             Expr::Ident { name, .. } => {
                 let escaped = Self::escape_ident(name.as_ref());
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    format!("(*{}.borrow()).clone()", escaped)
+                    let var_type = self.type_context.get_type(name.as_ref());
+                    if var_type.is_native() {
+                        var_type.to_value_expr(&format!("(*{}.borrow())", escaped))
+                    } else {
+                        format!("(*{}.borrow()).clone()", escaped)
+                    }
                 } else {
                     // Check if this is a typed variable that needs conversion to Value
                     let var_type = self.type_context.get_type(name.as_ref());
@@ -2314,37 +2340,47 @@ impl Codegen {
             }
             Expr::Assign { name, value, .. } => {
                 let escaped = Self::escape_ident(name.as_ref());
-                // Native fast path: if the target is a scalar native type, emit
-                // a direct assignment without boxing/unboxing through Value.
-                if !self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    let rust_type = self.type_context.get_type(name.as_ref());
-                    if rust_type.is_native() && matches!(rust_type, RustType::F64 | RustType::Bool | RustType::String) {
-                        let (val_code, val_ty) = self.emit_typed_expr(value)?;
-                        let native_val = if val_ty == rust_type {
-                            val_code
-                        } else if val_ty == RustType::Value {
-                            rust_type.from_value_expr(&val_code)
-                        } else {
-                            val_code
-                        };
-                        let return_val = rust_type.to_value_expr(&escaped);
-                        return Ok(format!(
-                            "{{ {} = {}; {} }}",
-                            escaped, native_val, return_val
-                        ));
-                    }
+                let rust_type = self.type_context.get_type(name.as_ref());
+                let is_ref = self.refcell_wrapped_vars.contains(name.as_ref());
+                // Native fast path: direct assignment (plain or Rc<RefCell<T>> for closure capture)
+                if rust_type.is_native()
+                    && matches!(rust_type, RustType::F64 | RustType::Bool | RustType::String)
+                {
+                    let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                    let native_val = if val_ty == rust_type {
+                        val_code
+                    } else if val_ty == RustType::Value {
+                        rust_type.from_value_expr(&val_code)
+                    } else {
+                        val_code
+                    };
+                    let return_val = if is_ref {
+                        rust_type.to_value_expr(&format!("(*{}.borrow())", escaped))
+                    } else {
+                        rust_type.to_value_expr(&escaped)
+                    };
+                    // Rust evaluates the assignment place before the RHS; RHS must not call
+                    // `.borrow()` on the same RefCell while `borrow_mut()` is active.
+                    let assign_stmt = if is_ref {
+                        format!(
+                            "let _assign_tmp = {}; *{}.borrow_mut() = _assign_tmp",
+                            native_val, escaped
+                        )
+                    } else {
+                        format!("{} = {}", escaped, native_val)
+                    };
+                    return Ok(format!("{{ {}; {} }}", assign_stmt, return_val));
                 }
                 // Fallback: Value path
                 let val = self.emit_expr(value)?;
                 let needs_outer_clone = self.should_clone(value);
-                if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                if is_ref {
                     if needs_outer_clone {
                         format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, escaped)
                     } else {
                         format!("{{ let _v = {}; *{}.borrow_mut() = _v.clone(); _v }}", val, escaped)
                     }
                 } else {
-                    let rust_type = self.type_context.get_type(name.as_ref());
                     let assign_rhs = if matches!(rust_type, RustType::Value) {
                         "_v.clone()".to_string()
                     } else {
@@ -2406,6 +2442,31 @@ impl Codegen {
                 let is_refcell = self.refcell_wrapped_vars.contains(name.as_ref());
                 let var_type = self.type_context.get_type(name.as_ref());
 
+                // ── native f64 in Rc<RefCell<f64>> (closure-mutated) ───────────
+                if is_refcell && var_type == RustType::F64 {
+                    let (rhs_code, rhs_ty) = self.emit_typed_expr(value)?;
+                    let rhs_f64 = if rhs_ty == RustType::F64 {
+                        rhs_code
+                    } else {
+                        let rhs_val = if rhs_ty.is_native() {
+                            rhs_ty.to_value_expr(&rhs_code)
+                        } else {
+                            rhs_code
+                        };
+                        format!("(match &({}) {{ Value::Number(n) => *n, v => panic!(\"compound assign: expected number, got {{:?}}\", v) }})", rhs_val)
+                    };
+                    let op_str = match op {
+                        CompoundOp::Add => "+=",
+                        CompoundOp::Sub => "-=",
+                        CompoundOp::Mul => "*=",
+                        CompoundOp::Div => "/=",
+                        CompoundOp::Mod => "%=",
+                    };
+                    return Ok(format!(
+                        "{{ let _op_rhs = {rhs_f64}; *{n}.borrow_mut() {op_str} _op_rhs; Value::Number(*{n}.borrow()) }}"
+                    ));
+                }
+
                 // ── native f64 fast path: direct arithmetic operators ─────────
                 // emit_expr must return a Value expression; wrap the result back.
                 if !is_refcell && var_type == RustType::F64 {
@@ -2430,6 +2491,32 @@ impl Codegen {
                     };
                     // Wrap in Value::Number so the expression is a valid Value
                     return Ok(format!("{{ {} {} {}; Value::Number({}) }}", n, op_str, rhs_f64, n));
+                }
+
+                // ── native String += in Rc<RefCell<String>> ───────────────────
+                if is_refcell && var_type == RustType::String && matches!(op, CompoundOp::Add) {
+                    let (rhs_code, rhs_ty) = self.emit_typed_expr(value)?;
+                    let rhs_str = if rhs_ty == RustType::String {
+                        rhs_code
+                    } else {
+                        let rhs_val = if rhs_ty.is_native() {
+                            rhs_ty.to_value_expr(&rhs_code)
+                        } else {
+                            rhs_code
+                        };
+                        format!(
+                            "match &({}) {{ \
+                             Value::String(s) => s.to_string(), \
+                             Value::Number(n) => {{ let i = *n as i64; if (*n - i as f64).abs() < f64::EPSILON {{ i.to_string() }} else {{ n.to_string() }} }}, \
+                             Value::Bool(b) => b.to_string(), \
+                             Value::Null => \"null\".to_string(), \
+                             other => format!(\"{{:?}}\", other) }}",
+                            rhs_val
+                        )
+                    };
+                    return Ok(format!(
+                        "{{ let _push_rhs = {rhs_str}; (*{n}.borrow_mut()).push_str(&_push_rhs); Value::String((*{n}.borrow()).clone().into()) }}"
+                    ));
                 }
 
                 // ── native String += fast path: push_str ─────────────────────
@@ -2470,8 +2557,8 @@ impl Codegen {
                 };
                 if is_refcell {
                     format!(
-                        "{{ let _rhs = ({}).clone(); *{}.borrow_mut() = tishlang_runtime::ops::{}(&*{}.borrow(), &_rhs)?; (*{}.borrow()).clone() }}",
-                        val, n, op_fn, n, n
+                        "{{ let _lhs_v = (*{}.borrow()).clone(); let _rhs = ({}).clone(); let _new = tishlang_runtime::ops::{}(&_lhs_v, &_rhs)?; *{}.borrow_mut() = _new; (*{}.borrow()).clone() }}",
+                        n, val, op_fn, n, n
                     )
                 } else if var_type.is_native() {
                     // Wrap native lhs as Value, run ops::, unbox result back to native
@@ -2496,26 +2583,56 @@ impl Codegen {
                 let var_type = self.type_context.get_type(name.as_ref());
 
                 // ── native type: wrap for condition, unbox for assignment ──────
-                if !is_refcell && var_type.is_native() {
-                    // n_as_value uses .clone() for String so we don't consume n
-                    let n_as_value = var_type.to_value_expr(&n);
+                // (plain binding or Rc<RefCell<T>> when closure-mutated)
+                if var_type.is_native() {
+                    let inner = if is_refcell {
+                        format!("(*{}.borrow())", n)
+                    } else {
+                        n.clone()
+                    };
+                    let n_as_value = var_type.to_value_expr(&inner);
                     let val_as_native = var_type.from_value_expr("_v");
+                    let ret_expr = if is_refcell {
+                        var_type.to_value_expr(&format!("(*{}.borrow())", n))
+                    } else {
+                        var_type.to_value_expr(&n)
+                    };
                     let (cond, assign_and_return, else_expr) = match op {
                         LogicalAssignOp::AndAnd => (
                             format!("{{ let __chk = {}; __chk.is_truthy() }}", n_as_value),
-                            format!("{{ let _v = ({}).clone(); {} = {}; {} }}", val, n, val_as_native, var_type.to_value_expr(&n)),
-                            var_type.to_value_expr(&n),
+                            if is_refcell {
+                                format!(
+                                    "{{ let _v = ({}).clone(); *{}.borrow_mut() = {}; {} }}",
+                                    val, n, val_as_native, ret_expr
+                                )
+                            } else {
+                                format!(
+                                    "{{ let _v = ({}).clone(); {} = {}; {} }}",
+                                    val, n, val_as_native, ret_expr
+                                )
+                            },
+                            ret_expr.clone(),
                         ),
                         LogicalAssignOp::OrOr => (
                             format!("!{{ let __chk = {}; __chk.is_truthy() }}", n_as_value),
-                            format!("{{ let _v = ({}).clone(); {} = {}; {} }}", val, n, val_as_native, var_type.to_value_expr(&n)),
-                            var_type.to_value_expr(&n),
+                            if is_refcell {
+                                format!(
+                                    "{{ let _v = ({}).clone(); *{}.borrow_mut() = {}; {} }}",
+                                    val, n, val_as_native, ret_expr
+                                )
+                            } else {
+                                format!(
+                                    "{{ let _v = ({}).clone(); {} = {}; {} }}",
+                                    val, n, val_as_native, ret_expr
+                                )
+                            },
+                            ret_expr.clone(),
                         ),
                         // Native types (f64, String, bool) are never null — ??= is a no-op
                         LogicalAssignOp::Nullish => (
                             "false".to_string(),
-                            var_type.to_value_expr(&n), // unreachable but must type-check
-                            var_type.to_value_expr(&n),
+                            ret_expr.clone(),
+                            ret_expr.clone(),
                         ),
                     };
                     return Ok(format!("{{ if {} {{ {} }} else {{ {} }} }}", cond, assign_and_return, else_expr));
@@ -3445,14 +3562,12 @@ impl Codegen {
         let mutable_outer_vars: Vec<String> = outer_vars.iter().filter(|v| assigned_in_body.contains(*v)).cloned().collect();
         let read_only_outer_vars: Vec<String> = outer_vars.iter().filter(|v| !assigned_in_body.contains(*v)).cloned().collect();
 
-        // Track which vars are already RefCell-wrapped (from outer closure) to avoid double-wrapping
-        let already_wrapped = self.refcell_wrapped_vars.clone();
-
-        // Wrap outer captures in Rc<RefCell<>> and use _ref suffix
+        // Wrap outer captures in Rc<RefCell<>> and use _ref suffix.
+        // Clone existing Rc only when VarDecl actually emitted `Rc<RefCell<...>>` (see rc_cell_storage_*).
         for outer_param in &outer_params {
             let param_escaped = Self::escape_ident(outer_param);
             let ref_name = format!("{}_ref", param_escaped);
-            if already_wrapped.contains(outer_param) {
+            if self.rc_cell_storage_contains(outer_param) {
                 code.push_str(&format!("    let {} = {}.clone();\n", ref_name, param_escaped));
             } else {
                 code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", ref_name, param_escaped));
@@ -3461,7 +3576,7 @@ impl Codegen {
         for outer_var in &outer_vars {
             let var_escaped = Self::escape_ident(outer_var);
             let ref_name = format!("{}_ref", var_escaped);
-            if already_wrapped.contains(outer_var) {
+            if self.rc_cell_storage_contains(outer_var) {
                 code.push_str(&format!("    let {} = {}.clone();\n", ref_name, var_escaped));
             } else {
                 code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", ref_name, var_escaped));
@@ -3637,7 +3752,11 @@ impl Codegen {
         if let Expr::Ident { name, .. } = expr {
             let var_type = self.type_context.get_type(name.as_ref());
             if &var_type == target_type {
-                return Ok(Self::escape_ident(name.as_ref()).into_owned());
+                let esc = Self::escape_ident(name.as_ref()).into_owned();
+                if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                    return Ok(format!("(*{}.borrow()).clone()", esc));
+                }
+                return Ok(esc);
             }
         }
         
@@ -3670,8 +3789,12 @@ impl Codegen {
             Expr::Ident { name, .. } => {
                 let escaped = Self::escape_ident(name.as_ref());
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    // RefCell-wrapped: unwrap via borrow and return Value
-                    Ok((format!("(*{}.borrow()).clone()", escaped), RustType::Value))
+                    let var_type = self.type_context.get_type(name.as_ref());
+                    if var_type.is_native() {
+                        Ok((format!("(*{}.borrow()).clone()", escaped), var_type))
+                    } else {
+                        Ok((format!("(*{}.borrow()).clone()", escaped), RustType::Value))
+                    }
                 } else {
                     let var_type = self.type_context.get_type(name.as_ref());
                     if var_type.is_native() {

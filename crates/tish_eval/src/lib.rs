@@ -3,7 +3,7 @@
 mod eval;
 #[cfg(feature = "http")]
 mod http;
-mod value_convert;
+pub mod value_convert;
 #[cfg(feature = "http")]
 mod promise;
 #[cfg(feature = "http")]

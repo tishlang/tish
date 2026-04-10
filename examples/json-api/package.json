@@ -4,5 +4,8 @@
   "tish": {
     "source": "./src/main.tish",
     "features": ["http"]
+  },
+  "scripts": {
+    "start": "tish run src/main.tish"
   }
 }

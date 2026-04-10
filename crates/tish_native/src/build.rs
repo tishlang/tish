@@ -5,6 +5,29 @@ use std::path::Path;
 
 use tishlang_compile::ResolvedNativeModule;
 
+/// `tishlang_runtime` Cargo feature names (subset of CLI / compile feature names).
+const RUNTIME_CARGO_FEATURES: &[&str] = &["http", "fs", "process", "regex", "ws"];
+
+/// Map CLI/compile features to flags passed to `tishlang_runtime` in the temp crate's Cargo.toml.
+/// `full` enables every optional runtime capability (matches `tish build --feature full` / LANGUAGE.md).
+fn runtime_features_for_cargo(features: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for f in features {
+        if f == "full" {
+            for name in RUNTIME_CARGO_FEATURES {
+                if !out.iter().any(|x: &String| x == *name) {
+                    out.push((*name).to_string());
+                }
+            }
+            continue;
+        }
+        if RUNTIME_CARGO_FEATURES.contains(&f.as_str()) && !out.contains(f) {
+            out.push(f.clone());
+        }
+    }
+    out
+}
+
 pub fn build_via_cargo(
     rust_code: &str,
     native_modules: Vec<ResolvedNativeModule>,
@@ -19,15 +42,12 @@ pub fn build_via_cargo(
 
     let runtime_path = tishlang_build_utils::find_runtime_path()?;
 
-    let runtime_features: Vec<&str> = features
-        .iter()
-        .filter(|f| ["http", "fs", "process", "regex", "ws"].contains(&f.as_str()))
-        .map(String::as_str)
-        .collect();
-    let features_str = if runtime_features.is_empty() {
+    let runtime_features = runtime_features_for_cargo(features);
+    let runtime_refs: Vec<&str> = runtime_features.iter().map(String::as_str).collect();
+    let features_str = if runtime_refs.is_empty() {
         String::new()
     } else {
-        format!(", features = {:?}", runtime_features)
+        format!(", features = {:?}", runtime_refs)
     };
 
     let needs_tokio = rust_code.contains("#[tokio::main]");
@@ -112,5 +132,26 @@ tishlang_runtime = {{ path = {:?}{} }}{}{}{}
     tishlang_build_utils::copy_binary_to_output(&binary, &target)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_features_for_cargo;
+
+    #[test]
+    fn runtime_features_full_expands() {
+        let f = runtime_features_for_cargo(&["full".to_string()]);
+        assert!(f.contains(&"http".to_string()));
+        assert!(f.contains(&"fs".to_string()));
+        assert!(f.contains(&"process".to_string()));
+        assert!(f.contains(&"regex".to_string()));
+        assert!(f.contains(&"ws".to_string()));
+    }
+
+    #[test]
+    fn runtime_features_merges_full_and_specific() {
+        let f = runtime_features_for_cargo(&["full".to_string(), "http".to_string()]);
+        assert_eq!(f.len(), 5);
+    }
 }
 

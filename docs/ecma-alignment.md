@@ -28,7 +28,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 
 ## test262/language
 
-- **block-scope** — Follow
+- **block-scope** — Simplify — Block/function shadowing matches lexical intuition (`tests/core/scopes.tish`). **Omit** ECMA **`let`/`const` temporal dead zone** and **`var`-style hoisting**; see [LANGUAGE.md](LANGUAGE.md) Semantics.
 - **comments** — Follow
 - **computed-property-names** — Follow (MemberProp::Expr)
 - **keywords** — + `fn`/`function`, `let`/`const`
@@ -102,8 +102,9 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 5. **No prototypes** — Plain records and arrays.
 6. **Strict equality only** — No `==` or implicit coercion.
 7. **No `eval`, `with`** — Omitted for security and compileability.
-8. **No `var`** — Block-scoped `any` only.
-9. **`new` expressions** — Supported syntactically; semantics are host-dependent and not full ECMA `[[Construct]]` except on JavaScript compile output.
+8. **No `var`** — Block-scoped `let`/`const` only; no `var` hoisting.
+9. **Scope model** — Lexical blocks and functions with shadowing; **no** ECMA **`let`/`const` TDZ** or other JS-only binding complications (see [LANGUAGE.md](LANGUAGE.md) Semantics).
+10. **`new` expressions** — Supported syntactically; semantics are host-dependent and not full ECMA `[[Construct]]` except on JavaScript compile output.
 
 ## Bytecode VM: jump peephole (implementation)
 

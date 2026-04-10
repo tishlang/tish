@@ -521,6 +521,54 @@ fn test_mvp_programs_interpreter() {
     }
 }
 
+/// Default bytecode VM must match the tree-walking interpreter for every MVP program.
+#[test]
+fn test_mvp_programs_interp_vm_stdout_parity() {
+    let core_dir = core_dir();
+    let bin = tish_bin();
+    assert!(
+        bin.exists(),
+        "tish binary not found at {}. Run `cargo build -p tishlang` first.",
+        bin.display()
+    );
+    for name in MVP_TEST_FILES {
+        let path = core_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let path_str = path.to_string_lossy();
+        let out_interp = Command::new(&bin)
+            .args(["run", path_str.as_ref(), "--backend", "interp"])
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish interpreter");
+        assert!(
+            out_interp.status.success(),
+            "Interpreter failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out_interp.stderr)
+        );
+        let out_vm = Command::new(&bin)
+            .args(["run", path_str.as_ref()])
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish VM");
+        assert!(
+            out_vm.status.success(),
+            "VM failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out_vm.stderr)
+        );
+        let s_interp = String::from_utf8_lossy(&out_interp.stdout);
+        let s_vm = String::from_utf8_lossy(&out_vm.stdout);
+        assert_eq!(
+            s_interp, s_vm,
+            "interp vs VM stdout mismatch for {}",
+            path.display()
+        );
+    }
+}
+
 /// Compile each .tish file to native, run, and compare stdout to static expected (parallelized).
 #[test]
 fn test_mvp_programs_native() {

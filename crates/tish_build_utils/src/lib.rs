@@ -15,6 +15,123 @@ fn is_tish_workspace_root(root: &Path) -> bool {
     root.join("crates").join("tish_runtime").is_dir()
 }
 
+/// True if `line` (trimmed) opens a Cargo.toml table whose body may contain path dependencies.
+fn cargo_section_may_contain_path_deps(header: &str) -> bool {
+    let h = header.trim();
+    if h == "dependencies"
+        || h == "dev-dependencies"
+        || h == "build-dependencies"
+        || h == "workspace.dependencies"
+    {
+        return true;
+    }
+    h.starts_with("dependencies.")
+        || h.starts_with("dev-dependencies.")
+        || h.starts_with("build-dependencies.")
+        || h.starts_with("workspace.dependencies.")
+        || h.starts_with("patch.")
+}
+
+/// Collect `path = "..."` / `path = '...'` strings from lines in dependency-related sections.
+fn path_values_from_cargo_toml(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_section = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            in_section = cargo_section_may_contain_path_deps(rest);
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        extract_path_assignments_from_line(trimmed, &mut out);
+    }
+    out
+}
+
+fn extract_path_assignments_from_line(line: &str, out: &mut Vec<String>) {
+    let mut rest = line;
+    while let Some(idx) = rest.find("path") {
+        let after = rest[idx + 4..].trim_start();
+        let after = match after.strip_prefix('=') {
+            Some(a) => a.trim_start(),
+            None => {
+                rest = &rest[idx + 4..];
+                continue;
+            }
+        };
+        let quote = match after.chars().next() {
+            Some('"') => '"',
+            Some('\'') => '\'',
+            _ => {
+                rest = &rest[idx + 4..];
+                continue;
+            }
+        };
+        let after = &after[quote.len_utf8()..];
+        let end = after.find(quote);
+        let Some(end) = end else {
+            rest = &rest[idx + 4..];
+            continue;
+        };
+        out.push(after[..end].to_string());
+        rest = &after[end + quote.len_utf8()..];
+    }
+}
+
+/// Starting from a filesystem path (crate dir or file), walk ancestors for `crates/tish_runtime`.
+fn tish_root_from_path_hint(start: &Path) -> Option<PathBuf> {
+    let mut dir = if start.is_file() {
+        start.parent()?.to_path_buf()
+    } else {
+        start.to_path_buf()
+    };
+    dir = fs::canonicalize(&dir).unwrap_or(dir);
+    let mut cur = dir.as_path();
+    for _ in 0..32 {
+        if is_tish_workspace_root(cur) {
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
+    }
+    None
+}
+
+/// Scan `dir/Cargo.toml` for path dependencies; if any resolves inside a Tish workspace, return that root.
+fn tish_root_from_cargo_manifest_dir(dir: &Path) -> Option<PathBuf> {
+    let cargo_toml = dir.join("Cargo.toml");
+    if !cargo_toml.is_file() {
+        return None;
+    }
+    let content = fs::read_to_string(&cargo_toml).ok()?;
+    let base = dir;
+    for rel in path_values_from_cargo_toml(&content) {
+        let joined = base.join(&rel);
+        let resolved = match joined.canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if let Some(root) = tish_root_from_path_hint(&resolved) {
+            return Some(root);
+        }
+    }
+    None
+}
+
+/// Walk from `start` upward; at each directory try [`tish_root_from_cargo_manifest_dir`].
+fn tish_root_from_project_cargo_files(mut start: PathBuf) -> Option<PathBuf> {
+    for _ in 0..32 {
+        if let Some(root) = tish_root_from_cargo_manifest_dir(&start) {
+            return Some(root);
+        }
+        if !start.pop() {
+            break;
+        }
+    }
+    None
+}
+
 /// Find the Tish workspace root using multiple strategies.
 ///
 /// Returns the directory containing the workspace Cargo.toml (with [workspace]).
@@ -29,6 +146,10 @@ pub fn find_workspace_root() -> Result<PathBuf, String> {
             if root_buf.join("Cargo.toml").exists() && is_tish_workspace_root(&root_buf) {
                 return Ok(root_buf);
             }
+        }
+        // Consumer workspace: manifest is the app crate; path deps point at Tish checkout.
+        if let Some(root) = tish_root_from_project_cargo_files(path.clone()) {
+            return Ok(root);
         }
     }
 
@@ -49,7 +170,14 @@ pub fn find_workspace_root() -> Result<PathBuf, String> {
         }
     }
 
-    // Strategy 3: Walk from current working directory
+    // Strategy 3: Walk from current working directory (path deps on a consumer crate)
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(root) = tish_root_from_project_cargo_files(cwd.clone()) {
+            return Ok(root);
+        }
+    }
+
+    // Strategy 4: Walk from current working directory
     if let Ok(mut current) = std::env::current_dir() {
         for _ in 0..15 {
             let cargo_toml = current.join("Cargo.toml");
@@ -192,4 +320,46 @@ pub fn copy_binary_to_output(binary: &Path, output_path: &Path) -> Result<(), St
     }
     fs::copy(binary, output_path).map_err(|e| format!("Cannot copy to {}: {}", output_path.display(), e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_values_dependencies_section_only() {
+        let toml = r#"
+[package]
+name = "app"
+path = "ignored-outside-deps"
+
+[dependencies]
+tishlang_runtime = { path = "../tish/crates/tish_runtime" }
+
+[metadata]
+path = "also-ignored"
+"#;
+        let paths = path_values_from_cargo_toml(toml);
+        assert_eq!(paths, vec!["../tish/crates/tish_runtime"]);
+    }
+
+    #[test]
+    fn path_values_workspace_dependencies() {
+        let toml = r#"
+[workspace.dependencies]
+tishlang_runtime = { path = "../../tish/tish/crates/tish_runtime" }
+"#;
+        let paths = path_values_from_cargo_toml(toml);
+        assert_eq!(paths, vec!["../../tish/tish/crates/tish_runtime"]);
+    }
+
+    #[test]
+    fn path_values_patch_section() {
+        let toml = r#"
+[patch.crates-io]
+tishlang_runtime = { path = "../vendor/tish_runtime" }
+"#;
+        let paths = path_values_from_cargo_toml(toml);
+        assert_eq!(paths, vec!["../vendor/tish_runtime"]);
+    }
 }
