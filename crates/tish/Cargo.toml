@@ -39,7 +39,7 @@ tishlang_wasm = { path = "../tish_wasm", version = ">=0.1" }
 tishlang_runtime = { path = "../tish_runtime", version = ">=0.1" }
 tishlang_core = { path = "../tish_core", version = ">=0.1" }
 tishlang_js_to_tish = { path = "../js_to_tish", version = ">=0.1" }
-clap = { version = "4.6.0", features = ["derive"] }
+clap = { version = "4.6.0", features = ["derive", "color"] }
 
 [dev-dependencies]
 rayon = "1.11"

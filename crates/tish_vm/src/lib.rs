@@ -2,7 +2,7 @@
 
 mod vm;
 
-pub use vm::{run, Vm};
+pub use vm::{all_compiled_capabilities, run, run_with_options, Vm, VmRunOptions};
 
 #[cfg(test)]
 mod tests {

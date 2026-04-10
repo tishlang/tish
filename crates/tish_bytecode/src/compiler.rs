@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, DestructElement, DestructPattern, Expr,
-    FunParam, JsxAttrValue, JsxChild, JsxProp, Literal, MemberProp, ObjectProp, Program, Span,
-    Statement,
+    ExportDeclaration, FunParam, JsxAttrValue, JsxChild, JsxProp, Literal, LogicalAssignOp,
+    MemberProp, ObjectProp, Program, Span, Statement,
 };
 
 use crate::chunk::{Chunk, Constant};
@@ -47,12 +47,27 @@ impl std::error::Error for CompileError {}
 /// Loop boundary for break/continue.
 struct LoopInfo {
     break_patches: Vec<usize>,
+    /// Operand positions for `continue`: either `JumpBack` (while / do-while / for-of) or `Jump`
+    /// (C-style `for`, where the update clause is emitted after the body).
     continue_patches: Vec<usize>,
+    /// When true, [`Opcode::Jump`] placeholders in `continue_patches` are patched forward with
+    /// [`Self::patch_jump`]. When false, they are [`Opcode::JumpBack`] patched with
+    /// [`Self::patch_jump_back`].
+    continue_is_forward_jump: bool,
 }
 
 /// Switch boundary: break exits the switch.
 struct SwitchInfo {
     break_patches: Vec<usize>,
+}
+
+/// Innermost break/continue target for unwinding `EnterBlock` before a jump.
+#[derive(Clone, Copy)]
+enum Breakable {
+    /// `usize` = `block_depth` before the loop body (same as Continue unwind target).
+    Loop { unwind_depth: usize },
+    /// `usize` = `block_depth` before the switch statement.
+    Switch { unwind_depth: usize },
 }
 
 struct Compiler<'a> {
@@ -62,6 +77,10 @@ struct Compiler<'a> {
     /// Stack of loop info for break/continue.
     loop_stack: Vec<LoopInfo>,
     switch_stack: Vec<SwitchInfo>,
+    /// Parallel to nested loops/switches: innermost target for break/continue block unwind.
+    breakable_stack: Vec<Breakable>,
+    /// Nesting depth of emitted `EnterBlock` (lexical blocks) not yet closed on the compile path.
+    block_depth: usize,
     /// When true (REPL mode), last ExprStmt leaves its value on the stack and we skip trailing LoadConst Null.
     retain_last_expr: bool,
 }
@@ -73,8 +92,99 @@ impl<'a> Compiler<'a> {
             scope: vec![HashMap::new()],
             loop_stack: Vec::new(),
             switch_stack: Vec::new(),
+            breakable_stack: Vec::new(),
+            block_depth: 0,
             retain_last_expr,
         }
+    }
+
+    fn emit_exit_blocks_until_depth(&mut self, target_depth: usize) {
+        let n = self.block_depth.saturating_sub(target_depth);
+        for _ in 0..n {
+            self.emit(Opcode::ExitBlock);
+        }
+    }
+
+    /// C-style `for` init: bindings are not inside the `{ ... }` body for block-undo purposes.
+    /// Formal parameters as VM slot names plus optional destructure patterns (one per formal).
+    fn plan_function_params(
+        params: &[FunParam],
+    ) -> Result<(Vec<Arc<str>>, Vec<Option<DestructPattern>>), CompileError> {
+        let mut names = Vec::with_capacity(params.len());
+        let mut slots: Vec<Option<DestructPattern>> = Vec::with_capacity(params.len());
+        let mut syn_counter = 0u32;
+        for p in params {
+            match p {
+                FunParam::Simple(tp) => {
+                    names.push(Arc::clone(&tp.name));
+                    slots.push(None);
+                }
+                FunParam::Destructure {
+                    pattern,
+                    default,
+                    ..
+                } => {
+                    if default.is_some() {
+                        return Err(CompileError {
+                            message: "Default values on destructuring parameters are not supported in bytecode"
+                                .to_string(),
+                        });
+                    }
+                    names.push(Arc::from(format!("__param_{}", syn_counter)));
+                    syn_counter += 1;
+                    slots.push(Some(pattern.clone()));
+                }
+            }
+        }
+        Ok((names, slots))
+    }
+
+    /// After VM binds positional args to `param_names`, load each destructure slot and bind pattern locals.
+    fn emit_param_destructure_prologue(
+        &mut self,
+        param_names: &[Arc<str>],
+        slots: &[Option<DestructPattern>],
+    ) -> Result<(), CompileError> {
+        debug_assert_eq!(param_names.len(), slots.len());
+        for (name, slot) in param_names.iter().zip(slots.iter()) {
+            if let Some(pattern) = slot {
+                let idx = self.name_idx(name);
+                self.emit_u16(Opcode::LoadVar, idx);
+                self.compile_destructure(pattern, false, false)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn compile_for_init_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
+        match stmt {
+            Statement::VarDecl {
+                name,
+                init,
+                mutable: _,
+                ..
+            } => {
+                if let Some(expr) = init {
+                    self.compile_expr(expr)?;
+                } else {
+                    let idx = self.constant_idx(Constant::Null);
+                    self.emit(Opcode::LoadConst);
+                    self.chunk.write_u16(idx);
+                }
+                let idx = self.name_idx(name);
+                self.emit_u16(Opcode::DeclareVarPlain, idx);
+                self.scope
+                    .last_mut()
+                    .unwrap()
+                    .insert(Arc::clone(name), false);
+            }
+            Statement::VarDeclDestructure { pattern, init, .. } => {
+                self.compile_expr(init)?;
+                self.compile_destructure(pattern, false, true)?;
+            }
+            _ => self.compile_statement(stmt)?,
+        }
+        Ok(())
     }
 
     fn name_idx(&mut self, name: &Arc<str>) -> u16 {
@@ -122,9 +232,10 @@ impl<'a> Compiler<'a> {
         self.chunk.code[patch_pos + 1] = bytes[1];
     }
 
-    /// Patch a JumpBack operand: distance from (patch_pos+3) back to target.
+    /// Patch a JumpBack operand: distance from the IP after this insn back to `target`.
+    /// `patch_pos` is the first byte of the u16 operand (same as [`Self::emit_jump_back`]'s return value).
     fn patch_jump_back(&mut self, patch_pos: usize, target: usize) {
-        let after_insn = patch_pos + 3;
+        let after_insn = patch_pos + 2;
         let dist = after_insn.saturating_sub(target);
         let bytes = (dist as u16).to_be_bytes();
         self.chunk.code[patch_pos] = bytes[0];
@@ -362,11 +473,15 @@ impl<'a> Compiler<'a> {
     fn compile_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
         match stmt {
             Statement::Block { statements, .. } => {
+                self.emit(Opcode::EnterBlock);
+                self.block_depth += 1;
                 self.scope.push(HashMap::new());
                 for s in statements {
                     self.compile_statement(s)?;
                 }
                 self.scope.pop();
+                self.emit(Opcode::ExitBlock);
+                self.block_depth -= 1;
             }
             Statement::VarDecl {
                 name,
@@ -382,7 +497,7 @@ impl<'a> Compiler<'a> {
                     self.chunk.write_u16(idx);
                 }
                 let idx = self.name_idx(name);
-                self.emit_u16(Opcode::StoreVar, idx);
+                self.emit_u16(Opcode::DeclareVar, idx);
                 self.scope
                     .last_mut()
                     .unwrap()
@@ -390,7 +505,7 @@ impl<'a> Compiler<'a> {
             }
             Statement::VarDeclDestructure { pattern, init, .. } => {
                 self.compile_expr(init)?;
-                self.compile_destructure(pattern, false)?;
+                self.compile_destructure(pattern, false, false)?;
             }
             Statement::ExprStmt { expr, .. } => {
                 self.compile_expr(expr)?;
@@ -417,7 +532,12 @@ impl<'a> Compiler<'a> {
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
                     continue_patches: Vec::new(),
+                    continue_is_forward_jump: false,
                 });
+                self.breakable_stack
+                    .push(Breakable::Loop {
+                        unwind_depth: self.block_depth,
+                    });
                 self.compile_expr(cond)?;
                 let jump_out = self.emit_jump(Opcode::JumpIfFalse);
                 // JumpIfFalse already pops condition when taking body
@@ -427,6 +547,7 @@ impl<'a> Compiler<'a> {
                 let end = self.chunk.code.len();
                 self.patch_jump(jump_out, end);
                 let info = self.loop_stack.pop().unwrap();
+                self.breakable_stack.pop();
                 for p in info.continue_patches {
                     self.patch_jump_back(p, start);
                 }
@@ -443,7 +564,7 @@ impl<'a> Compiler<'a> {
             } => {
                 self.scope.push(HashMap::new());
                 if let Some(i) = init {
-                    self.compile_statement(i)?;
+                    self.compile_for_init_statement(i.as_ref())?;
                 }
                 let cond_start = self.chunk.code.len();
                 if let Some(c) = cond {
@@ -457,7 +578,12 @@ impl<'a> Compiler<'a> {
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
                     continue_patches: Vec::new(),
+                    continue_is_forward_jump: true,
                 });
+                self.breakable_stack
+                    .push(Breakable::Loop {
+                        unwind_depth: self.block_depth,
+                    });
                 self.compile_statement(body)?;
                 let update_start = self.chunk.code.len();
                 if let Some(u) = update {
@@ -466,7 +592,7 @@ impl<'a> Compiler<'a> {
                 }
                 let info = self.loop_stack.pop().unwrap();
                 for p in info.continue_patches {
-                    self.patch_jump_back(p, update_start);
+                    self.patch_jump(p, update_start);
                 }
                 let jump_back_dist = (self.chunk.code.len() + 3).saturating_sub(cond_start);
                 self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
@@ -475,6 +601,7 @@ impl<'a> Compiler<'a> {
                 for p in info.break_patches {
                     self.patch_jump(p, end);
                 }
+                self.breakable_stack.pop();
                 self.scope.pop();
             }
             Statement::ForOf { name, iterable, body, .. } => {
@@ -487,27 +614,32 @@ impl<'a> Compiler<'a> {
                 let i_idx = self.name_idx(&i_name);
                 let len_idx = self.name_idx(&len_name);
                 let name_idx = self.name_idx(name);
-                self.emit_u16(Opcode::StoreVar, arr_idx);
+                self.emit_u16(Opcode::DeclareVar, arr_idx);
                 self.scope.last_mut().unwrap().insert(arr_name.clone(), false);
                 self.emit_u16(Opcode::LoadVar, arr_idx);
                 let len_name_idx = self.name_idx(&Arc::from("length"));
                 self.emit_u16(Opcode::GetMember, len_name_idx);
-                self.emit_u16(Opcode::StoreVar, len_idx);
+                self.emit_u16(Opcode::DeclareVar, len_idx);
                 self.scope.last_mut().unwrap().insert(len_name.clone(), false);
                 let zero_idx = self.constant_idx(Constant::Number(0.0));
                 self.emit(Opcode::LoadConst);
                 self.chunk.write_u16(zero_idx);
-                self.emit_u16(Opcode::StoreVar, i_idx);
+                self.emit_u16(Opcode::DeclareVar, i_idx);
                 self.scope.last_mut().unwrap().insert(i_name.clone(), false);
                 let loop_start = self.chunk.code.len();
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
                     continue_patches: Vec::new(),
+                    continue_is_forward_jump: false,
                 });
+                self.breakable_stack
+                    .push(Breakable::Loop {
+                        unwind_depth: self.block_depth,
+                    });
                 self.emit_u16(Opcode::LoadVar, arr_idx);
                 self.emit_u16(Opcode::LoadVar, i_idx);
                 self.emit(Opcode::GetIndex);
-                self.emit_u16(Opcode::StoreVar, name_idx);
+                self.emit_u16(Opcode::DeclareVar, name_idx);
                 self.scope.last_mut().unwrap().insert(Arc::clone(name), false);
                 self.compile_statement(body)?;
                 self.emit_u16(Opcode::LoadVar, i_idx);
@@ -525,6 +657,7 @@ impl<'a> Compiler<'a> {
                 let end = self.chunk.code.len();
                 self.patch_jump(jump_out, end);
                 let info = self.loop_stack.pop().unwrap();
+                self.breakable_stack.pop();
                 for p in info.continue_patches {
                     self.patch_jump_back(p, loop_start);
                 }
@@ -544,22 +677,56 @@ impl<'a> Compiler<'a> {
                 self.emit(Opcode::Return);
             }
             Statement::Break { .. } => {
+                let unwind_depth = match self.breakable_stack.last() {
+                    Some(Breakable::Loop { unwind_depth }) | Some(Breakable::Switch { unwind_depth }) => {
+                        *unwind_depth
+                    }
+                    None => {
+                        return Err(CompileError {
+                            message: "break not inside a loop or switch".to_string(),
+                        });
+                    }
+                };
+                self.emit_exit_blocks_until_depth(unwind_depth);
                 let pos = self.emit_jump(Opcode::Jump);
-                if let Some(sw) = self.switch_stack.last_mut() {
-                    sw.break_patches.push(pos);
-                } else if let Some(lo) = self.loop_stack.last_mut() {
-                    lo.break_patches.push(pos);
-                } else {
-                    return Err(CompileError {
-                        message: "break not inside a loop or switch".to_string(),
-                    });
+                match self.breakable_stack.last() {
+                    Some(Breakable::Loop { .. }) => {
+                        self.loop_stack.last_mut().unwrap().break_patches.push(pos);
+                    }
+                    Some(Breakable::Switch { .. }) => {
+                        self.switch_stack.last_mut().unwrap().break_patches.push(pos);
+                    }
+                    None => {}
                 }
             }
             Statement::Continue { .. } => {
-                let pos = self.emit_jump_back();
-                self.loop_stack.last_mut().ok_or_else(|| CompileError {
-                    message: "continue not inside a loop".to_string(),
-                })?.continue_patches.push(pos);
+                let unwind_depth = self
+                    .breakable_stack
+                    .iter()
+                    .rev()
+                    .find_map(|b| match b {
+                        Breakable::Loop { unwind_depth } => Some(*unwind_depth),
+                        Breakable::Switch { .. } => None,
+                    })
+                    .ok_or_else(|| CompileError {
+                        message: "continue not inside a loop".to_string(),
+                    })?;
+                self.emit_exit_blocks_until_depth(unwind_depth);
+                let forward = self
+                    .loop_stack
+                    .last()
+                    .expect("continue not inside a loop")
+                    .continue_is_forward_jump;
+                let pos = if forward {
+                    self.emit_jump(Opcode::Jump)
+                } else {
+                    self.emit_jump_back()
+                };
+                self.loop_stack
+                    .last_mut()
+                    .expect("continue not inside a loop")
+                    .continue_patches
+                    .push(pos);
             }
             Statement::FunDecl {
                 name,
@@ -569,24 +736,11 @@ impl<'a> Compiler<'a> {
                 async_: _,
                 ..
             } => {
-                for p in params {
-                    if matches!(p, FunParam::Destructure { .. }) {
-                        return Err(CompileError {
-                            message: "Destructuring parameters are not supported in bytecode"
-                                .to_string(),
-                        });
-                    }
-                }
+                let formal_len = params.len();
+                let (mut param_names, slots) = Self::plan_function_params(params)?;
                 let mut inner = Chunk::new();
-                let mut param_names: Vec<Arc<str>> = params
-                    .iter()
-                    .map(|p| match p {
-                        FunParam::Simple(tp) => Arc::clone(&tp.name),
-                        _ => unreachable!(),
-                    })
-                    .collect();
                 if let Some(rp) = rest_param {
-                    param_names.push(rp.name.clone());
+                    param_names.push(Arc::clone(&rp.name));
                     inner.rest_param_index = (param_names.len() as u16).saturating_sub(1);
                 }
                 for p in &param_names {
@@ -598,6 +752,7 @@ impl<'a> Compiler<'a> {
                     .iter()
                     .map(|n| (Arc::clone(n), false))
                     .collect::<HashMap<_, _>>()];
+                inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
                 inner_comp.compile_statement(body)?;
                 inner_comp.emit(Opcode::LoadConst);
                 let idx = inner_comp.constant_idx(Constant::Null);
@@ -608,7 +763,7 @@ impl<'a> Compiler<'a> {
                 let idx = self.constant_idx(Constant::Closure(nested_idx));
                 self.chunk.write_u16(idx);
                 let idx = self.name_idx(name);
-                self.emit_u16(Opcode::StoreVar, idx);
+                self.emit_u16(Opcode::DeclareVar, idx);
                 self.scope.last_mut().unwrap().insert(Arc::clone(name), false);
             }
             Statement::DoWhile { body, cond, .. } => {
@@ -616,7 +771,12 @@ impl<'a> Compiler<'a> {
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
                     continue_patches: Vec::new(),
+                    continue_is_forward_jump: false,
                 });
+                self.breakable_stack
+                    .push(Breakable::Loop {
+                        unwind_depth: self.block_depth,
+                    });
                 self.compile_statement(body)?;
                 let cond_start = self.chunk.code.len();
                 self.compile_expr(cond)?;
@@ -626,6 +786,7 @@ impl<'a> Compiler<'a> {
                 let end = self.chunk.code.len();
                 self.patch_jump(jump_back, end);
                 let info = self.loop_stack.pop().unwrap();
+                self.breakable_stack.pop();
                 for p in info.continue_patches {
                     self.patch_jump_back(p, cond_start);
                 }
@@ -634,8 +795,12 @@ impl<'a> Compiler<'a> {
                 }
             }
             Statement::Switch { expr, cases, default_body, .. } => {
+                let switch_unwind_depth = self.block_depth;
                 self.switch_stack.push(SwitchInfo {
                     break_patches: Vec::new(),
+                });
+                self.breakable_stack.push(Breakable::Switch {
+                    unwind_depth: switch_unwind_depth,
                 });
                 self.compile_expr(expr)?;
                 self.emit(Opcode::Dup);
@@ -684,6 +849,7 @@ impl<'a> Compiler<'a> {
                     self.patch_jump(p, self.chunk.code.len());
                 }
                 let sw = self.switch_stack.pop().unwrap();
+                self.breakable_stack.pop();
                 for p in sw.break_patches {
                     self.patch_jump(p, self.chunk.code.len());
                 }
@@ -708,16 +874,23 @@ impl<'a> Compiler<'a> {
                 let catch_start = self.chunk.code.len();
                 if let Some(catch_stmt) = catch_body {
                     if let Some(param) = catch_param {
+                        self.emit(Opcode::EnterBlock);
+                        self.block_depth += 1;
+                        self.scope.push(HashMap::new());
                         let param_idx = self.name_idx(param);
-                        self.emit_u16(Opcode::StoreVar, param_idx);
+                        self.emit_u16(Opcode::DeclareVar, param_idx);
                         self.scope
                             .last_mut()
                             .unwrap()
                             .insert(Arc::clone(param), false);
+                        self.compile_statement(catch_stmt)?;
+                        self.scope.pop();
+                        self.emit(Opcode::ExitBlock);
+                        self.block_depth -= 1;
                     } else {
                         self.emit(Opcode::Pop);
+                        self.compile_statement(catch_stmt)?;
                     }
-                    self.compile_statement(catch_stmt)?;
                 } else {
                     self.emit(Opcode::Throw);
                 }
@@ -730,11 +903,21 @@ impl<'a> Compiler<'a> {
                 self.chunk.code[catch_offset_pos + 1] = (catch_offset >> 8) as u8;
                 self.chunk.code[catch_offset_pos + 2] = (catch_offset & 0xff) as u8;
             }
-            Statement::Import { .. } | Statement::Export { .. } => {
+            Statement::Import { .. } => {
                 return Err(CompileError {
-                    message: "Import/Export not supported in bytecode".to_string(),
+                    message: "Import not supported in bytecode".to_string(),
                 });
             }
+            Statement::Export { declaration, .. } => match declaration.as_ref() {
+                ExportDeclaration::Named(inner_stmt) => {
+                    self.compile_statement(inner_stmt.as_ref())?;
+                }
+                ExportDeclaration::Default(_) => {
+                    return Err(CompileError {
+                        message: "export default is not supported in bytecode".to_string(),
+                    });
+                }
+            },
         }
         Ok(())
     }
@@ -743,7 +926,13 @@ impl<'a> Compiler<'a> {
         &mut self,
         pattern: &DestructPattern,
         mutable: bool,
+        for_header_binding: bool,
     ) -> Result<(), CompileError> {
+        let decl_op = if for_header_binding {
+            Opcode::DeclareVarPlain
+        } else {
+            Opcode::DeclareVar
+        };
         match pattern {
             DestructPattern::Array(elements) => {
                 for (i, elem) in elements.iter().enumerate() {
@@ -755,7 +944,7 @@ impl<'a> Compiler<'a> {
                             self.chunk.write_u16(idx);
                             self.emit(Opcode::GetIndex);
                             let idx = self.name_idx(name);
-                            self.emit_u16(Opcode::StoreVar, idx);
+                            self.emit_u16(decl_op, idx);
                             self.scope
                                 .last_mut()
                                 .unwrap()
@@ -780,7 +969,7 @@ impl<'a> Compiler<'a> {
                     match &prop.value {
                         DestructElement::Ident(name) => {
                             let idx = self.name_idx(name);
-                            self.emit_u16(Opcode::StoreVar, idx);
+                            self.emit_u16(decl_op, idx);
                             if mutable {
                                 self.scope
                                     .last_mut()
@@ -1093,22 +1282,9 @@ impl<'a> Compiler<'a> {
                 self.emit_u16(Opcode::Call, 1);
             }
             Expr::ArrowFunction { params, body, .. } => {
-                for p in params {
-                    if matches!(p, FunParam::Destructure { .. }) {
-                        return Err(CompileError {
-                            message: "Destructuring parameters are not supported in bytecode"
-                                .to_string(),
-                        });
-                    }
-                }
+                let formal_len = params.len();
+                let (param_names, slots) = Self::plan_function_params(params)?;
                 let mut inner = Chunk::new();
-                let param_names: Vec<Arc<str>> = params
-                    .iter()
-                    .map(|p| match p {
-                        FunParam::Simple(tp) => Arc::clone(&tp.name),
-                        _ => unreachable!(),
-                    })
-                    .collect();
                 for p in &param_names {
                     inner.add_name(Arc::clone(p));
                 }
@@ -1118,6 +1294,7 @@ impl<'a> Compiler<'a> {
                     .iter()
                     .map(|n| (Arc::clone(n), false))
                     .collect::<HashMap<_, _>>()];
+                inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
                 match body {
                     ArrowBody::Expr(e) => {
                         inner_comp.compile_expr(e)?;
@@ -1245,10 +1422,56 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(operand)?;
                 self.emit_u16(Opcode::Call, 1);
             }
-            Expr::LogicalAssign { .. } => {
-                return Err(CompileError {
-                    message: "Logical assignment (&&=, ||=, ??=) not yet supported in bytecode".to_string(),
-                });
+            Expr::LogicalAssign { name, op, value, .. } => {
+                let idx = self.name_idx(name);
+                match op {
+                    LogicalAssignOp::OrOr => {
+                        // ||= : if current is truthy, keep it; else eval rhs, assign, yield rhs
+                        self.emit_u16(Opcode::LoadVar, idx);
+                        self.emit(Opcode::Dup);
+                        let j_rhs = self.emit_jump(Opcode::JumpIfFalse);
+                        let j_end = self.emit_jump(Opcode::Jump);
+                        self.patch_jump(j_rhs, self.chunk.code.len());
+                        self.emit(Opcode::Pop);
+                        self.compile_expr(value)?;
+                        self.emit_u16(Opcode::StoreVar, idx);
+                        self.emit_u16(Opcode::LoadVar, idx);
+                        let end = self.chunk.code.len();
+                        self.patch_jump(j_end, end);
+                    }
+                    LogicalAssignOp::AndAnd => {
+                        // &&= : if current is falsy, keep it; else eval rhs, assign, yield rhs
+                        self.emit_u16(Opcode::LoadVar, idx);
+                        self.emit(Opcode::Dup);
+                        let j_short = self.emit_jump(Opcode::JumpIfFalse);
+                        self.emit(Opcode::Pop);
+                        self.compile_expr(value)?;
+                        self.emit_u16(Opcode::StoreVar, idx);
+                        self.emit_u16(Opcode::LoadVar, idx);
+                        let j_end = self.emit_jump(Opcode::Jump);
+                        let end = self.chunk.code.len();
+                        self.patch_jump(j_short, end);
+                        self.patch_jump(j_end, end);
+                    }
+                    LogicalAssignOp::Nullish => {
+                        // ??= : assign only when current === null (matches interpreter)
+                        let null_c = self.constant_idx(Constant::Null);
+                        self.emit_u16(Opcode::LoadVar, idx);
+                        self.emit(Opcode::Dup);
+                        self.emit(Opcode::LoadConst);
+                        self.chunk.write_u16(null_c);
+                        self.emit_u8(Opcode::BinOp, binop_to_u8(BinOp::StrictEq));
+                        let j_not_null = self.emit_jump(Opcode::JumpIfFalse);
+                        self.emit(Opcode::Pop);
+                        self.compile_expr(value)?;
+                        self.emit_u16(Opcode::StoreVar, idx);
+                        self.emit_u16(Opcode::LoadVar, idx);
+                        let j_end = self.emit_jump(Opcode::Jump);
+                        let end = self.chunk.code.len();
+                        self.patch_jump(j_not_null, end);
+                        self.patch_jump(j_end, end);
+                    }
+                }
             }
             Expr::New { callee, args, .. } => {
                 let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));

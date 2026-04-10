@@ -3,3 +3,11 @@ inner x: 2
 outer x after block: 1
 inner y: 20
 outer y: 10
+block1 a: 200
+block2 a: 300
+block1 a after inner: 200
+outer a: 100
+fn z: 2
+script z: 1
+if block b: 2
+outer b after if: 1

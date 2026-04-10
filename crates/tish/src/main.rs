@@ -1,80 +1,59 @@
 //! Tish CLI - run, REPL, build to native or other targets.
 
+mod cli_help;
 mod repl_completion;
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use rustyline::{Behavior, ColorMode, CompletionType, Config, Editor};
 
-#[derive(Parser)]
-#[command(name = "tish")]
-#[command(about = "Tish - minimal TS/JS-compatible language")]
-#[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(after_help = "To disable optimizations: TISH_NO_OPTIMIZE=1")]
-pub(crate) struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
+use cli_help::{Cli, Commands};
+
+/// Normalize `--feature` / `--feature http,fs` / `--feature full` for VM runs and native builds.
+fn normalize_capability_flags(features: &[String]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for s in features {
+        for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            if part == "full" {
+                for name in ["http", "fs", "process", "regex", "ws"] {
+                    out.insert(name.to_string());
+                }
+            } else {
+                out.insert(part.to_string());
+            }
+        }
+    }
+    out
 }
 
-#[derive(Parser)]
-struct RunArgs {
-    /// Path to a `.tish` file, or `-` to read the program from stdin (like `node -`).
-    #[arg(required = true, allow_hyphen_values = true)]
-    file: String,
-    #[arg(long, default_value = "vm")]
-    backend: String,
-    /// Enable capabilities (http, fs, process, regex, ws). Must match how tish was built.
-    /// E.g. cargo run -p tishlang--features http,fs -- run script.tish --feature http,fs
-    #[arg(long = "feature", action = clap::ArgAction::Append)]
-    features: Vec<String>,
-    /// Disable AST and bytecode optimizations (for debugging)
-    #[arg(long)]
-    no_optimize: bool,
+/// VM capabilities for `run` / `repl` / stdin with the bytecode VM.
+///
+/// If the user passes no `--feature`, enable **everything linked into this `tish` binary**
+/// (so `cargo run --bin tish --features full -- script.tish` does not need `--feature full`).
+/// If they pass `--feature …`, use **only** that set (e.g. restrict a full build to `http` only).
+fn vm_capabilities_for_cli_run(cli_features: &[String]) -> HashSet<String> {
+    if cli_features.is_empty() {
+        tishlang_vm::all_compiled_capabilities()
+    } else {
+        normalize_capability_flags(cli_features)
+    }
 }
 
-#[derive(Parser)]
-struct ReplArgs {
-    #[arg(long, default_value = "vm")]
-    backend: String,
-    #[arg(long)]
-    no_optimize: bool,
-}
-
-#[derive(Parser)]
-struct BuildArgs {
-    #[arg(short, long, default_value = "tish_out")]
-    output: String,
-    #[arg(long, default_value = "native")]
-    target: String,
-    #[arg(long, default_value = "rust")]
-    native_backend: String,
-    #[arg(long = "feature", action = clap::ArgAction::Append)]
-    features: Vec<String>,
-    #[arg(long)]
-    no_optimize: bool,
-    #[arg(required = true)]
-    file: String,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum Commands {
-    /// Run a Tish file (interpret)
-    Run(RunArgs),
-    /// Interactive REPL
-    Repl(ReplArgs),
-    /// Build native binary, wasm, wasi, or JavaScript output
-    Build(BuildArgs),
-    /// Parse and dump AST
-    #[command(name = "dump-ast")]
-    DumpAst {
-        #[arg(required = true)]
-        file: String,
-    },
+/// `--feature` list for `tish build --target native`: same default as `tish run` (all linked-in caps).
+fn native_build_features_from_cli(cli_features: &[String]) -> Vec<String> {
+    if cli_features.is_empty() {
+        let mut v: Vec<String> = tishlang_vm::all_compiled_capabilities().into_iter().collect();
+        v.sort();
+        v
+    } else {
+        cli_features.to_vec()
+    }
 }
 
 /// `tish script.tish` → insert `run` so it matches `tish run script.tish` (npx / npm UX).
@@ -107,11 +86,15 @@ fn main() {
         return;
     }
 
+    if cli_help::argv_requests_help(&argv) {
+        cli_help::print_tish_banner();
+    }
+
     let argv = argv_with_implicit_run(argv);
     let cli = Cli::parse_from(argv);
     let result = match cli.command {
         Some(Commands::Run(a)) => run_file(&a.file, &a.backend, &a.features, a.no_optimize || no_opt_env),
-        Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env),
+        Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env, &a.features),
         Some(Commands::Build(a)) => build_file(
             &a.file,
             &a.output,
@@ -123,7 +106,7 @@ fn main() {
         Some(Commands::DumpAst { file }) => dump_ast(&file),
         None => {
             if io::stdin().is_terminal() {
-                run_repl("vm", no_opt_env)
+                run_repl("vm", no_opt_env, &[])
             } else {
                 // `echo '...' | tish` — run script from stdin (Bun-style)
                 run_stdin_pipe("vm", &[], no_opt_env, false)
@@ -162,7 +145,7 @@ fn run_stdin_pipe(
 fn run_stdin_source(
     source: &str,
     backend: &str,
-    _features: &[String],
+    features: &[String],
     no_optimize: bool,
 ) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -174,7 +157,7 @@ fn run_stdin_source(
     } else {
         tishlang_opt::optimize(&prog)
     };
-    run_program(&program, backend, no_optimize)
+    run_program(&program, backend, no_optimize, features)
 }
 
 fn run_file(path: &str, backend: &str, features: &[String], no_optimize: bool) -> Result<(), String> {
@@ -211,10 +194,15 @@ fn run_file(path: &str, backend: &str, features: &[String], no_optimize: bool) -
         }
     };
 
-    run_program(&program, backend, no_optimize)
+    run_program(&program, backend, no_optimize, features)
 }
 
-fn run_program(program: &tishlang_ast::Program, backend: &str, no_optimize: bool) -> Result<(), String> {
+fn run_program(
+    program: &tishlang_ast::Program,
+    backend: &str,
+    no_optimize: bool,
+    features: &[String],
+) -> Result<(), String> {
     if backend == "interp" {
         let mut eval = tishlang_eval::Evaluator::new();
         let value = eval.eval_program(program)?;
@@ -229,14 +217,22 @@ fn run_program(program: &tishlang_ast::Program, backend: &str, no_optimize: bool
     } else {
         tishlang_bytecode::compile(program).map_err(|e| e.to_string())?
     };
-    let value = tishlang_vm::run(&chunk)?;
+    let caps = vm_capabilities_for_cli_run(features);
+    let value = tishlang_vm::run_with_options(
+        &chunk,
+        tishlang_vm::VmRunOptions {
+            repl_mode: false,
+            capabilities: caps,
+        },
+    )?;
     if !matches!(value, tishlang_core::Value::Null) {
         println!("{}", tishlang_core::format_value_styled(&value, tishlang_core::use_console_colors()));
     }
     Ok(())
 }
 
-fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
+fn run_repl(backend: &str, no_optimize: bool, features: &[String]) -> Result<(), String> {
+    cli_help::print_tish_banner();
     println!("Tish REPL (Ctrl-D to exit)");
     let mut buffer = String::new();
 
@@ -293,7 +289,9 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
     if !std::io::stdin().is_terminal() {
         eprintln!("Note: Tab completion and grey preview require an interactive terminal (TTY).");
     }
-    let vm = Rc::new(RefCell::new(tishlang_vm::Vm::new()));
+    let vm = Rc::new(RefCell::new(tishlang_vm::Vm::with_capabilities(
+        vm_capabilities_for_cli_run(features),
+    )));
     let completer = repl_completion::ReplCompleter {
         vm: Rc::clone(&vm),
         no_optimize,
@@ -333,7 +331,7 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
                             tishlang_bytecode::compile_for_repl
                         };
                         if let Ok(chunk) = compile_fn(&program) {
-                            let _ = vm.borrow_mut().run(&chunk);
+                            let _ = vm.borrow_mut().run_with_options(&chunk, true);
                         }
                     }
                     Err(e) => eprintln!("Parse error: {}", e),
@@ -365,7 +363,7 @@ fn run_repl(backend: &str, no_optimize: bool) -> Result<(), String> {
                 };
                 match compile_fn(&program) {
                     Ok(chunk) => {
-                        match vm.borrow_mut().run(&chunk) {
+                        match vm.borrow_mut().run_with_options(&chunk, true) {
                             Ok(v) => {
                                 if !matches!(v, tishlang_core::Value::Null) {
                                     println!("{}", tishlang_core::format_value_styled(&v, tishlang_core::use_console_colors()));
@@ -531,23 +529,7 @@ fn build_file(
             p
         }
     });
-    let features: Vec<String> = if cli_features.is_empty() {
-        #[allow(unused_mut)]
-        let mut f = Vec::new();
-        #[cfg(feature = "http")]
-        f.push("http".to_string());
-        #[cfg(feature = "fs")]
-        f.push("fs".to_string());
-        #[cfg(feature = "process")]
-        f.push("process".to_string());
-        #[cfg(feature = "regex")]
-        f.push("regex".to_string());
-        #[cfg(feature = "ws")]
-        f.push("ws".to_string());
-        f
-    } else {
-        cli_features.to_vec()
-    };
+    let features: Vec<String> = native_build_features_from_cli(cli_features);
 
     if is_js {
         let source = fs::read_to_string(&input_path).map_err(|e| format!("{}", e))?;
@@ -592,7 +574,9 @@ fn build_file(
 mod cli_tests {
     use clap::Parser;
 
-    use super::{argv_with_implicit_run, Cli, Commands};
+    use crate::cli_help::{Cli, Commands};
+
+    use super::argv_with_implicit_run;
 
     #[test]
     fn implicit_run_inserts_run_before_file() {

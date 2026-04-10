@@ -84,13 +84,22 @@ pub enum Opcode {
     Construct = 37,
     /// `new callee(...spread)` — stack: args array, then callee (same order as CallSpread).
     ConstructSpread = 38,
+    /// Declare `let`/`const` in the current lexical frame (operand: u16 name index). Pops value.
+    /// Does not walk enclosing scopes or globals (unlike [`StoreVar`]).
+    DeclareVar = 39,
+    /// Enter a block scope; pairs with [`ExitBlock`].
+    EnterBlock = 40,
+    /// Exit innermost block scope and restore shadowed bindings.
+    ExitBlock = 41,
+    /// Like [`DeclareVar`] but does not record block-scope undo (for `for`/`for-of` header bindings).
+    DeclareVarPlain = 42,
 }
 
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=38 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=42 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 38 {
+        if b <= 42 {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None
@@ -101,7 +110,8 @@ impl Opcode {
     pub fn instruction_size(self, code: &[u8], ip: usize) -> Option<usize> {
         let size = match self {
             Opcode::Nop | Opcode::Pop | Opcode::Dup | Opcode::Return | Opcode::ExitTry
-            | Opcode::ArrayMapIdentity | Opcode::CallSpread | Opcode::ConstructSpread => 1,
+            | Opcode::ArrayMapIdentity | Opcode::CallSpread | Opcode::ConstructSpread
+            | Opcode::EnterBlock | Opcode::ExitBlock => 1,
             Opcode::ArraySortByProperty | Opcode::ArrayMapBinOp | Opcode::ArrayFilterBinOp
             | Opcode::LoadNativeExport => 5,
             _ => 3,

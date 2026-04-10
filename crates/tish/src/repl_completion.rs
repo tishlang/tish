@@ -86,7 +86,7 @@ impl ReplCompleter {
             compile_for_repl
         };
         let chunk = compile_fn(&program).ok()?;
-        let value = self.vm.borrow_mut().run(&chunk).ok()?;
+        let value = self.vm.borrow_mut().run_with_options(&chunk, true).ok()?;
 
         let keys = value.completion_keys();
         let filtered: Vec<String> = keys

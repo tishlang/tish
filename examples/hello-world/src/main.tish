@@ -6,4 +6,3 @@ let name = "Tish"
 
 console.log(`Hello from ${name}!`)
 console.log(`Version: ${version}`)
-console.log("Deployment successful.")

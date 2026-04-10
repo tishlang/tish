@@ -2574,6 +2574,7 @@ dependencies = [
  "tishlang_core",
  "tishlang_opt",
  "tishlang_parser",
+ "tishlang_vm",
 ]
 
 [[package]]

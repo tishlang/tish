@@ -1,6 +1,8 @@
 //! Peephole optimizations on bytecode (post-emission).
 //! B2 from optimization plan: jump chaining, etc.
 
+use std::collections::BTreeSet;
+
 use crate::opcode::Opcode;
 use crate::Chunk;
 
@@ -90,6 +92,18 @@ fn final_jump_target(code: &[u8], jump_ip: usize) -> Option<usize> {
     skip_unconditional_jump_chain(code, first_target)
 }
 
+/// Instruction boundaries from a linear scan (aligned bytecode from the compiler).
+fn collect_insn_starts(code: &[u8]) -> BTreeSet<usize> {
+    let mut out = BTreeSet::new();
+    let mut ip = 0usize;
+    while ip < code.len() {
+        out.insert(ip);
+        let sz = instruction_size(code, ip).unwrap_or(1);
+        ip += sz;
+    }
+    out
+}
+
 /// Replace instruction at [ip..ip+len) with Nops (preserves length, no offset updates).
 fn nop_out(code: &mut [u8], ip: usize, len: usize) {
     for i in 0..len {
@@ -112,19 +126,6 @@ fn remove_dup_pop(code: &mut [u8]) {
     }
 }
 
-/// Remove redundant LoadConst + Pop (load constant then discard = no-op).
-fn remove_loadconst_pop(code: &mut [u8]) {
-    let mut ip = 0;
-    while ip + 4 <= code.len() {
-        if Opcode::from_u8(code[ip]) == Some(Opcode::LoadConst)
-            && Opcode::from_u8(code[ip + 3]) == Some(Opcode::Pop)
-        {
-            nop_out(code, ip, 4);
-        }
-        ip += instruction_size(code, ip).unwrap_or(1);
-    }
-}
-
 /// Replace no-op jumps (Jump with offset 0) with Nops.
 fn remove_noop_jumps(code: &mut [u8]) {
     let mut ip = 0;
@@ -142,6 +143,7 @@ fn remove_noop_jumps(code: &mut [u8]) {
 /// Apply jump chaining: if Jump/JumpIfFalse targets another jump, update to
 /// jump directly to the final target.
 fn chain_jumps(code: &mut [u8]) {
+    let insn_starts = collect_insn_starts(code);
     let mut ip = 0;
     while ip < code.len() {
         let op = match Opcode::from_u8(code[ip]) {
@@ -160,9 +162,13 @@ fn chain_jumps(code: &mut [u8]) {
                 let current_offset = read_i16(code, ip + 1) as isize;
                 let current_target = (ip as isize + 3 + current_offset).max(0) as usize;
                 if let Some(final_target) = final_jump_target(code, ip) {
-                    if final_target != current_target {
+                    let target_ok = final_target == code.len()
+                        || insn_starts.contains(&final_target);
+                    if final_target != current_target && target_ok {
                         let new_offset = final_target as i32 - (ip + 3) as i32;
-                        write_u16(code, ip + 1, (new_offset as i16) as u16);
+                        if (i16::MIN as i32..=i16::MAX as i32).contains(&new_offset) {
+                            write_u16(code, ip + 1, (new_offset as i16) as u16);
+                        }
                     }
                 }
             }
@@ -174,7 +180,6 @@ fn chain_jumps(code: &mut [u8]) {
 
 /// Run peephole optimizations on a chunk (and nested chunks).
 pub fn optimize(chunk: &mut Chunk) {
-    remove_loadconst_pop(&mut chunk.code);
     remove_dup_pop(&mut chunk.code);
     remove_noop_jumps(&mut chunk.code);
     chain_jumps(&mut chunk.code);
