@@ -28,11 +28,24 @@ fn runtime_features_for_cargo(features: &[String]) -> Vec<String> {
     out
 }
 
+/// Inject `mod generated_native;` after the crate attribute so the binary crate can call `crate::generated_native::…`.
+fn inject_generated_native_mod(rust_code: &str) -> String {
+    if let Some(pos) = rust_code.find("\n\n") {
+        let (a, b) = rust_code.split_at(pos + 2);
+        format!("{}mod generated_native;\n{}", a, b)
+    } else {
+        format!("{}\n\nmod generated_native;\n", rust_code)
+    }
+}
+
 pub fn build_via_cargo(
     rust_code: &str,
     native_modules: Vec<ResolvedNativeModule>,
     output_path: &Path,
     features: &[String],
+    extra_dependencies_toml: &str,
+    generated_native_rs: Option<&str>,
+    project_root: Option<&Path>,
 ) -> Result<(), String> {
     let out_name = output_path
         .file_stem()
@@ -40,7 +53,7 @@ pub fn build_via_cargo(
         .unwrap_or("tish_out");
     let build_dir = tishlang_build_utils::create_build_dir("tish_build", out_name)?;
 
-    let runtime_path = tishlang_build_utils::find_runtime_path()?;
+    let runtime_path = tishlang_build_utils::find_runtime_path_for_project(project_root)?;
 
     let runtime_features = runtime_features_for_cargo(features);
     let runtime_refs: Vec<&str> = runtime_features.iter().map(String::as_str).collect();
@@ -59,11 +72,27 @@ pub fn build_via_cargo(
 
     let native_deps: String = native_modules
         .iter()
+        .filter(|m| m.use_path_dependency)
         .map(|m| {
             let path = m.crate_path.display().to_string().replace('\\', "/");
             format!("{} = {{ path = {:?} }}\n", m.package_name, path)
         })
         .collect();
+
+    let mut more_deps = String::new();
+    more_deps.push_str(&tokio_dep);
+    if !native_deps.is_empty() {
+        more_deps.push_str(&format!("\n{}", native_deps));
+    }
+    if !extra_dependencies_toml.trim().is_empty() {
+        more_deps.push_str(&format!("\n{}", extra_dependencies_toml));
+    }
+
+    let rust_main = if generated_native_rs.is_some() {
+        inject_generated_native_mod(rust_code)
+    } else {
+        rust_code.to_string()
+    };
 
     let tish_ui_path = std::path::Path::new(&runtime_path)
         .parent()
@@ -96,23 +125,22 @@ codegen-units = 1
 lto = "thin"
 
 [dependencies]
-tishlang_runtime = {{ path = {:?}{} }}{}{}{}
-"#,
+tishlang_runtime = {{ path = {:?}{} }}
+{}{}"#,
         out_name,
         runtime_path,
         features_str,
-        tokio_dep,
-        if native_deps.is_empty() {
-            String::new()
-        } else {
-            format!("\n{}", native_deps)
-        },
+        more_deps,
         ui_dep
     );
 
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)
         .map_err(|e| format!("Cannot write Cargo.toml: {}", e))?;
-    fs::write(build_dir.join("src/main.rs"), rust_code)
+    if let Some(gen) = generated_native_rs {
+        fs::write(build_dir.join("src/generated_native.rs"), gen)
+            .map_err(|e| format!("Cannot write generated_native.rs: {}", e))?;
+    }
+    fs::write(build_dir.join("src/main.rs"), rust_main)
         .map_err(|e| format!("Cannot write main.rs: {}", e))?;
 
     let workspace_target = Path::new(&runtime_path)

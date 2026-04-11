@@ -57,21 +57,25 @@ pub fn compile_to_native(
 
     match backend {
         Backend::Rust => {
-            let (rust_code, native_modules, effective_features) = tishlang_compile::compile_project_full(
-                entry_path,
-                project_root,
-                features,
-                optimize,
-            )
-            .map_err(|e| NativeError {
-                message: e.to_string(),
-            })?;
+            let (rust_code, native_modules, effective_features, native_build) =
+                tishlang_compile::compile_project_full(
+                    entry_path,
+                    project_root,
+                    features,
+                    optimize,
+                )
+                .map_err(|e| NativeError {
+                    message: e.to_string(),
+                })?;
 
             crate::build::build_via_cargo(
                 &rust_code,
                 native_modules,
                 output_path,
                 &effective_features,
+                &native_build.rust_dependencies_toml,
+                native_build.generated_native_rs.as_deref(),
+                project_root,
             )
             .map_err(|e| NativeError { message: e })
         }
@@ -96,7 +100,7 @@ pub fn compile_to_native(
 
             if tishlang_compile::has_external_native_imports(&program) {
                 return Err(NativeError {
-                    message: "Cranelift backend does not support external native imports (tish:egui, @scope/pkg). Built-in tish:fs, tish:http, tish:process are supported. Use --native-backend rust for external modules.".to_string(),
+                    message: "Cranelift backend does not support external native imports (tish:…, cargo:…, @scope/pkg). Built-in tish:fs, tish:http, tish:process are supported. Use --native-backend rust for external modules.".to_string(),
                 });
             }
 
@@ -132,7 +136,7 @@ pub fn compile_to_native(
             };
             if tishlang_compile::has_external_native_imports(&program) {
                 return Err(NativeError {
-                    message: "LLVM backend does not support external native imports. Built-in tish:fs, tish:http, tish:process are supported.".to_string(),
+                    message: "LLVM backend does not support external native imports (tish:…, cargo:…, @scope/pkg). Built-in tish:fs, tish:http, tish:process are supported.".to_string(),
                 });
             }
             let chunk = if optimize {
@@ -180,6 +184,8 @@ pub fn compile_program_to_native(
             let root = project_root.unwrap_or_else(|| Path::new("."));
             let native_modules = tishlang_compile::resolve_native_modules(&program, root)
                 .map_err(|e| NativeError { message: e })?;
+            let native_build = tishlang_compile::compute_native_build_artifacts(&program, root, &native_modules)
+                .map_err(|e| NativeError { message: e })?;
             let mut all_features = features.to_vec();
             for f in tishlang_compile::extract_native_import_features(&program) {
                 if !all_features.contains(&f) {
@@ -191,18 +197,27 @@ pub fn compile_program_to_native(
                 project_root,
                 &all_features,
                 &native_modules,
+                &native_build.native_init,
                 optimize,
             )
             .map_err(|e| NativeError {
                 message: e.message,
             })?;
-            crate::build::build_via_cargo(&rust_code, native_modules, output_path, &all_features)
-                .map_err(|e| NativeError { message: e })
+            crate::build::build_via_cargo(
+                &rust_code,
+                native_modules,
+                output_path,
+                &all_features,
+                &native_build.rust_dependencies_toml,
+                native_build.generated_native_rs.as_deref(),
+                Some(root),
+            )
+            .map_err(|e| NativeError { message: e })
         }
         Backend::Cranelift => {
             if tishlang_compile::has_external_native_imports(program) {
                 return Err(NativeError {
-                    message: "Cranelift backend does not support external native imports. Built-in tish:fs, tish:http, tish:process are supported.".to_string(),
+                    message: "Cranelift backend does not support external native imports (tish:…, cargo:…, @scope/pkg). Built-in tish:fs, tish:http, tish:process are supported.".to_string(),
                 });
             }
             let program = if optimize { tishlang_opt::optimize(program) } else { program.clone() };
@@ -218,7 +233,7 @@ pub fn compile_program_to_native(
         Backend::Llvm => {
             if tishlang_compile::has_external_native_imports(program) {
                 return Err(NativeError {
-                    message: "LLVM backend does not support external native imports.".to_string(),
+                    message: "LLVM backend does not support external native imports (tish:…, cargo:…, @scope/pkg).".to_string(),
                 });
             }
             let program = if optimize { tishlang_opt::optimize(program) } else { program.clone() };

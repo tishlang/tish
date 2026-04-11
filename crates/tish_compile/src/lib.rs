@@ -13,9 +13,12 @@ pub use codegen::{
 };
 pub use codegen::CompileError;
 pub use resolve::{
-    detect_cycles, extract_native_import_features, has_external_native_imports, has_native_imports,
-    is_builtin_native_spec, merge_modules, resolve_native_modules, resolve_project,
-    resolve_project_from_stdin, ResolvedNativeModule,
+    cargo_export_fn_name, compute_native_build_artifacts, detect_cycles, export_name_to_rust_ident,
+    extract_native_import_features, format_rust_dependencies_toml, generate_native_wrapper_rs,
+    has_external_native_imports, has_native_imports, infer_native_module_exports,
+    is_builtin_native_spec, is_cargo_native_spec, merge_modules, read_project_tish_config,
+    resolve_native_modules, resolve_project, resolve_project_from_stdin, NativeBuildArtifacts,
+    NativeModuleInit, ResolvedNativeModule,
 };
 pub use types::{RustType, TypeContext};
 
@@ -108,7 +111,7 @@ fn factory() {
             .into_iter()
             .map(String::from)
             .collect::<Vec<_>>();
-        let (rust, _, _) = compile_project_full(&bench, bench.parent(), &features, true).unwrap();
+        let (rust, _, _, _) = compile_project_full(&bench, bench.parent(), &features, true).unwrap();
         // outerVar = 42 is inferred as f64; f64 is Copy so no .clone() is emitted.
         assert!(
             rust.contains("let mut outerVar: f64"),

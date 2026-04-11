@@ -393,19 +393,27 @@ pub fn compile_project(
     project_root: Option<&Path>,
     features: &[String],
 ) -> Result<String, CompileError> {
-    let (rust, _, _) = compile_project_full(entry_path, project_root, features, true)?;
+    let (rust, _, _, _) = compile_project_full(entry_path, project_root, features, true)?;
     Ok(rust)
 }
 
-/// Compile a project and return Rust code, resolved native modules, and the **effective** feature list
-/// (CLI features plus any inferred from `tish:fs` / `tish:http` / … imports). Pass this list to
-/// `tishlang_runtime` when linking (e.g. `build_via_cargo`) so Cargo `features` match codegen.
+/// Compile a project and return Rust code, resolved native modules, the **effective** feature list
+/// (CLI features plus any inferred from `tish:fs` / `tish:http` / … imports), and native build
+/// artifacts (Cargo dep lines, optional `generated_native.rs` source, init strategy per spec).
 pub fn compile_project_full(
     entry_path: &Path,
     project_root: Option<&Path>,
     features: &[String],
     optimize: bool,
-) -> Result<(String, Vec<crate::resolve::ResolvedNativeModule>, Vec<String>), CompileError> {
+) -> Result<
+    (
+        String,
+        Vec<crate::resolve::ResolvedNativeModule>,
+        Vec<String>,
+        crate::resolve::NativeBuildArtifacts,
+    ),
+    CompileError,
+> {
     use crate::resolve;
     let root = project_root.unwrap_or_else(|| entry_path.parent().unwrap_or(Path::new(".")));
     let modules = resolve::resolve_project(entry_path, project_root)
@@ -416,14 +424,23 @@ pub fn compile_project_full(
         .map_err(|e| CompileError { message: e, span: None })?;
     let native_modules = resolve::resolve_native_modules(&merged, root)
         .map_err(|e| CompileError { message: e, span: None })?;
+    let native_build = resolve::compute_native_build_artifacts(&merged, root, &native_modules)
+        .map_err(|e| CompileError { message: e, span: None })?;
     let mut all_features: Vec<String> = features.to_vec();
     for f in resolve::extract_native_import_features(&merged) {
         if !all_features.contains(&f) {
             all_features.push(f);
         }
     }
-    let rust = compile_with_native_modules(&merged, project_root, &all_features, &native_modules, optimize)?;
-    Ok((rust, native_modules, all_features))
+    let rust = compile_with_native_modules(
+        &merged,
+        project_root,
+        &all_features,
+        &native_modules,
+        &native_build.native_init,
+        optimize,
+    )?;
+    Ok((rust, native_modules, all_features, native_build))
 }
 
 /// Compile with explicit feature flags. When features are provided, codegen uses them
@@ -433,7 +450,8 @@ pub fn compile_with_features(
     project_root: Option<&Path>,
     features: &[String],
 ) -> Result<String, CompileError> {
-    compile_with_native_modules(program, project_root, features, &[], true)
+    let empty = std::collections::HashMap::new();
+    compile_with_native_modules(program, project_root, features, &[], &empty, true)
 }
 
 /// Compile with resolved native modules. Native imports emit calls to the module crates directly.
@@ -442,16 +460,30 @@ pub fn compile_with_native_modules(
     project_root: Option<&Path>,
     features: &[String],
     native_modules: &[crate::resolve::ResolvedNativeModule],
+    native_init: &std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
     optimize: bool,
 ) -> Result<String, CompileError> {
     let program = if optimize { tishlang_opt::optimize(program) } else { program.clone() };
     // Type-inference pass: fills in `type_ann` on unannotated VarDecl nodes where
     // the type is unambiguous (literals, arithmetic of typed vars, etc.).
     let program = crate::infer::infer_program(&program);
-    let map: std::collections::HashMap<String, (String, String)> = native_modules
-        .iter()
-        .map(|m| (m.spec.clone(), (m.crate_name.clone(), m.export_fn.clone())))
-        .collect();
+    let map: std::collections::HashMap<String, crate::resolve::NativeModuleInit> =
+        if native_init.is_empty() {
+            native_modules
+                .iter()
+                .map(|m| {
+                    (
+                        m.spec.clone(),
+                        crate::resolve::NativeModuleInit::Legacy {
+                            crate_name: m.crate_name.clone(),
+                            export_fn: m.export_fn.clone(),
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            native_init.clone()
+        };
     let mut g = Codegen::new_with_native_modules(project_root, features, map);
     g.emit_program(&program)?;
     Ok(g.output)
@@ -465,8 +497,8 @@ struct Codegen {
     project_root: Option<std::path::PathBuf>,
     /// Requested features (http, process, fs, regex, polars). When non-empty, used instead of #[cfg].
     features: std::collections::HashSet<String>,
-    /// spec -> (crate_name, export_fn) for native modules resolved via package.json
-    native_module_map: std::collections::HashMap<String, (String, String)>,
+    /// spec -> native init strategy (legacy adapter object vs generated `generated_native` wrapper)
+    native_module_init: std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
     /// Stack: true = async Rust context (run body), false = sync closure (Tish fn body)
     async_context_stack: Vec<bool>,
     loop_stack: Vec<(String, Option<String>)>, // (break_label, continue_update) for innermost loop
@@ -497,7 +529,7 @@ impl Codegen {
     fn new_with_native_modules(
         project_root: Option<&Path>,
         features: &[String],
-        native_module_map: std::collections::HashMap<String, (String, String)>,
+        native_module_init: std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
     ) -> Self {
         let features: std::collections::HashSet<String> = features.iter().cloned().collect();
         Self {
@@ -507,7 +539,7 @@ impl Codegen {
             is_async: false,
             project_root: project_root.map(|p| p.to_path_buf()),
             features,
-            native_module_map,
+            native_module_init,
             async_context_stack: Vec::new(),
             loop_stack: Vec::new(),
             function_scope_stack: vec![Vec::new()], // Start with global scope
@@ -540,12 +572,21 @@ impl Codegen {
         if is_builtin_native_spec(spec) {
             return self.builtin_native_module_rust_init(spec, export_name);
         }
-        self.native_module_map.get(spec).map(|(crate_name, export_fn)| {
+        self.native_module_init.get(spec).map(|init| {
             // Native modules return a namespace object (like an ES module).
             // Named imports extract the field from that namespace: `import { foo } from "pkg"` → `ns.foo`.
+            let init_expr = match init {
+                crate::resolve::NativeModuleInit::Legacy {
+                    crate_name,
+                    export_fn,
+                } => format!("{}::{}()", crate_name, export_fn),
+                crate::resolve::NativeModuleInit::Generated { export_fn, .. } => {
+                    format!("crate::generated_native::{}()", export_fn)
+                }
+            };
             format!(
-                "{{ let _ns = {}::{}(); match _ns {{ Value::Object(ref _o) => _o.borrow().get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }} }}",
-                crate_name, export_fn, export_name
+                "{{ let _ns = {}; match _ns {{ Value::Object(ref _o) => _o.borrow().get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }} }}",
+                init_expr, export_name
             )
         })
     }
@@ -1779,7 +1820,15 @@ impl Codegen {
             }
             Expr::Call { callee, args, .. } => {
                 // Compile-time embed: Polars.read_csv("<literal path>") when file exists
-                if let Some((crate_name, _)) = self.native_module_map.get("tish:polars") {
+                if let Some(init) = self.native_module_init.get("tish:polars") {
+                    let crate_name = match init {
+                        crate::resolve::NativeModuleInit::Legacy { crate_name, .. } => {
+                            crate_name.as_str()
+                        }
+                        crate::resolve::NativeModuleInit::Generated { shim_crate, .. } => {
+                            shim_crate.as_str()
+                        }
+                    };
                     if let (Some(root), Some(CallArg::Expr(first_arg))) =
                         (self.project_root.as_ref(), args.first())
                     {

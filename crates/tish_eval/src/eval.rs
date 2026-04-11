@@ -512,6 +512,11 @@ impl Evaluator {
 
     /// Load and evaluate a module, returning its exports object. Uses cache.
     fn load_module(&mut self, from: &str) -> Result<Value, EvalError> {
+        if from.starts_with("cargo:") {
+            return Err(EvalError::Error(
+                "cargo:… imports are only supported by `tish build` with the Rust native backend.".into(),
+            ));
+        }
         if from.starts_with("tish:") {
             return self.load_builtin_module(from);
         }
@@ -599,6 +604,11 @@ impl Evaluator {
 
     /// Load built-in module (tish:fs, tish:http, tish:process, …) or a virtual module from native crates.
     fn load_builtin_module(&self, spec: &str) -> Result<Value, EvalError> {
+        if spec.starts_with("cargo:") {
+            return Err(EvalError::Error(
+                "cargo:… imports are only supported when compiling with `tish build` and the Rust native backend. They link Cargo crates via package.json tish.rustDependencies and a generated native wrapper — not the interpreter or VM.".into(),
+            ));
+        }
         if let Some(v) = self.virtual_builtins.borrow().get(spec) {
             return Ok(v.clone());
         }

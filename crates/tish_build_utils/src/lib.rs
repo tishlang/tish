@@ -202,6 +202,21 @@ pub fn find_workspace_root() -> Result<PathBuf, String> {
     Err("Cannot find Tish workspace root. Run from workspace root or use cargo run.".to_string())
 }
 
+/// Path to `crates/tish_runtime` inside a locally installed `@tishlang/tish` npm package.
+pub fn npm_package_runtime_path(project_root: &Path) -> Option<PathBuf> {
+    let p = project_root
+        .join("node_modules")
+        .join("@tishlang")
+        .join("tish")
+        .join("crates")
+        .join("tish_runtime");
+    if p.is_dir() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
 /// Find the path to the tishlang_runtime crate.
 ///
 /// Returns a canonical path string suitable for Cargo.toml path dependencies.
@@ -215,6 +230,24 @@ pub fn find_runtime_path() -> Result<String, String> {
         .canonicalize()
         .map_err(|e| format!("Cannot canonicalize tishlang_runtime: {}", e))
         .map(|p| p.display().to_string().replace('\\', "/"))
+}
+
+/// Resolve `tishlang_runtime` for a Cargo build, preferring the npm install under `project_root`.
+///
+/// When a Tish app lives next to a checkout of the language repo (e.g. `…/tish/tish-cargo-example`),
+/// [`find_workspace_root`] can return the checkout while `rustDependencies` point at
+/// `node_modules/@tishlang/tish/crates/tish_core`. Using the npm tree for **both** runtime and shim
+/// avoids Cargo lockfile "package collision" for the same crate name/version at two paths.
+pub fn find_runtime_path_for_project(project_root: Option<&Path>) -> Result<String, String> {
+    if let Some(root) = project_root {
+        if let Some(rt) = npm_package_runtime_path(root) {
+            return rt
+                .canonicalize()
+                .map_err(|e| format!("Cannot canonicalize tishlang_runtime (npm): {}", e))
+                .map(|p| p.display().to_string().replace('\\', "/"));
+        }
+    }
+    find_runtime_path()
 }
 
 /// Crate package name -> directory name (directories kept as tish_* for historical reasons).

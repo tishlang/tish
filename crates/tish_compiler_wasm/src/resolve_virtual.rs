@@ -33,6 +33,7 @@ fn normalize_builtin_spec(spec: &str) -> Option<String> {
 
 fn is_native_import(spec: &str) -> bool {
     spec.starts_with("tish:")
+        || spec.starts_with("cargo:")
         || spec.starts_with('@')
         || matches!(spec, "fs" | "http" | "process" | "ws")
 }

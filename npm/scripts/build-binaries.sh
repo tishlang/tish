@@ -43,7 +43,16 @@ esac
 
 OUT="$PLATFORM_DIR/$PLATFORM/$BIN"
 echo "Building tish for $TARGET..."
-cargo build --release -p tishlang--target "$TARGET"
+cargo build --release -p tishlang --target "$TARGET"
 mkdir -p "$PLATFORM_DIR/$PLATFORM"
-cp "target/$TARGET/release/$BIN" "$OUT"
+TRIPLE_BIN="target/$TARGET/release/$BIN"
+HOST_BIN="target/release/$BIN"
+if [[ -f "$TRIPLE_BIN" ]]; then
+  cp "$TRIPLE_BIN" "$OUT"
+elif [[ -f "$HOST_BIN" ]]; then
+  cp "$HOST_BIN" "$OUT"
+else
+  echo "error: expected $TRIPLE_BIN or $HOST_BIN after build" >&2
+  exit 1
+fi
 echo "Copied to $OUT"
