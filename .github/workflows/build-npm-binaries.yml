@@ -260,13 +260,16 @@ jobs:
 
       - name: Build (native / rustup target)
         if: ${{ !matrix.use_cross }}
-        run: cargo build --release -p tishlang --target ${{ matrix.target }}
+        run: |
+          cargo build --release -p tishlang --target ${{ matrix.target }}
+          cargo build --release -p tishlang_cargo_bindgen --target ${{ matrix.target }}
 
       - name: Install cross and build (Linux ARM64)
         if: ${{ matrix.use_cross }}
         run: |
           cargo install cross
           cross build --target ${{ matrix.target }} -p tishlang --release
+          cross build --target ${{ matrix.target }} -p tishlang_cargo_bindgen --release
 
       - name: Stage binary for upload
         shell: bash
@@ -274,11 +277,27 @@ jobs:
           mkdir -p staging
           cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} staging/
 
+      - name: Stage bindgen binary for upload
+        shell: bash
+        run: |
+          mkdir -p staging
+          if [ "${{ matrix.platform }}" = "win32-x64" ]; then
+            cp "target/${{ matrix.target }}/release/tishlang-cargo-bindgen.exe" "staging/tish-bindgen.exe"
+          else
+            cp "target/${{ matrix.target }}/release/tishlang-cargo-bindgen" "staging/tish-bindgen"
+          fi
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}
           path: staging/${{ matrix.binary_name }}
+
+      - name: Upload bindgen binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindgen-${{ matrix.platform }}
+          path: staging/tish-bindgen*
 
   release:
     name: Release (prerelease branch + GitHub API)
@@ -318,6 +337,23 @@ jobs:
           chmod +x npm/tish/platform/linux-arm64/tish
           chmod +x npm/tish/platform/darwin-arm64/tish
           chmod +x npm/tish/platform/darwin-x64/tish
+
+          mkdir -p npm/cargo-bindgen/platform/darwin-arm64
+          mkdir -p npm/cargo-bindgen/platform/darwin-x64
+          mkdir -p npm/cargo-bindgen/platform/linux-x64
+          mkdir -p npm/cargo-bindgen/platform/linux-arm64
+          mkdir -p npm/cargo-bindgen/platform/win32-x64
+
+          cp artifacts/bindgen-linux-x64/tish-bindgen npm/cargo-bindgen/platform/linux-x64/tish-bindgen
+          cp artifacts/bindgen-linux-arm64/tish-bindgen npm/cargo-bindgen/platform/linux-arm64/tish-bindgen
+          cp artifacts/bindgen-darwin-arm64/tish-bindgen npm/cargo-bindgen/platform/darwin-arm64/tish-bindgen
+          cp artifacts/bindgen-darwin-x64/tish-bindgen npm/cargo-bindgen/platform/darwin-x64/tish-bindgen
+          cp artifacts/bindgen-win32-x64/tish-bindgen.exe npm/cargo-bindgen/platform/win32-x64/tish-bindgen.exe
+
+          chmod +x npm/cargo-bindgen/platform/linux-x64/tish-bindgen
+          chmod +x npm/cargo-bindgen/platform/linux-arm64/tish-bindgen
+          chmod +x npm/cargo-bindgen/platform/darwin-arm64/tish-bindgen
+          chmod +x npm/cargo-bindgen/platform/darwin-x64/tish-bindgen
 
       - name: Create platform binaries zip
         run: |
@@ -364,6 +400,17 @@ jobs:
         env:
           VERSION: ${{ steps.next_version.outputs.version }}
 
+      - name: Set @tishlang/cargo-bindgen package version for npm pack
+        run: |
+          node -e "
+          const fs = require('fs');
+          const p = require('./npm/cargo-bindgen/package.json');
+          p.version = process.env.VERSION;
+          fs.writeFileSync('./npm/cargo-bindgen/package.json', JSON.stringify(p, null, 2));
+          "
+        env:
+          VERSION: ${{ steps.next_version.outputs.version }}
+
       - name: Copy workspace source for native compile (rust backend)
         run: |
           cp Cargo.toml npm/tish/
@@ -380,6 +427,14 @@ jobs:
           node npm/tish/scripts/install-bin.js
           cd npm/tish && npm pack && cd ../..
           mv npm/tish/tishlang-tish-*.tgz tish-npm-package.tgz
+
+      - name: Create @tishlang/cargo-bindgen npm package tarball
+        env:
+          TISHLANG_CARGO_BINDGEN_NPM_PACK_REQUIRE: "1"
+        run: |
+          node npm/cargo-bindgen/scripts/install-bin.js
+          cd npm/cargo-bindgen && npm pack && cd ../..
+          mv npm/cargo-bindgen/tishlang-cargo-bindgen-*.tgz cargo-bindgen-npm-package.tgz
 
       - name: Create or update release branch and push
         env:
@@ -480,5 +535,11 @@ jobs:
           upload_asset darwin-x64/tish "tish-darwin-x64" "macOS (Intel)" "application/octet-stream"
           upload_asset win32-x64/tish.exe "tish-win32-x64.exe" "Windows (x64)" "application/octet-stream"
           cd ../../..
+          upload_asset npm/cargo-bindgen/platform/linux-x64/tish-bindgen "tish-bindgen-linux-x64" "tish-bindgen Linux (x64)" "application/octet-stream"
+          upload_asset npm/cargo-bindgen/platform/linux-arm64/tish-bindgen "tish-bindgen-linux-arm64" "tish-bindgen Linux (ARM64)" "application/octet-stream"
+          upload_asset npm/cargo-bindgen/platform/darwin-arm64/tish-bindgen "tish-bindgen-darwin-arm64" "tish-bindgen macOS (Apple Silicon)" "application/octet-stream"
+          upload_asset npm/cargo-bindgen/platform/darwin-x64/tish-bindgen "tish-bindgen-darwin-x64" "tish-bindgen macOS (Intel)" "application/octet-stream"
+          upload_asset npm/cargo-bindgen/platform/win32-x64/tish-bindgen.exe "tish-bindgen-win32-x64.exe" "tish-bindgen Windows (x64)" "application/octet-stream"
           upload_asset npm/tish/tish-platform-binaries.zip "tish-platform-binaries.zip" "Platform binaries (all OS)" "application/zip"
           upload_asset tish-npm-package.tgz "tish-npm-package.tgz" "npm package (publish with: npm publish)" "application/octet-stream"
+          upload_asset cargo-bindgen-npm-package.tgz "cargo-bindgen-npm-package.tgz" "npm @tishlang/cargo-bindgen (publish with: npm publish)" "application/octet-stream"

@@ -52,6 +52,7 @@ jobs:
             tishlang_bytecode
             tishlang_js_to_tish
             tishlang_runtime
+            tishlang_cargo_bindgen
             tishlang_cranelift
             tishlang_eval
             tishlang_vm
