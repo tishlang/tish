@@ -1,4 +1,5 @@
-//! Parity with CLI `tish build` (canonical entry + default native feature list).
+//! `cargo:` + `tish.rustDependencies` using the in-repo fixture at `tests/fixtures/cargo_example_project/`
+//! (same layout as the standalone `tish-cargo-example` template).
 
 use std::path::PathBuf;
 
@@ -16,12 +17,12 @@ fn native_build_features_from_cli(cli_features: &[String]) -> Vec<String> {
 }
 
 #[test]
-fn resolve_and_merge_only_for_tish_cargo_example() {
+fn resolve_and_merge_cargo_example_fixture() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let input_path = manifest_dir
-        .join("../../../tish-cargo-example/src/main.tish")
+        .join("tests/fixtures/cargo_example_project/src/main.tish")
         .canonicalize()
-        .expect("tish-cargo-example next to language repo");
+        .expect("cargo_example_project test fixture");
     let project_root = input_path.parent().map(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
             p.parent().unwrap_or(p)
@@ -40,12 +41,12 @@ fn resolve_and_merge_only_for_tish_cargo_example() {
 }
 
 #[test]
-fn compile_project_full_matches_cli_for_tish_cargo_example() {
+fn compile_project_full_cargo_example_fixture() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let example_main = manifest_dir
-        .join("../../../tish-cargo-example/src/main.tish")
+        .join("tests/fixtures/cargo_example_project/src/main.tish")
         .canonicalize()
-        .expect("tish-cargo-example next to language repo");
+        .expect("cargo_example_project test fixture");
     let input_path = example_main;
     let project_root = input_path.parent().map(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
