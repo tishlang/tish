@@ -1027,27 +1027,25 @@ mod cargo_spec_tests {
     #[test]
     fn detect_cycles_skips_cargo_import() {
         use super::{detect_cycles, resolve_project};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("main.tish");
         let src = "import { greet } from 'cargo:demo_shim'\nconsole.log(1)\n";
-        let p = std::env::temp_dir().join("tish_detect_cycles_cargo_import_test.tish");
         std::fs::write(&p, src).unwrap();
-        let root = p.parent().unwrap();
+        let root = dir.path();
         let modules = resolve_project(&p, Some(root)).unwrap();
-        let r = detect_cycles(&modules);
-        std::fs::remove_file(&p).ok();
-        r.unwrap();
+        detect_cycles(&modules).unwrap();
     }
 
     #[test]
     fn merge_modules_skips_cargo_import() {
         use super::{merge_modules, resolve_project};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("main.tish");
         let src = "import { greet } from 'cargo:demo_shim'\nconsole.log(1)\n";
-        let p = std::env::temp_dir().join("tish_merge_cargo_test.tish");
         std::fs::write(&p, src).unwrap();
-        let root = p.parent().unwrap();
+        let root = dir.path();
         let modules = resolve_project(&p, Some(root)).unwrap();
-        let r = merge_modules(modules);
-        std::fs::remove_file(&p).ok();
-        r.unwrap();
+        merge_modules(modules).unwrap();
     }
 
     #[test]
