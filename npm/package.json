@@ -4,6 +4,7 @@
   "description": "Root for Tish npm packages (do not publish)",
   "workspaces": [
     "tish",
+    "cargo-bindgen",
     "create-tish-app"
   ],
   "scripts": {

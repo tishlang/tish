@@ -38,7 +38,9 @@ mod tests {
         assert_eq!(program.statements.len(), 1);
         let stmt = &program.statements[0];
         let init = match stmt {
-            Statement::VarDecl { init: Some(ref i), .. } => i,
+            Statement::VarDecl {
+                init: Some(ref i), ..
+            } => i,
             _ => panic!("expected VarDecl with init"),
         };
         let props = match init {
@@ -61,11 +63,14 @@ mod tests {
 
     #[test]
     fn test_object_literal_string_key() {
-        let program = parse(r#"const o = { "ai-a": 0, human: 1 }"#).expect("parse object with string key");
+        let program =
+            parse(r#"const o = { "ai-a": 0, human: 1 }"#).expect("parse object with string key");
         assert_eq!(program.statements.len(), 1);
         let stmt = &program.statements[0];
         let init = match stmt {
-            Statement::VarDecl { init: Some(ref i), .. } => i,
+            Statement::VarDecl {
+                init: Some(ref i), ..
+            } => i,
             _ => panic!("expected VarDecl with init"),
         };
         let props = match init {
@@ -89,7 +94,9 @@ mod tests {
         assert_eq!(program.statements.len(), 1);
         let stmt = &program.statements[0];
         let init = match stmt {
-            Statement::VarDecl { init: Some(ref i), .. } => i,
+            Statement::VarDecl {
+                init: Some(ref i), ..
+            } => i,
             _ => panic!("expected VarDecl with init"),
         };
         let props = match init {
@@ -134,7 +141,9 @@ mod tests {
         let e = unwrap_expr_stmt(&program);
         match e {
             Expr::New { callee, args, .. } => {
-                assert!(matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Foo"));
+                assert!(
+                    matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Foo")
+                );
                 assert!(args.is_empty());
             }
             _ => panic!("expected New, got {:?}", e),
@@ -147,7 +156,9 @@ mod tests {
         let e = unwrap_expr_stmt(&program);
         match e {
             Expr::New { callee, args, .. } => {
-                assert!(matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Uint8Array"));
+                assert!(
+                    matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Uint8Array")
+                );
                 assert_eq!(args.len(), 1);
                 assert!(matches!(&args[0], CallArg::Expr(Expr::Literal { .. })));
             }
@@ -179,8 +190,14 @@ mod tests {
             Expr::New { callee, args, .. } => {
                 assert!(args.is_empty());
                 match callee.as_ref() {
-                    Expr::New { callee: inner, args: inner_args, .. } => {
-                        assert!(matches!(inner.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Date"));
+                    Expr::New {
+                        callee: inner,
+                        args: inner_args,
+                        ..
+                    } => {
+                        assert!(
+                            matches!(inner.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Date")
+                        );
                         assert!(inner_args.is_empty());
                     }
                     _ => panic!("expected nested New"),
@@ -195,11 +212,17 @@ mod tests {
         let program = parse("new Foo().bar").expect("parse");
         let e = unwrap_expr_stmt(&program);
         match e {
-            Expr::Member { object, prop: tishlang_ast::MemberProp::Name(p), .. } => {
+            Expr::Member {
+                object,
+                prop: tishlang_ast::MemberProp::Name(p),
+                ..
+            } => {
                 assert_eq!(p.as_ref(), "bar");
                 match object.as_ref() {
                     Expr::New { callee, args, .. } => {
-                        assert!(matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Foo"));
+                        assert!(
+                            matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Foo")
+                        );
                         assert!(args.is_empty());
                     }
                     _ => panic!("expected New object"),
@@ -215,7 +238,9 @@ mod tests {
         let e = unwrap_expr_stmt(&program);
         match e {
             Expr::New { args, .. } => {
-                assert!(matches!(&args[0], CallArg::Spread(Expr::Ident { name, .. }) if name.as_ref() == "xs"));
+                assert!(
+                    matches!(&args[0], CallArg::Spread(Expr::Ident { name, .. }) if name.as_ref() == "xs")
+                );
             }
             _ => panic!("expected New"),
         }

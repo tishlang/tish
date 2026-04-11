@@ -115,7 +115,8 @@ where
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(50));
             if let Ok(mut stream) = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)) {
-                let _ = stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+                let _ = stream
+                    .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
                 let _ = stream.shutdown(std::net::Shutdown::Write);
             }
         });
@@ -239,13 +240,20 @@ pub fn value_to_response(value: &Value) -> (u16, Vec<(String, String)>, String) 
 /// If the response value has a "file" key, extract (status, headers, file_path) for streaming.
 /// Used for binary files (e.g. .wasm) where readFile/body would fail.
 fn extract_file_from_response(value: &Value) -> Option<(u16, Vec<(String, String)>, String)> {
-    let Value::Object(obj) = value else { return None };
+    let Value::Object(obj) = value else {
+        return None;
+    };
     let obj_ref = obj.borrow();
-    let Value::String(file_path) = obj_ref.get(&Arc::from("file"))? else { return None };
+    let Value::String(file_path) = obj_ref.get(&Arc::from("file"))? else {
+        return None;
+    };
     let file_path = file_path.to_string();
     let status = obj_ref
         .get(&Arc::from("status"))
-        .and_then(|v| match v { Value::Number(n) => Some(*n as u16), _ => None })
+        .and_then(|v| match v {
+            Value::Number(n) => Some(*n as u16),
+            _ => None,
+        })
         .unwrap_or(200);
     let headers = obj_ref
         .get(&Arc::from("headers"))
@@ -272,8 +280,9 @@ fn send_file_response(
         Ok(f) => f,
         Err(e) => {
             eprintln!("Failed to open file {}: {}", file_path, e);
-            let fallback = tiny_http::Response::from_string(format!("File not found: {}", file_path))
-                .with_status_code(tiny_http::StatusCode(500));
+            let fallback =
+                tiny_http::Response::from_string(format!("File not found: {}", file_path))
+                    .with_status_code(tiny_http::StatusCode(500));
             let _ = request.respond(fallback);
             return;
         }

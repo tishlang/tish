@@ -10,13 +10,13 @@ pub fn percent_decode(input: &str) -> Result<String, String> {
         "%2F", "%2f", // /
         "%3F", "%3f", // ?
         "%3A", "%3a", // :
-        "%40",        // @
-        "%26",        // &
+        "%40", // @
+        "%26", // &
         "%3D", "%3d", // =
         "%2B", "%2b", // +
-        "%24",        // $
+        "%24", // $
         "%2C", "%2c", // ,
-        "%23",        // #
+        "%23", // #
     ];
 
     let mut result = String::with_capacity(input.len());
@@ -46,11 +46,14 @@ pub fn percent_decode(input: &str) -> Result<String, String> {
                     None => return Err("URIError: malformed URI sequence".to_string()),
                 }
             }
-            
+
             if hex.len() == 2 {
                 let encoded = format!("%{}", hex);
                 // Check if this is a reserved character that should NOT be decoded
-                if RESERVED_ENCODED.iter().any(|r| r.eq_ignore_ascii_case(&encoded)) {
+                if RESERVED_ENCODED
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case(&encoded))
+                {
                     result.push_str(&encoded);
                 } else if let Ok(byte) = u8::from_str_radix(&hex, 16) {
                     result.push(byte as char);

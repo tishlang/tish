@@ -5,8 +5,8 @@ use std::sync::Arc;
 use oxc::ast::ast::Expression as OxcExpr;
 use oxc::semantic::Semantic;
 use tishlang_ast::{
-    ArrayElement, ArrowBody, BinOp, CompoundOp, DestructPattern, Expr, Literal, LogicalAssignOp,
-    FunParam, MemberProp, ObjectProp, TypedParam,
+    ArrayElement, ArrowBody, BinOp, CompoundOp, DestructPattern, Expr, FunParam, Literal,
+    LogicalAssignOp, MemberProp, ObjectProp, TypedParam,
 };
 
 use crate::error::{ConvertError, ConvertErrorKind};
@@ -57,7 +57,12 @@ pub fn convert_expr(expr: &OxcExpr<'_>, ctx: &Ctx<'_>) -> Result<Expr, ConvertEr
             let left = Box::new(convert_expr(&b.left, ctx)?);
             let right = Box::new(convert_expr(&b.right, ctx)?);
             let op = convert_bin_op(&b.operator)?;
-            Ok(Expr::Binary { left, op, right, span })
+            Ok(Expr::Binary {
+                left,
+                op,
+                right,
+                span,
+            })
         }
         OxcExpr::UnaryExpression(u) => {
             let operand = Box::new(convert_expr(&u.argument, ctx)?);
@@ -112,10 +117,7 @@ pub fn convert_expr(expr: &OxcExpr<'_>, ctx: &Ctx<'_>) -> Result<Expr, ConvertEr
             })
         }
         OxcExpr::LogicalExpression(l) => {
-            if matches!(
-                l.operator,
-                oxc::ast::ast::LogicalOperator::Coalesce
-            ) {
+            if matches!(l.operator, oxc::ast::ast::LogicalOperator::Coalesce) {
                 Ok(Expr::NullishCoalesce {
                     left: Box::new(convert_expr(&l.left, ctx)?),
                     right: Box::new(convert_expr(&l.right, ctx)?),
@@ -155,12 +157,12 @@ pub fn convert_expr(expr: &OxcExpr<'_>, ctx: &Ctx<'_>) -> Result<Expr, ConvertEr
         OxcExpr::ArrowFunctionExpression(arrow) => {
             let params = convert_arrow_params(&arrow.params, ctx)?;
             let body = if arrow.expression {
-                let e = arrow
-                    .get_expression()
-                    .ok_or_else(|| ConvertError::new(ConvertErrorKind::Incompatible {
+                let e = arrow.get_expression().ok_or_else(|| {
+                    ConvertError::new(ConvertErrorKind::Incompatible {
                         what: "arrow expression body".into(),
                         reason: "expected expression".into(),
-                    }))?;
+                    })
+                })?;
                 ArrowBody::Expr(Box::new(convert_expr(e, ctx)?))
             } else {
                 let stmts = super::stmt::convert_statements(&arrow.body.statements, ctx.0, ctx.1)?;
@@ -169,11 +171,7 @@ pub fn convert_expr(expr: &OxcExpr<'_>, ctx: &Ctx<'_>) -> Result<Expr, ConvertEr
                     span: span_util::oxc_span_to_tish(ctx.1, &*arrow.body),
                 }))
             };
-            Ok(Expr::ArrowFunction {
-                params,
-                body,
-                span,
-            })
+            Ok(Expr::ArrowFunction { params, body, span })
         }
         OxcExpr::AwaitExpression(a) => Ok(Expr::Await {
             operand: Box::new(convert_expr(&a.argument, ctx)?),
@@ -226,11 +224,7 @@ pub fn convert_expr(expr: &OxcExpr<'_>, ctx: &Ctx<'_>) -> Result<Expr, ConvertEr
                     }))
                 }
             };
-            Ok(Expr::ArrowFunction {
-                params,
-                body,
-                span,
-            })
+            Ok(Expr::ArrowFunction { params, body, span })
         }
         _ => Err(ConvertError::new(ConvertErrorKind::Unsupported {
             what: format!("expression: {:?}", std::mem::discriminant(expr)),
@@ -285,7 +279,10 @@ fn convert_call_arg(
 ) -> Result<tishlang_ast::CallArg, ConvertError> {
     if arg.is_spread() {
         if let oxc::ast::ast::Argument::SpreadElement(s) = arg {
-            Ok(tishlang_ast::CallArg::Spread(convert_expr(&s.argument, ctx)?))
+            Ok(tishlang_ast::CallArg::Spread(convert_expr(
+                &s.argument,
+                ctx,
+            )?))
         } else {
             unreachable!()
         }
@@ -307,10 +304,12 @@ fn convert_array_element(
         oxc::ast::ast::ArrayExpressionElement::SpreadElement(s) => {
             Ok(ArrayElement::Spread(convert_expr(&s.argument, ctx)?))
         }
-        oxc::ast::ast::ArrayExpressionElement::Elision(_) => Ok(ArrayElement::Expr(Expr::Literal {
-            value: Literal::Null,
-            span: span_util::stub_span(),
-        })),
+        oxc::ast::ast::ArrayExpressionElement::Elision(_) => {
+            Ok(ArrayElement::Expr(Expr::Literal {
+                value: Literal::Null,
+                span: span_util::stub_span(),
+            }))
+        }
         _ => {
             if let Some(e) = el.as_expression() {
                 Ok(ArrayElement::Expr(convert_expr(e, ctx)?))
@@ -358,77 +357,59 @@ fn convert_assignment(
         let name = id.name.as_str();
         let value = Box::new(convert_expr(right, ctx)?);
         return match &a.operator {
-                oxc::ast::ast::AssignmentOperator::Assign => {
-                    Ok(Expr::Assign {
-                        name: Arc::from(name),
-                        value,
-                        span,
-                    })
-                }
-                oxc::ast::ast::AssignmentOperator::Addition => {
-                    Ok(Expr::CompoundAssign {
-                        name: Arc::from(name),
-                        op: CompoundOp::Add,
-                        value,
-                        span,
-                    })
-                }
-                oxc::ast::ast::AssignmentOperator::Subtraction => {
-                    Ok(Expr::CompoundAssign {
-                        name: Arc::from(name),
-                        op: CompoundOp::Sub,
-                        value,
-                        span,
-                    })
-                }
-                oxc::ast::ast::AssignmentOperator::Multiplication => {
-                    Ok(Expr::CompoundAssign {
-                        name: Arc::from(name),
-                        op: CompoundOp::Mul,
-                        value,
-                        span,
-                    })
-                }
-                oxc::ast::ast::AssignmentOperator::Division => {
-                    Ok(Expr::CompoundAssign {
-                        name: Arc::from(name),
-                        op: CompoundOp::Div,
-                        value,
-                        span,
-                    })
-                }
-                oxc::ast::ast::AssignmentOperator::Remainder => {
-                    Ok(Expr::CompoundAssign {
-                        name: Arc::from(name),
-                        op: CompoundOp::Mod,
-                        value,
-                        span,
-                    })
-                }
-                oxc::ast::ast::AssignmentOperator::LogicalAnd => {
-                    Ok(Expr::LogicalAssign {
-                        name: Arc::from(name),
-                        op: LogicalAssignOp::AndAnd,
-                        value,
-                        span,
-                    })
-                }
-                oxc::ast::ast::AssignmentOperator::LogicalOr => {
-                    Ok(Expr::LogicalAssign {
-                        name: Arc::from(name),
-                        op: LogicalAssignOp::OrOr,
-                        value,
-                        span,
-                    })
-                }
-                oxc::ast::ast::AssignmentOperator::LogicalNullish => {
-                    Ok(Expr::LogicalAssign {
-                        name: Arc::from(name),
-                        op: LogicalAssignOp::Nullish,
-                        value,
-                        span,
-                    })
-                }
+            oxc::ast::ast::AssignmentOperator::Assign => Ok(Expr::Assign {
+                name: Arc::from(name),
+                value,
+                span,
+            }),
+            oxc::ast::ast::AssignmentOperator::Addition => Ok(Expr::CompoundAssign {
+                name: Arc::from(name),
+                op: CompoundOp::Add,
+                value,
+                span,
+            }),
+            oxc::ast::ast::AssignmentOperator::Subtraction => Ok(Expr::CompoundAssign {
+                name: Arc::from(name),
+                op: CompoundOp::Sub,
+                value,
+                span,
+            }),
+            oxc::ast::ast::AssignmentOperator::Multiplication => Ok(Expr::CompoundAssign {
+                name: Arc::from(name),
+                op: CompoundOp::Mul,
+                value,
+                span,
+            }),
+            oxc::ast::ast::AssignmentOperator::Division => Ok(Expr::CompoundAssign {
+                name: Arc::from(name),
+                op: CompoundOp::Div,
+                value,
+                span,
+            }),
+            oxc::ast::ast::AssignmentOperator::Remainder => Ok(Expr::CompoundAssign {
+                name: Arc::from(name),
+                op: CompoundOp::Mod,
+                value,
+                span,
+            }),
+            oxc::ast::ast::AssignmentOperator::LogicalAnd => Ok(Expr::LogicalAssign {
+                name: Arc::from(name),
+                op: LogicalAssignOp::AndAnd,
+                value,
+                span,
+            }),
+            oxc::ast::ast::AssignmentOperator::LogicalOr => Ok(Expr::LogicalAssign {
+                name: Arc::from(name),
+                op: LogicalAssignOp::OrOr,
+                value,
+                span,
+            }),
+            oxc::ast::ast::AssignmentOperator::LogicalNullish => Ok(Expr::LogicalAssign {
+                name: Arc::from(name),
+                op: LogicalAssignOp::Nullish,
+                value,
+                span,
+            }),
             _ => Err(ConvertError::new(ConvertErrorKind::Unsupported {
                 what: "assignment operator".into(),
                 hint: None,
@@ -458,24 +439,14 @@ fn convert_update_expr(
         }
     };
     Ok(match (u.operator, u.prefix) {
-        (oxc::ast::ast::UpdateOperator::Increment, true) => {
-            Expr::PrefixInc { name, span }
-        }
-        (oxc::ast::ast::UpdateOperator::Increment, false) => {
-            Expr::PostfixInc { name, span }
-        }
-        (oxc::ast::ast::UpdateOperator::Decrement, true) => {
-            Expr::PrefixDec { name, span }
-        }
-        (oxc::ast::ast::UpdateOperator::Decrement, false) => {
-            Expr::PostfixDec { name, span }
-        }
+        (oxc::ast::ast::UpdateOperator::Increment, true) => Expr::PrefixInc { name, span },
+        (oxc::ast::ast::UpdateOperator::Increment, false) => Expr::PostfixInc { name, span },
+        (oxc::ast::ast::UpdateOperator::Decrement, true) => Expr::PrefixDec { name, span },
+        (oxc::ast::ast::UpdateOperator::Decrement, false) => Expr::PostfixDec { name, span },
     })
 }
 
-fn convert_bin_op(
-    op: &oxc::ast::ast::BinaryOperator,
-) -> Result<BinOp, ConvertError> {
+fn convert_bin_op(op: &oxc::ast::ast::BinaryOperator) -> Result<BinOp, ConvertError> {
     Ok(match op {
         oxc::ast::ast::BinaryOperator::Equality => BinOp::Eq,
         oxc::ast::ast::BinaryOperator::Inequality => BinOp::Ne,
@@ -554,24 +525,24 @@ pub fn convert_params(
         let fp = p;
         {
             let name = match &fp.pattern {
-                    oxc::ast::ast::BindingPattern::BindingIdentifier(b) => b.name.as_str(),
-                    _ => {
-                        return Err(ConvertError::new(ConvertErrorKind::Unsupported {
-                            what: "destructuring in params".into(),
-                            hint: None,
-                        }))
-                    }
-                };
-                let default = fp
-                    .initializer
-                    .as_ref()
-                    .map(|e| convert_expr(e, ctx))
-                    .transpose()?;
-                typed_params.push(FunParam::Simple(TypedParam {
-                    name: Arc::from(name),
-                    type_ann: None,
-                    default,
-                }));
+                oxc::ast::ast::BindingPattern::BindingIdentifier(b) => b.name.as_str(),
+                _ => {
+                    return Err(ConvertError::new(ConvertErrorKind::Unsupported {
+                        what: "destructuring in params".into(),
+                        hint: None,
+                    }))
+                }
+            };
+            let default = fp
+                .initializer
+                .as_ref()
+                .map(|e| convert_expr(e, ctx))
+                .transpose()?;
+            typed_params.push(FunParam::Simple(TypedParam {
+                name: Arc::from(name),
+                type_ann: None,
+                default,
+            }));
         }
     }
     if rest_param.is_none() {

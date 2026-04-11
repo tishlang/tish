@@ -47,10 +47,19 @@ jobs:
           SHA_LINUX_X64=$(download_and_sha "tish-linux-x64")
           SHA_LINUX_ARM=$(download_and_sha "tish-linux-arm64")
 
+          BG_SHA_ARM=$(download_and_sha "tish-bindgen-darwin-arm64")
+          BG_SHA_X64=$(download_and_sha "tish-bindgen-darwin-x64")
+          BG_SHA_LINUX_X64=$(download_and_sha "tish-bindgen-linux-x64")
+          BG_SHA_LINUX_ARM=$(download_and_sha "tish-bindgen-linux-arm64")
+
           echo "sha_darwin_arm64=$SHA_ARM" >> $GITHUB_OUTPUT
           echo "sha_darwin_x64=$SHA_X64" >> $GITHUB_OUTPUT
           echo "sha_linux_x64=$SHA_LINUX_X64" >> $GITHUB_OUTPUT
           echo "sha_linux_arm64=$SHA_LINUX_ARM" >> $GITHUB_OUTPUT
+          echo "bindgen_sha_darwin_arm64=$BG_SHA_ARM" >> $GITHUB_OUTPUT
+          echo "bindgen_sha_darwin_x64=$BG_SHA_X64" >> $GITHUB_OUTPUT
+          echo "bindgen_sha_linux_x64=$BG_SHA_LINUX_X64" >> $GITHUB_OUTPUT
+          echo "bindgen_sha_linux_arm64=$BG_SHA_LINUX_ARM" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Checkout repo (main branch)
@@ -66,6 +75,10 @@ jobs:
           SHA_X64: ${{ steps.shas.outputs.sha_darwin_x64 }}
           SHA_LINUX_X64: ${{ steps.shas.outputs.sha_linux_x64 }}
           SHA_LINUX_ARM: ${{ steps.shas.outputs.sha_linux_arm64 }}
+          BG_SHA_ARM: ${{ steps.shas.outputs.bindgen_sha_darwin_arm64 }}
+          BG_SHA_X64: ${{ steps.shas.outputs.bindgen_sha_darwin_x64 }}
+          BG_SHA_LINUX_X64: ${{ steps.shas.outputs.bindgen_sha_linux_x64 }}
+          BG_SHA_LINUX_ARM: ${{ steps.shas.outputs.bindgen_sha_linux_arm64 }}
           REPO: ${{ github.repository }}
         run: |
           TAG="v${VERSION}"
@@ -80,6 +93,8 @@ jobs:
             homepage "https://github.com/tishlang/tish"
             version "VERSION_PLACEHOLDER"
             license "MIT"
+
+            depends_on "tish-bindgen"
 
             on_macos do
               if Hardware::CPU.arm?
@@ -134,9 +149,72 @@ jobs:
             Formula/tish.rb
           rm -f Formula/tish.rb.bak
 
+          cat > Formula/tish-bindgen.rb << 'BINDGEN_FORMULA'
+          # typed: false
+          # frozen_string_literal: true
+
+          class TishBindgen < Formula
+            desc "CLI to generate Rust glue for Tish cargo: imports (tishlang-cargo-bindgen)"
+            homepage "https://github.com/tishlang/tish"
+            version "VERSION_PLACEHOLDER"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "BASE_PLACEHOLDER/tish-bindgen-darwin-arm64"
+                sha256 "BG_SHA_ARM_PLACEHOLDER"
+
+                def install
+                  bin.install "tish-bindgen-darwin-arm64" => "tish-bindgen"
+                end
+              end
+              if Hardware::CPU.intel?
+                url "BASE_PLACEHOLDER/tish-bindgen-darwin-x64"
+                sha256 "BG_SHA_X64_PLACEHOLDER"
+
+                def install
+                  bin.install "tish-bindgen-darwin-x64" => "tish-bindgen"
+                end
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "BASE_PLACEHOLDER/tish-bindgen-linux-arm64"
+                sha256 "BG_SHA_LINUX_ARM_PLACEHOLDER"
+
+                def install
+                  bin.install "tish-bindgen-linux-arm64" => "tish-bindgen"
+                end
+              end
+              if Hardware::CPU.intel?
+                url "BASE_PLACEHOLDER/tish-bindgen-linux-x64"
+                sha256 "BG_SHA_LINUX_X64_PLACEHOLDER"
+
+                def install
+                  bin.install "tish-bindgen-linux-x64" => "tish-bindgen"
+                end
+              end
+            end
+
+            test do
+              assert_match(/tishlang-cargo-bindgen/, shell_output("#{bin}/tish-bindgen --help"))
+            end
+          end
+          BINDGEN_FORMULA
+          sed -i.bak \
+            -e "s|VERSION_PLACEHOLDER|${VERSION}|g" \
+            -e "s|BASE_PLACEHOLDER|${BASE}|g" \
+            -e "s|BG_SHA_ARM_PLACEHOLDER|${BG_SHA_ARM}|g" \
+            -e "s|BG_SHA_X64_PLACEHOLDER|${BG_SHA_X64}|g" \
+            -e "s|BG_SHA_LINUX_X64_PLACEHOLDER|${BG_SHA_LINUX_X64}|g" \
+            -e "s|BG_SHA_LINUX_ARM_PLACEHOLDER|${BG_SHA_LINUX_ARM}|g" \
+            Formula/tish-bindgen.rb
+          rm -f Formula/tish-bindgen.rb.bak
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/tish.rb
+          git add Formula/tish.rb Formula/tish-bindgen.rb
           if git diff --staged --quiet; then
             echo "No formula changes (version may already be published)"
           else

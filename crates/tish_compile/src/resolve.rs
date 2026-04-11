@@ -73,7 +73,10 @@ pub fn is_builtin_native_spec(spec: &str) -> bool {
 /// Resolve all native imports in a merged program via package.json lookup.
 /// Built-in modules (tish:fs, tish:http, tish:process) are skipped - they use tishlang_runtime directly.
 /// Handles both lowered `NativeModuleLoad` (merged modules) and raw `import { … } from 'tish:…'`.
-pub fn resolve_native_modules(program: &Program, project_root: &Path) -> Result<Vec<ResolvedNativeModule>, String> {
+pub fn resolve_native_modules(
+    program: &Program,
+    project_root: &Path,
+) -> Result<Vec<ResolvedNativeModule>, String> {
     let root_canon = project_root
         .canonicalize()
         .map_err(|e| format!("Cannot canonicalize project root: {}", e))?;
@@ -131,12 +134,17 @@ pub fn cargo_export_fn_name(spec: &str) -> String {
     out
 }
 
-fn resolve_cargo_native_module(spec: &str, project_root: &Path) -> Result<ResolvedNativeModule, String> {
+fn resolve_cargo_native_module(
+    spec: &str,
+    project_root: &Path,
+) -> Result<ResolvedNativeModule, String> {
     let tail = spec
         .strip_prefix("cargo:")
         .ok_or_else(|| format!("Invalid cargo native spec: {}", spec))?;
     if tail.is_empty() {
-        return Err("cargo: import needs a dependency name, e.g. import { x } from 'cargo:serde_json'".into());
+        return Err(
+            "cargo: import needs a dependency name, e.g. import { x } from 'cargo:my_crate'".into(),
+        );
     }
     let dep_key = tail.to_string();
     let tish = read_project_tish_config(project_root);
@@ -179,14 +187,26 @@ fn resolve_native_module(spec: &str, project_root: &Path) -> Result<ResolvedNati
     let pkg_json = pkg_dir.join("package.json");
     let content = std::fs::read_to_string(&pkg_json)
         .map_err(|e| format!("Cannot read {}: {}", pkg_json.display(), e))?;
-    let json: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| format!("Invalid JSON in {}: {}", pkg_json.display(), e))?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Invalid JSON in {}: {}", pkg_json.display(), e))?;
     let tish = json
         .get("tish")
         .and_then(|v| v.as_object())
-        .ok_or_else(|| format!("Package {} has no \"tish\" config in package.json", package_name))?;
-    if !tish.get("module").and_then(|v| v.as_bool()).unwrap_or(false) {
-        return Err(format!("Package {} is not a Tish native module (tish.module must be true)", package_name));
+        .ok_or_else(|| {
+            format!(
+                "Package {} has no \"tish\" config in package.json",
+                package_name
+            )
+        })?;
+    if !tish
+        .get("module")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "Package {} is not a Tish native module (tish.module must be true)",
+            package_name
+        ));
     }
     let raw_crate = tish
         .get("crate")
@@ -219,7 +239,9 @@ pub fn read_project_tish_config(project_root: &Path) -> serde_json::Value {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
         return serde_json::json!({});
     };
-    json.get("tish").cloned().unwrap_or_else(|| serde_json::json!({}))
+    json.get("tish")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}))
 }
 
 fn resolve_cargo_path_for_toml(project_root: &Path, raw: &str) -> String {
@@ -233,7 +255,10 @@ fn resolve_cargo_path_for_toml(project_root: &Path, raw: &str) -> String {
     resolved.display().to_string().replace('\\', "/")
 }
 
-fn json_to_cargo_inline_value(v: &serde_json::Value, project_root: &Path) -> Result<String, String> {
+fn json_to_cargo_inline_value(
+    v: &serde_json::Value,
+    project_root: &Path,
+) -> Result<String, String> {
     match v {
         serde_json::Value::String(s) => Ok(format!("{:?}", s.as_str())),
         serde_json::Value::Bool(b) => Ok(b.to_string()),
@@ -264,7 +289,10 @@ fn json_to_cargo_inline_value(v: &serde_json::Value, project_root: &Path) -> Res
 
 /// Serialize `tish.rustDependencies` from project `package.json` into Cargo.toml `[dependencies]` lines.
 /// Relative `path = "…"` entries in inline tables are resolved against `project_root` so the temp build crate can find them.
-pub fn format_rust_dependencies_toml(tish: &serde_json::Value, project_root: &Path) -> Result<String, String> {
+pub fn format_rust_dependencies_toml(
+    tish: &serde_json::Value,
+    project_root: &Path,
+) -> Result<String, String> {
     let Some(obj) = tish.get("rustDependencies").and_then(|v| v.as_object()) else {
         return Ok(String::new());
     };
@@ -313,7 +341,10 @@ pub fn infer_native_module_exports(program: &Program) -> HashMap<String, HashSet
     for stmt in &program.statements {
         match stmt {
             Statement::VarDecl {
-                init: Some(Expr::NativeModuleLoad { spec, export_name, .. }),
+                init:
+                    Some(Expr::NativeModuleLoad {
+                        spec, export_name, ..
+                    }),
                 ..
             } => {
                 let s = spec.as_ref();
@@ -324,8 +355,11 @@ pub fn infer_native_module_exports(program: &Program) -> HashMap<String, HashSet
                     .or_default()
                     .insert(export_name.to_string());
             }
-            Statement::Import { specifiers, from, .. } if is_native_import(from.as_ref()) => {
-                let spec = normalize_builtin_spec(from.as_ref()).unwrap_or_else(|| from.to_string());
+            Statement::Import {
+                specifiers, from, ..
+            } if is_native_import(from.as_ref()) => {
+                let spec =
+                    normalize_builtin_spec(from.as_ref()).unwrap_or_else(|| from.to_string());
                 if is_builtin_native_spec(&spec) {
                     continue;
                 }
@@ -358,7 +392,11 @@ pub fn generate_native_wrapper_rs(
     );
     let mut any = false;
     for m in modules {
-        let Some(NativeModuleInit::Generated { shim_crate, export_fn }) = init_by_spec.get(&m.spec) else {
+        let Some(NativeModuleInit::Generated {
+            shim_crate,
+            export_fn,
+        }) = init_by_spec.get(&m.spec)
+        else {
             continue;
         };
         let Some(names) = inferred.get(&m.spec) else {
@@ -405,9 +443,16 @@ pub fn compute_native_build_artifacts(
     let mut native_init: HashMap<String, NativeModuleInit> = HashMap::new();
     for m in native_modules {
         let use_gen = if is_cargo_native_spec(&m.spec) {
-            inferred.get(&m.spec).map(|s| !s.is_empty()).unwrap_or(false)
+            inferred
+                .get(&m.spec)
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
         } else {
-            gen_tish && inferred.get(&m.spec).map(|s| !s.is_empty()).unwrap_or(false)
+            gen_tish
+                && inferred
+                    .get(&m.spec)
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
         };
         let init = if use_gen {
             NativeModuleInit::Generated {
@@ -538,13 +583,18 @@ pub fn resolve_project(
     entry_path: &Path,
     project_root: Option<&Path>,
 ) -> Result<Vec<ResolvedModule>, String> {
-    let project_root = project_root.unwrap_or_else(|| entry_path.parent().unwrap_or(Path::new(".")));
+    let project_root =
+        project_root.unwrap_or_else(|| entry_path.parent().unwrap_or(Path::new(".")));
     let entry_canon = entry_path
         .canonicalize()
         .map_err(|e| format!("Cannot canonicalize entry {}: {}", entry_path.display(), e))?;
-    let root_canon = project_root
-        .canonicalize()
-        .map_err(|e| format!("Cannot canonicalize project root {}: {}", project_root.display(), e))?;
+    let root_canon = project_root.canonicalize().map_err(|e| {
+        format!(
+            "Cannot canonicalize project root {}: {}",
+            project_root.display(),
+            e
+        )
+    })?;
 
     let mut visited = HashSet::new();
     let mut path_to_module: HashMap<PathBuf, Program> = HashMap::new();
@@ -574,21 +624,23 @@ pub fn resolve_project_from_stdin(
     source: &str,
     project_root: &Path,
 ) -> Result<Vec<ResolvedModule>, String> {
-    let root_canon = project_root
-        .canonicalize()
-        .map_err(|e| format!("Cannot canonicalize project root {}: {}", project_root.display(), e))?;
+    let root_canon = project_root.canonicalize().map_err(|e| {
+        format!(
+            "Cannot canonicalize project root {}: {}",
+            project_root.display(),
+            e
+        )
+    })?;
 
     let stdin_path = root_canon.join("<stdin>");
-    let program = tishlang_parser::parse(source)
-        .map_err(|e| format!("Parse error (stdin): {}", e))?;
+    let program =
+        tishlang_parser::parse(source).map_err(|e| format!("Parse error (stdin): {}", e))?;
 
     let mut visited = HashSet::new();
     let mut path_to_module: HashMap<PathBuf, Program> = HashMap::new();
     let mut load_order: Vec<PathBuf> = Vec::new();
 
-    let from_dir = stdin_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let from_dir = stdin_path.parent().unwrap_or_else(|| Path::new("."));
 
     for stmt in &program.statements {
         if let Statement::Import { from, .. } = stmt {
@@ -787,7 +839,10 @@ pub fn detect_cycles(modules: &[ResolvedModule]) -> Result<(), String> {
                 .iter()
                 .map(|&i| modules[i].path.display().to_string())
                 .collect();
-            return Err(format!("Circular import detected: {}", path_names.join(" -> ")));
+            return Err(format!(
+                "Circular import detected: {}",
+                path_names.join(" -> ")
+            ));
         }
     }
     Ok(())
@@ -817,14 +872,8 @@ fn has_cycle_from(
                     stack.push(dep_idx);
                     let dep = &modules[dep_idx];
                     let dep_dir = dep.path.parent().unwrap_or(Path::new("."));
-                    if has_cycle_from(
-                        dep_dir,
-                        &dep.program,
-                        path_to_idx,
-                        modules,
-                        stack,
-                        visiting,
-                    )? {
+                    if has_cycle_from(dep_dir, &dep.program, path_to_idx, modules, stack, visiting)?
+                    {
                         return Ok(true);
                     }
                     stack.pop();
@@ -874,12 +923,15 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
         let dir = module.path.parent().unwrap_or(Path::new("."));
         for stmt in &module.program.statements {
             match stmt {
-                Statement::Import { specifiers, from, span } => {
+                Statement::Import {
+                    specifiers,
+                    from,
+                    span,
+                } => {
                     if is_native_import(from.as_ref()) {
                         // Normalize fs/http/process -> tish:fs etc. for Node compatibility
-                        let canonical_spec =
-                            normalize_builtin_spec(from.as_ref())
-                                .unwrap_or_else(|| from.to_string());
+                        let canonical_spec = normalize_builtin_spec(from.as_ref())
+                            .unwrap_or_else(|| from.to_string());
                         // Emit VarDecl with NativeModuleLoad for each specifier
                         for spec in specifiers {
                             match spec {
@@ -918,9 +970,7 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
                         continue;
                     }
                     let dep_path = resolve_import_path(from.as_ref(), dir, Path::new("."))?;
-                    let dep_path = dep_path
-                        .canonicalize()
-                        .unwrap_or(dep_path);
+                    let dep_path = dep_path.canonicalize().unwrap_or(dep_path);
                     let dep_idx = *path_to_idx
                         .get(&dep_path)
                         .ok_or_else(|| format!("Resolved import '{}' not in module list", from))?;
@@ -961,18 +1011,13 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
                                     name: ns.clone(),
                                     mutable: false,
                                     type_ann: None,
-                                    init: Some(Expr::Object {
-                                        props,
-                                        span: *span,
-                                    }),
+                                    init: Some(Expr::Object { props, span: *span }),
                                     span: *span,
                                 });
                             }
                             ImportSpecifier::Default(bind) => {
-                                let source = dep_exports
-                                    .get("default")
-                                    .cloned()
-                                    .ok_or_else(|| {
+                                let source =
+                                    dep_exports.get("default").cloned().ok_or_else(|| {
                                         format!("Module '{}' has no default export", from)
                                     })?;
                                 statements.push(Statement::VarDecl {
@@ -989,21 +1034,19 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
                         }
                     }
                 }
-                Statement::Export { declaration, .. } => {
-                    match declaration.as_ref() {
-                        ExportDeclaration::Named(s) => statements.push(*s.clone()),
-                        ExportDeclaration::Default(e) => {
-                            let default_name = format!("__default_{}", idx);
-                            statements.push(Statement::VarDecl {
-                                name: Arc::from(default_name),
-                                mutable: false,
-                                type_ann: None,
-                                init: Some((*e).clone()),
-                                span: e.span(),
-                            });
-                        }
+                Statement::Export { declaration, .. } => match declaration.as_ref() {
+                    ExportDeclaration::Named(s) => statements.push(*s.clone()),
+                    ExportDeclaration::Default(e) => {
+                        let default_name = format!("__default_{}", idx);
+                        statements.push(Statement::VarDecl {
+                            name: Arc::from(default_name),
+                            mutable: false,
+                            type_ann: None,
+                            init: Some((*e).clone()),
+                            span: e.span(),
+                        });
                     }
-                }
+                },
                 _ => statements.push(stmt.clone()),
             }
         }
@@ -1051,8 +1094,8 @@ mod cargo_spec_tests {
     #[test]
     fn cargo_export_fn_name_sanitizes() {
         assert_eq!(
-            cargo_export_fn_name("cargo:serde_json"),
-            "cargo_native_serde_json_object"
+            cargo_export_fn_name("cargo:tish_serde_json"),
+            "cargo_native_tish_serde_json_object"
         );
         assert_eq!(
             cargo_export_fn_name("cargo:my-crate"),

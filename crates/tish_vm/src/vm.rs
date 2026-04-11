@@ -8,9 +8,9 @@ use std::sync::Arc;
 use tishlang_ast::{BinOp, UnaryOp};
 use tishlang_builtins::array as arr_builtins;
 use tishlang_builtins::construct as construct_builtin;
-use tishlang_builtins::string as str_builtins;
 use tishlang_builtins::globals as globals_builtins;
 use tishlang_builtins::math as math_builtins;
+use tishlang_builtins::string as str_builtins;
 use tishlang_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
 use tishlang_core::{ObjectMap, Value};
 
@@ -51,12 +51,24 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
     #[cfg(feature = "fs")]
     if spec == "tish:fs" && cap_allows(enabled, "fs") {
         return match export_name {
-            "readFile" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::read_file(args)))),
-            "writeFile" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::write_file(args)))),
-            "fileExists" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::file_exists(args)))),
-            "isDir" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::is_dir(args)))),
-            "readDir" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::read_dir(args)))),
-            "mkdir" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::mkdir(args)))),
+            "readFile" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tishlang_runtime::read_file(args)
+            }))),
+            "writeFile" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tishlang_runtime::write_file(args)
+            }))),
+            "fileExists" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tishlang_runtime::file_exists(args)
+            }))),
+            "isDir" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tishlang_runtime::is_dir(args)
+            }))),
+            "readDir" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tishlang_runtime::read_dir(args)
+            }))),
+            "mkdir" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tishlang_runtime::mkdir(args)
+            }))),
             _ => None,
         };
     }
@@ -87,9 +99,15 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
     #[cfg(feature = "process")]
     if spec == "tish:process" && cap_allows(enabled, "process") {
         return match export_name {
-            "exit" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exit(args)))),
-            "cwd" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_cwd(args)))),
-            "exec" => Some(Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exec(args)))),
+            "exit" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tishlang_runtime::process_exit(args)
+            }))),
+            "cwd" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tishlang_runtime::process_cwd(args)
+            }))),
+            "exec" => Some(Value::Function(Rc::new(|args: &[Value]| {
+                tishlang_runtime::process_exec(args)
+            }))),
             "argv" => Some(Value::Array(Rc::new(RefCell::new(
                 std::env::args().map(|s| Value::String(s.into())).collect(),
             )))),
@@ -100,9 +118,24 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             )))),
             "process" => {
                 let mut m = ObjectMap::default();
-                m.insert("exit".into(), Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exit(args))));
-                m.insert("cwd".into(), Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_cwd(args))));
-                m.insert("exec".into(), Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exec(args))));
+                m.insert(
+                    "exit".into(),
+                    Value::Function(Rc::new(|args: &[Value]| {
+                        tishlang_runtime::process_exit(args)
+                    })),
+                );
+                m.insert(
+                    "cwd".into(),
+                    Value::Function(Rc::new(|args: &[Value]| {
+                        tishlang_runtime::process_cwd(args)
+                    })),
+                );
+                m.insert(
+                    "exec".into(),
+                    Value::Function(Rc::new(|args: &[Value]| {
+                        tishlang_runtime::process_exec(args)
+                    })),
+                );
                 m.insert(
                     "argv".into(),
                     Value::Array(Rc::new(RefCell::new(
@@ -134,7 +167,10 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             "wsSend" => Some(Value::Function(Rc::new(|args: &[Value]| {
                 Value::Bool(tishlang_runtime::ws_send_native(
                     args.first().unwrap_or(&Value::Null),
-                    &args.get(1).map(|v| v.to_display_string()).unwrap_or_default(),
+                    &args
+                        .get(1)
+                        .map(|v| v.to_display_string())
+                        .unwrap_or_default(),
                 ))
             }))),
             "wsBroadcast" => Some(Value::Function(Rc::new(|args: &[Value]| {
@@ -183,7 +219,8 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     console.insert(
         "debug".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s = tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
+            let s =
+                tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log(&s);
             Value::Null
         })),
@@ -191,7 +228,8 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     console.insert(
         "log".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s = tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
+            let s =
+                tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log(&s);
             Value::Null
         })),
@@ -199,7 +237,8 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     console.insert(
         "info".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s = tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
+            let s =
+                tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log(&s);
             Value::Null
         })),
@@ -207,7 +246,8 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     console.insert(
         "warn".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s = tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
+            let s =
+                tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log_err(&s);
             Value::Null
         })),
@@ -215,12 +255,16 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     console.insert(
         "error".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s = tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
+            let s =
+                tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log_err(&s);
             Value::Null
         })),
     );
-    g.insert("console".into(), Value::Object(Rc::new(RefCell::new(console))));
+    g.insert(
+        "console".into(),
+        Value::Object(Rc::new(RefCell::new(console))),
+    );
 
     let mut math = ObjectMap::default();
     math.insert(
@@ -276,14 +320,38 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             Value::Number(nums.into_iter().fold(f64::NAN, |a, b| a.max(b)))
         })),
     );
-    math.insert("pow".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::pow(args))));
-    math.insert("sin".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::sin(args))));
-    math.insert("cos".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::cos(args))));
-    math.insert("tan".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::tan(args))));
-    math.insert("log".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::log(args))));
-    math.insert("exp".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::exp(args))));
-    math.insert("sign".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::sign(args))));
-    math.insert("trunc".into(), Value::Function(Rc::new(|args: &[Value]| math_builtins::trunc(args))));
+    math.insert(
+        "pow".into(),
+        Value::Function(Rc::new(|args: &[Value]| math_builtins::pow(args))),
+    );
+    math.insert(
+        "sin".into(),
+        Value::Function(Rc::new(|args: &[Value]| math_builtins::sin(args))),
+    );
+    math.insert(
+        "cos".into(),
+        Value::Function(Rc::new(|args: &[Value]| math_builtins::cos(args))),
+    );
+    math.insert(
+        "tan".into(),
+        Value::Function(Rc::new(|args: &[Value]| math_builtins::tan(args))),
+    );
+    math.insert(
+        "log".into(),
+        Value::Function(Rc::new(|args: &[Value]| math_builtins::log(args))),
+    );
+    math.insert(
+        "exp".into(),
+        Value::Function(Rc::new(|args: &[Value]| math_builtins::exp(args))),
+    );
+    math.insert(
+        "sign".into(),
+        Value::Function(Rc::new(|args: &[Value]| math_builtins::sign(args))),
+    );
+    math.insert(
+        "trunc".into(),
+        Value::Function(Rc::new(|args: &[Value]| math_builtins::trunc(args))),
+    );
     math.insert("PI".into(), Value::Number(std::f64::consts::PI));
     math.insert("E".into(), Value::Number(std::f64::consts::E));
     g.insert("Math".into(), Value::Object(Rc::new(RefCell::new(math))));
@@ -292,7 +360,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     json.insert(
         "parse".into(),
         Value::Function(Rc::new(|args: &[Value]| {
-            let s = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+            let s = args
+                .first()
+                .map(|v| v.to_display_string())
+                .unwrap_or_default();
             tishlang_core::json_parse(&s).unwrap_or(Value::Null)
         })),
     );
@@ -305,13 +376,36 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     );
     g.insert("JSON".into(), Value::Object(Rc::new(RefCell::new(json))));
 
-    g.insert("parseInt".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::parse_int(args))));
-    g.insert("parseFloat".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::parse_float(args))));
-    g.insert("encodeURI".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::encode_uri(args))));
-    g.insert("decodeURI".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::decode_uri(args))));
-    g.insert("Boolean".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::boolean(args))));
-    g.insert("isFinite".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::is_finite(args))));
-    g.insert("isNaN".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::is_nan(args))));
+    g.insert(
+        "parseInt".into(),
+        Value::Function(Rc::new(|args: &[Value]| globals_builtins::parse_int(args))),
+    );
+    g.insert(
+        "parseFloat".into(),
+        Value::Function(Rc::new(|args: &[Value]| {
+            globals_builtins::parse_float(args)
+        })),
+    );
+    g.insert(
+        "encodeURI".into(),
+        Value::Function(Rc::new(|args: &[Value]| globals_builtins::encode_uri(args))),
+    );
+    g.insert(
+        "decodeURI".into(),
+        Value::Function(Rc::new(|args: &[Value]| globals_builtins::decode_uri(args))),
+    );
+    g.insert(
+        "Boolean".into(),
+        Value::Function(Rc::new(|args: &[Value]| globals_builtins::boolean(args))),
+    );
+    g.insert(
+        "isFinite".into(),
+        Value::Function(Rc::new(|args: &[Value]| globals_builtins::is_finite(args))),
+    );
+    g.insert(
+        "isNaN".into(),
+        Value::Function(Rc::new(|args: &[Value]| globals_builtins::is_nan(args))),
+    );
     g.insert("Infinity".into(), Value::Number(f64::INFINITY));
     g.insert("NaN".into(), Value::Number(f64::NAN));
     g.insert(
@@ -349,31 +443,68 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     let mut object_methods = ObjectMap::default();
     object_methods.insert(
         "assign".into(),
-        Value::Function(Rc::new(|args: &[Value]| globals_builtins::object_assign(args))),
+        Value::Function(Rc::new(|args: &[Value]| {
+            globals_builtins::object_assign(args)
+        })),
     );
     object_methods.insert(
         "fromEntries".into(),
-        Value::Function(Rc::new(|args: &[Value]| globals_builtins::object_from_entries(args))),
+        Value::Function(Rc::new(|args: &[Value]| {
+            globals_builtins::object_from_entries(args)
+        })),
     );
-    object_methods.insert("keys".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::object_keys(args))));
-    object_methods.insert("values".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::object_values(args))));
-    object_methods.insert("entries".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::object_entries(args))));
-    g.insert("Object".into(), Value::Object(Rc::new(RefCell::new(object_methods))));
+    object_methods.insert(
+        "keys".into(),
+        Value::Function(Rc::new(|args: &[Value]| {
+            globals_builtins::object_keys(args)
+        })),
+    );
+    object_methods.insert(
+        "values".into(),
+        Value::Function(Rc::new(|args: &[Value]| {
+            globals_builtins::object_values(args)
+        })),
+    );
+    object_methods.insert(
+        "entries".into(),
+        Value::Function(Rc::new(|args: &[Value]| {
+            globals_builtins::object_entries(args)
+        })),
+    );
+    g.insert(
+        "Object".into(),
+        Value::Object(Rc::new(RefCell::new(object_methods))),
+    );
 
     // Array.isArray
     let mut array_static = ObjectMap::default();
     array_static.insert(
         "isArray".into(),
-        Value::Function(Rc::new(|args: &[Value]| globals_builtins::array_is_array(args))),
+        Value::Function(Rc::new(|args: &[Value]| {
+            globals_builtins::array_is_array(args)
+        })),
     );
-    g.insert("Array".into(), Value::Object(Rc::new(RefCell::new(array_static))));
+    g.insert(
+        "Array".into(),
+        Value::Object(Rc::new(RefCell::new(array_static))),
+    );
 
     // String(value) as callable + String.fromCharCode
-    let string_convert_fn = Value::Function(Rc::new(|args: &[Value]| globals_builtins::string_convert(args)));
+    let string_convert_fn = Value::Function(Rc::new(|args: &[Value]| {
+        globals_builtins::string_convert(args)
+    }));
     let mut string_static = ObjectMap::default();
-    string_static.insert("fromCharCode".into(), Value::Function(Rc::new(|args: &[Value]| globals_builtins::string_from_char_code(args))));
+    string_static.insert(
+        "fromCharCode".into(),
+        Value::Function(Rc::new(|args: &[Value]| {
+            globals_builtins::string_from_char_code(args)
+        })),
+    );
     string_static.insert(Arc::from("__call"), string_convert_fn);
-    g.insert("String".into(), Value::Object(Rc::new(RefCell::new(string_static))));
+    g.insert(
+        "String".into(),
+        Value::Object(Rc::new(RefCell::new(string_static))),
+    );
 
     // JSX / Lattish: stubs for bytecode VM when no DOM (e.g. console). Override via set_global in browser.
     g.insert(
@@ -405,22 +536,31 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     );
     let mut document_obj = ObjectMap::default();
     document_obj.insert("body".into(), Value::Null);
-    g.insert("document".into(), Value::Object(Rc::new(RefCell::new(document_obj))));
+    g.insert(
+        "document".into(),
+        Value::Object(Rc::new(RefCell::new(document_obj))),
+    );
 
     #[cfg(feature = "process")]
     if cap_allows(enabled, "process") {
         let mut process_obj = ObjectMap::default();
         process_obj.insert(
             "exit".into(),
-            Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exit(args))),
+            Value::Function(Rc::new(|args: &[Value]| {
+                tishlang_runtime::process_exit(args)
+            })),
         );
         process_obj.insert(
             "cwd".into(),
-            Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_cwd(args))),
+            Value::Function(Rc::new(|args: &[Value]| {
+                tishlang_runtime::process_cwd(args)
+            })),
         );
         process_obj.insert(
             "exec".into(),
-            Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::process_exec(args))),
+            Value::Function(Rc::new(|args: &[Value]| {
+                tishlang_runtime::process_exec(args)
+            })),
         );
         process_obj.insert(
             "argv".into(),
@@ -436,7 +576,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
                     .collect(),
             ))),
         );
-        g.insert("process".into(), Value::Object(Rc::new(RefCell::new(process_obj))));
+        g.insert(
+            "process".into(),
+            Value::Object(Rc::new(RefCell::new(process_obj))),
+        );
     }
 
     #[cfg(feature = "http")]
@@ -511,7 +654,11 @@ impl Vm {
 
     /// Names of all globals (for REPL bare-word tab completion).
     pub fn global_names(&self) -> Vec<String> {
-        self.globals.borrow().keys().map(|k| k.as_ref().to_string()).collect()
+        self.globals
+            .borrow()
+            .keys()
+            .map(|k| k.as_ref().to_string())
+            .collect()
     }
 
     fn read_u16(code: &[u8], ip: &mut usize) -> u16 {
@@ -663,9 +810,7 @@ impl Vm {
                     } else if self.scope.contains_key(name.as_ref()) {
                         self.scope.insert(Arc::clone(name), v);
                     } else if self.globals.borrow().contains_key(name.as_ref()) {
-                        self.globals
-                            .borrow_mut()
-                            .insert(Arc::clone(name), v);
+                        self.globals.borrow_mut().insert(Arc::clone(name), v);
                     } else {
                         // New variable: at top level (no enclosing) store in globals so REPL persists across lines
                         if self.enclosing.is_none() {
@@ -716,9 +861,9 @@ impl Vm {
                     block_undo_stack.push(Vec::new());
                 }
                 Opcode::ExitBlock => {
-                    let frame = block_undo_stack.pop().ok_or_else(|| {
-                        "ExitBlock without matching EnterBlock".to_string()
-                    })?;
+                    let frame = block_undo_stack
+                        .pop()
+                        .ok_or_else(|| "ExitBlock without matching EnterBlock".to_string())?;
                     for (name, old) in frame.into_iter().rev() {
                         let mut ls = local_scope.borrow_mut();
                         match old {
@@ -753,17 +898,19 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    self.globals
-                        .borrow_mut()
-                        .insert(Arc::clone(name), v);
+                    self.globals.borrow_mut().insert(Arc::clone(name), v);
                 }
                 Opcode::Pop => {
-                    self.stack.pop().ok_or_else(|| "Stack underflow".to_string())?;
+                    self.stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
                 }
                 Opcode::PopN => {
                     let n = Self::read_u16(code, &mut ip) as usize;
                     for _ in 0..n {
-                        self.stack.pop().ok_or_else(|| "Stack underflow".to_string())?;
+                        self.stack
+                            .pop()
+                            .ok_or_else(|| "Stack underflow".to_string())?;
                     }
                 }
                 Opcode::Dup => {
@@ -792,7 +939,9 @@ impl Vm {
                     let f = match &callee {
                         Value::Function(f) => Rc::clone(f),
                         Value::Object(o) => {
-                            if let Some(Value::Function(call_fn)) = o.borrow().get(&Arc::from("__call")) {
+                            if let Some(Value::Function(call_fn)) =
+                                o.borrow().get(&Arc::from("__call"))
+                            {
                                 Rc::clone(call_fn)
                             } else {
                                 return Err(format!(
@@ -802,10 +951,7 @@ impl Vm {
                             }
                         }
                         _ => {
-                            return Err(format!(
-                                "Call of non-function: {}",
-                                callee.type_name()
-                            ));
+                            return Err(format!("Call of non-function: {}", callee.type_name()));
                         }
                     };
                     let result = f(&args);
@@ -832,7 +978,9 @@ impl Vm {
                     let f = match &callee {
                         Value::Function(f) => Rc::clone(f),
                         Value::Object(o) => {
-                            if let Some(Value::Function(call_fn)) = o.borrow().get(&Arc::from("__call")) {
+                            if let Some(Value::Function(call_fn)) =
+                                o.borrow().get(&Arc::from("__call"))
+                            {
                                 Rc::clone(call_fn)
                             } else {
                                 return Err(format!(
@@ -842,10 +990,7 @@ impl Vm {
                             }
                         }
                         _ => {
-                            return Err(format!(
-                                "Call of non-function: {}",
-                                callee.type_name()
-                            ));
+                            return Err(format!("Call of non-function: {}", callee.type_name()));
                         }
                     };
                     let result = f(&args);
@@ -922,8 +1067,8 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    let op = u8_to_binop(op_u8)
-                        .ok_or_else(|| format!("Unknown binop: {}", op_u8))?;
+                    let op =
+                        u8_to_binop(op_u8).ok_or_else(|| format!("Unknown binop: {}", op_u8))?;
                     let result = eval_binop(op, &l, &r)?;
                     self.stack.push(result);
                 }
@@ -1023,8 +1168,7 @@ impl Vm {
                         );
                     }
                     elems.reverse();
-                    self.stack
-                        .push(Value::Array(Rc::new(RefCell::new(elems))));
+                    self.stack.push(Value::Array(Rc::new(RefCell::new(elems))));
                 }
                 Opcode::NewObject => {
                     let n = Self::read_u16(code, &mut ip) as usize;
@@ -1041,8 +1185,7 @@ impl Vm {
                         let key = key_val.to_display_string().into();
                         map.insert(key, val);
                     }
-                    self.stack
-                        .push(Value::Object(Rc::new(RefCell::new(map))));
+                    self.stack.push(Value::Object(Rc::new(RefCell::new(map))));
                 }
                 Opcode::EnterTry => {
                     let offset = Self::read_u16(code, &mut ip) as usize;
@@ -1159,9 +1302,7 @@ impl Vm {
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
                     let result = match &arr {
-                        Value::Array(a) => {
-                            Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
-                        }
+                        Value::Array(a) => Value::Array(Rc::new(RefCell::new(a.borrow().clone()))),
                         _ => Value::Null,
                     };
                     self.stack.push(result);
@@ -1187,8 +1328,16 @@ impl Vm {
                         let mapped: Vec<Value> = arr_borrow
                             .iter()
                             .map(|v| {
-                                let l: Value = if param_left { (*v).clone() } else { const_val.clone() };
-                                let r: Value = if param_left { const_val.clone() } else { (*v).clone() };
+                                let l: Value = if param_left {
+                                    (*v).clone()
+                                } else {
+                                    const_val.clone()
+                                };
+                                let r: Value = if param_left {
+                                    const_val.clone()
+                                } else {
+                                    (*v).clone()
+                                };
                                 eval_binop(binop, &l, &r).unwrap_or(Value::Null)
                             })
                             .collect();
@@ -1204,8 +1353,9 @@ impl Vm {
                     let const_idx = Self::read_u16(code, &mut ip);
                     let param_left = code[ip] == 0; // 0 = param on left (x op const), 1 = param on right (const op x)
                     ip += 1;
-                    let binop = u8_to_binop(binop_u8)
-                        .ok_or_else(|| format!("Unknown binop in ArrayFilterBinOp: {}", binop_u8))?;
+                    let binop = u8_to_binop(binop_u8).ok_or_else(|| {
+                        format!("Unknown binop in ArrayFilterBinOp: {}", binop_u8)
+                    })?;
                     let arr = self
                         .stack
                         .pop()
@@ -1219,8 +1369,16 @@ impl Vm {
                         let filtered: Vec<Value> = arr_borrow
                             .iter()
                             .filter(|v| {
-                                let l: Value = if param_left { (*v).clone() } else { const_val.clone() };
-                                let r: Value = if param_left { const_val.clone() } else { (*v).clone() };
+                                let l: Value = if param_left {
+                                    (*v).clone()
+                                } else {
+                                    const_val.clone()
+                                };
+                                let r: Value = if param_left {
+                                    const_val.clone()
+                                } else {
+                                    (*v).clone()
+                                };
                                 let b = eval_binop(binop, &l, &r).unwrap_or(Value::Null);
                                 b.is_truthy()
                             })
@@ -1250,7 +1408,10 @@ impl Vm {
                     let spec = match constants.get(spec_idx as usize) {
                         Some(Constant::String(s)) => s.as_ref(),
                         _ => {
-                            return Err("LoadNativeExport: spec constant out of bounds or not string".to_string());
+                            return Err(
+                                "LoadNativeExport: spec constant out of bounds or not string"
+                                    .to_string(),
+                            );
                         }
                     };
                     let export_name = match constants.get(export_idx as usize) {
@@ -1400,33 +1561,50 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
     match obj {
         Value::Object(m) => {
             let map = m.borrow();
-            map.get(key.as_ref()).cloned().ok_or_else(|| {
-                format!("Property '{}' not found", key)
-            })
+            map.get(key.as_ref())
+                .cloned()
+                .ok_or_else(|| format!("Property '{}' not found", key))
         }
         Value::Array(a) => {
             let key_s = key.as_ref();
             if let Ok(idx) = key_s.parse::<usize>() {
                 let arr = a.borrow();
-                return arr.get(idx).cloned().ok_or_else(|| "Index out of bounds".to_string());
+                return arr
+                    .get(idx)
+                    .cloned()
+                    .ok_or_else(|| "Index out of bounds".to_string());
             }
             if key_s == "length" {
                 return Ok(Value::Number(a.borrow().len() as f64));
             }
             let a_clone = Rc::clone(a);
             let method: ArrayMethodFn = match key_s {
-                "push" => Rc::new(move |args: &[Value]| arr_builtins::push(&Value::Array(Rc::clone(&a_clone)), args)),
-                "pop" => Rc::new(move |_args: &[Value]| arr_builtins::pop(&Value::Array(Rc::clone(&a_clone)))),
-                "shift" => Rc::new(move |_args: &[Value]| arr_builtins::shift(&Value::Array(Rc::clone(&a_clone)))),
-                "unshift" => Rc::new(move |args: &[Value]| arr_builtins::unshift(&Value::Array(Rc::clone(&a_clone)), args)),
-                "reverse" => Rc::new(move |_args: &[Value]| arr_builtins::reverse(&Value::Array(Rc::clone(&a_clone)))),
-                "shuffle" => Rc::new(move |_args: &[Value]| arr_builtins::shuffle(&Value::Array(Rc::clone(&a_clone)))),
+                "push" => Rc::new(move |args: &[Value]| {
+                    arr_builtins::push(&Value::Array(Rc::clone(&a_clone)), args)
+                }),
+                "pop" => Rc::new(move |_args: &[Value]| {
+                    arr_builtins::pop(&Value::Array(Rc::clone(&a_clone)))
+                }),
+                "shift" => Rc::new(move |_args: &[Value]| {
+                    arr_builtins::shift(&Value::Array(Rc::clone(&a_clone)))
+                }),
+                "unshift" => Rc::new(move |args: &[Value]| {
+                    arr_builtins::unshift(&Value::Array(Rc::clone(&a_clone)), args)
+                }),
+                "reverse" => Rc::new(move |_args: &[Value]| {
+                    arr_builtins::reverse(&Value::Array(Rc::clone(&a_clone)))
+                }),
+                "shuffle" => Rc::new(move |_args: &[Value]| {
+                    arr_builtins::shuffle(&Value::Array(Rc::clone(&a_clone)))
+                }),
                 "slice" => Rc::new(move |args: &[Value]| {
                     let start = args.first().unwrap_or(&Value::Null);
                     let end = args.get(1).unwrap_or(&Value::Null);
                     arr_builtins::slice(&Value::Array(Rc::clone(&a_clone)), start, end)
                 }),
-                "concat" => Rc::new(move |args: &[Value]| arr_builtins::concat(&Value::Array(Rc::clone(&a_clone)), args)),
+                "concat" => Rc::new(move |args: &[Value]| {
+                    arr_builtins::concat(&Value::Array(Rc::clone(&a_clone)), args)
+                }),
                 "join" => Rc::new(move |args: &[Value]| {
                     let sep = args.first().unwrap_or(&Value::Null);
                     arr_builtins::join(&Value::Array(Rc::clone(&a_clone)), sep)
@@ -1484,7 +1662,10 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "sort" => Rc::new(move |args: &[Value]| {
                     let cmp = args.first();
                     if let Some(Value::Function(_)) = cmp {
-                        arr_builtins::sort_with_comparator(&Value::Array(Rc::clone(&a_clone)), cmp.unwrap())
+                        arr_builtins::sort_with_comparator(
+                            &Value::Array(Rc::clone(&a_clone)),
+                            cmp.unwrap(),
+                        )
                     } else {
                         arr_builtins::sort_default(&Value::Array(Rc::clone(&a_clone)))
                     }
@@ -1493,7 +1674,12 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     let start = args.first().unwrap_or(&Value::Null);
                     let delete_count = args.get(1).map(|v| v as &Value);
                     let items: Vec<Value> = args.get(2..).unwrap_or(&[]).to_vec();
-                    arr_builtins::splice(&Value::Array(Rc::clone(&a_clone)), start, delete_count, &items)
+                    arr_builtins::splice(
+                        &Value::Array(Rc::clone(&a_clone)),
+                        start,
+                        delete_count,
+                        &items,
+                    )
                 }),
                 _ => return Err(format!("Property '{}' not found", key)),
             };
@@ -1519,10 +1705,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 }),
                 "lastIndexOf" => Rc::new(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
-                    let position = args
-                        .get(1)
-                        .cloned()
-                        .unwrap_or(Value::Number(f64::INFINITY));
+                    let position = args.get(1).cloned().unwrap_or(Value::Number(f64::INFINITY));
                     str_builtins::last_index_of(
                         &Value::String(Arc::clone(&s_clone)),
                         search,
@@ -1548,9 +1731,15 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     let sep = args.first().unwrap_or(&Value::Null);
                     str_builtins::split(&Value::String(Arc::clone(&s_clone)), sep)
                 }),
-                "trim" => Rc::new(move |_args: &[Value]| str_builtins::trim(&Value::String(Arc::clone(&s_clone)))),
-                "toUpperCase" => Rc::new(move |_args: &[Value]| str_builtins::to_upper_case(&Value::String(Arc::clone(&s_clone)))),
-                "toLowerCase" => Rc::new(move |_args: &[Value]| str_builtins::to_lower_case(&Value::String(Arc::clone(&s_clone)))),
+                "trim" => Rc::new(move |_args: &[Value]| {
+                    str_builtins::trim(&Value::String(Arc::clone(&s_clone)))
+                }),
+                "toUpperCase" => Rc::new(move |_args: &[Value]| {
+                    str_builtins::to_upper_case(&Value::String(Arc::clone(&s_clone)))
+                }),
+                "toLowerCase" => Rc::new(move |_args: &[Value]| {
+                    str_builtins::to_lower_case(&Value::String(Arc::clone(&s_clone)))
+                }),
                 "startsWith" => Rc::new(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     str_builtins::starts_with(&Value::String(Arc::clone(&s_clone)), search)
@@ -1567,7 +1756,11 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "replaceAll" => Rc::new(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let replacement = args.get(1).unwrap_or(&Value::Null);
-                    str_builtins::replace_all(&Value::String(Arc::clone(&s_clone)), search, replacement)
+                    str_builtins::replace_all(
+                        &Value::String(Arc::clone(&s_clone)),
+                        search,
+                        replacement,
+                    )
                 }),
                 "charAt" => Rc::new(move |args: &[Value]| {
                     let idx = args.first().unwrap_or(&Value::Null);
@@ -1595,7 +1788,11 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             };
             Ok(Value::Function(method))
         }
-        _ => Err(format!("Cannot read property '{}' of {}", key, obj.type_name())),
+        _ => Err(format!(
+            "Cannot read property '{}' of {}",
+            key,
+            obj.type_name()
+        )),
     }
 }
 

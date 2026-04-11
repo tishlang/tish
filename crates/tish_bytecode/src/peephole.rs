@@ -162,8 +162,8 @@ fn chain_jumps(code: &mut [u8]) {
                 let current_offset = read_i16(code, ip + 1) as isize;
                 let current_target = (ip as isize + 3 + current_offset).max(0) as usize;
                 if let Some(final_target) = final_jump_target(code, ip) {
-                    let target_ok = final_target == code.len()
-                        || insn_starts.contains(&final_target);
+                    let target_ok =
+                        final_target == code.len() || insn_starts.contains(&final_target);
                     if final_target != current_target && target_ok {
                         let new_offset = final_target as i32 - (ip + 3) as i32;
                         if (i16::MIN as i32..=i16::MAX as i32).contains(&new_offset) {

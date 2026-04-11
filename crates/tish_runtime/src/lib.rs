@@ -5,9 +5,9 @@
 
 #[cfg(feature = "regex")]
 use std::cell::RefCell;
+use std::fmt;
 #[cfg(feature = "regex")]
 use std::rc::Rc;
-use std::fmt;
 use std::sync::OnceLock;
 use tishlang_builtins::helpers::extract_num;
 #[cfg(feature = "fs")]
@@ -17,77 +17,70 @@ pub use tishlang_core::ObjectMap;
 pub use tishlang_core::Value;
 
 pub use tishlang_builtins::construct::{
-    audio_context_constructor_value as tish_audio_context_constructor,
-    construct as tish_construct,
+    audio_context_constructor_value as tish_audio_context_constructor, construct as tish_construct,
     uint8_array_constructor_value as tish_uint8_array_constructor,
 };
 
 // Re-export array methods from tishlang_builtins
 pub use tishlang_builtins::array::{
-    push as array_push_impl,
-    pop as array_pop,
-    shift as array_shift,
-    unshift as array_unshift_impl,
-    index_of as array_index_of_impl,
-    includes as array_includes_impl,
-    join as array_join_impl,
-    reverse as array_reverse,
-    shuffle as array_shuffle,
-    splice as array_splice_impl,
-    slice as array_slice_impl,
-    concat as array_concat_impl,
-    flat as array_flat_impl,
-    map as array_map,
-    filter as array_filter,
-    reduce as array_reduce,
-    for_each as array_for_each,
-    find as array_find,
-    find_index as array_find_index,
-    some as array_some,
-    every as array_every,
-    flat_map as array_flat_map,
-    sort_default as array_sort_default,
-    sort_with_comparator as array_sort_with_comparator,
-    sort_numeric_asc as array_sort_numeric_asc,
+    concat as array_concat_impl, every as array_every, filter as array_filter, find as array_find,
+    find_index as array_find_index, flat as array_flat_impl, flat_map as array_flat_map,
+    for_each as array_for_each, includes as array_includes_impl, index_of as array_index_of_impl,
+    join as array_join_impl, map as array_map, pop as array_pop, push as array_push_impl,
+    reduce as array_reduce, reverse as array_reverse, shift as array_shift,
+    shuffle as array_shuffle, slice as array_slice_impl, some as array_some,
+    sort_default as array_sort_default, sort_numeric_asc as array_sort_numeric_asc,
     sort_numeric_desc as array_sort_numeric_desc,
+    sort_with_comparator as array_sort_with_comparator, splice as array_splice_impl,
+    unshift as array_unshift_impl,
 };
 
 // Re-export string methods from tishlang_builtins
 pub use tishlang_builtins::string::{
-    index_of as string_index_of_impl,
-    includes as string_includes_impl,
-    slice as string_slice_impl,
-    substring as string_substring_impl,
-    split as string_split_impl,
+    char_at as string_char_at_impl, char_code_at as string_char_code_at_impl,
+    ends_with as string_ends_with_impl, includes as string_includes_impl,
+    index_of as string_index_of_impl, last_index_of as string_last_index_of_impl,
+    pad_end as string_pad_end_impl, pad_start as string_pad_start_impl,
+    repeat as string_repeat_impl, replace as string_replace_impl,
+    replace_all as string_replace_all_impl, slice as string_slice_impl, split as string_split_impl,
+    starts_with as string_starts_with_impl, substring as string_substring_impl,
+    to_lower_case as string_to_lower_case, to_upper_case as string_to_upper_case,
     trim as string_trim,
-    to_upper_case as string_to_upper_case,
-    to_lower_case as string_to_lower_case,
-    starts_with as string_starts_with_impl,
-    ends_with as string_ends_with_impl,
-    replace as string_replace_impl,
-    replace_all as string_replace_all_impl,
-    char_at as string_char_at_impl,
-    char_code_at as string_char_code_at_impl,
-    repeat as string_repeat_impl,
-    pad_start as string_pad_start_impl,
-    pad_end as string_pad_end_impl,
-    last_index_of as string_last_index_of_impl,
 };
 
 // Wrapper functions to maintain API compatibility
-pub fn array_push(arr: &Value, args: &[Value]) -> Value { array_push_impl(arr, args) }
-pub fn array_unshift(arr: &Value, args: &[Value]) -> Value { array_unshift_impl(arr, args) }
-pub fn array_index_of(arr: &Value, search: &Value) -> Value { array_index_of_impl(arr, search) }
+pub fn array_push(arr: &Value, args: &[Value]) -> Value {
+    array_push_impl(arr, args)
+}
+pub fn array_unshift(arr: &Value, args: &[Value]) -> Value {
+    array_unshift_impl(arr, args)
+}
+pub fn array_index_of(arr: &Value, search: &Value) -> Value {
+    array_index_of_impl(arr, search)
+}
 pub fn array_includes(arr: &Value, search: &Value, from: &Value) -> Value {
     array_includes_impl(arr, search, Some(from))
 }
-pub fn array_join(arr: &Value, sep: &Value) -> Value { array_join_impl(arr, sep) }
-pub fn array_splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &[Value]) -> Value {
+pub fn array_join(arr: &Value, sep: &Value) -> Value {
+    array_join_impl(arr, sep)
+}
+pub fn array_splice(
+    arr: &Value,
+    start: &Value,
+    delete_count: Option<&Value>,
+    items: &[Value],
+) -> Value {
     array_splice_impl(arr, start, delete_count, items)
 }
-pub fn array_slice(arr: &Value, start: &Value, end: &Value) -> Value { array_slice_impl(arr, start, end) }
-pub fn array_concat(arr: &Value, args: &[Value]) -> Value { array_concat_impl(arr, args) }
-pub fn array_flat(arr: &Value, depth: &Value) -> Value { array_flat_impl(arr, depth) }
+pub fn array_slice(arr: &Value, start: &Value, end: &Value) -> Value {
+    array_slice_impl(arr, start, end)
+}
+pub fn array_concat(arr: &Value, args: &[Value]) -> Value {
+    array_concat_impl(arr, args)
+}
+pub fn array_flat(arr: &Value, depth: &Value) -> Value {
+    array_flat_impl(arr, depth)
+}
 
 pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
     match comparator {
@@ -102,11 +95,21 @@ pub fn string_index_of(s: &Value, search: &Value, from: &Value) -> Value {
 pub fn string_includes(s: &Value, search: &Value, from: &Value) -> Value {
     string_includes_impl(s, search, Some(from))
 }
-pub fn string_slice(s: &Value, start: &Value, end: &Value) -> Value { string_slice_impl(s, start, end) }
-pub fn string_substring(s: &Value, start: &Value, end: &Value) -> Value { string_substring_impl(s, start, end) }
-pub fn string_split(s: &Value, sep: &Value) -> Value { string_split_impl(s, sep) }
-pub fn string_starts_with(s: &Value, search: &Value) -> Value { string_starts_with_impl(s, search) }
-pub fn string_ends_with(s: &Value, search: &Value) -> Value { string_ends_with_impl(s, search) }
+pub fn string_slice(s: &Value, start: &Value, end: &Value) -> Value {
+    string_slice_impl(s, start, end)
+}
+pub fn string_substring(s: &Value, start: &Value, end: &Value) -> Value {
+    string_substring_impl(s, start, end)
+}
+pub fn string_split(s: &Value, sep: &Value) -> Value {
+    string_split_impl(s, sep)
+}
+pub fn string_starts_with(s: &Value, search: &Value) -> Value {
+    string_starts_with_impl(s, search)
+}
+pub fn string_ends_with(s: &Value, search: &Value) -> Value {
+    string_ends_with_impl(s, search)
+}
 pub fn string_replace(s: &Value, search: &Value, replacement: &Value) -> Value {
     #[cfg(feature = "regex")]
     if matches!(search, Value::RegExp(_)) {
@@ -114,12 +117,24 @@ pub fn string_replace(s: &Value, search: &Value, replacement: &Value) -> Value {
     }
     string_replace_impl(s, search, replacement)
 }
-pub fn string_replace_all(s: &Value, search: &Value, replacement: &Value) -> Value { string_replace_all_impl(s, search, replacement) }
-pub fn string_char_at(s: &Value, idx: &Value) -> Value { string_char_at_impl(s, idx) }
-pub fn string_char_code_at(s: &Value, idx: &Value) -> Value { string_char_code_at_impl(s, idx) }
-pub fn string_repeat(s: &Value, count: &Value) -> Value { string_repeat_impl(s, count) }
-pub fn string_pad_start(s: &Value, target_len: &Value, pad: &Value) -> Value { string_pad_start_impl(s, target_len, pad) }
-pub fn string_pad_end(s: &Value, target_len: &Value, pad: &Value) -> Value { string_pad_end_impl(s, target_len, pad) }
+pub fn string_replace_all(s: &Value, search: &Value, replacement: &Value) -> Value {
+    string_replace_all_impl(s, search, replacement)
+}
+pub fn string_char_at(s: &Value, idx: &Value) -> Value {
+    string_char_at_impl(s, idx)
+}
+pub fn string_char_code_at(s: &Value, idx: &Value) -> Value {
+    string_char_code_at_impl(s, idx)
+}
+pub fn string_repeat(s: &Value, count: &Value) -> Value {
+    string_repeat_impl(s, count)
+}
+pub fn string_pad_start(s: &Value, target_len: &Value, pad: &Value) -> Value {
+    string_pad_start_impl(s, target_len, pad)
+}
+pub fn string_pad_end(s: &Value, target_len: &Value, pad: &Value) -> Value {
+    string_pad_end_impl(s, target_len, pad)
+}
 pub fn string_last_index_of(s: &Value, search: &Value, position: &Value) -> Value {
     string_last_index_of_impl(s, search, position)
 }
@@ -244,23 +259,15 @@ pub mod ops {
 }
 
 use tishlang_builtins::globals::{
-    array_is_array as builtins_array_is_array,
-    boolean as builtins_boolean,
-    decode_uri as builtins_decode_uri,
-    encode_uri as builtins_encode_uri,
-    is_finite as builtins_is_finite,
-    is_nan as builtins_is_nan,
-    object_assign as builtins_object_assign,
-    object_entries as builtins_object_entries,
-    object_from_entries as builtins_object_from_entries,
-    object_keys as builtins_object_keys,
+    array_is_array as builtins_array_is_array, boolean as builtins_boolean,
+    decode_uri as builtins_decode_uri, encode_uri as builtins_encode_uri,
+    is_finite as builtins_is_finite, is_nan as builtins_is_nan,
+    object_assign as builtins_object_assign, object_entries as builtins_object_entries,
+    object_from_entries as builtins_object_from_entries, object_keys as builtins_object_keys,
     object_values as builtins_object_values,
     string_from_char_code as builtins_string_from_char_code,
 };
-use tishlang_core::{
-    json_parse as core_json_parse,
-    json_stringify as core_json_stringify,
-};
+use tishlang_core::{json_parse as core_json_parse, json_stringify as core_json_stringify};
 
 /// Error type for Tish throw/catch.
 #[derive(Debug, Clone)]
@@ -290,14 +297,12 @@ enum LogLevel {
 static LOG_LEVEL: OnceLock<LogLevel> = OnceLock::new();
 
 fn get_log_level() -> LogLevel {
-    *LOG_LEVEL.get_or_init(|| {
-        match std::env::var("TISH_LOG_LEVEL").as_deref() {
-            Ok("debug") => LogLevel::Debug,
-            Ok("info") => LogLevel::Info,
-            Ok("warn") => LogLevel::Warn,
-            Ok("error") => LogLevel::Error,
-            _ => LogLevel::Log,
-        }
+    *LOG_LEVEL.get_or_init(|| match std::env::var("TISH_LOG_LEVEL").as_deref() {
+        Ok("debug") => LogLevel::Debug,
+        Ok("info") => LogLevel::Info,
+        Ok("warn") => LogLevel::Warn,
+        Ok("error") => LogLevel::Error,
+        _ => LogLevel::Log,
     })
 }
 
@@ -363,39 +368,59 @@ pub fn encode_uri(args: &[Value]) -> Value {
 
 // Math functions - use tishlang_builtins::math
 pub use tishlang_builtins::math::{
-    abs as tish_math_abs_impl,
-    sqrt as tish_math_sqrt_impl,
-    floor as tish_math_floor_impl,
-    ceil as tish_math_ceil_impl,
-    round as tish_math_round_impl,
-    sin as tish_math_sin_impl,
-    cos as tish_math_cos_impl,
-    tan as tish_math_tan_impl,
-    exp as tish_math_exp_impl,
-    trunc as tish_math_trunc_impl,
-    min as tish_math_min_impl,
-    max as tish_math_max_impl,
-    pow as tish_math_pow_impl,
-    sign as tish_math_sign_impl,
-    random as tish_math_random_impl,
+    abs as tish_math_abs_impl, ceil as tish_math_ceil_impl, cos as tish_math_cos_impl,
+    exp as tish_math_exp_impl, floor as tish_math_floor_impl, max as tish_math_max_impl,
+    min as tish_math_min_impl, pow as tish_math_pow_impl, random as tish_math_random_impl,
+    round as tish_math_round_impl, sign as tish_math_sign_impl, sin as tish_math_sin_impl,
+    sqrt as tish_math_sqrt_impl, tan as tish_math_tan_impl, trunc as tish_math_trunc_impl,
 };
 
 // Wrapper functions to maintain API (existing callers use math_* naming)
-pub fn math_abs(args: &[Value]) -> Value { tish_math_abs_impl(args) }
-pub fn math_sqrt(args: &[Value]) -> Value { tish_math_sqrt_impl(args) }
-pub fn math_floor(args: &[Value]) -> Value { tish_math_floor_impl(args) }
-pub fn math_ceil(args: &[Value]) -> Value { tish_math_ceil_impl(args) }
-pub fn math_round(args: &[Value]) -> Value { tish_math_round_impl(args) }
-pub fn math_min(args: &[Value]) -> Value { tish_math_min_impl(args) }
-pub fn math_max(args: &[Value]) -> Value { tish_math_max_impl(args) }
-pub fn math_sin(args: &[Value]) -> Value { tish_math_sin_impl(args) }
-pub fn math_cos(args: &[Value]) -> Value { tish_math_cos_impl(args) }
-pub fn math_tan(args: &[Value]) -> Value { tish_math_tan_impl(args) }
-pub fn math_exp(args: &[Value]) -> Value { tish_math_exp_impl(args) }
-pub fn math_trunc(args: &[Value]) -> Value { tish_math_trunc_impl(args) }
-pub fn math_pow(args: &[Value]) -> Value { tish_math_pow_impl(args) }
-pub fn math_sign(args: &[Value]) -> Value { tish_math_sign_impl(args) }
-pub fn math_random(args: &[Value]) -> Value { tish_math_random_impl(args) }
+pub fn math_abs(args: &[Value]) -> Value {
+    tish_math_abs_impl(args)
+}
+pub fn math_sqrt(args: &[Value]) -> Value {
+    tish_math_sqrt_impl(args)
+}
+pub fn math_floor(args: &[Value]) -> Value {
+    tish_math_floor_impl(args)
+}
+pub fn math_ceil(args: &[Value]) -> Value {
+    tish_math_ceil_impl(args)
+}
+pub fn math_round(args: &[Value]) -> Value {
+    tish_math_round_impl(args)
+}
+pub fn math_min(args: &[Value]) -> Value {
+    tish_math_min_impl(args)
+}
+pub fn math_max(args: &[Value]) -> Value {
+    tish_math_max_impl(args)
+}
+pub fn math_sin(args: &[Value]) -> Value {
+    tish_math_sin_impl(args)
+}
+pub fn math_cos(args: &[Value]) -> Value {
+    tish_math_cos_impl(args)
+}
+pub fn math_tan(args: &[Value]) -> Value {
+    tish_math_tan_impl(args)
+}
+pub fn math_exp(args: &[Value]) -> Value {
+    tish_math_exp_impl(args)
+}
+pub fn math_trunc(args: &[Value]) -> Value {
+    tish_math_trunc_impl(args)
+}
+pub fn math_pow(args: &[Value]) -> Value {
+    tish_math_pow_impl(args)
+}
+pub fn math_sign(args: &[Value]) -> Value {
+    tish_math_sign_impl(args)
+}
+pub fn math_random(args: &[Value]) -> Value {
+    tish_math_random_impl(args)
+}
 
 pub fn math_log(args: &[Value]) -> Value {
     let n = extract_num(args.first()).unwrap_or(f64::NAN);
@@ -408,7 +433,10 @@ pub fn json_stringify(args: &[Value]) -> Value {
 }
 
 pub fn json_parse(args: &[Value]) -> Value {
-    let s = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+    let s = args
+        .first()
+        .map(|v| v.to_display_string())
+        .unwrap_or_default();
     core_json_parse(&s).unwrap_or(Value::Null)
 }
 
@@ -431,10 +459,13 @@ pub fn string_from_char_code(args: &[Value]) -> Value {
 
 #[cfg(feature = "process")]
 pub fn process_exit(args: &[Value]) -> Value {
-    let code = args.first().and_then(|v| match v {
-        Value::Number(n) => Some(*n as i32),
-        _ => None,
-    }).unwrap_or(0);
+    let code = args
+        .first()
+        .and_then(|v| match v {
+            Value::Number(n) => Some(*n as i32),
+            _ => None,
+        })
+        .unwrap_or(0);
     std::process::exit(code);
 }
 
@@ -449,7 +480,10 @@ pub fn process_cwd(_args: &[Value]) -> Value {
 #[cfg(feature = "process")]
 pub fn process_exec(args: &[Value]) -> Value {
     use std::process::Command;
-    let cmd = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+    let cmd = args
+        .first()
+        .map(|v| v.to_display_string())
+        .unwrap_or_default();
     if cmd.is_empty() {
         return Value::Number(0.0);
     }
@@ -461,7 +495,10 @@ pub fn process_exec(args: &[Value]) -> Value {
 
 #[cfg(feature = "fs")]
 pub fn read_file(args: &[Value]) -> Value {
-    let path = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+    let path = args
+        .first()
+        .map(|v| v.to_display_string())
+        .unwrap_or_default();
     match std::fs::read_to_string(&path) {
         Ok(content) => Value::String(content.into()),
         Err(e) => make_error_value(e),
@@ -470,8 +507,14 @@ pub fn read_file(args: &[Value]) -> Value {
 
 #[cfg(feature = "fs")]
 pub fn write_file(args: &[Value]) -> Value {
-    let path = args.first().map(|v| v.to_display_string()).unwrap_or_default();
-    let content = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
+    let path = args
+        .first()
+        .map(|v| v.to_display_string())
+        .unwrap_or_default();
+    let content = args
+        .get(1)
+        .map(|v| v.to_display_string())
+        .unwrap_or_default();
     match std::fs::write(&path, &content) {
         Ok(()) => Value::Bool(true),
         Err(e) => make_error_value(e),
@@ -480,13 +523,19 @@ pub fn write_file(args: &[Value]) -> Value {
 
 #[cfg(feature = "fs")]
 pub fn file_exists(args: &[Value]) -> Value {
-    let path = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+    let path = args
+        .first()
+        .map(|v| v.to_display_string())
+        .unwrap_or_default();
     Value::Bool(std::path::Path::new(&path).exists())
 }
 
 #[cfg(feature = "fs")]
 pub fn is_dir(args: &[Value]) -> Value {
-    let path = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+    let path = args
+        .first()
+        .map(|v| v.to_display_string())
+        .unwrap_or_default();
     Value::Bool(std::path::Path::new(&path).is_dir())
 }
 
@@ -494,7 +543,10 @@ pub fn is_dir(args: &[Value]) -> Value {
 pub fn read_dir(args: &[Value]) -> Value {
     use std::cell::RefCell;
     use std::rc::Rc;
-    let path = args.first().map(|v| v.to_display_string()).unwrap_or_else(|| ".".to_string());
+    let path = args
+        .first()
+        .map(|v| v.to_display_string())
+        .unwrap_or_else(|| ".".to_string());
     match std::fs::read_dir(&path) {
         Ok(entries) => {
             let files: Vec<Value> = entries
@@ -509,7 +561,10 @@ pub fn read_dir(args: &[Value]) -> Value {
 
 #[cfg(feature = "fs")]
 pub fn mkdir(args: &[Value]) -> Value {
-    let path = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+    let path = args
+        .first()
+        .map(|v| v.to_display_string())
+        .unwrap_or_default();
     match std::fs::create_dir_all(&path) {
         Ok(()) => Value::Bool(true),
         Err(e) => make_error_value(e),
@@ -634,7 +689,7 @@ pub fn in_operator(key: &Value, obj: &Value) -> Value {
         Value::Number(n) => n.to_string().into(),
         _ => return Value::Bool(false),
     };
-    
+
     let result = match obj {
         Value::Object(map) => map.borrow().contains_key(&key_str),
         Value::Array(arr) => {
@@ -647,7 +702,7 @@ pub fn in_operator(key: &Value, obj: &Value) -> Value {
         }
         _ => false,
     };
-    
+
     Value::Bool(result)
 }
 
@@ -696,19 +751,17 @@ mod ws;
 
 #[cfg(feature = "ws")]
 pub use ws::{
-    web_socket_client, web_socket_server_accept, web_socket_server_construct, web_socket_server_listen,
-    ws_broadcast_native, ws_send_native,
+    web_socket_client, web_socket_server_accept, web_socket_server_construct,
+    web_socket_server_listen, ws_broadcast_native, ws_send_native,
 };
 
 #[cfg(feature = "http")]
 pub use http::{
-    await_fetch as http_await_fetch,
-    await_fetch_all as http_await_fetch_all,
-    serve as http_serve,
+    await_fetch as http_await_fetch, await_fetch_all as http_await_fetch_all, serve as http_serve,
 };
 
 #[cfg(any(feature = "http", feature = "ws"))]
-pub use timers::{set_timeout as timer_set_timeout, clear_timeout as timer_clear_timeout};
+pub use timers::{clear_timeout as timer_clear_timeout, set_timeout as timer_set_timeout};
 
 #[cfg(feature = "http")]
 pub use promise::promise_object;
@@ -718,7 +771,7 @@ pub use native_promise::{await_promise, fetch_all_promise, fetch_async_promise, 
 
 // RegExp Support
 #[cfg(feature = "regex")]
-pub use tishlang_core::{TishRegExp, RegExpFlags};
+pub use tishlang_core::{RegExpFlags, TishRegExp};
 
 #[cfg(feature = "regex")]
 pub fn regexp_new(args: &[Value]) -> Value {
@@ -833,7 +886,7 @@ pub fn string_split_regex(s: &Value, separator: &Value, limit: Option<usize>) ->
         Value::String(s) => s.as_ref(),
         _ => return Value::Array(Rc::new(RefCell::new(vec![s.clone()]))),
     };
-    
+
     let max = limit.unwrap_or(usize::MAX);
     if max == 0 {
         return Value::Array(Rc::new(RefCell::new(Vec::new())));
@@ -844,22 +897,24 @@ pub fn string_split_regex(s: &Value, separator: &Value, limit: Option<usize>) ->
             let re = re.borrow();
             let mut result = Vec::new();
             let mut last_end = 0;
-            
+
             for mat in re.regex.find_iter(input) {
                 match mat {
                     Ok(m) => {
-                        if result.len() >= max - 1 { break; }
+                        if result.len() >= max - 1 {
+                            break;
+                        }
                         result.push(Value::String(input[last_end..m.start()].into()));
                         last_end = m.end();
                     }
                     Err(_) => break,
                 }
             }
-            
+
             if result.len() < max {
                 result.push(Value::String(input[last_end..].into()));
             }
-            
+
             Value::Array(Rc::new(RefCell::new(result)))
         }
         Value::String(sep) => {
@@ -883,11 +938,11 @@ pub fn string_match_regex(s: &Value, regexp: &Value) -> Value {
     match regexp {
         Value::RegExp(re) => {
             let mut re = re.borrow_mut();
-            
+
             if re.flags.global {
                 let mut matches = Vec::new();
                 re.last_index = 0;
-                
+
                 while let Ok(Some(m)) = re.regex.find_from_pos(input, re.last_index) {
                     matches.push(Value::String(m.as_str().into()));
                     if m.start() == m.end() {
@@ -895,22 +950,26 @@ pub fn string_match_regex(s: &Value, regexp: &Value) -> Value {
                     } else {
                         re.last_index = m.end();
                     }
-                    if re.last_index > input.len() { break; }
+                    if re.last_index > input.len() {
+                        break;
+                    }
                 }
-                
+
                 re.last_index = 0;
-                
-                if matches.is_empty() { Value::Null } else { Value::Array(Rc::new(RefCell::new(matches))) }
+
+                if matches.is_empty() {
+                    Value::Null
+                } else {
+                    Value::Array(Rc::new(RefCell::new(matches)))
+                }
             } else {
                 regexp_exec_impl(&mut re, input)
             }
         }
-        Value::String(pattern) => {
-            match tishlang_core::TishRegExp::new(pattern, "") {
-                Ok(mut re) => regexp_exec_impl(&mut re, input),
-                Err(_) => Value::Null,
-            }
-        }
+        Value::String(pattern) => match tishlang_core::TishRegExp::new(pattern, "") {
+            Ok(mut re) => regexp_exec_impl(&mut re, input),
+            Err(_) => Value::Null,
+        },
         _ => Value::Null,
     }
 }
@@ -997,19 +1056,16 @@ pub fn string_search_regex(s: &Value, regexp: &Value) -> Value {
                 _ => Value::Number(-1.0),
             }
         }
-        Value::String(pattern) => {
-
-            match tishlang_core::TishRegExp::new(pattern, "") {
-                Ok(re) => match re.regex.find(input) {
-                    Ok(Some(m)) => {
-                        let char_index = input[..m.start()].chars().count();
-                        Value::Number(char_index as f64)
-                    }
-                    _ => Value::Number(-1.0),
-                },
-                Err(_) => Value::Number(-1.0),
-            }
-        }
+        Value::String(pattern) => match tishlang_core::TishRegExp::new(pattern, "") {
+            Ok(re) => match re.regex.find(input) {
+                Ok(Some(m)) => {
+                    let char_index = input[..m.start()].chars().count();
+                    Value::Number(char_index as f64)
+                }
+                _ => Value::Number(-1.0),
+            },
+            Err(_) => Value::Number(-1.0),
+        },
         _ => Value::Number(-1.0),
     }
 }

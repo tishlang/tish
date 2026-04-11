@@ -82,10 +82,7 @@ fn buffer_source_stub() -> Value {
         Arc::from("start"),
         Value::Function(Rc::new(|_| Value::Null)),
     );
-    m.insert(
-        Arc::from("stop"),
-        Value::Function(Rc::new(|_| Value::Null)),
-    );
+    m.insert(Arc::from("stop"), Value::Function(Rc::new(|_| Value::Null)));
     Value::Object(Rc::new(RefCell::new(m)))
 }
 
@@ -98,10 +95,7 @@ fn oscillator_stub() -> Value {
         Arc::from("start"),
         Value::Function(Rc::new(|_| Value::Null)),
     );
-    m.insert(
-        Arc::from("stop"),
-        Value::Function(Rc::new(|_| Value::Null)),
-    );
+    m.insert(Arc::from("stop"), Value::Function(Rc::new(|_| Value::Null)));
     Value::Object(Rc::new(RefCell::new(m)))
 }
 

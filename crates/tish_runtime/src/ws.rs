@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use lazy_static::lazy_static;
 use tishlang_core::{ObjectMap, Value};
-use tokio::sync::mpsc as tokio_mpsc;
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc as tokio_mpsc;
 
 thread_local! {
     /// Multi-thread runtime so `tokio::spawn` I/O tasks keep running after `block_on` returns.
@@ -200,7 +200,10 @@ fn conn_object(id: u32) -> Value {
     obj.insert(
         Arc::from("send"),
         Value::Function(Rc::new(move |args: &[Value]| {
-            let data = args.first().map(|v| v.to_display_string()).unwrap_or_default();
+            let data = args
+                .first()
+                .map(|v| v.to_display_string())
+                .unwrap_or_default();
             Value::Bool(conn_send(id, data))
         })),
     );
@@ -213,15 +216,13 @@ fn conn_object(id: u32) -> Value {
     );
     obj.insert(
         Arc::from("receive"),
-        Value::Function(Rc::new(move |_args: &[Value]| {
-            match conn_receive(id) {
-                Some(s) => {
-                    let mut ev: ObjectMap = ObjectMap::default();
-                    ev.insert(Arc::from("data"), Value::String(s.into()));
-                    Value::Object(Rc::new(RefCell::new(ev)))
-                }
-                None => Value::Null,
+        Value::Function(Rc::new(move |_args: &[Value]| match conn_receive(id) {
+            Some(s) => {
+                let mut ev: ObjectMap = ObjectMap::default();
+                ev.insert(Arc::from("data"), Value::String(s.into()));
+                Value::Object(Rc::new(RefCell::new(ev)))
             }
+            None => Value::Null,
         })),
     );
     let id_timeout = id;
@@ -231,7 +232,9 @@ fn conn_object(id: u32) -> Value {
             let timeout_ms = args
                 .first()
                 .and_then(|v| match v {
-                    Value::Number(n) if n.is_finite() && *n >= 0.0 => Some((*n as u64).min(3600_000)),
+                    Value::Number(n) if n.is_finite() && *n >= 0.0 => {
+                        Some((*n as u64).min(3600_000))
+                    }
                     _ => None,
                 })
                 .unwrap_or(1000);
@@ -366,11 +369,17 @@ pub fn web_socket_server_listen(args: &[Value]) -> Value {
                 };
                 let ws_stream = match tokio_tungstenite::accept_async(stream).await {
                     Ok(ws) => {
-                        eprintln!("[tish ws] server accepted connection (handshake OK): port {}", port);
+                        eprintln!(
+                            "[tish ws] server accepted connection (handshake OK): port {}",
+                            port
+                        );
                         ws
                     }
                     Err(e) => {
-                        eprintln!("[tish ws] server accept_async failed: {} (port {})", e, port);
+                        eprintln!(
+                            "[tish ws] server accept_async failed: {} (port {})",
+                            e, port
+                        );
                         continue;
                     }
                 };
@@ -475,8 +484,7 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
             .unwrap_or_default();
         let cb = args.get(2).cloned().unwrap_or(Value::Null);
         if event == "connection" {
-            so.borrow_mut()
-                .insert(Arc::from("_onConnection"), cb);
+            so.borrow_mut().insert(Arc::from("_onConnection"), cb);
         }
         Value::Null
     });
@@ -535,7 +543,10 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
     m.insert(Arc::from("clients"), Value::Array(clients));
     m.insert(Arc::from("on"), Value::Function(on_fn));
     m.insert(Arc::from("listen"), Value::Function(listen_fn));
-    m.insert(Arc::from("acceptTimeout"), Value::Function(accept_timeout_fn));
+    m.insert(
+        Arc::from("acceptTimeout"),
+        Value::Function(accept_timeout_fn),
+    );
     Value::Object(Rc::new(RefCell::new(m)))
 }
 
@@ -578,7 +589,9 @@ mod tests {
                                 .unwrap_or_default(),
                             _ => String::new(),
                         };
-                        if let Some(Value::Function(sf)) = wso.borrow().get(&Arc::from("send")).cloned() {
+                        if let Some(Value::Function(sf)) =
+                            wso.borrow().get(&Arc::from("send")).cloned()
+                        {
                             let _ = sf(&[Value::String(data.into())]);
                         }
                         break;
@@ -692,7 +705,11 @@ mod tests {
         let _ = send_f(&[Value::String(join_msg.into())]);
 
         // Client uses receiveTimeout like the agent
-        let recv_timeout = co.borrow().get(&Arc::from("receiveTimeout")).cloned().unwrap();
+        let recv_timeout = co
+            .borrow()
+            .get(&Arc::from("receiveTimeout"))
+            .cloned()
+            .unwrap();
         let Value::Function(recv_timeout_f) = recv_timeout else {
             panic!("no receiveTimeout");
         };
@@ -707,7 +724,11 @@ mod tests {
             .get(&Arc::from("data"))
             .map(|v| v.to_display_string())
             .unwrap_or_default();
-        assert!(data1.contains("\"type\":\"joined\""), "expected joined, got {}", data1);
+        assert!(
+            data1.contains("\"type\":\"joined\""),
+            "expected joined, got {}",
+            data1
+        );
 
         let got2 = recv_timeout_f(&[timeout_arg]);
         let Value::Object(ev2) = got2 else {
@@ -718,7 +739,11 @@ mod tests {
             .get(&Arc::from("data"))
             .map(|v| v.to_display_string())
             .unwrap_or_default();
-        assert!(data2.contains("\"type\":\"presence\""), "expected presence, got {}", data2);
+        assert!(
+            data2.contains("\"type\":\"presence\""),
+            "expected presence, got {}",
+            data2
+        );
 
         let _ = server.join();
     }

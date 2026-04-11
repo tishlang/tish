@@ -110,14 +110,14 @@ pub enum TokenKind {
     NullishCoalesce,
     Question,
     Arrow,
-    
-    // Template literal tokens
-    TemplateNoSub,   // `text` (no interpolation)
-    TemplateHead,    // `text${  (start with interpolation)
-    TemplateMiddle,  // }text${  (middle part)
-    TemplateTail,    // }text`   (end part)
 
-    JsxText,  // Raw text in JSX children (emojis, etc.); only {}<> are special
+    // Template literal tokens
+    TemplateNoSub,  // `text` (no interpolation)
+    TemplateHead,   // `text${  (start with interpolation)
+    TemplateMiddle, // }text${  (middle part)
+    TemplateTail,   // }text`   (end part)
+
+    JsxText, // Raw text in JSX children (emojis, etc.); only {}<> are special
 }
 
 impl TokenKind {

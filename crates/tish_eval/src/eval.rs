@@ -8,11 +8,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tishlang_ast::{BinOp, CompoundOp, ExportDeclaration, Expr, FunParam, ImportSpecifier, Literal, LogicalAssignOp, MemberProp, Span, Statement, UnaryOp};
+use tishlang_ast::{
+    BinOp, CompoundOp, ExportDeclaration, Expr, FunParam, ImportSpecifier, Literal,
+    LogicalAssignOp, MemberProp, Span, Statement, UnaryOp,
+};
 
-use crate::value::{PropMap, Value};
 #[cfg(any(feature = "fs", feature = "process"))]
 use crate::natives;
+use crate::value::{PropMap, Value};
 
 struct Scope {
     vars: PropMap,
@@ -93,12 +96,24 @@ impl Evaluator {
             console.insert("log".into(), Value::Native(natives::console_log));
             console.insert("warn".into(), Value::Native(natives::console_warn));
             console.insert("error".into(), Value::Native(natives::console_error));
-            s.set("console".into(), Value::Object(Rc::new(RefCell::new(console))), true);
+            s.set(
+                "console".into(),
+                Value::Object(Rc::new(RefCell::new(console))),
+                true,
+            );
             s.set("parseInt".into(), Value::Native(natives::parse_int), true);
-            s.set("parseFloat".into(), Value::Native(natives::parse_float), true);
+            s.set(
+                "parseFloat".into(),
+                Value::Native(natives::parse_float),
+                true,
+            );
             s.set("decodeURI".into(), Value::Native(natives::decode_uri), true);
             s.set("encodeURI".into(), Value::Native(natives::encode_uri), true);
-            s.set("Boolean".into(), Value::Native(natives::boolean_native), true);
+            s.set(
+                "Boolean".into(),
+                Value::Native(natives::boolean_native),
+                true,
+            );
             s.set("isFinite".into(), Value::Native(natives::is_finite), true);
             s.set("isNaN".into(), Value::Native(natives::is_nan), true);
             s.set("Infinity".into(), Value::Number(f64::INFINITY), true);
@@ -122,32 +137,65 @@ impl Evaluator {
             math.insert("trunc".into(), Value::Native(natives::math_trunc));
             math.insert("PI".into(), Value::Number(std::f64::consts::PI));
             math.insert("E".into(), Value::Number(std::f64::consts::E));
-            s.set("Math".into(), Value::Object(Rc::new(RefCell::new(math))), true);
+            s.set(
+                "Math".into(),
+                Value::Object(Rc::new(RefCell::new(math))),
+                true,
+            );
 
             let mut json = PropMap::with_capacity(2);
             json.insert("parse".into(), Value::Native(Self::json_parse_native));
-            json.insert("stringify".into(), Value::Native(Self::json_stringify_native));
-            s.set("JSON".into(), Value::Object(Rc::new(RefCell::new(json))), true);
+            json.insert(
+                "stringify".into(),
+                Value::Native(Self::json_stringify_native),
+            );
+            s.set(
+                "JSON".into(),
+                Value::Object(Rc::new(RefCell::new(json))),
+                true,
+            );
 
             let mut object = PropMap::with_capacity(5);
             object.insert("keys".into(), Value::Native(Self::object_keys));
             object.insert("values".into(), Value::Native(Self::object_values));
             object.insert("entries".into(), Value::Native(Self::object_entries));
             object.insert("assign".into(), Value::Native(Self::object_assign));
-            object.insert("fromEntries".into(), Value::Native(Self::object_from_entries));
-            s.set("Object".into(), Value::Object(Rc::new(RefCell::new(object))), true);
+            object.insert(
+                "fromEntries".into(),
+                Value::Native(Self::object_from_entries),
+            );
+            s.set(
+                "Object".into(),
+                Value::Object(Rc::new(RefCell::new(object))),
+                true,
+            );
 
             let mut array_obj = PropMap::with_capacity(1);
             array_obj.insert("isArray".into(), Value::Native(natives::array_is_array));
-            s.set("Array".into(), Value::Object(Rc::new(RefCell::new(array_obj))), true);
+            s.set(
+                "Array".into(),
+                Value::Object(Rc::new(RefCell::new(array_obj))),
+                true,
+            );
 
             let mut string_obj = PropMap::with_capacity(1);
-            string_obj.insert("fromCharCode".into(), Value::Native(natives::string_from_char_code));
-            s.set("String".into(), Value::Object(Rc::new(RefCell::new(string_obj))), true);
+            string_obj.insert(
+                "fromCharCode".into(),
+                Value::Native(natives::string_from_char_code),
+            );
+            s.set(
+                "String".into(),
+                Value::Object(Rc::new(RefCell::new(string_obj))),
+                true,
+            );
 
             let mut date = PropMap::with_capacity(1);
             date.insert("now".into(), Value::Native(natives::date_now));
-            s.set("Date".into(), Value::Object(Rc::new(RefCell::new(date))), true);
+            s.set(
+                "Date".into(),
+                Value::Object(Rc::new(RefCell::new(date))),
+                true,
+            );
 
             s.set(
                 "Uint8Array".into(),
@@ -166,7 +214,11 @@ impl Evaluator {
 
             #[cfg(feature = "regex")]
             {
-                s.set("RegExp".into(), Value::Native(Self::regexp_constructor_native), true);
+                s.set(
+                    "RegExp".into(),
+                    Value::Native(Self::regexp_constructor_native),
+                    true,
+                );
             }
 
             // fs, http, process: use import { x } from 'tish:fs' etc. No globals.
@@ -225,16 +277,28 @@ impl Evaluator {
                 self.scope = prev;
                 Ok(last)
             }
-            Statement::VarDecl { name, mutable, init, .. } => {
+            Statement::VarDecl {
+                name,
+                mutable,
+                init,
+                ..
+            } => {
                 let value = init
                     .as_ref()
                     .map(|e| self.eval_expr(e))
                     .transpose()?
                     .unwrap_or(Value::Null);
-                self.scope.borrow_mut().set(Arc::clone(name), value, *mutable);
+                self.scope
+                    .borrow_mut()
+                    .set(Arc::clone(name), value, *mutable);
                 Ok(Value::Null)
             }
-            Statement::VarDeclDestructure { pattern, mutable, init, .. } => {
+            Statement::VarDeclDestructure {
+                pattern,
+                mutable,
+                init,
+                ..
+            } => {
                 let value = self.eval_expr(init)?;
                 self.bind_destruct_pattern(pattern, &value, *mutable)?;
                 Ok(Value::Null)
@@ -269,15 +333,21 @@ impl Evaluator {
                 }
                 Ok(Value::Null)
             }
-            Statement::ForOf { name, iterable, body, .. } => {
+            Statement::ForOf {
+                name,
+                iterable,
+                body,
+                ..
+            } => {
                 let iter_val = self.eval_expr(iterable)?;
                 let elements = match &iter_val {
-                    crate::value::Value::Array(arr) => arr.borrow().iter().cloned().collect::<Vec<_>>(),
-                    crate::value::Value::String(s) => {
-                        s.chars()
-                            .map(|c| crate::value::Value::String(Arc::from(c.to_string())))
-                            .collect::<Vec<_>>()
+                    crate::value::Value::Array(arr) => {
+                        arr.borrow().iter().cloned().collect::<Vec<_>>()
                     }
+                    crate::value::Value::String(s) => s
+                        .chars()
+                        .map(|c| crate::value::Value::String(Arc::from(c.to_string())))
+                        .collect::<Vec<_>>(),
                     _ => {
                         return Err(EvalError::Error(format!(
                             "for-of requires iterable (array or string), got {}",
@@ -360,7 +430,12 @@ impl Evaluator {
                 self.scope.borrow_mut().set(Arc::clone(name), func, true);
                 Ok(Value::Null)
             }
-            Statement::Switch { expr, cases, default_body, .. } => {
+            Statement::Switch {
+                expr,
+                cases,
+                default_body,
+                ..
+            } => {
                 let v = self.eval_expr(expr)?;
                 let mut matched = false;
                 for (case_expr, body) in cases {
@@ -438,7 +513,7 @@ impl Evaluator {
                 ..
             } => {
                 let try_result = self.eval_statement(body);
-                
+
                 let result = match try_result {
                     Ok(v) => Ok(v),
                     Err(EvalError::Throw(thrown)) => {
@@ -459,18 +534,24 @@ impl Evaluator {
                     }
                     Err(e) => Err(e),
                 };
-                
+
                 if let Some(finally_stmt) = finally_body {
                     let _ = self.eval_statement(finally_stmt);
                 }
-                
+
                 result
             }
-            Statement::Import { specifiers, from, .. } => {
+            Statement::Import {
+                specifiers, from, ..
+            } => {
                 let exports_val = self.load_module(from)?;
                 let exports = match &exports_val {
                     Value::Object(m) => m.borrow().clone(),
-                    _ => return Err(EvalError::Error("Module exports must be object".to_string())),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "Module exports must be object".to_string(),
+                        ))
+                    }
                 };
                 let mut scope = self.scope.borrow_mut();
                 for spec in specifiers {
@@ -514,7 +595,8 @@ impl Evaluator {
     fn load_module(&mut self, from: &str) -> Result<Value, EvalError> {
         if from.starts_with("cargo:") {
             return Err(EvalError::Error(
-                "cargo:… imports are only supported by `tish build` with the Rust native backend.".into(),
+                "cargo:… imports are only supported by `tish build` with the Rust native backend."
+                    .into(),
             ));
         }
         if from.starts_with("tish:") {
@@ -525,24 +607,24 @@ impl Evaluator {
             return self.load_builtin_module(from);
         }
         let dir = self.current_dir.borrow().clone().ok_or_else(|| {
-            EvalError::Error("Cannot resolve imports: no current file directory (use run_file)".to_string())
+            EvalError::Error(
+                "Cannot resolve imports: no current file directory (use run_file)".to_string(),
+            )
         })?;
         let path = Self::resolve_import_path(from, &dir)?;
-        let path = path.canonicalize().map_err(|e| {
-            EvalError::Error(format!("Cannot resolve import '{}': {}", from, e))
-        })?;
+        let path = path
+            .canonicalize()
+            .map_err(|e| EvalError::Error(format!("Cannot resolve import '{}': {}", from, e)))?;
         {
             let cache = self.module_cache.borrow();
             if let Some(m) = cache.get(&path) {
                 return Ok(m.clone());
             }
         }
-        let source = std::fs::read_to_string(&path).map_err(|e| {
-            EvalError::Error(format!("Cannot read {}: {}", path.display(), e))
-        })?;
-        let program = tishlang_parser::parse(&source).map_err(|e| {
-            EvalError::Error(format!("Parse error in {}: {}", path.display(), e))
-        })?;
+        let source = std::fs::read_to_string(&path)
+            .map_err(|e| EvalError::Error(format!("Cannot read {}: {}", path.display(), e)))?;
+        let program = tishlang_parser::parse(&source)
+            .map_err(|e| EvalError::Error(format!("Parse error in {}: {}", path.display(), e)))?;
         let module_scope = Scope::child(Rc::clone(&self.scope));
         let prev_scope = std::mem::replace(&mut self.scope, Rc::clone(&module_scope));
         let parent_dir = self.current_dir.borrow().clone();
@@ -554,7 +636,9 @@ impl Evaluator {
                 match declaration.as_ref() {
                     ExportDeclaration::Named(s) => {
                         let _ = self.eval_statement(s);
-                        if let Statement::VarDecl { name, .. } | Statement::FunDecl { name, .. } = s.as_ref() {
+                        if let Statement::VarDecl { name, .. } | Statement::FunDecl { name, .. } =
+                            s.as_ref()
+                        {
                             export_names.push(name.to_string());
                         }
                     }
@@ -577,7 +661,9 @@ impl Evaluator {
         *self.current_dir.borrow_mut() = parent_dir;
         self.scope = prev_scope;
         let exports_val = Value::Object(Rc::new(RefCell::new(exports)));
-        self.module_cache.borrow_mut().insert(path, exports_val.clone());
+        self.module_cache
+            .borrow_mut()
+            .insert(path, exports_val.clone());
         Ok(exports_val)
     }
 
@@ -640,10 +726,22 @@ impl Evaluator {
                     exports.insert("fetchAll".into(), Value::Native(Self::fetch_all_native));
                     exports.insert("serve".into(), Value::Serve);
                     exports.insert("Promise".into(), Value::PromiseConstructor);
-                    exports.insert("setTimeout".into(), Value::TimerBuiltin(Arc::from("setTimeout")));
-                    exports.insert("setInterval".into(), Value::TimerBuiltin(Arc::from("setInterval")));
-                    exports.insert("clearTimeout".into(), Value::Native(Self::clear_timeout_native));
-                    exports.insert("clearInterval".into(), Value::Native(Self::clear_interval_native));
+                    exports.insert(
+                        "setTimeout".into(),
+                        Value::TimerBuiltin(Arc::from("setTimeout")),
+                    );
+                    exports.insert(
+                        "setInterval".into(),
+                        Value::TimerBuiltin(Arc::from("setInterval")),
+                    );
+                    exports.insert(
+                        "clearTimeout".into(),
+                        Value::Native(Self::clear_timeout_native),
+                    );
+                    exports.insert(
+                        "clearInterval".into(),
+                        Value::Native(Self::clear_interval_native),
+                    );
                     return Ok(Value::Object(Rc::new(RefCell::new(exports))));
                 }
                 #[cfg(not(feature = "http"))]
@@ -657,10 +755,16 @@ impl Evaluator {
                 #[cfg(feature = "ws")]
                 {
                     let mut exports: PropMap = PropMap::default();
-                    exports.insert("WebSocket".into(), Value::Native(Self::ws_web_socket_native));
+                    exports.insert(
+                        "WebSocket".into(),
+                        Value::Native(Self::ws_web_socket_native),
+                    );
                     exports.insert("Server".into(), Value::Native(Self::ws_server_native));
                     exports.insert("wsSend".into(), Value::Native(Self::ws_send_native));
-                    exports.insert("wsBroadcast".into(), Value::Native(Self::ws_broadcast_native));
+                    exports.insert(
+                        "wsBroadcast".into(),
+                        Value::Native(Self::ws_broadcast_native),
+                    );
                     return Ok(Value::Object(Rc::new(RefCell::new(exports))));
                 }
                 #[cfg(not(feature = "ws"))]
@@ -677,21 +781,29 @@ impl Evaluator {
                     exports.insert("exit".into(), Value::Native(natives::process_exit));
                     exports.insert("cwd".into(), Value::Native(natives::process_cwd));
                     exports.insert("exec".into(), Value::Native(natives::process_exec));
-                    let argv: Vec<Value> = std::env::args()
-                        .map(|s| Value::String(s.into()))
-                        .collect();
-                    exports.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv.clone()))));
+                    let argv: Vec<Value> =
+                        std::env::args().map(|s| Value::String(s.into())).collect();
+                    exports.insert(
+                        "argv".into(),
+                        Value::Array(Rc::new(RefCell::new(argv.clone()))),
+                    );
                     let env_obj: PropMap = std::env::vars()
                         .map(|(key, value)| (Arc::from(key.as_str()), Value::String(value.into())))
                         .collect();
-                    exports.insert("env".into(), Value::Object(Rc::new(RefCell::new(env_obj.clone()))));
+                    exports.insert(
+                        "env".into(),
+                        Value::Object(Rc::new(RefCell::new(env_obj.clone()))),
+                    );
                     let mut process_obj = PropMap::default();
                     process_obj.insert("exit".into(), Value::Native(natives::process_exit));
                     process_obj.insert("cwd".into(), Value::Native(natives::process_cwd));
                     process_obj.insert("exec".into(), Value::Native(natives::process_exec));
                     process_obj.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv))));
                     process_obj.insert("env".into(), Value::Object(Rc::new(RefCell::new(env_obj))));
-                    exports.insert("process".into(), Value::Object(Rc::new(RefCell::new(process_obj))));
+                    exports.insert(
+                        "process".into(),
+                        Value::Object(Rc::new(RefCell::new(process_obj))),
+                    );
                     return Ok(Value::Object(Rc::new(RefCell::new(exports))));
                 }
                 #[cfg(not(feature = "process"))]
@@ -1912,7 +2024,13 @@ impl Evaluator {
     /// descending = false: checks for `(a, b) => a - b`
     /// descending = true: checks for `(a, b) => b - a`
     fn is_numeric_sort_comparator(f: &Value, descending: bool) -> bool {
-        if let Value::Function { formals, body, rest_param, .. } = f {
+        if let Value::Function {
+            formals,
+            body,
+            rest_param,
+            ..
+        } = f
+        {
             // Must have exactly 2 simple params, no defaults, no rest
             if formals.len() != 2 || rest_param.is_some() {
                 return false;
@@ -1936,15 +2054,29 @@ impl Evaluator {
             };
 
             // Check for binary subtraction
-            if let Expr::Binary { left, op: BinOp::Sub, right, .. } = expr {
+            if let Expr::Binary {
+                left,
+                op: BinOp::Sub,
+                right,
+                ..
+            } = expr
+            {
                 // Check left is Ident(a) and right is Ident(b)
                 let (expected_left, expected_right) = if descending {
-                    (param_b, param_a)  // b - a
+                    (param_b, param_a) // b - a
                 } else {
-                    (param_a, param_b)  // a - b
+                    (param_a, param_b) // a - b
                 };
 
-                if let (Expr::Ident { name: left_name, .. }, Expr::Ident { name: right_name, .. }) = (left.as_ref(), right.as_ref()) {
+                if let (
+                    Expr::Ident {
+                        name: left_name, ..
+                    },
+                    Expr::Ident {
+                        name: right_name, ..
+                    },
+                ) = (left.as_ref(), right.as_ref())
+                {
                     return left_name == expected_left && right_name == expected_right;
                 }
             }
@@ -1999,8 +2131,17 @@ impl Evaluator {
 
     /// Optimized callback invocation for array methods.
     /// Creates a reusable scope that can be updated for each iteration.
-    fn create_callback_scope(&self, f: &Value) -> Option<(Rc<RefCell<Scope>>, Arc<[Arc<str>]>, Arc<Statement>)> {
-        if let Value::Function { formals, body, rest_param, .. } = f {
+    fn create_callback_scope(
+        &self,
+        f: &Value,
+    ) -> Option<(Rc<RefCell<Scope>>, Arc<[Arc<str>]>, Arc<Statement>)> {
+        if let Value::Function {
+            formals,
+            body,
+            rest_param,
+            ..
+        } = f
+        {
             if rest_param.is_some() {
                 return None;
             }
@@ -2063,12 +2204,14 @@ impl Evaluator {
 
     /// Try to evaluate a simple callback expression directly without creating a scope.
     /// Returns Some(result) for simple patterns like `x => x * 2` or `x => x > 5`.
-    fn eval_simple_callback(
-        &self,
-        f: &Value,
-        args: &[Value],
-    ) -> Option<Result<Value, EvalError>> {
-        if let Value::Function { formals, body, rest_param, .. } = f {
+    fn eval_simple_callback(&self, f: &Value, args: &[Value]) -> Option<Result<Value, EvalError>> {
+        if let Value::Function {
+            formals,
+            body,
+            rest_param,
+            ..
+        } = f
+        {
             if formals.len() != 1 || rest_param.is_some() {
                 return None;
             }
@@ -2088,17 +2231,25 @@ impl Evaluator {
             // Fast path for common patterns
             match expr {
                 // x * constant or x + constant, etc.
-                Expr::Binary { left, op, right, .. } => {
+                Expr::Binary {
+                    left, op, right, ..
+                } => {
                     let left_val = self.eval_simple_operand(left, param_name, &arg)?;
                     let right_val = self.eval_simple_operand(right, param_name, &arg)?;
-                    Some(self.eval_binop(&left_val, *op, &right_val).map_err(EvalError::Error))
+                    Some(
+                        self.eval_binop(&left_val, *op, &right_val)
+                            .map_err(EvalError::Error),
+                    )
                 }
                 // Just return the parameter
-                Expr::Ident { name, .. } if name == param_name => {
-                    Some(Ok(arg))
-                }
+                Expr::Ident { name, .. } if name == param_name => Some(Ok(arg)),
                 // Property access: x.prop
-                Expr::Member { object, prop, optional, .. } => {
+                Expr::Member {
+                    object,
+                    prop,
+                    optional,
+                    ..
+                } => {
                     if let Expr::Ident { name, .. } = object.as_ref() {
                         if name == param_name {
                             return self.eval_simple_member(&arg, prop, *optional);
@@ -2114,7 +2265,12 @@ impl Evaluator {
     }
 
     /// Evaluate a simple operand (identifier or literal).
-    fn eval_simple_operand(&self, expr: &Expr, param_name: &Arc<str>, param_val: &Value) -> Option<Value> {
+    fn eval_simple_operand(
+        &self,
+        expr: &Expr,
+        param_name: &Arc<str>,
+        param_val: &Value,
+    ) -> Option<Value> {
         match expr {
             Expr::Ident { name, .. } if name == param_name => Some(param_val.clone()),
             Expr::Literal { value, .. } => match value {
@@ -2128,20 +2284,27 @@ impl Evaluator {
     }
 
     /// Evaluate simple member access.
-    fn eval_simple_member(&self, obj: &Value, property: &MemberProp, _optional: bool) -> Option<Result<Value, EvalError>> {
+    fn eval_simple_member(
+        &self,
+        obj: &Value,
+        property: &MemberProp,
+        _optional: bool,
+    ) -> Option<Result<Value, EvalError>> {
         match property {
-            MemberProp::Name(name) => {
-                match obj {
-                    Value::Object(o) => {
-                        let result = o.borrow().get(name.as_ref()).cloned().unwrap_or(Value::Null);
-                        Some(Ok(result))
-                    }
-                    Value::Array(arr) if name.as_ref() == "length" => {
-                        Some(Ok(Value::Number(arr.borrow().len() as f64)))
-                    }
-                    _ => None,
+            MemberProp::Name(name) => match obj {
+                Value::Object(o) => {
+                    let result = o
+                        .borrow()
+                        .get(name.as_ref())
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    Some(Ok(result))
                 }
-            }
+                Value::Array(arr) if name.as_ref() == "length" => {
+                    Some(Ok(Value::Number(arr.borrow().len() as f64)))
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -2169,9 +2332,7 @@ impl Evaluator {
 
     fn call_func(&self, f: &Value, args: &[Value]) -> Result<Value, EvalError> {
         match f {
-            Value::Native(native_fn) => {
-                native_fn(args).map_err(EvalError::Error)
-            }
+            Value::Native(native_fn) => native_fn(args).map_err(EvalError::Error),
             #[cfg(feature = "http")]
             Value::PromiseResolver(r) => {
                 let value = args.first().cloned().unwrap_or(Value::Null);
@@ -2180,7 +2341,12 @@ impl Evaluator {
                         .map_err(EvalError::Error)?;
                 for reaction in reactions {
                     match reaction {
-                        crate::promise::Reaction::Then(on_fulfilled, on_rejected, ref resolve, ref reject) => {
+                        crate::promise::Reaction::Then(
+                            on_fulfilled,
+                            on_rejected,
+                            ref resolve,
+                            ref reject,
+                        ) => {
                             let handler_result = if is_fulfilled {
                                 if let Some(ref h) = on_fulfilled {
                                     self.call_func(h, &[val.clone()])
@@ -2232,8 +2398,10 @@ impl Evaluator {
             #[cfg(feature = "http")]
             Value::Serve => self.run_http_server(args),
             Value::CoreFn(f) => {
-                let ca: Result<Vec<tishlang_core::Value>, String> =
-                    args.iter().map(crate::value_convert::eval_to_core).collect();
+                let ca: Result<Vec<tishlang_core::Value>, String> = args
+                    .iter()
+                    .map(crate::value_convert::eval_to_core)
+                    .collect();
                 let ca = ca.map_err(EvalError::Error)?;
                 Ok(crate::value_convert::core_to_eval(f(&ca)))
             }
@@ -2247,15 +2415,25 @@ impl Evaluator {
             Value::TimerBuiltin(name) => self.run_timer_builtin(name.as_ref(), args),
             Value::OpaqueMethod(opaque, method_name) => {
                 let method = opaque.get_method(method_name.as_ref()).ok_or_else(|| {
-                    EvalError::Error(format!("Method {} not found on {}", method_name, opaque.type_name()))
+                    EvalError::Error(format!(
+                        "Method {} not found on {}",
+                        method_name,
+                        opaque.type_name()
+                    ))
                 })?;
-                let core_args: Result<Vec<tishlang_core::Value>, String> =
-                    args.iter().map(crate::value_convert::eval_to_core).collect();
+                let core_args: Result<Vec<tishlang_core::Value>, String> = args
+                    .iter()
+                    .map(crate::value_convert::eval_to_core)
+                    .collect();
                 let core_args = core_args.map_err(EvalError::Error)?;
                 let result = method(&core_args);
                 Ok(crate::value_convert::core_to_eval(result))
             }
-            Value::Function { formals, rest_param, body } => {
+            Value::Function {
+                formals,
+                rest_param,
+                body,
+            } => {
                 let scope = Scope::child(Rc::clone(&self.scope));
                 {
                     let mut s = scope.borrow_mut();
@@ -2289,8 +2467,13 @@ impl Evaluator {
                         }
                     }
                     if let Some(ref rest_name) = rest_param {
-                        let rest_vals: Vec<Value> = args.iter().skip(formals.len()).cloned().collect();
-                        s.set(Arc::clone(rest_name), Value::Array(Rc::new(RefCell::new(rest_vals))), true);
+                        let rest_vals: Vec<Value> =
+                            args.iter().skip(formals.len()).cloned().collect();
+                        s.set(
+                            Arc::clone(rest_name),
+                            Value::Array(Rc::new(RefCell::new(rest_vals))),
+                            true,
+                        );
                     }
                 }
                 let mut eval = Evaluator {
@@ -2304,8 +2487,12 @@ impl Evaluator {
                     Err(EvalError::Return(v)) => Ok(v),
                     Err(EvalError::Throw(v)) => Err(EvalError::Throw(v)),
                     Err(EvalError::Error(s)) => Err(EvalError::Error(s)),
-                    Err(EvalError::Break) => Err(EvalError::Error("break outside loop".to_string())),
-                    Err(EvalError::Continue) => Err(EvalError::Error("continue outside loop".to_string())),
+                    Err(EvalError::Break) => {
+                        Err(EvalError::Error("break outside loop".to_string()))
+                    }
+                    Err(EvalError::Continue) => {
+                        Err(EvalError::Error("continue outside loop".to_string()))
+                    }
                 }
             }
             _ => Err(EvalError::Error("Not a function".to_string())),
@@ -2320,14 +2507,15 @@ impl Evaluator {
         args: &[Value],
     ) -> Result<Value, EvalError> {
         match method {
-            "then" => self.run_promise_then_core(
-                promise_ref,
-                args.first().cloned(),
-                args.get(1).cloned(),
-            ),
+            "then" => {
+                self.run_promise_then_core(promise_ref, args.first().cloned(), args.get(1).cloned())
+            }
             "catch" => self.run_promise_then_core(promise_ref, None, args.first().cloned()),
             "finally" => self.run_promise_finally(promise_ref, args.first().cloned()),
-            _ => Err(EvalError::Error(format!("Unknown promise method: {}", method))),
+            _ => Err(EvalError::Error(format!(
+                "Unknown promise method: {}",
+                method
+            ))),
         }
     }
 
@@ -2428,7 +2616,12 @@ impl Evaluator {
                 crate::promise::PromiseState::Pending { .. } => {
                     crate::promise::add_reaction(
                         state,
-                        crate::promise::Reaction::Then(on_fulfilled, on_rejected, resolve.clone(), reject.clone()),
+                        crate::promise::Reaction::Then(
+                            on_fulfilled,
+                            on_rejected,
+                            resolve.clone(),
+                            reject.clone(),
+                        ),
                     );
                 }
             }
@@ -2537,8 +2730,11 @@ impl Evaluator {
             let port = port;
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(50));
-                if let Ok(mut stream) = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)) {
-                    let _ = stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+                if let Ok(mut stream) = std::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+                {
+                    let _ = stream.write_all(
+                        b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    );
                     let _ = stream.shutdown(std::net::Shutdown::Write);
                 }
             });
@@ -2603,7 +2799,11 @@ impl Evaluator {
             tishlang_ast::DestructPattern::Array(elements) => {
                 let arr = match value {
                     Value::Array(a) => a.borrow().clone(),
-                    _ => return Err(EvalError::Error("Cannot destructure non-array value".to_string())),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "Cannot destructure non-array value".to_string(),
+                        ))
+                    }
                 };
 
                 for (i, elem) in elements.iter().enumerate() {
@@ -2633,7 +2833,11 @@ impl Evaluator {
             tishlang_ast::DestructPattern::Object(props) => {
                 let obj = match value {
                     Value::Object(o) => o.borrow().clone(),
-                    _ => return Err(EvalError::Error("Cannot destructure non-object value".to_string())),
+                    _ => {
+                        return Err(EvalError::Error(
+                            "Cannot destructure non-object value".to_string(),
+                        ))
+                    }
                 };
 
                 for prop in props {
@@ -2657,7 +2861,12 @@ impl Evaluator {
         Ok(())
     }
 
-    fn bind_destruct_pattern(&mut self, pattern: &tishlang_ast::DestructPattern, value: &Value, mutable: bool) -> Result<(), EvalError> {
+    fn bind_destruct_pattern(
+        &mut self,
+        pattern: &tishlang_ast::DestructPattern,
+        value: &Value,
+        mutable: bool,
+    ) -> Result<(), EvalError> {
         Self::bind_destruct_pattern_scoped(&self.scope, pattern, value, mutable)
     }
 
@@ -2675,11 +2884,8 @@ impl Evaluator {
             Some(Value::Bool(b)) => tishlang_core::Value::Bool(*b),
             Some(_) => tishlang_core::Value::Number(0.0),
         };
-        let out = tishlang_builtins::string::last_index_of_str(
-            receiver.as_ref(),
-            search,
-            &position_core,
-        );
+        let out =
+            tishlang_builtins::string::last_index_of_str(receiver.as_ref(), search, &position_core);
         match out {
             tishlang_core::Value::Number(n) => Value::Number(n),
             _ => Value::Number(-1.0),
@@ -2963,7 +3169,9 @@ impl Evaluator {
             Ok((Value::Bool(false), rest))
         } else {
             let end = s
-                .find(|c: char| !c.is_ascii_digit() && c != '-' && c != '+' && c != '.' && c != 'e' && c != 'E')
+                .find(|c: char| {
+                    !c.is_ascii_digit() && c != '-' && c != '+' && c != '.' && c != 'e' && c != 'E'
+                })
                 .unwrap_or(s.len());
             let num_str = &s[..end];
             let n: f64 = num_str.parse().map_err(|_| ())?;
@@ -2991,7 +3199,11 @@ impl Evaluator {
                     .replace('\t', "\\t")
             ),
             Value::Array(arr) => {
-                let inner: Vec<String> = arr.borrow().iter().map(Self::json_stringify_value).collect();
+                let inner: Vec<String> = arr
+                    .borrow()
+                    .iter()
+                    .map(Self::json_stringify_value)
+                    .collect();
                 format!("[{}]", inner.join(","))
             }
             Value::Object(map) => {
@@ -3010,7 +3222,14 @@ impl Evaluator {
                     })
                     .collect();
                 entries.sort_by(|a, b| a.0.cmp(&b.0));
-                format!("{{{}}}", entries.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(","))
+                format!(
+                    "{{{}}}",
+                    entries
+                        .into_iter()
+                        .map(|(_, s)| s)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
             }
             Value::Function { .. } | Value::Native(_) => "null".to_string(),
             #[cfg(feature = "http")]
@@ -3021,7 +3240,8 @@ impl Evaluator {
             | Value::Promise(_)
             | Value::PromiseResolver(_)
             | Value::PromiseConstructor
-            | Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => "null".to_string(),
+            | Value::BoundPromiseMethod(_, _)
+            | Value::TimerBuiltin(_) => "null".to_string(),
             #[cfg(feature = "regex")]
             Value::RegExp(_) => "null".to_string(),
             Value::Opaque(_) | Value::OpaqueMethod(_, _) => "null".to_string(),
@@ -3041,7 +3261,11 @@ impl Evaluator {
 
     fn object_keys(args: &[Value]) -> Result<Value, String> {
         if let Some(Value::Object(obj)) = args.first() {
-            let keys: Vec<Value> = obj.borrow().keys().map(|k| Value::String(Arc::clone(k))).collect();
+            let keys: Vec<Value> = obj
+                .borrow()
+                .keys()
+                .map(|k| Value::String(Arc::clone(k)))
+                .collect();
             Ok(Value::Array(Rc::new(RefCell::new(keys))))
         } else {
             Ok(Value::Array(Rc::new(RefCell::new(Vec::new()))))
@@ -3059,12 +3283,16 @@ impl Evaluator {
 
     fn object_entries(args: &[Value]) -> Result<Value, String> {
         if let Some(Value::Object(obj)) = args.first() {
-            let entries: Vec<Value> = obj.borrow().iter().map(|(k, v)| {
-                Value::Array(Rc::new(RefCell::new(vec![
-                    Value::String(Arc::clone(k)),
-                    v.clone(),
-                ])))
-            }).collect();
+            let entries: Vec<Value> = obj
+                .borrow()
+                .iter()
+                .map(|(k, v)| {
+                    Value::Array(Rc::new(RefCell::new(vec![
+                        Value::String(Arc::clone(k)),
+                        v.clone(),
+                    ])))
+                })
+                .collect();
             Ok(Value::Array(Rc::new(RefCell::new(entries))))
         } else {
             Ok(Value::Array(Rc::new(RefCell::new(Vec::new()))))
@@ -3136,7 +3364,10 @@ impl Evaluator {
             .ok_or_else(|| "Promise.all requires an iterable".to_string())?;
         let values: Vec<Value> = match iterable {
             Value::Array(arr) => arr.borrow().clone(),
-            Value::String(s) => s.chars().map(|c| Value::String(c.to_string().into())).collect(),
+            Value::String(s) => s
+                .chars()
+                .map(|c| Value::String(c.to_string().into()))
+                .collect(),
             _ => return Err("Promise.all requires array or iterable".to_string()),
         };
         let mut results = Vec::with_capacity(values.len());
@@ -3146,7 +3377,8 @@ impl Evaluator {
                     crate::promise::PromiseAwaitResult::Fulfilled(x) => results.push(x),
                     crate::promise::PromiseAwaitResult::Rejected(x) => {
                         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
-                        let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+                        let (_, reject) =
+                            crate::promise::extract_resolvers(&resolve_val, &reject_val);
                         let _ = crate::promise::settle_promise(&reject, x, false);
                         return Ok(promise);
                     }
@@ -3157,7 +3389,8 @@ impl Evaluator {
                     Ok(x) => results.push(crate::value_convert::core_to_eval(x)),
                     Err(x) => {
                         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
-                        let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+                        let (_, reject) =
+                            crate::promise::extract_resolvers(&resolve_val, &reject_val);
                         let _ = crate::promise::settle_promise(
                             &reject,
                             crate::value_convert::core_to_eval(x),
@@ -3184,7 +3417,10 @@ impl Evaluator {
             .ok_or_else(|| "Promise.race requires an iterable".to_string())?;
         let values: Vec<Value> = match iterable {
             Value::Array(arr) => arr.borrow().clone(),
-            Value::String(s) => s.chars().map(|c| Value::String(c.to_string().into())).collect(),
+            Value::String(s) => s
+                .chars()
+                .map(|c| Value::String(c.to_string().into()))
+                .collect(),
             _ => return Err("Promise.race requires array or iterable".to_string()),
         };
         for v in values {
@@ -3192,7 +3428,8 @@ impl Evaluator {
                 match p.block_until_settled() {
                     Ok(x) => {
                         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
-                        let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+                        let (resolve, _) =
+                            crate::promise::extract_resolvers(&resolve_val, &reject_val);
                         crate::promise::settle_promise(
                             &resolve,
                             crate::value_convert::core_to_eval(x),
@@ -3202,7 +3439,8 @@ impl Evaluator {
                     }
                     Err(x) => {
                         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
-                        let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+                        let (_, reject) =
+                            crate::promise::extract_resolvers(&resolve_val, &reject_val);
                         crate::promise::settle_promise(
                             &reject,
                             crate::value_convert::core_to_eval(x),
@@ -3216,13 +3454,15 @@ impl Evaluator {
                 match crate::promise::block_until_settled(p) {
                     crate::promise::PromiseAwaitResult::Fulfilled(x) => {
                         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
-                        let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+                        let (resolve, _) =
+                            crate::promise::extract_resolvers(&resolve_val, &reject_val);
                         crate::promise::settle_promise(&resolve, x, true)?;
                         return Ok(promise);
                     }
                     crate::promise::PromiseAwaitResult::Rejected(x) => {
                         let (promise, resolve_val, reject_val) = crate::promise::create_promise();
-                        let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+                        let (_, reject) =
+                            crate::promise::extract_resolvers(&resolve_val, &reject_val);
                         crate::promise::settle_promise(&reject, x, false)?;
                         return Ok(promise);
                     }
@@ -3239,7 +3479,9 @@ impl Evaluator {
         for a in args {
             cv.push(crate::value_convert::eval_to_core(a)?);
         }
-        Ok(crate::value_convert::core_to_eval(tishlang_runtime::web_socket_client(&cv)))
+        Ok(crate::value_convert::core_to_eval(
+            tishlang_runtime::web_socket_client(&cv),
+        ))
     }
 
     #[cfg(feature = "ws")]
@@ -3248,7 +3490,9 @@ impl Evaluator {
         for a in args {
             cv.push(crate::value_convert::eval_to_core(a)?);
         }
-        Ok(crate::value_convert::core_to_eval(tishlang_runtime::web_socket_server_construct(&cv)))
+        Ok(crate::value_convert::core_to_eval(
+            tishlang_runtime::web_socket_server_construct(&cv),
+        ))
     }
 
     #[cfg(feature = "ws")]
@@ -3256,7 +3500,9 @@ impl Evaluator {
         let conn = args.first().ok_or("wsSend(conn, data) requires conn")?;
         let conn_core = crate::value_convert::eval_to_core(conn)?;
         let data = args.get(1).map(|v| v.to_string()).unwrap_or_default();
-        Ok(Value::Bool(tishlang_runtime::ws_send_native(&conn_core, &data)))
+        Ok(Value::Bool(tishlang_runtime::ws_send_native(
+            &conn_core, &data,
+        )))
     }
 
     #[cfg(feature = "ws")]
@@ -3265,7 +3511,9 @@ impl Evaluator {
         for a in args {
             cv.push(crate::value_convert::eval_to_core(a)?);
         }
-        Ok(crate::value_convert::core_to_eval(tishlang_runtime::ws_broadcast_native(&cv)))
+        Ok(crate::value_convert::core_to_eval(
+            tishlang_runtime::ws_broadcast_native(&cv),
+        ))
     }
 
     #[cfg(feature = "http")]
@@ -3319,7 +3567,6 @@ impl Evaluator {
             "await requires the http feature".to_string(),
         ))
     }
-
 }
 
 #[derive(Debug)]

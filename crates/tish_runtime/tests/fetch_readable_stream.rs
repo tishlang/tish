@@ -51,16 +51,17 @@ fn fetch_readable_stream_read_chunks() {
         Value::Object(o) => o.borrow(),
         _ => panic!("expected object response, got {:?}", resp),
     };
-    assert!(obj.get(&std::sync::Arc::from("ok")).map(|v| matches!(v, Value::Bool(true))).unwrap_or(false));
+    assert!(obj
+        .get(&std::sync::Arc::from("ok"))
+        .map(|v| matches!(v, Value::Bool(true)))
+        .unwrap_or(false));
 
     let body = obj.get(&std::sync::Arc::from("body")).expect("body");
     let stream = match body {
         Value::Opaque(s) => s.as_ref(),
         _ => panic!("expected ReadableStream opaque"),
     };
-    let reader_val = stream
-        .get_method("getReader")
-        .expect("getReader")(&[]);
+    let reader_val = stream.get_method("getReader").expect("getReader")(&[]);
     let reader = match reader_val {
         Value::Opaque(r) => r,
         _ => panic!("expected reader opaque, got {:?}", reader_val),

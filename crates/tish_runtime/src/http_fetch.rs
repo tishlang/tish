@@ -35,7 +35,11 @@ impl TishPromise for FetchResponsePromise {
 }
 
 struct FetchAllResponsesPromise {
-    rx: Mutex<Option<tokio::sync::oneshot::Receiver<Result<Vec<Result<reqwest::Response, String>>, String>>>>,
+    rx: Mutex<
+        Option<
+            tokio::sync::oneshot::Receiver<Result<Vec<Result<reqwest::Response, String>>, String>>,
+        >,
+    >,
 }
 
 impl TishPromise for FetchAllResponsesPromise {
@@ -47,7 +51,10 @@ impl TishPromise for FetchAllResponsesPromise {
                 Ok(Ok(vec)) => {
                     let out: Vec<Value> = vec
                         .into_iter()
-                        .map(|x| x.map(response_value_from_reqwest).unwrap_or_else(|e| build_error_response(&e)))
+                        .map(|x| {
+                            x.map(response_value_from_reqwest)
+                                .unwrap_or_else(|e| build_error_response(&e))
+                        })
                         .collect();
                     Ok(Value::Array(Rc::new(RefCell::new(out))))
                 }
@@ -85,10 +92,7 @@ impl TishPromise for ReadChunkPromise {
                     let arr: Vec<Value> = b.iter().map(|u| Value::Number(*u as f64)).collect();
                     let mut o = ObjectMap::default();
                     o.insert(Arc::from("done"), Value::Bool(false));
-                    o.insert(
-                        Arc::from("value"),
-                        Value::Array(Rc::new(RefCell::new(arr))),
-                    );
+                    o.insert(Arc::from("value"), Value::Array(Rc::new(RefCell::new(arr))));
                     Ok(Value::Object(Rc::new(RefCell::new(o))))
                 }
                 Ok(Err(e)) => Err({
@@ -160,18 +164,23 @@ impl HttpBody {
         let mut g = self.state.lock().unwrap();
         match &mut *g {
             BodyState::Fresh(r) => {
-                let resp = r.take().ok_or_else(|| "Response body already consumed".to_string())?;
+                let resp = r
+                    .take()
+                    .ok_or_else(|| "Response body already consumed".to_string())?;
                 *g = BodyState::ReadInProgress;
                 Ok(Box::pin(resp.bytes_stream()))
             }
-            BodyState::ReadInProgress => Err("ReadableStream is locked; getReader() already called".into()),
+            BodyState::ReadInProgress => {
+                Err("ReadableStream is locked; getReader() already called".into())
+            }
             BodyState::Gone => Err("Response body already consumed".into()),
         }
     }
 
     pub fn take_text_async(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + '_>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + '_>>
+    {
         let resp = {
             let mut g = self.state.lock().unwrap();
             match &mut *g {
@@ -182,9 +191,9 @@ impl HttpBody {
                     }
                     None => Err("Response body already consumed".into()),
                 },
-                BodyState::ReadInProgress => Err(
-                    "Cannot call text(): body is locked by ReadableStreamDefaultReader".into(),
-                ),
+                BodyState::ReadInProgress => {
+                    Err("Cannot call text(): body is locked by ReadableStreamDefaultReader".into())
+                }
                 BodyState::Gone => Err("Response body already consumed".into()),
             }
         };
@@ -420,7 +429,8 @@ pub fn fetch_all_promise_from_args(args: Vec<Value>) -> Value {
                     Some(u) => (u, Some(req.clone())),
                     None => {
                         let (tx, rx) = tokio::sync::oneshot::channel();
-                        let _ = tx.send(Err("Each request object must have a 'url' property".into()));
+                        let _ =
+                            tx.send(Err("Each request object must have a 'url' property".into()));
                         return Value::Promise(Arc::new(FetchAllResponsesPromise {
                             rx: Mutex::new(Some(rx)),
                         }));
@@ -430,7 +440,7 @@ pub fn fetch_all_promise_from_args(args: Vec<Value>) -> Value {
             _ => {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 let _ = tx.send(Err(
-                    "Each request must be a string URL or request object".into(),
+                    "Each request must be a string URL or request object".into()
                 ));
                 return Value::Promise(Arc::new(FetchAllResponsesPromise {
                     rx: Mutex::new(Some(rx)),

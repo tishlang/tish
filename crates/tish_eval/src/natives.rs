@@ -57,16 +57,21 @@ fn get_log_level() -> u8 {
 pub fn parse_int(args: &[Value]) -> Result<Value, String> {
     let s = args.first().map(|v| v.to_string()).unwrap_or_default();
     let s = s.trim();
-    let radix = args.get(1).and_then(|v| match v {
-        Value::Number(n) => Some(*n as i32),
-        _ => None,
-    }).unwrap_or(10);
+    let radix = args
+        .get(1)
+        .and_then(|v| match v {
+            Value::Number(n) => Some(*n as i32),
+            _ => None,
+        })
+        .unwrap_or(10);
     let n = if (2..=36).contains(&radix) {
         let prefix: String = s
             .chars()
             .take_while(|c| *c == '-' || *c == '+' || c.is_digit(radix as u32))
             .collect();
-        i64::from_str_radix(&prefix, radix as u32).ok().map(|n| n as f64)
+        i64::from_str_radix(&prefix, radix as u32)
+            .ok()
+            .map(|n| n as f64)
     } else {
         None
     };
@@ -80,12 +85,16 @@ pub fn parse_float(args: &[Value]) -> Result<Value, String> {
 }
 
 pub fn is_finite(args: &[Value]) -> Result<Value, String> {
-    let b = args.first().is_some_and(|v| matches!(v, Value::Number(n) if n.is_finite()));
+    let b = args
+        .first()
+        .is_some_and(|v| matches!(v, Value::Number(n) if n.is_finite()));
     Ok(Value::Bool(b))
 }
 
 pub fn is_nan(args: &[Value]) -> Result<Value, String> {
-    let b = args.first().is_none_or(|v| matches!(v, Value::Number(n) if n.is_nan()) || !matches!(v, Value::Number(_)));
+    let b = args.first().is_none_or(|v| {
+        matches!(v, Value::Number(n) if n.is_nan()) || !matches!(v, Value::Number(_))
+    });
     Ok(Value::Bool(b))
 }
 
@@ -96,7 +105,9 @@ pub fn boolean_native(args: &[Value]) -> Result<Value, String> {
 
 pub fn decode_uri(args: &[Value]) -> Result<Value, String> {
     let s = args.first().map(|v| v.to_string()).unwrap_or_default();
-    Ok(Value::String(tishlang_core::percent_decode(&s).unwrap_or(s).into()))
+    Ok(Value::String(
+        tishlang_core::percent_decode(&s).unwrap_or(s).into(),
+    ))
 }
 
 pub fn encode_uri(args: &[Value]) -> Result<Value, String> {
@@ -105,41 +116,61 @@ pub fn encode_uri(args: &[Value]) -> Result<Value, String> {
 }
 
 pub fn math_abs(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).abs()))
+    Ok(Value::Number(
+        get_num(args.first().unwrap_or(&Value::Null)).abs(),
+    ))
 }
 
 pub fn math_sqrt(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).sqrt()))
+    Ok(Value::Number(
+        get_num(args.first().unwrap_or(&Value::Null)).sqrt(),
+    ))
 }
 
 pub fn math_min(args: &[Value]) -> Result<Value, String> {
-    let nums: Vec<f64> = args.iter().filter_map(|v| match v {
-        Value::Number(n) => Some(*n),
-        _ => None,
-    }).collect();
+    let nums: Vec<f64> = args
+        .iter()
+        .filter_map(|v| match v {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
     let n = nums.into_iter().fold(f64::INFINITY, f64::min);
     Ok(Value::Number(if n == f64::INFINITY { f64::NAN } else { n }))
 }
 
 pub fn math_max(args: &[Value]) -> Result<Value, String> {
-    let nums: Vec<f64> = args.iter().filter_map(|v| match v {
-        Value::Number(n) => Some(*n),
-        _ => None,
-    }).collect();
+    let nums: Vec<f64> = args
+        .iter()
+        .filter_map(|v| match v {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
     let n = nums.into_iter().fold(f64::NEG_INFINITY, f64::max);
-    Ok(Value::Number(if n == f64::NEG_INFINITY { f64::NAN } else { n }))
+    Ok(Value::Number(if n == f64::NEG_INFINITY {
+        f64::NAN
+    } else {
+        n
+    }))
 }
 
 pub fn math_floor(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).floor()))
+    Ok(Value::Number(
+        get_num(args.first().unwrap_or(&Value::Null)).floor(),
+    ))
 }
 
 pub fn math_ceil(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).ceil()))
+    Ok(Value::Number(
+        get_num(args.first().unwrap_or(&Value::Null)).ceil(),
+    ))
 }
 
 pub fn math_round(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).round()))
+    Ok(Value::Number(
+        get_num(args.first().unwrap_or(&Value::Null)).round(),
+    ))
 }
 
 pub fn math_random(_args: &[Value]) -> Result<Value, String> {
@@ -156,33 +187,53 @@ pub fn math_pow(args: &[Value]) -> Result<Value, String> {
 }
 
 pub fn math_sin(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).sin()))
+    Ok(Value::Number(
+        get_num(args.first().unwrap_or(&Value::Null)).sin(),
+    ))
 }
 
 pub fn math_cos(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).cos()))
+    Ok(Value::Number(
+        get_num(args.first().unwrap_or(&Value::Null)).cos(),
+    ))
 }
 
 pub fn math_tan(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).tan()))
+    Ok(Value::Number(
+        get_num(args.first().unwrap_or(&Value::Null)).tan(),
+    ))
 }
 
 pub fn math_log(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).ln()))
+    Ok(Value::Number(
+        get_num(args.first().unwrap_or(&Value::Null)).ln(),
+    ))
 }
 
 pub fn math_exp(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).exp()))
+    Ok(Value::Number(
+        get_num(args.first().unwrap_or(&Value::Null)).exp(),
+    ))
 }
 
 pub fn math_sign(args: &[Value]) -> Result<Value, String> {
     let n = get_num(args.first().unwrap_or(&Value::Null));
-    let sign = if n.is_nan() { f64::NAN } else if n > 0.0 { 1.0 } else if n < 0.0 { -1.0 } else { 0.0 };
+    let sign = if n.is_nan() {
+        f64::NAN
+    } else if n > 0.0 {
+        1.0
+    } else if n < 0.0 {
+        -1.0
+    } else {
+        0.0
+    };
     Ok(Value::Number(sign))
 }
 
 pub fn math_trunc(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).trunc()))
+    Ok(Value::Number(
+        get_num(args.first().unwrap_or(&Value::Null)).trunc(),
+    ))
 }
 
 pub fn date_now(_args: &[Value]) -> Result<Value, String> {
@@ -199,19 +250,25 @@ pub fn array_is_array(args: &[Value]) -> Result<Value, String> {
 }
 
 pub fn string_from_char_code(args: &[Value]) -> Result<Value, String> {
-    let s: String = args.iter().filter_map(|v| match v {
-        Value::Number(n) => Some(char::from_u32(*n as u32).unwrap_or('\u{FFFD}')),
-        _ => None,
-    }).collect();
+    let s: String = args
+        .iter()
+        .filter_map(|v| match v {
+            Value::Number(n) => Some(char::from_u32(*n as u32).unwrap_or('\u{FFFD}')),
+            _ => None,
+        })
+        .collect();
     Ok(Value::String(s.into()))
 }
 
 #[cfg(feature = "process")]
 pub fn process_exit(args: &[Value]) -> Result<Value, String> {
-    let code = args.first().and_then(|v| match v {
-        Value::Number(n) => Some(*n as i32),
-        _ => None,
-    }).unwrap_or(0);
+    let code = args
+        .first()
+        .and_then(|v| match v {
+            Value::Number(n) => Some(*n as i32),
+            _ => None,
+        })
+        .unwrap_or(0);
     std::process::exit(code);
 }
 
@@ -274,7 +331,7 @@ pub fn is_dir(args: &[Value]) -> Result<Value, String> {
 pub fn read_dir(args: &[Value]) -> Result<Value, String> {
     use std::cell::RefCell;
     use std::rc::Rc;
-    
+
     let path = args.first().map(|v| v.to_string()).unwrap_or_default();
     match std::fs::read_dir(&path) {
         Ok(entries) => {

@@ -3,15 +3,15 @@
 mod eval;
 #[cfg(feature = "http")]
 mod http;
-pub mod value_convert;
+mod natives;
 #[cfg(feature = "http")]
 mod promise;
-#[cfg(feature = "http")]
-mod timers;
-mod natives;
 #[cfg(feature = "regex")]
 pub mod regex;
+#[cfg(feature = "http")]
+mod timers;
 mod value;
+pub mod value_convert;
 
 pub use eval::Evaluator;
 pub use value::PropMap;
@@ -51,11 +51,15 @@ pub fn format_value_for_console(value: &Value, colors: bool) -> String {
 }
 
 /// Run a Tish file with import/export support. Resolves relative imports from the file's directory.
-pub fn run_file(path: &std::path::Path, project_root: Option<&std::path::Path>) -> Result<Value, String> {
+pub fn run_file(
+    path: &std::path::Path,
+    project_root: Option<&std::path::Path>,
+) -> Result<Value, String> {
     let path = path
         .canonicalize()
         .map_err(|e| format!("Cannot canonicalize {}: {}", path.display(), e))?;
-    let source = std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {}: {}", path.display(), e))?;
+    let source = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Cannot read {}: {}", path.display(), e))?;
     let program = tishlang_parser::parse(&source)?;
     let mut eval = Evaluator::new();
     eval.set_current_dir(project_root.or(path.parent()));

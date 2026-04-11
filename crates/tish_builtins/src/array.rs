@@ -1,9 +1,9 @@
 //! Array builtin methods.
 
+use crate::helpers::normalize_index;
 use std::cell::RefCell;
 use std::rc::Rc;
 use tishlang_core::Value;
-use crate::helpers::normalize_index;
 
 /// Create a new array Value from a Vec of Values.
 pub fn from_vec(v: Vec<Value>) -> Value {
@@ -153,7 +153,11 @@ pub fn slice(arr: &Value, start: &Value, end: &Value) -> Value {
         let len = arr_borrow.len() as i64;
         let start_idx = normalize_index(start, len, 0);
         let end_idx = normalize_index(end, len, len as usize);
-        let sliced = if start_idx < end_idx { arr_borrow[start_idx..end_idx].to_vec() } else { vec![] };
+        let sliced = if start_idx < end_idx {
+            arr_borrow[start_idx..end_idx].to_vec()
+        } else {
+            vec![]
+        };
         Value::Array(Rc::new(RefCell::new(sliced)))
     } else {
         Value::Null
@@ -188,7 +192,7 @@ pub fn flat(arr: &Value, depth: &Value) -> Value {
             result.push(v.clone());
         }
     }
-    
+
     if let Value::Array(arr) = arr {
         let d = match depth {
             Value::Number(n) => *n as i32,
@@ -208,9 +212,11 @@ pub fn flat(arr: &Value, depth: &Value) -> Value {
 pub fn map(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
-        let result: Vec<Value> = arr_borrow.iter().enumerate().map(|(i, v)| {
-            cb(&[v.clone(), Value::Number(i as f64)])
-        }).collect();
+        let result: Vec<Value> = arr_borrow
+            .iter()
+            .enumerate()
+            .map(|(i, v)| cb(&[v.clone(), Value::Number(i as f64)]))
+            .collect();
         Value::Array(Rc::new(RefCell::new(result)))
     } else {
         Value::Null
@@ -220,10 +226,18 @@ pub fn map(arr: &Value, callback: &Value) -> Value {
 pub fn filter(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
-        let result: Vec<Value> = arr_borrow.iter().enumerate().filter_map(|(i, v)| {
-            let keep = cb(&[v.clone(), Value::Number(i as f64)]);
-            if keep.is_truthy() { Some(v.clone()) } else { None }
-        }).collect();
+        let result: Vec<Value> = arr_borrow
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| {
+                let keep = cb(&[v.clone(), Value::Number(i as f64)]);
+                if keep.is_truthy() {
+                    Some(v.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
         Value::Array(Rc::new(RefCell::new(result)))
     } else {
         Value::Null
@@ -234,9 +248,7 @@ pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         let len = arr_borrow.len();
-        let (start_idx, mut acc) = if matches!(initial, Value::Null)
-            && !arr_borrow.is_empty()
-        {
+        let (start_idx, mut acc) = if matches!(initial, Value::Null) && !arr_borrow.is_empty() {
             // No initial value: use first element as acc, start from index 1
             (1, arr_borrow[0].clone())
         } else {
@@ -335,7 +347,9 @@ pub fn flat_map(arr: &Value, callback: &Value) -> Value {
 }
 
 fn sort_by_impl<F>(arr: &Value, cmp: F) -> Value
-where F: FnMut(&Value, &Value) -> std::cmp::Ordering {
+where
+    F: FnMut(&Value, &Value) -> std::cmp::Ordering,
+{
     if let Value::Array(arr) = arr {
         arr.borrow_mut().sort_by(cmp);
         Value::Array(Rc::clone(arr))
@@ -345,7 +359,9 @@ where F: FnMut(&Value, &Value) -> std::cmp::Ordering {
 }
 
 pub fn sort_default(arr: &Value) -> Value {
-    sort_by_impl(arr, |a, b| a.to_display_string().cmp(&b.to_display_string()))
+    sort_by_impl(arr, |a, b| {
+        a.to_display_string().cmp(&b.to_display_string())
+    })
 }
 
 pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
@@ -355,7 +371,7 @@ pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
         let mut indices: Vec<usize> = (0..len).collect();
         let mut elements: Vec<Value> = std::mem::take(&mut *arr_mut);
         let mut args_buf: [Value; 2] = [Value::Null, Value::Null];
-        
+
         indices.sort_by(|&a, &b| {
             args_buf[0] = elements[a].clone();
             args_buf[1] = elements[b].clone();
@@ -365,8 +381,11 @@ pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
                 _ => std::cmp::Ordering::Equal,
             }
         });
-        
-        *arr_mut = indices.into_iter().map(|i| std::mem::replace(&mut elements[i], Value::Null)).collect();
+
+        *arr_mut = indices
+            .into_iter()
+            .map(|i| std::mem::replace(&mut elements[i], Value::Null))
+            .collect();
         drop(arr_mut);
         Value::Array(Rc::clone(arr))
     } else {
@@ -380,7 +399,11 @@ fn num_cmp(a: &Value, b: &Value, asc: bool) -> std::cmp::Ordering {
         _ => (f64::NAN, f64::NAN),
     };
     let cmp = na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal);
-    if asc { cmp } else { cmp.reverse() }
+    if asc {
+        cmp
+    } else {
+        cmp.reverse()
+    }
 }
 
 pub fn sort_numeric_asc(arr: &Value) -> Value {
@@ -398,13 +421,21 @@ pub fn sort_by_property_numeric(arr: &Value, prop: &str, asc: bool) -> Value {
         let na = get_prop_number(a, &prop_arc);
         let nb = get_prop_number(b, &prop_arc);
         let cmp = na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal);
-        if asc { cmp } else { cmp.reverse() }
+        if asc {
+            cmp
+        } else {
+            cmp.reverse()
+        }
     })
 }
 
 fn get_prop_number(v: &Value, prop: &std::sync::Arc<str>) -> f64 {
     match v {
-        Value::Object(o) => o.borrow().get(prop.as_ref()).map(|v| v.as_number().unwrap_or(f64::NAN)).unwrap_or(f64::NAN),
+        Value::Object(o) => o
+            .borrow()
+            .get(prop.as_ref())
+            .map(|v| v.as_number().unwrap_or(f64::NAN))
+            .unwrap_or(f64::NAN),
         _ => f64::NAN,
     }
 }

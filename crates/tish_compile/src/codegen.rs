@@ -1,11 +1,14 @@
 //! Code generation: AST -> Rust source.
 
+use crate::resolve::is_builtin_native_spec;
+use crate::types::{RustType, TypeContext};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use tishlang_ast::{ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr, FunParam, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp};
-use crate::resolve::is_builtin_native_spec;
-use crate::types::{RustType, TypeContext};
+use tishlang_ast::{
+    ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr,
+    FunParam, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp,
+};
 
 /// Tracks variable usage for move/clone optimization.
 /// A variable can be moved instead of cloned if it's at its last use.
@@ -41,7 +44,12 @@ impl UsageAnalyzer {
                     self.analyze_expr(e);
                 }
             }
-            Statement::If { cond, then_branch, else_branch, .. } => {
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.analyze_expr(cond);
                 self.analyze_statement(then_branch);
                 if let Some(e) = else_branch {
@@ -49,7 +57,13 @@ impl UsageAnalyzer {
                 }
             }
             Statement::Block { statements, .. } => self.analyze_statements(statements),
-            Statement::For { init, cond, update, body, .. } => {
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
                 if let Some(i) = init {
                     self.analyze_statement(i);
                 }
@@ -69,7 +83,12 @@ impl UsageAnalyzer {
                 self.analyze_expr(cond);
                 self.analyze_statement(body);
             }
-            Statement::Switch { expr, cases, default_body, .. } => {
+            Statement::Switch {
+                expr,
+                cases,
+                default_body,
+                ..
+            } => {
                 self.analyze_expr(expr);
                 for (case_expr, stmts) in cases {
                     if let Some(e) = case_expr {
@@ -82,7 +101,12 @@ impl UsageAnalyzer {
                 }
             }
             Statement::Throw { value, .. } => self.analyze_expr(value),
-            Statement::Try { body, catch_body, finally_body, .. } => {
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
                 self.analyze_statement(body);
                 if let Some(c) = catch_body {
                     self.analyze_statement(c);
@@ -153,14 +177,17 @@ impl UsageAnalyzer {
                     }
                 }
             }
-            Expr::ArrowFunction { body, .. } => {
-                match body {
-                    ArrowBody::Expr(e) => self.analyze_expr(e),
-                    ArrowBody::Block(s) => self.analyze_statement(s),
-                }
-            }
+            Expr::ArrowFunction { body, .. } => match body {
+                ArrowBody::Expr(e) => self.analyze_expr(e),
+                ArrowBody::Block(s) => self.analyze_statement(s),
+            },
             Expr::Assign { value, .. } => self.analyze_expr(value),
-            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.analyze_expr(cond);
                 self.analyze_expr(then_branch);
                 self.analyze_expr(else_branch);
@@ -183,23 +210,37 @@ impl UsageAnalyzer {
                 *self.use_counts.entry(name.to_string()).or_insert(0) += 1;
                 self.analyze_expr(value);
             }
-            Expr::PostfixInc { name, .. } | Expr::PostfixDec { name, .. } | Expr::PrefixInc { name, .. } | Expr::PrefixDec { name, .. } => {
+            Expr::PostfixInc { name, .. }
+            | Expr::PostfixDec { name, .. }
+            | Expr::PrefixInc { name, .. }
+            | Expr::PrefixDec { name, .. } => {
                 *self.use_counts.entry(name.to_string()).or_insert(0) += 1;
             }
             Expr::MemberAssign { object, value, .. } => {
                 self.analyze_expr(object);
                 self.analyze_expr(value);
             }
-            Expr::IndexAssign { object, index, value, .. } => {
+            Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            } => {
                 self.analyze_expr(object);
                 self.analyze_expr(index);
                 self.analyze_expr(value);
             }
             Expr::Await { operand, .. } => self.analyze_expr(operand),
-            Expr::JsxElement { props, children, .. } => {
+            Expr::JsxElement {
+                props, children, ..
+            } => {
                 for p in props {
                     match p {
-                        tishlang_ast::JsxProp::Attr { value: tishlang_ast::JsxAttrValue::Expr(e), .. } | tishlang_ast::JsxProp::Spread(e) => self.analyze_expr(e),
+                        tishlang_ast::JsxProp::Attr {
+                            value: tishlang_ast::JsxAttrValue::Expr(e),
+                            ..
+                        }
+                        | tishlang_ast::JsxProp::Spread(e) => self.analyze_expr(e),
                         _ => {}
                     }
                 }
@@ -240,7 +281,10 @@ pub struct CompileError {
 
 impl CompileError {
     fn new(msg: impl Into<String>, span: Option<Span>) -> Self {
-        Self { message: msg.into(), span }
+        Self {
+            message: msg.into(),
+            span,
+        }
     }
 }
 
@@ -262,21 +306,45 @@ fn program_uses_async(program: &Program) -> bool {
         match s {
             Statement::FunDecl { async_, .. } if *async_ => true,
             Statement::Block { statements, .. } => statements.iter().any(stmt_has_async),
-            Statement::If { then_branch, else_branch, .. } => {
-                stmt_has_async(then_branch) || else_branch.as_ref().is_some_and(|s| stmt_has_async(s.as_ref()))
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                stmt_has_async(then_branch)
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|s| stmt_has_async(s.as_ref()))
             }
-            Statement::While { body, .. } | Statement::For { body, .. } | Statement::ForOf { body, .. }
+            Statement::While { body, .. }
+            | Statement::For { body, .. }
+            | Statement::ForOf { body, .. }
             | Statement::DoWhile { body, .. } => stmt_has_async(body),
-            Statement::Switch { cases, default_body, .. } => {
-                cases.iter().any(|(_, stmts)| stmts.iter().any(stmt_has_async))
+            Statement::Switch {
+                cases,
+                default_body,
+                ..
+            } => {
+                cases
+                    .iter()
+                    .any(|(_, stmts)| stmts.iter().any(stmt_has_async))
                     || default_body
                         .as_ref()
                         .is_some_and(|stmts| stmts.iter().any(stmt_has_async))
             }
-            Statement::Try { body, catch_body, finally_body, .. } => {
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
                 stmt_has_async(body)
-                    || catch_body.as_ref().is_some_and(|s| stmt_has_async(s.as_ref()))
-                    || finally_body.as_ref().is_some_and(|s| stmt_has_async(s.as_ref()))
+                    || catch_body
+                        .as_ref()
+                        .is_some_and(|s| stmt_has_async(s.as_ref()))
+                    || finally_body
+                        .as_ref()
+                        .is_some_and(|s| stmt_has_async(s.as_ref()))
             }
             _ => false,
         }
@@ -287,14 +355,16 @@ fn program_uses_async(program: &Program) -> bool {
             Expr::Binary { left, right, .. } => expr_has_await(left) || expr_has_await(right),
             Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } => expr_has_await(operand),
             Expr::Call { callee, args, .. } => {
-                expr_has_await(callee) || args.iter().any(|a| match a {
-                    CallArg::Expr(e) | CallArg::Spread(e) => expr_has_await(e),
-                })
+                expr_has_await(callee)
+                    || args.iter().any(|a| match a {
+                        CallArg::Expr(e) | CallArg::Spread(e) => expr_has_await(e),
+                    })
             }
             Expr::New { callee, args, .. } => {
-                expr_has_await(callee) || args.iter().any(|a| match a {
-                    CallArg::Expr(e) | CallArg::Spread(e) => expr_has_await(e),
-                })
+                expr_has_await(callee)
+                    || args.iter().any(|a| match a {
+                        CallArg::Expr(e) | CallArg::Spread(e) => expr_has_await(e),
+                    })
             }
             Expr::Member { object, prop, .. } => {
                 expr_has_await(object)
@@ -305,32 +375,48 @@ fn program_uses_async(program: &Program) -> bool {
                     }
             }
             Expr::Index { object, index, .. } => expr_has_await(object) || expr_has_await(index),
-            Expr::Conditional { cond, then_branch, else_branch, .. } => {
-                expr_has_await(cond) || expr_has_await(then_branch) || expr_has_await(else_branch)
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => expr_has_await(cond) || expr_has_await(then_branch) || expr_has_await(else_branch),
+            Expr::NullishCoalesce { left, right, .. } => {
+                expr_has_await(left) || expr_has_await(right)
             }
-            Expr::NullishCoalesce { left, right, .. } => expr_has_await(left) || expr_has_await(right),
             Expr::Array { elements, .. } => elements.iter().any(|el| match el {
                 ArrayElement::Expr(e) | ArrayElement::Spread(e) => expr_has_await(e),
             }),
             Expr::Object { props, .. } => props.iter().any(|p| match p {
                 ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => expr_has_await(e),
             }),
-            Expr::Assign { value, .. } | Expr::CompoundAssign { value, .. } | Expr::LogicalAssign { value, .. }
-            | Expr::MemberAssign { value, .. } | Expr::IndexAssign { value, .. } => expr_has_await(value),
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. }
+            | Expr::MemberAssign { value, .. }
+            | Expr::IndexAssign { value, .. } => expr_has_await(value),
             Expr::ArrowFunction { body, .. } => match body {
                 ArrowBody::Expr(e) => expr_has_await(e),
                 ArrowBody::Block(s) => stmt_has_async(s),
             },
             Expr::TemplateLiteral { exprs, .. } => exprs.iter().any(expr_has_await),
-            Expr::JsxElement { props, children, .. } => {
+            Expr::JsxElement {
+                props, children, ..
+            } => {
                 props.iter().any(|p| match p {
-                    tishlang_ast::JsxProp::Attr { value: tishlang_ast::JsxAttrValue::Expr(e), .. } | tishlang_ast::JsxProp::Spread(e) => expr_has_await(e),
+                    tishlang_ast::JsxProp::Attr {
+                        value: tishlang_ast::JsxAttrValue::Expr(e),
+                        ..
+                    }
+                    | tishlang_ast::JsxProp::Spread(e) => expr_has_await(e),
                     _ => false,
-                }) || children.iter().any(|c| matches!(c, tishlang_ast::JsxChild::Expr(e) if expr_has_await(e)))
+                }) || children
+                    .iter()
+                    .any(|c| matches!(c, tishlang_ast::JsxChild::Expr(e) if expr_has_await(e)))
             }
-            Expr::JsxFragment { children, .. } => {
-                children.iter().any(|c| matches!(c, tishlang_ast::JsxChild::Expr(e) if expr_has_await(e)))
-            }
+            Expr::JsxFragment { children, .. } => children
+                .iter()
+                .any(|c| matches!(c, tishlang_ast::JsxChild::Expr(e) if expr_has_await(e))),
             _ => false,
         }
     }
@@ -340,21 +426,42 @@ fn program_uses_async(program: &Program) -> bool {
             Statement::VarDecl { init, .. } => init.as_ref().is_some_and(expr_has_await),
             Statement::VarDeclDestructure { init, .. } => expr_has_await(init),
             Statement::ExprStmt { expr, .. } => expr_has_await(expr),
-            Statement::If { cond, then_branch, else_branch, .. } => {
-                expr_has_await(cond) || stmt_has_await(then_branch)
-                    || else_branch.as_ref().is_some_and(|s| stmt_has_await(s.as_ref()))
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                expr_has_await(cond)
+                    || stmt_has_await(then_branch)
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|s| stmt_has_await(s.as_ref()))
             }
             Statement::While { cond, body, .. } => expr_has_await(cond) || stmt_has_await(body),
-            Statement::For { init, cond, update, body, .. } => {
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
                 init.as_ref().is_some_and(|s| stmt_has_await(s.as_ref()))
                     || cond.as_ref().is_some_and(expr_has_await)
                     || update.as_ref().is_some_and(expr_has_await)
                     || stmt_has_await(body)
             }
-            Statement::ForOf { iterable, body, .. } => expr_has_await(iterable) || stmt_has_await(body),
+            Statement::ForOf { iterable, body, .. } => {
+                expr_has_await(iterable) || stmt_has_await(body)
+            }
             Statement::Return { value, .. } => value.as_ref().is_some_and(expr_has_await),
             Statement::FunDecl { body, .. } => stmt_has_await(body),
-            Statement::Switch { expr, cases, default_body, .. } => {
+            Statement::Switch {
+                expr,
+                cases,
+                default_body,
+                ..
+            } => {
                 expr_has_await(expr)
                     || cases.iter().any(|(c, stmts)| {
                         c.as_ref().is_some_and(expr_has_await) || stmts.iter().any(stmt_has_await)
@@ -365,23 +472,38 @@ fn program_uses_async(program: &Program) -> bool {
             }
             Statement::DoWhile { body, cond, .. } => stmt_has_await(body) || expr_has_await(cond),
             Statement::Throw { value, .. } => expr_has_await(value),
-            Statement::Try { body, catch_body, finally_body, .. } => {
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
                 stmt_has_await(body)
-                    || catch_body.as_ref().is_some_and(|s| stmt_has_await(s.as_ref()))
-                    || finally_body.as_ref().is_some_and(|s| stmt_has_await(s.as_ref()))
+                    || catch_body
+                        .as_ref()
+                        .is_some_and(|s| stmt_has_await(s.as_ref()))
+                    || finally_body
+                        .as_ref()
+                        .is_some_and(|s| stmt_has_await(s.as_ref()))
             }
             Statement::Import { .. } | Statement::Export { .. } => false,
             _ => false,
         }
     }
-    program.statements.iter().any(|s| stmt_has_async(s) || stmt_has_await(s))
+    program
+        .statements
+        .iter()
+        .any(|s| stmt_has_async(s) || stmt_has_await(s))
 }
 
 pub fn compile(program: &Program) -> Result<String, CompileError> {
     compile_with_project_root(program, None)
 }
 
-pub fn compile_with_project_root(program: &Program, project_root: Option<&Path>) -> Result<String, CompileError> {
+pub fn compile_with_project_root(
+    program: &Program,
+    project_root: Option<&Path>,
+) -> Result<String, CompileError> {
     compile_with_features(program, project_root, &[])
 }
 
@@ -416,16 +538,28 @@ pub fn compile_project_full(
 > {
     use crate::resolve;
     let root = project_root.unwrap_or_else(|| entry_path.parent().unwrap_or(Path::new(".")));
-    let modules = resolve::resolve_project(entry_path, project_root)
-        .map_err(|e| CompileError { message: e, span: None })?;
-    resolve::detect_cycles(&modules)
-        .map_err(|e| CompileError { message: e, span: None })?;
-    let merged = resolve::merge_modules(modules)
-        .map_err(|e| CompileError { message: e, span: None })?;
-    let native_modules = resolve::resolve_native_modules(&merged, root)
-        .map_err(|e| CompileError { message: e, span: None })?;
+    let modules = resolve::resolve_project(entry_path, project_root).map_err(|e| CompileError {
+        message: e,
+        span: None,
+    })?;
+    resolve::detect_cycles(&modules).map_err(|e| CompileError {
+        message: e,
+        span: None,
+    })?;
+    let merged = resolve::merge_modules(modules).map_err(|e| CompileError {
+        message: e,
+        span: None,
+    })?;
+    let native_modules =
+        resolve::resolve_native_modules(&merged, root).map_err(|e| CompileError {
+            message: e,
+            span: None,
+        })?;
     let native_build = resolve::compute_native_build_artifacts(&merged, root, &native_modules)
-        .map_err(|e| CompileError { message: e, span: None })?;
+        .map_err(|e| CompileError {
+            message: e,
+            span: None,
+        })?;
     let mut all_features: Vec<String> = features.to_vec();
     for f in resolve::extract_native_import_features(&merged) {
         if !all_features.contains(&f) {
@@ -463,7 +597,11 @@ pub fn compile_with_native_modules(
     native_init: &std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
     optimize: bool,
 ) -> Result<String, CompileError> {
-    let program = if optimize { tishlang_opt::optimize(program) } else { program.clone() };
+    let program = if optimize {
+        tishlang_opt::optimize(program)
+    } else {
+        program.clone()
+    };
     // Type-inference pass: fills in `type_ann` on unannotated VarDecl nodes where
     // the type is unambiguous (literals, arithmetic of typed vars, etc.).
     let program = crate::infer::infer_program(&program);
@@ -668,17 +806,23 @@ impl Codegen {
     /// Escape Rust reserved keywords by prefixing with r#
     fn escape_ident(name: &str) -> Cow<'_, str> {
         // Rust standard library macros that conflict with variable names
-        const RUST_MACROS: &[&str] = &["line", "column", "file", "module_path", "stringify", "concat"];
+        const RUST_MACROS: &[&str] = &[
+            "line",
+            "column",
+            "file",
+            "module_path",
+            "stringify",
+            "concat",
+        ];
         if RUST_MACROS.contains(&name) {
             return Cow::Owned(format!("r#{}", name));
         }
         const RUST_KEYWORDS: &[&str] = &[
-            "as", "async", "await", "break", "const", "continue", "crate", "dyn",
-            "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in",
-            "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
-            "self", "Self", "static", "struct", "super", "trait", "true", "type",
-            "unsafe", "use", "where", "while", "abstract", "become", "box", "do",
-            "final", "macro", "override", "priv", "try", "typeof", "unsized",
+            "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+            "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod",
+            "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super",
+            "trait", "true", "type", "unsafe", "use", "where", "while", "abstract", "become",
+            "box", "do", "final", "macro", "override", "priv", "try", "typeof", "unsized",
             "virtual", "yield",
         ];
         if RUST_KEYWORDS.contains(&name) {
@@ -717,20 +861,20 @@ impl Codegen {
         if !Self::needs_clone(expr) {
             return false;
         }
-        
+
         // Check for last-use optimization on simple identifiers
         if let Expr::Ident { name, .. } = expr {
             // Don't optimize RefCell-wrapped vars (they're borrowed, not owned)
             if self.refcell_wrapped_vars.contains(name.as_ref()) {
                 return true;
             }
-            
+
             // Inside a loop, any variable used in an init (e.g. "let x = outerVar") must be cloned:
             // the loop body runs multiple times, so we cannot move on the first iteration.
             if !self.loop_stack.is_empty() {
                 return true;
             }
-            
+
             // Check if this is the last use
             if let Some(ref mut analyzer) = self.usage_analyzer {
                 if analyzer.is_last_use(name.as_ref()) {
@@ -738,7 +882,7 @@ impl Codegen {
                 }
             }
         }
-        
+
         true
     }
 
@@ -806,7 +950,7 @@ impl Codegen {
     /// Returns Some(true) for ascending, Some(false) for descending, None if not detected
     fn detect_numeric_sort_comparator(expr: &Expr) -> Option<bool> {
         use tishlang_ast::ArrowBody;
-        
+
         if let Expr::ArrowFunction { params, body, .. } = expr {
             if params.len() != 2 {
                 return None;
@@ -819,7 +963,7 @@ impl Codegen {
                 }
                 _ => return None,
             };
-            
+
             // Body must be a single expression that's a subtraction
             let body_expr = match body {
                 ArrowBody::Expr(e) => e.as_ref(),
@@ -831,10 +975,24 @@ impl Codegen {
                     }
                 }
             };
-            
-            if let Expr::Binary { left, op: BinOp::Sub, right, .. } = body_expr {
+
+            if let Expr::Binary {
+                left,
+                op: BinOp::Sub,
+                right,
+                ..
+            } = body_expr
+            {
                 // Check for a - b (ascending) or b - a (descending)
-                if let (Expr::Ident { name: left_name, .. }, Expr::Ident { name: right_name, .. }) = (left.as_ref(), right.as_ref()) {
+                if let (
+                    Expr::Ident {
+                        name: left_name, ..
+                    },
+                    Expr::Ident {
+                        name: right_name, ..
+                    },
+                ) = (left.as_ref(), right.as_ref())
+                {
                     if left_name.as_ref() == param_a && right_name.as_ref() == param_b {
                         return Some(true); // ascending
                     }
@@ -916,31 +1074,61 @@ impl Codegen {
         self.writeln("(Arc::from(\"error\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_error(args); Value::Null }))),");
         self.indent -= 1;
         self.writeln("]))));");
-        self.writeln("let Boolean = Value::Function(Rc::new(|args: &[Value]| tish_boolean(args)));");
-        self.writeln("let parseInt = Value::Function(Rc::new(|args: &[Value]| tish_parse_int(args)));");
-        self.writeln("let parseFloat = Value::Function(Rc::new(|args: &[Value]| tish_parse_float(args)));");
-        self.writeln("let decodeURI = Value::Function(Rc::new(|args: &[Value]| tish_decode_uri(args)));");
-        self.writeln("let encodeURI = Value::Function(Rc::new(|args: &[Value]| tish_encode_uri(args)));");
-        self.writeln("let isFinite = Value::Function(Rc::new(|args: &[Value]| tish_is_finite(args)));");
+        self.writeln(
+            "let Boolean = Value::Function(Rc::new(|args: &[Value]| tish_boolean(args)));",
+        );
+        self.writeln(
+            "let parseInt = Value::Function(Rc::new(|args: &[Value]| tish_parse_int(args)));",
+        );
+        self.writeln(
+            "let parseFloat = Value::Function(Rc::new(|args: &[Value]| tish_parse_float(args)));",
+        );
+        self.writeln(
+            "let decodeURI = Value::Function(Rc::new(|args: &[Value]| tish_decode_uri(args)));",
+        );
+        self.writeln(
+            "let encodeURI = Value::Function(Rc::new(|args: &[Value]| tish_encode_uri(args)));",
+        );
+        self.writeln(
+            "let isFinite = Value::Function(Rc::new(|args: &[Value]| tish_is_finite(args)));",
+        );
         self.writeln("let isNaN = Value::Function(Rc::new(|args: &[Value]| tish_is_nan(args)));");
         self.writeln("let Infinity = Value::Number(f64::INFINITY);");
         self.writeln("let NaN = Value::Number(f64::NAN);");
         self.writeln("let Math = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"abs\"), Value::Function(Rc::new(|args: &[Value]| tish_math_abs(args)))),");
+        self.writeln(
+            "(Arc::from(\"abs\"), Value::Function(Rc::new(|args: &[Value]| tish_math_abs(args)))),",
+        );
         self.writeln("(Arc::from(\"sqrt\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sqrt(args)))),");
-        self.writeln("(Arc::from(\"min\"), Value::Function(Rc::new(|args: &[Value]| tish_math_min(args)))),");
-        self.writeln("(Arc::from(\"max\"), Value::Function(Rc::new(|args: &[Value]| tish_math_max(args)))),");
+        self.writeln(
+            "(Arc::from(\"min\"), Value::Function(Rc::new(|args: &[Value]| tish_math_min(args)))),",
+        );
+        self.writeln(
+            "(Arc::from(\"max\"), Value::Function(Rc::new(|args: &[Value]| tish_math_max(args)))),",
+        );
         self.writeln("(Arc::from(\"floor\"), Value::Function(Rc::new(|args: &[Value]| tish_math_floor(args)))),");
         self.writeln("(Arc::from(\"ceil\"), Value::Function(Rc::new(|args: &[Value]| tish_math_ceil(args)))),");
         self.writeln("(Arc::from(\"round\"), Value::Function(Rc::new(|args: &[Value]| tish_math_round(args)))),");
         self.writeln("(Arc::from(\"random\"), Value::Function(Rc::new(|args: &[Value]| tish_math_random(args)))),");
-        self.writeln("(Arc::from(\"pow\"), Value::Function(Rc::new(|args: &[Value]| tish_math_pow(args)))),");
-        self.writeln("(Arc::from(\"sin\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sin(args)))),");
-        self.writeln("(Arc::from(\"cos\"), Value::Function(Rc::new(|args: &[Value]| tish_math_cos(args)))),");
-        self.writeln("(Arc::from(\"tan\"), Value::Function(Rc::new(|args: &[Value]| tish_math_tan(args)))),");
-        self.writeln("(Arc::from(\"log\"), Value::Function(Rc::new(|args: &[Value]| tish_math_log(args)))),");
-        self.writeln("(Arc::from(\"exp\"), Value::Function(Rc::new(|args: &[Value]| tish_math_exp(args)))),");
+        self.writeln(
+            "(Arc::from(\"pow\"), Value::Function(Rc::new(|args: &[Value]| tish_math_pow(args)))),",
+        );
+        self.writeln(
+            "(Arc::from(\"sin\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sin(args)))),",
+        );
+        self.writeln(
+            "(Arc::from(\"cos\"), Value::Function(Rc::new(|args: &[Value]| tish_math_cos(args)))),",
+        );
+        self.writeln(
+            "(Arc::from(\"tan\"), Value::Function(Rc::new(|args: &[Value]| tish_math_tan(args)))),",
+        );
+        self.writeln(
+            "(Arc::from(\"log\"), Value::Function(Rc::new(|args: &[Value]| tish_math_log(args)))),",
+        );
+        self.writeln(
+            "(Arc::from(\"exp\"), Value::Function(Rc::new(|args: &[Value]| tish_math_exp(args)))),",
+        );
         self.writeln("(Arc::from(\"sign\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sign(args)))),");
         self.writeln("(Arc::from(\"trunc\"), Value::Function(Rc::new(|args: &[Value]| tish_math_trunc(args)))),");
         self.writeln("(Arc::from(\"PI\"), Value::Number(std::f64::consts::PI)),");
@@ -968,7 +1156,9 @@ impl Codegen {
 
         self.writeln("let Date = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"now\"), Value::Function(Rc::new(|args: &[Value]| tish_date_now(args)))),");
+        self.writeln(
+            "(Arc::from(\"now\"), Value::Function(Rc::new(|args: &[Value]| tish_date_now(args)))),",
+        );
         self.indent -= 1;
         self.writeln("]))));");
 
@@ -993,14 +1183,18 @@ impl Codegen {
             self.writeln("p.insert(Arc::from(\"cwd\"), Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args))));");
             self.writeln("p.insert(Arc::from(\"exec\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args))));");
             self.writeln("let argv: Vec<Value> = std::env::args().map(|s| Value::String(s.into())).collect();");
-            self.writeln("p.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(argv))));");
+            self.writeln(
+                "p.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(argv))));",
+            );
             self.writeln("let mut env_obj = ObjectMap::default();");
             self.writeln("for (key, value) in std::env::vars() {");
             self.indent += 1;
             self.writeln("env_obj.insert(Arc::from(key.as_str()), Value::String(value.into()));");
             self.indent -= 1;
             self.writeln("}");
-            self.writeln("p.insert(Arc::from(\"env\"), Value::Object(Rc::new(RefCell::new(env_obj))));");
+            self.writeln(
+                "p.insert(Arc::from(\"env\"), Value::Object(Rc::new(RefCell::new(env_obj))));",
+            );
             self.writeln("p");
             self.indent -= 1;
             self.writeln("})));");
@@ -1032,16 +1226,28 @@ impl Codegen {
         }
 
         if self.has_feature("fs") {
-            self.writeln("let readFile = Value::Function(Rc::new(|args: &[Value]| tish_read_file(args)));");
-            self.writeln("let writeFile = Value::Function(Rc::new(|args: &[Value]| tish_write_file(args)));");
+            self.writeln(
+                "let readFile = Value::Function(Rc::new(|args: &[Value]| tish_read_file(args)));",
+            );
+            self.writeln(
+                "let writeFile = Value::Function(Rc::new(|args: &[Value]| tish_write_file(args)));",
+            );
             self.writeln("let fileExists = Value::Function(Rc::new(|args: &[Value]| tish_file_exists(args)));");
-            self.writeln("let isDir = Value::Function(Rc::new(|args: &[Value]| tish_is_dir(args)));");
-            self.writeln("let readDir = Value::Function(Rc::new(|args: &[Value]| tish_read_dir(args)));");
-            self.writeln("let mkdir = Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)));");
+            self.writeln(
+                "let isDir = Value::Function(Rc::new(|args: &[Value]| tish_is_dir(args)));",
+            );
+            self.writeln(
+                "let readDir = Value::Function(Rc::new(|args: &[Value]| tish_read_dir(args)));",
+            );
+            self.writeln(
+                "let mkdir = Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)));",
+            );
         }
 
         if self.has_feature("regex") {
-            self.writeln("let RegExp = Value::Function(Rc::new(|args: &[Value]| regexp_new(args)));");
+            self.writeln(
+                "let RegExp = Value::Function(Rc::new(|args: &[Value]| regexp_new(args)));",
+            );
         }
 
         if self.program_has_jsx {
@@ -1049,7 +1255,9 @@ impl Codegen {
             self.writeln("let Fragment = fragment_value();");
             self.writeln("let h = Value::Function(Rc::new(|args: &[Value]| ui_h(args)));");
             self.writeln("let text = Value::Function(Rc::new(|args: &[Value]| ui_text(args)));");
-            self.writeln("let useState = Value::Function(Rc::new(|args: &[Value]| native_use_state(args)));");
+            self.writeln(
+                "let useState = Value::Function(Rc::new(|args: &[Value]| native_use_state(args)));",
+            );
             self.writeln("let createRoot = Value::Function(Rc::new(|args: &[Value]| native_create_root(args)));");
         }
 
@@ -1060,7 +1268,10 @@ impl Codegen {
         *self.function_scope_stack.last_mut().unwrap() = top_level_funcs.clone();
         for func_name in &top_level_funcs {
             let escaped = Self::escape_ident(func_name);
-            self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", escaped));
+            self.writeln(&format!(
+                "let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));",
+                escaped
+            ));
         }
 
         // Initialize usage analyzer for move/clone optimization
@@ -1097,9 +1308,11 @@ impl Codegen {
                 self.indent += 1;
                 self.type_context.push_scope();
                 self.outer_vars_stack.push(Vec::new());
-                self.rc_cell_storage_scopes.push(std::collections::HashSet::new());
+                self.rc_cell_storage_scopes
+                    .push(std::collections::HashSet::new());
                 // Prepass: vars that must be RefCell because nested closures capture and mutate them
-                let vars_mutated_by_nested = Self::collect_vars_mutated_by_nested_closures(statements);
+                let vars_mutated_by_nested =
+                    Self::collect_vars_mutated_by_nested_closures(statements);
                 for v in &vars_mutated_by_nested {
                     self.refcell_wrapped_vars.insert(v.clone());
                 }
@@ -1109,7 +1322,10 @@ impl Codegen {
                 // Create cells for all functions in this scope
                 for func_name in &func_names {
                     let escaped = Self::escape_ident(func_name);
-                    self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", escaped));
+                    self.writeln(&format!(
+                        "let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));",
+                        escaped
+                    ));
                 }
                 for s in statements {
                     self.emit_statement(s)?;
@@ -1124,7 +1340,13 @@ impl Codegen {
                 self.indent -= 1;
                 self.writeln("}");
             }
-            Statement::VarDecl { name, mutable, type_ann, init, .. } => {
+            Statement::VarDecl {
+                name,
+                mutable,
+                type_ann,
+                init,
+                ..
+            } => {
                 // Determine the Rust type from annotation
                 let rust_type = type_ann
                     .as_ref()
@@ -1133,10 +1355,10 @@ impl Codegen {
 
                 // Track the variable type
                 self.type_context.define(name.as_ref(), rust_type.clone());
-                
+
                 let mutability = if *mutable { "let mut" } else { "let" };
                 let escaped_name = Self::escape_ident(name.as_ref());
-                
+
                 if rust_type.is_native() {
                     // Generate native typed variable
                     let expr_str = match init.as_ref() {
@@ -1164,8 +1386,7 @@ impl Codegen {
                             let s = self.emit_expr(e)?;
                             // Variable refs (Ident) in init must always clone: they may be used
                             // multiple times (e.g. in a loop body) and we cannot move.
-                            let needs = matches!(e, Expr::Ident { .. })
-                                || self.should_clone(e);
+                            let needs = matches!(e, Expr::Ident { .. }) || self.should_clone(e);
                             (s, needs)
                         }
                         None => ("Value::Null".to_string(), false),
@@ -1177,23 +1398,39 @@ impl Codegen {
                         } else {
                             expr_str.to_string()
                         };
-                        self.writeln(&format!("let {} = std::rc::Rc::new(RefCell::new({}));", escaped_name, init_val));
+                        self.writeln(&format!(
+                            "let {} = std::rc::Rc::new(RefCell::new({}));",
+                            escaped_name, init_val
+                        ));
                         self.rc_cell_storage_define(name.as_ref());
                     } else if clone_needed {
-                        self.writeln(&format!("{} {} = ({}).clone();", mutability, escaped_name, expr_str));
+                        self.writeln(&format!(
+                            "{} {} = ({}).clone();",
+                            mutability, escaped_name, expr_str
+                        ));
                     } else {
                         self.writeln(&format!("{} {} = {};", mutability, escaped_name, expr_str));
                     }
                 }
-                
+
                 if let Some(scope) = self.outer_vars_stack.last_mut() {
                     scope.push(name.to_string());
                 }
             }
-            Statement::VarDeclDestructure { pattern, mutable, init, span, .. } => {
+            Statement::VarDeclDestructure {
+                pattern,
+                mutable,
+                init,
+                span,
+                ..
+            } => {
                 let expr = self.emit_expr(init)?;
                 let mutability = if *mutable { "let mut" } else { "let" };
-                let clone_suffix = if Self::needs_clone(init) { ".clone()" } else { "" };
+                let clone_suffix = if Self::needs_clone(init) {
+                    ".clone()"
+                } else {
+                    ""
+                };
                 self.writeln(&format!("let _destruct_val = ({}){};", expr, clone_suffix));
                 self.emit_destruct_bindings(pattern, "_destruct_val", mutability, *span)?;
             }
@@ -1232,7 +1469,12 @@ impl Codegen {
                 self.indent -= 1;
                 self.writeln("}");
             }
-            Statement::ForOf { name, iterable, body, .. } => {
+            Statement::ForOf {
+                name,
+                iterable,
+                body,
+                ..
+            } => {
                 let iter_expr = self.emit_expr(iterable)?;
                 self.writeln(&format!("{{ let _fof = ({}).clone();", iter_expr));
                 self.indent += 1;
@@ -1242,7 +1484,10 @@ impl Codegen {
                 self.indent += 1;
                 self.writeln("for _v in _arr.borrow().iter() {");
                 self.indent += 1;
-                self.writeln(&format!("let {} = _v.clone();", Self::escape_ident(name.as_ref())));
+                self.writeln(&format!(
+                    "let {} = _v.clone();",
+                    Self::escape_ident(name.as_ref())
+                ));
                 self.emit_statement(body)?;
                 self.indent -= 1;
                 self.writeln("}");
@@ -1320,12 +1565,10 @@ impl Codegen {
                 }
             }
             Statement::Continue { .. } => {
-                let snippet = self.loop_stack.last().map(|(label, update)| {
-                    (
-                        label.clone(),
-                        update.clone(),
-                    )
-                });
+                let snippet = self
+                    .loop_stack
+                    .last()
+                    .map(|(label, update)| (label.clone(), update.clone()));
                 if let Some((label, Some(update))) = snippet {
                     self.writeln(&update);
                     self.writeln(&format!("continue {};", label));
@@ -1341,7 +1584,12 @@ impl Codegen {
                     span: None,
                 });
             }
-            Statement::Switch { expr, cases, default_body, .. } => {
+            Statement::Switch {
+                expr,
+                cases,
+                default_body,
+                ..
+            } => {
                 let e = self.emit_expr(expr)?;
                 self.writeln(&format!("let _sv = {};", e));
                 self.writeln("match () {");
@@ -1407,7 +1655,7 @@ impl Codegen {
                 self.writeln("Ok(Value::Null)");
                 self.indent -= 1;
                 self.writeln("})();");
-                
+
                 if let Some(catch_stmt) = catch_body {
                     if let Some(param) = catch_param {
                         self.writeln("if let Err(e) = _try_result {");
@@ -1417,7 +1665,10 @@ impl Codegen {
                         self.writeln("Ok(tish_err) => {");
                         self.indent += 1;
                         self.writeln("if let tishlang_runtime::TishError::Throw(v) = *tish_err {");
-                        self.writeln(&format!("let {} = v.clone();", Self::escape_ident(param.as_ref())));
+                        self.writeln(&format!(
+                            "let {} = v.clone();",
+                            Self::escape_ident(param.as_ref())
+                        ));
                         self.emit_statement(catch_stmt)?;
                         self.writeln("} else { return Err(Box::new(tish_err)); }");
                         self.indent -= 1;
@@ -1434,25 +1685,36 @@ impl Codegen {
                     }
                     self.writeln("}");
                 }
-                
+
                 if let Some(finally_stmt) = finally_body {
                     self.emit_statement(finally_stmt)?;
                 }
             }
-            Statement::FunDecl { name, params, rest_param, body, span, .. } => {
+            Statement::FunDecl {
+                name,
+                params,
+                rest_param,
+                body,
+                span,
+                ..
+            } => {
                 // Use Rc<RefCell<>> pattern to allow recursive function calls
                 // The function can reference itself through the cell
                 let name_raw = name.as_ref();
                 let name_str = Self::escape_ident(name_raw);
                 // Check if cell was already created by block prescan
-                let cell_exists = self.function_scope_stack
+                let cell_exists = self
+                    .function_scope_stack
                     .last()
                     .map(|scope| scope.contains(&name_raw.to_string()))
                     .unwrap_or(false);
                 if !cell_exists {
-                    self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", name_str));
+                    self.writeln(&format!(
+                        "let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));",
+                        name_str
+                    ));
                 }
-                
+
                 // Analyze body to find which identifiers are actually referenced
                 let mut referenced = HashSet::new();
                 Self::collect_stmt_idents(body, &mut referenced);
@@ -1461,9 +1723,10 @@ impl Codegen {
                     .flat_map(|p| p.bound_names())
                     .map(|n| n.to_string())
                     .collect();
-                
+
                 // Collect all outer parameters that need to be captured (only those referenced)
-                let outer_params: Vec<String> = self.outer_params_stack
+                let outer_params: Vec<String> = self
+                    .outer_params_stack
                     .iter()
                     .flat_map(|p| p.iter().cloned())
                     .filter(|name| referenced.contains(name) && !param_names.contains(name))
@@ -1472,11 +1735,31 @@ impl Codegen {
                 // Exclude params and variables declared in this function's body (locals)
                 let mut local_var_names = HashSet::new();
                 Self::collect_local_var_names(body, &mut local_var_names);
-                let outer_vars: Vec<String> = self.outer_vars_stack
+                let outer_vars: Vec<String> = self
+                    .outer_vars_stack
                     .iter()
                     .flat_map(|v| v.iter().cloned())
-                    .filter(|name| referenced.contains(name) && !param_names.contains(name) && !local_var_names.contains(name))
-                    .filter(|name| !["Boolean", "console", "Math", "JSON", "Date", "process", "setTimeout", "clearTimeout", "Promise", "RegExp", "Polars"].contains(&name.as_str()))
+                    .filter(|name| {
+                        referenced.contains(name)
+                            && !param_names.contains(name)
+                            && !local_var_names.contains(name)
+                    })
+                    .filter(|name| {
+                        ![
+                            "Boolean",
+                            "console",
+                            "Math",
+                            "JSON",
+                            "Date",
+                            "process",
+                            "setTimeout",
+                            "clearTimeout",
+                            "Promise",
+                            "RegExp",
+                            "Polars",
+                        ]
+                        .contains(&name.as_str())
+                    })
                     .collect();
 
                 // Outer vars that are assigned in the body need RefCell (capture cell, add to refcell_wrapped_vars).
@@ -1499,9 +1782,15 @@ impl Codegen {
                 for outer_var in &outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
                     if self.rc_cell_storage_contains(outer_var) {
-                        self.writeln(&format!("let {}_cell = {}.clone();", var_escaped, var_escaped));
+                        self.writeln(&format!(
+                            "let {}_cell = {}.clone();",
+                            var_escaped, var_escaped
+                        ));
                     } else {
-                        self.writeln(&format!("let {}_cell = std::rc::Rc::new(RefCell::new({}.clone()));", var_escaped, var_escaped));
+                        self.writeln(&format!(
+                            "let {}_cell = std::rc::Rc::new(RefCell::new({}.clone()));",
+                            var_escaped, var_escaped
+                        ));
                     }
                 }
 
@@ -1510,32 +1799,62 @@ impl Codegen {
                 // Clone RefCell for outer vars so closure can capture
                 for outer_var in &outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
-                    self.writeln(&format!("let {}_cell = {}_cell.clone();", var_escaped, var_escaped));
+                    self.writeln(&format!(
+                        "let {}_cell = {}_cell.clone();",
+                        var_escaped, var_escaped
+                    ));
                 }
                 // Clone the cell so the closure can reference the function recursively
                 let needs_self_ref = referenced.contains(name_raw);
                 if needs_self_ref {
-                    self.writeln(&format!("let {}_ref = {}_cell.clone();", name_str, name_str));
+                    self.writeln(&format!(
+                        "let {}_ref = {}_cell.clone();",
+                        name_str, name_str
+                    ));
                 }
                 // Clone sibling function cells for mutual recursion
-                let sibling_fns: Vec<String> = self.function_scope_stack
+                let sibling_fns: Vec<String> = self
+                    .function_scope_stack
                     .last()
-                    .map(|scope| scope.iter()
-                        .filter(|s| s.as_str() != name_raw && referenced.contains(s.as_str()))
-                        .cloned()
-                        .collect())
+                    .map(|scope| {
+                        scope
+                            .iter()
+                            .filter(|s| s.as_str() != name_raw && referenced.contains(s.as_str()))
+                            .cloned()
+                            .collect()
+                    })
                     .unwrap_or_default();
                 for sibling in &sibling_fns {
                     let sibling_escaped = Self::escape_ident(sibling);
-                    self.writeln(&format!("let {}_ref = {}_cell.clone();", sibling_escaped, sibling_escaped));
+                    self.writeln(&format!(
+                        "let {}_ref = {}_cell.clone();",
+                        sibling_escaped, sibling_escaped
+                    ));
                 }
                 // Clone outer parameters so they can be captured by the move closure
                 for outer_param in &outer_params {
                     let param_escaped = Self::escape_ident(outer_param);
-                    self.writeln(&format!("let {} = {}.clone();", param_escaped, param_escaped));
+                    self.writeln(&format!(
+                        "let {} = {}.clone();",
+                        param_escaped, param_escaped
+                    ));
                 }
                 // Only clone builtins that are actually referenced (clone so outer scope can still use them, e.g. process for PORT before serve)
-                for builtin in &["Boolean", "console", "Math", "JSON", "Date", "Uint8Array", "AudioContext", "process", "setTimeout", "clearTimeout", "Promise", "RegExp", "Polars"] {
+                for builtin in &[
+                    "Boolean",
+                    "console",
+                    "Math",
+                    "JSON",
+                    "Date",
+                    "Uint8Array",
+                    "AudioContext",
+                    "process",
+                    "setTimeout",
+                    "clearTimeout",
+                    "Promise",
+                    "RegExp",
+                    "Polars",
+                ] {
                     if referenced.contains(*builtin) {
                         self.writeln(&format!("let {} = {}.clone();", builtin, builtin));
                     }
@@ -1545,21 +1864,33 @@ impl Codegen {
                 // Mutable outer vars: capture the RefCell so assignments use borrow_mut
                 for outer_var in &mutable_outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
-                    self.writeln(&format!("let {} = {}_cell.clone();", var_escaped, var_escaped));
+                    self.writeln(&format!(
+                        "let {} = {}_cell.clone();",
+                        var_escaped, var_escaped
+                    ));
                 }
                 // Read-only outer vars: Value binding from borrow (avoids param-shadow issues)
                 for outer_var in &read_only_outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
-                    self.writeln(&format!("let {} = (*{}_cell.borrow()).clone();", var_escaped, var_escaped));
+                    self.writeln(&format!(
+                        "let {} = (*{}_cell.borrow()).clone();",
+                        var_escaped, var_escaped
+                    ));
                 }
                 // Make the function available by its name inside the closure (only if recursive)
                 if needs_self_ref {
-                    self.writeln(&format!("let {} = (*{}_ref.borrow()).clone();", name_str, name_str));
+                    self.writeln(&format!(
+                        "let {} = (*{}_ref.borrow()).clone();",
+                        name_str, name_str
+                    ));
                 }
                 // Make sibling functions available for mutual recursion
                 for sibling in &sibling_fns {
                     let sibling_escaped = Self::escape_ident(sibling);
-                    self.writeln(&format!("let {} = (*{}_ref.borrow()).clone();", sibling_escaped, sibling_escaped));
+                    self.writeln(&format!(
+                        "let {} = (*{}_ref.borrow()).clone();",
+                        sibling_escaped, sibling_escaped
+                    ));
                 }
                 // Extract just the parameter names (type annotations are parsed but not used in codegen yet)
                 let current_param_names: Vec<String> = params
@@ -1594,10 +1925,10 @@ impl Codegen {
                         params.len()
                     ));
                 }
-                
+
                 // Push current params to stack for nested functions
                 self.outer_params_stack.push(current_param_names);
-                
+
                 // Function bodies are sync closures (even Tish async fn) - use block_on for await
                 self.async_context_stack.push(false);
 
@@ -1606,7 +1937,7 @@ impl Codegen {
                 for v in &mutable_outer_vars {
                     self.refcell_wrapped_vars.insert(v.clone());
                 }
-                
+
                 // Pre-scan body for nested functions (handles function body as Block)
                 if let Statement::Block { statements, .. } = body.as_ref() {
                     let nested_func_names = self.prescan_function_decls(statements);
@@ -1614,7 +1945,10 @@ impl Codegen {
                     // Create cells for nested functions
                     for func_name in &nested_func_names {
                         let escaped = Self::escape_ident(func_name);
-                        self.writeln(&format!("let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));", escaped));
+                        self.writeln(&format!(
+                            "let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));",
+                            escaped
+                        ));
                     }
                     for s in statements {
                         self.emit_statement(s)?;
@@ -1625,22 +1959,25 @@ impl Codegen {
                     self.emit_statement(body)?;
                     self.function_scope_stack.pop();
                 }
-                
+
                 self.async_context_stack.pop();
 
                 // Restore refcell_wrapped_vars (remove mutable outer vars we added)
                 self.refcell_wrapped_vars = saved_refcell;
-                
+
                 // Pop params stack
                 self.outer_params_stack.pop();
-                
+
                 self.writeln("Value::Null");
                 self.indent -= 1;
                 self.writeln("}))");
                 self.indent -= 1;
                 self.writeln("};");
                 // Update the cell with the actual function value
-                self.writeln(&format!("*{}_cell.borrow_mut() = {}.clone();", name_str, name_str));
+                self.writeln(&format!(
+                    "*{}_cell.borrow_mut() = {}.clone();",
+                    name_str, name_str
+                ));
             }
         }
         Ok(())
@@ -1673,7 +2010,10 @@ impl Codegen {
                     }
                 }
             }
-            Ok(format!("{{ let mut _args: Vec<Value> = Vec::new(); {} _args }}", parts.join(" ")))
+            Ok(format!(
+                "{{ let mut _args: Vec<Value> = Vec::new(); {} _args }}",
+                parts.join(" ")
+            ))
         } else {
             let mut emitted = Vec::new();
             for arg in args {
@@ -1695,7 +2035,13 @@ impl Codegen {
         }
     }
 
-    fn emit_destruct_bindings(&mut self, pattern: &DestructPattern, value_expr: &str, mutability: &str, span: Span) -> Result<(), CompileError> {
+    fn emit_destruct_bindings(
+        &mut self,
+        pattern: &DestructPattern,
+        value_expr: &str,
+        mutability: &str,
+        span: Span,
+    ) -> Result<(), CompileError> {
         // Flat `let` bindings so names stay in scope for the rest of the function (e.g. JSX).
         match pattern {
             DestructPattern::Array(elements) => {
@@ -2852,7 +3198,7 @@ impl Codegen {
             }
         })
     }
-    
+
     /// Collect all identifiers referenced in an arrow body
     fn collect_referenced_idents(body: &ArrowBody) -> HashSet<String> {
         let mut idents = HashSet::new();
@@ -2862,10 +3208,12 @@ impl Codegen {
         }
         idents
     }
-    
+
     fn collect_expr_idents(expr: &Expr, idents: &mut HashSet<String>) {
         match expr {
-            Expr::Ident { name, .. } => { idents.insert(name.to_string()); }
+            Expr::Ident { name, .. } => {
+                idents.insert(name.to_string());
+            }
             Expr::Assign { name, value, .. } => {
                 idents.insert(name.to_string());
                 Self::collect_expr_idents(value, idents);
@@ -2879,7 +3227,9 @@ impl Codegen {
                 Self::collect_expr_idents(callee, idents);
                 for arg in args {
                     match arg {
-                        CallArg::Expr(e) | CallArg::Spread(e) => Self::collect_expr_idents(e, idents),
+                        CallArg::Expr(e) | CallArg::Spread(e) => {
+                            Self::collect_expr_idents(e, idents)
+                        }
                     }
                 }
             }
@@ -2887,19 +3237,28 @@ impl Codegen {
                 Self::collect_expr_idents(callee, idents);
                 for arg in args {
                     match arg {
-                        CallArg::Expr(e) | CallArg::Spread(e) => Self::collect_expr_idents(e, idents),
+                        CallArg::Expr(e) | CallArg::Spread(e) => {
+                            Self::collect_expr_idents(e, idents)
+                        }
                     }
                 }
             }
             Expr::Member { object, prop, .. } => {
                 Self::collect_expr_idents(object, idents);
-                if let MemberProp::Expr(e) = prop { Self::collect_expr_idents(e, idents); }
+                if let MemberProp::Expr(e) = prop {
+                    Self::collect_expr_idents(e, idents);
+                }
             }
             Expr::MemberAssign { object, value, .. } => {
                 Self::collect_expr_idents(object, idents);
                 Self::collect_expr_idents(value, idents);
             }
-            Expr::IndexAssign { object, index, value, .. } => {
+            Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            } => {
                 Self::collect_expr_idents(object, idents);
                 Self::collect_expr_idents(index, idents);
                 Self::collect_expr_idents(value, idents);
@@ -2908,13 +3267,20 @@ impl Codegen {
                 Self::collect_expr_idents(object, idents);
                 Self::collect_expr_idents(index, idents);
             }
-            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 Self::collect_expr_idents(cond, idents);
                 Self::collect_expr_idents(then_branch, idents);
                 Self::collect_expr_idents(else_branch, idents);
             }
-            Expr::PostfixInc { name, .. } | Expr::PostfixDec { name, .. } |
-            Expr::PrefixInc { name, .. } | Expr::PrefixDec { name, .. } => {
+            Expr::PostfixInc { name, .. }
+            | Expr::PostfixDec { name, .. }
+            | Expr::PrefixInc { name, .. }
+            | Expr::PrefixDec { name, .. } => {
                 idents.insert(name.to_string());
             }
             Expr::CompoundAssign { name, value, .. } => {
@@ -2928,23 +3294,25 @@ impl Codegen {
             Expr::Array { elements, .. } => {
                 for el in elements {
                     match el {
-                        ArrayElement::Expr(e) | ArrayElement::Spread(e) => Self::collect_expr_idents(e, idents),
+                        ArrayElement::Expr(e) | ArrayElement::Spread(e) => {
+                            Self::collect_expr_idents(e, idents)
+                        }
                     }
                 }
             }
             Expr::Object { props, .. } => {
                 for prop in props {
                     match prop {
-                        ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => Self::collect_expr_idents(e, idents),
+                        ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => {
+                            Self::collect_expr_idents(e, idents)
+                        }
                     }
                 }
             }
-            Expr::ArrowFunction { body, .. } => {
-                match body {
-                    ArrowBody::Expr(e) => Self::collect_expr_idents(e, idents),
-                    ArrowBody::Block(s) => Self::collect_stmt_idents(s, idents),
-                }
-            }
+            Expr::ArrowFunction { body, .. } => match body {
+                ArrowBody::Expr(e) => Self::collect_expr_idents(e, idents),
+                ArrowBody::Block(s) => Self::collect_stmt_idents(s, idents),
+            },
             Expr::NullishCoalesce { left, right, .. } => {
                 Self::collect_expr_idents(left, idents);
                 Self::collect_expr_idents(right, idents);
@@ -2952,12 +3320,20 @@ impl Codegen {
             Expr::TypeOf { operand, .. } => Self::collect_expr_idents(operand, idents),
             Expr::Await { operand, .. } => Self::collect_expr_idents(operand, idents),
             Expr::TemplateLiteral { exprs, .. } => {
-                for e in exprs { Self::collect_expr_idents(e, idents); }
+                for e in exprs {
+                    Self::collect_expr_idents(e, idents);
+                }
             }
-            Expr::JsxElement { props, children, .. } => {
+            Expr::JsxElement {
+                props, children, ..
+            } => {
                 for p in props {
                     match p {
-                        tishlang_ast::JsxProp::Attr { value: tishlang_ast::JsxAttrValue::Expr(e), .. } | tishlang_ast::JsxProp::Spread(e) => Self::collect_expr_idents(e, idents),
+                        tishlang_ast::JsxProp::Attr {
+                            value: tishlang_ast::JsxAttrValue::Expr(e),
+                            ..
+                        }
+                        | tishlang_ast::JsxProp::Spread(e) => Self::collect_expr_idents(e, idents),
                         _ => {}
                     }
                 }
@@ -2978,7 +3354,7 @@ impl Codegen {
             Expr::Literal { .. } => {}
         }
     }
-    
+
     /// Collect variable names that are assigned to in a statement/body (target of =, +=, ++, etc).
     fn collect_assigned_idents_in_stmt(stmt: &Statement, names: &mut HashSet<String>) {
         match stmt {
@@ -2989,14 +3365,25 @@ impl Codegen {
                     Self::collect_assigned_idents_in_stmt(s, names);
                 }
             }
-            Statement::If { cond, then_branch, else_branch, .. } => {
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 Self::collect_assigned_idents_in_expr(cond, names);
                 Self::collect_assigned_idents_in_stmt(then_branch, names);
                 if let Some(eb) = else_branch {
                     Self::collect_assigned_idents_in_stmt(eb, names);
                 }
             }
-            Statement::For { init, cond, update, body, .. } => {
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
                 if let Some(i) = init {
                     Self::collect_assigned_idents_in_stmt(i, names);
                 }
@@ -3016,7 +3403,12 @@ impl Codegen {
                 Self::collect_assigned_idents_in_expr(cond, names);
                 Self::collect_assigned_idents_in_stmt(body, names);
             }
-            Statement::Switch { expr, cases, default_body, .. } => {
+            Statement::Switch {
+                expr,
+                cases,
+                default_body,
+                ..
+            } => {
                 Self::collect_assigned_idents_in_expr(expr, names);
                 for (case_expr, stmts) in cases {
                     if let Some(e) = case_expr {
@@ -3032,7 +3424,12 @@ impl Codegen {
                     }
                 }
             }
-            Statement::Try { body, catch_body, finally_body, .. } => {
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
                 Self::collect_assigned_idents_in_stmt(body, names);
                 if let Some(c) = catch_body {
                     Self::collect_assigned_idents_in_stmt(c, names);
@@ -3048,7 +3445,10 @@ impl Codegen {
                 }
             }
             Statement::Throw { value, .. } => Self::collect_assigned_idents_in_expr(value, names),
-            Statement::Break { .. } | Statement::Continue { .. } | Statement::Import { .. } | Statement::Export { .. } => {}
+            Statement::Break { .. }
+            | Statement::Continue { .. }
+            | Statement::Import { .. }
+            | Statement::Export { .. } => {}
         }
     }
 
@@ -3066,15 +3466,22 @@ impl Codegen {
                 names.insert(name.to_string());
                 Self::collect_assigned_idents_in_expr(value, names);
             }
-            Expr::PostfixInc { name, .. } | Expr::PostfixDec { name, .. }
-            | Expr::PrefixInc { name, .. } | Expr::PrefixDec { name, .. } => {
+            Expr::PostfixInc { name, .. }
+            | Expr::PostfixDec { name, .. }
+            | Expr::PrefixInc { name, .. }
+            | Expr::PrefixDec { name, .. } => {
                 names.insert(name.to_string());
             }
             Expr::MemberAssign { object, value, .. } => {
                 Self::collect_assigned_idents_in_expr(object, names);
                 Self::collect_assigned_idents_in_expr(value, names);
             }
-            Expr::IndexAssign { object, index, value, .. } => {
+            Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            } => {
                 Self::collect_assigned_idents_in_expr(object, names);
                 Self::collect_assigned_idents_in_expr(index, names);
                 Self::collect_assigned_idents_in_expr(value, names);
@@ -3114,17 +3521,20 @@ impl Codegen {
                 Self::collect_assigned_idents_in_expr(object, names);
                 Self::collect_assigned_idents_in_expr(index, names);
             }
-            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 Self::collect_assigned_idents_in_expr(cond, names);
                 Self::collect_assigned_idents_in_expr(then_branch, names);
                 Self::collect_assigned_idents_in_expr(else_branch, names);
             }
-            Expr::ArrowFunction { body, .. } => {
-                match body {
-                    ArrowBody::Expr(e) => Self::collect_assigned_idents_in_expr(e, names),
-                    ArrowBody::Block(s) => Self::collect_assigned_idents_in_stmt(s, names),
-                }
-            }
+            Expr::ArrowFunction { body, .. } => match body {
+                ArrowBody::Expr(e) => Self::collect_assigned_idents_in_expr(e, names),
+                ArrowBody::Block(s) => Self::collect_assigned_idents_in_stmt(s, names),
+            },
             Expr::Array { elements, .. } => {
                 for el in elements {
                     match el {
@@ -3152,7 +3562,9 @@ impl Codegen {
                     Self::collect_assigned_idents_in_expr(e, names);
                 }
             }
-            Expr::JsxElement { props, children, .. } => {
+            Expr::JsxElement {
+                props, children, ..
+            } => {
                 for p in props {
                     match p {
                         tishlang_ast::JsxProp::Attr {
@@ -3196,10 +3608,7 @@ impl Codegen {
                 Statement::VarDeclDestructure { pattern, .. } => {
                     Self::collect_destruct_names(pattern, names);
                 }
-                Statement::For {
-                    init: Some(i),
-                    ..
-                } => {
+                Statement::For { init: Some(i), .. } => {
                     if let Statement::VarDecl { name, .. } = i.as_ref() {
                         names.insert(name.to_string());
                     }
@@ -3288,11 +3697,17 @@ impl Codegen {
         }
         match body {
             ArrowBody::Expr(e) => Self::collect_mutated_captures_from_expr(e, block_vars, result),
-            ArrowBody::Block(s) => Self::collect_mutated_captures_from_statements(s, block_vars, result),
+            ArrowBody::Block(s) => {
+                Self::collect_mutated_captures_from_statements(s, block_vars, result)
+            }
         }
     }
 
-    fn collect_mutated_captures_from_expr(expr: &Expr, block_vars: &HashSet<String>, result: &mut HashSet<String>) {
+    fn collect_mutated_captures_from_expr(
+        expr: &Expr,
+        block_vars: &HashSet<String>,
+        result: &mut HashSet<String>,
+    ) {
         match expr {
             Expr::ArrowFunction { params, body, .. } => {
                 Self::collect_mutated_captures_from_arrow(params, body, block_vars, result);
@@ -3323,13 +3738,17 @@ impl Codegen {
                     Self::collect_mutated_captures_from_expr(e, block_vars, result);
                 }
             }
-            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 Self::collect_mutated_captures_from_expr(cond, block_vars, result);
                 Self::collect_mutated_captures_from_expr(then_branch, block_vars, result);
                 Self::collect_mutated_captures_from_expr(else_branch, block_vars, result);
             }
-            Expr::Binary { left, right, .. }
-            | Expr::NullishCoalesce { left, right, .. } => {
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
                 Self::collect_mutated_captures_from_expr(left, block_vars, result);
                 Self::collect_mutated_captures_from_expr(right, block_vars, result);
             }
@@ -3372,14 +3791,25 @@ impl Codegen {
                     Self::collect_mutated_captures_from_statements(s, block_vars, result);
                 }
             }
-            Statement::If { cond, then_branch, else_branch, .. } => {
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 Self::collect_mutated_captures_from_expr(cond, block_vars, result);
                 Self::collect_mutated_captures_from_statements(then_branch, block_vars, result);
                 if let Some(eb) = else_branch {
                     Self::collect_mutated_captures_from_statements(eb, block_vars, result);
                 }
             }
-            Statement::For { init, cond, update, body, .. } => {
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
                 if let Some(i) = init {
                     Self::collect_mutated_captures_from_statements(i, block_vars, result);
                 }
@@ -3399,7 +3829,12 @@ impl Codegen {
                 Self::collect_mutated_captures_from_expr(cond, block_vars, result);
                 Self::collect_mutated_captures_from_statements(body, block_vars, result);
             }
-            Statement::Switch { expr, cases, default_body, .. } => {
+            Statement::Switch {
+                expr,
+                cases,
+                default_body,
+                ..
+            } => {
                 Self::collect_mutated_captures_from_expr(expr, block_vars, result);
                 for (ce, stmts) in cases {
                     if let Some(e) = ce {
@@ -3415,7 +3850,12 @@ impl Codegen {
                     }
                 }
             }
-            Statement::Try { body, catch_body, finally_body, .. } => {
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
                 Self::collect_mutated_captures_from_statements(body, block_vars, result);
                 if let Some(c) = catch_body {
                     Self::collect_mutated_captures_from_statements(c, block_vars, result);
@@ -3433,7 +3873,9 @@ impl Codegen {
             Statement::Return { value: Some(e), .. } => {
                 Self::collect_mutated_captures_from_expr(e, block_vars, result);
             }
-            Statement::Throw { value, .. } => Self::collect_mutated_captures_from_expr(value, block_vars, result),
+            Statement::Throw { value, .. } => {
+                Self::collect_mutated_captures_from_expr(value, block_vars, result)
+            }
             _ => {}
         }
     }
@@ -3452,37 +3894,66 @@ impl Codegen {
     /// Collect variable names declared in a statement (VarDecl, Destructure, For init).
     fn collect_local_var_names(stmt: &Statement, names: &mut HashSet<String>) {
         match stmt {
-            Statement::VarDecl { name, .. } => { names.insert(name.to_string()); }
+            Statement::VarDecl { name, .. } => {
+                names.insert(name.to_string());
+            }
             Statement::VarDeclDestructure { pattern, .. } => {
                 Self::collect_destruct_names(pattern, names);
             }
             Statement::Block { statements, .. } => {
-                for s in statements { Self::collect_local_var_names(s, names); }
+                for s in statements {
+                    Self::collect_local_var_names(s, names);
+                }
             }
-            Statement::If { then_branch, else_branch, .. } => {
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 Self::collect_local_var_names(then_branch, names);
-                if let Some(eb) = else_branch { Self::collect_local_var_names(eb, names); }
+                if let Some(eb) = else_branch {
+                    Self::collect_local_var_names(eb, names);
+                }
             }
             Statement::For { init, body, .. } => {
-                if let Some(i) = init { Self::collect_local_var_names(i, names); }
+                if let Some(i) = init {
+                    Self::collect_local_var_names(i, names);
+                }
                 Self::collect_local_var_names(body, names);
             }
             Statement::ForOf { body, .. } => Self::collect_local_var_names(body, names),
             Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
                 Self::collect_local_var_names(body, names);
             }
-            Statement::Switch { cases, default_body, .. } => {
+            Statement::Switch {
+                cases,
+                default_body,
+                ..
+            } => {
                 for (_, stmts) in cases {
-                    for s in stmts { Self::collect_local_var_names(s, names); }
+                    for s in stmts {
+                        Self::collect_local_var_names(s, names);
+                    }
                 }
                 if let Some(stmts) = default_body {
-                    for s in stmts { Self::collect_local_var_names(s, names); }
+                    for s in stmts {
+                        Self::collect_local_var_names(s, names);
+                    }
                 }
             }
-            Statement::Try { body, catch_body, finally_body, .. } => {
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
                 Self::collect_local_var_names(body, names);
-                if let Some(c) = catch_body { Self::collect_local_var_names(c, names); }
-                if let Some(f) = finally_body { Self::collect_local_var_names(f, names); }
+                if let Some(c) = catch_body {
+                    Self::collect_local_var_names(c, names);
+                }
+                if let Some(f) = finally_body {
+                    Self::collect_local_var_names(f, names);
+                }
             }
             Statement::FunDecl { body, .. } => Self::collect_local_var_names(body, names),
             _ => {}
@@ -3493,16 +3964,24 @@ impl Codegen {
         match pattern {
             DestructPattern::Array(elements) => {
                 for el in elements {
-                    if let Some(DestructElement::Ident(n)) = el { names.insert(n.to_string()); }
-                    if let Some(DestructElement::Pattern(p)) = el { Self::collect_destruct_names(p, names); }
+                    if let Some(DestructElement::Ident(n)) = el {
+                        names.insert(n.to_string());
+                    }
+                    if let Some(DestructElement::Pattern(p)) = el {
+                        Self::collect_destruct_names(p, names);
+                    }
                 }
             }
             DestructPattern::Object(props) => {
                 for prop in props {
                     match &prop.value {
-                        DestructElement::Ident(n) => { names.insert(n.to_string()); }
+                        DestructElement::Ident(n) => {
+                            names.insert(n.to_string());
+                        }
                         DestructElement::Pattern(p) => Self::collect_destruct_names(p, names),
-                        DestructElement::Rest(n) => { names.insert(n.to_string()); }
+                        DestructElement::Rest(n) => {
+                            names.insert(n.to_string());
+                        }
                     }
                 }
             }
@@ -3513,25 +3992,48 @@ impl Codegen {
         match stmt {
             Statement::ExprStmt { expr, .. } => Self::collect_expr_idents(expr, idents),
             Statement::VarDecl { init, .. } => {
-                if let Some(e) = init { Self::collect_expr_idents(e, idents); }
+                if let Some(e) = init {
+                    Self::collect_expr_idents(e, idents);
+                }
             }
             Statement::VarDeclDestructure { init, .. } => Self::collect_expr_idents(init, idents),
             Statement::Block { statements, .. } => {
-                for s in statements { Self::collect_stmt_idents(s, idents); }
+                for s in statements {
+                    Self::collect_stmt_idents(s, idents);
+                }
             }
-            Statement::If { cond, then_branch, else_branch, .. } => {
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 Self::collect_expr_idents(cond, idents);
                 Self::collect_stmt_idents(then_branch, idents);
-                if let Some(e) = else_branch { Self::collect_stmt_idents(e, idents); }
+                if let Some(e) = else_branch {
+                    Self::collect_stmt_idents(e, idents);
+                }
             }
             Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
                 Self::collect_expr_idents(cond, idents);
                 Self::collect_stmt_idents(body, idents);
             }
-            Statement::For { init, cond, update, body, .. } => {
-                if let Some(s) = init { Self::collect_stmt_idents(s, idents); }
-                if let Some(e) = cond { Self::collect_expr_idents(e, idents); }
-                if let Some(e) = update { Self::collect_expr_idents(e, idents); }
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
+                if let Some(s) = init {
+                    Self::collect_stmt_idents(s, idents);
+                }
+                if let Some(e) = cond {
+                    Self::collect_expr_idents(e, idents);
+                }
+                if let Some(e) = update {
+                    Self::collect_expr_idents(e, idents);
+                }
                 Self::collect_stmt_idents(body, idents);
             }
             Statement::ForOf { iterable, body, .. } => {
@@ -3539,26 +4041,51 @@ impl Codegen {
                 Self::collect_stmt_idents(body, idents);
             }
             Statement::Return { value, .. } => {
-                if let Some(e) = value { Self::collect_expr_idents(e, idents); }
+                if let Some(e) = value {
+                    Self::collect_expr_idents(e, idents);
+                }
             }
             Statement::Throw { value, .. } => Self::collect_expr_idents(value, idents),
-            Statement::Try { body, catch_body, finally_body, .. } => {
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
                 Self::collect_stmt_idents(body, idents);
-                if let Some(c) = catch_body { Self::collect_stmt_idents(c, idents); }
-                if let Some(f) = finally_body { Self::collect_stmt_idents(f, idents); }
+                if let Some(c) = catch_body {
+                    Self::collect_stmt_idents(c, idents);
+                }
+                if let Some(f) = finally_body {
+                    Self::collect_stmt_idents(f, idents);
+                }
             }
-            Statement::Switch { expr, cases, default_body, .. } => {
+            Statement::Switch {
+                expr,
+                cases,
+                default_body,
+                ..
+            } => {
                 Self::collect_expr_idents(expr, idents);
                 for (case_expr, stmts) in cases {
-                    if let Some(e) = case_expr { Self::collect_expr_idents(e, idents); }
-                    for s in stmts { Self::collect_stmt_idents(s, idents); }
+                    if let Some(e) = case_expr {
+                        Self::collect_expr_idents(e, idents);
+                    }
+                    for s in stmts {
+                        Self::collect_stmt_idents(s, idents);
+                    }
                 }
                 if let Some(stmts) = default_body {
-                    for s in stmts { Self::collect_stmt_idents(s, idents); }
+                    for s in stmts {
+                        Self::collect_stmt_idents(s, idents);
+                    }
                 }
             }
             Statement::FunDecl { body, .. } => Self::collect_stmt_idents(body, idents),
-            Statement::Break { .. } | Statement::Continue { .. } | Statement::Import { .. } | Statement::Export { .. } => {}
+            Statement::Break { .. }
+            | Statement::Continue { .. }
+            | Statement::Import { .. }
+            | Statement::Export { .. } => {}
         }
     }
 
@@ -3571,7 +4098,7 @@ impl Codegen {
         // Build the arrow function as a Value::Function closure
         let mut code = String::new();
         code.push_str("{\n");
-        
+
         // Find which identifiers are actually referenced in the body
         let referenced = Self::collect_referenced_idents(body);
         // Exclude the arrow's own parameters - they're not outer captures
@@ -3589,17 +4116,23 @@ impl Codegen {
         }
 
         // Collect outer parameters that need to be captured
-        let outer_params: Vec<String> = self.outer_params_stack
+        let outer_params: Vec<String> = self
+            .outer_params_stack
             .iter()
             .flat_map(|p| p.iter().cloned())
             .filter(|name| referenced.contains(name) && !param_names.contains(name))
             .collect();
-        
+
         // Collect outer variables (from outer scopes) that need to be captured
-        let outer_vars: Vec<String> = self.outer_vars_stack
+        let outer_vars: Vec<String> = self
+            .outer_vars_stack
             .iter()
             .flat_map(|v| v.iter().cloned())
-            .filter(|name| referenced.contains(name) && !param_names.contains(name) && !local_var_names.contains(name))
+            .filter(|name| {
+                referenced.contains(name)
+                    && !param_names.contains(name)
+                    && !local_var_names.contains(name)
+            })
             .collect();
 
         // Outer vars that are assigned in the body need RefCell; read-only get Value binding
@@ -3608,8 +4141,16 @@ impl Codegen {
             ArrowBody::Expr(e) => Self::collect_assigned_idents_in_expr(e, &mut assigned_in_body),
             ArrowBody::Block(s) => Self::collect_assigned_idents_in_stmt(s, &mut assigned_in_body),
         }
-        let mutable_outer_vars: Vec<String> = outer_vars.iter().filter(|v| assigned_in_body.contains(*v)).cloned().collect();
-        let read_only_outer_vars: Vec<String> = outer_vars.iter().filter(|v| !assigned_in_body.contains(*v)).cloned().collect();
+        let mutable_outer_vars: Vec<String> = outer_vars
+            .iter()
+            .filter(|v| assigned_in_body.contains(*v))
+            .cloned()
+            .collect();
+        let read_only_outer_vars: Vec<String> = outer_vars
+            .iter()
+            .filter(|v| !assigned_in_body.contains(*v))
+            .cloned()
+            .collect();
 
         // Wrap outer captures in Rc<RefCell<>> and use _ref suffix.
         // Clone existing Rc only when VarDecl actually emitted `Rc<RefCell<...>>` (see rc_cell_storage_*).
@@ -3617,38 +4158,70 @@ impl Codegen {
             let param_escaped = Self::escape_ident(outer_param);
             let ref_name = format!("{}_ref", param_escaped);
             if self.rc_cell_storage_contains(outer_param) {
-                code.push_str(&format!("    let {} = {}.clone();\n", ref_name, param_escaped));
+                code.push_str(&format!(
+                    "    let {} = {}.clone();\n",
+                    ref_name, param_escaped
+                ));
             } else {
-                code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", ref_name, param_escaped));
+                code.push_str(&format!(
+                    "    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n",
+                    ref_name, param_escaped
+                ));
             }
         }
         for outer_var in &outer_vars {
             let var_escaped = Self::escape_ident(outer_var);
             let ref_name = format!("{}_ref", var_escaped);
             if self.rc_cell_storage_contains(outer_var) {
-                code.push_str(&format!("    let {} = {}.clone();\n", ref_name, var_escaped));
+                code.push_str(&format!(
+                    "    let {} = {}.clone();\n",
+                    ref_name, var_escaped
+                ));
             } else {
-                code.push_str(&format!("    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n", ref_name, var_escaped));
+                code.push_str(&format!(
+                    "    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n",
+                    ref_name, var_escaped
+                ));
             }
         }
         // Only clone builtins that are actually referenced (clone so outer scope can still use, e.g. process for PORT)
-        for builtin in &["console", "Math", "JSON", "Date", "Uint8Array", "AudioContext", "process", "setTimeout", "clearTimeout", "Promise", "RegExp", "Polars"] {
+        for builtin in &[
+            "console",
+            "Math",
+            "JSON",
+            "Date",
+            "Uint8Array",
+            "AudioContext",
+            "process",
+            "setTimeout",
+            "clearTimeout",
+            "Promise",
+            "RegExp",
+            "Polars",
+        ] {
             if referenced.contains(*builtin) {
                 code.push_str(&format!("    let {} = {}.clone();\n", builtin, builtin));
             }
         }
 
         // Clone only function cells that are actually referenced in this arrow
-        let referenced_funcs: Vec<String> = self.function_scope_stack
+        let referenced_funcs: Vec<String> = self
+            .function_scope_stack
             .last()
-            .map(|scope| scope.iter()
-                .filter(|f| referenced.contains(f.as_str()) && !param_names.contains(*f))
-                .cloned()
-                .collect())
+            .map(|scope| {
+                scope
+                    .iter()
+                    .filter(|f| referenced.contains(f.as_str()) && !param_names.contains(*f))
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
         for func_name in &referenced_funcs {
             let escaped = Self::escape_ident(func_name);
-            code.push_str(&format!("    let {}_ref = {}_cell.clone();\n", escaped, escaped));
+            code.push_str(&format!(
+                "    let {}_ref = {}_cell.clone();\n",
+                escaped, escaped
+            ));
         }
 
         code.push_str("    Value::Function(Rc::new(move |args: &[Value]| {\n");
@@ -3656,23 +4229,35 @@ impl Codegen {
         // Make captured outer params available as plain Values (from _ref RefCells)
         for outer_param in &outer_params {
             let param_escaped = Self::escape_ident(outer_param);
-            code.push_str(&format!("        let {} = (*{}_ref.borrow()).clone();\n", param_escaped, param_escaped));
+            code.push_str(&format!(
+                "        let {} = (*{}_ref.borrow()).clone();\n",
+                param_escaped, param_escaped
+            ));
         }
         // Mutable outer vars: capture RefCell so assignments use borrow_mut
         for outer_var in &mutable_outer_vars {
             let var_escaped = Self::escape_ident(outer_var);
-            code.push_str(&format!("        let {} = {}_ref.clone();\n", var_escaped, var_escaped));
+            code.push_str(&format!(
+                "        let {} = {}_ref.clone();\n",
+                var_escaped, var_escaped
+            ));
         }
         // Read-only outer vars: Value binding from borrow
         for outer_var in &read_only_outer_vars {
             let var_escaped = Self::escape_ident(outer_var);
-            code.push_str(&format!("        let {} = (*{}_ref.borrow()).clone();\n", var_escaped, var_escaped));
+            code.push_str(&format!(
+                "        let {} = (*{}_ref.borrow()).clone();\n",
+                var_escaped, var_escaped
+            ));
         }
 
         // Make captured functions available
         for func_name in &referenced_funcs {
             let escaped = Self::escape_ident(func_name);
-            code.push_str(&format!("        let {} = (*{}_ref.borrow()).clone();\n", escaped, escaped));
+            code.push_str(&format!(
+                "        let {} = (*{}_ref.borrow()).clone();\n",
+                escaped, escaped
+            ));
         }
 
         // Extract parameters from args
@@ -3727,18 +4312,18 @@ impl Codegen {
             tishlang_ast::ArrowBody::Block(block_stmt) => {
                 // For block bodies, emit the block statement
                 self.function_scope_stack.push(Vec::new());
-                
+
                 // Save current output, emit to temp, then restore
                 let saved_output = std::mem::take(&mut self.output);
                 let saved_indent = self.indent;
                 self.indent = 2; // Base indent inside the closure
-                
+
                 self.emit_statement(block_stmt)?;
-                
+
                 let body_code = std::mem::replace(&mut self.output, saved_output);
                 self.indent = saved_indent;
                 self.function_scope_stack.pop();
-                
+
                 code.push_str(&body_code);
                 code.push_str("        Value::Null\n");
             }
@@ -3758,7 +4343,11 @@ impl Codegen {
     /// Emit an expression as a native Rust type (not wrapped in Value).
     /// Falls back to emit_expr + conversion if the expression cannot be directly
     /// emitted as the target type.
-    fn emit_native_expr(&mut self, expr: &Expr, target_type: &RustType) -> Result<String, CompileError> {
+    fn emit_native_expr(
+        &mut self,
+        expr: &Expr,
+        target_type: &RustType,
+    ) -> Result<String, CompileError> {
         // Try to emit literals directly as native types
         if let Expr::Literal { value, .. } = expr {
             match (target_type, value) {
@@ -3777,7 +4366,7 @@ impl Codegen {
                 _ => {}
             }
         }
-        
+
         // Try to emit array literals directly as Vec<T>
         if let (RustType::Vec(inner_type), Expr::Array { elements, .. }) = (target_type, expr) {
             let mut items = Vec::new();
@@ -3796,7 +4385,7 @@ impl Codegen {
             }
             return Ok(format!("vec![{}]", items.join(", ")));
         }
-        
+
         // Check if the identifier is already of the target type
         if let Expr::Ident { name, .. } = expr {
             let var_type = self.type_context.get_type(name.as_ref());
@@ -3808,7 +4397,7 @@ impl Codegen {
                 return Ok(esc);
             }
         }
-        
+
         // Fall back to emit_expr + conversion
         let value_expr = self.emit_expr(expr)?;
         Ok(target_type.from_value_expr(&value_expr))
@@ -3829,7 +4418,9 @@ impl Codegen {
             // ── literals ─────────────────────────────────────────────────────────
             Expr::Literal { value, .. } => match value {
                 Literal::Number(n) => Ok((format!("{}_f64", n), RustType::F64)),
-                Literal::String(s) => Ok((format!("{:?}.to_string()", s.as_ref()), RustType::String)),
+                Literal::String(s) => {
+                    Ok((format!("{:?}.to_string()", s.as_ref()), RustType::String))
+                }
                 Literal::Bool(b) => Ok((format!("{}", b), RustType::Bool)),
                 Literal::Null => Ok(("Value::Null".to_string(), RustType::Value)),
             },
@@ -3855,7 +4446,13 @@ impl Codegen {
             }
 
             // ── binary expressions ───────────────────────────────────────────────
-            Expr::Binary { left, op, right, span, .. } => {
+            Expr::Binary {
+                left,
+                op,
+                right,
+                span,
+                ..
+            } => {
                 let (l, lt) = self.emit_typed_expr(left)?;
                 let (r, rt) = self.emit_typed_expr(right)?;
 
@@ -3882,14 +4479,27 @@ impl Codegen {
                 }
 
                 // Fall back: convert both sides to Value and use the runtime.
-                let lv = if lt.is_native() { lt.to_value_expr(&l) } else { l };
-                let rv = if rt.is_native() { rt.to_value_expr(&r) } else { r };
+                let lv = if lt.is_native() {
+                    lt.to_value_expr(&l)
+                } else {
+                    l
+                };
+                let rv = if rt.is_native() {
+                    rt.to_value_expr(&r)
+                } else {
+                    r
+                };
                 let result = self.emit_binop(&lv, *op, &rv, *span)?;
                 Ok((result, RustType::Value))
             }
 
             // ── array indexing ───────────────────────────────────────────────────
-            Expr::Index { object, index, optional, .. } => {
+            Expr::Index {
+                object,
+                index,
+                optional,
+                ..
+            } => {
                 // Native fast path: `vec[i]` where vec is Vec<T> and i is numeric.
                 if !optional {
                     if let Expr::Ident { name, .. } = object.as_ref() {
@@ -3958,19 +4568,28 @@ impl Codegen {
         }
     }
 
-    fn emit_binop(
-        &self,
-        l: &str,
-        op: BinOp,
-        r: &str,
-        span: Span,
-    ) -> Result<String, CompileError> {
+    fn emit_binop(&self, l: &str, op: BinOp, r: &str, span: Span) -> Result<String, CompileError> {
         Ok(match op {
-            BinOp::Add => format!("tishlang_runtime::ops::add(&{}, &{}).unwrap_or(Value::Null)", l, r),
-            BinOp::Sub => format!("tishlang_runtime::ops::sub(&{}, &{}).unwrap_or(Value::Null)", l, r),
-            BinOp::Mul => format!("tishlang_runtime::ops::mul(&{}, &{}).unwrap_or(Value::Null)", l, r),
-            BinOp::Div => format!("tishlang_runtime::ops::div(&{}, &{}).unwrap_or(Value::Null)", l, r),
-            BinOp::Mod => format!("tishlang_runtime::ops::modulo(&{}, &{}).unwrap_or(Value::Null)", l, r),
+            BinOp::Add => format!(
+                "tishlang_runtime::ops::add(&{}, &{}).unwrap_or(Value::Null)",
+                l, r
+            ),
+            BinOp::Sub => format!(
+                "tishlang_runtime::ops::sub(&{}, &{}).unwrap_or(Value::Null)",
+                l, r
+            ),
+            BinOp::Mul => format!(
+                "tishlang_runtime::ops::mul(&{}, &{}).unwrap_or(Value::Null)",
+                l, r
+            ),
+            BinOp::Div => format!(
+                "tishlang_runtime::ops::div(&{}, &{}).unwrap_or(Value::Null)",
+                l, r
+            ),
+            BinOp::Mod => format!(
+                "tishlang_runtime::ops::modulo(&{}, &{}).unwrap_or(Value::Null)",
+                l, r
+            ),
             BinOp::Pow => format!(
                 "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
                  let Value::Number(b) = &({}) else {{ panic!() }}; a.powf(*b) }})",
@@ -3991,7 +4610,10 @@ impl Codegen {
             BinOp::Shr => Self::emit_bitwise_binop(l, r, ">>"),
             BinOp::In => format!("tish_in_operator(&{}, &{})", l, r),
             BinOp::Eq | BinOp::Ne => {
-                return Err(CompileError::new("Loose equality not supported", Some(span)))
+                return Err(CompileError::new(
+                    "Loose equality not supported",
+                    Some(span),
+                ))
             }
         })
     }

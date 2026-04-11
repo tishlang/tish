@@ -8,7 +8,9 @@ use tishlang_compile::{compile_project_full, merge_modules, resolve_project};
 
 fn native_build_features_from_cli(cli_features: &[String]) -> Vec<String> {
     if cli_features.is_empty() {
-        let mut v: Vec<String> = tishlang_vm::all_compiled_capabilities().into_iter().collect();
+        let mut v: Vec<String> = tishlang_vm::all_compiled_capabilities()
+            .into_iter()
+            .collect();
         v.sort();
         v
     } else {

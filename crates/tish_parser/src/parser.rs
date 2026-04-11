@@ -52,7 +52,7 @@ macro_rules! binary_multi_op {
 }
 
 use tishlang_ast::{
-    ArrowBody, ArrayElement, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
+    ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
     DestructProp, ExportDeclaration, Expr, FunParam, ImportSpecifier, JsxAttrValue, JsxChild,
     JsxProp, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement,
     TypeAnnotation, TypedParam, UnaryOp,
@@ -86,19 +86,21 @@ impl<'a> Parser<'a> {
     }
 
     fn expect(&mut self, kind: TokenKind) -> Result<&Token, String> {
-        let t = self.advance().ok_or_else(|| format!("Expected {:?}, got EOF", kind))?;
+        let t = self
+            .advance()
+            .ok_or_else(|| format!("Expected {:?}, got EOF", kind))?;
         if t.kind == kind {
             Ok(t)
         } else {
-            Err(format!("Expected {:?}, got {:?} at {:?}", kind, t.kind, t.span))
+            Err(format!(
+                "Expected {:?}, got {:?} at {:?}",
+                kind, t.kind, t.span
+            ))
         }
     }
 
     fn span_end(&self, start: (usize, usize)) -> Span {
-        let end = self
-            .peek()
-            .map(|t| t.span.start)
-            .unwrap_or(start);
+        let end = self.peek().map(|t| t.span.start).unwrap_or(start);
         Span { start, end }
     }
 
@@ -207,7 +209,10 @@ impl<'a> Parser<'a> {
             statements.push(self.parse_statement()?);
         }
 
-        if matches!(self.peek_kind(), Some(TokenKind::RBrace | TokenKind::Dedent)) {
+        if matches!(
+            self.peek_kind(),
+            Some(TokenKind::RBrace | TokenKind::Dedent)
+        ) {
             self.advance();
         }
 
@@ -215,10 +220,7 @@ impl<'a> Parser<'a> {
             statements,
             span: Span {
                 start: span_start,
-                end: self
-                    .peek()
-                    .map(|x| x.span.end)
-                    .unwrap_or(span_start),
+                end: self.peek().map(|x| x.span.end).unwrap_or(span_start),
             },
         })
     }
@@ -229,9 +231,12 @@ impl<'a> Parser<'a> {
         } else {
             self.expect(TokenKind::Const)?.span.start
         };
-        
+
         // Check for destructuring pattern
-        if matches!(self.peek_kind(), Some(TokenKind::LBracket) | Some(TokenKind::LBrace)) {
+        if matches!(
+            self.peek_kind(),
+            Some(TokenKind::LBracket) | Some(TokenKind::LBrace)
+        ) {
             let pattern = self.parse_destruct_pattern()?;
             self.expect(TokenKind::Assign)?;
             let init = self.parse_expr()?;
@@ -242,7 +247,7 @@ impl<'a> Parser<'a> {
                 span: self.span_end(span_start),
             });
         }
-        
+
         let name = self
             .expect(TokenKind::Ident)?
             .literal
@@ -271,7 +276,7 @@ impl<'a> Parser<'a> {
             span: self.span_end(span_start),
         })
     }
-    
+
     fn parse_destruct_pattern(&mut self) -> Result<DestructPattern, String> {
         match self.peek_kind() {
             Some(TokenKind::LBracket) => self.parse_array_destruct_pattern(),
@@ -279,11 +284,11 @@ impl<'a> Parser<'a> {
             _ => Err("Expected destructuring pattern".to_string()),
         }
     }
-    
+
     fn parse_array_destruct_pattern(&mut self) -> Result<DestructPattern, String> {
         self.expect(TokenKind::LBracket)?;
         let mut elements = Vec::new();
-        
+
         while !matches!(self.peek_kind(), Some(TokenKind::RBracket)) {
             // Handle holes (elision): [a, , b]
             if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
@@ -291,15 +296,19 @@ impl<'a> Parser<'a> {
                 self.advance();
                 continue;
             }
-            
+
             // Rest element: ...rest
             if matches!(self.peek_kind(), Some(TokenKind::Spread)) {
                 self.advance();
-                let name = self.expect(TokenKind::Ident)?.literal.clone().ok_or("Expected identifier")?;
+                let name = self
+                    .expect(TokenKind::Ident)?
+                    .literal
+                    .clone()
+                    .ok_or("Expected identifier")?;
                 elements.push(Some(DestructElement::Rest(name)));
                 break;
             }
-            
+
             // Nested pattern or identifier
             let elem = match self.peek_kind() {
                 Some(TokenKind::LBracket) | Some(TokenKind::LBrace) => {
@@ -307,31 +316,40 @@ impl<'a> Parser<'a> {
                     DestructElement::Pattern(Box::new(nested))
                 }
                 Some(TokenKind::Ident) => {
-                    let name = self.advance().ok_or("Unexpected EOF")?.literal.clone().ok_or("Expected identifier")?;
+                    let name = self
+                        .advance()
+                        .ok_or("Unexpected EOF")?
+                        .literal
+                        .clone()
+                        .ok_or("Expected identifier")?;
                     DestructElement::Ident(name)
                 }
                 _ => return Err("Expected identifier or pattern in destructuring".to_string()),
             };
             elements.push(Some(elem));
-            
+
             if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
                 self.advance();
             } else {
                 break;
             }
         }
-        
+
         self.expect(TokenKind::RBracket)?;
         Ok(DestructPattern::Array(elements))
     }
-    
+
     fn parse_object_destruct_pattern(&mut self) -> Result<DestructPattern, String> {
         self.expect(TokenKind::LBrace)?;
         let mut props = Vec::new();
-        
+
         while !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
-            let key = self.expect(TokenKind::Ident)?.literal.clone().ok_or("Expected identifier")?;
-            
+            let key = self
+                .expect(TokenKind::Ident)?
+                .literal
+                .clone()
+                .ok_or("Expected identifier")?;
+
             let value = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
                 self.advance();
                 // Could be renamed binding or nested pattern
@@ -341,7 +359,12 @@ impl<'a> Parser<'a> {
                         DestructElement::Pattern(Box::new(nested))
                     }
                     Some(TokenKind::Ident) => {
-                        let name = self.advance().ok_or("Unexpected EOF")?.literal.clone().ok_or("Expected identifier")?;
+                        let name = self
+                            .advance()
+                            .ok_or("Unexpected EOF")?
+                            .literal
+                            .clone()
+                            .ok_or("Expected identifier")?;
                         DestructElement::Ident(name)
                     }
                     _ => return Err("Expected identifier or pattern after ':'".to_string()),
@@ -350,16 +373,16 @@ impl<'a> Parser<'a> {
                 // Shorthand: { key } is equivalent to { key: key }
                 DestructElement::Ident(key.clone())
             };
-            
+
             props.push(DestructProp { key, value });
-            
+
             if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
                 self.advance();
             } else {
                 break;
             }
         }
-        
+
         self.expect(TokenKind::RBrace)?;
         Ok(DestructPattern::Object(props))
     }
@@ -412,18 +435,18 @@ impl<'a> Parser<'a> {
             default,
         }))
     }
-    
+
     /// Parse a type annotation (number, string, T[], {a: T}, etc.)
     fn parse_type_annotation(&mut self) -> Result<TypeAnnotation, String> {
         let base = self.parse_type_primary()?;
-        
+
         // Check for array suffix: T[]
         if matches!(self.peek_kind(), Some(TokenKind::LBracket)) {
             self.advance(); // [
             self.expect(TokenKind::RBracket)?; // ]
             return Ok(TypeAnnotation::Array(Box::new(base)));
         }
-        
+
         // Check for union: T | U
         if matches!(self.peek_kind(), Some(TokenKind::BitOr)) {
             let mut types = vec![base];
@@ -433,10 +456,10 @@ impl<'a> Parser<'a> {
             }
             return Ok(TypeAnnotation::Union(types));
         }
-        
+
         Ok(base)
     }
-    
+
     /// Parse a primary type (identifier, object, or function type)
     fn parse_type_primary(&mut self) -> Result<TypeAnnotation, String> {
         match self.peek_kind() {
@@ -459,7 +482,10 @@ impl<'a> Parser<'a> {
                 self.advance(); // {
                 let mut props = Vec::new();
                 while !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
-                    let key = self.expect(TokenKind::Ident)?.literal.clone()
+                    let key = self
+                        .expect(TokenKind::Ident)?
+                        .literal
+                        .clone()
                         .ok_or("Expected property name")?;
                     self.expect(TokenKind::Colon)?;
                     let typ = self.parse_type_annotation()?;
@@ -486,7 +512,7 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(TokenKind::RParen)?;
                 // Expect => for return type
-                self.expect(TokenKind::Assign)?; // = 
+                self.expect(TokenKind::Assign)?; // =
                 self.expect(TokenKind::Gt)?; // > (forms =>)
                 let returns = self.parse_type_annotation()?;
                 Ok(TypeAnnotation::Function {
@@ -523,7 +549,11 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                rest_param = Some(TypedParam { name: param_name, type_ann, default: None });
+                rest_param = Some(TypedParam {
+                    name: param_name,
+                    type_ann,
+                    default: None,
+                });
                 if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
                     return Err("Rest parameter must be last".to_string());
                 }
@@ -535,7 +565,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(TokenKind::RParen)?;
-        
+
         // Optional return type: `: Type`
         let return_type = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
             self.advance();
@@ -665,7 +695,10 @@ impl<'a> Parser<'a> {
         if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
             self.advance();
         }
-        let cond = if matches!(self.peek_kind(), Some(TokenKind::Semicolon | TokenKind::RParen)) {
+        let cond = if matches!(
+            self.peek_kind(),
+            Some(TokenKind::Semicolon | TokenKind::RParen)
+        ) {
             None
         } else {
             let c = self.parse_expr()?;
@@ -780,11 +813,11 @@ impl<'a> Parser<'a> {
     fn parse_try(&mut self) -> Result<Statement, String> {
         let span_start = self.expect(TokenKind::Try)?.span.start;
         let body = Box::new(self.parse_block_or_statement()?);
-        
+
         let mut catch_param = None;
         let mut catch_body = None;
         let mut finally_body = None;
-        
+
         if matches!(self.peek_kind(), Some(TokenKind::Catch)) {
             self.advance();
             self.expect(TokenKind::LParen)?;
@@ -792,16 +825,16 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RParen)?;
             catch_body = Some(Box::new(self.parse_block_or_statement()?));
         }
-        
+
         if matches!(self.peek_kind(), Some(TokenKind::Finally)) {
             self.advance();
             finally_body = Some(Box::new(self.parse_block_or_statement()?));
         }
-        
+
         if catch_body.is_none() && finally_body.is_none() {
             return Err("try statement requires catch or finally".to_string());
         }
-        
+
         Ok(Statement::Try {
             body,
             catch_param,
@@ -920,7 +953,7 @@ impl<'a> Parser<'a> {
         // Check for simple assignment
         if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
             let start = left.span().start;
-            
+
             // Variable assignment: x = val
             if let Expr::Ident { name, .. } = &left {
                 let name = Arc::clone(name);
@@ -933,9 +966,14 @@ impl<'a> Parser<'a> {
                     span: Span { start, end },
                 });
             }
-            
+
             // Member assignment: obj.prop = val
-            if let Expr::Member { object, prop: MemberProp::Name(prop_name), .. } = &left {
+            if let Expr::Member {
+                object,
+                prop: MemberProp::Name(prop_name),
+                ..
+            } = &left
+            {
                 let object = Box::clone(object);
                 let prop = Arc::clone(prop_name);
                 self.advance(); // =
@@ -948,7 +986,7 @@ impl<'a> Parser<'a> {
                     span: Span { start, end },
                 });
             }
-            
+
             // Index assignment: arr[idx] = val or obj[key] = val
             if let Expr::Index { object, index, .. } = &left {
                 let object = Box::clone(object);
@@ -1060,7 +1098,7 @@ impl<'a> Parser<'a> {
     binary_single_op!(parse_bit_or, parse_bit_xor, BitOr, BinOp::BitOr);
     binary_single_op!(parse_bit_xor, parse_bit_and, BitXor, BinOp::BitXor);
     binary_single_op!(parse_bit_and, parse_shift, BitAnd, BinOp::BitAnd);
-    
+
     binary_multi_op!(parse_shift, parse_equality, Shl => BinOp::Shl, Shr => BinOp::Shr);
     binary_multi_op!(parse_equality, parse_comparison,
         StrictEq => BinOp::StrictEq, StrictNe => BinOp::StrictNe,
@@ -1099,14 +1137,20 @@ impl<'a> Parser<'a> {
             let operand = self.parse_unary()?;
             if let Expr::Ident { name, span } = &operand {
                 let name = Arc::clone(name);
-                let span = Span { start: span_start, end: span.end };
+                let span = Span {
+                    start: span_start,
+                    end: span.end,
+                };
                 return Ok(if is_inc {
                     Expr::PrefixInc { name, span }
                 } else {
                     Expr::PrefixDec { name, span }
                 });
             }
-            return Err(format!("Prefix {} requires an identifier", if is_inc { "++" } else { "--" }));
+            return Err(format!(
+                "Prefix {} requires an identifier",
+                if is_inc { "++" } else { "--" }
+            ));
         }
         let op = match self.peek_kind() {
             Some(TokenKind::Not) => UnaryOp::Not,
@@ -1134,7 +1178,10 @@ impl<'a> Parser<'a> {
                 let end = operand.span().end;
                 return Ok(Expr::Await {
                     operand: Box::new(operand),
-                    span: Span { start: span_start, end },
+                    span: Span {
+                        start: span_start,
+                        end,
+                    },
                 });
             }
             _ => return self.parse_postfix(),
@@ -1302,11 +1349,18 @@ impl<'a> Parser<'a> {
                     };
                 }
                 TokenKind::PlusPlus | TokenKind::MinusMinus => {
-                    if let Expr::Ident { name, span: ident_span } = &expr {
+                    if let Expr::Ident {
+                        name,
+                        span: ident_span,
+                    } = &expr
+                    {
                         let name = Arc::clone(name);
                         let is_inc = kind == TokenKind::PlusPlus;
                         let tok = self.advance().ok_or("Unexpected EOF")?;
-                        let span = Span { start: ident_span.start, end: tok.span.end };
+                        let span = Span {
+                            start: ident_span.start,
+                            end: tok.span.end,
+                        };
                         expr = if is_inc {
                             Expr::PostfixInc { name, span }
                         } else {
@@ -1374,7 +1428,10 @@ impl<'a> Parser<'a> {
                             default: None,
                         })],
                         body,
-                        span: Span { start: span.start, end },
+                        span: Span {
+                            start: span.start,
+                            end,
+                        },
                     });
                 }
                 Ok(Expr::Ident { name, span })
@@ -1418,7 +1475,10 @@ impl<'a> Parser<'a> {
                 match self.peek_kind() {
                     Some(TokenKind::Ident) => self.parse_jsx_element(span.start),
                     Some(TokenKind::Gt) => self.parse_jsx_fragment(span.start),
-                    _ => Err(format!("Invalid JSX: expected tag name or <> after <, got {:?}", self.peek_kind())),
+                    _ => Err(format!(
+                        "Invalid JSX: expected tag name or <> after <, got {:?}",
+                        self.peek_kind()
+                    )),
                 }
             }
             TokenKind::LBrace => {
@@ -1432,10 +1492,7 @@ impl<'a> Parser<'a> {
                         let key_tok = self.advance().ok_or("Expected object key")?;
                         let (key, key_span, is_ident_key) = match key_tok.kind {
                             TokenKind::Ident => {
-                                let k = key_tok
-                                    .literal
-                                    .clone()
-                                    .ok_or("Expected key")?;
+                                let k = key_tok.literal.clone().ok_or("Expected key")?;
                                 let sp = Span {
                                     start: key_tok.span.start,
                                     end: key_tok.span.end,
@@ -1443,20 +1500,19 @@ impl<'a> Parser<'a> {
                                 (k, sp, true)
                             }
                             TokenKind::String => {
-                                let k = key_tok
-                                    .literal
-                                    .clone()
-                                    .ok_or("Expected string key")?;
+                                let k = key_tok.literal.clone().ok_or("Expected string key")?;
                                 let sp = Span {
                                     start: key_tok.span.start,
                                     end: key_tok.span.end,
                                 };
                                 (k, sp, false)
                             }
-                            _ => return Err(format!(
-                                "Expected object key (ident or string), got {:?}",
-                                key_tok.kind
-                            )),
+                            _ => {
+                                return Err(format!(
+                                    "Expected object key (ident or string), got {:?}",
+                                    key_tok.kind
+                                ))
+                            }
                         };
                         let value = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
                             self.expect(TokenKind::Colon)?;
@@ -1499,12 +1555,12 @@ impl<'a> Parser<'a> {
                 // Template literal with interpolation: `text${
                 let mut quasis = vec![t.literal.clone().unwrap_or_default()];
                 let mut exprs = Vec::new();
-                
+
                 loop {
                     // Parse the expression inside ${}
                     let expr = self.parse_expr()?;
                     exprs.push(expr);
-                    
+
                     // Next token should be TemplateMiddle or TemplateTail
                     let next = self.advance().ok_or("Unexpected EOF in template literal")?;
                     match next.kind {
@@ -1514,14 +1570,22 @@ impl<'a> Parser<'a> {
                             return Ok(Expr::TemplateLiteral {
                                 quasis,
                                 exprs,
-                                span: Span { start: span.start, end },
+                                span: Span {
+                                    start: span.start,
+                                    end,
+                                },
                             });
                         }
                         TokenKind::TemplateMiddle => {
                             quasis.push(next.literal.clone().unwrap_or_default());
                             // Continue parsing more expressions
                         }
-                        _ => return Err(format!("Expected template continuation, got {:?}", next.kind)),
+                        _ => {
+                            return Err(format!(
+                                "Expected template continuation, got {:?}",
+                                next.kind
+                            ))
+                        }
                     }
                 }
             }
@@ -1534,11 +1598,11 @@ impl<'a> Parser<'a> {
     fn try_parse_arrow_function(&mut self, start_span: &Span) -> Result<Option<Expr>, String> {
         // Save position for backtracking
         let saved_pos = self.pos;
-        
+
         // Try to parse as arrow function params
         let mut params = Vec::new();
         let mut is_arrow = false;
-        
+
         // Check for empty params: () => ...
         if matches!(self.peek_kind(), Some(TokenKind::RParen)) {
             self.advance(); // consume )
@@ -1574,20 +1638,23 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        
+
         if !is_arrow {
             // Backtrack - it's not an arrow function
             self.pos = saved_pos;
             return Ok(None);
         }
-        
+
         let body = self.parse_arrow_body()?;
         let end = self.previous_span_end();
-        
+
         Ok(Some(Expr::ArrowFunction {
             params,
             body,
-            span: Span { start: start_span.start, end },
+            span: Span {
+                start: start_span.start,
+                end,
+            },
         }))
     }
 
@@ -1651,7 +1718,11 @@ impl<'a> Parser<'a> {
                             self.expect(TokenKind::RBrace)?; // }
                             JsxAttrValue::Expr(expr)
                         } else {
-                            let s = self.expect(TokenKind::String)?.literal.clone().ok_or("Expected string")?;
+                            let s = self
+                                .expect(TokenKind::String)?
+                                .literal
+                                .clone()
+                                .ok_or("Expected string")?;
                             JsxAttrValue::String(s)
                         };
                         props.push(JsxProp::Attr { name, value });
@@ -1662,7 +1733,12 @@ impl<'a> Parser<'a> {
                         });
                     }
                 }
-                _ => return Err(format!("Unexpected token in JSX props: {:?}", self.peek_kind())),
+                _ => {
+                    return Err(format!(
+                        "Unexpected token in JSX props: {:?}",
+                        self.peek_kind()
+                    ))
+                }
             }
         }
         self.advance(); // consume >
@@ -1745,9 +1821,16 @@ impl<'a> Parser<'a> {
                             // </ closing tag
                             self.advance(); // <
                             self.advance(); // /
-                            let name = self.expect(TokenKind::Ident)?.literal.clone().ok_or("Expected tag name")?;
+                            let name = self
+                                .expect(TokenKind::Ident)?
+                                .literal
+                                .clone()
+                                .ok_or("Expected tag name")?;
                             if name.as_ref() != close_tag {
-                                return Err(format!("Mismatched JSX tag: expected </{}> got </{}>", close_tag, name));
+                                return Err(format!(
+                                    "Mismatched JSX tag: expected </{}> got </{}>",
+                                    close_tag, name
+                                ));
                             }
                             self.expect(TokenKind::Gt)?; // >
                             return Ok(children);
@@ -1827,7 +1910,10 @@ impl<'a> Parser<'a> {
                                     self.advance();
                                     self.advance();
                                     let end = self.previous_span_end();
-                                    return Ok(Expr::JsxFragment { children, span: Span { start, end } });
+                                    return Ok(Expr::JsxFragment {
+                                        children,
+                                        span: Span { start, end },
+                                    });
                                 }
                             }
                             return Err("Expected </> to close fragment".to_string());
@@ -1929,4 +2015,3 @@ impl ExprSpan for Expr {
         }
     }
 }
-

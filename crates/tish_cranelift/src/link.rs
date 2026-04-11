@@ -12,9 +12,8 @@ pub fn link_to_binary(
     output_path: &Path,
     features: &[String],
 ) -> Result<(), CraneliftError> {
-    let workspace_root = tishlang_build_utils::find_workspace_root().map_err(|e| CraneliftError {
-        message: e,
-    })?;
+    let workspace_root =
+        tishlang_build_utils::find_workspace_root().map_err(|e| CraneliftError { message: e })?;
     let out_name = output_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -104,17 +103,15 @@ fn main() {{
         message: format!("Cannot write build.rs: {}", e),
     })?;
 
-    tishlang_build_utils::run_cargo_build(&build_dir, None).map_err(|e| CraneliftError { message: e })?;
+    tishlang_build_utils::run_cargo_build(&build_dir, None)
+        .map_err(|e| CraneliftError { message: e })?;
 
     let binary_dir = build_dir.join("target").join("release");
-    let binary =
-        tishlang_build_utils::find_release_binary(&binary_dir, out_name)
-            .map_err(|e| CraneliftError { message: e })?;
+    let binary = tishlang_build_utils::find_release_binary(&binary_dir, out_name)
+        .map_err(|e| CraneliftError { message: e })?;
     let target = tishlang_build_utils::resolve_output_path(output_path, out_name);
     tishlang_build_utils::copy_binary_to_output(&binary, &target)
         .map_err(|e| CraneliftError { message: e })?;
 
     Ok(())
 }
-
-

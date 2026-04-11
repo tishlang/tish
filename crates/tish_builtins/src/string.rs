@@ -3,11 +3,11 @@
 //! All indices use character (Unicode scalar) positions for consistency with
 //! JavaScript, matching .length and .charAt(). Byte offsets are never exposed.
 
+use crate::helpers::normalize_index;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use tishlang_core::Value;
-use crate::helpers::normalize_index;
 
 /// Byte offset -> character index.
 fn byte_to_char_index(s: &str, byte_offset: usize) -> usize {
@@ -152,7 +152,10 @@ pub fn slice(s: &Value, start: &Value, end: &Value) -> Value {
     if let Value::String(s) = s {
         let chars: Vec<char> = s.chars().collect();
         let len = chars.len() as i64;
-        let (si, ei) = (normalize_index(start, len, 0), normalize_index(end, len, len as usize));
+        let (si, ei) = (
+            normalize_index(start, len, 0),
+            normalize_index(end, len, len as usize),
+        );
         let result: String = if si < ei {
             chars[si..ei].iter().collect()
         } else {
@@ -193,7 +196,8 @@ pub fn split(s: &Value, sep: &Value) -> Value {
             Value::String(ss) => ss.as_ref(),
             _ => return Value::Array(Rc::new(RefCell::new(vec![Value::String(Arc::clone(s))]))),
         };
-        let parts: Vec<Value> = s.split(separator)
+        let parts: Vec<Value> = s
+            .split(separator)
             .map(|p| Value::String(p.into()))
             .collect();
         Value::Array(Rc::new(RefCell::new(parts)))
@@ -244,9 +248,19 @@ pub fn ends_with(s: &Value, search: &Value) -> Value {
 
 fn replace_impl(s: &Value, search: &Value, replacement: &Value, all: bool) -> Value {
     if let Value::String(s) = s {
-        let search_str = match search { Value::String(ss) => ss.as_ref(), _ => return Value::String(Arc::clone(s)) };
-        let repl_str = match replacement { Value::String(ss) => ss.as_ref(), _ => "" };
-        let result = if all { s.replace(search_str, repl_str) } else { s.replacen(search_str, repl_str, 1) };
+        let search_str = match search {
+            Value::String(ss) => ss.as_ref(),
+            _ => return Value::String(Arc::clone(s)),
+        };
+        let repl_str = match replacement {
+            Value::String(ss) => ss.as_ref(),
+            _ => "",
+        };
+        let result = if all {
+            s.replace(search_str, repl_str)
+        } else {
+            s.replacen(search_str, repl_str, 1)
+        };
         Value::String(result.into())
     } else {
         Value::Null
@@ -267,8 +281,13 @@ fn char_at_idx(s: &str, idx: usize) -> Option<char> {
 
 pub fn char_at(s: &Value, idx: &Value) -> Value {
     if let Value::String(s) = s {
-        let idx = match idx { Value::Number(n) => *n as usize, _ => 0 };
-        char_at_idx(s, idx).map(|c| Value::String(c.to_string().into())).unwrap_or(Value::String("".into()))
+        let idx = match idx {
+            Value::Number(n) => *n as usize,
+            _ => 0,
+        };
+        char_at_idx(s, idx)
+            .map(|c| Value::String(c.to_string().into()))
+            .unwrap_or(Value::String("".into()))
     } else {
         Value::Null
     }
@@ -276,8 +295,13 @@ pub fn char_at(s: &Value, idx: &Value) -> Value {
 
 pub fn char_code_at(s: &Value, idx: &Value) -> Value {
     if let Value::String(s) = s {
-        let idx = match idx { Value::Number(n) => *n as usize, _ => 0 };
-        char_at_idx(s, idx).map(|c| Value::Number(c as u32 as f64)).unwrap_or(Value::Number(f64::NAN))
+        let idx = match idx {
+            Value::Number(n) => *n as usize,
+            _ => 0,
+        };
+        char_at_idx(s, idx)
+            .map(|c| Value::Number(c as u32 as f64))
+            .unwrap_or(Value::Number(f64::NAN))
     } else {
         Value::Null
     }
@@ -311,7 +335,11 @@ fn pad_impl(s: &Value, target_len: &Value, pad: &Value, at_start: bool) -> Value
         }
         let needed = target_len - char_count;
         let padding: String = pad_str.chars().cycle().take(needed).collect();
-        let result = if at_start { format!("{}{}", padding, s) } else { format!("{}{}", s, padding) };
+        let result = if at_start {
+            format!("{}{}", padding, s)
+        } else {
+            format!("{}{}", s, padding)
+        };
         Value::String(result.into())
     } else {
         Value::Null
@@ -382,16 +410,31 @@ mod tests {
     fn includes_basic() {
         assert_same!(includes(&s("hello"), &s("ll"), None), Value::Bool(true));
         assert_same!(includes(&s("hello"), &s("x"), None), Value::Bool(false));
-        assert_same!(includes(&s("hello"), &s("l"), Some(&n(3.0))), Value::Bool(true));
-        assert_same!(includes(&s("hello"), &s("l"), Some(&n(4.0))), Value::Bool(false));
+        assert_same!(
+            includes(&s("hello"), &s("l"), Some(&n(3.0))),
+            Value::Bool(true)
+        );
+        assert_same!(
+            includes(&s("hello"), &s("l"), Some(&n(4.0))),
+            Value::Bool(false)
+        );
     }
 
     #[test]
     fn includes_negative_from() {
-        assert_same!(includes(&s("hello"), &s("o"), Some(&n(-1.0))), Value::Bool(true));
-        assert_same!(includes(&s("hello"), &s("h"), Some(&n(-5.0))), Value::Bool(true));
+        assert_same!(
+            includes(&s("hello"), &s("o"), Some(&n(-1.0))),
+            Value::Bool(true)
+        );
+        assert_same!(
+            includes(&s("hello"), &s("h"), Some(&n(-5.0))),
+            Value::Bool(true)
+        );
         // fromIndex -1 → start at len-1 = 1 ("i" only), "h" not found
-        assert_same!(includes(&s("hi"), &s("h"), Some(&n(-1.0))), Value::Bool(false));
+        assert_same!(
+            includes(&s("hi"), &s("h"), Some(&n(-1.0))),
+            Value::Bool(false)
+        );
     }
 
     #[test]
@@ -466,7 +509,10 @@ mod tests {
 
     #[test]
     fn last_index_of_basic() {
-        assert_same!(last_index_of(&s("abcabc"), &s("a"), &n(f64::INFINITY)), n(3.0));
+        assert_same!(
+            last_index_of(&s("abcabc"), &s("a"), &n(f64::INFINITY)),
+            n(3.0)
+        );
         assert_same!(last_index_of(&s("abcabc"), &s("a"), &n(2.0)), n(0.0));
         assert_same!(last_index_of(&s("hello"), &s("l"), &n(3.0)), n(3.0));
         assert_same!(last_index_of(&s("hello"), &s("l"), &n(1.0)), n(-1.0));
@@ -490,8 +536,14 @@ mod tests {
 
     #[test]
     fn last_index_of_unicode() {
-        assert_same!(last_index_of(&s("😀a😀"), &s("a"), &n(f64::INFINITY)), n(1.0));
-        assert_same!(last_index_of(&s("😀a😀"), &s("😀"), &n(f64::INFINITY)), n(2.0));
+        assert_same!(
+            last_index_of(&s("😀a😀"), &s("a"), &n(f64::INFINITY)),
+            n(1.0)
+        );
+        assert_same!(
+            last_index_of(&s("😀a😀"), &s("😀"), &n(f64::INFINITY)),
+            n(2.0)
+        );
     }
 
     #[test]

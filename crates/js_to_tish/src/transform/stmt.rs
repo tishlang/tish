@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use oxc::ast::ast::Statement as OxcStmt;
 use oxc::semantic::Semantic;
-use tishlang_ast::{Statement, Span};
+use tishlang_ast::{Span, Statement};
 
 use super::expr;
 use crate::error::{ConvertError, ConvertErrorKind};
@@ -19,9 +19,7 @@ pub fn convert_statements(
     source: &str,
 ) -> Result<Vec<Statement>, ConvertError> {
     let ctx = (semantic, source);
-    body.iter()
-        .map(|s| convert_statement(s, &ctx))
-        .collect()
+    body.iter().map(|s| convert_statement(s, &ctx)).collect()
 }
 
 fn convert_statement(stmt: &OxcStmt<'_>, ctx: &Ctx<'_>) -> Result<Statement, ConvertError> {
@@ -29,10 +27,7 @@ fn convert_statement(stmt: &OxcStmt<'_>, ctx: &Ctx<'_>) -> Result<Statement, Con
     match stmt {
         OxcStmt::BlockStatement(b) => {
             let statements = convert_statements(&b.body, ctx.0, ctx.1)?;
-            Ok(Statement::Block {
-                statements,
-                span,
-            })
+            Ok(Statement::Block { statements, span })
         }
         OxcStmt::VariableDeclaration(v) => convert_var_decl(v, ctx, span),
         OxcStmt::ExpressionStatement(e) => {
@@ -146,7 +141,11 @@ fn convert_var_decl(
     if v.declarations.len() == 1 {
         let d = &v.declarations[0];
         let id = &d.id;
-        let init = d.init.as_ref().map(|i| expr::convert_expr(i, ctx)).transpose()?;
+        let init = d
+            .init
+            .as_ref()
+            .map(|i| expr::convert_expr(i, ctx))
+            .transpose()?;
         match id {
             oxc::ast::ast::BindingPattern::BindingIdentifier(b) => {
                 let name: Arc<str> = Arc::from(b.name.as_str());
@@ -314,13 +313,16 @@ fn convert_try_statement(
     });
     let (catch_param, catch_body) = match &t.handler {
         Some(h) => {
-            let param = h.param.as_ref().and_then(|cp: &oxc::ast::ast::CatchParameter<'_>| {
-                if let oxc::ast::ast::BindingPattern::BindingIdentifier(b) = &cp.pattern {
-                    Some(Arc::from(b.name.as_str()))
-                } else {
-                    None
-                }
-            });
+            let param = h
+                .param
+                .as_ref()
+                .and_then(|cp: &oxc::ast::ast::CatchParameter<'_>| {
+                    if let oxc::ast::ast::BindingPattern::BindingIdentifier(b) = &cp.pattern {
+                        Some(Arc::from(b.name.as_str()))
+                    } else {
+                        None
+                    }
+                });
             let catch_stmts = convert_statements(&h.body.body, ctx.0, ctx.1)?;
             let cb = Box::new(Statement::Block {
                 statements: catch_stmts,
@@ -356,11 +358,10 @@ fn convert_function_decl(
     span: Span,
 ) -> Result<Statement, ConvertError> {
     let async_ = f.r#async;
-    let name: Arc<str> = f
-        .id
-        .as_ref()
-        .map(|id| Arc::from(id.name.as_str()))
-        .unwrap_or_else(|| Arc::from(""));
+    let name: Arc<str> =
+        f.id.as_ref()
+            .map(|id| Arc::from(id.name.as_str()))
+            .unwrap_or_else(|| Arc::from(""));
     let (params, rest_param) = expr::convert_params(&f.params, ctx)?;
     let body = match &f.body {
         Some(fb) => {
@@ -439,7 +440,9 @@ fn convert_export_default(
     let declaration = if let Some(expr) = e.declaration.as_expression() {
         let expr = expr::convert_expr(expr, ctx)?;
         tishlang_ast::ExportDeclaration::Default(expr)
-    } else if let oxc::ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(f) = &e.declaration {
+    } else if let oxc::ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(f) =
+        &e.declaration
+    {
         let stmt = convert_function_decl(f.as_ref(), ctx, span_util::stub_span())?;
         tishlang_ast::ExportDeclaration::Named(Box::new(stmt))
     } else {

@@ -16,7 +16,9 @@ struct Codegen {
 fn stmt_terminates_switch(stmt: Option<&Statement>) -> bool {
     matches!(
         stmt,
-        Some(Statement::Break { .. }) | Some(Statement::Return { .. }) | Some(Statement::Throw { .. })
+        Some(Statement::Break { .. })
+            | Some(Statement::Return { .. })
+            | Some(Statement::Throw { .. })
     )
 }
 
@@ -174,7 +176,12 @@ impl Codegen {
                 self.emit_statement(body)?;
                 self.indent -= 1;
             }
-            Statement::ForOf { name, iterable, body, .. } => {
+            Statement::ForOf {
+                name,
+                iterable,
+                body,
+                ..
+            } => {
                 let escaped = Self::escape_ident(name.as_ref());
                 let it = self.emit_expr(iterable)?;
                 self.writeln(&format!("for (const {} of {})", escaped, it));
@@ -204,7 +211,10 @@ impl Codegen {
                 let async_prefix = if *async_ { "async " } else { "" };
                 let escaped = Self::escape_ident(name.as_ref());
                 let params_str = self.emit_params(params, rest_param.as_ref())?;
-                self.writeln(&format!("{}function {} ({}) {{", async_prefix, escaped, params_str));
+                self.writeln(&format!(
+                    "{}function {} ({}) {{",
+                    async_prefix, escaped, params_str
+                ));
                 self.indent += 1;
                 if *async_ {
                     self.in_async = true;
@@ -337,9 +347,7 @@ impl Codegen {
                 let parts: Vec<String> = elements
                     .iter()
                     .map(|el| match el {
-                        Some(DestructElement::Ident(n)) => {
-                            Ok(Self::escape_ident(n.as_ref()))
-                        }
+                        Some(DestructElement::Ident(n)) => Ok(Self::escape_ident(n.as_ref())),
                         Some(DestructElement::Pattern(p)) => self.emit_destruct_pattern(p),
                         Some(DestructElement::Rest(n)) => {
                             Ok(format!("...{}", Self::escape_ident(n.as_ref())))
@@ -385,7 +393,9 @@ impl Codegen {
                 Literal::Null => "null".to_string(),
             },
             Expr::Ident { name, .. } => Self::escape_ident(name.as_ref()),
-            Expr::Binary { left, op, right, .. } => {
+            Expr::Binary {
+                left, op, right, ..
+            } => {
                 let l = self.emit_expr(left)?;
                 let r = self.emit_expr(right)?;
                 let op_str = match op {
@@ -451,7 +461,9 @@ impl Codegen {
                 let obj = self.emit_expr(object)?;
                 let expr = match prop {
                     MemberProp::Name(p) => {
-                        if p.parse::<u32>().is_ok() || !p.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        if p.parse::<u32>().is_ok()
+                            || !p.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        {
                             format!("{}[{:?}]", obj, p.as_ref())
                         } else {
                             let sep = if *optional { "?." } else { "." };
@@ -548,7 +560,9 @@ impl Codegen {
             Expr::PrefixDec { name, .. } => {
                 format!("--{}", Self::escape_ident(name.as_ref()))
             }
-            Expr::CompoundAssign { name, op, value, .. } => {
+            Expr::CompoundAssign {
+                name, op, value, ..
+            } => {
                 let n = Self::escape_ident(name.as_ref());
                 let v = self.emit_expr(value)?;
                 let op_str = match op {
@@ -560,7 +574,9 @@ impl Codegen {
                 };
                 format!("({} {} {})", n, op_str, v)
             }
-            Expr::LogicalAssign { name, op, value, .. } => {
+            Expr::LogicalAssign {
+                name, op, value, ..
+            } => {
                 let n = Self::escape_ident(name.as_ref());
                 let v = self.emit_expr(value)?;
                 let op_str = match op {
@@ -570,7 +586,12 @@ impl Codegen {
                 };
                 format!("({} {} {})", n, op_str, v)
             }
-            Expr::MemberAssign { object, prop, value, .. } => {
+            Expr::MemberAssign {
+                object,
+                prop,
+                value,
+                ..
+            } => {
                 let obj = self.emit_expr(object)?;
                 let val = self.emit_expr(value)?;
                 format!("({}.{} = {})", obj, prop.as_ref(), val)
@@ -652,7 +673,6 @@ impl Codegen {
             CallArg::Spread(e) => Ok(format!("...{}", self.emit_expr(e)?)),
         }
     }
-
 }
 
 /// Compile a single program (no imports) to JavaScript. JSX lowers to `h` / `Fragment` (Lattish).
@@ -679,7 +699,8 @@ pub fn compile_project_with_jsx(
         .map_err(|e| CompileError { message: e })?;
     tishlang_compile::detect_cycles(&modules).map_err(|e| CompileError { message: e })?;
     let program = {
-        let prog = tishlang_compile::merge_modules(modules).map_err(|e| CompileError { message: e })?;
+        let prog =
+            tishlang_compile::merge_modules(modules).map_err(|e| CompileError { message: e })?;
         if optimize {
             tishlang_opt::optimize(&prog)
         } else {

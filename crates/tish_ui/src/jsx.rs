@@ -1,8 +1,6 @@
 //! Shared JSX lowering: emit `h(tag, props, children)` as JavaScript or Rust (`Value`) source.
 
-use tishlang_ast::{
-    ArrayElement, Expr, JsxAttrValue, JsxChild, JsxProp, Literal, ObjectProp,
-};
+use tishlang_ast::{ArrayElement, Expr, JsxAttrValue, JsxChild, JsxProp, Literal, ObjectProp};
 
 /// Escape a Tish identifier for Rust output (matches `tishlang_compile` conventions).
 pub fn escape_ident_rust(s: &str) -> String {
@@ -26,20 +24,29 @@ where
             children,
             ..
         } => {
-            let tag_str = if tag.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            let tag_str = if tag
+                .chars()
+                .next()
+                .map(|c| c.is_uppercase())
+                .unwrap_or(false)
+            {
                 tag.as_ref().to_string()
             } else {
                 format!("{:?}", tag.as_ref())
             };
             let props_str = emit_jsx_props_js(props, emit_expr)?;
-            let children_strs: Result<Vec<_>, _> =
-                children.iter().map(|c| emit_jsx_child_js(c, emit_expr)).collect();
+            let children_strs: Result<Vec<_>, _> = children
+                .iter()
+                .map(|c| emit_jsx_child_js(c, emit_expr))
+                .collect();
             let children_str = children_strs?.join(", ");
             Ok(format!("h({}, {}, [{}])", tag_str, props_str, children_str))
         }
         Expr::JsxFragment { children, .. } => {
-            let children_strs: Result<Vec<_>, _> =
-                children.iter().map(|c| emit_jsx_child_js(c, emit_expr)).collect();
+            let children_strs: Result<Vec<_>, _> = children
+                .iter()
+                .map(|c| emit_jsx_child_js(c, emit_expr))
+                .collect();
             let children_str = children_strs?.join(", ");
             Ok(format!("h(Fragment, null, [{}])", children_str))
         }
@@ -120,7 +127,11 @@ where
             children,
             ..
         } => {
-            let is_component = tag.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+            let is_component = tag
+                .chars()
+                .next()
+                .map(|c| c.is_uppercase())
+                .unwrap_or(false);
             let tag_rust = if is_component {
                 escape_ident_rust(tag.as_ref())
             } else {
@@ -146,11 +157,7 @@ where
                 "Value::Array(Rc::new(RefCell::new(vec![{}])))",
                 child_parts?.join(", ")
             );
-            Ok(wrap_h_call_rust(
-                "Fragment",
-                "Value::Null",
-                &children_rust,
-            ))
+            Ok(wrap_h_call_rust("Fragment", "Value::Null", &children_rust))
         }
         _ => Err(E::from("emit_jsx_rust: not a JSX expression".to_string())),
     }
@@ -279,7 +286,13 @@ fn stmt_contains_jsx(stmt: &tishlang_ast::Statement) -> bool {
         Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
             expr_contains_jsx(cond) || stmt_contains_jsx(body)
         }
-        Statement::For { init, cond, update, body, .. } => {
+        Statement::For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
             init.as_ref().is_some_and(|s| stmt_contains_jsx(s))
                 || cond.as_ref().is_some_and(expr_contains_jsx)
                 || update.as_ref().is_some_and(expr_contains_jsx)
@@ -288,7 +301,12 @@ fn stmt_contains_jsx(stmt: &tishlang_ast::Statement) -> bool {
         Statement::ForOf { iterable, body, .. } => {
             expr_contains_jsx(iterable) || stmt_contains_jsx(body)
         }
-        Statement::Switch { expr, cases, default_body, .. } => {
+        Statement::Switch {
+            expr,
+            cases,
+            default_body,
+            ..
+        } => {
             expr_contains_jsx(expr)
                 || cases.iter().any(|(e, ss)| {
                     e.as_ref().is_some_and(expr_contains_jsx) || ss.iter().any(stmt_contains_jsx)
@@ -372,9 +390,12 @@ fn expr_contains_jsx(expr: &Expr) -> bool {
         Expr::MemberAssign { object, value, .. } => {
             expr_contains_jsx(object) || expr_contains_jsx(value)
         }
-        Expr::IndexAssign { object, index, value, .. } => {
-            expr_contains_jsx(object) || expr_contains_jsx(index) || expr_contains_jsx(value)
-        }
+        Expr::IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => expr_contains_jsx(object) || expr_contains_jsx(index) || expr_contains_jsx(value),
         Expr::New { callee, args, .. } => {
             expr_contains_jsx(callee)
                 || args.iter().any(|a| match a {
@@ -383,8 +404,6 @@ fn expr_contains_jsx(expr: &Expr) -> bool {
                     }
                 })
         }
-        Expr::Literal { .. }
-        | Expr::Ident { .. }
-        | Expr::NativeModuleLoad { .. } => false,
+        Expr::Literal { .. } | Expr::Ident { .. } | Expr::NativeModuleLoad { .. } => false,
     }
 }

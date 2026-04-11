@@ -30,7 +30,6 @@ impl Constant {
     }
 }
 
-
 /// A bytecode chunk: instructions and associated data.
 #[derive(Debug, Clone)]
 pub struct Chunk {

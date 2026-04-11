@@ -7,11 +7,11 @@ mod infer;
 mod resolve;
 mod types;
 
+pub use codegen::CompileError;
 pub use codegen::{
     compile, compile_project, compile_project_full, compile_with_features,
     compile_with_native_modules, compile_with_project_root,
 };
-pub use codegen::CompileError;
 pub use resolve::{
     cargo_export_fn_name, compute_native_build_artifacts, detect_cycles, export_name_to_rust_ident,
     extract_native_import_features, format_rust_dependencies_toml, generate_native_wrapper_rs,
@@ -44,7 +44,10 @@ fn sum(...args: number[]): number {
         // total should be declared as f64
         assert!(rust.contains("let mut total: f64"), "expected total: f64");
         // The return value of run() should convert total back to Value
-        assert!(rust.contains("Value::Number(total)"), "expected Value::Number(total) wrapping");
+        assert!(
+            rust.contains("Value::Number(total)"),
+            "expected Value::Number(total) wrapping"
+        );
     }
 
     #[test]
@@ -60,7 +63,10 @@ for (let i = 0; i < 5; i = i + 1) {
         let program = parse(src).unwrap();
         let rust = compile(&program).unwrap();
         // outerVar and x are f64 (inferred) — Copy assignment, no .clone() needed.
-        assert!(rust.contains("let mut outerVar: f64"), "expected outerVar: f64");
+        assert!(
+            rust.contains("let mut outerVar: f64"),
+            "expected outerVar: f64"
+        );
         assert!(rust.contains("let mut x: f64"), "expected x: f64");
     }
 
@@ -105,13 +111,17 @@ fn factory() {
         // This test verifies the full benchmark_granular project compiles and that outerVar
         // is emitted as the inferred f64 type rather than requiring a Value clone.
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let bench = manifest.join("../../tests/core/benchmark_granular.tish").canonicalize().unwrap();
+        let bench = manifest
+            .join("../../tests/core/benchmark_granular.tish")
+            .canonicalize()
+            .unwrap();
         // Use same default features as tish CLI (http, fs, process, regex)
         let features = ["http", "fs", "process", "regex"]
             .into_iter()
             .map(String::from)
             .collect::<Vec<_>>();
-        let (rust, _, _, _) = compile_project_full(&bench, bench.parent(), &features, true).unwrap();
+        let (rust, _, _, _) =
+            compile_project_full(&bench, bench.parent(), &features, true).unwrap();
         // outerVar = 42 is inferred as f64; f64 is Copy so no .clone() is emitted.
         assert!(
             rust.contains("let mut outerVar: f64"),

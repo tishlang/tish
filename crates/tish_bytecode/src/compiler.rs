@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tishlang_ast::{
-    ArrayElement, ArrowBody, BinOp, CallArg, DestructElement, DestructPattern, Expr,
-    ExportDeclaration, FunParam, JsxAttrValue, JsxChild, JsxProp, Literal, LogicalAssignOp,
-    MemberProp, ObjectProp, Program, Span, Statement,
+    ArrayElement, ArrowBody, BinOp, CallArg, DestructElement, DestructPattern, ExportDeclaration,
+    Expr, FunParam, JsxAttrValue, JsxChild, JsxProp, Literal, LogicalAssignOp, MemberProp,
+    ObjectProp, Program, Span, Statement,
 };
 
 use crate::chunk::{Chunk, Constant};
@@ -120,9 +120,7 @@ impl<'a> Compiler<'a> {
                     slots.push(None);
                 }
                 FunParam::Destructure {
-                    pattern,
-                    default,
-                    ..
+                    pattern, default, ..
                 } => {
                     if default.is_some() {
                         return Err(CompileError {
@@ -274,8 +272,18 @@ impl<'a> Compiler<'a> {
                 ..
             } = body_expr
             {
-                if let (Expr::Member { object: lo, prop: MemberProp::Name(p), .. }, Expr::Member { object: ro, prop: MemberProp::Name(pr), .. }) =
-                    (left.as_ref(), right.as_ref())
+                if let (
+                    Expr::Member {
+                        object: lo,
+                        prop: MemberProp::Name(p),
+                        ..
+                    },
+                    Expr::Member {
+                        object: ro,
+                        prop: MemberProp::Name(pr),
+                        ..
+                    },
+                ) = (left.as_ref(), right.as_ref())
                 {
                     if p != pr {
                         return None;
@@ -327,8 +335,14 @@ impl<'a> Compiler<'a> {
                 ..
             } = body_expr
             {
-                if let (Expr::Ident { name: left_name, .. }, Expr::Ident { name: right_name, .. }) =
-                    (left.as_ref(), right.as_ref())
+                if let (
+                    Expr::Ident {
+                        name: left_name, ..
+                    },
+                    Expr::Ident {
+                        name: right_name, ..
+                    },
+                ) = (left.as_ref(), right.as_ref())
                 {
                     if left_name.as_ref() == param_a && right_name.as_ref() == param_b {
                         return Some(true);
@@ -360,7 +374,10 @@ impl<'a> Compiler<'a> {
             ArrowBody::Expr(e) => e.as_ref(),
             ArrowBody::Block(stmt) => {
                 let s = stmt.as_ref();
-                if let Statement::Return { value: Some(ref e), .. } = s {
+                if let Statement::Return {
+                    value: Some(ref e), ..
+                } = s
+                {
                     e
                 } else if let Statement::ExprStmt { expr: ref e, .. } = s {
                     e
@@ -376,9 +393,14 @@ impl<'a> Compiler<'a> {
             }
         }
         // Binary: x op const or const op x
-        if let Expr::Binary { left, op, right, .. } = expr_ref {
-            let left_is_param = matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
-            let right_is_param = matches!(right.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
+        if let Expr::Binary {
+            left, op, right, ..
+        } = expr_ref
+        {
+            let left_is_param =
+                matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
+            let right_is_param =
+                matches!(right.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
             let left_is_literal = matches!(left.as_ref(), Expr::Literal { .. });
             let right_is_literal = matches!(right.as_ref(), Expr::Literal { .. });
             if left_is_param && right_is_literal {
@@ -412,7 +434,10 @@ impl<'a> Compiler<'a> {
             ArrowBody::Expr(e) => e.as_ref(),
             ArrowBody::Block(stmt) => {
                 let s = stmt.as_ref();
-                if let Statement::Return { value: Some(ref e), .. } = s {
+                if let Statement::Return {
+                    value: Some(ref e), ..
+                } = s
+                {
                     e
                 } else if let Statement::ExprStmt { expr: ref e, .. } = s {
                     e
@@ -421,12 +446,29 @@ impl<'a> Compiler<'a> {
                 }
             }
         };
-        if let Expr::Binary { left, op, right, .. } = expr_ref {
-            if !matches!(op, BinOp::Eq | BinOp::Ne | BinOp::StrictEq | BinOp::StrictNe | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or) {
+        if let Expr::Binary {
+            left, op, right, ..
+        } = expr_ref
+        {
+            if !matches!(
+                op,
+                BinOp::Eq
+                    | BinOp::Ne
+                    | BinOp::StrictEq
+                    | BinOp::StrictNe
+                    | BinOp::Lt
+                    | BinOp::Le
+                    | BinOp::Gt
+                    | BinOp::Ge
+                    | BinOp::And
+                    | BinOp::Or
+            ) {
                 return None;
             }
-            let left_is_param = matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
-            let right_is_param = matches!(right.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
+            let left_is_param =
+                matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
+            let right_is_param =
+                matches!(right.as_ref(), Expr::Ident { name, .. } if name.as_ref() == param_name);
             let left_is_literal = matches!(left.as_ref(), Expr::Literal { .. });
             let right_is_literal = matches!(right.as_ref(), Expr::Literal { .. });
             if left_is_param && right_is_literal {
@@ -534,10 +576,9 @@ impl<'a> Compiler<'a> {
                     continue_patches: Vec::new(),
                     continue_is_forward_jump: false,
                 });
-                self.breakable_stack
-                    .push(Breakable::Loop {
-                        unwind_depth: self.block_depth,
-                    });
+                self.breakable_stack.push(Breakable::Loop {
+                    unwind_depth: self.block_depth,
+                });
                 self.compile_expr(cond)?;
                 let jump_out = self.emit_jump(Opcode::JumpIfFalse);
                 // JumpIfFalse already pops condition when taking body
@@ -580,10 +621,9 @@ impl<'a> Compiler<'a> {
                     continue_patches: Vec::new(),
                     continue_is_forward_jump: true,
                 });
-                self.breakable_stack
-                    .push(Breakable::Loop {
-                        unwind_depth: self.block_depth,
-                    });
+                self.breakable_stack.push(Breakable::Loop {
+                    unwind_depth: self.block_depth,
+                });
                 self.compile_statement(body)?;
                 let update_start = self.chunk.code.len();
                 if let Some(u) = update {
@@ -604,7 +644,12 @@ impl<'a> Compiler<'a> {
                 self.breakable_stack.pop();
                 self.scope.pop();
             }
-            Statement::ForOf { name, iterable, body, .. } => {
+            Statement::ForOf {
+                name,
+                iterable,
+                body,
+                ..
+            } => {
                 self.compile_expr(iterable)?;
                 self.scope.push(HashMap::new());
                 let arr_name = Arc::from("__forof_arr__");
@@ -615,12 +660,18 @@ impl<'a> Compiler<'a> {
                 let len_idx = self.name_idx(&len_name);
                 let name_idx = self.name_idx(name);
                 self.emit_u16(Opcode::DeclareVar, arr_idx);
-                self.scope.last_mut().unwrap().insert(arr_name.clone(), false);
+                self.scope
+                    .last_mut()
+                    .unwrap()
+                    .insert(arr_name.clone(), false);
                 self.emit_u16(Opcode::LoadVar, arr_idx);
                 let len_name_idx = self.name_idx(&Arc::from("length"));
                 self.emit_u16(Opcode::GetMember, len_name_idx);
                 self.emit_u16(Opcode::DeclareVar, len_idx);
-                self.scope.last_mut().unwrap().insert(len_name.clone(), false);
+                self.scope
+                    .last_mut()
+                    .unwrap()
+                    .insert(len_name.clone(), false);
                 let zero_idx = self.constant_idx(Constant::Number(0.0));
                 self.emit(Opcode::LoadConst);
                 self.chunk.write_u16(zero_idx);
@@ -632,15 +683,17 @@ impl<'a> Compiler<'a> {
                     continue_patches: Vec::new(),
                     continue_is_forward_jump: false,
                 });
-                self.breakable_stack
-                    .push(Breakable::Loop {
-                        unwind_depth: self.block_depth,
-                    });
+                self.breakable_stack.push(Breakable::Loop {
+                    unwind_depth: self.block_depth,
+                });
                 self.emit_u16(Opcode::LoadVar, arr_idx);
                 self.emit_u16(Opcode::LoadVar, i_idx);
                 self.emit(Opcode::GetIndex);
                 self.emit_u16(Opcode::DeclareVar, name_idx);
-                self.scope.last_mut().unwrap().insert(Arc::clone(name), false);
+                self.scope
+                    .last_mut()
+                    .unwrap()
+                    .insert(Arc::clone(name), false);
                 self.compile_statement(body)?;
                 self.emit_u16(Opcode::LoadVar, i_idx);
                 let one_idx = self.constant_idx(Constant::Number(1.0));
@@ -678,9 +731,8 @@ impl<'a> Compiler<'a> {
             }
             Statement::Break { .. } => {
                 let unwind_depth = match self.breakable_stack.last() {
-                    Some(Breakable::Loop { unwind_depth }) | Some(Breakable::Switch { unwind_depth }) => {
-                        *unwind_depth
-                    }
+                    Some(Breakable::Loop { unwind_depth })
+                    | Some(Breakable::Switch { unwind_depth }) => *unwind_depth,
                     None => {
                         return Err(CompileError {
                             message: "break not inside a loop or switch".to_string(),
@@ -694,7 +746,11 @@ impl<'a> Compiler<'a> {
                         self.loop_stack.last_mut().unwrap().break_patches.push(pos);
                     }
                     Some(Breakable::Switch { .. }) => {
-                        self.switch_stack.last_mut().unwrap().break_patches.push(pos);
+                        self.switch_stack
+                            .last_mut()
+                            .unwrap()
+                            .break_patches
+                            .push(pos);
                     }
                     None => {}
                 }
@@ -764,7 +820,10 @@ impl<'a> Compiler<'a> {
                 self.chunk.write_u16(idx);
                 let idx = self.name_idx(name);
                 self.emit_u16(Opcode::DeclareVar, idx);
-                self.scope.last_mut().unwrap().insert(Arc::clone(name), false);
+                self.scope
+                    .last_mut()
+                    .unwrap()
+                    .insert(Arc::clone(name), false);
             }
             Statement::DoWhile { body, cond, .. } => {
                 let start = self.chunk.code.len();
@@ -773,10 +832,9 @@ impl<'a> Compiler<'a> {
                     continue_patches: Vec::new(),
                     continue_is_forward_jump: false,
                 });
-                self.breakable_stack
-                    .push(Breakable::Loop {
-                        unwind_depth: self.block_depth,
-                    });
+                self.breakable_stack.push(Breakable::Loop {
+                    unwind_depth: self.block_depth,
+                });
                 self.compile_statement(body)?;
                 let cond_start = self.chunk.code.len();
                 self.compile_expr(cond)?;
@@ -794,7 +852,12 @@ impl<'a> Compiler<'a> {
                     self.patch_jump(p, end);
                 }
             }
-            Statement::Switch { expr, cases, default_body, .. } => {
+            Statement::Switch {
+                expr,
+                cases,
+                default_body,
+                ..
+            } => {
                 let switch_unwind_depth = self.block_depth;
                 self.switch_stack.push(SwitchInfo {
                     break_patches: Vec::new(),
@@ -899,7 +962,8 @@ impl<'a> Compiler<'a> {
                 if let Some(finally) = finally_body {
                     self.compile_statement(finally)?;
                 }
-                let catch_offset = catch_start.wrapping_sub(catch_offset_pos).wrapping_sub(3) as u16;
+                let catch_offset =
+                    catch_start.wrapping_sub(catch_offset_pos).wrapping_sub(3) as u16;
                 self.chunk.code[catch_offset_pos + 1] = (catch_offset >> 8) as u8;
                 self.chunk.code[catch_offset_pos + 2] = (catch_offset & 0xff) as u8;
             }
@@ -1008,7 +1072,9 @@ impl<'a> Compiler<'a> {
                 let idx = self.name_idx(name);
                 self.emit_u16(Opcode::LoadVar, idx);
             }
-            Expr::Binary { left, op, right, .. } => {
+            Expr::Binary {
+                left, op, right, ..
+            } => {
                 match op {
                     BinOp::And => {
                         // Short-circuit: a && b => if !a then a else b
@@ -1049,16 +1115,29 @@ impl<'a> Compiler<'a> {
                     && args.len() == 1
                     && matches!(args[0], CallArg::Expr(_))
                 {
-                    if let (Expr::Member { object, prop: MemberProp::Name(key), optional: false, .. }, CallArg::Expr(cmp_expr)) =
-                        (callee.as_ref(), &args[0])
+                    if let (
+                        Expr::Member {
+                            object,
+                            prop: MemberProp::Name(key),
+                            optional: false,
+                            ..
+                        },
+                        CallArg::Expr(cmp_expr),
+                    ) = (callee.as_ref(), &args[0])
                     {
                         if key.as_ref() == "sort" {
-                            if let Some(ascending) = Self::detect_numeric_sort_comparator(cmp_expr) {
+                            if let Some(ascending) = Self::detect_numeric_sort_comparator(cmp_expr)
+                            {
                                 self.compile_expr(object)?;
-                                self.emit_u8(Opcode::ArraySortNumeric, if ascending { 0 } else { 1 });
+                                self.emit_u8(
+                                    Opcode::ArraySortNumeric,
+                                    if ascending { 0 } else { 1 },
+                                );
                                 return Ok(());
                             }
-                            if let Some((prop, ascending)) = Self::detect_property_sort_comparator(cmp_expr) {
+                            if let Some((prop, ascending)) =
+                                Self::detect_property_sort_comparator(cmp_expr)
+                            {
                                 self.compile_expr(object)?;
                                 let prop_idx = self.constant_idx(Constant::String(prop));
                                 self.emit(Opcode::ArraySortByProperty);
@@ -1211,7 +1290,9 @@ impl<'a> Compiler<'a> {
                 self.patch_jump(jump_end, self.chunk.code.len());
             }
             Expr::Array { elements, .. } => {
-                let has_spread = elements.iter().any(|e| matches!(e, ArrayElement::Spread(_)));
+                let has_spread = elements
+                    .iter()
+                    .any(|e| matches!(e, ArrayElement::Spread(_)));
                 if has_spread {
                     // Build array incrementally: start with [], concat each element
                     self.emit_u16(Opcode::NewArray, 0);
@@ -1376,7 +1457,9 @@ impl<'a> Compiler<'a> {
                 self.emit(Opcode::Dup);
                 self.emit_u16(Opcode::StoreVar, idx);
             }
-            Expr::CompoundAssign { name, op, value, .. } => {
+            Expr::CompoundAssign {
+                name, op, value, ..
+            } => {
                 let idx = self.name_idx(name);
                 self.emit_u16(Opcode::LoadVar, idx);
                 self.compile_expr(value)?;
@@ -1384,20 +1467,32 @@ impl<'a> Compiler<'a> {
                 self.emit(Opcode::Dup);
                 self.emit_u16(Opcode::StoreVar, idx);
             }
-            Expr::MemberAssign { object, prop, value, .. } => {
+            Expr::MemberAssign {
+                object,
+                prop,
+                value,
+                ..
+            } => {
                 self.compile_expr(object)?;
                 self.compile_expr(value)?;
                 let idx = self.name_idx(prop);
                 self.emit_u16(Opcode::SetMember, idx); // SetMember pops obj, val and pushes val back
             }
-            Expr::IndexAssign { object, index, value, .. } => {
+            Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            } => {
                 self.compile_expr(object)?;
                 self.compile_expr(index)?;
                 self.compile_expr(value)?;
                 self.emit(Opcode::Dup); // leave copy for assignment expression result
                 self.emit(Opcode::SetIndex);
             }
-            Expr::NativeModuleLoad { spec, export_name, .. } => {
+            Expr::NativeModuleLoad {
+                spec, export_name, ..
+            } => {
                 let spec_idx = self.constant_idx(Constant::String(Arc::clone(spec)));
                 let export_idx = self.constant_idx(Constant::String(Arc::clone(export_name)));
                 self.emit(Opcode::LoadNativeExport);
@@ -1405,7 +1500,10 @@ impl<'a> Compiler<'a> {
                 self.chunk.write_u16(export_idx);
             }
             Expr::JsxElement {
-                tag, props, children, ..
+                tag,
+                props,
+                children,
+                ..
             } => {
                 self.compile_jsx_element(tag, props, children)?;
             }
@@ -1422,7 +1520,9 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(operand)?;
                 self.emit_u16(Opcode::Call, 1);
             }
-            Expr::LogicalAssign { name, op, value, .. } => {
+            Expr::LogicalAssign {
+                name, op, value, ..
+            } => {
                 let idx = self.name_idx(name);
                 match op {
                     LogicalAssignOp::OrOr => {
@@ -1515,7 +1615,11 @@ impl<'a> Compiler<'a> {
         let h_idx = self.name_idx(&Arc::from("h"));
         self.emit_u16(Opcode::LoadGlobal, h_idx);
         let tag_str = tag.as_ref();
-        let is_component = tag_str.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+        let is_component = tag_str
+            .chars()
+            .next()
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false);
         if is_component {
             let tag_idx = self.name_idx(tag);
             self.emit_u16(Opcode::LoadGlobal, tag_idx);

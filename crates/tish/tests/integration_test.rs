@@ -7,16 +7,18 @@
 //! - Compiled outputs are cached under `target/integration_compile_cache/` per backend.
 
 use std::collections::hash_map::DefaultHasher;
+use std::ffi::OsString;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rayon::prelude::*;
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
 }
 
 fn core_dir() -> PathBuf {
@@ -25,7 +27,10 @@ fn core_dir() -> PathBuf {
 
 /// Path to the static expected stdout for a .tish file (e.g. fn_any.tish -> fn_any.tish.expected).
 fn expected_path(path: &Path) -> PathBuf {
-    path.with_file_name(format!("{}.expected", path.file_name().unwrap().to_string_lossy()))
+    path.with_file_name(format!(
+        "{}.expected",
+        path.file_name().unwrap().to_string_lossy()
+    ))
 }
 
 /// Read static expected stdout for a test file. Returns None if the file does not exist.
@@ -70,7 +75,11 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
 
     let (artifact_path, compile_args): (PathBuf, Vec<OsString>) = match backend {
         "native" => {
-            let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+            let ext = if cfg!(target_os = "windows") {
+                ".exe"
+            } else {
+                ""
+            };
             let cached = cache_base.join(format!("{}_{}{}", stem, hash8, ext));
             let args = vec![
                 OsString::from("build"),
@@ -81,7 +90,11 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
             (cached, args)
         }
         "cranelift" => {
-            let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+            let ext = if cfg!(target_os = "windows") {
+                ".exe"
+            } else {
+                ""
+            };
             let cached = cache_base.join(format!("{}_{}{}", stem, hash8, ext));
             let args = vec![
                 OsString::from("build"),
@@ -137,8 +150,12 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
     }
 
     // Copy to temp so caller can run and delete without touching cache.
-    let ext = artifact_path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
-    let temp_dest = std::env::temp_dir().join(format!("tish_cached_{}_{}_{}", backend, stem, hash8));
+    let ext = artifact_path
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let temp_dest =
+        std::env::temp_dir().join(format!("tish_cached_{}_{}_{}", backend, stem, hash8));
     let temp_dest = if ext.is_empty() {
         temp_dest
     } else {
@@ -151,12 +168,20 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
 /// Path to the tish CLI binary. When running under cargo-llvm-cov, the build goes to
 /// target/llvm-cov-target and CARGO_TARGET_DIR may not be set for the test process.
 fn tish_bin() -> PathBuf {
-    let bin_name = if cfg!(target_os = "windows") { "tish.exe" } else { "tish" };
+    let bin_name = if cfg!(target_os = "windows") {
+        "tish.exe"
+    } else {
+        "tish"
+    };
     let default = target_dir().join("debug").join(bin_name);
     if default.exists() {
         return default;
     }
-    let llvm_cov = workspace_root().join("target").join("llvm-cov-target").join("debug").join(bin_name);
+    let llvm_cov = workspace_root()
+        .join("target")
+        .join("llvm-cov-target")
+        .join("debug")
+        .join(bin_name);
     if llvm_cov.exists() {
         return llvm_cov;
     }
@@ -167,9 +192,16 @@ fn tish_bin() -> PathBuf {
 #[test]
 fn test_tish_version_flag() {
     let bin = tish_bin();
-    assert!(bin.exists(), "tish binary not found. Run `cargo build -p tishlang` first.");
+    assert!(
+        bin.exists(),
+        "tish binary not found. Run `cargo build -p tishlang` first."
+    );
     let out = Command::new(&bin).arg("-V").output().expect("run tish -V");
-    assert!(out.status.success(), "tish -V failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "tish -V failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains(env!("CARGO_PKG_VERSION")),
@@ -177,20 +209,35 @@ fn test_tish_version_flag() {
         env!("CARGO_PKG_VERSION"),
         stdout
     );
-    let out2 = Command::new(&bin).arg("--version").output().expect("run tish --version");
+    let out2 = Command::new(&bin)
+        .arg("--version")
+        .output()
+        .expect("run tish --version");
     assert!(out2.status.success());
     let stdout2 = String::from_utf8_lossy(&out2.stdout);
-    assert!(stdout2.contains(env!("CARGO_PKG_VERSION")), "tish --version should print version");
+    assert!(
+        stdout2.contains(env!("CARGO_PKG_VERSION")),
+        "tish --version should print version"
+    );
 }
 
 /// Parse async-await example (validates async fn parsing).
 #[test]
 fn test_async_await_parse() {
-    let path = workspace_root().join("examples").join("async-await").join("src").join("main.tish");
+    let path = workspace_root()
+        .join("examples")
+        .join("async-await")
+        .join("src")
+        .join("main.tish");
     if path.exists() {
         let source = std::fs::read_to_string(&path).unwrap();
         let result = tishlang_parser::parse(&source);
-        assert!(result.is_ok(), "Parse failed for {}: {:?}", path.display(), result.err());
+        assert!(
+            result.is_ok(),
+            "Parse failed for {}: {:?}",
+            path.display(),
+            result.err()
+        );
     }
 }
 
@@ -199,11 +246,20 @@ fn test_async_await_parse() {
 #[cfg(feature = "http")]
 fn test_async_await_compile_via_binary() {
     let bin = tish_bin();
-    let path = workspace_root().join("examples").join("async-await").join("src").join("main.tish");
+    let path = workspace_root()
+        .join("examples")
+        .join("async-await")
+        .join("src")
+        .join("main.tish");
     if path.exists() && bin.exists() {
         let out = std::env::temp_dir().join("tish_async_test_out");
         let compile_result = Command::new(&bin)
-            .args(["build", path.to_string_lossy().as_ref(), "-o", out.to_string_lossy().as_ref()])
+            .args([
+                "build",
+                path.to_string_lossy().as_ref(),
+                "-o",
+                out.to_string_lossy().as_ref(),
+            ])
             .current_dir(workspace_root())
             .output();
         let compile_out = compile_result.expect("run tish build");
@@ -213,9 +269,7 @@ fn test_async_await_compile_via_binary() {
             String::from_utf8_lossy(&compile_out.stderr)
         );
         // Run compiled binary to validate non-blocking fetchAll executes correctly
-        let run_result = Command::new(&out)
-            .current_dir(workspace_root())
-            .output();
+        let run_result = Command::new(&out).current_dir(workspace_root()).output();
         let run_out = run_result.expect("run compiled async binary");
         assert!(
             run_out.status.success(),
@@ -223,7 +277,10 @@ fn test_async_await_compile_via_binary() {
             String::from_utf8_lossy(&run_out.stderr)
         );
         let stdout = String::from_utf8_lossy(&run_out.stdout);
-        assert!(stdout.contains("Fetching"), "expected output to mention fetching");
+        assert!(
+            stdout.contains("Fetching"),
+            "expected output to mention fetching"
+        );
         assert!(stdout.contains("Done"), "expected output to contain Done");
     }
 }
@@ -235,8 +292,16 @@ fn test_async_await_compile_via_binary() {
 #[ignore = "timing and network sensitive; run manually: cargo test test_async_parallel_vs_sequential_timing -p tishlang--features http -- --ignored"]
 fn test_async_parallel_vs_sequential_timing() {
     let bin = tish_bin();
-    let parallel_src = workspace_root().join("examples").join("async-await").join("src").join("parallel.tish");
-    let sequential_src = workspace_root().join("examples").join("async-await").join("src").join("sequential.tish");
+    let parallel_src = workspace_root()
+        .join("examples")
+        .join("async-await")
+        .join("src")
+        .join("parallel.tish");
+    let sequential_src = workspace_root()
+        .join("examples")
+        .join("async-await")
+        .join("src")
+        .join("sequential.tish");
     if !parallel_src.exists() || !sequential_src.exists() || !bin.exists() {
         return;
     }
@@ -245,28 +310,58 @@ fn test_async_parallel_vs_sequential_timing() {
 
     // Compile both
     let compile_par = Command::new(&bin)
-        .args(["build", parallel_src.to_string_lossy().as_ref(), "-o", out_parallel.to_string_lossy().as_ref()])
+        .args([
+            "build",
+            parallel_src.to_string_lossy().as_ref(),
+            "-o",
+            out_parallel.to_string_lossy().as_ref(),
+        ])
         .current_dir(workspace_root())
         .output();
-    assert!(compile_par.as_ref().unwrap().status.success(), "compile parallel: {}", String::from_utf8_lossy(&compile_par.as_ref().unwrap().stderr));
+    assert!(
+        compile_par.as_ref().unwrap().status.success(),
+        "compile parallel: {}",
+        String::from_utf8_lossy(&compile_par.as_ref().unwrap().stderr)
+    );
 
     let compile_seq = Command::new(&bin)
-        .args(["build", sequential_src.to_string_lossy().as_ref(), "-o", out_sequential.to_string_lossy().as_ref()])
+        .args([
+            "build",
+            sequential_src.to_string_lossy().as_ref(),
+            "-o",
+            out_sequential.to_string_lossy().as_ref(),
+        ])
         .current_dir(workspace_root())
         .output();
-    assert!(compile_seq.as_ref().unwrap().status.success(), "compile sequential: {}", String::from_utf8_lossy(&compile_seq.as_ref().unwrap().stderr));
+    assert!(
+        compile_seq.as_ref().unwrap().status.success(),
+        "compile sequential: {}",
+        String::from_utf8_lossy(&compile_seq.as_ref().unwrap().stderr)
+    );
 
     // Run parallel and time
     let t_parallel = std::time::Instant::now();
-    let run_par = Command::new(&out_parallel).current_dir(workspace_root()).output();
+    let run_par = Command::new(&out_parallel)
+        .current_dir(workspace_root())
+        .output();
     let elapsed_parallel = t_parallel.elapsed();
-    assert!(run_par.as_ref().unwrap().status.success(), "run parallel: {}", String::from_utf8_lossy(&run_par.as_ref().unwrap().stderr));
+    assert!(
+        run_par.as_ref().unwrap().status.success(),
+        "run parallel: {}",
+        String::from_utf8_lossy(&run_par.as_ref().unwrap().stderr)
+    );
 
     // Run sequential and time
     let t_sequential = std::time::Instant::now();
-    let run_seq = Command::new(&out_sequential).current_dir(workspace_root()).output();
+    let run_seq = Command::new(&out_sequential)
+        .current_dir(workspace_root())
+        .output();
     let elapsed_sequential = t_sequential.elapsed();
-    assert!(run_seq.as_ref().unwrap().status.success(), "run sequential: {}", String::from_utf8_lossy(&run_seq.as_ref().unwrap().stderr));
+    assert!(
+        run_seq.as_ref().unwrap().status.success(),
+        "run sequential: {}",
+        String::from_utf8_lossy(&run_seq.as_ref().unwrap().stderr)
+    );
 
     // PARALLEL MUST BE FASTER: parallel < sequential * 0.6 (parallel ~1s, sequential ~3s)
     let parallel_secs = elapsed_parallel.as_secs_f64();
@@ -285,11 +380,20 @@ fn test_async_parallel_vs_sequential_timing() {
 #[cfg(feature = "http")]
 #[ignore = "requires async runtime; use test_async_await_compile_via_binary for CI"]
 fn test_async_await_run() {
-    let path = workspace_root().join("examples").join("async-await").join("src").join("main.tish");
+    let path = workspace_root()
+        .join("examples")
+        .join("async-await")
+        .join("src")
+        .join("main.tish");
     if path.exists() {
         let source = std::fs::read_to_string(&path).unwrap();
         let result = tishlang_eval::run(&source);
-        assert!(result.is_ok(), "Run failed for {}: {:?}", path.display(), result.err());
+        assert!(
+            result.is_ok(),
+            "Run failed for {}: {:?}",
+            path.display(),
+            result.err()
+        );
     }
 }
 
@@ -300,7 +404,10 @@ fn test_async_await_run() {
 #[ignore = "requires async runtime"]
 fn test_promise_and_settimeout() {
     for name in ["promise", "settimeout"] {
-        let path = workspace_root().join("tests").join("modules").join(format!("{}.tish", name));
+        let path = workspace_root()
+            .join("tests")
+            .join("modules")
+            .join(format!("{}.tish", name));
         if path.exists() {
             let source = std::fs::read_to_string(&path).unwrap();
             let result = tishlang_eval::run(&source);
@@ -338,7 +445,10 @@ fn test_async_promise_settimeout_combined() {
 /// VM run with Date global (resolve+merge+bytecode+run pipeline).
 #[test]
 fn test_vm_date_now() {
-    let path = workspace_root().join("tests").join("core").join("date.tish");
+    let path = workspace_root()
+        .join("tests")
+        .join("core")
+        .join("date.tish");
     if !path.exists() {
         return;
     }
@@ -348,7 +458,11 @@ fn test_vm_date_now() {
     let program = tishlang_compile::merge_modules(modules).expect("merge");
     let chunk = tishlang_bytecode::compile(&program).expect("compile");
     let result = tishlang_vm::run(&chunk);
-    assert!(result.is_ok(), "VM run (library) failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "VM run (library) failed: {:?}",
+        result.err()
+    );
     // Binary path - same flow as `tish run <file>`
     let bin = tish_bin();
     if bin.exists() {
@@ -379,20 +493,30 @@ fn test_vm_index_assign_direct() {
 /// VM run via resolve+merge (same as tish run) - must also pass.
 #[test]
 fn test_vm_index_assign_via_resolve() {
-    let path = workspace_root().join("tests").join("core").join("array_sort_minimal.tish");
+    let path = workspace_root()
+        .join("tests")
+        .join("core")
+        .join("array_sort_minimal.tish");
     let modules = tishlang_compile::resolve_project(&path, path.parent()).expect("resolve");
     tishlang_compile::detect_cycles(&modules).expect("cycles");
     let program = tishlang_compile::merge_modules(modules).expect("merge");
     let chunk = tishlang_bytecode::compile(&program).expect("compile");
     let result = tishlang_vm::run(&chunk);
-    assert!(result.is_ok(), "VM IndexAssign via resolve failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "VM IndexAssign via resolve failed: {:?}",
+        result.err()
+    );
 }
 
 /// tish run binary must pass array_sort_minimal (ensures CLI works).
 #[test]
 fn test_tish_run_index_assign() {
     let bin = tish_bin();
-    let path = workspace_root().join("tests").join("core").join("array_sort_minimal.tish");
+    let path = workspace_root()
+        .join("tests")
+        .join("core")
+        .join("array_sort_minimal.tish");
     if !bin.exists() {
         eprintln!("Skipping: tish binary not built");
         return;
@@ -516,7 +640,12 @@ fn test_mvp_programs_interpreter() {
                     path.display()
                 )
             });
-            assert_eq!(stdout, expected, "Interpreter output mismatch for {}", path.display());
+            assert_eq!(
+                stdout,
+                expected,
+                "Interpreter output mismatch for {}",
+                path.display()
+            );
         }
     }
 }
@@ -562,7 +691,8 @@ fn test_mvp_programs_interp_vm_stdout_parity() {
         let s_interp = String::from_utf8_lossy(&out_interp.stdout);
         let s_vm = String::from_utf8_lossy(&out_vm.stdout);
         assert_eq!(
-            s_interp, s_vm,
+            s_interp,
+            s_vm,
             "interp vs VM stdout mismatch for {}",
             path.display()
         );
@@ -603,7 +733,11 @@ fn test_mvp_programs_native() {
             };
             let _ = std::fs::remove_file(&out_bin);
             if !out.status.success() {
-                return Some(format!("{}: {}", path.display(), String::from_utf8_lossy(&out.stderr)));
+                return Some(format!(
+                    "{}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&out.stderr)
+                ));
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
             if stdout != expected {
@@ -670,7 +804,11 @@ fn test_mvp_programs_cranelift() {
             };
             let _ = std::fs::remove_file(&out_bin);
             if !out.status.success() {
-                return Some(format!("{}: {}", path.display(), String::from_utf8_lossy(&out.stderr)));
+                return Some(format!(
+                    "{}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&out.stderr)
+                ));
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
             if stdout != expected {
@@ -679,7 +817,11 @@ fn test_mvp_programs_cranelift() {
             None
         })
         .collect();
-    assert!(errors.is_empty(), "cranelift failures:\n{}", errors.join("\n"));
+    assert!(
+        errors.is_empty(),
+        "cranelift failures:\n{}",
+        errors.join("\n")
+    );
 }
 
 /// Compile each .tish file to WASI, run with wasmtime, and compare stdout to static expected (parallelized).
@@ -727,7 +869,11 @@ fn test_mvp_programs_wasi() {
             };
             let _ = std::fs::remove_file(&out_wasm);
             if !out.status.success() {
-                return Some(format!("{}: {}", path.display(), String::from_utf8_lossy(&out.stderr)));
+                return Some(format!(
+                    "{}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&out.stderr)
+                ));
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
             if stdout != expected {
@@ -789,7 +935,11 @@ fn test_mvp_programs_js() {
             String::from_utf8_lossy(&out.stderr)
         );
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert_eq!(stdout, expected, "JS output mismatch for {}", path.display());
+        assert_eq!(
+            stdout,
+            expected,
+            "JS output mismatch for {}",
+            path.display()
+        );
     }
 }
-

@@ -48,7 +48,9 @@ fn vm_capabilities_for_cli_run(cli_features: &[String]) -> HashSet<String> {
 /// `--feature` list for `tish build --target native`: same default as `tish run` (all linked-in caps).
 fn native_build_features_from_cli(cli_features: &[String]) -> Vec<String> {
     if cli_features.is_empty() {
-        let mut v: Vec<String> = tishlang_vm::all_compiled_capabilities().into_iter().collect();
+        let mut v: Vec<String> = tishlang_vm::all_compiled_capabilities()
+            .into_iter()
+            .collect();
         v.sort();
         v
     } else {
@@ -61,8 +63,7 @@ fn argv_with_implicit_run(mut argv: Vec<String>) -> Vec<String> {
     if argv.len() >= 2 {
         let first = argv[1].as_str();
         const SUBCOMMANDS: &[&str] = &["run", "repl", "build", "dump-ast"];
-        let looks_like_file =
-            !first.starts_with('-') && !SUBCOMMANDS.iter().any(|&s| s == first);
+        let looks_like_file = !first.starts_with('-') && !SUBCOMMANDS.iter().any(|&s| s == first);
         if looks_like_file {
             argv.insert(1, "run".to_string());
         }
@@ -95,7 +96,12 @@ fn main() {
     let matches = cli_help::build_command().get_matches_from(&argv);
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let result = match cli.command {
-        Some(Commands::Run(a)) => run_file(&a.file, &a.backend, &a.features, a.no_optimize || no_opt_env),
+        Some(Commands::Run(a)) => run_file(
+            &a.file,
+            &a.backend,
+            &a.features,
+            a.no_optimize || no_opt_env,
+        ),
         Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env, &a.features),
         Some(Commands::Build(a)) => build_file(
             &a.file,
@@ -136,7 +142,8 @@ fn run_stdin_pipe(
     if source.trim().is_empty() {
         if fail_on_empty {
             return Err(
-                "No source on stdin. Example: echo 'console.log(1)' | tish   or   tish run -".into(),
+                "No source on stdin. Example: echo 'console.log(1)' | tish   or   tish run -"
+                    .into(),
             );
         }
         return Ok(());
@@ -162,12 +169,18 @@ fn run_stdin_source(
     run_program(&program, backend, no_optimize, features)
 }
 
-fn run_file(path: &str, backend: &str, features: &[String], no_optimize: bool) -> Result<(), String> {
+fn run_file(
+    path: &str,
+    backend: &str,
+    features: &[String],
+    no_optimize: bool,
+) -> Result<(), String> {
     let program = if path == "-" {
         return run_stdin_pipe(backend, features, no_optimize, true);
     } else {
-        let path =
-            Path::new(path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", path, e))?;
+        let path = Path::new(path)
+            .canonicalize()
+            .map_err(|e| format!("Cannot resolve {}: {}", path, e))?;
         let project_root = path.parent().and_then(|p| {
             if p.file_name().and_then(|n| n.to_str()) == Some("src") {
                 p.parent()
@@ -177,8 +190,10 @@ fn run_file(path: &str, backend: &str, features: &[String], no_optimize: bool) -
         });
 
         if path.extension().map(|e| e == "js") == Some(true) {
-            let prog = tishlang_js_to_tish::convert(&fs::read_to_string(&path).map_err(|e| format!("{}", e))?)
-                .map_err(|e| format!("{}", e))?;
+            let prog = tishlang_js_to_tish::convert(
+                &fs::read_to_string(&path).map_err(|e| format!("{}", e))?,
+            )
+            .map_err(|e| format!("{}", e))?;
             if no_optimize {
                 prog
             } else {
@@ -209,7 +224,13 @@ fn run_program(
         let mut eval = tishlang_eval::Evaluator::new();
         let value = eval.eval_program(program)?;
         if !matches!(value, tishlang_eval::Value::Null) {
-            println!("{}", tishlang_eval::format_value_for_console(&value, tishlang_core::use_console_colors()));
+            println!(
+                "{}",
+                tishlang_eval::format_value_for_console(
+                    &value,
+                    tishlang_core::use_console_colors()
+                )
+            );
         }
         return Ok(());
     }
@@ -228,7 +249,10 @@ fn run_program(
         },
     )?;
     if !matches!(value, tishlang_core::Value::Null) {
-        println!("{}", tishlang_core::format_value_styled(&value, tishlang_core::use_console_colors()));
+        println!(
+            "{}",
+            tishlang_core::format_value_styled(&value, tishlang_core::use_console_colors())
+        );
     }
     Ok(())
 }
@@ -246,7 +270,11 @@ fn run_repl(backend: &str, no_optimize: bool, features: &[String]) -> Result<(),
             print!("{}", prompt);
             io::stdout().flush().map_err(|e| e.to_string())?;
             buffer.clear();
-            if io::stdin().read_line(&mut buffer).map_err(|e| e.to_string())? == 0 {
+            if io::stdin()
+                .read_line(&mut buffer)
+                .map_err(|e| e.to_string())?
+                == 0
+            {
                 if !multiline.is_empty() {
                     let _ = tishlang_parser::parse(multiline.trim());
                 }
@@ -267,7 +295,13 @@ fn run_repl(backend: &str, no_optimize: bool, features: &[String]) -> Result<(),
                     match eval.eval_program(&program) {
                         Ok(v) => {
                             if !matches!(v, tishlang_eval::Value::Null) {
-                                println!("{}", tishlang_eval::format_value_for_console(&v, tishlang_core::use_console_colors()));
+                                println!(
+                                    "{}",
+                                    tishlang_eval::format_value_for_console(
+                                        &v,
+                                        tishlang_core::use_console_colors()
+                                    )
+                                );
                             }
                         }
                         Err(e) => eprintln!("{}", e),
@@ -364,16 +398,20 @@ fn run_repl(backend: &str, no_optimize: bool, features: &[String]) -> Result<(),
                     tishlang_bytecode::compile_for_repl
                 };
                 match compile_fn(&program) {
-                    Ok(chunk) => {
-                        match vm.borrow_mut().run_with_options(&chunk, true) {
-                            Ok(v) => {
-                                if !matches!(v, tishlang_core::Value::Null) {
-                                    println!("{}", tishlang_core::format_value_styled(&v, tishlang_core::use_console_colors()));
-                                }
+                    Ok(chunk) => match vm.borrow_mut().run_with_options(&chunk, true) {
+                        Ok(v) => {
+                            if !matches!(v, tishlang_core::Value::Null) {
+                                println!(
+                                    "{}",
+                                    tishlang_core::format_value_styled(
+                                        &v,
+                                        tishlang_core::use_console_colors()
+                                    )
+                                );
                             }
-                            Err(e) => eprintln!("{}", e),
                         }
-                    }
+                        Err(e) => eprintln!("{}", e),
+                    },
                     Err(e) => eprintln!("Compile error: {}", e),
                 }
                 let _ = rl.add_history_entry(buffer.trim());
@@ -413,8 +451,7 @@ fn repl_prompt(primary: bool) -> String {
 
 /// Path to REPL history file (Python-style: ~/.tish_history).
 fn tish_history_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"));
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     home.map(|h| PathBuf::from(h).join(".tish_history"))
 }
 
@@ -432,8 +469,8 @@ fn compile_to_js(input_path: &Path, output_path: &str, optimize: bool) -> Result
             "export fn __TishJsxRoot() {{\n  return (\n{}\n  )\n}}",
             source.trim()
         );
-        let program = tishlang_parser::parse(&wrapped)
-            .map_err(|e| format!("JSX wrapper parse: {}", e))?;
+        let program =
+            tishlang_parser::parse(&wrapped).map_err(|e| format!("JSX wrapper parse: {}", e))?;
         let p = if optimize {
             tishlang_opt::optimize(&program)
         } else {
@@ -477,8 +514,9 @@ fn build_file(
     no_optimize: bool,
 ) -> Result<(), String> {
     let optimize = !no_optimize;
-    let input_path =
-        Path::new(input_path).canonicalize().map_err(|e| format!("Cannot resolve {}: {}", input_path, e))?;
+    let input_path = Path::new(input_path)
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve {}: {}", input_path, e))?;
 
     let is_js = input_path.extension().map(|e| e == "js") == Some(true);
 
@@ -501,8 +539,13 @@ fn build_file(
                 Some(p)
             }
         });
-        return tishlang_wasm::compile_to_wasm(&input_path, project_root, Path::new(output_path), optimize)
-            .map_err(|e| e.to_string());
+        return tishlang_wasm::compile_to_wasm(
+            &input_path,
+            project_root,
+            Path::new(output_path),
+            optimize,
+        )
+        .map_err(|e| e.to_string());
     }
 
     if target == "wasi" {
@@ -513,8 +556,13 @@ fn build_file(
                 Some(p)
             }
         });
-        return tishlang_wasm::compile_to_wasi(&input_path, project_root, Path::new(output_path), optimize)
-            .map_err(|e| e.to_string());
+        return tishlang_wasm::compile_to_wasi(
+            &input_path,
+            project_root,
+            Path::new(output_path),
+            optimize,
+        )
+        .map_err(|e| e.to_string());
     }
 
     if target != "native" {
@@ -570,8 +618,6 @@ fn build_file(
     Ok(())
 }
 
-
-
 #[cfg(test)]
 mod cli_tests {
     use clap::Parser;
@@ -582,10 +628,7 @@ mod cli_tests {
 
     #[test]
     fn implicit_run_inserts_run_before_file() {
-        let argv = argv_with_implicit_run(vec![
-            "tish".to_string(),
-            "hello.tish".to_string(),
-        ]);
+        let argv = argv_with_implicit_run(vec!["tish".to_string(), "hello.tish".to_string()]);
         let cli = Cli::try_parse_from(argv).unwrap();
         match cli.command {
             Some(Commands::Run(a)) => assert_eq!(a.file, "hello.tish"),
@@ -595,26 +638,15 @@ mod cli_tests {
 
     #[test]
     fn explicit_subcommand_not_treated_as_file() {
-        let argv = argv_with_implicit_run(vec![
-            "tish".to_string(),
-            "repl".to_string(),
-        ]);
+        let argv = argv_with_implicit_run(vec!["tish".to_string(), "repl".to_string()]);
         let cli = Cli::try_parse_from(argv).unwrap();
         assert!(matches!(cli.command, Some(Commands::Repl(_))));
     }
 
     #[test]
     fn build_js_target_parses() {
-        let cli = Cli::try_parse_from([
-            "tish",
-            "build",
-            "m.tish",
-            "--target",
-            "js",
-            "-o",
-            "x.js",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["tish", "build", "m.tish", "--target", "js", "-o", "x.js"])
+            .unwrap();
         match cli.command {
             Some(Commands::Build(a)) => assert_eq!(a.file, "m.tish"),
             _ => panic!("expected Build"),
@@ -632,8 +664,7 @@ mod cli_tests {
 }
 
 fn dump_ast(path: &str) -> Result<(), String> {
-    let source =
-        fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
+    let source = fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
     let program = tishlang_parser::parse(&source)?;
     println!("{:#?}", program);
     Ok(())

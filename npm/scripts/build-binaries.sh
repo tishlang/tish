@@ -56,3 +56,31 @@ else
   exit 1
 fi
 echo "Copied to $OUT"
+
+BINDGEN_PLATFORM_DIR="npm/cargo-bindgen/platform"
+BINDGEN_BIN="tish-bindgen"
+if [[ "$PLATFORM" == "win32-x64" ]]; then
+  BINDGEN_BIN="tish-bindgen.exe"
+fi
+BINDGEN_SRC="target/$TARGET/release/tishlang-cargo-bindgen"
+if [[ "$PLATFORM" == "win32-x64" ]]; then
+  BINDGEN_SRC="target/$TARGET/release/tishlang-cargo-bindgen.exe"
+fi
+BINDGEN_HOST_SRC="target/release/tishlang-cargo-bindgen"
+if [[ "$PLATFORM" == "win32-x64" ]]; then
+  BINDGEN_HOST_SRC="target/release/tishlang-cargo-bindgen.exe"
+fi
+BINDGEN_OUT="$BINDGEN_PLATFORM_DIR/$PLATFORM/$BINDGEN_BIN"
+
+echo "Building tishlang_cargo_bindgen for $TARGET..."
+cargo build --release -p tishlang_cargo_bindgen --target "$TARGET"
+mkdir -p "$BINDGEN_PLATFORM_DIR/$PLATFORM"
+if [[ -f "$BINDGEN_SRC" ]]; then
+  cp "$BINDGEN_SRC" "$BINDGEN_OUT"
+elif [[ -f "$BINDGEN_HOST_SRC" ]]; then
+  cp "$BINDGEN_HOST_SRC" "$BINDGEN_OUT"
+else
+  echo "error: expected $BINDGEN_SRC or $BINDGEN_HOST_SRC after bindgen build" >&2
+  exit 1
+fi
+echo "Copied bindgen to $BINDGEN_OUT"

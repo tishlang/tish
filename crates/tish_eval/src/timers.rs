@@ -4,8 +4,8 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::value::Value;
 
@@ -32,12 +32,15 @@ pub fn setTimeout(callback: Value, args: Vec<Value>, delay_ms: u64) -> u64 {
     let id = next_id();
     let due = Instant::now() + Duration::from_millis(delay_ms);
     REGISTRY.with(|r| {
-        r.borrow_mut().insert(id, TimerEntry {
-            due,
-            callback,
-            args,
-            interval_ms: 0,
-        });
+        r.borrow_mut().insert(
+            id,
+            TimerEntry {
+                due,
+                callback,
+                args,
+                interval_ms: 0,
+            },
+        );
     });
     id
 }
@@ -48,12 +51,15 @@ pub fn setInterval(callback: Value, args: Vec<Value>, delay_ms: u64) -> u64 {
     let id = next_id();
     let due = Instant::now() + Duration::from_millis(delay_ms);
     REGISTRY.with(|r| {
-        r.borrow_mut().insert(id, TimerEntry {
-            due,
-            callback,
-            args,
-            interval_ms: delay_ms,
-        });
+        r.borrow_mut().insert(
+            id,
+            TimerEntry {
+                due,
+                callback,
+                args,
+                interval_ms: delay_ms,
+            },
+        );
     });
     id
 }
@@ -88,12 +94,15 @@ pub fn take_due_timers() -> Vec<(u64, Value, Vec<Value>, u64)> {
 pub fn re_register_interval(id: u64, callback: Value, args: Vec<Value>, interval_ms: u64) {
     let due = Instant::now() + Duration::from_millis(interval_ms);
     REGISTRY.with(|r| {
-        r.borrow_mut().insert(id, TimerEntry {
-            due,
-            callback,
-            args,
-            interval_ms,
-        });
+        r.borrow_mut().insert(
+            id,
+            TimerEntry {
+                due,
+                callback,
+                args,
+                interval_ms,
+            },
+        );
     });
 }
 

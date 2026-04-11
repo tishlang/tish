@@ -228,7 +228,7 @@ fn parse_number(input: &str) -> Result<(Value, &str), String> {
 
     let num_str: String = chars[..end].iter().collect();
     let byte_len: usize = chars[..end].iter().map(|c| c.len_utf8()).sum();
-    
+
     num_str
         .parse::<f64>()
         .map(|n| (Value::Number(n), &input[byte_len..]))
@@ -306,7 +306,9 @@ mod tests {
         assert!(matches!(json_parse("true").unwrap(), Value::Bool(true)));
         assert!(matches!(json_parse("false").unwrap(), Value::Bool(false)));
         assert!(matches!(json_parse("42").unwrap(), Value::Number(n) if n == 42.0));
-        assert!(matches!(json_parse("\"hello\"").unwrap(), Value::String(s) if s.as_ref() == "hello"));
+        assert!(
+            matches!(json_parse("\"hello\"").unwrap(), Value::String(s) if s.as_ref() == "hello")
+        );
     }
 
     #[test]
@@ -315,7 +317,7 @@ mod tests {
         let value = json_parse(original).unwrap();
         let stringified = json_stringify(&value);
         let reparsed = json_parse(&stringified).unwrap();
-        
+
         match (&value, &reparsed) {
             (Value::Object(a), Value::Object(b)) => {
                 assert_eq!(a.borrow().len(), b.borrow().len());

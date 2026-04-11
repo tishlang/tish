@@ -34,6 +34,12 @@ jobs:
             exit 1
           fi
           curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL" -o tish-npm-package.tgz
+          ASSET_URL_BINDGEN=$(echo '${{ toJSON(github.event.release.assets) }}' | jq -r '.[] | select(.name == "cargo-bindgen-npm-package.tgz") | .url')
+          if [ -z "$ASSET_URL_BINDGEN" ] || [ "$ASSET_URL_BINDGEN" = "null" ]; then
+            echo "Release has no asset cargo-bindgen-npm-package.tgz"
+            exit 1
+          fi
+          curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_BINDGEN" -o cargo-bindgen-npm-package.tgz
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -43,6 +49,9 @@ jobs:
 
       - name: Publish @tishlang/tish from tarball
         run: npm publish tish-npm-package.tgz --access public
+
+      - name: Publish @tishlang/cargo-bindgen from tarball
+        run: npm publish cargo-bindgen-npm-package.tgz --access public
 
       # Scoped package: token must have publish on @tishlang (granular tokens usually include this).
       - name: Publish @tishlang/create-tish-app
@@ -79,6 +88,7 @@ jobs:
           TAG="${{ github.event.release.tag_name }}"
           VERSION="${TAG#v}"
           NPM_URL="https://www.npmjs.com/package/@tishlang/tish/v/${VERSION}"
+          NPM_BINDGEN_URL="https://www.npmjs.com/package/@tishlang/cargo-bindgen/v/${VERSION}"
           CTA_SCOPED="https://www.npmjs.com/package/@tishlang/create-tish-app/v/${VERSION}"
           CTA_UNSCOPED="https://www.npmjs.com/package/create-tish-app/v/${VERSION}"
           CRATES_URL="https://crates.io/crates/tishlang/${VERSION}"
@@ -89,7 +99,7 @@ jobs:
           NEW_BODY="${CURRENT_BODY}
 
           ---
-          Published to npm: ${NPM_URL} | create-tish-app: ${CTA_SCOPED} · ${CTA_UNSCOPED} | crates.io: ${CRATES_URL}"
+          Published to npm: ${NPM_URL} | cargo-bindgen: ${NPM_BINDGEN_URL} | create-tish-app: ${CTA_SCOPED} · ${CTA_UNSCOPED} | crates.io: ${CRATES_URL}"
           curl -s -X PATCH \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \

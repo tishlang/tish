@@ -5,11 +5,11 @@
 //! and native signatures.
 
 pub mod array;
-pub mod string;
-pub mod object;
-pub mod math;
-pub mod helpers;
-pub mod globals;
 pub mod construct;
+pub mod globals;
+pub mod helpers;
+pub mod math;
+pub mod object;
+pub mod string;
 
 pub use tishlang_core::Value;

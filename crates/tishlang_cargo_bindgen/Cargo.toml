@@ -1,0 +1,25 @@
+[package]
+name = "tishlang_cargo_bindgen"
+version = "0.1.0"
+edition = "2021"
+description = "Generate Rust glue for Tish cargo: imports (bindgen-style, pre-commit friendly)"
+license-file = { workspace = true }
+repository = { workspace = true }
+
+[[bin]]
+name = "tishlang-cargo-bindgen"
+path = "src/main.rs"
+
+[lib]
+name = "tishlang_cargo_bindgen"
+path = "src/lib.rs"
+
+[dependencies]
+cargo_metadata = "0.19"
+clap = { version = "4.6", features = ["derive", "color"] }
+pathdiff = "0.2"
+serde_json = "1"
+syn = { version = "2.0", features = ["full", "extra-traits"] }
+tempfile = "3"
+toml = "0.8"
+walkdir = "2"
