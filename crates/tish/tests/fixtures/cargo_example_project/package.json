@@ -1,0 +1,10 @@
+{
+  "name": "tish-cargo-example-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "tish": {
+    "rustDependencies": {
+      "demo_shim": { "path": "./crates/demo-shim" }
+    }
+  }
+}

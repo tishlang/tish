@@ -1,0 +1,3 @@
+import { greet } from 'cargo:demo_shim'
+
+console.log(greet('from cargo'))
