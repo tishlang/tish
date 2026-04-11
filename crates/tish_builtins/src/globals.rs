@@ -16,29 +16,35 @@ pub fn boolean(args: &[Value]) -> Value {
 
 /// decodeURI(str)
 pub fn decode_uri(args: &[Value]) -> Value {
-    let s = args.first().map(Value::to_display_string).unwrap_or_default();
+    let s = args
+        .first()
+        .map(Value::to_display_string)
+        .unwrap_or_default();
     Value::String(percent_decode(&s).unwrap_or(s).into())
 }
 
 /// encodeURI(str)
 pub fn encode_uri(args: &[Value]) -> Value {
-    let s = args.first().map(Value::to_display_string).unwrap_or_default();
+    let s = args
+        .first()
+        .map(Value::to_display_string)
+        .unwrap_or_default();
     Value::String(percent_encode(&s).into())
 }
 
 /// isFinite(value)
 pub fn is_finite(args: &[Value]) -> Value {
-    Value::Bool(args.first().is_some_and(|v| matches!(v, Value::Number(n) if n.is_finite())))
+    Value::Bool(
+        args.first()
+            .is_some_and(|v| matches!(v, Value::Number(n) if n.is_finite())),
+    )
 }
 
 /// isNaN(value)
 pub fn is_nan(args: &[Value]) -> Value {
-    Value::Bool(
-        args.first().is_none_or(|v| {
-            matches!(v, Value::Number(n) if n.is_nan())
-                || !matches!(v, Value::Number(_))
-        }),
-    )
+    Value::Bool(args.first().is_none_or(|v| {
+        matches!(v, Value::Number(n) if n.is_nan()) || !matches!(v, Value::Number(_))
+    }))
 }
 
 /// Array.isArray(value)
@@ -144,12 +150,18 @@ pub fn object_assign(args: &[Value]) -> Value {
 
 /// parseInt(string, radix?)
 pub fn parse_int(args: &[Value]) -> Value {
-    let s = args.first().map(Value::to_display_string).unwrap_or_default();
+    let s = args
+        .first()
+        .map(Value::to_display_string)
+        .unwrap_or_default();
     let s = s.trim();
-    let radix = args.get(1).and_then(|v| match v {
-        Value::Number(n) => Some(*n as i32),
-        _ => None,
-    }).unwrap_or(10);
+    let radix = args
+        .get(1)
+        .and_then(|v| match v {
+            Value::Number(n) => Some(*n as i32),
+            _ => None,
+        })
+        .unwrap_or(10);
 
     if (2..=36).contains(&radix) {
         let prefix: String = s
@@ -165,7 +177,10 @@ pub fn parse_int(args: &[Value]) -> Value {
 
 /// parseFloat(string)
 pub fn parse_float(args: &[Value]) -> Value {
-    let s = args.first().map(Value::to_display_string).unwrap_or_default();
+    let s = args
+        .first()
+        .map(Value::to_display_string)
+        .unwrap_or_default();
     Value::Number(s.trim().parse().unwrap_or(f64::NAN))
 }
 

@@ -34,7 +34,6 @@ pub struct TypedParam {
     pub default: Option<Expr>,
 }
 
-
 /// Single formal parameter: simple identifier or destructuring pattern.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FunParam {
@@ -45,7 +44,6 @@ pub enum FunParam {
         default: Option<Expr>,
     },
 }
-
 
 impl FunParam {
     /// Variable names introduced by this formal parameter.
@@ -123,7 +121,10 @@ pub struct DestructProp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImportSpecifier {
     /// Named: { foo } or { foo as bar }
-    Named { name: Arc<str>, alias: Option<Arc<str>> },
+    Named {
+        name: Arc<str>,
+        alias: Option<Arc<str>>,
+    },
     /// Namespace: * as M
     Namespace(Arc<str>),
     /// Default: import X from "..."
@@ -366,8 +367,8 @@ pub enum Expr {
     },
     /// Template literal: `text ${expr} text`
     TemplateLiteral {
-        quasis: Vec<Arc<str>>,    // Static string parts (n+1 for n expressions)
-        exprs: Vec<Expr>,          // Interpolated expressions (n)
+        quasis: Vec<Arc<str>>, // Static string parts (n+1 for n expressions)
+        exprs: Vec<Expr>,      // Interpolated expressions (n)
         span: Span,
     },
     /// Await expression: await operand
@@ -399,10 +400,7 @@ pub enum Expr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsxProp {
     /// name="value" or name={expr} or name (boolean shorthand)
-    Attr {
-        name: Arc<str>,
-        value: JsxAttrValue,
-    },
+    Attr { name: Arc<str>, value: JsxAttrValue },
     /// {...expr}
     Spread(Expr),
 }
@@ -493,11 +491,11 @@ pub enum CallArg {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompoundOp {
-    Add,  // +=
-    Sub,  // -=
-    Mul,  // *=
-    Div,  // /=
-    Mod,  // %=
+    Add, // +=
+    Sub, // -=
+    Mul, // *=
+    Div, // /=
+    Mod, // %=
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

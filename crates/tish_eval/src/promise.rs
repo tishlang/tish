@@ -116,7 +116,11 @@ pub fn settle_promise(
         }
     };
     if let Some(tx) = tx {
-        let result = if is_resolve { Ok(value.clone()) } else { Err(value.clone()) };
+        let result = if is_resolve {
+            Ok(value.clone())
+        } else {
+            Err(value.clone())
+        };
         let _ = tx.send(result);
     }
     Ok((value, is_resolve, reactions))
@@ -134,7 +138,9 @@ pub fn add_reaction(state: &PromiseStateRef, reaction: Reaction) {
 impl Clone for Reaction {
     fn clone(&self) -> Self {
         match self {
-            Reaction::Then(a, b, r1, r2) => Reaction::Then(a.clone(), b.clone(), r1.clone(), r2.clone()),
+            Reaction::Then(a, b, r1, r2) => {
+                Reaction::Then(a.clone(), b.clone(), r1.clone(), r2.clone())
+            }
             Reaction::Finally(f, r1, r2) => Reaction::Finally(f.clone(), r1.clone(), r2.clone()),
         }
     }
@@ -156,18 +162,18 @@ pub fn block_until_settled(promise_ref: &PromiseRef) -> PromiseAwaitResult {
         match result {
             Ok(Ok(v)) => PromiseAwaitResult::Fulfilled(v),
             Ok(Err(v)) => PromiseAwaitResult::Rejected(v),
-            Err(_) => PromiseAwaitResult::Error(
-                "Promise channel dropped before settlement".to_string(),
-            ),
+            Err(_) => {
+                PromiseAwaitResult::Error("Promise channel dropped before settlement".to_string())
+            }
         }
     } else {
         let state = promise_ref.state.borrow();
         match &*state {
             PromiseState::Fulfilled(v) => PromiseAwaitResult::Fulfilled(v.clone()),
             PromiseState::Rejected(v) => PromiseAwaitResult::Rejected(v.clone()),
-            PromiseState::Pending { .. } => PromiseAwaitResult::Error(
-                "Promise receiver already consumed".to_string(),
-            ),
+            PromiseState::Pending { .. } => {
+                PromiseAwaitResult::Error("Promise receiver already consumed".to_string())
+            }
         }
     }
 }

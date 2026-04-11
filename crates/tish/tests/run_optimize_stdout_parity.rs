@@ -15,12 +15,7 @@ fn string_or_fixture_stdout_matches_with_and_without_optimize() {
     assert!(fixture.is_file(), "missing fixture {}", fixture.display());
 
     let out_default = Command::new(&tish)
-        .args([
-            "run",
-            "--feature",
-            "process",
-            fixture.to_str().unwrap(),
-        ])
+        .args(["run", "--feature", "process", fixture.to_str().unwrap()])
         .output()
         .expect("spawn tish run");
     assert!(
@@ -46,7 +41,8 @@ fn string_or_fixture_stdout_matches_with_and_without_optimize() {
     );
 
     assert_eq!(
-        out_default.stdout, out_noopt.stdout,
+        out_default.stdout,
+        out_noopt.stdout,
         "stdout differs:\n default: {:?}\n noopt: {:?}",
         String::from_utf8_lossy(&out_default.stdout),
         String::from_utf8_lossy(&out_noopt.stdout)

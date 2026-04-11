@@ -5,7 +5,7 @@
 
 mod token;
 
-pub use token::{Token, TokenKind, Span};
+pub use token::{Span, Token, TokenKind};
 
 use std::collections::VecDeque;
 use std::iter::Peekable;
@@ -74,14 +74,21 @@ impl<'a> Lexer<'a> {
         loop {
             match self.peek() {
                 None | Some('{') | Some('<') => break,
-                Some(c) => { self.advance(); s.push(c); }
+                Some(c) => {
+                    self.advance();
+                    s.push(c);
+                }
             }
         }
         if s.is_empty() {
             Ok(None)
         } else {
             let end = self.span_start();
-            Ok(Some(Token { kind: TokenKind::JsxText, span: Span { start, end }, literal: Some(s.into()) }))
+            Ok(Some(Token {
+                kind: TokenKind::JsxText,
+                span: Span { start, end },
+                literal: Some(s.into()),
+            }))
         }
     }
 
@@ -139,7 +146,9 @@ impl<'a> Lexer<'a> {
 
     fn skip_line_comment(&mut self) {
         while let Some(c) = self.advance() {
-            if c == '\n' { break; }
+            if c == '\n' {
+                break;
+            }
         }
     }
 
@@ -147,8 +156,14 @@ impl<'a> Lexer<'a> {
         let mut depth = 1;
         while depth > 0 {
             match self.advance() {
-                Some('*') if self.peek() == Some('/') => { self.advance(); depth -= 1; }
-                Some('/') if self.peek() == Some('*') => { self.advance(); depth += 1; }
+                Some('*') if self.peek() == Some('/') => {
+                    self.advance();
+                    depth -= 1;
+                }
+                Some('/') if self.peek() == Some('*') => {
+                    self.advance();
+                    depth += 1;
+                }
                 None => return Err("Unterminated block comment".to_string()),
                 _ => {}
             }
@@ -186,7 +201,11 @@ impl<'a> Lexer<'a> {
 
     fn read_string(&mut self, quote: char) -> Result<String, String> {
         let mut s = String::with_capacity(32);
-        let extra = if quote == '"' { &['"', '\''][..] } else { &['\'', '"'][..] };
+        let extra = if quote == '"' {
+            &['"', '\''][..]
+        } else {
+            &['\'', '"'][..]
+        };
         loop {
             match self.advance() {
                 None => return Err("Unterminated string".to_string()),
@@ -213,24 +232,44 @@ impl<'a> Lexer<'a> {
     }
 
     /// Read a template literal. If `is_continuation` is true, we're continuing after a `}`.
-    fn read_template(&mut self, start: (usize, usize), is_continuation: bool) -> Result<Option<Token>, String> {
+    fn read_template(
+        &mut self,
+        start: (usize, usize),
+        is_continuation: bool,
+    ) -> Result<Option<Token>, String> {
         let mut s = String::with_capacity(if is_continuation { 32 } else { 64 });
         let extra = &['`', '$', '{'][..];
-        
+
         loop {
             match self.advance() {
                 None => return Err("Unterminated template literal".to_string()),
                 Some('`') => {
                     let end = self.span_start();
-                    let kind = if is_continuation { TokenKind::TemplateTail } else { TokenKind::TemplateNoSub };
-                    return Ok(Some(Token { kind, span: Span { start, end }, literal: Some(s.into()) }));
+                    let kind = if is_continuation {
+                        TokenKind::TemplateTail
+                    } else {
+                        TokenKind::TemplateNoSub
+                    };
+                    return Ok(Some(Token {
+                        kind,
+                        span: Span { start, end },
+                        literal: Some(s.into()),
+                    }));
                 }
                 Some('$') if self.peek() == Some('{') => {
                     self.advance();
                     self.template_brace_stack.push(1);
                     let end = self.span_start();
-                    let kind = if is_continuation { TokenKind::TemplateMiddle } else { TokenKind::TemplateHead };
-                    return Ok(Some(Token { kind, span: Span { start, end }, literal: Some(s.into()) }));
+                    let kind = if is_continuation {
+                        TokenKind::TemplateMiddle
+                    } else {
+                        TokenKind::TemplateHead
+                    };
+                    return Ok(Some(Token {
+                        kind,
+                        span: Span { start, end },
+                        literal: Some(s.into()),
+                    }));
                 }
                 Some('\\') => s.push(self.handle_escape(extra)?),
                 Some(c) => s.push(c),
@@ -308,7 +347,10 @@ impl<'a> Lexer<'a> {
                     self.indent_stack.pop();
                     return Ok(Some(Token {
                         kind: TokenKind::Dedent,
-                        span: Span { start: (self.line, self.col), end: (self.line, self.col) },
+                        span: Span {
+                            start: (self.line, self.col),
+                            end: (self.line, self.col),
+                        },
                         literal: None,
                     }));
                 }
@@ -362,31 +404,66 @@ impl<'a> Lexer<'a> {
             ';' => TokenKind::Semicolon,
             ',' => TokenKind::Comma,
             '.' => {
-                if self.peek() == Some('?') { self.advance(); TokenKind::OptionalChain }
-                else if self.peek() == Some('.') {
+                if self.peek() == Some('?') {
                     self.advance();
-                    if self.peek() == Some('.') { self.advance(); TokenKind::Spread }
-                    else { return Err("Unexpected .. (use ... for rest params)".to_string()); }
-                } else { TokenKind::Dot }
+                    TokenKind::OptionalChain
+                } else if self.peek() == Some('.') {
+                    self.advance();
+                    if self.peek() == Some('.') {
+                        self.advance();
+                        TokenKind::Spread
+                    } else {
+                        return Err("Unexpected .. (use ... for rest params)".to_string());
+                    }
+                } else {
+                    TokenKind::Dot
+                }
             }
             '=' => {
                 if self.peek() == Some('=') {
                     self.advance();
-                    if self.peek() == Some('=') { self.advance(); TokenKind::StrictEq } else { TokenKind::Eq }
-                } else if self.peek() == Some('>') { self.advance(); TokenKind::Arrow }
-                else { TokenKind::Assign }
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        TokenKind::StrictEq
+                    } else {
+                        TokenKind::Eq
+                    }
+                } else if self.peek() == Some('>') {
+                    self.advance();
+                    TokenKind::Arrow
+                } else {
+                    TokenKind::Assign
+                }
             }
             '!' => {
                 if self.peek() == Some('=') {
                     self.advance();
-                    if self.peek() == Some('=') { self.advance(); TokenKind::StrictNe } else { TokenKind::Ne }
-                } else { TokenKind::Not }
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        TokenKind::StrictNe
+                    } else {
+                        TokenKind::Ne
+                    }
+                } else {
+                    TokenKind::Not
+                }
             }
             '<' => {
-                if self.peek() == Some('=') { self.advance(); TokenKind::Le }
-                else if self.peek() == Some('<') { self.advance(); TokenKind::Shl }
-                else if self.peek() == Some('/') { self.jsx_in_closing_tag = true; TokenKind::Lt }
-                else if self.peek() == Some('>') || self.peek().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::Le
+                } else if self.peek() == Some('<') {
+                    self.advance();
+                    TokenKind::Shl
+                } else if self.peek() == Some('/') {
+                    self.jsx_in_closing_tag = true;
+                    TokenKind::Lt
+                } else if self.peek() == Some('>')
+                    || self
+                        .peek()
+                        .map(|c| c.is_ascii_alphabetic() || c == '_')
+                        .unwrap_or(false)
+                {
                     self.jsx_depth += 1;
                     self.jsx_stack.push(JsxEl {
                         in_opener: true,
@@ -394,12 +471,18 @@ impl<'a> Lexer<'a> {
                     });
                     self.jsx_in_opening_tag = true;
                     TokenKind::Lt
-                } else { TokenKind::Lt }
+                } else {
+                    TokenKind::Lt
+                }
             }
             '>' => {
-                if self.peek() == Some('=') { self.advance(); TokenKind::Ge }
-                else if self.peek() == Some('>') { self.advance(); TokenKind::Shr }
-                else {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::Ge
+                } else if self.peek() == Some('>') {
+                    self.advance();
+                    TokenKind::Shr
+                } else {
                     if self.jsx_in_closing_tag {
                         self.jsx_depth = (self.jsx_depth - 1).max(0);
                         self.jsx_stack.pop();
@@ -425,66 +508,126 @@ impl<'a> Lexer<'a> {
             '^' => TokenKind::BitXor,
             '~' => TokenKind::BitNot,
             '+' => {
-                if self.peek() == Some('+') { self.advance(); TokenKind::PlusPlus }
-                else if self.peek() == Some('=') { self.advance(); TokenKind::PlusAssign }
-                else { TokenKind::Plus }
+                if self.peek() == Some('+') {
+                    self.advance();
+                    TokenKind::PlusPlus
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::PlusAssign
+                } else {
+                    TokenKind::Plus
+                }
             }
             '-' => {
-                if self.peek() == Some('-') { self.advance(); TokenKind::MinusMinus }
-                else if self.peek() == Some('=') { self.advance(); TokenKind::MinusAssign }
-                else { TokenKind::Minus }
+                if self.peek() == Some('-') {
+                    self.advance();
+                    TokenKind::MinusMinus
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::MinusAssign
+                } else {
+                    TokenKind::Minus
+                }
             }
             '*' => {
-                if self.peek() == Some('*') { self.advance(); TokenKind::StarStar }
-                else if self.peek() == Some('=') { self.advance(); TokenKind::StarAssign }
-                else { TokenKind::Star }
+                if self.peek() == Some('*') {
+                    self.advance();
+                    TokenKind::StarStar
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::StarAssign
+                } else {
+                    TokenKind::Star
+                }
             }
             '/' => {
-                if self.peek() == Some('/') { self.advance(); self.skip_line_comment(); return self.next_token(); }
-                else if self.peek() == Some('*') { self.advance(); self.skip_block_comment()?; return self.next_token(); }
-                else if self.peek() == Some('=') { self.advance(); TokenKind::SlashAssign }
-                else {
-                    if self.jsx_in_opening_tag { self.jsx_saw_slash_before_gt = true; }
+                if self.peek() == Some('/') {
+                    self.advance();
+                    self.skip_line_comment();
+                    return self.next_token();
+                } else if self.peek() == Some('*') {
+                    self.advance();
+                    self.skip_block_comment()?;
+                    return self.next_token();
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::SlashAssign
+                } else {
+                    if self.jsx_in_opening_tag {
+                        self.jsx_saw_slash_before_gt = true;
+                    }
                     TokenKind::Slash
                 }
             }
             '%' => {
-                if self.peek() == Some('=') { self.advance(); TokenKind::PercentAssign }
-                else { TokenKind::Percent }
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::PercentAssign
+                } else {
+                    TokenKind::Percent
+                }
             }
             '&' => {
                 if self.peek() == Some('&') {
                     self.advance();
-                    if self.peek() == Some('=') { self.advance(); TokenKind::AndAndAssign }
-                    else { TokenKind::And }
-                } else { TokenKind::BitAnd }
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        TokenKind::AndAndAssign
+                    } else {
+                        TokenKind::And
+                    }
+                } else {
+                    TokenKind::BitAnd
+                }
             }
             '|' => {
                 if self.peek() == Some('|') {
                     self.advance();
-                    if self.peek() == Some('=') { self.advance(); TokenKind::OrOrAssign }
-                    else { TokenKind::Or }
-                } else { TokenKind::BitOr }
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        TokenKind::OrOrAssign
+                    } else {
+                        TokenKind::Or
+                    }
+                } else {
+                    TokenKind::BitOr
+                }
             }
             '?' => {
                 if self.peek() == Some('?') {
                     self.advance();
-                    if self.peek() == Some('=') { self.advance(); TokenKind::NullishAssign }
-                    else { TokenKind::NullishCoalesce }
-                } else if self.peek() == Some('.') { self.advance(); TokenKind::OptionalChain }
-                else { TokenKind::Question }
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        TokenKind::NullishAssign
+                    } else {
+                        TokenKind::NullishCoalesce
+                    }
+                } else if self.peek() == Some('.') {
+                    self.advance();
+                    TokenKind::OptionalChain
+                } else {
+                    TokenKind::Question
+                }
             }
             ':' => TokenKind::Colon,
             '"' | '\'' => {
                 let s = self.read_string(c)?;
                 let end = self.span_start();
-                return Ok(Some(Token { kind: TokenKind::String, span: Span { start, end }, literal: Some(s.into()) }));
+                return Ok(Some(Token {
+                    kind: TokenKind::String,
+                    span: Span { start, end },
+                    literal: Some(s.into()),
+                }));
             }
             '`' => return self.read_template(start, false),
             '0'..='9' => {
                 let num = self.read_number(c);
                 let end = self.span_start();
-                return Ok(Some(Token { kind: TokenKind::Number, span: Span { start, end }, literal: Some(num.into()) }));
+                return Ok(Some(Token {
+                    kind: TokenKind::Number,
+                    span: Span { start, end },
+                    literal: Some(num.into()),
+                }));
             }
             'a'..='z' | 'A'..='Z' | '_' => {
                 let ident = self.read_ident_or_keyword(c);
@@ -493,15 +636,26 @@ impl<'a> Lexer<'a> {
                 return Ok(Some(Token {
                     kind,
                     span: Span { start, end },
-                    literal: if matches!(kind, TokenKind::Ident) { Some(ident.into()) } else { None },
+                    literal: if matches!(kind, TokenKind::Ident) {
+                        Some(ident.into())
+                    } else {
+                        None
+                    },
                 }));
             }
-            '\n' => { self.at_line_start = true; return self.next_token(); }
+            '\n' => {
+                self.at_line_start = true;
+                return self.next_token();
+            }
             _ => return Err(format!("Unexpected character: {:?}", c)),
         };
 
         let end = self.span_start();
-        Ok(Some(Token { kind, span: Span { start, end }, literal: None }))
+        Ok(Some(Token {
+            kind,
+            span: Span { start, end },
+            literal: None,
+        }))
     }
 }
 

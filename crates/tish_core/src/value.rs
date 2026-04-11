@@ -54,29 +54,70 @@ impl RegExpFlags {
         let mut result = Self::default();
         for c in flags.chars() {
             match c {
-                'g' => { if result.global { return Err(format!("duplicate flag '{}'", c)); } result.global = true; }
-                'i' => { if result.ignore_case { return Err(format!("duplicate flag '{}'", c)); } result.ignore_case = true; }
-                'm' => { if result.multiline { return Err(format!("duplicate flag '{}'", c)); } result.multiline = true; }
-                's' => { if result.dot_all { return Err(format!("duplicate flag '{}'", c)); } result.dot_all = true; }
-                'u' => { if result.unicode { return Err(format!("duplicate flag '{}'", c)); } result.unicode = true; }
-                'y' => { if result.sticky { return Err(format!("duplicate flag '{}'", c)); } result.sticky = true; }
+                'g' => {
+                    if result.global {
+                        return Err(format!("duplicate flag '{}'", c));
+                    }
+                    result.global = true;
+                }
+                'i' => {
+                    if result.ignore_case {
+                        return Err(format!("duplicate flag '{}'", c));
+                    }
+                    result.ignore_case = true;
+                }
+                'm' => {
+                    if result.multiline {
+                        return Err(format!("duplicate flag '{}'", c));
+                    }
+                    result.multiline = true;
+                }
+                's' => {
+                    if result.dot_all {
+                        return Err(format!("duplicate flag '{}'", c));
+                    }
+                    result.dot_all = true;
+                }
+                'u' => {
+                    if result.unicode {
+                        return Err(format!("duplicate flag '{}'", c));
+                    }
+                    result.unicode = true;
+                }
+                'y' => {
+                    if result.sticky {
+                        return Err(format!("duplicate flag '{}'", c));
+                    }
+                    result.sticky = true;
+                }
                 _ => return Err(format!("unknown flag '{}'", c)),
             }
         }
         Ok(result)
     }
-
 }
 
 #[cfg(feature = "regex")]
 impl std::fmt::Display for RegExpFlags {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.global { f.write_str("g")?; }
-        if self.ignore_case { f.write_str("i")?; }
-        if self.multiline { f.write_str("m")?; }
-        if self.dot_all { f.write_str("s")?; }
-        if self.unicode { f.write_str("u")?; }
-        if self.sticky { f.write_str("y")?; }
+        if self.global {
+            f.write_str("g")?;
+        }
+        if self.ignore_case {
+            f.write_str("i")?;
+        }
+        if self.multiline {
+            f.write_str("m")?;
+        }
+        if self.dot_all {
+            f.write_str("s")?;
+        }
+        if self.unicode {
+            f.write_str("u")?;
+        }
+        if self.sticky {
+            f.write_str("y")?;
+        }
         Ok(())
     }
 }
@@ -96,23 +137,36 @@ impl TishRegExp {
     pub fn new(pattern: &str, flags_str: &str) -> Result<Self, String> {
         let flags = RegExpFlags::from_string(flags_str)?;
         let mut regex_pattern = pattern.to_string();
-        
+
         if flags.ignore_case || flags.multiline || flags.dot_all {
             let mut flag_prefix = String::from("(?");
-            if flags.ignore_case { flag_prefix.push('i'); }
-            if flags.multiline { flag_prefix.push('m'); }
-            if flags.dot_all { flag_prefix.push('s'); }
+            if flags.ignore_case {
+                flag_prefix.push('i');
+            }
+            if flags.multiline {
+                flag_prefix.push('m');
+            }
+            if flags.dot_all {
+                flag_prefix.push('s');
+            }
             flag_prefix.push(')');
             regex_pattern = format!("{}{}", flag_prefix, regex_pattern);
         }
-        
-        let regex = Regex::new(&regex_pattern)
-            .map_err(|e| format!("Invalid regular expression: {}", e))?;
-        
-        Ok(Self { source: pattern.to_string(), flags, regex: Arc::new(regex), last_index: 0 })
+
+        let regex =
+            Regex::new(&regex_pattern).map_err(|e| format!("Invalid regular expression: {}", e))?;
+
+        Ok(Self {
+            source: pattern.to_string(),
+            flags,
+            regex: Arc::new(regex),
+            last_index: 0,
+        })
     }
 
-    pub fn flags_string(&self) -> String { self.flags.to_string() }
+    pub fn flags_string(&self) -> String {
+        self.flags.to_string()
+    }
 
     pub fn test(&mut self, input: &str) -> bool {
         if self.flags.global || self.flags.sticky {
@@ -121,10 +175,10 @@ impl TishRegExp {
                 self.last_index = 0;
                 return false;
             }
-            
+
             let byte_start: usize = input.chars().take(start).map(|c| c.len_utf8()).sum();
             let search_str = &input[byte_start..];
-            
+
             match self.regex.find(search_str) {
                 Ok(Some(m)) => {
                     if self.flags.sticky && m.start() != 0 {
@@ -176,7 +230,12 @@ impl std::fmt::Debug for Value {
             Value::Object(obj) => write!(f, "Object({:?})", obj.borrow()),
             Value::Function(_) => write!(f, "Function"),
             #[cfg(feature = "regex")]
-            Value::RegExp(re) => write!(f, "RegExp(/{}/{})", re.borrow().source, re.borrow().flags_string()),
+            Value::RegExp(re) => write!(
+                f,
+                "RegExp(/{}/{})",
+                re.borrow().source,
+                re.borrow().flags_string()
+            ),
             Value::Promise(_) => write!(f, "Promise"),
             Value::Opaque(o) => write!(f, "{}(opaque)", o.type_name()),
         }
@@ -202,7 +261,8 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
             Value::Array(arr) => {
-                let inner: Vec<String> = arr.borrow().iter().map(|v| v.to_display_string()).collect();
+                let inner: Vec<String> =
+                    arr.borrow().iter().map(|v| v.to_display_string()).collect();
                 format!("[{}]", inner.join(", "))
             }
             Value::Object(obj) => {
@@ -378,7 +438,11 @@ impl Value {
                     "trim".into(),
                 ]
             }
-            Value::Number(_) => vec!["toFixed".into(), "toExponential".into(), "toPrecision".into()],
+            Value::Number(_) => vec![
+                "toFixed".into(),
+                "toExponential".into(),
+                "toPrecision".into(),
+            ],
             _ => vec![],
         }
     }

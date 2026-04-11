@@ -45,9 +45,7 @@ impl RustType {
                 "any" => RustType::Value,
                 _ => RustType::Value, // Unknown types fall back to Value
             },
-            TypeAnnotation::Array(elem) => {
-                RustType::Vec(Box::new(Self::from_annotation(elem)))
-            }
+            TypeAnnotation::Array(elem) => RustType::Vec(Box::new(Self::from_annotation(elem))),
             TypeAnnotation::Object(fields) => {
                 let typed_fields: Vec<_> = fields
                     .iter()
@@ -66,13 +64,13 @@ impl RustType {
             TypeAnnotation::Union(types) => {
                 // Check for T | null pattern -> Option<T>
                 if types.len() == 2 {
-                    let has_null = types.iter().any(|t| {
-                        matches!(t, TypeAnnotation::Simple(s) if s.as_ref() == "null")
-                    });
+                    let has_null = types
+                        .iter()
+                        .any(|t| matches!(t, TypeAnnotation::Simple(s) if s.as_ref() == "null"));
                     if has_null {
-                        let non_null = types.iter().find(|t| {
-                            !matches!(t, TypeAnnotation::Simple(s) if s.as_ref() == "null")
-                        });
+                        let non_null = types.iter().find(
+                            |t| !matches!(t, TypeAnnotation::Simple(s) if s.as_ref() == "null"),
+                        );
                         if let Some(inner) = non_null {
                             return RustType::Option(Box::new(Self::from_annotation(inner)));
                         }
@@ -271,9 +269,7 @@ impl TypeContext {
 
     /// Check if a variable is typed (has a non-Value type).
     pub fn is_typed(&self, name: &str) -> bool {
-        self.lookup(name)
-            .map(|ty| ty.is_native())
-            .unwrap_or(false)
+        self.lookup(name).map(|ty| ty.is_native()).unwrap_or(false)
     }
 
     /// Get the type of a variable, defaulting to Value if not found.
@@ -329,12 +325,12 @@ mod tests {
         ctx.define("x", RustType::F64);
         assert_eq!(ctx.get_type("x"), RustType::F64);
         assert!(ctx.is_typed("x"));
-        
+
         ctx.push_scope();
         ctx.define("y", RustType::String);
         assert_eq!(ctx.get_type("y"), RustType::String);
         assert_eq!(ctx.get_type("x"), RustType::F64); // Can still see outer scope
-        
+
         ctx.pop_scope();
         assert_eq!(ctx.get_type("y"), RustType::Value); // y no longer visible
     }

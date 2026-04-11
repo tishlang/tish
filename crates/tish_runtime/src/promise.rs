@@ -44,11 +44,7 @@ pub fn promise_all(args: &[Value]) -> Value {
 /// Promise.race(iterable) - returns first element of array.
 pub fn promise_race(args: &[Value]) -> Value {
     match args.first() {
-        Some(Value::Array(arr)) => arr
-            .borrow()
-            .first()
-            .cloned()
-            .unwrap_or(Value::Null),
+        Some(Value::Array(arr)) => arr.borrow().first().cloned().unwrap_or(Value::Null),
         _ => Value::Null,
     }
 }

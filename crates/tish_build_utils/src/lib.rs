@@ -158,7 +158,9 @@ pub fn find_workspace_root() -> Result<PathBuf, String> {
         if let Some(mut current) = exe.parent() {
             for _ in 0..15 {
                 let crates_dir = current.join("crates");
-                if crates_dir.join("tish_runtime").exists() || crates_dir.join("tish_cranelift_runtime").exists() {
+                if crates_dir.join("tish_runtime").exists()
+                    || crates_dir.join("tish_cranelift_runtime").exists()
+                {
                     return Ok(current.to_path_buf());
                 }
                 if let Some(p) = current.parent() {
@@ -174,6 +176,19 @@ pub fn find_workspace_root() -> Result<PathBuf, String> {
     if let Ok(cwd) = std::env::current_dir() {
         if let Some(root) = tish_root_from_project_cargo_files(cwd.clone()) {
             return Ok(root);
+        }
+    }
+
+    // Strategy 3b: `node_modules/@tishlang/tish` from cwd or any ancestor (package.json-only apps)
+    if let Ok(mut dir) = std::env::current_dir() {
+        for _ in 0..32 {
+            let npm_pkg = dir.join("node_modules").join("@tishlang").join("tish");
+            if is_tish_workspace_root(&npm_pkg) {
+                return Ok(npm_pkg);
+            }
+            if !dir.pop() {
+                break;
+            }
         }
     }
 
@@ -276,16 +291,22 @@ pub fn find_crate_path(crate_name: &str) -> Result<PathBuf, String> {
 
 /// Create a temp build directory with src subdir.
 pub fn create_build_dir(prefix: &str, out_name: &str) -> Result<PathBuf, String> {
-    let build_dir = std::env::temp_dir().join(prefix).join(format!("{}_{}", out_name, std::process::id()));
+    let build_dir =
+        std::env::temp_dir()
+            .join(prefix)
+            .join(format!("{}_{}", out_name, std::process::id()));
     fs::create_dir_all(&build_dir).map_err(|e| format!("Cannot create build dir: {}", e))?;
-    fs::create_dir_all(build_dir.join("src")).map_err(|e| format!("Cannot create src dir: {}", e))?;
+    fs::create_dir_all(build_dir.join("src"))
+        .map_err(|e| format!("Cannot create src dir: {}", e))?;
     Ok(build_dir)
 }
 
 /// Run cargo build in the given directory.
 /// If target_dir is Some, use that for --target-dir (e.g. workspace target for caching).
 pub fn run_cargo_build(build_dir: &Path, target_dir: Option<&Path>) -> Result<(), String> {
-    let target_dir = target_dir.map(|p| p.to_path_buf()).unwrap_or_else(|| build_dir.join("target"));
+    let target_dir = target_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| build_dir.join("target"));
     let output = Command::new("cargo")
         .args(["build", "--release", "--target-dir"])
         .arg(&target_dir)
@@ -298,7 +319,10 @@ pub fn run_cargo_build(build_dir: &Path, target_dir: Option<&Path>) -> Result<()
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!("Compilation failed.\nstdout:\n{}\nstderr:\n{}", stdout, stderr));
+        return Err(format!(
+            "Compilation failed.\nstdout:\n{}\nstderr:\n{}",
+            stdout, stderr
+        ));
     }
     Ok(())
 }
@@ -351,7 +375,8 @@ pub fn copy_binary_to_output(binary: &Path, output_path: &Path) -> Result<(), St
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Cannot create output dir: {}", e))?;
     }
-    fs::copy(binary, output_path).map_err(|e| format!("Cannot copy to {}: {}", output_path.display(), e))?;
+    fs::copy(binary, output_path)
+        .map_err(|e| format!("Cannot copy to {}: {}", output_path.display(), e))?;
     Ok(())
 }
 

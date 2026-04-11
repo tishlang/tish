@@ -22,7 +22,9 @@ pub struct InferCtx {
 
 impl InferCtx {
     pub fn new() -> Self {
-        Self { scopes: vec![HashMap::new()] }
+        Self {
+            scopes: vec![HashMap::new()],
+        }
     }
 
     fn push_scope(&mut self) {
@@ -75,17 +77,16 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
             Literal::Null => None,
         },
         Expr::Ident { name, .. } => ctx.lookup(name.as_ref()).cloned(),
-        Expr::Binary { left, op, right, .. } => {
+        Expr::Binary {
+            left, op, right, ..
+        } => {
             let lt = infer_expr_type(left, ctx)?;
             let rt = infer_expr_type(right, ctx)?;
             if is_number(&lt) && is_number(&rt) {
                 match op {
-                    BinOp::Add
-                    | BinOp::Sub
-                    | BinOp::Mul
-                    | BinOp::Div
-                    | BinOp::Mod
-                    | BinOp::Pow => Some(number_ann()),
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow => {
+                        Some(number_ann())
+                    }
                     BinOp::Lt
                     | BinOp::Le
                     | BinOp::Gt
@@ -103,7 +104,11 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
             match op {
                 UnaryOp::Neg | UnaryOp::Pos => {
                     let t = infer_expr_type(operand, ctx)?;
-                    if is_number(&t) { Some(number_ann()) } else { None }
+                    if is_number(&t) {
+                        Some(number_ann())
+                    } else {
+                        None
+                    }
                 }
                 UnaryOp::Not => Some(bool_ann()),
                 _ => None,
@@ -117,7 +122,9 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
 /// type annotations filled in on `VarDecl` nodes.
 pub fn infer_program(program: &Program) -> Program {
     let mut ctx = InferCtx::new();
-    Program { statements: infer_statements(&program.statements, &mut ctx) }
+    Program {
+        statements: infer_statements(&program.statements, &mut ctx),
+    }
 }
 
 fn infer_statements(stmts: &[Statement], ctx: &mut InferCtx) -> Vec<Statement> {
@@ -126,7 +133,13 @@ fn infer_statements(stmts: &[Statement], ctx: &mut InferCtx) -> Vec<Statement> {
 
 fn infer_statement(stmt: &Statement, ctx: &mut InferCtx) -> Statement {
     match stmt {
-        Statement::VarDecl { name, mutable, type_ann, init, span } => {
+        Statement::VarDecl {
+            name,
+            mutable,
+            type_ann,
+            init,
+            span,
+        } => {
             // Already annotated — propagate into ctx but don't change the node.
             if let Some(ann) = type_ann {
                 ctx.define(name.as_ref(), ann.clone());
@@ -149,9 +162,18 @@ fn infer_statement(stmt: &Statement, ctx: &mut InferCtx) -> Statement {
             ctx.push_scope();
             let stmts = infer_statements(statements, ctx);
             ctx.pop_scope();
-            Statement::Block { statements: stmts, span: *span }
+            Statement::Block {
+                statements: stmts,
+                span: *span,
+            }
         }
-        Statement::For { init, cond, update, body, span } => {
+        Statement::For {
+            init,
+            cond,
+            update,
+            body,
+            span,
+        } => {
             // Scope for loop variable
             ctx.push_scope();
             let new_init = init.as_ref().map(|i| Box::new(infer_statement(i, ctx)));
@@ -165,7 +187,12 @@ fn infer_statement(stmt: &Statement, ctx: &mut InferCtx) -> Statement {
                 span: *span,
             }
         }
-        Statement::ForOf { name, iterable, body, span } => {
+        Statement::ForOf {
+            name,
+            iterable,
+            body,
+            span,
+        } => {
             ctx.push_scope();
             let new_body = Box::new(infer_statement(body, ctx));
             ctx.pop_scope();
@@ -180,17 +207,32 @@ fn infer_statement(stmt: &Statement, ctx: &mut InferCtx) -> Statement {
             ctx.push_scope();
             let new_body = Box::new(infer_statement(body, ctx));
             ctx.pop_scope();
-            Statement::While { cond: cond.clone(), body: new_body, span: *span }
+            Statement::While {
+                cond: cond.clone(),
+                body: new_body,
+                span: *span,
+            }
         }
         Statement::DoWhile { body, cond, span } => {
             ctx.push_scope();
             let new_body = Box::new(infer_statement(body, ctx));
             ctx.pop_scope();
-            Statement::DoWhile { body: new_body, cond: cond.clone(), span: *span }
+            Statement::DoWhile {
+                body: new_body,
+                cond: cond.clone(),
+                span: *span,
+            }
         }
-        Statement::If { cond, then_branch, else_branch, span } => {
+        Statement::If {
+            cond,
+            then_branch,
+            else_branch,
+            span,
+        } => {
             let new_then = Box::new(infer_statement(then_branch, ctx));
-            let new_else = else_branch.as_ref().map(|e| Box::new(infer_statement(e, ctx)));
+            let new_else = else_branch
+                .as_ref()
+                .map(|e| Box::new(infer_statement(e, ctx)));
             Statement::If {
                 cond: cond.clone(),
                 then_branch: new_then,
@@ -198,7 +240,15 @@ fn infer_statement(stmt: &Statement, ctx: &mut InferCtx) -> Statement {
                 span: *span,
             }
         }
-        Statement::FunDecl { async_, name, params, rest_param, return_type, body, span } => {
+        Statement::FunDecl {
+            async_,
+            name,
+            params,
+            rest_param,
+            return_type,
+            body,
+            span,
+        } => {
             ctx.push_scope();
             for p in params {
                 if let FunParam::Simple(tp) = p {

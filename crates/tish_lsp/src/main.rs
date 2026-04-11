@@ -7,12 +7,12 @@ use std::sync::{Arc, RwLock};
 use regex::Regex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, NumberOrString,
-    CompletionParams, CompletionResponse, CompletionTriggerKind, Diagnostic, DiagnosticSeverity,
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
-    GotoDefinitionResponse, InitializeParams, InitializeResult, Location, MessageType, OneOf,
-    Position, Range, ServerCapabilities, ServerInfo, SymbolInformation, SymbolKind,
+    CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse,
+    CompletionTriggerKind, Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams,
+    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
+    InitializeParams, InitializeResult, Location, MessageType, NumberOrString, OneOf, Position,
+    Range, ServerCapabilities, ServerInfo, SymbolInformation, SymbolKind,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
     WorkspaceSymbolParams,
 };
@@ -171,11 +171,7 @@ impl LanguageServer for Backend {
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let uri = params
-            .text_document_position
-            .text_document
-            .uri
-            .clone();
+        let uri = params.text_document_position.text_document.uri.clone();
         let _pos = params.text_document_position.position;
         let text = {
             let g = self.docs.read().unwrap();
@@ -223,10 +219,8 @@ impl LanguageServer for Backend {
         }
 
         if let Some(ctx) = params.context {
-            if matches!(
-                ctx.trigger_kind,
-                CompletionTriggerKind::TRIGGER_CHARACTER
-            ) && ctx.trigger_character.as_deref() == Some(".")
+            if matches!(ctx.trigger_kind, CompletionTriggerKind::TRIGGER_CHARACTER)
+                && ctx.trigger_character.as_deref() == Some(".")
             {
                 // After dot: could add member completion later
             }
@@ -294,16 +288,15 @@ impl LanguageServer for Backend {
         if let Some(ref base) = path {
             for s in &program.statements {
                 if let tishlang_ast::Statement::Import {
-                    specifiers,
-                    from,
-                    ..
+                    specifiers, from, ..
                 } = s
                 {
                     for sp in specifiers {
                         let (imported, local) = match sp {
-                            tishlang_ast::ImportSpecifier::Named { name, alias } => {
-                                (name.as_ref(), alias.as_ref().map(|a| a.as_ref()).unwrap_or(name.as_ref()))
-                            }
+                            tishlang_ast::ImportSpecifier::Named { name, alias } => (
+                                name.as_ref(),
+                                alias.as_ref().map(|a| a.as_ref()).unwrap_or(name.as_ref()),
+                            ),
                             tishlang_ast::ImportSpecifier::Default(n) => (n.as_ref(), n.as_ref()),
                             _ => continue,
                         };
@@ -325,9 +318,7 @@ impl LanguageServer for Backend {
                             if let Ok(u) = Url::from_file_path(&can) {
                                 if let Ok(src) = std::fs::read_to_string(&can) {
                                     if let Ok(prog) = tishlang_parser::parse(&src) {
-                                        if let Some(loc) =
-                                            find_export(&prog, imported, &u, &src)
-                                        {
+                                        if let Some(loc) = find_export(&prog, imported, &u, &src) {
                                             return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
                                         }
                                     }
@@ -342,7 +333,10 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
-    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<tower_lsp::lsp_types::TextEdit>>> {
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> Result<Option<Vec<tower_lsp::lsp_types::TextEdit>>> {
         let uri = params.text_document.uri;
         let text = {
             let g = self.docs.read().unwrap();
@@ -365,10 +359,7 @@ impl LanguageServer for Backend {
             }
             Err(e) => {
                 self.client
-                    .show_message(
-                        MessageType::ERROR,
-                        format!("tish-fmt (formatter): {}", e),
-                    )
+                    .show_message(MessageType::ERROR, format!("tish-fmt (formatter): {}", e))
                     .await;
                 Ok(None)
             }
@@ -499,14 +490,18 @@ fn find_decl_in_stmt(
     text: &str,
 ) -> Option<Location> {
     match s {
-        tishlang_ast::Statement::FunDecl { name, span, .. } if name.as_ref() == word => Some(Location {
-            uri: uri.clone(),
-            range: span_to_range(span, text),
-        }),
-        tishlang_ast::Statement::VarDecl { name, span, .. } if name.as_ref() == word => Some(Location {
-            uri: uri.clone(),
-            range: span_to_range(span, text),
-        }),
+        tishlang_ast::Statement::FunDecl { name, span, .. } if name.as_ref() == word => {
+            Some(Location {
+                uri: uri.clone(),
+                range: span_to_range(span, text),
+            })
+        }
+        tishlang_ast::Statement::VarDecl { name, span, .. } if name.as_ref() == word => {
+            Some(Location {
+                uri: uri.clone(),
+                range: span_to_range(span, text),
+            })
+        }
         tishlang_ast::Statement::Block { statements, .. } => {
             for x in statements {
                 if let Some(l) = find_decl_in_stmt(x, word, uri, text) {
@@ -521,8 +516,14 @@ fn find_decl_in_stmt(
 
 fn span_to_range(span: &tishlang_ast::Span, _text: &str) -> Range {
     Range {
-        start: pos(span.start.0.saturating_sub(1) as u32, span.start.1.saturating_sub(1) as u32),
-        end: pos(span.end.0.saturating_sub(1) as u32, span.end.1.saturating_sub(1) as u32),
+        start: pos(
+            span.start.0.saturating_sub(1) as u32,
+            span.start.1.saturating_sub(1) as u32,
+        ),
+        end: pos(
+            span.end.0.saturating_sub(1) as u32,
+            span.end.1.saturating_sub(1) as u32,
+        ),
     }
 }
 
@@ -556,10 +557,7 @@ fn doc_symbol_stmt(
 ) {
     match s {
         tishlang_ast::Statement::FunDecl {
-            name,
-            span,
-            body,
-            ..
+            name, span, body, ..
         } => {
             let mut children = Vec::new();
             collect_child_syms(body, text, &mut children);

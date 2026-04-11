@@ -109,10 +109,19 @@ impl Opcode {
     /// Size in bytes of this instruction at `ip` (including operands). Returns None if truncated.
     pub fn instruction_size(self, code: &[u8], ip: usize) -> Option<usize> {
         let size = match self {
-            Opcode::Nop | Opcode::Pop | Opcode::Dup | Opcode::Return | Opcode::ExitTry
-            | Opcode::ArrayMapIdentity | Opcode::CallSpread | Opcode::ConstructSpread
-            | Opcode::EnterBlock | Opcode::ExitBlock => 1,
-            Opcode::ArraySortByProperty | Opcode::ArrayMapBinOp | Opcode::ArrayFilterBinOp
+            Opcode::Nop
+            | Opcode::Pop
+            | Opcode::Dup
+            | Opcode::Return
+            | Opcode::ExitTry
+            | Opcode::ArrayMapIdentity
+            | Opcode::CallSpread
+            | Opcode::ConstructSpread
+            | Opcode::EnterBlock
+            | Opcode::ExitBlock => 1,
+            Opcode::ArraySortByProperty
+            | Opcode::ArrayMapBinOp
+            | Opcode::ArrayFilterBinOp
             | Opcode::LoadNativeExport => 5,
             _ => 3,
         };

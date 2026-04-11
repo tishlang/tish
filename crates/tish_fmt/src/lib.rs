@@ -2,9 +2,9 @@
 
 use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
-    ExportDeclaration, Expr, FunParam, ImportSpecifier, JsxAttrValue, JsxChild, JsxProp,
-    Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Statement, TypeAnnotation,
-    TypedParam, UnaryOp,
+    ExportDeclaration, Expr, FunParam, ImportSpecifier, JsxAttrValue, JsxChild, JsxProp, Literal,
+    LogicalAssignOp, MemberProp, ObjectProp, Program, Statement, TypeAnnotation, TypedParam,
+    UnaryOp,
 };
 
 /// Format Tish source. On parse error, returns the parser message.
@@ -79,7 +79,10 @@ impl Printer {
                 }
             }
             Statement::VarDeclDestructure {
-                pattern, mutable, init, ..
+                pattern,
+                mutable,
+                init,
+                ..
             } => {
                 self.indent(level);
                 self.buf.push_str(if *mutable { "let " } else { "const " });
@@ -267,7 +270,9 @@ impl Printer {
                     self.stmt_inline_or_block(fb, level);
                 }
             }
-            Statement::Import { specifiers, from, .. } => {
+            Statement::Import {
+                specifiers, from, ..
+            } => {
                 self.indent(level);
                 self.buf.push_str("import ");
                 self.import_specs(specifiers);
@@ -279,8 +284,15 @@ impl Printer {
                 self.buf.push_str("export ");
                 match declaration.as_ref() {
                     ExportDeclaration::Named(inner) => {
-                        if let Statement::FunDecl { async_, name, params, rest_param, return_type, body, .. } =
-                            inner.as_ref()
+                        if let Statement::FunDecl {
+                            async_,
+                            name,
+                            params,
+                            rest_param,
+                            return_type,
+                            body,
+                            ..
+                        } = inner.as_ref()
                         {
                             if *async_ {
                                 self.buf.push_str("async ");
@@ -536,7 +548,9 @@ impl Printer {
                 Literal::Null => self.buf.push_str("null"),
             },
             Expr::Ident { name, .. } => self.buf.push_str(name.as_ref()),
-            Expr::Binary { left, op, right, .. } => {
+            Expr::Binary {
+                left, op, right, ..
+            } => {
                 self.expr(left);
                 self.buf.push(' ');
                 self.buf.push_str(binop(*op));
@@ -704,12 +718,16 @@ impl Printer {
                 self.buf.push_str("--");
                 self.buf.push_str(name.as_ref());
             }
-            Expr::CompoundAssign { name, op, value, .. } => {
+            Expr::CompoundAssign {
+                name, op, value, ..
+            } => {
                 self.buf.push_str(name.as_ref());
                 self.buf.push_str(compound(*op));
                 self.expr(value);
             }
-            Expr::LogicalAssign { name, op, value, .. } => {
+            Expr::LogicalAssign {
+                name, op, value, ..
+            } => {
                 self.buf.push_str(name.as_ref());
                 self.buf.push_str(logical_assign(*op));
                 self.expr(value);
@@ -830,9 +848,7 @@ impl Printer {
                 self.buf.push_str("</>");
             }
             Expr::NativeModuleLoad {
-                spec,
-                export_name,
-                ..
+                spec, export_name, ..
             } => {
                 self.buf.push_str("import { ");
                 self.buf.push_str(export_name.as_ref());

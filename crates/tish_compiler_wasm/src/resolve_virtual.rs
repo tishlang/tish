@@ -109,10 +109,16 @@ pub fn resolve_virtual(
         if files.contains_key(&with_ext) {
             with_ext
         } else {
-            return Err(format!("Entry file '{}' not in virtual file map", entry_path));
+            return Err(format!(
+                "Entry file '{}' not in virtual file map",
+                entry_path
+            ));
         }
     } else {
-        return Err(format!("Entry file '{}' not in virtual file map", entry_path));
+        return Err(format!(
+            "Entry file '{}' not in virtual file map",
+            entry_path
+        ));
     };
 
     let mut visited = HashSet::new();
@@ -148,9 +154,9 @@ fn load_module_recursive(
     }
     visited.insert(module_path.to_string());
 
-    let source = files.get(module_path).ok_or_else(|| {
-        format!("Module '{}' not in virtual file map", module_path)
-    })?;
+    let source = files
+        .get(module_path)
+        .ok_or_else(|| format!("Module '{}' not in virtual file map", module_path))?;
     let program = tishlang_parser::parse(source.trim())
         .map_err(|e| format!("Parse error in {}: {}", module_path, e))?;
 
@@ -162,13 +168,7 @@ fn load_module_recursive(
             }
             let dep_key = resolve_import_to_key(from, from_dir, files)?;
             if !path_to_module.contains_key(&dep_key) {
-                load_module_recursive(
-                    &dep_key,
-                    files,
-                    visited,
-                    path_to_module,
-                    load_order,
-                )?;
+                load_module_recursive(&dep_key, files, visited, path_to_module, load_order)?;
             }
         }
     }
@@ -197,11 +197,11 @@ pub fn detect_cycles_virtual(modules: &[VirtualModule]) -> Result<(), String> {
             &mut stack,
             &mut HashSet::new(),
         )? {
-            let path_names: Vec<_> = stack
-                .iter()
-                .map(|&i| modules[i].path.clone())
-                .collect();
-            return Err(format!("Circular import detected: {}", path_names.join(" -> ")));
+            let path_names: Vec<_> = stack.iter().map(|&i| modules[i].path.clone()).collect();
+            return Err(format!(
+                "Circular import detected: {}",
+                path_names.join(" -> ")
+            ));
         }
     }
     Ok(())
@@ -231,14 +231,8 @@ fn has_cycle_from(
                     stack.push(dep_idx);
                     let dep = &modules[dep_idx];
                     let dep_dir = parent_dir(&dep.path);
-                    if has_cycle_from(
-                        dep_dir,
-                        &dep.program,
-                        path_to_idx,
-                        modules,
-                        stack,
-                        visiting,
-                    )? {
+                    if has_cycle_from(dep_dir, &dep.program, path_to_idx, modules, stack, visiting)?
+                    {
                         return Ok(true);
                     }
                     stack.pop();
@@ -307,7 +301,11 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
         let dir = parent_dir(&module.path);
         for stmt in &module.program.statements {
             match stmt {
-                Statement::Import { specifiers, from, span } => {
+                Statement::Import {
+                    specifiers,
+                    from,
+                    span,
+                } => {
                     if is_native_import(from) {
                         let canonical_spec =
                             normalize_builtin_spec(from).unwrap_or_else(|| from.to_string());
@@ -387,18 +385,13 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                                     name: ns.clone(),
                                     mutable: false,
                                     type_ann: None,
-                                    init: Some(Expr::Object {
-                                        props,
-                                        span: *span,
-                                    }),
+                                    init: Some(Expr::Object { props, span: *span }),
                                     span: *span,
                                 });
                             }
                             ImportSpecifier::Default(bind) => {
-                                let source = dep_exports
-                                    .get("default")
-                                    .cloned()
-                                    .ok_or_else(|| {
+                                let source =
+                                    dep_exports.get("default").cloned().ok_or_else(|| {
                                         format!("Module '{}' has no default export", from)
                                     })?;
                                 statements.push(Statement::VarDecl {
@@ -415,21 +408,19 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                         }
                     }
                 }
-                Statement::Export { declaration, .. } => {
-                    match declaration.as_ref() {
-                        ExportDeclaration::Named(s) => statements.push(*s.clone()),
-                        ExportDeclaration::Default(e) => {
-                            let default_name = format!("__default_{}", idx);
-                            statements.push(Statement::VarDecl {
-                                name: Arc::from(default_name),
-                                mutable: false,
-                                type_ann: None,
-                                init: Some((*e).clone()),
-                                span: e.span(),
-                            });
-                        }
+                Statement::Export { declaration, .. } => match declaration.as_ref() {
+                    ExportDeclaration::Named(s) => statements.push(*s.clone()),
+                    ExportDeclaration::Default(e) => {
+                        let default_name = format!("__default_{}", idx);
+                        statements.push(Statement::VarDecl {
+                            name: Arc::from(default_name),
+                            mutable: false,
+                            type_ann: None,
+                            init: Some((*e).clone()),
+                            span: e.span(),
+                        });
                     }
-                }
+                },
                 _ => statements.push(stmt.clone()),
             }
         }

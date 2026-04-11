@@ -30,15 +30,9 @@ pub enum ConvertErrorKind {
     /// Semantic analysis error from OXC.
     Semantic(String),
     /// Unsupported construct (class, this, for-in, etc.).
-    Unsupported {
-        what: String,
-        hint: Option<String>,
-    },
+    Unsupported { what: String, hint: Option<String> },
     /// JS feature that cannot be expressed in Tish.
-    Incompatible {
-        what: String,
-        reason: String,
-    },
+    Incompatible { what: String, reason: String },
 }
 
 impl fmt::Display for ConvertErrorKind {

@@ -1,7 +1,7 @@
 //! Math builtin functions.
 
-use tishlang_core::Value;
 use crate::helpers::extract_num;
+use tishlang_core::Value;
 
 macro_rules! math_unary {
     ($name:ident, $op:ident) => {
@@ -31,14 +31,16 @@ math_unary!(trunc, trunc);
 math_unary!(cbrt, cbrt);
 
 pub fn min(args: &[Value]) -> Value {
-    let n = args.iter()
+    let n = args
+        .iter()
         .filter_map(|v| extract_num(Some(v)))
         .fold(f64::INFINITY, f64::min);
     Value::Number(if n == f64::INFINITY { f64::NAN } else { n })
 }
 
 pub fn max(args: &[Value]) -> Value {
-    let n = args.iter()
+    let n = args
+        .iter()
         .filter_map(|v| extract_num(Some(v)))
         .fold(f64::NEG_INFINITY, f64::max);
     Value::Number(if n == f64::NEG_INFINITY { f64::NAN } else { n })

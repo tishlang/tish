@@ -9,7 +9,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 /// FIGlet-style block letters (UTF-8). On a TTY, a short expand + palette-color animation runs.
 const TISH_BANNER_LINES: &[&str] = &[
-        "",
+    "",
     "████████╗██╗███████╗██╗  ██╗",
     "╚══██╔══╝██║██╔════╝██║  ██║",
     "   ██║   ██║███████╗███████║",
@@ -26,13 +26,13 @@ const BANNER_FRAME_MS: u64 = 20;
 
 /// Orange → Yellow → Green → Teal → Blue → Purple → Pink (matching the brand palette).
 const PALETTE: &[(u8, u8, u8)] = &[
-    (255, 159,  64),  // Orange
-    (255, 213,  64),  // Yellow
-    ( 52, 199,  89),  // Green
-    ( 48, 209, 188),  // Teal
-    ( 10, 132, 255),  // Blue
-    (175,  82, 222),  // Purple
-    (255,  55, 148),  // Pink
+    (255, 159, 64), // Orange
+    (255, 213, 64), // Yellow
+    (52, 199, 89),  // Green
+    (48, 209, 188), // Teal
+    (10, 132, 255), // Blue
+    (175, 82, 222), // Purple
+    (255, 55, 148), // Pink
 ];
 
 fn ease_out_cubic(t: f32) -> f32 {
@@ -128,8 +128,8 @@ pub fn print_tish_banner() {
 pub fn build_command() -> clap::Command {
     Cli::command()
         .after_help(cli_after_help())
-        .mut_subcommand("run",   |sub| sub.after_help(run_after_help()))
-        .mut_subcommand("repl",  |sub| sub.after_help(repl_after_help()))
+        .mut_subcommand("run", |sub| sub.after_help(run_after_help()))
+        .mut_subcommand("repl", |sub| sub.after_help(repl_after_help()))
         .mut_subcommand("build", |sub| sub.after_long_help(build_after_help()))
 }
 
@@ -138,7 +138,10 @@ fn count_help_lines(cmd: &mut clap::Command, sub_name: Option<&str>) -> usize {
     let mut buf = Vec::<u8>::new();
     if let Some(name) = sub_name {
         if cmd.find_subcommand(name).is_some() {
-            let _ = cmd.find_subcommand_mut(name).unwrap().write_long_help(&mut buf);
+            let _ = cmd
+                .find_subcommand_mut(name)
+                .unwrap()
+                .write_long_help(&mut buf);
         } else {
             let _ = cmd.write_long_help(&mut buf);
         }
@@ -236,8 +239,11 @@ pub fn print_banner_with_help(argv: &[String]) {
         let mut out = io::stdout().lock();
         write_tish_banner_frame(&mut out, 1.0, 0);
         let _ = writeln!(out); // blank separator  (row n+1)
-        // ── Manual prefix (MAIN_PREFIX_LINES = 4 lines) ──────────────────
-        let _ = writeln!(out, "{H_PURPLE}Tish{H_RESET} {H_GREY}(version {VERSION}){H_RESET}");
+                               // ── Manual prefix (MAIN_PREFIX_LINES = 4 lines) ──────────────────
+        let _ = writeln!(
+            out,
+            "{H_PURPLE}Tish{H_RESET} {H_GREY}(version {VERSION}){H_RESET}"
+        );
         let _ = writeln!(out, "Minimal TS/JS-ish language");
         let _ = writeln!(out, "{H_PINK}https://tishlang.com{H_RESET}");
         let _ = writeln!(out); // blank before Usage
@@ -289,20 +295,24 @@ fn rgb_bold(r: u8, g: u8, b: u8) -> Style {
 /// Orange → section headers / usage.  Teal → literals (commands, flags).  Yellow → placeholders.
 pub fn cargo_help_styles() -> Styles {
     Styles::styled()
-        .header(rgb_bold(255, 159,  64))      // Orange  – "Commands:", "Options:", "Usage:"
-        .usage(rgb_bold(255, 159,  64))       // Orange
-        .literal(rgb_bold( 48, 209, 188))     // Teal    – run, repl, --help, -V …
-        .placeholder(rgb_bold(255, 213,  64)) // Yellow  – <FILE>, <NAME>, …
-        .error(rgb_bold(255,  55, 148))       // Pink    – error messages
-        .valid(rgb_bold( 52, 199,  89))       // Green   – valid values
-        .invalid(rgb_bold(255,  55, 148))     // Pink    – invalid values
+        .header(rgb_bold(255, 159, 64)) // Orange  – "Commands:", "Options:", "Usage:"
+        .usage(rgb_bold(255, 159, 64)) // Orange
+        .literal(rgb_bold(48, 209, 188)) // Teal    – run, repl, --help, -V …
+        .placeholder(rgb_bold(255, 213, 64)) // Yellow  – <FILE>, <NAME>, …
+        .error(rgb_bold(255, 55, 148)) // Pink    – error messages
+        .valid(rgb_bold(52, 199, 89)) // Green   – valid values
+        .invalid(rgb_bold(255, 55, 148)) // Pink    – invalid values
 }
 
 /// Returns the colored `after_help` text for the top-level `tish --help`.
 /// Colors are emitted only when stdout is a TTY.
 pub fn cli_after_help() -> String {
     let (oh, t, r) = if io::stdout().is_terminal() {
-        ("\x1b[1;38;2;255;159;64m", "\x1b[1;38;2;48;209;188m", "\x1b[0m")
+        (
+            "\x1b[1;38;2;255;159;64m",
+            "\x1b[1;38;2;48;209;188m",
+            "\x1b[0m",
+        )
     } else {
         ("", "", "")
     };
@@ -346,7 +356,11 @@ Omit --feature to use every capability linked into this binary."
 /// Returns the colored `after_help` for `tish run --help`.
 pub fn run_after_help() -> String {
     let (oh, t, r) = if io::stdout().is_terminal() {
-        ("\x1b[1;38;2;255;159;64m", "\x1b[1;38;2;48;209;188m", "\x1b[0m")
+        (
+            "\x1b[1;38;2;255;159;64m",
+            "\x1b[1;38;2;48;209;188m",
+            "\x1b[0m",
+        )
     } else {
         ("", "", "")
     };
@@ -356,7 +370,11 @@ pub fn run_after_help() -> String {
 /// Returns the colored `after_help` for `tish repl --help`.
 pub fn repl_after_help() -> String {
     let (oh, t, r) = if io::stdout().is_terminal() {
-        ("\x1b[1;38;2;255;159;64m", "\x1b[1;38;2;48;209;188m", "\x1b[0m")
+        (
+            "\x1b[1;38;2;255;159;64m",
+            "\x1b[1;38;2;48;209;188m",
+            "\x1b[0m",
+        )
     } else {
         ("", "", "")
     };
@@ -366,7 +384,11 @@ pub fn repl_after_help() -> String {
 /// Returns the colored `after_long_help` for `tish build --help`.
 pub fn build_after_help() -> String {
     let (oh, t, r) = if io::stdout().is_terminal() {
-        ("\x1b[1;38;2;255;159;64m", "\x1b[1;38;2;48;209;188m", "\x1b[0m")
+        (
+            "\x1b[1;38;2;255;159;64m",
+            "\x1b[1;38;2;48;209;188m",
+            "\x1b[0m",
+        )
     } else {
         ("", "", "")
     };
@@ -421,10 +443,20 @@ pub(crate) struct Cli {
 #[derive(Parser)]
 pub(crate) struct RunArgs {
     /// Path to a `.tish` file, or `-` to read the program from stdin (like `node -`).
-    #[arg(required = true, allow_hyphen_values = true, value_name = "FILE", help_heading = "Arguments")]
+    #[arg(
+        required = true,
+        allow_hyphen_values = true,
+        value_name = "FILE",
+        help_heading = "Arguments"
+    )]
     pub file: String,
     /// `vm` or `interp` (see `tish --help` for capabilities / `--feature`).
-    #[arg(long, default_value = "vm", value_name = "NAME", help_heading = "Options")]
+    #[arg(
+        long,
+        default_value = "vm",
+        value_name = "NAME",
+        help_heading = "Options"
+    )]
     pub backend: String,
     /// Subset of capabilities (see `tish --help` for the full list).
     #[arg(
@@ -442,7 +474,12 @@ pub(crate) struct RunArgs {
 #[derive(Parser)]
 pub(crate) struct ReplArgs {
     /// `vm` or `interp` (see `tish --help`).
-    #[arg(long, default_value = "vm", value_name = "NAME", help_heading = "Options")]
+    #[arg(
+        long,
+        default_value = "vm",
+        value_name = "NAME",
+        help_heading = "Options"
+    )]
     pub backend: String,
     /// Subset of capabilities (see `tish --help` for the full list).
     #[arg(
@@ -467,10 +504,20 @@ pub(crate) struct BuildArgs {
     )]
     pub output: String,
     /// `native`, `js`, `wasm`, or `wasi` (see long help below).
-    #[arg(long, default_value = "native", value_name = "TARGET", help_heading = "Options")]
+    #[arg(
+        long,
+        default_value = "native",
+        value_name = "TARGET",
+        help_heading = "Options"
+    )]
     pub target: String,
     /// `rust`, `cranelift`, or `llvm` (only for `--target native`).
-    #[arg(long, default_value = "rust", value_name = "BACKEND", help_heading = "Options")]
+    #[arg(
+        long,
+        default_value = "rust",
+        value_name = "BACKEND",
+        help_heading = "Options"
+    )]
     pub native_backend: String,
     /// Capability subset for native output (see long help below).
     #[arg(

@@ -28,6 +28,7 @@ members = [
     "crates/tish_fmt",
     "crates/tish_lint",
     "crates/tish_lsp",
+    "crates/tishlang_cargo_bindgen",
 ]
 resolver = "2"
 

@@ -14,7 +14,10 @@ fn test_and_shortcircuit_emits_jump() {
     let chunk = compile_unoptimized(&program).expect("compile");
     let code = &chunk.code;
     let has_jump_if_false = code.windows(1).any(|w| w[0] == Opcode::JumpIfFalse as u8);
-    assert!(has_jump_if_false, "And should emit JumpIfFalse for short-circuit");
+    assert!(
+        has_jump_if_false,
+        "And should emit JumpIfFalse for short-circuit"
+    );
 }
 
 #[test]
@@ -23,7 +26,11 @@ fn test_and_shortcircuit_runs_unoptimized() {
     let program = parse(source).expect("parse");
     let chunk = compile_unoptimized(&program).expect("compile");
     let result = tishlang_vm::run(&chunk);
-    assert!(result.is_ok(), "Should not throw (short-circuit avoids x.foo): {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Should not throw (short-circuit avoids x.foo): {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -33,7 +40,11 @@ fn test_and_shortcircuit_runs_optimized() {
     let program = tishlang_opt::optimize(&program);
     let chunk = tishlang_bytecode::compile(&program).expect("compile");
     let result = tishlang_vm::run(&chunk);
-    assert!(result.is_ok(), "Should not throw with peephole (short-circuit): {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Should not throw with peephole (short-circuit): {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -46,5 +57,9 @@ fn test_and_shortcircuit_via_resolve_project() {
     let program = tishlang_opt::optimize(&program); // Mirror CLI
     let chunk = compile(&program).expect("compile");
     let result = tishlang_vm::run(&chunk);
-    assert!(result.is_ok(), "Should not throw via resolve+merge+opt (CLI path): {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Should not throw via resolve+merge+opt (CLI path): {:?}",
+        result.err()
+    );
 }

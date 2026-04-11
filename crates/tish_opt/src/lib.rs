@@ -10,11 +10,7 @@ use tishlang_ast::{ArrowBody, BinOp, Expr, Literal, Program, Statement, UnaryOp}
 /// Optimize a Tish program. Returns a new program with transformations applied.
 pub fn optimize(program: &Program) -> Program {
     Program {
-        statements: program
-            .statements
-            .iter()
-            .map(optimize_statement)
-            .collect(),
+        statements: program.statements.iter().map(optimize_statement).collect(),
     }
 }
 
@@ -79,7 +75,9 @@ fn optimize_statement(stmt: &Statement) -> Statement {
             Statement::If {
                 cond: opt_cond,
                 then_branch: Box::new(optimize_statement(then_branch)),
-                else_branch: else_branch.as_ref().map(|b| Box::new(optimize_statement(b))),
+                else_branch: else_branch
+                    .as_ref()
+                    .map(|b| Box::new(optimize_statement(b))),
                 span: *span,
             }
         }
@@ -144,21 +142,12 @@ fn optimize_statement(stmt: &Statement) -> Statement {
             expr: optimize_expr(expr),
             cases: cases
                 .iter()
-                .map(|(ce, stmts)| {
-                    (
-                        ce.as_ref().map(optimize_expr),
-                        optimize_block(stmts),
-                    )
-                })
+                .map(|(ce, stmts)| (ce.as_ref().map(optimize_expr), optimize_block(stmts)))
                 .collect(),
             default_body: default_body.as_ref().map(|stmts| optimize_block(stmts)),
             span: *span,
         },
-        Statement::DoWhile {
-            body,
-            cond,
-            span,
-        } => Statement::DoWhile {
+        Statement::DoWhile { body, cond, span } => Statement::DoWhile {
             body: Box::new(optimize_statement(body)),
             cond: optimize_expr(cond),
             span: *span,
@@ -177,7 +166,9 @@ fn optimize_statement(stmt: &Statement) -> Statement {
             body: Box::new(optimize_statement(body)),
             catch_param: catch_param.clone(),
             catch_body: catch_body.as_ref().map(|b| Box::new(optimize_statement(b))),
-            finally_body: finally_body.as_ref().map(|b| Box::new(optimize_statement(b))),
+            finally_body: finally_body
+                .as_ref()
+                .map(|b| Box::new(optimize_statement(b))),
             span: *span,
         },
         Statement::Import { .. } | Statement::Export { .. } => stmt.clone(),
@@ -232,7 +223,12 @@ fn optimize_expr(expr: &Expr) -> Expr {
             name: Arc::clone(name),
             span: *span,
         },
-        Expr::Binary { left, op, right, span } => {
+        Expr::Binary {
+            left,
+            op,
+            right,
+            span,
+        } => {
             let opt_left = optimize_expr(left);
             let opt_right = optimize_expr(right);
 
@@ -324,32 +320,28 @@ fn optimize_expr(expr: &Expr) -> Expr {
                 span: *span,
             }
         }
-        Expr::Call {
-            callee,
-            args,
-            span,
-        } => Expr::Call {
+        Expr::Call { callee, args, span } => Expr::Call {
             callee: Box::new(optimize_expr(callee)),
             args: args
                 .iter()
                 .map(|a| match a {
                     tishlang_ast::CallArg::Expr(e) => tishlang_ast::CallArg::Expr(optimize_expr(e)),
-                    tishlang_ast::CallArg::Spread(e) => tishlang_ast::CallArg::Spread(optimize_expr(e)),
+                    tishlang_ast::CallArg::Spread(e) => {
+                        tishlang_ast::CallArg::Spread(optimize_expr(e))
+                    }
                 })
                 .collect(),
             span: *span,
         },
-        Expr::New {
-            callee,
-            args,
-            span,
-        } => Expr::New {
+        Expr::New { callee, args, span } => Expr::New {
             callee: Box::new(optimize_expr(callee)),
             args: args
                 .iter()
                 .map(|a| match a {
                     tishlang_ast::CallArg::Expr(e) => tishlang_ast::CallArg::Expr(optimize_expr(e)),
-                    tishlang_ast::CallArg::Spread(e) => tishlang_ast::CallArg::Spread(optimize_expr(e)),
+                    tishlang_ast::CallArg::Spread(e) => {
+                        tishlang_ast::CallArg::Spread(optimize_expr(e))
+                    }
                 })
                 .collect(),
             span: *span,
@@ -385,14 +377,11 @@ fn optimize_expr(expr: &Expr) -> Expr {
             optional: *optional,
             span: *span,
         },
-        Expr::NullishCoalesce {
-            left,
-            right,
-            span,
-        } => {
+        Expr::NullishCoalesce { left, right, span } => {
             let opt_left = optimize_expr(left);
             if let Expr::Literal {
-                value: Literal::Null, ..
+                value: Literal::Null,
+                ..
             } = &opt_left
             {
                 return optimize_expr(right);
@@ -444,13 +433,23 @@ fn optimize_expr(expr: &Expr) -> Expr {
         | Expr::PostfixDec { .. }
         | Expr::PrefixInc { .. }
         | Expr::PrefixDec { .. } => expr.clone(),
-        Expr::CompoundAssign { name, op, value, span } => Expr::CompoundAssign {
+        Expr::CompoundAssign {
+            name,
+            op,
+            value,
+            span,
+        } => Expr::CompoundAssign {
             name: Arc::clone(name),
             op: *op,
             value: Box::new(optimize_expr(value)),
             span: *span,
         },
-        Expr::LogicalAssign { name, op, value, span } => Expr::LogicalAssign {
+        Expr::LogicalAssign {
+            name,
+            op,
+            value,
+            span,
+        } => Expr::LogicalAssign {
             name: Arc::clone(name),
             op: *op,
             value: Box::new(optimize_expr(value)),
@@ -478,11 +477,7 @@ fn optimize_expr(expr: &Expr) -> Expr {
             value: Box::new(optimize_expr(value)),
             span: *span,
         },
-        Expr::ArrowFunction {
-            params,
-            body,
-            span,
-        } => {
+        Expr::ArrowFunction { params, body, span } => {
             let opt_body = match body {
                 ArrowBody::Expr(e) => ArrowBody::Expr(Box::new(optimize_expr(e))),
                 ArrowBody::Block(s) => ArrowBody::Block(Box::new(optimize_statement(s))),
@@ -493,7 +488,11 @@ fn optimize_expr(expr: &Expr) -> Expr {
                 span: *span,
             }
         }
-        Expr::TemplateLiteral { quasis, exprs, span } => Expr::TemplateLiteral {
+        Expr::TemplateLiteral {
+            quasis,
+            exprs,
+            span,
+        } => Expr::TemplateLiteral {
             quasis: quasis.iter().map(Arc::clone).collect(),
             exprs: exprs.iter().map(optimize_expr).collect(),
             span: *span,
@@ -503,7 +502,11 @@ fn optimize_expr(expr: &Expr) -> Expr {
             span: *span,
         },
         Expr::JsxElement { .. } | Expr::JsxFragment { .. } => expr.clone(),
-        Expr::NativeModuleLoad { spec, export_name, span } => Expr::NativeModuleLoad {
+        Expr::NativeModuleLoad {
+            spec,
+            export_name,
+            span,
+        } => Expr::NativeModuleLoad {
             spec: Arc::clone(spec),
             export_name: Arc::clone(export_name),
             span: *span,
@@ -699,8 +702,12 @@ fn try_fold_binop(left: &Literal, op: BinOp, right: &Literal) -> Option<Literal>
         Add => {
             if matches!(left, Literal::String(_)) || matches!(right, Literal::String(_)) {
                 return Some(Literal::String(
-                    format!("{}{}", literal_to_display_string(left), literal_to_display_string(right))
-                        .into(),
+                    format!(
+                        "{}{}",
+                        literal_to_display_string(left),
+                        literal_to_display_string(right)
+                    )
+                    .into(),
                 ));
             }
             Literal::Number(ln + rn)
@@ -769,7 +776,11 @@ mod tests {
             [tishlang_ast::Statement::ExprStmt { expr, .. }] => expr,
             _ => panic!("expected single expr stmt"),
         };
-        assert!(has_literal_number(expr, -42.0), "expected -42, got {:?}", expr);
+        assert!(
+            has_literal_number(expr, -42.0),
+            "expected -42, got {:?}",
+            expr
+        );
     }
 
     #[test]
@@ -781,7 +792,13 @@ mod tests {
             _ => panic!("expected single expr stmt"),
         };
         assert!(
-            matches!(expr, Expr::Literal { value: Literal::Bool(false), .. }),
+            matches!(
+                expr,
+                Expr::Literal {
+                    value: Literal::Bool(false),
+                    ..
+                }
+            ),
             "expected false, got {:?}",
             expr
         );

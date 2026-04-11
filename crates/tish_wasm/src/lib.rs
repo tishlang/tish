@@ -107,27 +107,33 @@ fn emit_wasm_from_chunk(chunk: &Chunk, output_path: &Path) -> Result<(), WasmErr
     std::fs::create_dir_all(&out_dir_abs).map_err(|e| WasmError {
         message: format!("Cannot create output directory: {}", e),
     })?;
-    let workspace_root = tishlang_build_utils::find_workspace_root().map_err(|e| WasmError {
-        message: e,
-    })?;
+    let workspace_root =
+        tishlang_build_utils::find_workspace_root().map_err(|e| WasmError { message: e })?;
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let build_status = Command::new(&cargo)
         .current_dir(&workspace_root)
         .args([
-            "build", "-p", "tishlang_wasm_runtime",
-            "--target", "wasm32-unknown-unknown",
-            "--release", "--features", "browser",
+            "build",
+            "-p",
+            "tishlang_wasm_runtime",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--release",
+            "--features",
+            "browser",
         ])
         .status()
-        .map_err(|e| WasmError { message: format!("Failed to run cargo: {}", e) })?;
+        .map_err(|e| WasmError {
+            message: format!("Failed to run cargo: {}", e),
+        })?;
     if !build_status.success() {
         return Err(WasmError {
             message: "Failed to build wasm runtime. Run: rustup target add wasm32-unknown-unknown"
                 .to_string(),
         });
     }
-    let wasm_artifact = workspace_root
-        .join("target/wasm32-unknown-unknown/release/tishlang_wasm_runtime.wasm");
+    let wasm_artifact =
+        workspace_root.join("target/wasm32-unknown-unknown/release/tishlang_wasm_runtime.wasm");
     if !wasm_artifact.exists() {
         return Err(WasmError {
             message: format!("Wasm artifact not found: {}", wasm_artifact.display()),
@@ -137,17 +143,25 @@ fn emit_wasm_from_chunk(chunk: &Chunk, output_path: &Path) -> Result<(), WasmErr
     let out_name = stem.to_string();
     let bindgen_status = Command::new(&wasm_bindgen)
         .args([
-            "--target", "web",
-            "--out-dir", out_dir_abs.to_str().unwrap(),
-            "--out-name", &out_name,
+            "--target",
+            "web",
+            "--out-dir",
+            out_dir_abs.to_str().unwrap(),
+            "--out-name",
+            &out_name,
             wasm_artifact.to_str().unwrap(),
         ])
         .status()
         .map_err(|e| WasmError {
-            message: format!("Failed to run wasm-bindgen: {}. Install with: cargo install wasm-bindgen-cli", e),
+            message: format!(
+                "Failed to run wasm-bindgen: {}. Install with: cargo install wasm-bindgen-cli",
+                e
+            ),
         })?;
     if !bindgen_status.success() {
-        return Err(WasmError { message: "wasm-bindgen failed".to_string() });
+        return Err(WasmError {
+            message: "wasm-bindgen failed".to_string(),
+        });
     }
     let js_name = format!("{}.js", stem);
     let html = format!(
@@ -171,7 +185,12 @@ run(chunk);
     std::fs::write(&html_path, html).map_err(|e| WasmError {
         message: format!("Cannot write {}: {}", html_path.display(), e),
     })?;
-    println!("Built: {}_bg.wasm, {}.js, {}", stem, stem, html_path.display());
+    println!(
+        "Built: {}_bg.wasm, {}.js, {}",
+        stem,
+        stem,
+        html_path.display()
+    );
     Ok(())
 }
 
@@ -233,9 +252,8 @@ pub fn compile_to_wasi(
         message: format!("Cannot create output directory: {}", e),
     })?;
 
-    let workspace_root = tishlang_build_utils::find_workspace_root().map_err(|e| WasmError {
-        message: e,
-    })?;
+    let workspace_root =
+        tishlang_build_utils::find_workspace_root().map_err(|e| WasmError { message: e })?;
 
     // Create generated project: wasi_build/{stem}/
     let build_dir = out_dir_abs.join("wasi_build").join(stem);
@@ -249,9 +267,7 @@ pub fn compile_to_wasi(
     })?;
 
     // Cargo.toml - path to tishlang_wasm_runtime (crate in crates/tish_wasm_runtime)
-    let runtime_path = workspace_root
-        .join("crates")
-        .join("tish_wasm_runtime");
+    let runtime_path = workspace_root.join("crates").join("tish_wasm_runtime");
     let runtime_path_str = runtime_path
         .canonicalize()
         .unwrap_or(runtime_path)
@@ -314,12 +330,7 @@ fn main() {
     let build_status = Command::new(&cargo)
         .current_dir(&build_dir)
         .env("CARGO_TARGET_DIR", &target_dir)
-        .args([
-            "build",
-            "--target",
-            "wasm32-wasip1",
-            "--release",
-        ])
+        .args(["build", "--target", "wasm32-wasip1", "--release"])
         .status()
         .map_err(|e| WasmError {
             message: format!("Failed to run cargo: {}", e),
@@ -355,4 +366,3 @@ fn main() {
     );
     Ok(())
 }
-

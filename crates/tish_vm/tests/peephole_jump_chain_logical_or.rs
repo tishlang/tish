@@ -41,7 +41,10 @@ fn string_strict_eq_logical_or_inside_ternary_repl_last_expr() {
     let opt = tishlang_opt::optimize(&tishlang_parser::parse(src).expect("parse"));
     let v_peep = run_chunk(&compile_for_repl(&opt).expect("compile repl"));
     let v_unopt = run_chunk(&compile_for_repl_unoptimized(&opt).expect("compile repl unopt"));
-    assert!(v_peep.strict_eq(&v_unopt), "peep={v_peep:?} unopt={v_unopt:?}");
+    assert!(
+        v_peep.strict_eq(&v_unopt),
+        "peep={v_peep:?} unopt={v_unopt:?}"
+    );
     assert!(
         matches!(&v_peep, Value::Number(n) if *n == 1.0),
         "expected 1, got {v_peep:?}"
@@ -62,7 +65,8 @@ fn logical_or_strict_eq_peephole_matches_unoptimized() {
     );
 
     let v_peep_repl = run_chunk(&compile_for_repl(&program).expect("compile repl"));
-    let v_raw_repl = run_chunk(&compile_for_repl_unoptimized(&program).expect("compile repl unopt"));
+    let v_raw_repl =
+        run_chunk(&compile_for_repl_unoptimized(&program).expect("compile repl unopt"));
     assert!(
         v_peep_repl.strict_eq(&v_raw_repl),
         "repl: peep={v_peep_repl:?} raw={v_raw_repl:?}"
@@ -111,7 +115,8 @@ fn string_strict_eq_logical_or_peephole_matches_unoptimized() {
 /// `tish run path/to/file.tish` uses merge_modules; ensure that matches plain parse for the fixture.
 #[test]
 fn merged_module_program_bytecode_matches_parse_for_string_or_fixture() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/or_string_cmd.tish");
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/or_string_cmd.tish");
     let src = std::fs::read_to_string(&fixture).expect("read fixture");
     let modules = tishlang_compile::resolve_project(&fixture, Some(fixture.parent().unwrap()))
         .expect("resolve");

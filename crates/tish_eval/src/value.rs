@@ -15,9 +15,9 @@ use tishlang_core::NativeFn as CoreNativeFn;
 
 /// Property map for interpreter `Value::Object` (uses `eval::Value`, not `tishlang_core::Value`).
 pub type PropMap = AHashMap<Arc<str>, Value>;
+use tishlang_core::TishOpaque;
 #[cfg(feature = "http")]
 use tishlang_core::TishPromise;
-use tishlang_core::TishOpaque;
 
 #[cfg(feature = "http")]
 pub use crate::promise::PromiseResolver;
@@ -88,7 +88,12 @@ impl std::fmt::Debug for Value {
             #[cfg(feature = "http")]
             Value::Serve => write!(f, "Serve"),
             #[cfg(feature = "regex")]
-            Value::RegExp(re) => write!(f, "RegExp(/{}/{})", re.borrow().source, re.borrow().flags_string()),
+            Value::RegExp(re) => write!(
+                f,
+                "RegExp(/{}/{})",
+                re.borrow().source,
+                re.borrow().flags_string()
+            ),
             #[cfg(feature = "http")]
             Value::Promise(_) => write!(f, "Promise"),
             #[cfg(feature = "http")]
@@ -187,7 +192,9 @@ impl Value {
             (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
             (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
             (Value::Opaque(a), Value::Opaque(b)) => Arc::ptr_eq(a, b),
-            (Value::OpaqueMethod(a, ak), Value::OpaqueMethod(b, bk)) => Arc::ptr_eq(a, b) && ak == bk,
+            (Value::OpaqueMethod(a, ak), Value::OpaqueMethod(b, bk)) => {
+                Arc::ptr_eq(a, b) && ak == bk
+            }
             _ => false,
         }
     }

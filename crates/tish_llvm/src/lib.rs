@@ -17,10 +17,15 @@ pub fn compile_to_native(
     project_root: Option<&Path>,
     output_path: &Path,
 ) -> Result<(), LlvmError> {
-    let modules = resolve_project(entry_path, project_root)
-        .map_err(|e| LlvmError { message: e.to_string() })?;
-    detect_cycles(&modules).map_err(|e| LlvmError { message: e.to_string() })?;
-    let program = merge_modules(modules).map_err(|e| LlvmError { message: e.to_string() })?;
+    let modules = resolve_project(entry_path, project_root).map_err(|e| LlvmError {
+        message: e.to_string(),
+    })?;
+    detect_cycles(&modules).map_err(|e| LlvmError {
+        message: e.to_string(),
+    })?;
+    let program = merge_modules(modules).map_err(|e| LlvmError {
+        message: e.to_string(),
+    })?;
     let chunk = tishlang_bytecode::compile(&program).map_err(|e| LlvmError {
         message: e.to_string(),
     })?;
@@ -71,7 +76,10 @@ const uint64_t tish_chunk_len = sizeof(tish_chunk_data);
         .arg(&chunk_c_path)
         .status()
         .map_err(|e| LlvmError {
-            message: format!("Failed to run clang: {}. Install clang (LLVM) or set CLANG env var.", e),
+            message: format!(
+                "Failed to run clang: {}. Install clang (LLVM) or set CLANG env var.",
+                e
+            ),
         })?;
 
     if !status.success() {
@@ -84,9 +92,8 @@ const uint64_t tish_chunk_len = sizeof(tish_chunk_data);
     let object_path_canonical = object_path.canonicalize().map_err(|e| LlvmError {
         message: format!("Cannot canonicalize object path: {}", e),
     })?;
-    tishlang_cranelift::link_to_binary(&object_path_canonical, output_path, features).map_err(|e| LlvmError {
-        message: e.message,
-    })?;
+    tishlang_cranelift::link_to_binary(&object_path_canonical, output_path, features)
+        .map_err(|e| LlvmError { message: e.message })?;
 
     Ok(())
 }

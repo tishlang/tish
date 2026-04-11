@@ -127,11 +127,7 @@ lto = "thin"
 [dependencies]
 tishlang_runtime = {{ path = {:?}{} }}
 {}{}"#,
-        out_name,
-        runtime_path,
-        features_str,
-        more_deps,
-        ui_dep
+        out_name, runtime_path, features_str, more_deps, ui_dep
     );
 
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)
@@ -182,4 +178,3 @@ mod tests {
         assert_eq!(f.len(), 5);
     }
 }
-
