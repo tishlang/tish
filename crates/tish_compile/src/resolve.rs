@@ -1,5 +1,5 @@
 //! Module resolver: resolves relative imports, builds dependency graph, detects cycles.
-//! Supports native imports: tish:egui, tish:polars, @scope/pkg (via package.json).
+//! Supports native imports: `tish:…`, `cargo:…`, `@scope/pkg` (via package.json).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -16,6 +16,33 @@ pub struct ResolvedNativeModule {
     pub crate_name: String,
     pub crate_path: PathBuf,
     pub export_fn: String,
+    /// When false, omit `path = …` in the generated Cargo.toml (crate comes from `tish.rustDependencies` only).
+    pub use_path_dependency: bool,
+}
+
+/// How codegen links a native import to Rust (`generateNativeWrapper` for `tish:*`; `cargo:*` always generated).
+#[derive(Debug, Clone)]
+pub enum NativeModuleInit {
+    /// Call `external_crate::export_fn()` and read named exports from the returned object.
+    Legacy {
+        crate_name: String,
+        export_fn: String,
+    },
+    /// Call `crate::generated_native::export_fn()` — object built from per-export fns on `shim_crate`.
+    Generated {
+        shim_crate: String,
+        export_fn: String,
+    },
+}
+
+/// Extra native build inputs produced alongside Rust source (Cargo merge + optional wrapper).
+#[derive(Debug, Clone)]
+pub struct NativeBuildArtifacts {
+    /// Extra `[dependencies]` lines from `tish.rustDependencies`.
+    pub rust_dependencies_toml: String,
+    /// Generated `generated_native.rs` when using [`NativeModuleInit::Generated`].
+    pub generated_native_rs: Option<String>,
+    pub native_init: std::collections::HashMap<String, NativeModuleInit>,
 }
 
 /// Node-compatible aliases for built-in modules (fs -> tish:fs, etc.).
@@ -45,6 +72,7 @@ pub fn is_builtin_native_spec(spec: &str) -> bool {
 
 /// Resolve all native imports in a merged program via package.json lookup.
 /// Built-in modules (tish:fs, tish:http, tish:process) are skipped - they use tishlang_runtime directly.
+/// Handles both lowered `NativeModuleLoad` (merged modules) and raw `import { … } from 'tish:…'`.
 pub fn resolve_native_modules(program: &Program, project_root: &Path) -> Result<Vec<ResolvedNativeModule>, String> {
     let root_canon = project_root
         .canonicalize()
@@ -52,23 +80,91 @@ pub fn resolve_native_modules(program: &Program, project_root: &Path) -> Result<
     let mut seen = HashSet::new();
     let mut modules = Vec::new();
     for stmt in &program.statements {
-        if let Statement::VarDecl {
-            init: Some(Expr::NativeModuleLoad { spec, .. }),
-            ..
-        } = stmt
-        {
-            let s = spec.as_ref();
-            if is_builtin_native_spec(s) {
-                continue; // Built-ins use tishlang_runtime, no package.json lookup
+        let specs: Vec<String> = match stmt {
+            Statement::VarDecl {
+                init: Some(Expr::NativeModuleLoad { spec, .. }),
+                ..
+            } => vec![spec.as_ref().to_string()],
+            Statement::Import { from, .. } if is_native_import(from.as_ref()) => {
+                vec![normalize_builtin_spec(from.as_ref()).unwrap_or_else(|| from.to_string())]
             }
-            if !seen.insert(s.to_string()) {
+            _ => continue,
+        };
+        for s in specs {
+            if is_builtin_native_spec(&s) {
                 continue;
             }
-            let m = resolve_native_module(s, &root_canon)?;
+            if !seen.insert(s.clone()) {
+                continue;
+            }
+            let m = if s.starts_with("cargo:") {
+                resolve_cargo_native_module(&s, &root_canon)?
+            } else {
+                resolve_native_module(&s, &root_canon)?
+            };
             modules.push(m);
         }
     }
     Ok(modules)
+}
+
+/// True for `cargo:…` specs (Cargo-backed imports; Rust native backend only).
+pub fn is_cargo_native_spec(spec: &str) -> bool {
+    spec.starts_with("cargo:")
+}
+
+/// Stable Rust symbol for the generated namespace function, e.g. `cargo:my-crate` → `cargo_native_my_crate_object`.
+pub fn cargo_export_fn_name(spec: &str) -> String {
+    let tail = spec.strip_prefix("cargo:").unwrap_or(spec);
+    let mut out = String::from("cargo_native_");
+    for c in tail.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out == "cargo_native_" {
+        out.push_str("unnamed");
+    }
+    out.push_str("_object");
+    out
+}
+
+fn resolve_cargo_native_module(spec: &str, project_root: &Path) -> Result<ResolvedNativeModule, String> {
+    let tail = spec
+        .strip_prefix("cargo:")
+        .ok_or_else(|| format!("Invalid cargo native spec: {}", spec))?;
+    if tail.is_empty() {
+        return Err("cargo: import needs a dependency name, e.g. import { x } from 'cargo:serde_json'".into());
+    }
+    let dep_key = tail.to_string();
+    let tish = read_project_tish_config(project_root);
+    let rust_deps = tish.get("rustDependencies").and_then(|v| v.as_object()).ok_or_else(|| {
+        format!(
+            "cargo:{} requires package.json \"tish\": {{ \"rustDependencies\": {{ \"{}\": \"…\" }} }}",
+            tail, dep_key
+        )
+    })?;
+    if !rust_deps.contains_key(&dep_key) {
+        return Err(format!(
+            "cargo:{}: add \"{}\" to tish.rustDependencies in package.json (version string or inline table)",
+            tail, dep_key
+        ));
+    }
+    let crate_name = dep_key.replace('-', "_");
+    let export_fn = cargo_export_fn_name(spec);
+    let crate_path = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    Ok(ResolvedNativeModule {
+        spec: spec.to_string(),
+        package_name: dep_key.clone(),
+        crate_name,
+        crate_path,
+        export_fn,
+        use_path_dependency: false,
+    })
 }
 
 fn resolve_native_module(spec: &str, project_root: &Path) -> Result<ResolvedNativeModule, String> {
@@ -110,6 +206,236 @@ fn resolve_native_module(spec: &str, project_root: &Path) -> Result<ResolvedNati
         crate_name: raw_crate.replace('-', "_"),
         crate_path,
         export_fn,
+        use_path_dependency: true,
+    })
+}
+
+/// Read the `tish` object from the project root `package.json` (empty JSON object if missing).
+pub fn read_project_tish_config(project_root: &Path) -> serde_json::Value {
+    let path = project_root.join("package.json");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return serde_json::json!({});
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return serde_json::json!({});
+    };
+    json.get("tish").cloned().unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn resolve_cargo_path_for_toml(project_root: &Path, raw: &str) -> String {
+    let p = Path::new(raw);
+    let resolved = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        project_root.join(p)
+    };
+    let resolved = resolved.canonicalize().unwrap_or(resolved);
+    resolved.display().to_string().replace('\\', "/")
+}
+
+fn json_to_cargo_inline_value(v: &serde_json::Value, project_root: &Path) -> Result<String, String> {
+    match v {
+        serde_json::Value::String(s) => Ok(format!("{:?}", s.as_str())),
+        serde_json::Value::Bool(b) => Ok(b.to_string()),
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        serde_json::Value::Array(arr) => {
+            let mut inner = Vec::new();
+            for item in arr {
+                inner.push(json_to_cargo_inline_value(item, project_root)?);
+            }
+            Ok(format!("[{}]", inner.join(", ")))
+        }
+        serde_json::Value::Object(map) => {
+            let mut parts = Vec::new();
+            for (k, v) in map {
+                let rhs = if k == "path" && v.as_str().is_some() {
+                    let s = v.as_str().unwrap();
+                    format!("{:?}", resolve_cargo_path_for_toml(project_root, s))
+                } else {
+                    json_to_cargo_inline_value(v, project_root)?
+                };
+                parts.push(format!("{} = {}", k, rhs));
+            }
+            Ok(format!("{{ {} }}", parts.join(", ")))
+        }
+        serde_json::Value::Null => Err("null is not valid in a Cargo dependency value".to_string()),
+    }
+}
+
+/// Serialize `tish.rustDependencies` from project `package.json` into Cargo.toml `[dependencies]` lines.
+/// Relative `path = "…"` entries in inline tables are resolved against `project_root` so the temp build crate can find them.
+pub fn format_rust_dependencies_toml(tish: &serde_json::Value, project_root: &Path) -> Result<String, String> {
+    let Some(obj) = tish.get("rustDependencies").and_then(|v| v.as_object()) else {
+        return Ok(String::new());
+    };
+    let mut out = String::new();
+    for (name, val) in obj {
+        match val {
+            serde_json::Value::String(_) | serde_json::Value::Object(_) => {
+                out.push_str(&format!(
+                    "{} = {}\n",
+                    name,
+                    json_to_cargo_inline_value(val, project_root)?
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "tish.rustDependencies.{} must be a string (version) or object (inline table)",
+                    name
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Map a Tish export name to a Rust identifier (e.g. `readFile` → `read_file`) for shim crate symbols.
+pub fn export_name_to_rust_ident(export_name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in export_name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            out.push('_');
+        }
+        for lower in c.to_lowercase() {
+            out.push(lower);
+        }
+    }
+    if out.is_empty() {
+        "native_export".to_string()
+    } else {
+        out
+    }
+}
+
+/// Collect `(spec, export_name)` for every non-builtin native import in the program.
+pub fn infer_native_module_exports(program: &Program) -> HashMap<String, HashSet<String>> {
+    let mut map: HashMap<String, HashSet<String>> = HashMap::new();
+    for stmt in &program.statements {
+        match stmt {
+            Statement::VarDecl {
+                init: Some(Expr::NativeModuleLoad { spec, export_name, .. }),
+                ..
+            } => {
+                let s = spec.as_ref();
+                if is_builtin_native_spec(s) {
+                    continue;
+                }
+                map.entry(s.to_string())
+                    .or_default()
+                    .insert(export_name.to_string());
+            }
+            Statement::Import { specifiers, from, .. } if is_native_import(from.as_ref()) => {
+                let spec = normalize_builtin_spec(from.as_ref()).unwrap_or_else(|| from.to_string());
+                if is_builtin_native_spec(&spec) {
+                    continue;
+                }
+                for sp in specifiers {
+                    if let ImportSpecifier::Named { name, .. } = sp {
+                        map.entry(spec.clone())
+                            .or_default()
+                            .insert(name.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    map
+}
+
+/// Emit `generated_native.rs` for [`NativeModuleInit::Generated`] modules.
+pub fn generate_native_wrapper_rs(
+    modules: &[ResolvedNativeModule],
+    inferred: &HashMap<String, HashSet<String>>,
+    init_by_spec: &HashMap<String, NativeModuleInit>,
+) -> String {
+    let mut file = String::from(
+        "//! Generated by `tish build` — do not edit.\n\
+         use std::cell::RefCell;\n\
+         use std::rc::Rc;\n\
+         use std::sync::Arc;\n\
+         use tishlang_runtime::{ObjectMap, Value};\n\n",
+    );
+    let mut any = false;
+    for m in modules {
+        let Some(NativeModuleInit::Generated { shim_crate, export_fn }) = init_by_spec.get(&m.spec) else {
+            continue;
+        };
+        let Some(names) = inferred.get(&m.spec) else {
+            continue;
+        };
+        if names.is_empty() {
+            continue;
+        }
+        any = true;
+        let mut keys: Vec<_> = names.iter().cloned().collect();
+        keys.sort();
+        file.push_str(&format!("pub fn {}() -> Value {{\n", export_fn));
+        file.push_str("    let mut m = ObjectMap::default();\n");
+        for export_name in keys {
+            let rust_fn = export_name_to_rust_ident(&export_name);
+            let key_lit = format!("{:?}", export_name);
+            file.push_str(&format!(
+                "    m.insert(Arc::from({}), Value::Function(Rc::new(|args: &[Value]| {{\n        {}::{}(args)\n    }})));\n",
+                key_lit, shim_crate, rust_fn
+            ));
+        }
+        file.push_str("    Value::Object(Rc::new(RefCell::new(m)))\n}\n\n");
+    }
+    if !any {
+        return String::new();
+    }
+    file
+}
+
+/// Combine project `package.json`, inferred exports, and resolved native modules into build artifacts.
+pub fn compute_native_build_artifacts(
+    program: &Program,
+    project_root: &Path,
+    native_modules: &[ResolvedNativeModule],
+) -> Result<NativeBuildArtifacts, String> {
+    let tish = read_project_tish_config(project_root);
+    let rust_dependencies_toml = format_rust_dependencies_toml(&tish, project_root)?;
+    let inferred = infer_native_module_exports(program);
+    let gen_tish = tish
+        .get("generateNativeWrapper")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut native_init: HashMap<String, NativeModuleInit> = HashMap::new();
+    for m in native_modules {
+        let use_gen = if is_cargo_native_spec(&m.spec) {
+            inferred.get(&m.spec).map(|s| !s.is_empty()).unwrap_or(false)
+        } else {
+            gen_tish && inferred.get(&m.spec).map(|s| !s.is_empty()).unwrap_or(false)
+        };
+        let init = if use_gen {
+            NativeModuleInit::Generated {
+                shim_crate: m.crate_name.clone(),
+                export_fn: m.export_fn.clone(),
+            }
+        } else {
+            NativeModuleInit::Legacy {
+                crate_name: m.crate_name.clone(),
+                export_fn: m.export_fn.clone(),
+            }
+        };
+        native_init.insert(m.spec.clone(), init);
+    }
+
+    let generated_native_rs = {
+        let s = generate_native_wrapper_rs(native_modules, &inferred, &native_init);
+        if s.trim().is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
+
+    Ok(NativeBuildArtifacts {
+        rust_dependencies_toml,
+        generated_native_rs,
+        native_init,
     })
 }
 
@@ -151,16 +477,25 @@ fn read_package_name(pkg_path: &Path) -> Option<String> {
     json.get("name").and_then(|v| v.as_str()).map(String::from)
 }
 
+fn stmt_native_specs(stmt: &Statement) -> Vec<String> {
+    match stmt {
+        Statement::VarDecl {
+            init: Some(Expr::NativeModuleLoad { spec, .. }),
+            ..
+        } => vec![spec.to_string()],
+        Statement::Import { from, .. } if is_native_import(from.as_ref()) => {
+            vec![normalize_builtin_spec(from.as_ref()).unwrap_or_else(|| from.to_string())]
+        }
+        _ => vec![],
+    }
+}
+
 /// Extract Cargo feature names from native imports in a merged program.
 /// Used to enable tishlang_runtime features based on `import { x } from 'tish:egui'` etc.
 pub fn extract_native_import_features(program: &Program) -> Vec<String> {
     let mut features = std::collections::HashSet::new();
     for stmt in &program.statements {
-        if let Statement::VarDecl {
-            init: Some(Expr::NativeModuleLoad { spec, .. }),
-            ..
-        } = stmt
-        {
+        for spec in stmt_native_specs(stmt) {
             if let Some(f) = native_spec_to_feature(spec.as_ref()) {
                 features.insert(f);
             }
@@ -171,27 +506,17 @@ pub fn extract_native_import_features(program: &Program) -> Vec<String> {
 
 /// Returns true if the merged program contains native imports (tish:*, @scope/pkg).
 pub fn has_native_imports(program: &Program) -> bool {
-    for stmt in &program.statements {
-        if let Statement::VarDecl {
-            init: Some(Expr::NativeModuleLoad { .. }),
-            ..
-        } = stmt
-        {
-            return true;
-        }
-    }
-    false
+    program
+        .statements
+        .iter()
+        .any(|stmt| !stmt_native_specs(stmt).is_empty())
 }
 
 /// Returns true if the merged program contains external native imports (not built-in tish:fs/http/process).
 /// Cranelift/LLVM reject these; bytecode VM supports built-ins only.
 pub fn has_external_native_imports(program: &Program) -> bool {
     for stmt in &program.statements {
-        if let Statement::VarDecl {
-            init: Some(Expr::NativeModuleLoad { spec, .. }),
-            ..
-        } = stmt
-        {
+        for spec in stmt_native_specs(stmt) {
             if !is_builtin_native_spec(spec.as_ref()) {
                 return true;
             }
@@ -267,10 +592,10 @@ pub fn resolve_project_from_stdin(
 
     for stmt in &program.statements {
         if let Statement::Import { from, .. } = stmt {
-            if is_native_import(from) {
+            if is_native_import(from.as_ref()) {
                 continue;
             }
-            let dep_path = resolve_import_path(from, from_dir, &root_canon)?;
+            let dep_path = resolve_import_path(from.as_ref(), from_dir, &root_canon)?;
             if !path_to_module.contains_key(&dep_path) {
                 load_module_recursive(
                     &dep_path,
@@ -320,10 +645,10 @@ fn load_module_recursive(
     let dir = canonical.parent().unwrap_or(Path::new("."));
     for stmt in &program.statements {
         if let Statement::Import { from, .. } = stmt {
-            if is_native_import(from) {
+            if is_native_import(from.as_ref()) {
                 continue; // Native imports don't load files
             }
-            let dep_path = resolve_import_path(from, dir, project_root)?;
+            let dep_path = resolve_import_path(from.as_ref(), dir, project_root)?;
             if !path_to_module.contains_key(&dep_path) {
                 load_module_recursive(
                     &dep_path,
@@ -344,9 +669,11 @@ fn load_module_recursive(
 /// Returns true for native module imports that don't resolve to files.
 /// - fs, http, process, ws (Node-compatible aliases for tish:fs, tish:http, tish:process, tish:ws)
 /// - tish:egui, tish:polars, etc.
+/// - cargo:… (Cargo `rustDependencies` + generated wrapper; Rust native backend)
 /// - @scope/package (npm-style)
 pub fn is_native_import(spec: &str) -> bool {
     spec.starts_with("tish:")
+        || spec.starts_with("cargo:")
         || spec.starts_with('@')
         || matches!(spec, "fs" | "http" | "process" | "ws")
 }
@@ -476,10 +803,10 @@ fn has_cycle_from(
 ) -> Result<bool, String> {
     for stmt in &program.statements {
         if let Statement::Import { from, .. } = stmt {
-            if is_native_import(from) {
+            if is_native_import(from.as_ref()) {
                 continue;
             }
-            let dep_path = resolve_import_path(from, from_dir, Path::new("."))?;
+            let dep_path = resolve_import_path(from.as_ref(), from_dir, Path::new("."))?;
             if let Some(&dep_idx) = path_to_idx.get(&dep_path) {
                 if stack.contains(&dep_idx) {
                     stack.push(dep_idx);
@@ -548,10 +875,11 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
         for stmt in &module.program.statements {
             match stmt {
                 Statement::Import { specifiers, from, span } => {
-                    if is_native_import(from) {
+                    if is_native_import(from.as_ref()) {
                         // Normalize fs/http/process -> tish:fs etc. for Node compatibility
                         let canonical_spec =
-                            normalize_builtin_spec(from).unwrap_or_else(|| from.to_string());
+                            normalize_builtin_spec(from.as_ref())
+                                .unwrap_or_else(|| from.to_string());
                         // Emit VarDecl with NativeModuleLoad for each specifier
                         for spec in specifiers {
                             match spec {
@@ -589,7 +917,7 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
                         }
                         continue;
                     }
-                    let dep_path = resolve_import_path(from, dir, Path::new("."))?;
+                    let dep_path = resolve_import_path(from.as_ref(), dir, Path::new("."))?;
                     let dep_path = dep_path
                         .canonicalize()
                         .unwrap_or(dep_path);
@@ -681,4 +1009,56 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
         }
     }
     Ok(Program { statements })
+}
+
+#[cfg(test)]
+mod cargo_spec_tests {
+    use std::sync::Arc;
+
+    use super::cargo_export_fn_name;
+    use super::is_native_import;
+
+    #[test]
+    fn is_native_import_accepts_arc_str_ref() {
+        let from: &Arc<str> = &Arc::from("cargo:demo_shim");
+        assert!(is_native_import(from));
+    }
+
+    #[test]
+    fn detect_cycles_skips_cargo_import() {
+        use super::{detect_cycles, resolve_project};
+        let src = "import { greet } from 'cargo:demo_shim'\nconsole.log(1)\n";
+        let p = std::env::temp_dir().join("tish_detect_cycles_cargo_import_test.tish");
+        std::fs::write(&p, src).unwrap();
+        let root = p.parent().unwrap();
+        let modules = resolve_project(&p, Some(root)).unwrap();
+        let r = detect_cycles(&modules);
+        std::fs::remove_file(&p).ok();
+        r.unwrap();
+    }
+
+    #[test]
+    fn merge_modules_skips_cargo_import() {
+        use super::{merge_modules, resolve_project};
+        let src = "import { greet } from 'cargo:demo_shim'\nconsole.log(1)\n";
+        let p = std::env::temp_dir().join("tish_merge_cargo_test.tish");
+        std::fs::write(&p, src).unwrap();
+        let root = p.parent().unwrap();
+        let modules = resolve_project(&p, Some(root)).unwrap();
+        let r = merge_modules(modules);
+        std::fs::remove_file(&p).ok();
+        r.unwrap();
+    }
+
+    #[test]
+    fn cargo_export_fn_name_sanitizes() {
+        assert_eq!(
+            cargo_export_fn_name("cargo:serde_json"),
+            "cargo_native_serde_json_object"
+        );
+        assert_eq!(
+            cargo_export_fn_name("cargo:my-crate"),
+            "cargo_native_my_crate_object"
+        );
+    }
 }

@@ -1260,10 +1260,17 @@ impl Vm {
                         }
                     };
                     let v = get_builtin_export(self.capabilities.as_ref(), spec, export_name).ok_or_else(|| {
-                        format!(
-                            "Built-in module '{}' does not export '{}' or capability not enabled for this run. Use e.g. tish run --feature fs (or full). The tish binary must also be built with that capability linked in.",
-                            spec, export_name
-                        )
+                        if spec.starts_with("cargo:") {
+                            format!(
+                                "cargo:… imports are only supported by `tish build` with the Rust native backend (not the bytecode VM). Spec: {}",
+                                spec
+                            )
+                        } else {
+                            format!(
+                                "Built-in module '{}' does not export '{}' or capability not enabled for this run. Use e.g. tish run --feature fs (or full). The tish binary must also be built with that capability linked in.",
+                                spec, export_name
+                            )
+                        }
                     })?;
                     self.stack.push(v);
                 }
