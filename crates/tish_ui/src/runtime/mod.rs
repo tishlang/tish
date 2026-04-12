@@ -6,7 +6,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub use hooks::{native_create_root, native_use_state, schedule_flush, HookState, HOOK};
+pub use hooks::{
+    native_create_root, native_use_memo, native_use_state, schedule_flush, HookState, HOOK,
+};
 
 use tishlang_core::{ObjectMap, Value};
 
@@ -112,6 +114,12 @@ fn vnode_fragment(children: Vec<Value>) -> Value {
 pub trait Host {
     /// Apply a new root vnode (after each render flush).
     fn commit_root(&mut self, vnode: &Value);
+    /// Content area width changed (e.g. window resize); default no-op.
+    fn content_width_changed(&mut self, _width: f64) {}
+    /// Called once from the main queue shortly after the window is ordered on-screen. Split /
+    /// sidebar hosts can use this to re-layout when pane bounds were still provisional during the
+    /// first commit.
+    fn after_window_shown(&mut self) {}
 }
 
 /// No-op / test host that only stores the last committed tree.

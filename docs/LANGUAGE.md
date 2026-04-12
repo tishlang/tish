@@ -104,6 +104,21 @@ Build: `cargo build --features full`. CLI artifact output: `tish build … --fea
 
 ---
 
+## Native UI hooks (`tishlang_ui`, `tish:macos`, `tish:native-ui`, …)
+
+Embeds that ship **`tishlang_ui`** expose **`useState`** and **`useMemo`** on the native module object (e.g. `import { useState, useMemo } from "tish:macos"`).
+
+- **`useState(initial)`** returns a two-element array `[value, setValue]`; **`setValue`** schedules a coalesced re-render (hook cursor resets each pass).
+- **`useMemo(factory, deps?)`** runs **`factory()`** once per render pass and **reuses the last result** when **`deps`** is unchanged. Dependencies are compared with a **shallow structural** rule on **`number` / `string` / `bool` / `null` / nested arrays** of those scalars. Omit **`deps`** or pass **`[]`** to memoize for the lifetime of the root. **Function** values are not compared by identity in **`deps`** today.
+
+**`tish:macos` (AppKit):** besides **`macos.run(App)`**, you can call **`macos.runWithSidebar(App, options?)`** to use a window with **`NSSplitViewController`** (system collapsible sidebar) and a unified toolbar. The root vnode must be **`sidebar_window`** with **exactly two pane subtrees** (first = sidebar, second = detail); whitespace-only JSX text between them is ignored. For **`image`**, set **`symbol`** (or **`sfSymbol`** / **`sf_symbol`**) to load the **`src`** name via **`NSImage.imageWithSystemSymbolName`** (SF Symbols); otherwise **`src`** is still resolved as a named image or file path as before. With **`runWithSidebar`**, **`window.innerWidth`** / **`innerHeight`** report the **detail** pane size.
+
+**`runWithSidebar` toolbar chrome (optional second argument, an object):** the expand/collapse control is **not** a Tish vnode — it is AppKit’s standard **`NSToolbarToggleSidebarItemIdentifier`** (system icon + **`toggleSidebar:`** behavior). From Tish you only choose whether to show it. Recognized keys (all default **`true`** if omitted): **`sidebarToolbarToggle`** (aliases **`sidebar_toggle`**, **`showSidebarToolbarToggle`**) and **`sidebarTrackingSeparator`** (aliases **`sidebar_tracking_separator`**, **`showSidebarTrackingSeparator`**). Use **`false`** to hide either item. Example: **`macos.runWithSidebar(App, { sidebarToolbarToggle: true, sidebarTrackingSeparator: true })`**.
+
+**Render model:** Each flush still re-runs the root component and passes a new vnode tree to the host. **`useMemo`** avoids recomputing **subtrees or derived values** and returns a **`Value`** that can **`Rc`‑reuse** inner vnode objects when unchanged. **Hosts** (e.g. AppKit) may still **rebuild native widgets from scratch** until they implement incremental **`commit_root`** diffing; **`React.memo`‑style automatic component skipping** is not the default in the language today.
+
+---
+
 ## CLI
 
 ```bash
