@@ -1,6 +1,11 @@
 //! Shared JSX lowering: emit `h(tag, props, children)` as JavaScript or Rust (`Value`) source.
 
-use tishlang_ast::{ArrayElement, Expr, JsxAttrValue, JsxChild, JsxProp, Literal, ObjectProp};
+use std::collections::HashSet;
+
+use tishlang_ast::{
+    ArrayElement, ArrowBody, CallArg, ExportDeclaration, Expr, JsxAttrValue, JsxChild, JsxProp,
+    Literal, MemberProp, ObjectProp, Program, Statement,
+};
 
 /// Escape a Tish identifier for Rust output (matches `tishlang_compile` conventions).
 pub fn escape_ident_rust(s: &str) -> String {
@@ -114,8 +119,260 @@ where
     }
 }
 
+/// Every `fn Foo` name in the program (including nested bodies), for Rust JSX tag lowering.
+///
+/// PascalCase JSX tags that match a name here are emitted as a Rust identifier (component
+/// `Value::Function`). Other PascalCase tags become `Value::String("Tag")` (native intrinsics).
+pub fn collect_fun_decl_names(program: &Program) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for s in &program.statements {
+        collect_fun_decl_names_stmt(s, &mut names);
+    }
+    names
+}
+
+fn collect_fun_decl_names_stmt(stmt: &Statement, names: &mut HashSet<String>) {
+    match stmt {
+        Statement::FunDecl { name, body, .. } => {
+            names.insert(name.to_string());
+            collect_fun_decl_names_stmt(body, names);
+        }
+        Statement::Block { statements, .. } => {
+            for s in statements {
+                collect_fun_decl_names_stmt(s, names);
+            }
+        }
+        Statement::VarDecl { init, .. } => {
+            if let Some(e) = init {
+                collect_fun_decl_names_expr(e, names);
+            }
+        }
+        Statement::VarDeclDestructure { init, .. } => collect_fun_decl_names_expr(init, names),
+        Statement::ExprStmt { expr, .. } => collect_fun_decl_names_expr(expr, names),
+        Statement::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_fun_decl_names_expr(cond, names);
+            collect_fun_decl_names_stmt(then_branch, names);
+            if let Some(e) = else_branch {
+                collect_fun_decl_names_stmt(e, names);
+            }
+        }
+        Statement::While { cond, body, .. } => {
+            collect_fun_decl_names_expr(cond, names);
+            collect_fun_decl_names_stmt(body, names);
+        }
+        Statement::For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
+            if let Some(i) = init {
+                collect_fun_decl_names_stmt(i, names);
+            }
+            if let Some(c) = cond {
+                collect_fun_decl_names_expr(c, names);
+            }
+            if let Some(u) = update {
+                collect_fun_decl_names_expr(u, names);
+            }
+            collect_fun_decl_names_stmt(body, names);
+        }
+        Statement::ForOf { iterable, body, .. } => {
+            collect_fun_decl_names_expr(iterable, names);
+            collect_fun_decl_names_stmt(body, names);
+        }
+        Statement::Return { value, .. } => {
+            if let Some(e) = value {
+                collect_fun_decl_names_expr(e, names);
+            }
+        }
+        Statement::Switch {
+            expr,
+            cases,
+            default_body,
+            ..
+        } => {
+            collect_fun_decl_names_expr(expr, names);
+            for (ce, ss) in cases {
+                if let Some(e) = ce {
+                    collect_fun_decl_names_expr(e, names);
+                }
+                for s in ss {
+                    collect_fun_decl_names_stmt(s, names);
+                }
+            }
+            if let Some(ss) = default_body {
+                for s in ss {
+                    collect_fun_decl_names_stmt(s, names);
+                }
+            }
+        }
+        Statement::DoWhile { body, cond, .. } => {
+            collect_fun_decl_names_stmt(body, names);
+            collect_fun_decl_names_expr(cond, names);
+        }
+        Statement::Throw { value, .. } => collect_fun_decl_names_expr(value, names),
+        Statement::Try {
+            body,
+            catch_body,
+            finally_body,
+            ..
+        } => {
+            collect_fun_decl_names_stmt(body, names);
+            if let Some(c) = catch_body {
+                collect_fun_decl_names_stmt(c, names);
+            }
+            if let Some(f) = finally_body {
+                collect_fun_decl_names_stmt(f, names);
+            }
+        }
+        Statement::Export { declaration, .. } => match declaration.as_ref() {
+            ExportDeclaration::Named(inner) => collect_fun_decl_names_stmt(inner, names),
+            ExportDeclaration::Default(e) => collect_fun_decl_names_expr(e, names),
+        },
+        Statement::Import { .. } | Statement::Break { .. } | Statement::Continue { .. } => {}
+    }
+}
+
+fn collect_fun_decl_names_expr(expr: &Expr, names: &mut HashSet<String>) {
+    match expr {
+        Expr::ArrowFunction { body, .. } => match body {
+            ArrowBody::Expr(e) => collect_fun_decl_names_expr(e, names),
+            ArrowBody::Block(s) => collect_fun_decl_names_stmt(s, names),
+        },
+        Expr::Binary { left, right, .. } => {
+            collect_fun_decl_names_expr(left, names);
+            collect_fun_decl_names_expr(right, names);
+        }
+        Expr::Unary { operand, .. } => collect_fun_decl_names_expr(operand, names),
+        Expr::Assign { value, .. } => collect_fun_decl_names_expr(value, names),
+        Expr::Call { callee, args, .. } => {
+            collect_fun_decl_names_expr(callee, names);
+            for a in args {
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => collect_fun_decl_names_expr(e, names),
+                }
+            }
+        }
+        Expr::Member { object, prop, .. } => {
+            collect_fun_decl_names_expr(object, names);
+            if let MemberProp::Expr(e) = prop {
+                collect_fun_decl_names_expr(e, names);
+            }
+        }
+        Expr::Index { object, index, .. } => {
+            collect_fun_decl_names_expr(object, names);
+            collect_fun_decl_names_expr(index, names);
+        }
+        Expr::Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_fun_decl_names_expr(cond, names);
+            collect_fun_decl_names_expr(then_branch, names);
+            collect_fun_decl_names_expr(else_branch, names);
+        }
+        Expr::Array { elements, .. } => {
+            for el in elements {
+                match el {
+                    ArrayElement::Expr(e) | ArrayElement::Spread(e) => {
+                        collect_fun_decl_names_expr(e, names);
+                    }
+                }
+            }
+        }
+        Expr::Object { props, .. } => {
+            for p in props {
+                match p {
+                    ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => {
+                        collect_fun_decl_names_expr(e, names);
+                    }
+                }
+            }
+        }
+        Expr::NullishCoalesce { left, right, .. } => {
+            collect_fun_decl_names_expr(left, names);
+            collect_fun_decl_names_expr(right, names);
+        }
+        Expr::TemplateLiteral { exprs, .. } => {
+            for e in exprs {
+                collect_fun_decl_names_expr(e, names);
+            }
+        }
+        Expr::Await { operand, .. } | Expr::TypeOf { operand, .. } => {
+            collect_fun_decl_names_expr(operand, names);
+        }
+        Expr::CompoundAssign { value, .. } | Expr::LogicalAssign { value, .. } => {
+            collect_fun_decl_names_expr(value, names);
+        }
+        Expr::MemberAssign { object, value, .. } => {
+            collect_fun_decl_names_expr(object, names);
+            collect_fun_decl_names_expr(value, names);
+        }
+        Expr::IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => {
+            collect_fun_decl_names_expr(object, names);
+            collect_fun_decl_names_expr(index, names);
+            collect_fun_decl_names_expr(value, names);
+        }
+        Expr::New { callee, args, .. } => {
+            collect_fun_decl_names_expr(callee, names);
+            for a in args {
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => collect_fun_decl_names_expr(e, names),
+                }
+            }
+        }
+        Expr::PostfixInc { .. }
+        | Expr::PrefixInc { .. }
+        | Expr::PostfixDec { .. }
+        | Expr::PrefixDec { .. } => {}
+        Expr::JsxElement { props, children, .. } => {
+            for p in props {
+                match p {
+                    JsxProp::Attr { value, .. } => {
+                        if let JsxAttrValue::Expr(e) = value {
+                            collect_fun_decl_names_expr(e, names);
+                        }
+                    }
+                    JsxProp::Spread(e) => collect_fun_decl_names_expr(e, names),
+                }
+            }
+            for c in children {
+                if let JsxChild::Expr(e) = c {
+                    collect_fun_decl_names_expr(e, names);
+                }
+            }
+        }
+        Expr::JsxFragment { children, .. } => {
+            for c in children {
+                if let JsxChild::Expr(e) = c {
+                    collect_fun_decl_names_expr(e, names);
+                }
+            }
+        }
+        Expr::Literal { .. } | Expr::Ident { .. } | Expr::NativeModuleLoad { .. } => {}
+    }
+}
+
 /// Emit JSX as Rust `Value` by calling `tishlang_ui::ui_h` directly (no closure capture of a local `h` binding).
-pub fn emit_jsx_rust<F, E>(expr: &Expr, emit_expr: &mut F) -> Result<String, E>
+pub fn emit_jsx_rust<F, E>(
+    expr: &Expr,
+    emit_expr: &mut F,
+    fun_decls: &HashSet<String>,
+) -> Result<String, E>
 where
     F: FnMut(&Expr) -> Result<String, E>,
     E: From<String>,
@@ -133,7 +390,11 @@ where
                 .map(|c| c.is_uppercase())
                 .unwrap_or(false);
             let tag_rust = if is_component {
-                escape_ident_rust(tag.as_ref())
+                if fun_decls.contains(tag.as_ref()) {
+                    escape_ident_rust(tag.as_ref())
+                } else {
+                    format!("Value::String({:?}.into())", tag.as_ref())
+                }
             } else {
                 format!("Value::String({:?}.into())", tag.as_ref())
             };

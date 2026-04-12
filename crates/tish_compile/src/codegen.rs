@@ -661,6 +661,8 @@ struct Codegen {
     type_context: TypeContext,
     /// Program uses JSX; emit `tishlang_ui` imports and `h` / `Fragment` globals.
     program_has_jsx: bool,
+    /// `fn` names for Rust JSX: PascalCase tags matching these use a value binding; others are string intrinsics.
+    program_fun_decl_names: std::collections::HashSet<String>,
 }
 
 impl Codegen {
@@ -688,6 +690,7 @@ impl Codegen {
             usage_analyzer: None,
             type_context: TypeContext::new(),
             program_has_jsx: false,
+            program_fun_decl_names: std::collections::HashSet::new(),
         }
     }
 
@@ -1008,6 +1011,7 @@ impl Codegen {
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
         self.is_async = program_uses_async(program);
         self.program_has_jsx = tishlang_ui::jsx::program_contains_jsx(program);
+        self.program_fun_decl_names = tishlang_ui::jsx::collect_fun_decl_names(program);
         self.write("#![allow(unused, non_snake_case)]\n\n");
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
@@ -3149,9 +3153,12 @@ impl Codegen {
                 format!("Value::String([{}].concat().into())", parts.join(", "))
             }
             Expr::JsxElement { .. } | Expr::JsxFragment { .. } => {
-                tishlang_ui::jsx::emit_jsx_rust(expr, &mut |e| {
-                    self.emit_expr(e).map_err(|ce| ce.message)
-                })
+                let fun_decls = self.program_fun_decl_names.clone();
+                tishlang_ui::jsx::emit_jsx_rust(
+                    expr,
+                    &mut |e| self.emit_expr(e).map_err(|ce| ce.message),
+                    &fun_decls,
+                )
                 .map_err(|m| CompileError::new(m, None))?
             }
             Expr::New { callee, args, .. } => {
