@@ -35,9 +35,16 @@ fn extract_num(v: Option<&Value>) -> u64 {
 
 /// Sleep for ms, running due timers before sleeping. Use this instead of thread::sleep
 /// in blocking loops so setTimeout callbacks can fire.
+#[allow(dead_code)] // Used by embedders with blocking poll loops; AppKit uses [`drain_timers`] instead.
 pub fn sleep_with_drain(ms: u64) {
     run_due_timers();
     std::thread::sleep(Duration::from_millis(ms));
+}
+
+/// Run all due timer callbacks (e.g. from an AppKit / GUI event pump).
+#[inline]
+pub fn drain_timers() {
+    run_due_timers();
 }
 
 /// Run all due timer callbacks.

@@ -52,15 +52,27 @@ pub fn install_thread_local_host(host: Box<dyn Host>) {
     install_host_for_root(LEGACY_ROOT_ID, host);
 }
 
-pub fn unregister_root(root_id: RootId) {
+/// Remove hook state and run effect cleanups. Safe to call while the host still exists (e.g. before
+/// dropping AppKit objects that might receive async callbacks).
+pub fn unregister_root_hooks_and_effects(root_id: RootId) {
     HOOKS.with(|h| {
         if let Some(st) = h.borrow_mut().remove(&root_id) {
             run_all_effect_cleanups(st.effect_cells.as_ref());
         }
     });
+}
+
+/// Drop the [`Host`] for `root_id`. Defer after `windowWillClose:` returns when the host retains the
+/// window delegate object that is still executing that callback.
+pub fn drop_host_for_root(root_id: RootId) {
     HOSTS.with(|h| {
         h.borrow_mut().remove(&root_id);
     });
+}
+
+pub fn unregister_root(root_id: RootId) {
+    unregister_root_hooks_and_effects(root_id);
+    drop_host_for_root(root_id);
 }
 
 pub fn with_host_for_root<R>(root_id: RootId, f: impl FnOnce(&mut dyn Host) -> R) -> Option<R> {
@@ -79,6 +91,15 @@ pub fn with_thread_local_host<R>(f: impl FnOnce(&mut dyn Host) -> R) -> Option<R
 /// Root currently rendering or running hook flush (`None` outside that scope).
 pub fn current_root_id() -> Option<RootId> {
     CURRENT_ROOT.get()
+}
+
+/// Sets [`CURRENT_ROOT`] for the duration of `f` so `window.*` and similar APIs target this tree.
+pub fn run_with_current_root<R>(root_id: RootId, f: impl FnOnce() -> R) -> R {
+    let prev = CURRENT_ROOT.get();
+    CURRENT_ROOT.set(Some(root_id));
+    let out = f();
+    CURRENT_ROOT.set(prev);
+    out
 }
 
 /// One `useEffect` slot: committed dependency snapshot and optional cleanup from the last run.

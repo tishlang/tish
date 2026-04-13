@@ -7,8 +7,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub use hooks::{
-    alloc_root_id, current_root_id, install_host_for_root, native_create_root, native_use_effect,
-    native_use_memo, native_use_state, schedule_flush, unregister_root, with_host_for_root, HookState,
+    alloc_root_id, current_root_id, drop_host_for_root, install_host_for_root, native_create_root,
+    native_use_effect, native_use_memo, native_use_state, run_with_current_root, schedule_flush,
+    unregister_root, unregister_root_hooks_and_effects, with_host_for_root, HookState,
     LEGACY_ROOT_ID, RootId,
 };
 
@@ -122,6 +123,8 @@ pub trait Host {
     /// sidebar hosts can use this to re-layout when pane bounds were still provisional during the
     /// first commit.
     fn after_window_shown(&mut self) {}
+    /// Clear native control target/action (and similar) before the host is dropped — e.g. window close.
+    fn detach_native_actions(&mut self) {}
 }
 
 /// No-op / test host that only stores the last committed tree.

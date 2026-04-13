@@ -737,7 +737,6 @@ mod http;
 #[cfg(feature = "http")]
 mod http_fetch;
 
-#[cfg(any(feature = "http", feature = "ws"))]
 mod timers;
 
 #[cfg(feature = "http")]
@@ -760,8 +759,9 @@ pub use http::{
     await_fetch as http_await_fetch, await_fetch_all as http_await_fetch_all, serve as http_serve,
 };
 
-#[cfg(any(feature = "http", feature = "ws"))]
-pub use timers::{clear_timeout as timer_clear_timeout, set_timeout as timer_set_timeout};
+pub use timers::{
+    clear_timeout as timer_clear_timeout, drain_timers, set_timeout as timer_set_timeout,
+};
 
 #[cfg(feature = "http")]
 pub use promise::promise_object;
