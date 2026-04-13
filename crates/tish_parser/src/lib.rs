@@ -245,4 +245,5 @@ mod tests {
             _ => panic!("expected New"),
         }
     }
+
 }

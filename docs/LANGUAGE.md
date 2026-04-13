@@ -104,6 +104,27 @@ Build: `cargo build --features full`. CLI artifact output: `tish build … --fea
 
 ---
 
+## Native UI hooks (`tishlang_ui`, `tish:macos`, `tish:native-ui`, …)
+
+Embeds that ship **`tishlang_ui`** expose **`useState`** and **`useMemo`** on the native module object (e.g. `import { useState, useMemo } from "tish:macos"`).
+
+- **`useState(initial)`** returns a two-element array `[value, setValue]`; **`setValue`** schedules a coalesced re-render (hook cursor resets each pass). **`setValue(x)`** sets the slot to **`x`**. **`setValue(updater)`** may pass an **updater function** **`(prev) => next`** (same idea as React): the runtime calls it with the **current** slot value and stores the return value—use that in **timers**, **`useEffect`** closures, and other callbacks so you do not read a **stale** render-time **`value`**.
+- **`useMemo(factory, deps?)`** runs **`factory()`** once per render pass and **reuses the last result** when **`deps`** is unchanged. Dependencies are compared with a **shallow structural** rule on **`number` / `string` / `bool` / `null` / nested arrays** of those scalars. Omit **`deps`** or pass **`[]`** to memoize for the lifetime of the root. **Function** values are not compared by identity in **`deps`** today.
+
+**`tish:macos` (AppKit):** **`macos.run(App, options?)`** starts the app; the **first** committed root vnode picks the window shell — default content window, or **`sidebar_window`** / **`SidebarWindow`** for **`NSSplitViewController`** (collapsible sidebar) plus a unified toolbar. The sidebar root must have **exactly two** pane subtrees (first = sidebar, second = detail); whitespace-only JSX text between them is ignored. **`macos.openWindow(App, options?)`** opens **another** **`NSWindow`** in the **same process** (a new independent Tish root). **`macos.spawnPeer()`** starts a **second process** (same binary, separate `NSApplication`). **`postSessionMessage`** / **`onSessionMessage`** coordinate peers via distributed notifications and **`TISH_MACOS_SESSION_ID`**.
+
+**Handles and globals:** With **`autoRunEventLoop: false`**, **`macos.run`** returns **`{ show, runEventLoop, spawnPeer, nsWindow }`**. **`macos.openWindow`** returns the same shape. **`nsWindow`** exposes per-window methods (e.g. **`setTitle`**, **`focus`**) for that handle’s **`NSWindow`**. **`app.runEventLoop`**, **`app.spawnPeer`**, and **`app.activate`** are application-wide. Import **`window`** for global **`window.*`** — it resolves to the **current** Tish root’s window (the tree that is rendering or whose UI fired the callback). On **`sidebar_window`**, **`window.innerWidth`** / **`innerHeight`** follow the **detail** pane when the host wires metrics that way.
+
+**`Window` / `SidebarWindow` lifecycle (vnode props):** optional function props **`onOpen`** (alias **`on_open`**), **`onClose`** (**`on_close`**), **`onMinimize`** (**`on_minimize`**), **`onMaximize`** (**`on_maximize`**). **`onOpen`** runs after the window is ordered on-screen; **`onClose`** runs when the window is about to close, before the Tish root is torn down; **`onMinimize`** runs when the window miniaturizes to the Dock; **`onMaximize`** runs when the window becomes zoomed (green traffic-light maximize). Only **compiled** function values are invoked.
+
+**`SidebarWindow` toolbar chrome (vnode props):** the expand/collapse control is AppKit’s **`NSToolbarToggleSidebarItemIdentifier`**. Optional props (default **`true`**): **`sidebarToolbarToggle`** (aliases **`sidebar_toggle`**, **`showSidebarToolbarToggle`**) and **`sidebarTrackingSeparator`** (aliases **`sidebar_tracking_separator`**, **`showSidebarTrackingSeparator`**).
+
+For **`image`**, set **`symbol`** (or **`sfSymbol`** / **`sf_symbol`**) for **`NSImage.imageWithSystemSymbolName`** (SF Symbols); otherwise **`src`** is still a named image or file path as before.
+
+**Render model:** Each flush still re-runs the root component and passes a new vnode tree to the host. **`useMemo`** avoids recomputing **subtrees or derived values** and returns a **`Value`** that can **`Rc`‑reuse** inner vnode objects when unchanged. **Hosts** (e.g. AppKit) may still **rebuild native widgets from scratch** until they implement incremental **`commit_root`** diffing; **`React.memo`‑style automatic component skipping** is not the default in the language today.
+
+---
+
 ## CLI
 
 ```bash

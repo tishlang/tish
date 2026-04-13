@@ -6,7 +6,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub use hooks::{native_create_root, native_use_state, schedule_flush, HookState, HOOK};
+pub use hooks::{
+    alloc_root_id, current_root_id, drop_host_for_root, install_host_for_root, native_create_root,
+    native_use_effect, native_use_memo, native_use_state, run_with_current_root, schedule_flush,
+    unregister_root, unregister_root_hooks_and_effects, with_host_for_root, HookState,
+    LEGACY_ROOT_ID, RootId,
+};
 
 use tishlang_core::{ObjectMap, Value};
 
@@ -72,9 +77,23 @@ pub fn ui_h(args: &[Value]) -> Value {
 fn normalize_children_list(children_arg: Value) -> Vec<Value> {
     match children_arg {
         Value::Null => vec![],
-        Value::Array(a) => a.borrow().clone(),
+        Value::Array(a) => flatten_vnode_children(&a.borrow()),
         other => vec![other],
     }
+}
+
+/// JSX often passes `{items.map(...)}` as one slot in the children array. Treat nested `Value::Array`
+/// like React: splice them into the parent list so hosts never see a raw array vnode.
+fn flatten_vnode_children(items: &[Value]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for c in items {
+        match c {
+            Value::Array(inner) => out.extend(flatten_vnode_children(&inner.borrow())),
+            Value::Null => {}
+            _ => out.push(c.clone()),
+        }
+    }
+    out
 }
 
 fn vnode_element(tag: Arc<str>, props: Value, children: Vec<Value>) -> Value {
@@ -112,6 +131,14 @@ fn vnode_fragment(children: Vec<Value>) -> Value {
 pub trait Host {
     /// Apply a new root vnode (after each render flush).
     fn commit_root(&mut self, vnode: &Value);
+    /// Content area width changed (e.g. window resize); default no-op.
+    fn content_width_changed(&mut self, _width: f64) {}
+    /// Called once from the main queue shortly after the window is ordered on-screen. Split /
+    /// sidebar hosts can use this to re-layout when pane bounds were still provisional during the
+    /// first commit.
+    fn after_window_shown(&mut self) {}
+    /// Clear native control target/action (and similar) before the host is dropped — e.g. window close.
+    fn detach_native_actions(&mut self) {}
 }
 
 /// No-op / test host that only stores the last committed tree.

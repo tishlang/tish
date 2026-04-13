@@ -661,6 +661,8 @@ struct Codegen {
     type_context: TypeContext,
     /// Program uses JSX; emit `tishlang_ui` imports and `h` / `Fragment` globals.
     program_has_jsx: bool,
+    /// `fn` names for Rust JSX: PascalCase tags matching these use a value binding; others are string intrinsics.
+    program_fun_decl_names: std::collections::HashSet<String>,
 }
 
 impl Codegen {
@@ -688,6 +690,7 @@ impl Codegen {
             usage_analyzer: None,
             type_context: TypeContext::new(),
             program_has_jsx: false,
+            program_fun_decl_names: std::collections::HashSet::new(),
         }
     }
 
@@ -747,9 +750,9 @@ impl Codegen {
                     "serve" => Some("Value::Function(Rc::new(|args: &[Value]| { let port = args.first().cloned().unwrap_or(Value::Null); let handler = args.get(1).cloned().unwrap_or(Value::Null); if let Value::Function(f) = handler { tish_http_serve(args, move |req_args| f(req_args)) } else { Value::Null } }))"),
                     "Promise" => Some("tish_promise_object()"),
                     "setTimeout" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_set_timeout(args)))"),
-                    "setInterval" => Some("Value::Function(Rc::new(|_args: &[Value]| panic!(\"setInterval not yet supported in native\")))"),
+                    "setInterval" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_set_interval(args)))"),
                     "clearTimeout" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_timeout(args)))"),
-                    "clearInterval" => Some("Value::Function(Rc::new(|_args: &[Value]| Value::Null))"),
+                    "clearInterval" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_interval(args)))"),
                     _ => None,
                 },
             "tish:process" if self.has_feature("process") => match export_name {
@@ -1008,6 +1011,7 @@ impl Codegen {
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
         self.is_async = program_uses_async(program);
         self.program_has_jsx = tishlang_ui::jsx::program_contains_jsx(program);
+        self.program_fun_decl_names = tishlang_ui::jsx::collect_fun_decl_names(program);
         self.write("#![allow(unused, non_snake_case)]\n\n");
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
@@ -1021,9 +1025,9 @@ impl Codegen {
         }
         if self.has_feature("http") {
             if self.is_async {
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, promise_object as tish_promise_object, await_promise as tish_await_promise};\n");
+                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, timer_set_interval as tish_timer_set_interval, timer_clear_interval as tish_timer_clear_interval, promise_object as tish_promise_object, await_promise as tish_await_promise};\n");
             } else {
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout};\n");
+                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, timer_set_interval as tish_timer_set_interval, timer_clear_interval as tish_timer_clear_interval};\n");
             }
         }
         if self.has_feature("fs") {
@@ -1205,6 +1209,8 @@ impl Codegen {
             self.writeln("let fetchAll = Value::Function(Rc::new(|args: &[Value]| tish_fetch_all_promise(args.to_vec())));");
             self.writeln("let setTimeout = Value::Function(Rc::new(|args: &[Value]| tish_timer_set_timeout(args)));");
             self.writeln("let clearTimeout = Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_timeout(args)));");
+            self.writeln("let setInterval = Value::Function(Rc::new(|args: &[Value]| tish_timer_set_interval(args)));");
+            self.writeln("let clearInterval = Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_interval(args)));");
             if self.is_async {
                 self.writeln("let Promise = tish_promise_object();");
             }
@@ -1433,6 +1439,7 @@ impl Codegen {
                 };
                 self.writeln(&format!("let _destruct_val = ({}){};", expr, clone_suffix));
                 self.emit_destruct_bindings(pattern, "_destruct_val", mutability, *span)?;
+                self.register_destruct_pattern_outer_vars(pattern);
             }
             Statement::ExprStmt { expr, .. } => {
                 let e = self.emit_expr(expr)?;
@@ -1754,6 +1761,8 @@ impl Codegen {
                             "process",
                             "setTimeout",
                             "clearTimeout",
+                            "setInterval",
+                            "clearInterval",
                             "Promise",
                             "RegExp",
                             "Polars",
@@ -1851,6 +1860,8 @@ impl Codegen {
                     "process",
                     "setTimeout",
                     "clearTimeout",
+                    "setInterval",
+                    "clearInterval",
                     "Promise",
                     "RegExp",
                     "Polars",
@@ -1942,6 +1953,9 @@ impl Codegen {
                 if let Statement::Block { statements, .. } = body.as_ref() {
                     let nested_func_names = self.prescan_function_decls(statements);
                     self.function_scope_stack.push(nested_func_names.clone());
+                    self.outer_vars_stack.push(Vec::new());
+                    self.rc_cell_storage_scopes
+                        .push(std::collections::HashSet::new());
                     // Create cells for nested functions
                     for func_name in &nested_func_names {
                         let escaped = Self::escape_ident(func_name);
@@ -1954,10 +1968,17 @@ impl Codegen {
                         self.emit_statement(s)?;
                     }
                     self.function_scope_stack.pop();
+                    self.outer_vars_stack.pop();
+                    self.rc_cell_storage_scopes.pop();
                 } else {
                     self.function_scope_stack.push(Vec::new());
+                    self.outer_vars_stack.push(Vec::new());
+                    self.rc_cell_storage_scopes
+                        .push(std::collections::HashSet::new());
                     self.emit_statement(body)?;
                     self.function_scope_stack.pop();
+                    self.outer_vars_stack.pop();
+                    self.rc_cell_storage_scopes.pop();
                 }
 
                 self.async_context_stack.pop();
@@ -2110,6 +2131,47 @@ impl Codegen {
             }
         }
         Ok(())
+    }
+
+    /// Like `VarDecl` pushing onto `outer_vars_stack`, so nested `move` closures rebind
+    /// destructured names via `_cell` / `.clone()` instead of moving `Value` multiple times.
+    fn register_destruct_pattern_outer_vars(&mut self, pattern: &DestructPattern) {
+        match pattern {
+            DestructPattern::Array(elements) => {
+                for el in elements.iter().flatten() {
+                    match el {
+                        DestructElement::Ident(name) => {
+                            if let Some(scope) = self.outer_vars_stack.last_mut() {
+                                scope.push(name.to_string());
+                            }
+                        }
+                        DestructElement::Pattern(nested) => {
+                            self.register_destruct_pattern_outer_vars(nested);
+                        }
+                        DestructElement::Rest(name) => {
+                            if let Some(scope) = self.outer_vars_stack.last_mut() {
+                                scope.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            DestructPattern::Object(props) => {
+                for prop in props {
+                    match &prop.value {
+                        DestructElement::Ident(name) => {
+                            if let Some(scope) = self.outer_vars_stack.last_mut() {
+                                scope.push(name.to_string());
+                            }
+                        }
+                        DestructElement::Pattern(nested) => {
+                            self.register_destruct_pattern_outer_vars(nested);
+                        }
+                        DestructElement::Rest(_) => {}
+                    }
+                }
+            }
+        }
     }
 
     fn emit_expr(&mut self, expr: &Expr) -> Result<String, CompileError> {
@@ -3149,9 +3211,12 @@ impl Codegen {
                 format!("Value::String([{}].concat().into())", parts.join(", "))
             }
             Expr::JsxElement { .. } | Expr::JsxFragment { .. } => {
-                tishlang_ui::jsx::emit_jsx_rust(expr, &mut |e| {
-                    self.emit_expr(e).map_err(|ce| ce.message)
-                })
+                let fun_decls = self.program_fun_decl_names.clone();
+                tishlang_ui::jsx::emit_jsx_rust(
+                    expr,
+                    &mut |e| self.emit_expr(e).map_err(|ce| ce.message),
+                    &fun_decls,
+                )
                 .map_err(|m| CompileError::new(m, None))?
             }
             Expr::New { callee, args, .. } => {
@@ -4141,14 +4206,16 @@ impl Codegen {
             ArrowBody::Expr(e) => Self::collect_assigned_idents_in_expr(e, &mut assigned_in_body),
             ArrowBody::Block(s) => Self::collect_assigned_idents_in_stmt(s, &mut assigned_in_body),
         }
-        let mutable_outer_vars: Vec<String> = outer_vars
+        // Live cell capture: assigned here, or already `Rc<RefCell<Value>>` in a parent scope
+        // (cleanups may only read `timer2` but must see updates from nested callbacks).
+        let cell_capture_outer_vars: Vec<String> = outer_vars
             .iter()
-            .filter(|v| assigned_in_body.contains(*v))
+            .filter(|v| assigned_in_body.contains(*v) || self.rc_cell_storage_contains(*v))
             .cloned()
             .collect();
         let read_only_outer_vars: Vec<String> = outer_vars
             .iter()
-            .filter(|v| !assigned_in_body.contains(*v))
+            .filter(|v| !assigned_in_body.contains(*v) && !self.rc_cell_storage_contains(*v))
             .cloned()
             .collect();
 
@@ -4195,6 +4262,8 @@ impl Codegen {
             "process",
             "setTimeout",
             "clearTimeout",
+            "setInterval",
+            "clearInterval",
             "Promise",
             "RegExp",
             "Polars",
@@ -4234,15 +4303,15 @@ impl Codegen {
                 param_escaped, param_escaped
             ));
         }
-        // Mutable outer vars: capture RefCell so assignments use borrow_mut
-        for outer_var in &mutable_outer_vars {
+        // Outer vars that share a RefCell with the parent: capture the cell (read + write)
+        for outer_var in &cell_capture_outer_vars {
             let var_escaped = Self::escape_ident(outer_var);
             code.push_str(&format!(
                 "        let {} = {}_ref.clone();\n",
                 var_escaped, var_escaped
             ));
         }
-        // Read-only outer vars: Value binding from borrow
+        // Read-only outer vars: snapshot Value at closure creation
         for outer_var in &read_only_outer_vars {
             let var_escaped = Self::escape_ident(outer_var);
             code.push_str(&format!(
@@ -4297,9 +4366,9 @@ impl Codegen {
         // Push empty scope for variables declared inside this arrow function
         self.outer_vars_stack.push(Vec::new());
 
-        // Mutable outer vars need to be in refcell_wrapped_vars so Assign/CompoundAssign emit borrow_mut
+        // Cell-backed outer vars need refcell_wrapped_vars for Assign and for reads in emit_expr
         let saved_refcell_vars = self.refcell_wrapped_vars.clone();
-        for v in &mutable_outer_vars {
+        for v in &cell_capture_outer_vars {
             self.refcell_wrapped_vars.insert(v.clone());
         }
 
