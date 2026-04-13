@@ -77,9 +77,23 @@ pub fn ui_h(args: &[Value]) -> Value {
 fn normalize_children_list(children_arg: Value) -> Vec<Value> {
     match children_arg {
         Value::Null => vec![],
-        Value::Array(a) => a.borrow().clone(),
+        Value::Array(a) => flatten_vnode_children(&a.borrow()),
         other => vec![other],
     }
+}
+
+/// JSX often passes `{items.map(...)}` as one slot in the children array. Treat nested `Value::Array`
+/// like React: splice them into the parent list so hosts never see a raw array vnode.
+fn flatten_vnode_children(items: &[Value]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for c in items {
+        match c {
+            Value::Array(inner) => out.extend(flatten_vnode_children(&inner.borrow())),
+            Value::Null => {}
+            _ => out.push(c.clone()),
+        }
+    }
+    out
 }
 
 fn vnode_element(tag: Arc<str>, props: Value, children: Vec<Value>) -> Value {
