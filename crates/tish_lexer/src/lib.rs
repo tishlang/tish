@@ -544,6 +544,13 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('/') {
                     self.advance();
                     self.skip_line_comment();
+                    // `skip_line_comment` consumes the newline via `advance()`, which sets
+                    // `at_line_start` before we would normally run `skip_whitespace()`. Without
+                    // stripping the next line's leading spaces here, `read_indent_level` would see
+                    // physical indentation and emit a spurious `Indent` (breaks e.g. object
+                    // literals with trailing `//` comments). Newlines handled in `skip_whitespace`
+                    // eat those spaces before the indent pass; match that behavior.
+                    self.skip_whitespace();
                     return self.next_token();
                 } else if self.peek() == Some('*') {
                     self.advance();
@@ -692,5 +699,16 @@ mod tests {
         let tokens = tokens.unwrap();
         let string_tok = tokens.iter().find(|t| t.kind == TokenKind::String).unwrap();
         assert_eq!(string_tok.literal.as_deref(), Some("H"));
+    }
+
+    #[test]
+    fn line_comment_does_not_emit_spurious_indent_before_next_line() {
+        let with_comment = "fn f() {\n  return {\n    a: 1, // c\n    b: 2\n  }\n}\n";
+        let tokens: Vec<_> = Lexer::new(with_comment).collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(
+            !tokens.iter().any(|t| t.kind == TokenKind::Indent),
+            "unexpected Indent after line comment: {:?}",
+            tokens.iter().map(|t| format!("{:?}", t.kind)).collect::<Vec<_>>()
+        );
     }
 }
