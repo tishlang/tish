@@ -1,15 +1,82 @@
 //! Minimal hook state: `useState`, `useMemo`, and render flush (Lattish-style cursor reset).
+//! Supports multiple independent roots (`RootId`) in one thread.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use tishlang_core::{ObjectMap, Value};
 
-use super::ACTIVE_HOST;
+use super::Host;
+
+/// Opaque id for one `createRoot().render(App)` tree in this thread.
+pub type RootId = u64;
+
+/// First root: `install_thread_local_host` and `native_create_root` without an id argument.
+pub const LEGACY_ROOT_ID: RootId = 1;
 
 thread_local! {
-    pub static HOOK: RefCell<HookState> = RefCell::new(HookState::default());
+    static HOOKS: RefCell<HashMap<RootId, HookState>> = RefCell::new(HashMap::new());
+    static CURRENT_ROOT: Cell<Option<RootId>> = Cell::new(None);
+    static HOSTS: RefCell<HashMap<RootId, Box<dyn Host>>> = RefCell::new(HashMap::new());
+    static NEXT_DYNAMIC_ROOT_ID: Cell<RootId> = Cell::new(2);
     static IN_FLUSH: Cell<bool> = Cell::new(false);
+}
+
+/// Allocate an id for an additional in-process window (starts at 2; 1 is legacy primary).
+pub fn alloc_root_id() -> RootId {
+    NEXT_DYNAMIC_ROOT_ID.with(|n| {
+        let id = n.get();
+        n.set(id.saturating_add(1).max(2));
+        id
+    })
+}
+
+fn ensure_hook_entry(root_id: RootId) {
+    HOOKS.with(|h| {
+        h.borrow_mut().entry(root_id).or_default();
+    });
+}
+
+/// Install the host for a specific root. Replaces any previous host for that id.
+pub fn install_host_for_root(root_id: RootId, host: Box<dyn Host>) {
+    ensure_hook_entry(root_id);
+    HOSTS.with(|h| {
+        h.borrow_mut().insert(root_id, host);
+    });
+}
+
+/// Legacy: install host for [`LEGACY_ROOT_ID`] (same as `macos.run` / single-window tools).
+#[allow(dead_code)] // Emitted Rust / hosts call via `tishlang_ui` re-exports; unused inside this crate.
+pub fn install_thread_local_host(host: Box<dyn Host>) {
+    install_host_for_root(LEGACY_ROOT_ID, host);
+}
+
+pub fn unregister_root(root_id: RootId) {
+    HOOKS.with(|h| {
+        h.borrow_mut().remove(&root_id);
+    });
+    HOSTS.with(|h| {
+        h.borrow_mut().remove(&root_id);
+    });
+}
+
+pub fn with_host_for_root<R>(root_id: RootId, f: impl FnOnce(&mut dyn Host) -> R) -> Option<R> {
+    HOSTS.with(|c| {
+        let mut m = c.borrow_mut();
+        m.get_mut(&root_id).map(|host| f(host.as_mut()))
+    })
+}
+
+/// Prefer [`with_host_for_root`]; kept for call sites that assume a single primary root.
+#[allow(dead_code)]
+pub fn with_thread_local_host<R>(f: impl FnOnce(&mut dyn Host) -> R) -> Option<R> {
+    with_host_for_root(LEGACY_ROOT_ID, f)
+}
+
+/// Root currently rendering or running hook flush (`None` outside that scope).
+pub fn current_root_id() -> Option<RootId> {
+    CURRENT_ROOT.get()
 }
 
 /// Hook storage for one `createRoot().render(App)` tree.
@@ -82,11 +149,17 @@ fn memo_deps_unchanged(prev: &[Value], next: &[Value]) -> bool {
             .all(|(a, b)| memo_dep_eq(a, b))
 }
 
+fn root_id_for_hooks() -> RootId {
+    CURRENT_ROOT.get().unwrap_or(LEGACY_ROOT_ID)
+}
+
 /// `useState(initial)` → `[state, setState]` as a Tish array.
 pub fn native_use_state(args: &[Value]) -> Value {
     let initial = args.first().cloned().unwrap_or(Value::Null);
-    HOOK.with(|h| {
-        let mut st = h.borrow_mut();
+    let root_id = root_id_for_hooks();
+    HOOKS.with(|h| {
+        let mut map = h.borrow_mut();
+        let st = map.entry(root_id).or_default();
         let i = st.cursor;
         st.cursor += 1;
         let slots = Rc::clone(&st.state_slots);
@@ -97,8 +170,15 @@ pub fn native_use_state(args: &[Value]) -> Value {
         let idx = i;
         let setter = Value::Function(Rc::new(move |a: &[Value]| {
             let new_v = a.first().cloned().unwrap_or(Value::Null);
-            slots.borrow_mut()[idx] = new_v;
-            schedule_flush();
+            HOOKS.with(|hooks| {
+                if let Some(st) = hooks.borrow_mut().get_mut(&root_id) {
+                    st.state_slots.borrow_mut()[idx] = new_v;
+                    st.flush_scheduled = true;
+                }
+            });
+            if !IN_FLUSH.get() {
+                drain_flush_queue();
+            }
             Value::Null
         }));
         Value::Array(Rc::new(RefCell::new(vec![current, setter])))
@@ -106,9 +186,6 @@ pub fn native_use_state(args: &[Value]) -> Value {
 }
 
 /// `useMemo(factory, deps?)` — caches `factory()` until `deps` changes (shallow compare per slot).
-///
-/// Dependency comparison supports `number`, `string`, `bool`, `null`, and nested arrays of those
-/// (e.g. `[a, b]`). **Function** identity in deps is not supported.
 pub fn native_use_memo(args: &[Value]) -> Value {
     let Some(Value::Function(factory)) = args.first() else {
         return Value::Null;
@@ -120,8 +197,10 @@ pub fn native_use_memo(args: &[Value]) -> Value {
         None => vec![],
     };
 
-    HOOK.with(|h| {
-        let mut st = h.borrow_mut();
+    let root_id = root_id_for_hooks();
+    HOOKS.with(|h| {
+        let mut map = h.borrow_mut();
+        let st = map.entry(root_id).or_default();
         let i = st.memo_cursor;
         st.memo_cursor += 1;
         let cache = Rc::clone(&st.memo_cache);
@@ -142,13 +221,24 @@ pub fn native_use_memo(args: &[Value]) -> Value {
     })
 }
 
-/// `createRoot(container)` → `{ render: (App) => { ... } }` (container ignored for headless native).
+fn parse_root_id_arg(args: &[Value]) -> RootId {
+    match args.first() {
+        Some(Value::Number(n)) if n.is_finite() && *n >= 1.0 && n.fract() == 0.0 => *n as u64,
+        _ => LEGACY_ROOT_ID,
+    }
+}
+
+/// `createRoot(container?)` or `createRoot(rootId)` → `{ render: (App) => { ... } }`.
+/// Pass a positive integer as the first argument to bind this root to a host installed via
+/// [`install_host_for_root`].
 pub fn native_create_root(args: &[Value]) -> Value {
-    let _container = args.first();
-    let render_fn = Value::Function(Rc::new(|app_args: &[Value]| {
+    let root_id = parse_root_id_arg(args);
+    ensure_hook_entry(root_id);
+    let render_fn = Value::Function(Rc::new(move |app_args: &[Value]| {
         let app = app_args.first().cloned().unwrap_or(Value::Null);
-        HOOK.with(|h| {
-            let mut st = h.borrow_mut();
+        HOOKS.with(|h| {
+            let mut map = h.borrow_mut();
+            let st = map.entry(root_id).or_default();
             st.reset_for_new_root();
             st.root_app = Some(app);
             st.flush_scheduled = true;
@@ -164,8 +254,11 @@ pub fn native_create_root(args: &[Value]) -> Value {
 
 /// Request a re-render (coalesced; safe if called during flush).
 pub fn schedule_flush() {
-    HOOK.with(|h| {
-        h.borrow_mut().flush_scheduled = true;
+    let root_id = root_id_for_hooks();
+    HOOKS.with(|h| {
+        if let Some(st) = h.borrow_mut().get_mut(&root_id) {
+            st.flush_scheduled = true;
+        }
     });
     if IN_FLUSH.get() {
         return;
@@ -175,46 +268,53 @@ pub fn schedule_flush() {
 
 fn drain_flush_queue() {
     loop {
-        let run = HOOK.with(|h| {
-            let mut st = h.borrow_mut();
-            if st.flush_scheduled {
+        let root_id = HOOKS.with(|h| {
+            h.borrow()
+                .iter()
+                .find(|(_, st)| st.flush_scheduled)
+                .map(|(id, _)| *id)
+        });
+        let Some(root_id) = root_id else {
+            break;
+        };
+
+        IN_FLUSH.set(true);
+        CURRENT_ROOT.set(Some(root_id));
+        HOOKS.with(|h| {
+            if let Some(st) = h.borrow_mut().get_mut(&root_id) {
                 st.flush_scheduled = false;
-                true
-            } else {
-                false
             }
         });
-        if !run {
-            break;
-        }
-        IN_FLUSH.set(true);
-        // Clone the app `NativeFn` and reset the hook cursor without holding `HOOK` across `f(&[])`.
-        // Component code (e.g. `useState`) borrows `HOOK` again; a nested `borrow_mut` would panic.
-        let app_fn = HOOK.with(|h| {
-            let mut st = h.borrow_mut();
+
+        let app_fn = HOOKS.with(|h| {
+            let mut map = h.borrow_mut();
+            let st = map.get_mut(&root_id)?;
             st.cursor = 0;
             st.memo_cursor = 0;
-            let Some(app) = st.root_app.clone() else {
-                return None;
-            };
+            let app = st.root_app.clone()?;
             let Value::Function(f) = app else {
                 return None;
             };
             Some(f)
         });
+
         if let Some(f) = app_fn {
             let tree = f(&[]);
-            HOOK.with(|h| {
-                let mut st = h.borrow_mut();
-                st.root_vnode = Some(tree.clone());
-                ACTIVE_HOST.with(|host_cell| {
-                    let mut host_opt = host_cell.borrow_mut();
-                    if let Some(host) = host_opt.as_deref_mut() {
-                        host.commit_root(&tree);
-                    }
-                });
+            HOOKS.with(|h| {
+                let mut map = h.borrow_mut();
+                if let Some(st) = map.get_mut(&root_id) {
+                    st.root_vnode = Some(tree.clone());
+                    HOSTS.with(|hosts| {
+                        let mut hm = hosts.borrow_mut();
+                        if let Some(host) = hm.get_mut(&root_id) {
+                            host.commit_root(&tree);
+                        }
+                    });
+                }
             });
         }
+
+        CURRENT_ROOT.set(None);
         IN_FLUSH.set(false);
     }
 }

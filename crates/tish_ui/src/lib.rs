@@ -11,6 +11,8 @@ pub mod runtime;
 
 #[cfg(feature = "runtime")]
 pub use runtime::{
-    fragment_value, install_thread_local_host, native_create_root, native_use_memo, native_use_state,
-    ui_h, ui_text, with_thread_local_host, HeadlessHost, Host, FRAGMENT_SENTINEL,
+    alloc_root_id, current_root_id, fragment_value, install_host_for_root, install_thread_local_host,
+    native_create_root, native_use_memo, native_use_state, ui_h, ui_text, unregister_root,
+    with_host_for_root, with_thread_local_host, HeadlessHost, Host, FRAGMENT_SENTINEL, LEGACY_ROOT_ID,
+    RootId,
 };
