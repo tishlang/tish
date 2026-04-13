@@ -7,9 +7,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub use hooks::{
-    alloc_root_id, current_root_id, install_host_for_root, native_create_root, native_use_memo,
-    native_use_state, schedule_flush, unregister_root, with_host_for_root, HookState, LEGACY_ROOT_ID,
-    RootId,
+    alloc_root_id, current_root_id, install_host_for_root, native_create_root, native_use_effect,
+    native_use_memo, native_use_state, schedule_flush, unregister_root, with_host_for_root, HookState,
+    LEGACY_ROOT_ID, RootId,
 };
 
 use tishlang_core::{ObjectMap, Value};
