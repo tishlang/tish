@@ -228,17 +228,20 @@ pub fn native_use_state(args: &[Value]) -> Value {
             let arg = a.first().cloned().unwrap_or(Value::Null);
             HOOKS.with(|hooks| {
                 if let Some(st) = hooks.borrow_mut().get_mut(&root_id) {
-                    let mut slots = st.state_slots.borrow_mut();
-                    if idx < slots.len() {
-                        let new_v = match &arg {
-                            Value::Function(f) => {
-                                let prev = slots[idx].clone();
-                                f(&[prev])
-                            }
-                            _ => arg,
-                        };
-                        slots[idx] = new_v;
+                    let slot_len = st.state_slots.borrow().len();
+                    if idx >= slot_len {
+                        st.flush_scheduled = true;
+                        return;
                     }
+                    let prev = st.state_slots.borrow()[idx].clone();
+                    let new_v = match &arg {
+                        Value::Function(f) => f(&[prev.clone()]),
+                        _ => arg.clone(),
+                    };
+                    if memo_dep_eq(&prev, &new_v) {
+                        return;
+                    }
+                    st.state_slots.borrow_mut()[idx] = new_v;
                     st.flush_scheduled = true;
                 }
             });
@@ -345,26 +348,35 @@ fn flush_pending_effects(root_id: RootId) {
     };
 
     for p in pending {
-        let mut cells = cells_rc.borrow_mut();
-        while cells.len() <= p.slot {
-            cells.push(EffectCell::default());
-        }
-        let cell = &mut cells[p.slot];
-        if let Some(c) = cell.cleanup.take() {
-            if let Value::Function(f) = c {
-                let _ = f(&[]);
+        // Never hold `effect_cells` across user cleanup/effect: they may call `setState` →
+        // `drain_flush_queue` → `native_use_effect`, which must `borrow_mut` the same RefCell.
+        let cleanup_fn = {
+            let mut cells = cells_rc.borrow_mut();
+            while cells.len() <= p.slot {
+                cells.push(EffectCell::default());
             }
+            cells[p.slot].cleanup.take()
+        };
+        if let Some(Value::Function(f)) = cleanup_fn {
+            let _ = f(&[]);
         }
         let run_result = if let Value::Function(f) = &p.effect_fn {
             f(&[])
         } else {
             Value::Null
         };
-        cell.cleanup = match run_result {
-            Value::Function(f) => Some(Value::Function(f)),
-            _ => None,
-        };
-        cell.committed_deps = Some(p.new_deps);
+        {
+            let mut cells = cells_rc.borrow_mut();
+            while cells.len() <= p.slot {
+                cells.push(EffectCell::default());
+            }
+            let cell = &mut cells[p.slot];
+            cell.cleanup = match run_result {
+                Value::Function(f) => Some(Value::Function(f)),
+                _ => None,
+            };
+            cell.committed_deps = Some(p.new_deps);
+        }
     }
 }
 
