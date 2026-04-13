@@ -1,4 +1,4 @@
-//! setTimeout, clearTimeout for compiled Tish and VM.
+//! setTimeout, setInterval, clearTimeout, clearInterval for compiled Tish and VM.
 //! Callbacks run when blocking ops (e.g. ws.receiveTimeout) yield in their poll loop.
 
 use std::cell::RefCell;
@@ -116,6 +116,30 @@ pub fn set_timeout(args: &[Value]) -> Value {
     Value::Number(id as f64)
 }
 
+/// setInterval(callback, intervalMs, ...args) — first run after `intervalMs`, then repeats.
+pub fn set_interval(args: &[Value]) -> Value {
+    let callback = args.first().cloned().unwrap_or(Value::Null);
+    let interval_ms = extract_num(args.get(1)).min(3600_000);
+    let extra_args: Vec<Value> = args.iter().skip(2).cloned().collect();
+    if matches!(callback, Value::Null) {
+        return Value::Number(next_id() as f64);
+    }
+    let id = next_id();
+    let due = Instant::now() + Duration::from_millis(interval_ms);
+    REGISTRY.with(|r| {
+        r.borrow_mut().insert(
+            id,
+            TimerEntry {
+                due,
+                callback,
+                args: extra_args,
+                interval_ms,
+            },
+        );
+    });
+    Value::Number(id as f64)
+}
+
 /// clearTimeout(id) - removes timer.
 pub fn clear_timeout(args: &[Value]) -> Value {
     let id = args
@@ -129,4 +153,9 @@ pub fn clear_timeout(args: &[Value]) -> Value {
         r.borrow_mut().remove(&id);
     });
     Value::Null
+}
+
+/// clearInterval(id) — same registry as clearTimeout.
+pub fn clear_interval(args: &[Value]) -> Value {
+    clear_timeout(args)
 }

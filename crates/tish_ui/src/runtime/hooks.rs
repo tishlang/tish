@@ -225,10 +225,20 @@ pub fn native_use_state(args: &[Value]) -> Value {
         let current = slots.borrow()[i].clone();
         let idx = i;
         let setter = Value::Function(Rc::new(move |a: &[Value]| {
-            let new_v = a.first().cloned().unwrap_or(Value::Null);
+            let arg = a.first().cloned().unwrap_or(Value::Null);
             HOOKS.with(|hooks| {
                 if let Some(st) = hooks.borrow_mut().get_mut(&root_id) {
-                    st.state_slots.borrow_mut()[idx] = new_v;
+                    let mut slots = st.state_slots.borrow_mut();
+                    if idx < slots.len() {
+                        let new_v = match &arg {
+                            Value::Function(f) => {
+                                let prev = slots[idx].clone();
+                                f(&[prev])
+                            }
+                            _ => arg,
+                        };
+                        slots[idx] = new_v;
+                    }
                     st.flush_scheduled = true;
                 }
             });

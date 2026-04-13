@@ -760,7 +760,8 @@ pub use http::{
 };
 
 pub use timers::{
-    clear_timeout as timer_clear_timeout, drain_timers, set_timeout as timer_set_timeout,
+    clear_interval as timer_clear_interval, clear_timeout as timer_clear_timeout, drain_timers,
+    set_interval as timer_set_interval, set_timeout as timer_set_timeout,
 };
 
 #[cfg(feature = "http")]
