@@ -255,20 +255,20 @@ jobs:
           key: ${{ matrix.target }}-${{ needs.version.outputs.version }}
           cache-workspace-crates: "true"
 
-      - name: Clean tishlang to force rebuild (version is compile-time)
-        run: cargo clean -p tishlang
+      - name: Clean tishlang + VM to force rebuild (version + capability cfgs are compile-time)
+        run: cargo clean -p tishlang -p tishlang_vm
 
       - name: Build (native / rustup target)
         if: ${{ !matrix.use_cross }}
         run: |
-          cargo build --release -p tishlang --target ${{ matrix.target }}
+          cargo build --release -p tishlang --target ${{ matrix.target }} --features full
           cargo build --release -p tishlang_cargo_bindgen --target ${{ matrix.target }}
 
       - name: Install cross and build (Linux ARM64)
         if: ${{ matrix.use_cross }}
         run: |
           cargo install cross
-          cross build --target ${{ matrix.target }} -p tishlang --release
+          cross build --target ${{ matrix.target }} -p tishlang --release --features full
           cross build --target ${{ matrix.target }} -p tishlang_cargo_bindgen --release
 
       - name: Stage binary for upload

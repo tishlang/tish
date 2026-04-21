@@ -90,7 +90,9 @@ pub fn compile_to_native(
                 message: e.to_string(),
             })?;
             let program = {
-                let prog = tishlang_compile::merge_modules(modules).map_err(|e| NativeError {
+                let prog = tishlang_compile::merge_modules(modules)
+                    .map(|m| m.program)
+                    .map_err(|e| NativeError {
                     message: e.to_string(),
                 })?;
                 if optimize {
@@ -133,7 +135,9 @@ pub fn compile_to_native(
                 message: e.to_string(),
             })?;
             let program = {
-                let prog = tishlang_compile::merge_modules(modules).map_err(|e| NativeError {
+                let prog = tishlang_compile::merge_modules(modules)
+                    .map(|m| m.program)
+                    .map_err(|e| NativeError {
                     message: e.to_string(),
                 })?;
                 if optimize {

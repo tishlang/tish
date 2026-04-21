@@ -119,7 +119,11 @@ impl UsageAnalyzer {
                 self.analyze_statement(body);
             }
             Statement::Break { .. } | Statement::Continue { .. } => {}
-            Statement::Import { .. } | Statement::Export { .. } => {
+            Statement::Import { .. }
+            | Statement::Export { .. }
+            | Statement::TypeAlias { .. }
+            | Statement::DeclareVar { .. }
+            | Statement::DeclareFun { .. } => {
                 // Import/Export should be resolved by merge_modules before compilation
             }
         }
@@ -551,23 +555,27 @@ pub fn compile_project_full(
         span: None,
     })?;
     let native_modules =
-        resolve::resolve_native_modules(&merged, root).map_err(|e| CompileError {
+        resolve::resolve_native_modules(&merged.program, root).map_err(|e| CompileError {
             message: e,
             span: None,
         })?;
-    let native_build = resolve::compute_native_build_artifacts(&merged, root, &native_modules)
+    let native_build = resolve::compute_native_build_artifacts(
+        &merged.program,
+        root,
+        &native_modules,
+    )
         .map_err(|e| CompileError {
             message: e,
             span: None,
         })?;
     let mut all_features: Vec<String> = features.to_vec();
-    for f in resolve::extract_native_import_features(&merged) {
+    for f in resolve::extract_native_import_features(&merged.program) {
         if !all_features.contains(&f) {
             all_features.push(f);
         }
     }
     let rust = compile_with_native_modules(
-        &merged,
+        &merged.program,
         project_root,
         &all_features,
         &native_modules,
@@ -1591,6 +1599,9 @@ impl Codegen {
                     span: None,
                 });
             }
+            Statement::TypeAlias { .. }
+            | Statement::DeclareVar { .. }
+            | Statement::DeclareFun { .. } => {}
             Statement::Switch {
                 expr,
                 cases,
@@ -2069,7 +2080,7 @@ impl Codegen {
                 for (i, elem) in elements.iter().enumerate() {
                     if let Some(el) = elem {
                         match el {
-                            DestructElement::Ident(name) => {
+                            DestructElement::Ident(name, _) => {
                                 self.writeln(&format!(
                                     "{} {} = match &({}) {{ Value::Array(ref _a) => _a.borrow().get({}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
                                     mutability,
@@ -2086,7 +2097,7 @@ impl Codegen {
                                 ));
                                 self.emit_destruct_bindings(nested, &nested_var, mutability, span)?;
                             }
-                            DestructElement::Rest(name) => {
+                            DestructElement::Rest(name, _) => {
                                 self.writeln(&format!(
                                     "{} {} = match &({}) {{ Value::Array(ref _a) => {{ let _b = _a.borrow(); Value::Array(Rc::new(RefCell::new(_b.iter().skip({}).cloned().collect()))) }}, _ => Value::Array(Rc::new(RefCell::new(Vec::new()))) }};",
                                     mutability,
@@ -2103,7 +2114,7 @@ impl Codegen {
                 for prop in props {
                     let key = prop.key.as_ref();
                     match &prop.value {
-                        DestructElement::Ident(name) => {
+                        DestructElement::Ident(name, _) => {
                             self.writeln(&format!(
                                 "{} {} = match &({}) {{ Value::Object(ref _o) => _o.borrow().get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
                                 mutability,
@@ -2120,7 +2131,7 @@ impl Codegen {
                             ));
                             self.emit_destruct_bindings(nested, &nested_var, mutability, span)?;
                         }
-                        DestructElement::Rest(_) => {
+                        DestructElement::Rest(_, _) => {
                             return Err(CompileError::new(
                                 "Rest in object destructuring not supported",
                                 Some(span),
@@ -2140,7 +2151,7 @@ impl Codegen {
             DestructPattern::Array(elements) => {
                 for el in elements.iter().flatten() {
                     match el {
-                        DestructElement::Ident(name) => {
+                        DestructElement::Ident(name, _) => {
                             if let Some(scope) = self.outer_vars_stack.last_mut() {
                                 scope.push(name.to_string());
                             }
@@ -2148,7 +2159,7 @@ impl Codegen {
                         DestructElement::Pattern(nested) => {
                             self.register_destruct_pattern_outer_vars(nested);
                         }
-                        DestructElement::Rest(name) => {
+                        DestructElement::Rest(name, _) => {
                             if let Some(scope) = self.outer_vars_stack.last_mut() {
                                 scope.push(name.to_string());
                             }
@@ -2159,7 +2170,7 @@ impl Codegen {
             DestructPattern::Object(props) => {
                 for prop in props {
                     match &prop.value {
-                        DestructElement::Ident(name) => {
+                        DestructElement::Ident(name, _) => {
                             if let Some(scope) = self.outer_vars_stack.last_mut() {
                                 scope.push(name.to_string());
                             }
@@ -2167,7 +2178,7 @@ impl Codegen {
                         DestructElement::Pattern(nested) => {
                             self.register_destruct_pattern_outer_vars(nested);
                         }
-                        DestructElement::Rest(_) => {}
+                        DestructElement::Rest(_, _) => {}
                     }
                 }
             }
@@ -2242,7 +2253,7 @@ impl Codegen {
                     {
                         if let Expr::Member {
                             object,
-                            prop: MemberProp::Name(ref method_name),
+                            prop: MemberProp::Name { name: ref method_name, .. },
                             ..
                         } = callee.as_ref()
                         {
@@ -2273,7 +2284,12 @@ impl Codegen {
                 }
 
                 // Check for built-in method calls on arrays/strings
-                if let Expr::Member { object, prop: MemberProp::Name(method_name), .. } = callee.as_ref() {
+                if let Expr::Member {
+                    object,
+                    prop: MemberProp::Name { name: method_name, .. },
+                    ..
+                } = callee.as_ref()
+                {
                     // ── native Vec<T> push fast path ──────────────────────────────
                     if method_name.as_ref() == "push" {
                         if let Expr::Ident { name, .. } = object.as_ref() {
@@ -2658,7 +2674,7 @@ impl Codegen {
             } => {
                 let obj = self.emit_expr(object)?;
                 let key = match prop {
-                    MemberProp::Name(n) => format!("{:?}", n.as_ref()),
+                    MemberProp::Name { name, .. } => format!("{:?}", name.as_ref()),
                     MemberProp::Expr(e) => {
                         let k = self.emit_expr(e)?;
                         format!("{}.to_display_string()", k)
@@ -3513,7 +3529,10 @@ impl Codegen {
             Statement::Break { .. }
             | Statement::Continue { .. }
             | Statement::Import { .. }
-            | Statement::Export { .. } => {}
+            | Statement::Export { .. }
+            | Statement::TypeAlias { .. }
+            | Statement::DeclareVar { .. }
+            | Statement::DeclareFun { .. } => {}
         }
     }
 
@@ -4029,7 +4048,7 @@ impl Codegen {
         match pattern {
             DestructPattern::Array(elements) => {
                 for el in elements {
-                    if let Some(DestructElement::Ident(n)) = el {
+                    if let Some(DestructElement::Ident(n, _)) = el {
                         names.insert(n.to_string());
                     }
                     if let Some(DestructElement::Pattern(p)) = el {
@@ -4040,11 +4059,11 @@ impl Codegen {
             DestructPattern::Object(props) => {
                 for prop in props {
                     match &prop.value {
-                        DestructElement::Ident(n) => {
+                        DestructElement::Ident(n, _) => {
                             names.insert(n.to_string());
                         }
                         DestructElement::Pattern(p) => Self::collect_destruct_names(p, names),
-                        DestructElement::Rest(n) => {
+                        DestructElement::Rest(n, _) => {
                             names.insert(n.to_string());
                         }
                     }
@@ -4150,7 +4169,10 @@ impl Codegen {
             Statement::Break { .. }
             | Statement::Continue { .. }
             | Statement::Import { .. }
-            | Statement::Export { .. } => {}
+            | Statement::Export { .. }
+            | Statement::TypeAlias { .. }
+            | Statement::DeclareVar { .. }
+            | Statement::DeclareFun { .. } => {}
         }
     }
 

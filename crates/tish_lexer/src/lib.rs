@@ -643,11 +643,8 @@ impl<'a> Lexer<'a> {
                 return Ok(Some(Token {
                     kind,
                     span: Span { start, end },
-                    literal: if matches!(kind, TokenKind::Ident) {
-                        Some(ident.into())
-                    } else {
-                        None
-                    },
+                    // Spelling is useful for keywords too (e.g. object keys, type names like `type`).
+                    literal: Some(ident.into()),
                 }));
             }
             '\n' => {

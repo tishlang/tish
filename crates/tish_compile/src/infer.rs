@@ -135,6 +135,7 @@ fn infer_statement(stmt: &Statement, ctx: &mut InferCtx) -> Statement {
     match stmt {
         Statement::VarDecl {
             name,
+            name_span,
             mutable,
             type_ann,
             init,
@@ -152,6 +153,7 @@ fn infer_statement(stmt: &Statement, ctx: &mut InferCtx) -> Statement {
             }
             Statement::VarDecl {
                 name: name.clone(),
+                name_span: *name_span,
                 mutable: *mutable,
                 type_ann: inferred,
                 init: init.clone(),
@@ -189,6 +191,7 @@ fn infer_statement(stmt: &Statement, ctx: &mut InferCtx) -> Statement {
         }
         Statement::ForOf {
             name,
+            name_span,
             iterable,
             body,
             span,
@@ -198,6 +201,7 @@ fn infer_statement(stmt: &Statement, ctx: &mut InferCtx) -> Statement {
             ctx.pop_scope();
             Statement::ForOf {
                 name: name.clone(),
+                name_span: *name_span,
                 iterable: iterable.clone(),
                 body: new_body,
                 span: *span,
@@ -243,6 +247,7 @@ fn infer_statement(stmt: &Statement, ctx: &mut InferCtx) -> Statement {
         Statement::FunDecl {
             async_,
             name,
+            name_span,
             params,
             rest_param,
             return_type,
@@ -267,6 +272,7 @@ fn infer_statement(stmt: &Statement, ctx: &mut InferCtx) -> Statement {
             Statement::FunDecl {
                 async_: *async_,
                 name: name.clone(),
+                name_span: *name_span,
                 params: params.clone(),
                 rest_param: rest_param.clone(),
                 return_type: return_type.clone(),

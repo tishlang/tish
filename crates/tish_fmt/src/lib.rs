@@ -279,6 +279,51 @@ impl Printer {
                 self.buf.push_str(" from ");
                 self.string_lit(from.as_ref());
             }
+            Statement::TypeAlias { name, ty, .. } => {
+                self.indent(level);
+                self.buf.push_str("type ");
+                self.buf.push_str(name);
+                self.buf.push_str(" = ");
+                self.type_ann(ty);
+            }
+            Statement::DeclareVar {
+                name,
+                type_ann,
+                const_,
+                ..
+            } => {
+                self.indent(level);
+                self.buf.push_str("declare ");
+                self.buf.push_str(if *const_ { "const " } else { "let " });
+                self.buf.push_str(name);
+                if let Some(t) = type_ann {
+                    self.buf.push_str(": ");
+                    self.type_ann(t);
+                }
+            }
+            Statement::DeclareFun {
+                async_,
+                name,
+                params,
+                rest_param,
+                return_type,
+                ..
+            } => {
+                self.indent(level);
+                self.buf.push_str("declare ");
+                if *async_ {
+                    self.buf.push_str("async ");
+                }
+                self.buf.push_str("fn ");
+                self.buf.push_str(name);
+                self.buf.push('(');
+                self.param_list(params, rest_param);
+                self.buf.push(')');
+                if let Some(rt) = return_type {
+                    self.buf.push_str(": ");
+                    self.type_ann(rt);
+                }
+            }
             Statement::Export { declaration, .. } => {
                 self.indent(level);
                 self.buf.push_str("export ");
@@ -361,12 +406,12 @@ impl Printer {
     fn import_specs(&mut self, specs: &[ImportSpecifier]) {
         if specs.len() == 1 {
             match &specs[0] {
-                ImportSpecifier::Default(n) => self.buf.push_str(n.as_ref()),
-                ImportSpecifier::Namespace(n) => {
+                ImportSpecifier::Default { name, .. } => self.buf.push_str(name.as_ref()),
+                ImportSpecifier::Namespace { name, .. } => {
                     self.buf.push_str("* as ");
-                    self.buf.push_str(n.as_ref());
+                    self.buf.push_str(name.as_ref());
                 }
-                ImportSpecifier::Named { name, alias } => {
+                ImportSpecifier::Named { name, alias, .. } => {
                     self.buf.push_str("{ ");
                     self.buf.push_str(name.as_ref());
                     if let Some(a) = alias {
@@ -384,7 +429,7 @@ impl Printer {
                 self.buf.push_str(", ");
             }
             match sp {
-                ImportSpecifier::Named { name, alias } => {
+                ImportSpecifier::Named { name, alias, .. } => {
                     self.buf.push_str(name.as_ref());
                     if let Some(a) = alias {
                         self.buf.push_str(" as ");
@@ -453,9 +498,9 @@ impl Printer {
                         self.buf.push_str(", ");
                     }
                     match e {
-                        Some(DestructElement::Ident(n)) => self.buf.push_str(n.as_ref()),
+                        Some(DestructElement::Ident(n, _)) => self.buf.push_str(n.as_ref()),
                         Some(DestructElement::Pattern(inner)) => self.destruct_pat(inner),
-                        Some(DestructElement::Rest(n)) => {
+                        Some(DestructElement::Rest(n, _)) => {
                             self.buf.push_str("...");
                             self.buf.push_str(n.as_ref());
                         }
@@ -472,16 +517,16 @@ impl Printer {
                     }
                     self.buf.push_str(pr.key.as_ref());
                     match &pr.value {
-                        DestructElement::Ident(n) if n.as_ref() != pr.key.as_ref() => {
+                        DestructElement::Ident(n, _) if n.as_ref() != pr.key.as_ref() => {
                             self.buf.push_str(": ");
                             self.buf.push_str(n.as_ref());
                         }
-                        DestructElement::Ident(_) => {}
+                        DestructElement::Ident(_, _) => {}
                         DestructElement::Pattern(inner) => {
                             self.buf.push_str(": ");
                             self.destruct_pat(inner);
                         }
-                        DestructElement::Rest(n) => {
+                        DestructElement::Rest(n, _) => {
                             self.buf.push_str(": ...");
                             self.buf.push_str(n.as_ref());
                         }
@@ -617,7 +662,7 @@ impl Printer {
                     self.buf.push('.');
                 }
                 match prop {
-                    MemberProp::Name(n) => self.buf.push_str(n.as_ref()),
+                    MemberProp::Name { name, .. } => self.buf.push_str(name.as_ref()),
                     MemberProp::Expr(ex) => {
                         self.buf.push('[');
                         self.expr(ex);
@@ -817,35 +862,72 @@ impl Printer {
                 if children.is_empty() {
                     self.buf.push_str(" />");
                 } else {
-                    self.buf.push('>');
-                    for ch in children {
-                        match ch {
-                            JsxChild::Text(t) => self.buf.push_str(t.as_ref()),
-                            JsxChild::Expr(e) => {
-                                self.buf.push('{');
-                                self.expr(e);
-                                self.buf.push('}');
-                            }
+                    let compact = children.len() == 1
+                        && matches!(
+                            &children[0],
+                            JsxChild::Text(t) if !t.as_ref().contains('\n')
+                        );
+                    if compact {
+                        self.buf.push('>');
+                        if let JsxChild::Text(t) = &children[0] {
+                            self.buf.push_str(t.as_ref());
                         }
+                        self.buf.push_str("</");
+                        self.buf.push_str(tag.as_ref());
+                        self.buf.push('>');
+                    } else {
+                        self.buf.push('>');
+                        self.buf.push('\n');
+                        for ch in children {
+                            self.buf.push_str("  ");
+                            match ch {
+                                JsxChild::Text(t) => self.buf.push_str(t.as_ref()),
+                                JsxChild::Expr(e) => {
+                                    self.buf.push('{');
+                                    self.expr(e);
+                                    self.buf.push('}');
+                                }
+                            }
+                            self.buf.push('\n');
+                        }
+                        self.buf.push_str("  </");
+                        self.buf.push_str(tag.as_ref());
+                        self.buf.push('>');
                     }
-                    self.buf.push_str("</");
-                    self.buf.push_str(tag.as_ref());
-                    self.buf.push('>');
                 }
             }
             Expr::JsxFragment { children, .. } => {
                 self.buf.push_str("<>");
-                for ch in children {
-                    match ch {
-                        JsxChild::Text(t) => self.buf.push_str(t.as_ref()),
-                        JsxChild::Expr(e) => {
-                            self.buf.push('{');
-                            self.expr(e);
-                            self.buf.push('}');
+                if children.is_empty() {
+                    self.buf.push_str("</>");
+                } else {
+                    let compact = children.len() == 1
+                        && matches!(
+                            &children[0],
+                            JsxChild::Text(t) if !t.as_ref().contains('\n')
+                        );
+                    if compact {
+                        if let JsxChild::Text(t) = &children[0] {
+                            self.buf.push_str(t.as_ref());
                         }
+                        self.buf.push_str("</>");
+                    } else {
+                        self.buf.push('\n');
+                        for ch in children {
+                            self.buf.push_str("  ");
+                            match ch {
+                                JsxChild::Text(t) => self.buf.push_str(t.as_ref()),
+                                JsxChild::Expr(e) => {
+                                    self.buf.push('{');
+                                    self.expr(e);
+                                    self.buf.push('}');
+                                }
+                            }
+                            self.buf.push('\n');
+                        }
+                        self.buf.push_str("</>");
                     }
                 }
-                self.buf.push_str("</>");
             }
             Expr::NativeModuleLoad {
                 spec, export_name, ..
@@ -934,6 +1016,14 @@ mod tests {
     fn round_trip_simple() {
         let src = "fn add(a, b) {\n  return a + b\n}\n";
         let out = format_source(src).unwrap();
+        let _ = tishlang_parser::parse(&out).unwrap();
+    }
+
+    #[test]
+    fn jsx_multiline_when_mixed_children() {
+        let src = "let x = <div>a{b}</div>\n";
+        let out = format_source(src).unwrap();
+        assert!(out.contains('\n'), "expected line breaks in formatted JSX: {out:?}");
         let _ = tishlang_parser::parse(&out).unwrap();
     }
 }

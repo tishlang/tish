@@ -529,6 +529,9 @@ pub(crate) struct BuildArgs {
     pub features: Vec<String>,
     #[arg(long, help_heading = "Options")]
     pub no_optimize: bool,
+    /// For `--target js` project builds: emit `OUTPUT.js.map` and `//# sourceMappingURL=…` so JS/TS tools can jump to original `.tish` (implies `--no-optimize` for that build).
+    #[arg(long, help_heading = "Options")]
+    pub source_map: bool,
     /// Entry `.tish` file (or `.js` where supported).
     #[arg(required = true, value_name = "FILE", help_heading = "Arguments")]
     pub file: String,

@@ -41,7 +41,7 @@ Then visit `http://localhost:8080`.
 ## Project Structure
 
 ```
-tishx-example/
+lattish/
 ├── package.json     # lattish dependency
 ├── zectre.yaml
 ├── index.html       # Loads App.js (runs on load)

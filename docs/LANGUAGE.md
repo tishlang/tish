@@ -89,7 +89,13 @@ Build: `cargo build --features full`. CLI artifact output: `tish build … --fea
 
 ## Native compile (implementation status)
 
-**Runtime model today:** Values are **dynamically tagged** (`Value` in Rust). Optional type annotations are **parsed only** — they do not yet drive codegen or checked types.
+**Runtime model today:** Values are **dynamically tagged** (`Value` in Rust). Type annotations, `type` aliases, and `declare …` statements are **parsed** (formatter, resolve walks, LSP name sites) but **do not** yet drive codegen or a sound type checker.
+
+**Ambient builtins (`stdlib/builtins.d.tish`):** The repo ships **`stdlib/builtins.d.tish`** as the canonical **`declare` / `type`** surface for globals (`console`, `Math`, timers, …). Lines of the form **`// @tish-source <symbol> <path-from-repo-root> <1-based-line>`** tie symbols (including dotted names like **`console.log`**) to Rust sources; **`tish-lsp`** uses them for **Go to definition** when **`TISHLANG_SOURCE_ROOT`** or LSP **`tishlangSourceRoot`** points at the `tish` checkout.
+
+**Native host packages (`tish:macos`, …):** A package may ship **`lsp-pragmas.d.tish`** beside **`package.json`**. Each line is **`// @tish-source <dotted-symbol> <path-from-package-root> <1-based-line>`** with an optional **`| one-line hover`** suffix. **`tish-lsp`** uses these when **`receiver.member`** comes from a native import but there is no matching **`pub fn`** to jump to (typical for object maps built from closures).
+
+**Type-only syntax:** `type Name = TypeExpr`; `declare let` / `declare const`; `declare function` (no body). Function types use **`=>`**. These forms are erased at runtime in **`tish run`** and bytecode backends.
 
 | Route | What you get |
 |-------|----------------|
@@ -113,13 +119,29 @@ Embeds that ship **`tishlang_ui`** expose **`useState`** and **`useMemo`** on th
 
 **`tish:macos` (AppKit):** **`macos.run(App, options?)`** starts the app; the **first** committed root vnode picks the window shell — default content window, or **`sidebar_window`** / **`SidebarWindow`** for **`NSSplitViewController`** (collapsible sidebar) plus a unified toolbar. The sidebar root must have **exactly two** pane subtrees (first = sidebar, second = detail); whitespace-only JSX text between them is ignored. **`macos.openWindow(App, options?)`** opens **another** **`NSWindow`** in the **same process** (a new independent Tish root). **`macos.spawnPeer()`** starts a **second process** (same binary, separate `NSApplication`). **`postSessionMessage`** / **`onSessionMessage`** coordinate peers via distributed notifications and **`TISH_MACOS_SESSION_ID`**.
 
-**Handles and globals:** With **`autoRunEventLoop: false`**, **`macos.run`** returns **`{ show, runEventLoop, spawnPeer, nsWindow }`**. **`macos.openWindow`** returns the same shape. **`nsWindow`** exposes per-window methods (e.g. **`setTitle`**, **`focus`**) for that handle’s **`NSWindow`**. **`app.runEventLoop`**, **`app.spawnPeer`**, and **`app.activate`** are application-wide. Import **`window`** for global **`window.*`** — it resolves to the **current** Tish root’s window (the tree that is rendering or whose UI fired the callback). On **`sidebar_window`**, **`window.innerWidth`** / **`innerHeight`** follow the **detail** pane when the host wires metrics that way.
+**Handles and globals:** With **`autoRunEventLoop: false`**, **`macos.run`** returns **`{ show, runEventLoop, spawnPeer, nsWindow }`**. **`macos.openWindow`** returns the same shape. **`nsWindow`** exposes per-window methods (e.g. **`setTitle`**, **`focus`**) for that handle’s **`NSWindow`**. **`app.runEventLoop`**, **`app.spawnPeer`**, and **`app.activate`** are application-wide. Import **`window`** for global **`window.*`** — it resolves to the **current** Tish root’s window (the tree that is rendering or whose UI fired the callback). On **`sidebar_window`**, **`window.innerWidth`** / **`innerHeight`** follow the **detail** pane when the host wires metrics that way. **`window.toggleSidebar()`** toggles the sidebar pane via **`NSSplitViewController`**; **`window.sidebarCollapsed()`** is **`true`** when that pane is collapsed (also on **`nsWindow`** for a specific handle).
 
 **`Window` / `SidebarWindow` lifecycle (vnode props):** optional function props **`onOpen`** (alias **`on_open`**), **`onClose`** (**`on_close`**), **`onMinimize`** (**`on_minimize`**), **`onMaximize`** (**`on_maximize`**). **`onOpen`** runs after the window is ordered on-screen; **`onClose`** runs when the window is about to close, before the Tish root is torn down; **`onMinimize`** runs when the window miniaturizes to the Dock; **`onMaximize`** runs when the window becomes zoomed (green traffic-light maximize). Only **compiled** function values are invoked.
 
 **`SidebarWindow` toolbar chrome (vnode props):** the expand/collapse control is AppKit’s **`NSToolbarToggleSidebarItemIdentifier`**. Optional props (default **`true`**): **`sidebarToolbarToggle`** (aliases **`sidebar_toggle`**, **`showSidebarToolbarToggle`**) and **`sidebarTrackingSeparator`** (aliases **`sidebar_tracking_separator`**, **`showSidebarTrackingSeparator`**).
 
+For **`button`**, optional **`bezelStyle`** / **`bezel`** maps to AppKit **`NSBezelStyle`** (e.g. **`toolbar`**, **`glass`** / **`liquidGlass`** for macOS 26+ Liquid Glass, **`circular`** for a round disc, **`accessoryBar`**, **`accessoryBarAction`**, **`borderless`** / **`shadowless`** → **`NSShadowlessSquare`** for a flat template icon). Symbol-only **`toolbar`** and **`glass`** buttons default to **`bordered: true`**; set **`bordered`** / **`buttonBordered`** / **`toolbarBordered`** / **`glassBordered`** to **`false`** for a flat template icon.
+
 For **`image`**, set **`symbol`** (or **`sfSymbol`** / **`sf_symbol`**) for **`NSImage.imageWithSystemSymbolName`** (SF Symbols); otherwise **`src`** is still a named image or file path as before.
+
+**`VisualEffect` / `visual_effect` (AppKit):** maps to **`NSVisualEffectView`**. Props include **`material`** (semantic string such as **`sidebar`**, **`header`**, **`popover`**, **`menu`**, **`sheet`**, **`underPage`**, …, or a numeric **`NSVisualEffectMaterial`** raw value), **`blendingMode`** / **`blending`** (**`withinWindow`** | **`behindWindow`**), **`state`** (**`active`** | **`inactive`** | **`followsWindow`**), **`emphasized`** (boolean), optional **`scrollerGutterRight`** / **`scroller_gutter_right`** (number of points to shave off the **right** edge so a sibling **`NSScrollView`** vertical scroller is not painted over in **`ZStack`** overlays), optional **`appearance`** / **`nsAppearance`** (same names as the window shell), and the usual merged **`style`** layer fields (**`backgroundColor`**, **`borderRadius`**, **`opacity`**, **`borderWidth`**, **`borderColor`**) for rounded corners and overlays.
+
+**`ZStack` / `zstack` (AppKit):** overlay stack. Children are committed in **source order** (earlier = farther back). By default (**`fillIndex`** / **`fill_index`** / **`fillChild`** omitted or **`0`**), the **first** child receives the pane’s bounded height (**`height="fill"`**); later siblings share the same top-left, use intrinsic height, and draw **on top**. **Two-child pattern (`GroupedTable` + `VisualEffect`):** the host marks the **`GroupedTable`** **`NSScrollView`** and, when a **`ZStack`** has **exactly** those two children (in either order), **reparents** the **`FlippedVisualEffectView`** **into** the scroll view **above** the clip view but **below** the vertical scroller so **`NSVisualEffectView`** vibrancy blurs **scrolling list rows** while the scroller stays visible; pair with **`documentTopInset`** on **`GroupedTable`**. For other **`ZStack`** overlays, a **`VisualEffect`** stacked **after** a plain **`ScrollView`** is still drawn above the whole scroll surface (use **`scrollerGutterRight`** on the effect only as a layout hint). **`ZStack`** changes force a full rebuild (no incremental patch).
+
+**`ScrollView` / `GroupedTable` document inset (AppKit):** optional numeric **`documentTopInset`** (alias **`contentInsetTop`**) adds empty space at the **top of the scroll document** so the first row is not hidden under a **`ZStack`** overlay; that inset scrolls away so content can pass under a translucent header. When **`documentTopInset` > 0**, the host also sets **`NSScrollView` `scrollerInsets.top`** to the same value so the vertical scroller is not clipped under the overlay.
+
+**`ScrollView`** / **`list`** / **`text_editor`** / **`markdown_text` (AppKit):** optional **`scrollerGutterRight`** / **`scroller_gutter_right`** sets **`NSScrollView` `contentInsets.right`** so document content does not paint into an **overlay** vertical scroller track; when a **`VisualEffect`** is a **`ZStack`** overlay above the scroll view, the same value on **`VisualEffect`** narrows the effect’s frame.
+
+**`GroupedTable` scroller layout (AppKit):** the host uses **`NSScrollerStyle::Legacy`** and lays out the flipped document (and embedded two-child **`VisualEffect`** header width) at **scroll width minus the vertical scroller lane**, so rows shrink with the pane and the scroller is not drawn on top of row content. **`scrollerGutterRight`** on **`GroupedTable`** does not drive that lane (it is for **`ScrollView`**-style **`contentInsets.right`** only).
+
+**`GroupedTable` section chrome (AppKit):** optional **`vibrantSectionHeaders`** / **`vibrant_section_headers`** (boolean, default **`true`**) controls whether **`section`** headers use **`NSVisualEffectView`**. Set **`false`** when stacking blur would look muddy (e.g. with a separate overlay header).
+
+**`GroupedTable` / `grouped_table` (AppKit):** scrollable grouped list using the same flipped **`NSScrollView`** document model as **`ScrollView`**. Children must be **`section`** / **`Section`** nodes with **`title`** (or **`label`**) plus row content; each section header uses vibrancy (**`NSVisualEffectMaterial.header`**). Section headers scroll with the list (they are not pinned like **`NSTableView`** floating group rows). Outside **`GroupedTable`**, **`section`** is laid out like **`column`** / **`Column`**. Host changes under this tag force a full rebuild (no incremental patch).
 
 **Render model:** Each flush still re-runs the root component and passes a new vnode tree to the host. **`useMemo`** avoids recomputing **subtrees or derived values** and returns a **`Value`** that can **`Rc`‑reuse** inner vnode objects when unchanged. **Hosts** (e.g. AppKit) may still **rebuild native widgets from scratch** until they implement incremental **`commit_root`** diffing; **`React.memo`‑style automatic component skipping** is not the default in the language today.
 
@@ -171,6 +193,12 @@ fn handleRequest(req)
     return { status: 404, body: "Not Found" }
 serve(8080, handleRequest)
 ```
+
+---
+
+## Roadmap: checked types (Phase 2)
+
+**Today:** `type` / `declare` / optional annotations on `let`/`const`/`fn` are parsed (see **Runtime model today**) but **not** checked against values. **Next:** a unifier/checker in `tish build` and **`tish-lsp`** diagnostics; richer type references with navigation on `: Foo`; possibly `interface` with **structural** matching. Generics, declaration merging, and full ECMAScript type compatibility stay **out of scope** until spelled out here. Keep **`tree-sitter-tish`** in sync when the grammar surface changes.
 
 ---
 

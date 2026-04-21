@@ -311,8 +311,14 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                             normalize_builtin_spec(from).unwrap_or_else(|| from.to_string());
                         for spec in specifiers {
                             match spec {
-                                ImportSpecifier::Named { name, alias } => {
+                                ImportSpecifier::Named {
+                                    name,
+                                    name_span,
+                                    alias,
+                                    alias_span,
+                                } => {
                                     let bind = alias.as_deref().unwrap_or(name.as_ref());
+                                    let decl_name_span = alias_span.as_ref().unwrap_or(name_span);
                                     let init = Expr::NativeModuleLoad {
                                         spec: Arc::from(canonical_spec.clone()),
                                         export_name: name.clone(),
@@ -320,23 +326,24 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                                     };
                                     statements.push(Statement::VarDecl {
                                         name: Arc::from(bind),
+                                        name_span: *decl_name_span,
                                         mutable: false,
                                         type_ann: None,
                                         init: Some(init),
                                         span: *span,
                                     });
                                 }
-                                ImportSpecifier::Namespace(ns) => {
+                                ImportSpecifier::Namespace { name, .. } => {
                                     return Err(format!(
                                         "Namespace import (* as {}) not supported for native module '{}'",
-                                        ns.as_ref(),
+                                        name.as_ref(),
                                         from.as_ref()
                                     ));
                                 }
-                                ImportSpecifier::Default(bind) => {
+                                ImportSpecifier::Default { name, .. } => {
                                     return Err(format!(
                                         "Default import '{}' not supported for native module '{}'. Use named import.",
-                                        bind.as_ref(),
+                                        name.as_ref(),
                                         from.as_ref()
                                     ));
                                 }
@@ -351,15 +358,22 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                     let dep_exports = &module_exports[dep_idx];
                     for spec in specifiers {
                         match spec {
-                            ImportSpecifier::Named { name, alias } => {
+                            ImportSpecifier::Named {
+                                name,
+                                name_span,
+                                alias,
+                                alias_span,
+                            } => {
                                 let source = dep_exports
                                     .get(name.as_ref())
                                     .cloned()
                                     .unwrap_or_else(|| name.to_string());
                                 let bind = alias.as_deref().unwrap_or(name.as_ref());
                                 if bind != source {
+                                    let decl_name_span = alias_span.as_ref().unwrap_or(name_span);
                                     statements.push(Statement::VarDecl {
                                         name: Arc::from(bind),
+                                        name_span: *decl_name_span,
                                         mutable: false,
                                         type_ann: None,
                                         init: Some(Expr::Ident {
@@ -370,7 +384,7 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                                     });
                                 }
                             }
-                            ImportSpecifier::Namespace(ns) => {
+                            ImportSpecifier::Namespace { name, name_span } => {
                                 let mut props = Vec::new();
                                 for (k, v) in dep_exports {
                                     props.push(tishlang_ast::ObjectProp::KeyValue(
@@ -382,20 +396,22 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                                     ));
                                 }
                                 statements.push(Statement::VarDecl {
-                                    name: ns.clone(),
+                                    name: name.clone(),
+                                    name_span: *name_span,
                                     mutable: false,
                                     type_ann: None,
                                     init: Some(Expr::Object { props, span: *span }),
                                     span: *span,
                                 });
                             }
-                            ImportSpecifier::Default(bind) => {
+                            ImportSpecifier::Default { name, name_span } => {
                                 let source =
                                     dep_exports.get("default").cloned().ok_or_else(|| {
                                         format!("Module '{}' has no default export", from)
                                     })?;
                                 statements.push(Statement::VarDecl {
-                                    name: bind.clone(),
+                                    name: name.clone(),
+                                    name_span: *name_span,
                                     mutable: false,
                                     type_ann: None,
                                     init: Some(Expr::Ident {
@@ -412,12 +428,14 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                     ExportDeclaration::Named(s) => statements.push(*s.clone()),
                     ExportDeclaration::Default(e) => {
                         let default_name = format!("__default_{}", idx);
+                        let espan = e.span();
                         statements.push(Statement::VarDecl {
                             name: Arc::from(default_name),
+                            name_span: espan,
                             mutable: false,
                             type_ann: None,
                             init: Some((*e).clone()),
-                            span: e.span(),
+                            span: espan,
                         });
                     }
                 },

@@ -23,7 +23,9 @@ pub fn compile_to_native(
     detect_cycles(&modules).map_err(|e| LlvmError {
         message: e.to_string(),
     })?;
-    let program = merge_modules(modules).map_err(|e| LlvmError {
+    let program = merge_modules(modules)
+        .map(|m| m.program)
+        .map_err(|e| LlvmError {
         message: e.to_string(),
     })?;
     let chunk = tishlang_bytecode::compile(&program).map_err(|e| LlvmError {

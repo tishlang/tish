@@ -89,9 +89,14 @@ pub fn convert_expr(expr: &OxcExpr<'_>, ctx: &Ctx<'_>) -> Result<Expr, ConvertEr
         }
         OxcExpr::StaticMemberExpression(s) => {
             let object = Box::new(convert_expr(&s.object, ctx)?);
+            let name = Arc::from(s.property.name.as_str());
+            let name_span = span_util::oxc_span_to_tish(ctx.1, &s.property);
             Ok(Expr::Member {
                 object,
-                prop: MemberProp::Name(Arc::from(s.property.name.as_str())),
+                prop: MemberProp::Name {
+                    name,
+                    span: name_span,
+                },
                 optional: s.optional,
                 span,
             })
@@ -241,9 +246,14 @@ fn convert_chain_element(
     match ce {
         oxc::ast::ast::ChainElement::StaticMemberExpression(m) => {
             let object = Box::new(convert_expr(&m.object, ctx)?);
+            let name = Arc::from(m.property.name.as_str());
+            let name_span = span_util::oxc_span_to_tish(ctx.1, &m.property);
             Ok(Expr::Member {
                 object,
-                prop: MemberProp::Name(Arc::from(m.property.name.as_str())),
+                prop: MemberProp::Name {
+                    name,
+                    span: name_span,
+                },
                 optional: m.optional,
                 span,
             })
@@ -504,8 +514,11 @@ pub fn convert_params(
     for (i, p) in params.items.iter().enumerate() {
         if params.rest.is_some() && i == params.items.len() - 1 {
             if let Some(rest) = &params.rest {
-                let rest_name = match &rest.rest.argument {
-                    oxc::ast::ast::BindingPattern::BindingIdentifier(b) => b.name.as_str(),
+                let (rest_name, rest_name_span) = match &rest.rest.argument {
+                    oxc::ast::ast::BindingPattern::BindingIdentifier(b) => (
+                        b.name.as_str(),
+                        crate::span_util::oxc_span_to_tish(ctx.1, b.as_ref()),
+                    ),
                     _ => {
                         return Err(ConvertError::new(ConvertErrorKind::Unsupported {
                             what: "rest param with non-identifier".into(),
@@ -515,6 +528,7 @@ pub fn convert_params(
                 };
                 rest_param = Some(TypedParam {
                     name: Arc::from(rest_name),
+                    name_span: rest_name_span,
                     type_ann: None,
                     default: None,
                 });
@@ -524,8 +538,10 @@ pub fn convert_params(
         // params.items contains FormalParameter structs (not enum)
         let fp = p;
         {
-            let name = match &fp.pattern {
-                oxc::ast::ast::BindingPattern::BindingIdentifier(b) => b.name.as_str(),
+            let (name, name_span) = match &fp.pattern {
+                oxc::ast::ast::BindingPattern::BindingIdentifier(b) => {
+                    (b.name.as_str(), crate::span_util::oxc_span_to_tish(ctx.1, b.as_ref()))
+                }
                 _ => {
                     return Err(ConvertError::new(ConvertErrorKind::Unsupported {
                         what: "destructuring in params".into(),
@@ -540,6 +556,7 @@ pub fn convert_params(
                 .transpose()?;
             typed_params.push(FunParam::Simple(TypedParam {
                 name: Arc::from(name),
+                name_span,
                 type_ann: None,
                 default,
             }));
@@ -547,8 +564,10 @@ pub fn convert_params(
     }
     if rest_param.is_none() {
         if let Some(rest) = &params.rest {
-            let rest_name = match &rest.rest.argument {
-                oxc::ast::ast::BindingPattern::BindingIdentifier(b) => b.name.as_str(),
+            let (rest_name, rest_name_span) = match &rest.rest.argument {
+                oxc::ast::ast::BindingPattern::BindingIdentifier(b) => {
+                    (b.name.as_str(), crate::span_util::oxc_span_to_tish(ctx.1, b.as_ref()))
+                }
                 _ => {
                     return Err(ConvertError::new(ConvertErrorKind::Unsupported {
                         what: "rest param with non-identifier".into(),
@@ -558,6 +577,7 @@ pub fn convert_params(
             };
             rest_param = Some(TypedParam {
                 name: Arc::from(rest_name),
+                name_span: rest_name_span,
                 type_ann: None,
                 default: None,
             });

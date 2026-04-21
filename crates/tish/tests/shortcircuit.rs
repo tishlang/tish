@@ -53,7 +53,7 @@ fn test_and_shortcircuit_via_resolve_project() {
     let path = path.canonicalize().expect("path");
     let project_root = path.parent().unwrap();
     let modules = resolve_project(&path, Some(project_root)).expect("resolve");
-    let program = merge_modules(modules).expect("merge");
+    let program = merge_modules(modules).expect("merge").program;
     let program = tishlang_opt::optimize(&program); // Mirror CLI
     let chunk = compile(&program).expect("compile");
     let result = tishlang_vm::run(&chunk);

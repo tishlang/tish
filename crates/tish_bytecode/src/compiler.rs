@@ -275,12 +275,12 @@ impl<'a> Compiler<'a> {
                 if let (
                     Expr::Member {
                         object: lo,
-                        prop: MemberProp::Name(p),
+                        prop: MemberProp::Name { name: p, .. },
                         ..
                     },
                     Expr::Member {
                         object: ro,
-                        prop: MemberProp::Name(pr),
+                        prop: MemberProp::Name { name: pr, .. },
                         ..
                     },
                 ) = (left.as_ref(), right.as_ref())
@@ -982,6 +982,9 @@ impl<'a> Compiler<'a> {
                     });
                 }
             },
+            Statement::TypeAlias { .. }
+            | Statement::DeclareVar { .. }
+            | Statement::DeclareFun { .. } => {}
         }
         Ok(())
     }
@@ -1001,7 +1004,7 @@ impl<'a> Compiler<'a> {
             DestructPattern::Array(elements) => {
                 for (i, elem) in elements.iter().enumerate() {
                     match elem {
-                        Some(DestructElement::Ident(name)) => {
+                        Some(DestructElement::Ident(name, _)) => {
                             self.emit(Opcode::Dup);
                             let idx = self.constant_idx(Constant::Number(i as f64));
                             self.emit(Opcode::LoadConst);
@@ -1031,7 +1034,7 @@ impl<'a> Compiler<'a> {
                     self.chunk.write_u16(key_idx);
                     self.emit(Opcode::GetIndex); // GetIndex pops obj, index and uses get_member
                     match &prop.value {
-                        DestructElement::Ident(name) => {
+                        DestructElement::Ident(name, _) => {
                             let idx = self.name_idx(name);
                             self.emit_u16(decl_op, idx);
                             if mutable {
@@ -1118,7 +1121,7 @@ impl<'a> Compiler<'a> {
                     if let (
                         Expr::Member {
                             object,
-                            prop: MemberProp::Name(key),
+                            prop: MemberProp::Name { name: key, .. },
                             optional: false,
                             ..
                         },
@@ -1231,7 +1234,7 @@ impl<'a> Compiler<'a> {
                     let jump_end = self.emit_jump(Opcode::Jump);
                     self.patch_jump(jump_to_get, self.chunk.code.len());
                     match prop {
-                        MemberProp::Name(key) => {
+                        MemberProp::Name { name: key, .. } => {
                             let idx = self.name_idx(key);
                             self.emit_u16(Opcode::GetMemberOptional, idx);
                         }
@@ -1243,7 +1246,7 @@ impl<'a> Compiler<'a> {
                     self.patch_jump(jump_end, self.chunk.code.len());
                 } else {
                     match prop {
-                        MemberProp::Name(key) => {
+                        MemberProp::Name { name: key, .. } => {
                             let idx = self.name_idx(key);
                             self.emit_u16(Opcode::GetMember, idx);
                         }

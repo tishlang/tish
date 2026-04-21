@@ -42,8 +42,8 @@ case "$(uname -s)-$(uname -m)" in
 esac
 
 OUT="$PLATFORM_DIR/$PLATFORM/$BIN"
-echo "Building tish for $TARGET..."
-cargo build --release -p tishlang --target "$TARGET"
+echo "Building tish for $TARGET (features: full — npm CLI must match VM capabilities: http, fs, process, regex, ws)..."
+cargo build --release -p tishlang --target "$TARGET" --features full
 mkdir -p "$PLATFORM_DIR/$PLATFORM"
 TRIPLE_BIN="target/$TARGET/release/$BIN"
 HOST_BIN="target/release/$BIN"

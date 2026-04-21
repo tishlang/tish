@@ -1,5 +1,5 @@
 {
-  "name": "tishx-example",
+  "name": "lattish-example",
   "version": "0.1.0",
   "scripts": {
     "build": "tish build --target js src/App.tish -o dist/App"

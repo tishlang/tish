@@ -4,6 +4,8 @@
 
 This npm package ships the **Tish CLI**. It includes platform-specific native binaries under `platform/`; **`npm install`** runs `postinstall`, which copies the correct binary to `bin/tish`. That file is what runs when you invoke `tish` — the CLI itself is native, not Node. Node **22+** is required for install scripts and tooling (e.g. semantic-release in this repo); the `tish` binary has no Node runtime dependency.
 
+Those prebuilt binaries are built with **`--features full`** (http, fs, process, regex, ws) so `tish run` and the bytecode VM match a full developer toolchain. For a minimal CLI, build `tishlang` from the repo with `--no-default-features` (see the workspace `justfile`).
+
 ## Install
 
 ```bash

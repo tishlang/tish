@@ -174,7 +174,7 @@ mod tests {
             Expr::New { callee, args, .. } => {
                 assert!(matches!(
                     callee.as_ref(),
-                    Expr::Member { prop: tishlang_ast::MemberProp::Name(p), .. } if p.as_ref() == "AudioContext"
+                    Expr::Member { prop: tishlang_ast::MemberProp::Name { name, .. }, .. } if name.as_ref() == "AudioContext"
                 ));
                 assert!(args.is_empty());
             }
@@ -214,10 +214,10 @@ mod tests {
         match e {
             Expr::Member {
                 object,
-                prop: tishlang_ast::MemberProp::Name(p),
+                prop: tishlang_ast::MemberProp::Name { name, .. },
                 ..
             } => {
-                assert_eq!(p.as_ref(), "bar");
+                assert_eq!(name.as_ref(), "bar");
                 match object.as_ref() {
                     Expr::New { callee, args, .. } => {
                         assert!(
@@ -244,6 +244,12 @@ mod tests {
             }
             _ => panic!("expected New"),
         }
+    }
+
+    #[test]
+    fn stdlib_builtins_d_tish_parses() {
+        const SRC: &str = include_str!("../../../stdlib/builtins.d.tish");
+        parse(SRC).expect("stdlib/builtins.d.tish should parse");
     }
 
 }
