@@ -455,7 +455,9 @@ fn test_vm_date_now() {
     // Library path
     let modules = tishlang_compile::resolve_project(&path, path.parent()).expect("resolve");
     tishlang_compile::detect_cycles(&modules).expect("cycles");
-    let program = tishlang_compile::merge_modules(modules).expect("merge");
+    let program = tishlang_compile::merge_modules(modules)
+        .expect("merge")
+        .program;
     let chunk = tishlang_bytecode::compile(&program).expect("compile");
     let result = tishlang_vm::run(&chunk);
     assert!(
@@ -499,7 +501,9 @@ fn test_vm_index_assign_via_resolve() {
         .join("array_sort_minimal.tish");
     let modules = tishlang_compile::resolve_project(&path, path.parent()).expect("resolve");
     tishlang_compile::detect_cycles(&modules).expect("cycles");
-    let program = tishlang_compile::merge_modules(modules).expect("merge");
+    let program = tishlang_compile::merge_modules(modules)
+        .expect("merge")
+        .program;
     let chunk = tishlang_bytecode::compile(&program).expect("compile");
     let result = tishlang_vm::run(&chunk);
     assert!(

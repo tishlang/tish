@@ -21,6 +21,7 @@ pub mod infer;
 mod metadata;
 
 pub use classify::SignatureClass;
+pub use discover::rust_public_fn_location;
 pub use metadata::{resolve_dependency_from_manifest, resolve_registry_dependency, ResolvedDependency};
 
 use std::fs;

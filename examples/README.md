@@ -18,7 +18,7 @@ Example applications you can run and compile with Tish. Build the CLI from the r
 | [async-await](async-await/) | Async/await with `fetch` / `fetchAll` | `http` |
 | [mdx-docs](mdx-docs/) | Static docs: MDX, file-based routing, pre-rendered | `http`, `fs` |
 | [json-file-edit](json-file-edit/) | Read JSON file, decode, modify, write back | `fs` |
-| [tishx-example](tishx-example/) | Tish + JSX compiled to vanilla JavaScript (no 3rd party libs) | — |
+| [lattish](lattish/) | Tish + JSX compiled to vanilla JavaScript (no 3rd party libs) | — |
 
 ## Quick start — run locally
 

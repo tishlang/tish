@@ -39,7 +39,7 @@ fn resolve_and_merge_cargo_example_fixture() {
         panic!("expected import, got {:?}", first);
     };
     assert_eq!(from.as_ref(), "cargo:demo_shim");
-    merge_modules(modules).unwrap();
+    let _ = merge_modules(modules).unwrap();
 }
 
 #[test]

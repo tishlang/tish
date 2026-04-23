@@ -43,7 +43,9 @@ fn resolve_and_compile_to_chunk(
         message: e.to_string(),
     })?;
     let program = {
-        let prog = merge_modules(modules).map_err(|e| WasmError {
+        let prog = merge_modules(modules)
+            .map(|m| m.program)
+            .map_err(|e| WasmError {
             message: e.to_string(),
         })?;
         if optimize {

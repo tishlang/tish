@@ -149,8 +149,10 @@ fn convert_var_decl(
         match id {
             oxc::ast::ast::BindingPattern::BindingIdentifier(b) => {
                 let name: Arc<str> = Arc::from(b.name.as_str());
+                let name_span = span_util::oxc_span_to_tish(ctx.1, b.as_ref());
                 Ok(Statement::VarDecl {
                     name,
+                    name_span,
                     mutable,
                     type_ann: None,
                     init,
@@ -240,12 +242,14 @@ fn convert_for_of_statement(
     ctx: &Ctx<'_>,
     span: Span,
 ) -> Result<Statement, ConvertError> {
-    let name = match &f.left {
+    let (name, name_span) = match &f.left {
         oxc::ast::ast::ForStatementLeft::VariableDeclaration(v) => {
             if v.declarations.len() == 1 {
                 let d = &v.declarations[0];
                 match &d.id {
-                    oxc::ast::ast::BindingPattern::BindingIdentifier(b) => b.name.as_str(),
+                    oxc::ast::ast::BindingPattern::BindingIdentifier(b) => {
+                        (b.name.as_str(), span_util::oxc_span_to_tish(ctx.1, b.as_ref()))
+                    }
                     _ => {
                         return Err(ConvertError::new(ConvertErrorKind::Incompatible {
                             what: "for-of with destructuring".into(),
@@ -271,6 +275,7 @@ fn convert_for_of_statement(
     let body = Box::new(convert_statement(&f.body, ctx)?);
     Ok(Statement::ForOf {
         name: Arc::from(name),
+        name_span,
         iterable,
         body,
         span,
@@ -311,26 +316,30 @@ fn convert_try_statement(
         statements: body_stmts,
         span: span_util::oxc_span_to_tish(ctx.1, &*t.block),
     });
-    let (catch_param, catch_body) = match &t.handler {
+    let (catch_param, catch_param_span, catch_body) = match &t.handler {
         Some(h) => {
-            let param = h
+            let (param, pspan) = h
                 .param
                 .as_ref()
                 .and_then(|cp: &oxc::ast::ast::CatchParameter<'_>| {
                     if let oxc::ast::ast::BindingPattern::BindingIdentifier(b) = &cp.pattern {
-                        Some(Arc::from(b.name.as_str()))
+                        Some((
+                            Arc::from(b.name.as_str()),
+                            span_util::oxc_span_to_tish(ctx.1, b.as_ref()),
+                        ))
                     } else {
                         None
                     }
-                });
+                })
+                .map_or((None, None), |(n, s)| (Some(n), Some(s)));
             let catch_stmts = convert_statements(&h.body.body, ctx.0, ctx.1)?;
             let cb = Box::new(Statement::Block {
                 statements: catch_stmts,
                 span: span_util::oxc_span_to_tish(ctx.1, &*h.body),
             });
-            (param, Some(cb))
+            (param, pspan, Some(cb))
         }
-        None => (None, None),
+        None => (None, None, None),
     };
     let finally_body = t
         .finalizer
@@ -346,6 +355,7 @@ fn convert_try_statement(
     Ok(Statement::Try {
         body,
         catch_param,
+        catch_param_span,
         catch_body,
         finally_body,
         span,
@@ -358,10 +368,16 @@ fn convert_function_decl(
     span: Span,
 ) -> Result<Statement, ConvertError> {
     let async_ = f.r#async;
-    let name: Arc<str> =
-        f.id.as_ref()
-            .map(|id| Arc::from(id.name.as_str()))
-            .unwrap_or_else(|| Arc::from(""));
+    let name: Arc<str> = f
+        .id
+        .as_ref()
+        .map(|id| Arc::from(id.name.as_str()))
+        .unwrap_or_else(|| Arc::from(""));
+    let name_span = f
+        .id
+        .as_ref()
+        .map(|id| span_util::oxc_span_to_tish(ctx.1, id))
+        .unwrap_or_else(span_util::stub_span);
     let (params, rest_param) = expr::convert_params(&f.params, ctx)?;
     let body = match &f.body {
         Some(fb) => {
@@ -381,6 +397,7 @@ fn convert_function_decl(
     Ok(Statement::FunDecl {
         async_,
         name,
+        name_span,
         params,
         rest_param,
         return_type: None,
@@ -391,7 +408,7 @@ fn convert_function_decl(
 
 fn convert_import(
     i: &oxc::ast::ast::ImportDeclaration<'_>,
-    _ctx: &Ctx<'_>,
+    ctx: &Ctx<'_>,
     span: Span,
 ) -> Result<Statement, ConvertError> {
     let from: Arc<str> = Arc::from(i.source.value.as_str());
@@ -402,25 +419,35 @@ fn convert_import(
                 oxc::ast::ast::ImportDeclarationSpecifier::ImportSpecifier(is) => {
                     let imported_name = is.imported.name().as_str();
                     let local_name = is.local.name.as_str();
-                    let alias = if imported_name == local_name {
-                        None
+                    let name_span = crate::span_util::oxc_span_to_tish(ctx.1, &is.imported);
+                    let (alias, alias_span) = if imported_name == local_name {
+                        (None, None)
                     } else {
-                        Some(Arc::from(local_name))
+                        (
+                            Some(Arc::from(local_name)),
+                            Some(crate::span_util::oxc_span_to_tish(ctx.1, &is.local)),
+                        )
                     };
                     specifiers.push(tishlang_ast::ImportSpecifier::Named {
                         name: Arc::from(imported_name),
+                        name_span,
                         alias,
+                        alias_span,
                     });
                 }
                 oxc::ast::ast::ImportDeclarationSpecifier::ImportDefaultSpecifier(ds) => {
-                    specifiers.push(tishlang_ast::ImportSpecifier::Default(Arc::from(
-                        ds.local.name.as_str(),
-                    )));
+                    let name_span = crate::span_util::oxc_span_to_tish(ctx.1, &ds.local);
+                    specifiers.push(tishlang_ast::ImportSpecifier::Default {
+                        name: Arc::from(ds.local.name.as_str()),
+                        name_span,
+                    });
                 }
                 oxc::ast::ast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(ns) => {
-                    specifiers.push(tishlang_ast::ImportSpecifier::Namespace(Arc::from(
-                        ns.local.name.as_str(),
-                    )));
+                    let name_span = crate::span_util::oxc_span_to_tish(ctx.1, &ns.local);
+                    specifiers.push(tishlang_ast::ImportSpecifier::Namespace {
+                        name: Arc::from(ns.local.name.as_str()),
+                        name_span,
+                    });
                 }
             }
         }

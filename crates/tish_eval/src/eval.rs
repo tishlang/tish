@@ -556,21 +556,21 @@ impl Evaluator {
                 let mut scope = self.scope.borrow_mut();
                 for spec in specifiers {
                     match spec {
-                        ImportSpecifier::Named { name, alias } => {
+                        ImportSpecifier::Named { name, alias, .. } => {
                             let v = exports.get(name.as_ref()).ok_or_else(|| {
                                 EvalError::Error(format!("Module does not export '{}'", name))
                             })?;
                             let bind = alias.as_deref().unwrap_or(name.as_ref());
                             scope.set(Arc::from(bind), v.clone(), false);
                         }
-                        ImportSpecifier::Namespace(ns) => {
-                            scope.set(Arc::clone(ns), exports_val.clone(), false);
+                        ImportSpecifier::Namespace { name, .. } => {
+                            scope.set(Arc::clone(name), exports_val.clone(), false);
                         }
-                        ImportSpecifier::Default(bind) => {
+                        ImportSpecifier::Default { name, .. } => {
                             let v = exports.get("default").ok_or_else(|| {
                                 EvalError::Error("Module does not have default export".to_string())
                             })?;
-                            scope.set(Arc::clone(bind), v.clone(), false);
+                            scope.set(Arc::clone(name), v.clone(), false);
                         }
                     }
                 }
@@ -586,6 +586,9 @@ impl Evaluator {
                         self.scope.borrow_mut().set(Arc::from("default"), v, false);
                     }
                 }
+                Ok(Value::Null)
+            }
+            Statement::TypeAlias { .. } | Statement::DeclareVar { .. } | Statement::DeclareFun { .. } => {
                 Ok(Value::Null)
             }
         }
@@ -862,7 +865,12 @@ impl Evaluator {
             }
             Expr::Call { callee, args, .. } => {
                 // Check for built-in method calls on arrays/strings
-                if let Expr::Member { object, prop: MemberProp::Name(method_name), .. } = callee.as_ref() {
+                if let Expr::Member {
+                    object,
+                    prop: MemberProp::Name { name: method_name, .. },
+                    ..
+                } = callee.as_ref()
+                {
                     let obj = self.eval_expr(object)?;
                     let arg_vals = self.eval_call_args(args)?;
                     
@@ -1629,7 +1637,7 @@ impl Evaluator {
                     return Ok(Value::Null);
                 }
                 let key = match prop {
-                    MemberProp::Name(n) => Arc::clone(n),
+                    MemberProp::Name { name, .. } => Arc::clone(name),
                     MemberProp::Expr(e) => {
                         let v = self.eval_expr(e)?;
                         match v {
@@ -2291,7 +2299,7 @@ impl Evaluator {
         _optional: bool,
     ) -> Option<Result<Value, EvalError>> {
         match property {
-            MemberProp::Name(name) => match obj {
+            MemberProp::Name { name, .. } => match obj {
                 Value::Object(o) => {
                     let result = o
                         .borrow()
@@ -2760,8 +2768,14 @@ impl Evaluator {
                 }
             };
 
-            let (status, headers, body) = crate::http::value_to_response(&response_value);
-            crate::http::send_response(request, status, headers, body);
+            if let Some((status, headers, file_path)) =
+                crate::http::extract_file_from_response(&response_value)
+            {
+                crate::http::send_file_response(request, status, headers, file_path);
+            } else {
+                let (status, headers, body) = crate::http::value_to_response(&response_value);
+                crate::http::send_response(request, status, headers, body);
+            }
             count += 1;
             if max_requests.map(|m| count >= m).unwrap_or(false) {
                 break;
@@ -2809,7 +2823,7 @@ impl Evaluator {
                 for (i, elem) in elements.iter().enumerate() {
                     if let Some(el) = elem {
                         match el {
-                            tishlang_ast::DestructElement::Ident(name) => {
+                            tishlang_ast::DestructElement::Ident(name, _) => {
                                 let val = arr.get(i).cloned().unwrap_or(Value::Null);
                                 scope.borrow_mut().set(Arc::clone(name), val, mutable);
                             }
@@ -2817,7 +2831,7 @@ impl Evaluator {
                                 let val = arr.get(i).cloned().unwrap_or(Value::Null);
                                 Self::bind_destruct_pattern_scoped(scope, nested, &val, mutable)?;
                             }
-                            tishlang_ast::DestructElement::Rest(name) => {
+                            tishlang_ast::DestructElement::Rest(name, _) => {
                                 let rest: Vec<Value> = arr.iter().skip(i).cloned().collect();
                                 scope.borrow_mut().set(
                                     Arc::clone(name),
@@ -2843,13 +2857,13 @@ impl Evaluator {
                 for prop in props {
                     let val = obj.get(&prop.key).cloned().unwrap_or(Value::Null);
                     match &prop.value {
-                        tishlang_ast::DestructElement::Ident(name) => {
+                        tishlang_ast::DestructElement::Ident(name, _) => {
                             scope.borrow_mut().set(Arc::clone(name), val, mutable);
                         }
                         tishlang_ast::DestructElement::Pattern(nested) => {
                             Self::bind_destruct_pattern_scoped(scope, nested, &val, mutable)?;
                         }
-                        tishlang_ast::DestructElement::Rest(_) => {
+                        tishlang_ast::DestructElement::Rest(_, _) => {
                             return Err(EvalError::Error(
                                 "Rest not supported in object destructuring".to_string(),
                             ));

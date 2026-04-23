@@ -7,7 +7,9 @@ mod error;
 #[cfg(test)]
 mod tests_jsx;
 
-pub use codegen::{compile_project_with_jsx, compile_with_jsx};
+pub use codegen::{
+    compile_project_with_jsx, compile_project_with_jsx_and_source_map, compile_with_jsx, JsBundle,
+};
 pub use error::CompileError;
 
 /// JSX lowers to `h` / `Fragment`; merge the `lattish` runtime for hooks and DOM.

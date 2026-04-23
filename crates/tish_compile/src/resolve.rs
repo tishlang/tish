@@ -737,7 +737,9 @@ pub fn native_spec_to_feature(spec: &str) -> Option<String> {
 }
 
 /// Resolve a bare specifier (e.g. "lattish") to a path via node_modules.
-fn resolve_bare_spec(spec: &str, from_dir: &Path, _project_root: &Path) -> Option<PathBuf> {
+/// Resolve a bare package name (npm-style) to the package entry `.tish` file, walking `node_modules`
+/// from `from_dir` upward.
+pub fn resolve_bare_spec(spec: &str, from_dir: &Path, _project_root: &Path) -> Option<PathBuf> {
     let mut search = from_dir.to_path_buf();
     loop {
         let node_mod = search.join("node_modules").join(spec);
@@ -885,10 +887,27 @@ fn has_cycle_from(
     Ok(false)
 }
 
+/// Result of [`merge_modules`]: merged AST plus, per top-level statement, the originating `.tish` file.
+#[derive(Debug)]
+pub struct MergedProgram {
+    pub program: Program,
+    pub statement_sources: Vec<PathBuf>,
+}
+
+fn merge_push(
+    statements: &mut Vec<Statement>,
+    statement_sources: &mut Vec<PathBuf>,
+    stmt: Statement,
+    source: PathBuf,
+) {
+    statements.push(stmt);
+    statement_sources.push(source);
+}
+
 /// Merge all resolved modules into a single program. Dependencies are emitted first.
 /// Import statements are rewritten as bindings from already-emitted dep exports.
 /// Export statements are unwrapped (the inner declaration is emitted).
-pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
+pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<MergedProgram, String> {
     let path_to_idx: HashMap<PathBuf, usize> = modules
         .iter()
         .enumerate()
@@ -919,7 +938,9 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
     }
 
     let mut statements = Vec::new();
+    let mut statement_sources = Vec::new();
     for (idx, module) in modules.iter().enumerate() {
+        let src_path = module.path.clone();
         let dir = module.path.parent().unwrap_or(Path::new("."));
         for stmt in &module.program.statements {
             match stmt {
@@ -935,32 +956,44 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
                         // Emit VarDecl with NativeModuleLoad for each specifier
                         for spec in specifiers {
                             match spec {
-                                ImportSpecifier::Named { name, alias } => {
+                                ImportSpecifier::Named {
+                                    name,
+                                    name_span,
+                                    alias,
+                                    alias_span,
+                                } => {
                                     let bind = alias.as_deref().unwrap_or(name.as_ref());
+                                    let decl_name_span = alias_span.as_ref().unwrap_or(name_span);
                                     let init = Expr::NativeModuleLoad {
                                         spec: Arc::from(canonical_spec.clone()),
                                         export_name: name.clone(),
                                         span: *span,
                                     };
-                                    statements.push(Statement::VarDecl {
-                                        name: Arc::from(bind),
-                                        mutable: false,
-                                        type_ann: None,
-                                        init: Some(init),
-                                        span: *span,
-                                    });
+                                    merge_push(
+                                        &mut statements,
+                                        &mut statement_sources,
+                                        Statement::VarDecl {
+                                            name: Arc::from(bind),
+                                            name_span: *decl_name_span,
+                                            mutable: false,
+                                            type_ann: None,
+                                            init: Some(init),
+                                            span: *span,
+                                        },
+                                        src_path.clone(),
+                                    );
                                 }
-                                ImportSpecifier::Namespace(ns) => {
+                                ImportSpecifier::Namespace { name, .. } => {
                                     return Err(format!(
                                         "Namespace import (* as {}) not supported for native module '{}'",
-                                        ns.as_ref(),
+                                        name.as_ref(),
                                         from.as_ref()
                                     ));
                                 }
-                                ImportSpecifier::Default(bind) => {
+                                ImportSpecifier::Default { name, .. } => {
                                     return Err(format!(
                                         "Default import '{}' not supported for native module '{}'. Use named import, e.g. import {{ egui }} from '{}'",
-                                        bind.as_ref(),
+                                        name.as_ref(),
                                         from.as_ref(),
                                         from.as_ref()
                                     ));
@@ -977,26 +1010,38 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
                     let dep_exports = &module_exports[dep_idx];
                     for spec in specifiers {
                         match spec {
-                            ImportSpecifier::Named { name, alias } => {
+                            ImportSpecifier::Named {
+                                name,
+                                name_span,
+                                alias,
+                                alias_span,
+                            } => {
                                 let source = dep_exports
                                     .get(name.as_ref())
                                     .cloned()
                                     .unwrap_or_else(|| name.to_string());
                                 let bind = alias.as_deref().unwrap_or(name.as_ref());
                                 if bind != source {
-                                    statements.push(Statement::VarDecl {
-                                        name: Arc::from(bind),
-                                        mutable: false,
-                                        type_ann: None,
-                                        init: Some(Expr::Ident {
-                                            name: Arc::from(source),
+                                    let decl_name_span = alias_span.as_ref().unwrap_or(name_span);
+                                    merge_push(
+                                        &mut statements,
+                                        &mut statement_sources,
+                                        Statement::VarDecl {
+                                            name: Arc::from(bind),
+                                            name_span: *decl_name_span,
+                                            mutable: false,
+                                            type_ann: None,
+                                            init: Some(Expr::Ident {
+                                                name: Arc::from(source),
+                                                span: *span,
+                                            }),
                                             span: *span,
-                                        }),
-                                        span: *span,
-                                    });
+                                        },
+                                        src_path.clone(),
+                                    );
                                 }
                             }
-                            ImportSpecifier::Namespace(ns) => {
+                            ImportSpecifier::Namespace { name, name_span } => {
                                 let mut props = Vec::new();
                                 for (k, v) in dep_exports {
                                     props.push(tishlang_ast::ObjectProp::KeyValue(
@@ -1007,51 +1052,83 @@ pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<Program, String> {
                                         },
                                     ));
                                 }
-                                statements.push(Statement::VarDecl {
-                                    name: ns.clone(),
-                                    mutable: false,
-                                    type_ann: None,
-                                    init: Some(Expr::Object { props, span: *span }),
-                                    span: *span,
-                                });
+                                merge_push(
+                                    &mut statements,
+                                    &mut statement_sources,
+                                    Statement::VarDecl {
+                                        name: name.clone(),
+                                        name_span: *name_span,
+                                        mutable: false,
+                                        type_ann: None,
+                                        init: Some(Expr::Object { props, span: *span }),
+                                        span: *span,
+                                    },
+                                    src_path.clone(),
+                                );
                             }
-                            ImportSpecifier::Default(bind) => {
+                            ImportSpecifier::Default { name, name_span } => {
                                 let source =
                                     dep_exports.get("default").cloned().ok_or_else(|| {
                                         format!("Module '{}' has no default export", from)
                                     })?;
-                                statements.push(Statement::VarDecl {
-                                    name: bind.clone(),
-                                    mutable: false,
-                                    type_ann: None,
-                                    init: Some(Expr::Ident {
-                                        name: Arc::from(source),
+                                merge_push(
+                                    &mut statements,
+                                    &mut statement_sources,
+                                    Statement::VarDecl {
+                                        name: name.clone(),
+                                        name_span: *name_span,
+                                        mutable: false,
+                                        type_ann: None,
+                                        init: Some(Expr::Ident {
+                                            name: Arc::from(source),
+                                            span: *span,
+                                        }),
                                         span: *span,
-                                    }),
-                                    span: *span,
-                                });
+                                    },
+                                    src_path.clone(),
+                                );
                             }
                         }
                     }
                 }
                 Statement::Export { declaration, .. } => match declaration.as_ref() {
-                    ExportDeclaration::Named(s) => statements.push(*s.clone()),
+                    ExportDeclaration::Named(s) => merge_push(
+                        &mut statements,
+                        &mut statement_sources,
+                        *s.clone(),
+                        src_path.clone(),
+                    ),
                     ExportDeclaration::Default(e) => {
                         let default_name = format!("__default_{}", idx);
-                        statements.push(Statement::VarDecl {
-                            name: Arc::from(default_name),
-                            mutable: false,
-                            type_ann: None,
-                            init: Some((*e).clone()),
-                            span: e.span(),
-                        });
+                        let espan = e.span();
+                        merge_push(
+                            &mut statements,
+                            &mut statement_sources,
+                            Statement::VarDecl {
+                                name: Arc::from(default_name),
+                                name_span: espan,
+                                mutable: false,
+                                type_ann: None,
+                                init: Some((*e).clone()),
+                                span: espan,
+                            },
+                            src_path.clone(),
+                        );
                     }
                 },
-                _ => statements.push(stmt.clone()),
+                _ => merge_push(
+                    &mut statements,
+                    &mut statement_sources,
+                    stmt.clone(),
+                    src_path.clone(),
+                ),
             }
         }
     }
-    Ok(Program { statements })
+    Ok(MergedProgram {
+        program: Program { statements },
+        statement_sources,
+    })
 }
 
 #[cfg(test)]
@@ -1088,7 +1165,7 @@ mod cargo_spec_tests {
         std::fs::write(&p, src).unwrap();
         let root = dir.path();
         let modules = resolve_project(&p, Some(root)).unwrap();
-        merge_modules(modules).unwrap();
+        let _ = merge_modules(modules).unwrap();
     }
 
     #[test]

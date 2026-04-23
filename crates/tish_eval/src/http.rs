@@ -1,6 +1,7 @@
 //! HTTP server for the Tish interpreter. Client `fetch` uses `tishlang_runtime` from eval.
 
 use crate::value::{PropMap, Value};
+use std::fs::File;
 use std::sync::Arc;
 
 use tokio::runtime::Runtime;
@@ -99,6 +100,66 @@ pub fn value_to_response(value: &Value) -> (u16, Vec<(String, String)>, String) 
     };
 
     (status, headers, body)
+}
+
+/// If the response value has a `file` key, stream that path (binary-safe). Matches `tishlang_runtime` HTTP behavior.
+pub(crate) fn extract_file_from_response(value: &Value) -> Option<(u16, Vec<(String, String)>, String)> {
+    let Value::Object(obj) = value else {
+        return None;
+    };
+    let obj_ref = obj.borrow();
+    let file_val = obj_ref.get(&Arc::from("file"))?;
+    let Value::String(file_path) = file_val else {
+        return None;
+    };
+    let file_path = file_path.to_string();
+    let status = obj_ref
+        .get(&Arc::from("status"))
+        .and_then(|v| match v {
+            Value::Number(n) => Some(*n as u16),
+            _ => None,
+        })
+        .unwrap_or(200);
+    let headers = obj_ref
+        .get(&Arc::from("headers"))
+        .and_then(|v| match v {
+            Value::Object(h) => Some(
+                h.borrow()
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    Some((status, headers, file_path))
+}
+
+pub(crate) fn send_file_response(
+    request: tiny_http::Request,
+    status: u16,
+    headers: Vec<(String, String)>,
+    file_path: String,
+) {
+    let file = match File::open(&file_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to open file {}: {}", file_path, e);
+            let fallback =
+                tiny_http::Response::from_string(format!("File not found: {}", file_path))
+                    .with_status_code(tiny_http::StatusCode(500));
+            let _ = request.respond(fallback);
+            return;
+        }
+    };
+    let status_code = tiny_http::StatusCode(status);
+    let mut response = tiny_http::Response::from_file(file).with_status_code(status_code);
+    for (key, value) in headers {
+        if let Ok(header) = tiny_http::Header::from_bytes(key.as_bytes(), value.as_bytes()) {
+            response = response.with_header(header);
+        }
+    }
+    let _ = request.respond(response);
 }
 
 /// Send a response using tiny_http.

@@ -30,6 +30,7 @@ pub enum TypeAnnotation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedParam {
     pub name: Arc<str>,
+    pub name_span: Span,
     pub type_ann: Option<TypeAnnotation>,
     pub default: Option<Expr>,
 }
@@ -64,11 +65,11 @@ impl FunParam {
                 for el in elements {
                     if let Some(el) = el {
                         match el {
-                            DestructElement::Ident(n) => out.push(Arc::clone(n)),
+                            DestructElement::Ident(n, _) => out.push(Arc::clone(n)),
                             DestructElement::Pattern(p) => {
                                 Self::collect_pattern_binding_names(p, out);
                             }
-                            DestructElement::Rest(n) => out.push(Arc::clone(n)),
+                            DestructElement::Rest(n, _) => out.push(Arc::clone(n)),
                         }
                     }
                 }
@@ -76,11 +77,11 @@ impl FunParam {
             DestructPattern::Object(props) => {
                 for prop in props {
                     match &prop.value {
-                        DestructElement::Ident(n) => out.push(Arc::clone(n)),
+                        DestructElement::Ident(n, _) => out.push(Arc::clone(n)),
                         DestructElement::Pattern(p) => {
                             Self::collect_pattern_binding_names(p, out);
                         }
-                        DestructElement::Rest(n) => out.push(Arc::clone(n)),
+                        DestructElement::Rest(n, _) => out.push(Arc::clone(n)),
                     }
                 }
             }
@@ -101,11 +102,11 @@ pub enum DestructPattern {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DestructElement {
     /// Simple binding: a
-    Ident(Arc<str>),
+    Ident(Arc<str>, Span),
     /// Nested pattern: [a, b] or { x, y }
     Pattern(Box<DestructPattern>),
     /// Rest element: ...rest
-    Rest(Arc<str>),
+    Rest(Arc<str>, Span),
 }
 
 /// Property in object destructuring pattern
@@ -123,12 +124,20 @@ pub enum ImportSpecifier {
     /// Named: { foo } or { foo as bar }
     Named {
         name: Arc<str>,
+        name_span: Span,
         alias: Option<Arc<str>>,
+        alias_span: Option<Span>,
     },
     /// Namespace: * as M
-    Namespace(Arc<str>),
+    Namespace {
+        name: Arc<str>,
+        name_span: Span,
+    },
     /// Default: import X from "..."
-    Default(Arc<str>),
+    Default {
+        name: Arc<str>,
+        name_span: Span,
+    },
 }
 
 /// Export declaration: named (const/let/fn) or default
@@ -153,6 +162,7 @@ pub enum Statement {
     },
     VarDecl {
         name: Arc<str>,
+        name_span: Span,
         mutable: bool, // true for `let`, false for `const`
         type_ann: Option<TypeAnnotation>,
         init: Option<Expr>,
@@ -189,6 +199,7 @@ pub enum Statement {
     },
     ForOf {
         name: Arc<str>,
+        name_span: Span,
         iterable: Expr,
         body: Box<Statement>,
         span: Span,
@@ -206,6 +217,7 @@ pub enum Statement {
     FunDecl {
         async_: bool,
         name: Arc<str>,
+        name_span: Span,
         params: Vec<FunParam>,
         rest_param: Option<TypedParam>,
         return_type: Option<TypeAnnotation>,
@@ -230,6 +242,7 @@ pub enum Statement {
     Try {
         body: Box<Statement>,
         catch_param: Option<Arc<str>>,
+        catch_param_span: Option<Span>,
         catch_body: Option<Box<Statement>>,
         finally_body: Option<Box<Statement>>,
         span: Span,
@@ -241,6 +254,31 @@ pub enum Statement {
     },
     Export {
         declaration: Box<ExportDeclaration>,
+        span: Span,
+    },
+    /// `type Name = Type` (erased at runtime; for checker / declaration files).
+    TypeAlias {
+        name: Arc<str>,
+        name_span: Span,
+        ty: TypeAnnotation,
+        span: Span,
+    },
+    /// `declare let name: T` or `declare const name: T`
+    DeclareVar {
+        name: Arc<str>,
+        name_span: Span,
+        type_ann: Option<TypeAnnotation>,
+        const_: bool,
+        span: Span,
+    },
+    /// `declare [async] function name(...): R` (no body).
+    DeclareFun {
+        async_: bool,
+        name: Arc<str>,
+        name_span: Span,
+        params: Vec<FunParam>,
+        rest_param: Option<TypedParam>,
+        return_type: Option<TypeAnnotation>,
         span: Span,
     },
 }
@@ -550,6 +588,39 @@ pub enum UnaryOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MemberProp {
-    Name(Arc<str>),
+    /// Property name in `obj.prop` / `obj?.prop` (span covers **prop** only).
+    Name {
+        name: Arc<str>,
+        span: Span,
+    },
     Expr(Box<Expr>), // for computed property
+}
+
+impl Statement {
+    /// Source span covering this statement (including nested bodies where applicable).
+    pub fn span(&self) -> Span {
+        match self {
+            Statement::Block { span, .. }
+            | Statement::VarDecl { span, .. }
+            | Statement::VarDeclDestructure { span, .. }
+            | Statement::ExprStmt { span, .. }
+            | Statement::If { span, .. }
+            | Statement::While { span, .. }
+            | Statement::For { span, .. }
+            | Statement::ForOf { span, .. }
+            | Statement::Return { span, .. }
+            | Statement::Break { span, .. }
+            | Statement::Continue { span, .. }
+            | Statement::FunDecl { span, .. }
+            | Statement::Switch { span, .. }
+            | Statement::DoWhile { span, .. }
+            | Statement::Throw { span, .. }
+            | Statement::Try { span, .. }
+            |             Statement::Import { span, .. }
+            | Statement::Export { span, .. }
+            | Statement::TypeAlias { span, .. }
+            | Statement::DeclareVar { span, .. }
+            | Statement::DeclareFun { span, .. } => *span,
+        }
+    }
 }

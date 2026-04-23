@@ -1,0 +1,13 @@
+[package]
+name = "tishlang_resolve"
+version = "0.1.1"
+edition = "2021"
+description = "Lexical name resolution for Tish (LSP, tooling)"
+license-file = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+tishlang_ast = { path = "../tish_ast", version = ">=0.1" }
+
+[dev-dependencies]
+tishlang_parser = { path = "../tish_parser", version = ">=0.1" }

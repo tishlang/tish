@@ -120,7 +120,9 @@ fn merged_module_program_bytecode_matches_parse_for_string_or_fixture() {
     let src = std::fs::read_to_string(&fixture).expect("read fixture");
     let modules = tishlang_compile::resolve_project(&fixture, Some(fixture.parent().unwrap()))
         .expect("resolve");
-    let merged = tishlang_compile::merge_modules(modules).expect("merge");
+    let merged = tishlang_compile::merge_modules(modules)
+        .expect("merge")
+        .program;
     let flat = tishlang_parser::parse(&src).expect("parse");
     let m_opt = tishlang_opt::optimize(&merged);
     let f_opt = tishlang_opt::optimize(&flat);

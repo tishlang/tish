@@ -11,11 +11,13 @@ default = []
 regex = ["tishlang_core/regex"]
 # For wasm32 target: use web_sys console for output
 wasm = ["dep:wasm-bindgen"]
-# Built-in modules: fs, http, process (for bytecode LoadNativeExport)
-fs = ["tishlang_runtime/fs"]
-process = ["tishlang_runtime/process"]
-http = ["tishlang_runtime/http"]
-ws = ["tishlang_runtime/ws"]
+# Built-in modules: fs, http, process (for bytecode LoadNativeExport).
+# `dep:tishlang_runtime` is required so enabling e.g. `http` always activates the optional runtime crate
+# (some Cargo/cache combinations only saw `tishlang_runtime/http` and built VM stubs without http).
+fs = ["dep:tishlang_runtime", "tishlang_runtime/fs"]
+process = ["dep:tishlang_runtime", "tishlang_runtime/process"]
+http = ["dep:tishlang_runtime", "tishlang_runtime/http"]
+ws = ["dep:tishlang_runtime", "tishlang_runtime/ws"]
 
 [dependencies]
 tishlang_ast = { path = "../tish_ast", version = ">=0.1" }

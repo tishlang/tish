@@ -1,0 +1,155 @@
+// Canonical ambient declarations for Tish globals, namespaces, and timers.
+//
+// LSP "Go to definition" for built-ins is driven by lines of the form:
+//   // @tish-source <symbol> <path-from-repo-root> <1-based-line>
+//
+// Symbols may be dotted (`console.log`, `Math.abs`). Paths are relative to the
+// `tishlang/tish` repository root (same layout as `tish_eval`, `tish_ui`, etc.).
+
+// --- @tish-source anchors (keep in sync with interpreter / runtime) ---
+
+// @tish-source console crates/tish_eval/src/eval.rs 100
+// @tish-source console.debug crates/tish_eval/src/natives.rs 12
+// @tish-source console.info crates/tish_eval/src/natives.rs 20
+// @tish-source console.log crates/tish_eval/src/natives.rs 28
+// @tish-source console.warn crates/tish_eval/src/natives.rs 36
+// @tish-source console.error crates/tish_eval/src/natives.rs 44
+
+// @tish-source parseInt crates/tish_eval/src/eval.rs 104
+// @tish-source parseFloat crates/tish_eval/src/eval.rs 106
+// @tish-source decodeURI crates/tish_eval/src/eval.rs 110
+// @tish-source encodeURI crates/tish_eval/src/eval.rs 111
+// @tish-source Boolean crates/tish_eval/src/eval.rs 113
+// @tish-source isFinite crates/tish_eval/src/eval.rs 117
+// @tish-source isNaN crates/tish_eval/src/eval.rs 118
+// @tish-source Infinity crates/tish_eval/src/eval.rs 119
+// @tish-source NaN crates/tish_eval/src/eval.rs 120
+
+// @tish-source Math crates/tish_eval/src/eval.rs 141
+// @tish-source Math.abs crates/tish_eval/src/natives.rs 118
+// @tish-source Math.sqrt crates/tish_eval/src/natives.rs 124
+// @tish-source Math.min crates/tish_eval/src/natives.rs 130
+// @tish-source Math.max crates/tish_eval/src/natives.rs 142
+// @tish-source Math.floor crates/tish_eval/src/natives.rs 158
+// @tish-source Math.ceil crates/tish_eval/src/natives.rs 164
+// @tish-source Math.round crates/tish_eval/src/natives.rs 170
+// @tish-source Math.random crates/tish_eval/src/natives.rs 176
+// @tish-source Math.pow crates/tish_eval/src/natives.rs 183
+// @tish-source Math.sin crates/tish_eval/src/natives.rs 189
+// @tish-source Math.cos crates/tish_eval/src/natives.rs 195
+// @tish-source Math.tan crates/tish_eval/src/natives.rs 201
+// @tish-source Math.log crates/tish_eval/src/natives.rs 207
+// @tish-source Math.exp crates/tish_eval/src/natives.rs 213
+// @tish-source Math.sign crates/tish_eval/src/natives.rs 219
+// @tish-source Math.trunc crates/tish_eval/src/natives.rs 233
+// @tish-source Math.PI crates/tish_eval/src/eval.rs 138
+// @tish-source Math.E crates/tish_eval/src/eval.rs 139
+
+// @tish-source JSON crates/tish_eval/src/eval.rs 153
+// @tish-source JSON.parse crates/tish_eval/src/eval.rs 3257
+// @tish-source JSON.stringify crates/tish_eval/src/eval.rs 3262
+
+// @tish-source Object crates/tish_eval/src/eval.rs 168
+// @tish-source Object.keys crates/tish_eval/src/eval.rs 3267
+// @tish-source Object.values crates/tish_eval/src/eval.rs 3280
+// @tish-source Object.entries crates/tish_eval/src/eval.rs 3289
+// @tish-source Object.assign crates/tish_eval/src/eval.rs 3307
+// @tish-source Object.fromEntries crates/tish_eval/src/eval.rs 3324
+
+// @tish-source Array crates/tish_eval/src/eval.rs 176
+// @tish-source Array.isArray crates/tish_eval/src/natives.rs 248
+
+// @tish-source String crates/tish_eval/src/eval.rs 187
+// @tish-source String.fromCharCode crates/tish_eval/src/natives.rs 252
+
+// @tish-source Date crates/tish_eval/src/eval.rs 195
+// @tish-source Date.now crates/tish_eval/src/natives.rs 239
+
+// @tish-source Uint8Array crates/tish_eval/src/eval.rs 200
+// @tish-source AudioContext crates/tish_eval/src/eval.rs 207
+// @tish-source RegExp crates/tish_eval/src/eval.rs 218
+
+// @tish-source setTimeout crates/tish_eval/src/timers.rs 31
+// @tish-source setInterval crates/tish_eval/src/timers.rs 50
+// @tish-source clearTimeout crates/tish_eval/src/timers.rs 69
+// @tish-source clearInterval crates/tish_eval/src/timers.rs 69
+
+// @tish-source Fragment crates/tish_ui/src/jsx.rs 56
+// @tish-source div crates/tish_ui/src/runtime/mod.rs 41
+
+// --- types (checker / editor; no runtime effect) ---
+
+type AnyFn = (any) => any
+
+declare let console: {
+  debug: AnyFn,
+  info: AnyFn,
+  log: AnyFn,
+  warn: AnyFn,
+  error: AnyFn,
+}
+
+declare const Math: {
+  abs: AnyFn,
+  sqrt: AnyFn,
+  min: AnyFn,
+  max: AnyFn,
+  floor: AnyFn,
+  ceil: AnyFn,
+  round: AnyFn,
+  random: AnyFn,
+  pow: AnyFn,
+  sin: AnyFn,
+  cos: AnyFn,
+  tan: AnyFn,
+  log: AnyFn,
+  exp: AnyFn,
+  sign: AnyFn,
+  trunc: AnyFn,
+  PI: number,
+  E: number,
+}
+
+declare const JSON: {
+  parse: AnyFn,
+  stringify: AnyFn,
+}
+
+declare const Object: {
+  keys: AnyFn,
+  values: AnyFn,
+  entries: AnyFn,
+  assign: AnyFn,
+  fromEntries: AnyFn,
+}
+
+declare const Array: {
+  isArray: AnyFn,
+}
+
+declare const String: {
+  fromCharCode: AnyFn,
+}
+
+declare const Date: {
+  now: AnyFn,
+}
+
+declare let parseInt: AnyFn
+declare let parseFloat: AnyFn
+declare let decodeURI: AnyFn
+declare let encodeURI: AnyFn
+declare let Boolean: AnyFn
+declare let isFinite: AnyFn
+declare let isNaN: AnyFn
+declare const Infinity: number
+declare const NaN: number
+
+declare let Uint8Array: any
+declare let AudioContext: any
+declare let RegExp: any
+
+declare function setTimeout(callback: any, delay: number): number
+declare function setInterval(callback: any, delay: number): number
+declare function clearTimeout(id: number): void
+declare function clearInterval(id: number): void

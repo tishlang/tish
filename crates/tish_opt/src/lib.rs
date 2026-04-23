@@ -25,12 +25,14 @@ fn optimize_statement(stmt: &Statement) -> Statement {
         }
         Statement::VarDecl {
             name,
+            name_span,
             mutable,
             type_ann,
             init,
             span,
         } => Statement::VarDecl {
             name: Arc::clone(name),
+            name_span: *name_span,
             mutable: *mutable,
             type_ann: type_ann.clone(),
             init: init.as_ref().map(optimize_expr),
@@ -101,11 +103,13 @@ fn optimize_statement(stmt: &Statement) -> Statement {
         },
         Statement::ForOf {
             name,
+            name_span,
             iterable,
             body,
             span,
         } => Statement::ForOf {
             name: Arc::clone(name),
+            name_span: *name_span,
             iterable: optimize_expr(iterable),
             body: Box::new(optimize_statement(body)),
             span: *span,
@@ -119,6 +123,7 @@ fn optimize_statement(stmt: &Statement) -> Statement {
         Statement::FunDecl {
             async_,
             name,
+            name_span,
             params,
             rest_param,
             return_type,
@@ -127,6 +132,7 @@ fn optimize_statement(stmt: &Statement) -> Statement {
         } => Statement::FunDecl {
             async_: *async_,
             name: Arc::clone(name),
+            name_span: *name_span,
             params: params.clone(),
             rest_param: rest_param.clone(),
             return_type: return_type.clone(),
@@ -159,19 +165,25 @@ fn optimize_statement(stmt: &Statement) -> Statement {
         Statement::Try {
             body,
             catch_param,
+            catch_param_span,
             catch_body,
             finally_body,
             span,
         } => Statement::Try {
             body: Box::new(optimize_statement(body)),
             catch_param: catch_param.clone(),
+            catch_param_span: *catch_param_span,
             catch_body: catch_body.as_ref().map(|b| Box::new(optimize_statement(b))),
             finally_body: finally_body
                 .as_ref()
                 .map(|b| Box::new(optimize_statement(b))),
             span: *span,
         },
-        Statement::Import { .. } | Statement::Export { .. } => stmt.clone(),
+        Statement::Import { .. }
+        | Statement::Export { .. }
+        | Statement::TypeAlias { .. }
+        | Statement::DeclareVar { .. }
+        | Statement::DeclareFun { .. } => stmt.clone(),
     }
 }
 
@@ -354,7 +366,10 @@ fn optimize_expr(expr: &Expr) -> Expr {
         } => {
             let opt_obj = optimize_expr(object);
             let opt_prop = match prop {
-                tishlang_ast::MemberProp::Name(n) => tishlang_ast::MemberProp::Name(Arc::clone(n)),
+                tishlang_ast::MemberProp::Name { name, span } => tishlang_ast::MemberProp::Name {
+                    name: Arc::clone(name),
+                    span: *span,
+                },
                 tishlang_ast::MemberProp::Expr(e) => {
                     tishlang_ast::MemberProp::Expr(Box::new(optimize_expr(e)))
                 }

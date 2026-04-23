@@ -159,6 +159,8 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Import => self.parse_import()?,
             TokenKind::Export => self.parse_export()?,
+            TokenKind::Type => self.parse_type_alias()?,
+            TokenKind::Declare => self.parse_declare()?,
             _ => {
                 let expr = self.parse_expr()?;
                 let span_end = expr.span().end;
@@ -216,11 +218,26 @@ impl<'a> Parser<'a> {
             self.advance();
         }
 
+        let peek_end = self.peek().map(|x| x.span.end);
+        let last_end = statements.last().map(|s| s.span().end);
+        let end = match (peek_end, last_end) {
+            (Some(p), Some(l)) => {
+                if p.0 > l.0 || (p.0 == l.0 && p.1 > l.1) {
+                    p
+                } else {
+                    l
+                }
+            }
+            (Some(p), None) => p,
+            (None, Some(l)) => l,
+            (None, None) => span_start,
+        };
+
         Ok(Statement::Block {
             statements,
             span: Span {
                 start: span_start,
-                end: self.peek().map(|x| x.span.end).unwrap_or(span_start),
+                end,
             },
         })
     }
@@ -248,8 +265,12 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let name = self
-            .expect(TokenKind::Ident)?
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let name_span = Span {
+            start: name_tok.span.start,
+            end: name_tok.span.end,
+        };
+        let name = name_tok
             .literal
             .clone()
             .ok_or("Expected identifier")?;
@@ -270,6 +291,7 @@ impl<'a> Parser<'a> {
         };
         Ok(Statement::VarDecl {
             name,
+            name_span,
             mutable,
             type_ann,
             init,
@@ -300,12 +322,16 @@ impl<'a> Parser<'a> {
             // Rest element: ...rest
             if matches!(self.peek_kind(), Some(TokenKind::Spread)) {
                 self.advance();
-                let name = self
-                    .expect(TokenKind::Ident)?
+                let name_tok = self.expect(TokenKind::Ident)?;
+                let name_span = Span {
+                    start: name_tok.span.start,
+                    end: name_tok.span.end,
+                };
+                let name = name_tok
                     .literal
                     .clone()
                     .ok_or("Expected identifier")?;
-                elements.push(Some(DestructElement::Rest(name)));
+                elements.push(Some(DestructElement::Rest(name, name_span)));
                 break;
             }
 
@@ -316,13 +342,16 @@ impl<'a> Parser<'a> {
                     DestructElement::Pattern(Box::new(nested))
                 }
                 Some(TokenKind::Ident) => {
-                    let name = self
-                        .advance()
-                        .ok_or("Unexpected EOF")?
+                    let name_tok = self.advance().ok_or("Unexpected EOF")?;
+                    let name_span = Span {
+                        start: name_tok.span.start,
+                        end: name_tok.span.end,
+                    };
+                    let name = name_tok
                         .literal
                         .clone()
                         .ok_or("Expected identifier")?;
-                    DestructElement::Ident(name)
+                    DestructElement::Ident(name, name_span)
                 }
                 _ => return Err("Expected identifier or pattern in destructuring".to_string()),
             };
@@ -344,8 +373,12 @@ impl<'a> Parser<'a> {
         let mut props = Vec::new();
 
         while !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
-            let key = self
-                .expect(TokenKind::Ident)?
+            let key_tok = self.expect(TokenKind::Ident)?;
+            let key_span = Span {
+                start: key_tok.span.start,
+                end: key_tok.span.end,
+            };
+            let key = key_tok
                 .literal
                 .clone()
                 .ok_or("Expected identifier")?;
@@ -359,19 +392,22 @@ impl<'a> Parser<'a> {
                         DestructElement::Pattern(Box::new(nested))
                     }
                     Some(TokenKind::Ident) => {
-                        let name = self
-                            .advance()
-                            .ok_or("Unexpected EOF")?
+                        let name_tok = self.advance().ok_or("Unexpected EOF")?;
+                        let name_span = Span {
+                            start: name_tok.span.start,
+                            end: name_tok.span.end,
+                        };
+                        let name = name_tok
                             .literal
                             .clone()
                             .ok_or("Expected identifier")?;
-                        DestructElement::Ident(name)
+                        DestructElement::Ident(name, name_span)
                     }
                     _ => return Err("Expected identifier or pattern after ':'".to_string()),
                 }
             } else {
                 // Shorthand: { key } is equivalent to { key: key }
-                DestructElement::Ident(key.clone())
+                DestructElement::Ident(key.clone(), key_span)
             };
 
             props.push(DestructProp { key, value });
@@ -412,8 +448,12 @@ impl<'a> Parser<'a> {
                 default,
             });
         }
-        let param_name = self
-            .expect(TokenKind::Ident)?
+        let param_tok = self.expect(TokenKind::Ident)?;
+        let name_span = Span {
+            start: param_tok.span.start,
+            end: param_tok.span.end,
+        };
+        let param_name = param_tok
             .literal
             .clone()
             .ok_or("Expected param name")?;
@@ -431,6 +471,7 @@ impl<'a> Parser<'a> {
         };
         Ok(FunParam::Simple(TypedParam {
             name: param_name,
+            name_span,
             type_ann,
             default,
         }))
@@ -464,6 +505,11 @@ impl<'a> Parser<'a> {
     fn parse_type_primary(&mut self) -> Result<TypeAnnotation, String> {
         match self.peek_kind() {
             Some(TokenKind::Ident) => {
+                let tok = self.advance().ok_or("Expected type name")?;
+                let name = tok.literal.clone().ok_or("Expected type name")?;
+                Ok(TypeAnnotation::Simple(name))
+            }
+            Some(TokenKind::Type | TokenKind::Declare) => {
                 let tok = self.advance().ok_or("Expected type name")?;
                 let name = tok.literal.clone().ok_or("Expected type name")?;
                 Ok(TypeAnnotation::Simple(name))
@@ -511,9 +557,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(TokenKind::RParen)?;
-                // Expect => for return type
-                self.expect(TokenKind::Assign)?; // =
-                self.expect(TokenKind::Gt)?; // > (forms =>)
+                self.expect(TokenKind::Arrow)?;
                 let returns = self.parse_type_annotation()?;
                 Ok(TypeAnnotation::Function {
                     params,
@@ -526,8 +570,12 @@ impl<'a> Parser<'a> {
 
     fn parse_fun_decl(&mut self, async_: bool) -> Result<Statement, String> {
         let span_start = self.expect(TokenKind::Fn)?.span.start;
-        let name = self
-            .expect(TokenKind::Ident)?
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let name_span = Span {
+            start: name_tok.span.start,
+            end: name_tok.span.end,
+        };
+        let name = name_tok
             .literal
             .clone()
             .ok_or("Expected function name")?;
@@ -537,8 +585,12 @@ impl<'a> Parser<'a> {
         while !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
             if matches!(self.peek_kind(), Some(TokenKind::Spread)) {
                 self.advance();
-                let param_name = self
-                    .expect(TokenKind::Ident)?
+                let rest_tok = self.expect(TokenKind::Ident)?;
+                let rest_name_span = Span {
+                    start: rest_tok.span.start,
+                    end: rest_tok.span.end,
+                };
+                let param_name = rest_tok
                     .literal
                     .clone()
                     .ok_or("Expected rest param name")?;
@@ -551,6 +603,7 @@ impl<'a> Parser<'a> {
                 };
                 rest_param = Some(TypedParam {
                     name: param_name,
+                    name_span: rest_name_span,
                     type_ann,
                     default: None,
                 });
@@ -589,13 +642,182 @@ impl<'a> Parser<'a> {
             Box::new(self.parse_block()?)
         };
 
+        // Span must cover the whole declaration through the body. `peek().start` alone can sit on
+        // the opening `{` (same as `span_start` at EOF) or otherwise truncate before inner spans.
+        let peek_start = self.peek().map(|t| t.span.start).unwrap_or(span_start);
+        let body_end = body.as_ref().span().end;
+        let end = if peek_start.0 > body_end.0
+            || (peek_start.0 == body_end.0 && peek_start.1 > body_end.1)
+        {
+            peek_start
+        } else {
+            body_end
+        };
+
         Ok(Statement::FunDecl {
             async_,
             name,
+            name_span,
             params,
             rest_param,
             return_type,
             body,
+            span: Span {
+                start: span_start,
+                end,
+            },
+        })
+    }
+
+    fn parse_type_alias(&mut self) -> Result<Statement, String> {
+        let span_start = self.expect(TokenKind::Type)?.span.start;
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let name_span = Span {
+            start: name_tok.span.start,
+            end: name_tok.span.end,
+        };
+        let name = name_tok
+            .literal
+            .clone()
+            .ok_or("Expected type alias name")?;
+        self.expect(TokenKind::Assign)?;
+        let ty = self.parse_type_annotation()?;
+        Ok(Statement::TypeAlias {
+            name,
+            name_span,
+            ty,
+            span: self.span_end(span_start),
+        })
+    }
+
+    fn parse_declare(&mut self) -> Result<Statement, String> {
+        let span_start = self.expect(TokenKind::Declare)?.span.start;
+        let async_ = if matches!(self.peek_kind(), Some(TokenKind::Async)) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        if matches!(self.peek_kind(), Some(TokenKind::Fn)) {
+            return self.parse_declare_fun(span_start, async_);
+        }
+        let const_ = match self.peek_kind() {
+            Some(TokenKind::Let) => {
+                self.advance();
+                false
+            }
+            Some(TokenKind::Const) => {
+                self.advance();
+                true
+            }
+            _ => {
+                return Err(
+                    "Expected `let`, `const`, `async fn`, or `fn` after `declare`".to_string(),
+                );
+            }
+        };
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let name_span = Span {
+            start: name_tok.span.start,
+            end: name_tok.span.end,
+        };
+        let name = name_tok
+            .literal
+            .clone()
+            .ok_or("Expected identifier")?;
+        let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+            self.advance();
+            Some(self.parse_type_annotation()?)
+        } else {
+            None
+        };
+        if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
+            return Err("`declare` cannot have an initializer".to_string());
+        }
+        Ok(Statement::DeclareVar {
+            name,
+            name_span,
+            type_ann,
+            const_,
+            span: self.span_end(span_start),
+        })
+    }
+
+    fn parse_declare_fun(
+        &mut self,
+        span_start: (usize, usize),
+        async_: bool,
+    ) -> Result<Statement, String> {
+        self.expect(TokenKind::Fn)?;
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let name_span = Span {
+            start: name_tok.span.start,
+            end: name_tok.span.end,
+        };
+        let name = name_tok
+            .literal
+            .clone()
+            .ok_or("Expected function name")?;
+        self.expect(TokenKind::LParen)?;
+        let mut params = Vec::with_capacity(4);
+        let mut rest_param = None;
+        while !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+            if matches!(self.peek_kind(), Some(TokenKind::Spread)) {
+                self.advance();
+                let rest_tok = self.expect(TokenKind::Ident)?;
+                let rest_name_span = Span {
+                    start: rest_tok.span.start,
+                    end: rest_tok.span.end,
+                };
+                let param_name = rest_tok
+                    .literal
+                    .clone()
+                    .ok_or("Expected rest param name")?;
+                let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+                    self.advance();
+                    Some(self.parse_type_annotation()?)
+                } else {
+                    None
+                };
+                rest_param = Some(TypedParam {
+                    name: param_name,
+                    name_span: rest_name_span,
+                    type_ann,
+                    default: None,
+                });
+                if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+                    return Err("Rest parameter must be last".to_string());
+                }
+                break;
+            }
+            params.push(self.parse_fun_param()?);
+            if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+                self.expect(TokenKind::Comma)?;
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        let return_type = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+            self.advance();
+            Some(self.parse_type_annotation()?)
+        } else {
+            None
+        };
+        if matches!(
+            self.peek_kind(),
+            Some(TokenKind::Assign | TokenKind::LBrace | TokenKind::Indent)
+        ) {
+            return Err("`declare function` must not have a body".to_string());
+        }
+        if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
+            self.advance();
+        }
+        Ok(Statement::DeclareFun {
+            async_,
+            name,
+            name_span,
+            params,
+            rest_param,
+            return_type,
             span: self.span_end(span_start),
         })
     }
@@ -640,8 +862,12 @@ impl<'a> Parser<'a> {
             let mutable = matches!(self.peek_kind(), Some(TokenKind::Let));
             let var_span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
             self.advance();
-            let name = self
-                .expect(TokenKind::Ident)?
+            let for_name_tok = self.expect(TokenKind::Ident)?;
+            let name_span = Span {
+                start: for_name_tok.span.start,
+                end: for_name_tok.span.end,
+            };
+            let name = for_name_tok
                 .literal
                 .clone()
                 .ok_or("Expected identifier")?;
@@ -652,6 +878,7 @@ impl<'a> Parser<'a> {
                 let body = Box::new(self.parse_block_or_statement()?);
                 return Ok(Statement::ForOf {
                     name,
+                    name_span,
                     iterable,
                     body,
                     span: self.span_end(span_start),
@@ -674,6 +901,7 @@ impl<'a> Parser<'a> {
             }
             Some(Box::new(Statement::VarDecl {
                 name,
+                name_span,
                 mutable,
                 type_ann,
                 init: init_expr,
@@ -815,13 +1043,19 @@ impl<'a> Parser<'a> {
         let body = Box::new(self.parse_block_or_statement()?);
 
         let mut catch_param = None;
+        let mut catch_param_span = None;
         let mut catch_body = None;
         let mut finally_body = None;
 
         if matches!(self.peek_kind(), Some(TokenKind::Catch)) {
             self.advance();
             self.expect(TokenKind::LParen)?;
-            catch_param = self.expect(TokenKind::Ident)?.literal.clone();
+            let catch_tok = self.expect(TokenKind::Ident)?;
+            catch_param_span = Some(Span {
+                start: catch_tok.span.start,
+                end: catch_tok.span.end,
+            });
+            catch_param = catch_tok.literal.clone();
             self.expect(TokenKind::RParen)?;
             catch_body = Some(Box::new(self.parse_block_or_statement()?));
         }
@@ -838,6 +1072,7 @@ impl<'a> Parser<'a> {
         Ok(Statement::Try {
             body,
             catch_param,
+            catch_param_span,
             catch_body,
             finally_body,
             span: self.span_end(span_start),
@@ -851,25 +1086,42 @@ impl<'a> Parser<'a> {
             self.advance();
             let mut specs = Vec::new();
             while !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
-                let name = self
-                    .expect(TokenKind::Ident)?
+                let name_tok = self.expect(TokenKind::Ident)?;
+                let name_span = Span {
+                    start: name_tok.span.start,
+                    end: name_tok.span.end,
+                };
+                let name = name_tok
                     .literal
                     .clone()
                     .ok_or("Expected identifier in import")?;
-                let alias = if matches!(self.peek_kind(), Some(TokenKind::Ident))
+                let (alias, alias_span) = if matches!(self.peek_kind(), Some(TokenKind::Ident))
                     && self.peek().and_then(|t| t.literal.as_deref()) == Some("as")
                 {
                     self.advance(); // consume 'as'
-                    Some(
-                        self.expect(TokenKind::Ident)?
-                            .literal
-                            .clone()
-                            .ok_or("Expected alias after 'as'")?,
+                    let alias_tok = self.expect(TokenKind::Ident)?;
+                    let asp = Span {
+                        start: alias_tok.span.start,
+                        end: alias_tok.span.end,
+                    };
+                    (
+                        Some(
+                            alias_tok
+                                .literal
+                                .clone()
+                                .ok_or("Expected alias after 'as'")?,
+                        ),
+                        Some(asp),
                     )
                 } else {
-                    None
+                    (None, None)
                 };
-                specs.push(ImportSpecifier::Named { name, alias });
+                specs.push(ImportSpecifier::Named {
+                    name,
+                    name_span,
+                    alias,
+                    alias_span,
+                });
                 if !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
                     self.expect(TokenKind::Comma)?;
                 }
@@ -883,20 +1135,31 @@ impl<'a> Parser<'a> {
             if as_tok.literal.as_deref() != Some("as") {
                 return Err("Expected 'as' after '*' in namespace import".to_string());
             }
-            let alias = self
-                .expect(TokenKind::Ident)?
+            let alias_tok = self.expect(TokenKind::Ident)?;
+            let name_span = Span {
+                start: alias_tok.span.start,
+                end: alias_tok.span.end,
+            };
+            let alias = alias_tok
                 .literal
                 .clone()
                 .ok_or("Expected identifier after 'as'")?;
-            vec![ImportSpecifier::Namespace(alias)]
+            vec![ImportSpecifier::Namespace {
+                name: alias,
+                name_span,
+            }]
         } else if matches!(self.peek_kind(), Some(TokenKind::Ident)) {
             // Default: import X from "..."
-            let name = self
-                .expect(TokenKind::Ident)?
+            let def_tok = self.expect(TokenKind::Ident)?;
+            let name_span = Span {
+                start: def_tok.span.start,
+                end: def_tok.span.end,
+            };
+            let name = def_tok
                 .literal
                 .clone()
                 .ok_or("Expected identifier")?;
-            vec![ImportSpecifier::Default(name)]
+            vec![ImportSpecifier::Default { name, name_span }]
         } else {
             return Err("Expected { }, * as name, or default import".to_string());
         };
@@ -922,6 +1185,10 @@ impl<'a> Parser<'a> {
             self.advance();
             let expr = self.parse_expr()?;
             ExportDeclaration::Default(expr)
+        } else if matches!(self.peek_kind(), Some(TokenKind::Type)) {
+            ExportDeclaration::Named(Box::new(self.parse_type_alias()?))
+        } else if matches!(self.peek_kind(), Some(TokenKind::Declare)) {
+            ExportDeclaration::Named(Box::new(self.parse_declare()?))
         } else if matches!(self.peek_kind(), Some(TokenKind::Const)) {
             ExportDeclaration::Named(Box::new(self.parse_var_decl(false)?))
         } else if matches!(self.peek_kind(), Some(TokenKind::Let)) {
@@ -935,7 +1202,10 @@ impl<'a> Parser<'a> {
             }
             ExportDeclaration::Named(Box::new(self.parse_fun_decl(async_)?))
         } else {
-            return Err("Expected 'default', 'const', 'let', or 'fn' after export".to_string());
+            return Err(
+                "Expected 'default', 'type', 'declare', 'const', 'let', or 'fn' after export"
+                    .to_string(),
+            );
         };
         Ok(Statement::Export {
             declaration: Box::new(declaration),
@@ -970,7 +1240,7 @@ impl<'a> Parser<'a> {
             // Member assignment: obj.prop = val
             if let Expr::Member {
                 object,
-                prop: MemberProp::Name(prop_name),
+                prop: MemberProp::Name { name: prop_name, .. },
                 ..
             } = &left
             {
@@ -1208,16 +1478,23 @@ impl<'a> Parser<'a> {
                 TokenKind::Dot | TokenKind::OptionalChain => {
                     let optional = kind == TokenKind::OptionalChain;
                     self.advance();
-                    let prop = self
-                        .expect(TokenKind::Ident)?
+                    let prop_tok = self.expect(TokenKind::Ident)?;
+                    let prop = prop_tok
                         .literal
                         .clone()
                         .ok_or("Expected property name")?;
+                    let prop_span = Span {
+                        start: prop_tok.span.start,
+                        end: prop_tok.span.end,
+                    };
                     let start = expr.span().start;
                     let end = self.peek().map(|x| x.span.start).unwrap_or(start);
                     expr = Expr::Member {
                         object: Box::new(expr),
-                        prop: MemberProp::Name(prop),
+                        prop: MemberProp::Name {
+                            name: prop,
+                            span: prop_span,
+                        },
                         optional,
                         span: Span { start, end },
                     };
@@ -1321,16 +1598,23 @@ impl<'a> Parser<'a> {
                 TokenKind::Dot | TokenKind::OptionalChain => {
                     let optional = kind == TokenKind::OptionalChain;
                     self.advance();
-                    let prop = self
-                        .expect(TokenKind::Ident)?
+                    let prop_tok = self.expect(TokenKind::Ident)?;
+                    let prop = prop_tok
                         .literal
                         .clone()
                         .ok_or("Expected property name")?;
+                    let prop_span = Span {
+                        start: prop_tok.span.start,
+                        end: prop_tok.span.end,
+                    };
                     let start = expr.span().start;
                     let end = self.peek().map(|x| x.span.start).unwrap_or(start);
                     expr = Expr::Member {
                         object: Box::new(expr),
-                        prop: MemberProp::Name(prop),
+                        prop: MemberProp::Name {
+                            name: prop,
+                            span: prop_span,
+                        },
                         optional,
                         span: Span { start, end },
                     };
@@ -1424,6 +1708,7 @@ impl<'a> Parser<'a> {
                     return Ok(Expr::ArrowFunction {
                         params: vec![FunParam::Simple(TypedParam {
                             name: name.clone(),
+                            name_span: span,
                             type_ann: None,
                             default: None,
                         })],
@@ -1491,7 +1776,7 @@ impl<'a> Parser<'a> {
                     } else {
                         let key_tok = self.advance().ok_or("Expected object key")?;
                         let (key, key_span, is_ident_key) = match key_tok.kind {
-                            TokenKind::Ident => {
+                            TokenKind::Ident | TokenKind::Type | TokenKind::Declare => {
                                 let k = key_tok.literal.clone().ok_or("Expected key")?;
                                 let sp = Span {
                                     start: key_tok.span.start,

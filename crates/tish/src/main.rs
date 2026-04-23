@@ -110,6 +110,7 @@ fn main() {
             &a.native_backend,
             &a.features,
             a.no_optimize || no_opt_env,
+            a.source_map,
         ),
         Some(Commands::DumpAst { file }) => dump_ast(&file),
         None => {
@@ -160,7 +161,7 @@ fn run_stdin_source(
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let modules = tishlang_compile::resolve_project_from_stdin(source, &cwd)?;
     tishlang_compile::detect_cycles(&modules)?;
-    let prog = tishlang_compile::merge_modules(modules)?;
+    let prog = tishlang_compile::merge_modules(modules)?.program;
     let program = if no_optimize {
         prog
     } else {
@@ -202,7 +203,7 @@ fn run_file(
         } else {
             let modules = tishlang_compile::resolve_project(&path, project_root)?;
             tishlang_compile::detect_cycles(&modules)?;
-            let prog = tishlang_compile::merge_modules(modules)?;
+            let prog = tishlang_compile::merge_modules(modules)?.program;
             if no_optimize {
                 prog
             } else {
@@ -455,7 +456,27 @@ fn tish_history_path() -> Option<PathBuf> {
     home.map(|h| PathBuf::from(h).join(".tish_history"))
 }
 
-fn compile_to_js(input_path: &Path, output_path: &str, optimize: bool) -> Result<(), String> {
+fn compile_to_js(
+    input_path: &Path,
+    output_path: &str,
+    optimize: bool,
+    source_map: bool,
+) -> Result<(), String> {
+    if source_map && optimize {
+        return Err(
+            "tish build --target js --source-map requires --no-optimize (mappings follow unmerged statement order)."
+                .into(),
+        );
+    }
+    if source_map
+        && (input_path.extension().map(|e| e == "jsx") == Some(true)
+            || input_path.extension().map(|e| e == "js") == Some(true))
+    {
+        return Err(
+            "tish build --target js --source-map is only supported for .tish project builds (not single-file .jsx / .js inputs)."
+                .into(),
+        );
+    }
     let project_root = input_path.parent().and_then(|p| {
         if p.file_name().and_then(|n| n.to_str()) == Some("src") {
             p.parent()
@@ -463,7 +484,20 @@ fn compile_to_js(input_path: &Path, output_path: &str, optimize: bool) -> Result
             Some(p)
         }
     });
-    let js = if input_path.extension().map(|e| e == "jsx") == Some(true) {
+    let out_path = Path::new(output_path);
+    let out_path = if out_path.extension().is_none()
+        || out_path.extension() == Some(std::ffi::OsStr::new(""))
+    {
+        out_path.with_extension("js")
+    } else {
+        out_path.to_path_buf()
+    };
+    let out_js_name = out_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("out.js");
+
+    let (js, map_json) = if input_path.extension().map(|e| e == "jsx") == Some(true) {
         let source = fs::read_to_string(input_path).map_err(|e| format!("{}", e))?;
         let wrapped = format!(
             "export fn __TishJsxRoot() {{\n  return (\n{}\n  )\n}}",
@@ -476,30 +510,44 @@ fn compile_to_js(input_path: &Path, output_path: &str, optimize: bool) -> Result
         } else {
             program
         };
-        tishlang_compile_js::compile_with_jsx(&p, optimize).map_err(|e| format!("{}", e))?
+        let js = tishlang_compile_js::compile_with_jsx(&p, optimize).map_err(|e| format!("{}", e))?;
+        (js, None)
     } else if input_path.extension().map(|e| e == "js") == Some(true) {
         let source = fs::read_to_string(input_path).map_err(|e| format!("{}", e))?;
         let program = tishlang_js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        tishlang_compile_js::compile_with_jsx(&program, optimize).map_err(|e| format!("{}", e))?
+        let js =
+            tishlang_compile_js::compile_with_jsx(&program, optimize).map_err(|e| format!("{}", e))?;
+        (js, None)
+    } else if source_map {
+        let bundle = tishlang_compile_js::compile_project_with_jsx_and_source_map(
+            input_path,
+            project_root,
+            out_js_name,
+        )
+        .map_err(|e| format!("{}", e))?;
+        (bundle.js, bundle.source_map_json)
     } else {
-        tishlang_compile_js::compile_project_with_jsx(input_path, project_root, optimize)
-            .map_err(|e| format!("{}", e))?
-    };
-
-    let out_path = Path::new(output_path);
-    let out_path = if out_path.extension().is_none()
-        || out_path.extension() == Some(std::ffi::OsStr::new(""))
-    {
-        out_path.with_extension("js")
-    } else {
-        out_path.to_path_buf()
+        let js = tishlang_compile_js::compile_project_with_jsx(input_path, project_root, optimize)
+            .map_err(|e| format!("{}", e))?;
+        (js, None)
     };
 
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Cannot create output directory {}: {}", parent.display(), e))?;
     }
-    fs::write(&out_path, js).map_err(|e| format!("Cannot write {}: {}", out_path.display(), e))?;
+    let mut js_out = js;
+    if let Some(map) = &map_json {
+        let map_path = out_path.with_extension("js.map");
+        fs::write(&map_path, map).map_err(|e| format!("Cannot write {}: {}", map_path.display(), e))?;
+        let map_url = map_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("out.js.map");
+        js_out.push_str(&format!("\n//# sourceMappingURL={map_url}\n"));
+        println!("Built: {}", map_path.display());
+    }
+    fs::write(&out_path, js_out).map_err(|e| format!("Cannot write {}: {}", out_path.display(), e))?;
     println!("Built: {}", out_path.display());
     Ok(())
 }
@@ -512,6 +560,7 @@ fn build_file(
     native_backend: &str,
     cli_features: &[String],
     no_optimize: bool,
+    source_map: bool,
 ) -> Result<(), String> {
     let optimize = !no_optimize;
     let input_path = Path::new(input_path)
@@ -521,7 +570,7 @@ fn build_file(
     let is_js = input_path.extension().map(|e| e == "js") == Some(true);
 
     if target == "js" {
-        return compile_to_js(&input_path, output_path, optimize);
+        return compile_to_js(&input_path, output_path, optimize, source_map);
     }
 
     if target == "wasm" && is_js {
