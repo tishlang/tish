@@ -109,6 +109,7 @@ impl Evaluator {
             );
             s.set("decodeURI".into(), Value::Native(natives::decode_uri), true);
             s.set("encodeURI".into(), Value::Native(natives::encode_uri), true);
+            s.set("htmlEscape".into(), Value::Native(natives::html_escape), true);
             s.set(
                 "Boolean".into(),
                 Value::Native(natives::boolean_native),

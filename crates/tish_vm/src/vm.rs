@@ -1,7 +1,7 @@
 //! Stack-based bytecode VM.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -86,8 +86,31 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                 tishlang_runtime::fetch_all_promise(args.to_vec())
             }))),
             "serve" => Some(Value::Function(Rc::new(|args: &[Value]| {
-                let handler = args.get(1).cloned().unwrap_or(Value::Null);
-                if let Value::Function(f) = handler {
+                // Phase-1 item 2: support `serve(port, { handler, onWorker })`
+                // in addition to `serve(port, handler)`. When an options
+                // object is given and onWorker is a function, invoke it with
+                // worker id 0 and expect it to return the request handler.
+                let raw = args.get(1).cloned().unwrap_or(Value::Null);
+                let handler_value = match raw {
+                    Value::Function(_) => raw,
+                    Value::Object(ref obj) => {
+                        let obj_ref = obj.borrow();
+                        if let Some(Value::Function(on_worker)) =
+                            obj_ref.get(&std::sync::Arc::from("onWorker")).cloned()
+                        {
+                            let args_for_init = [Value::Number(0.0)];
+                            on_worker(&args_for_init)
+                        } else if let Some(h) =
+                            obj_ref.get(&std::sync::Arc::from("handler")).cloned()
+                        {
+                            h
+                        } else {
+                            Value::Null
+                        }
+                    }
+                    _ => Value::Null,
+                };
+                if let Value::Function(f) = handler_value {
                     tishlang_runtime::http_serve(args, move |req_args| f(req_args))
                 } else {
                     Value::Null
@@ -395,6 +418,12 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         Value::Function(Rc::new(|args: &[Value]| globals_builtins::decode_uri(args))),
     );
     g.insert(
+        "htmlEscape".into(),
+        Value::Function(Rc::new(|args: &[Value]| {
+            tishlang_builtins::string::escape_html(args.first().unwrap_or(&Value::Null))
+        })),
+    );
+    g.insert(
         "Boolean".into(),
         Value::Function(Rc::new(|args: &[Value]| globals_builtins::boolean(args))),
     );
@@ -585,10 +614,49 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     #[cfg(feature = "http")]
     if cap_allows(enabled, "http") {
         g.insert(
+            "registerStaticRoute".into(),
+            Value::Function(Rc::new(|args: &[Value]| {
+                let path = match args.first() {
+                    Some(Value::String(s)) => s.to_string(),
+                    _ => return Value::Null,
+                };
+                let body = match args.get(1) {
+                    Some(Value::String(s)) => s.as_bytes().to_vec(),
+                    _ => return Value::Null,
+                };
+                let ct = match args.get(2) {
+                    Some(Value::String(s)) => s.to_string(),
+                    _ => "application/octet-stream".to_string(),
+                };
+                tishlang_runtime::register_static_route(&path, &body, &ct);
+                Value::Null
+            })),
+        );
+        g.insert(
             "serve".into(),
             Value::Function(Rc::new(|args: &[Value]| {
-                let handler = args.get(1).cloned().unwrap_or(Value::Null);
-                if let Value::Function(f) = handler {
+                // Phase-1 item 2 (see tish:http.serve above for full docs).
+                let raw = args.get(1).cloned().unwrap_or(Value::Null);
+                let handler_value = match raw {
+                    Value::Function(_) => raw,
+                    Value::Object(ref obj) => {
+                        let obj_ref = obj.borrow();
+                        if let Some(Value::Function(on_worker)) =
+                            obj_ref.get(&std::sync::Arc::from("onWorker")).cloned()
+                        {
+                            let args_for_init = [Value::Number(0.0)];
+                            on_worker(&args_for_init)
+                        } else if let Some(h) =
+                            obj_ref.get(&std::sync::Arc::from("handler")).cloned()
+                        {
+                            h
+                        } else {
+                            Value::Null
+                        }
+                    }
+                    _ => Value::Null,
+                };
+                if let Value::Function(f) = handler_value {
                     tishlang_runtime::http_serve(args, move |req_args| f(req_args))
                 } else {
                     Value::Null
@@ -621,6 +689,11 @@ pub struct Vm {
     globals: Rc<RefCell<ObjectMap>>,
     /// Capabilities for `LoadNativeExport` and globals such as `process` / `serve`.
     capabilities: Arc<HashSet<String>>,
+    /// Externally registered native modules, keyed by import spec (e.g.
+    /// `"cargo:tish_pg"`). Populated by embedders before `run` (see
+    /// [`register_native_module`]). Phase-2 item 11: unblocks `cargo:`
+    /// imports on the cranelift and llvm backends which run this VM.
+    native_modules: Rc<RefCell<HashMap<String, Rc<RefCell<ObjectMap>>>>>,
 }
 
 impl Vm {
@@ -641,7 +714,20 @@ impl Vm {
             enclosing: None,
             globals: Rc::new(RefCell::new(init_globals(capabilities.as_ref()))),
             capabilities,
+            native_modules: Rc::new(RefCell::new(HashMap::new())),
         }
+    }
+
+    /// Register an externally-supplied native module under a `cargo:`-style
+    /// spec (e.g. `"cargo:tish_pg"`). The `exports` map is what
+    /// `LoadNativeExport` will index into when user code imports from this
+    /// spec. Intended to be called by the `tishlang_cranelift_runtime` /
+    /// `tishlang_llvm` link step, or by external embedders that want to
+    /// expose Rust crates to `.tish` programs running on the bytecode VM.
+    pub fn register_native_module(&mut self, spec: impl Into<String>, exports: ObjectMap) {
+        self.native_modules
+            .borrow_mut()
+            .insert(spec.into(), Rc::new(RefCell::new(exports)));
     }
 
     pub fn get_global(&self, name: &str) -> Option<Value> {
@@ -753,6 +839,7 @@ impl Vm {
                             let globals = Rc::clone(&self.globals);
                             let enclosing = Some(Rc::clone(&local_scope));
                             let capabilities = Arc::clone(&self.capabilities);
+                            let native_modules = Rc::clone(&self.native_modules);
                             Value::Function(Rc::new(move |args: &[Value]| {
                                 let mut vm = Vm {
                                     stack: Vec::new(),
@@ -760,6 +847,7 @@ impl Vm {
                                     enclosing: enclosing.clone(),
                                     globals: Rc::clone(&globals),
                                     capabilities: Arc::clone(&capabilities),
+                                    native_modules: Rc::clone(&native_modules),
                                 };
                                 vm.run_chunk(&inner_clone, &inner_clone.nested, args, false)
                                     .unwrap_or(Value::Null)
@@ -1420,19 +1508,36 @@ impl Vm {
                             return Err("LoadNativeExport: export_name constant out of bounds or not string".to_string());
                         }
                     };
-                    let v = get_builtin_export(self.capabilities.as_ref(), spec, export_name).ok_or_else(|| {
-                        if spec.starts_with("cargo:") {
-                            format!(
-                                "cargo:… imports are only supported by `tish build` with the Rust native backend (not the bytecode VM). Spec: {}",
-                                spec
-                            )
-                        } else {
-                            format!(
-                                "Built-in module '{}' does not export '{}' or capability not enabled for this run. Use e.g. tish run --feature fs (or full). The tish binary must also be built with that capability linked in.",
-                                spec, export_name
-                            )
-                        }
-                    })?;
+                    // Phase-2 item 11: consult externally registered native
+                    // modules (populated via `Vm::register_native_module`)
+                    // before falling through to the built-in lookup. Embedders
+                    // on the cranelift / llvm backends that want to expose
+                    // `cargo:…` Rust crates should register the module's
+                    // exports map before calling `vm.run(chunk)`.
+                    let from_registry: Option<Value> = if spec.starts_with("cargo:") {
+                        let regs = self.native_modules.borrow();
+                        regs.get(spec)
+                            .and_then(|m| m.borrow().get(&Arc::from(export_name)).cloned())
+                    } else {
+                        None
+                    };
+                    let v = from_registry
+                        .or_else(|| get_builtin_export(self.capabilities.as_ref(), spec, export_name))
+                        .ok_or_else(|| {
+                            if spec.starts_with("cargo:") {
+                                format!(
+                                    "cargo:{} is not registered on the bytecode VM. Embedders must call Vm::register_native_module before run(). Spec: {} export: {}",
+                                    spec.trim_start_matches("cargo:"),
+                                    spec,
+                                    export_name,
+                                )
+                            } else {
+                                format!(
+                                    "Built-in module '{}' does not export '{}' or capability not enabled for this run. Use e.g. tish run --feature fs (or full). The tish binary must also be built with that capability linked in.",
+                                    spec, export_name
+                                )
+                            }
+                        })?;
                     self.stack.push(v);
                 }
                 Opcode::Closure | Opcode::LoadThis => {

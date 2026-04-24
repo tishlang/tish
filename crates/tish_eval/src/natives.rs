@@ -115,6 +115,47 @@ pub fn encode_uri(args: &[Value]) -> Result<Value, String> {
     Ok(Value::String(tishlang_core::percent_encode(&s).into()))
 }
 
+pub fn html_escape(args: &[Value]) -> Result<Value, String> {
+    let input = match args.first() {
+        Some(Value::String(s)) => s.to_string(),
+        Some(v) => v.to_string(),
+        None => return Ok(Value::Null),
+    };
+    let bytes = input.as_bytes();
+    let mut extra = 0usize;
+    for b in bytes {
+        match b {
+            b'&' => extra += 4,
+            b'<' | b'>' => extra += 3,
+            b'"' => extra += 5,
+            b'\'' => extra += 4,
+            _ => {}
+        }
+    }
+    if extra == 0 {
+        return Ok(Value::String(input.into()));
+    }
+    let mut out = String::with_capacity(input.len() + extra);
+    let mut last = 0usize;
+    for (i, b) in bytes.iter().enumerate() {
+        let repl: Option<&'static str> = match b {
+            b'&' => Some("&amp;"),
+            b'<' => Some("&lt;"),
+            b'>' => Some("&gt;"),
+            b'"' => Some("&quot;"),
+            b'\'' => Some("&#39;"),
+            _ => None,
+        };
+        if let Some(r) = repl {
+            out.push_str(&input[last..i]);
+            out.push_str(r);
+            last = i + 1;
+        }
+    }
+    out.push_str(&input[last..]);
+    Ok(Value::String(out.into()))
+}
+
 pub fn math_abs(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Number(
         get_num(args.first().unwrap_or(&Value::Null)).abs(),

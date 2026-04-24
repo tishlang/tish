@@ -8,12 +8,32 @@ license-file = { workspace = true }
 repository = { workspace = true }
 [features]
 default = []
-http = ["tokio", "reqwest", "futures", "bytes", "tiny_http", "tishlang_core/regex"]
+http = ["dep:tokio", "dep:reqwest", "dep:futures", "dep:bytes", "dep:tiny_http", "dep:socket2", "dep:libc", "dep:arc-swap", "tishlang_core/regex"]
+# Phase-3 item 13: io_uring-backed accept + send loop (Linux only).
+# Disabled by default; enable with `--feature http,http-io-uring` on Linux
+# to pick up the experimental accept path.
+http-io-uring = ["http"]
+# hyper-based HTTP backend: async single-threaded tokio runtime per core, no
+# per-connection OS threads. Unblocks the tiny_http thread-churn ceiling on
+# macOS loopback (~140k RPS) and enables HTTP/2. Opt-in via the
+# `TISH_HTTP_BACKEND=hyper` env var at runtime when the feature is compiled in.
+http-hyper = [
+    "http",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+    "dep:http",
+    "dep:pin-project-lite",
+    "dep:core_affinity",
+    "tokio/net",
+    "tokio/rt",
+    "tokio/io-util",
+]
 fs = []
 process = []
 regex = ["tishlang_core/regex"]
 # WebSocket (JS-like API). Modular: import { WebSocket, Server } from 'tish:ws'
-ws = ["tokio", "tokio/net", "tokio/io-util", "tokio-tungstenite", "futures-util", "lazy_static"]
+ws = ["dep:tokio", "tokio/net", "tokio/io-util", "dep:tokio-tungstenite", "dep:futures-util", "dep:lazy_static"]
 
 [dependencies]
 tishlang_core = { path = "../tish_core", version = ">=0.1" }
@@ -23,6 +43,16 @@ reqwest = { version = "0.13.2", default-features = false, features = ["rustls", 
 futures = { version = "0.3.32", optional = true }
 bytes = { version = "1", optional = true }
 tiny_http = { version = "0.12.0", optional = true }
+socket2 = { version = "0.5", features = ["all"], optional = true }
+libc = { version = "0.2", optional = true }
+arc-swap = { version = "1", optional = true }
+# hyper backend (feature = http-hyper)
+hyper = { version = "1", default-features = false, features = ["server", "http1", "http2"], optional = true }
+hyper-util = { version = "0.1", features = ["server", "tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+http = { version = "1", optional = true }
+pin-project-lite = { version = "0.2", optional = true }
+core_affinity = { version = "0.8", optional = true }
 tokio-tungstenite = { version = "0.29", optional = true }
 futures-util = { version = "0.3", optional = true }
 lazy_static = { version = "1", optional = true }

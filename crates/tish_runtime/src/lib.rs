@@ -38,11 +38,12 @@ pub use tishlang_builtins::array::{
 // Re-export string methods from tishlang_builtins
 pub use tishlang_builtins::string::{
     char_at as string_char_at_impl, char_code_at as string_char_code_at_impl,
-    ends_with as string_ends_with_impl, includes as string_includes_impl,
-    index_of as string_index_of_impl, last_index_of as string_last_index_of_impl,
-    pad_end as string_pad_end_impl, pad_start as string_pad_start_impl,
-    repeat as string_repeat_impl, replace as string_replace_impl,
-    replace_all as string_replace_all_impl, slice as string_slice_impl, split as string_split_impl,
+    ends_with as string_ends_with_impl, escape_html as string_escape_html_impl,
+    includes as string_includes_impl, index_of as string_index_of_impl,
+    last_index_of as string_last_index_of_impl, pad_end as string_pad_end_impl,
+    pad_start as string_pad_start_impl, repeat as string_repeat_impl,
+    replace as string_replace_impl, replace_all as string_replace_all_impl,
+    slice as string_slice_impl, split as string_split_impl,
     starts_with as string_starts_with_impl, substring as string_substring_impl,
     to_lower_case as string_to_lower_case, to_upper_case as string_to_upper_case,
     trim as string_trim,
@@ -735,6 +736,15 @@ mod promise_io;
 mod http;
 
 #[cfg(feature = "http")]
+mod http_prefork;
+
+#[cfg(feature = "http-io-uring")]
+mod http_io_uring;
+
+#[cfg(feature = "http-hyper")]
+mod http_hyper;
+
+#[cfg(feature = "http")]
 mod http_fetch;
 
 mod timers;
@@ -756,8 +766,32 @@ pub use ws::{
 
 #[cfg(feature = "http")]
 pub use http::{
-    await_fetch as http_await_fetch, await_fetch_all as http_await_fetch_all, serve as http_serve,
+    await_fetch as http_await_fetch, await_fetch_all as http_await_fetch_all,
+    register_static_route,
 };
+
+// `serve` is the user-facing entry point for Tish's HTTP server. By default
+// it uses the tiny_http + SO_REUSEPORT path in `http.rs`. When compiled with
+// `--features http-hyper` and the `TISH_HTTP_BACKEND=hyper` env var is set
+// at runtime, it dispatches to the hyper backend in `http_hyper.rs`.
+//
+// The env-var switch (rather than a cargo feature switch) means one built
+// binary can toggle backends for A/B benchmarking and production rollout
+// without rebuilding. When `http-hyper` is not compiled in, the switch is a
+// no-op and the tiny_http path is used unconditionally.
+#[cfg(feature = "http")]
+pub fn http_serve<F>(args: &[tishlang_core::Value], handler: F) -> tishlang_core::Value
+where
+    F: Fn(&[tishlang_core::Value]) -> tishlang_core::Value,
+{
+    #[cfg(feature = "http-hyper")]
+    {
+        if http_hyper::is_enabled_via_env() {
+            return http_hyper::serve(args, handler);
+        }
+    }
+    http::serve(args, handler)
+}
 
 pub use timers::{
     clear_interval as timer_clear_interval, clear_timeout as timer_clear_timeout, drain_timers,

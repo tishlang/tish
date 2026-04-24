@@ -275,6 +275,53 @@ pub fn replace_all(s: &Value, search: &Value, replacement: &Value) -> Value {
     replace_impl(s, search, replacement, true)
 }
 
+/// HTML entity escape for the five canonical characters (`& < > " '`).
+/// Single linear pass over the input; takes a zero-copy fast path when no
+/// character needs escaping. Matches TFB's fortunes verifier byte-for-byte.
+pub fn escape_html(s: &Value) -> Value {
+    let input = match s {
+        Value::String(s) => s.as_ref(),
+        Value::Null => return Value::String(Arc::from("")),
+        _ => return Value::Null,
+    };
+    let bytes = input.as_bytes();
+    let mut extra = 0usize;
+    for b in bytes {
+        match b {
+            b'&' => extra += 4,
+            b'<' | b'>' => extra += 3,
+            b'"' => extra += 5,
+            b'\'' => extra += 4,
+            _ => {}
+        }
+    }
+    if extra == 0 {
+        return Value::String(Arc::clone(match s {
+            Value::String(s) => s,
+            _ => unreachable!(),
+        }));
+    }
+    let mut out = String::with_capacity(input.len() + extra);
+    let mut last = 0usize;
+    for (i, b) in bytes.iter().enumerate() {
+        let repl: Option<&'static str> = match b {
+            b'&' => Some("&amp;"),
+            b'<' => Some("&lt;"),
+            b'>' => Some("&gt;"),
+            b'"' => Some("&quot;"),
+            b'\'' => Some("&#39;"),
+            _ => None,
+        };
+        if let Some(r) = repl {
+            out.push_str(&input[last..i]);
+            out.push_str(r);
+            last = i + 1;
+        }
+    }
+    out.push_str(&input[last..]);
+    Value::String(Arc::from(out))
+}
+
 fn char_at_idx(s: &str, idx: usize) -> Option<char> {
     s.chars().nth(idx)
 }
@@ -549,5 +596,27 @@ mod tests {
     #[test]
     fn last_index_of_non_string() {
         assert_same!(last_index_of(&n(1.0), &s("a"), &n(0.0)), n(-1.0));
+    }
+
+    #[test]
+    fn escape_html_basic() {
+        assert_same!(escape_html(&s("plain text")), s("plain text"));
+        assert_same!(
+            escape_html(&s("<script>alert(\"xss\")</script>")),
+            s("&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;")
+        );
+        assert_same!(escape_html(&s("tom & jerry")), s("tom &amp; jerry"));
+        assert_same!(escape_html(&s("it's")), s("it&#39;s"));
+        assert_same!(
+            escape_html(&s("<script>alert('x' & \"y\");</script>")),
+            s("&lt;script&gt;alert(&#39;x&#39; &amp; &quot;y&quot;);&lt;/script&gt;")
+        );
+    }
+
+    #[test]
+    fn escape_html_unicode_preserved() {
+        // Astral symbols / non-ASCII must round-trip unchanged.
+        assert_same!(escape_html(&s("フレーム")), s("フレーム"));
+        assert_same!(escape_html(&s("🎉 & 💥")), s("🎉 &amp; 💥"));
     }
 }

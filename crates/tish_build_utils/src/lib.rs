@@ -307,12 +307,24 @@ pub fn run_cargo_build(build_dir: &Path, target_dir: Option<&Path>) -> Result<()
     let target_dir = target_dir
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| build_dir.join("target"));
+    // Default to target-cpu=native so the emitted binary uses every SIMD / ISA
+    // extension the build host supports. Callers can override by pre-setting
+    // RUSTFLAGS in the environment.
+    let existing_rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
+    let merged_rustflags = if existing_rustflags.is_empty() {
+        "-C target-cpu=native".to_string()
+    } else if existing_rustflags.contains("target-cpu") {
+        existing_rustflags
+    } else {
+        format!("{} -C target-cpu=native", existing_rustflags)
+    };
     let output = Command::new("cargo")
         .args(["build", "--release", "--target-dir"])
         .arg(&target_dir)
         .current_dir(build_dir)
         .env_remove("CARGO_TARGET_DIR")
         .env("CARGO_TERM_PROGRESS", "always")
+        .env("RUSTFLAGS", &merged_rustflags)
         .output()
         .map_err(|e| format!("Failed to run cargo: {}", e))?;
 
