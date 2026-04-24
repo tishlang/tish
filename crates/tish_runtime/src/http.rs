@@ -25,11 +25,12 @@
 //! bodies round out the hot-path optimisations.
 
 use std::cell::RefCell;
+use tishlang_core::VmRef;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -111,7 +112,7 @@ pub(crate) fn build_error_response(error: &str) -> Value {
     let mut obj: ObjectMap = ObjectMap::with_capacity(2);
     obj.insert(Arc::from("error"), Value::String(error.into()));
     obj.insert(Arc::from("ok"), Value::Bool(false));
-    Value::Object(Rc::new(RefCell::new(obj)))
+    Value::Object(VmRef::new(obj))
 }
 
 // -------- cached Date header -----------------------------------------------
@@ -269,10 +270,10 @@ impl RequestPrimitive {
             }
             obj.insert(
                 Arc::clone(&keys.headers),
-                Value::Object(Rc::new(RefCell::new(h))),
+                Value::Object(VmRef::new(h)),
             );
             obj.insert(Arc::clone(&keys.body), Value::String(self.body.into()));
-            Value::Object(Rc::new(RefCell::new(obj)))
+            Value::Object(VmRef::new(obj))
         })
     }
 }
@@ -783,9 +784,37 @@ pub(crate) fn num_prefork_workers() -> usize {
 type Job = (RequestPrimitive, mpsc::SyncSender<ResponsePrimitive>);
 
 /// Start an HTTP server that handles requests using the provided handler function.
+///
+/// When `send-values` is enabled (required for the `http` feature) the
+/// handler is `Fn + Send + Sync`, so we run it directly on each HTTP
+/// accept thread instead of funneling every request through a single
+/// dispatcher. That's the multi-core unlock for the VM: handler calls
+/// execute in parallel across N OS threads, with `Value` safely shared
+/// via `VmRef` (`Arc<Mutex>`) on every array/object.
+///
+/// On builds without `send-values` (wasm / single-threaded targets)
+/// the handler only needs `Fn`; we fall back to the mpsc-dispatch model
+/// where all handler calls execute on one VM thread.
+#[cfg(feature = "send-values")]
+pub fn serve<F>(args: &[Value], handler: F) -> Value
+where
+    F: Fn(&[Value]) -> Value + Send + Sync + 'static,
+{
+    serve_impl(args, handler)
+}
+
+#[cfg(not(feature = "send-values"))]
 pub fn serve<F>(args: &[Value], handler: F) -> Value
 where
     F: Fn(&[Value]) -> Value,
+{
+    serve_impl(args, handler)
+}
+
+#[cfg(feature = "send-values")]
+fn serve_impl<F>(args: &[Value], handler: F) -> Value
+where
+    F: Fn(&[Value]) -> Value + Send + Sync + 'static,
 {
     let port = match args.first() {
         Some(Value::Number(n)) => *n as u16,
@@ -877,9 +906,101 @@ where
         );
     }
 
-    // Shared job queue. VM thread drains; workers push.
-    let (tx, rx) = mpsc::sync_channel::<Job>(workers * 256);
     let stop = prefork_stop.clone().unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+
+    if max_requests == Some(1) {
+        let p = port;
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            if let Ok(mut s) = std::net::TcpStream::connect(format!("127.0.0.1:{}", p)) {
+                let _ =
+                    s.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+                let _ = s.shutdown(std::net::Shutdown::Write);
+            }
+        });
+    }
+
+    // Shared handler — every accept thread invokes it directly. Because
+    // `Value: Send + Sync` under `send-values`, this is race-free: each
+    // request object is freshly constructed on the worker thread, and any
+    // shared Value inside the handler is protected by its own `VmRef`.
+    let handler: Arc<dyn Fn(&[Value]) -> Value + Send + Sync> = Arc::new(handler);
+
+    let processed = Arc::new(AtomicUsize::new(0));
+    let mut worker_handles = Vec::with_capacity(workers);
+    for (idx, listener) in listeners.into_iter().enumerate() {
+        let handler = Arc::clone(&handler);
+        let stop = Arc::clone(&stop);
+        let processed = Arc::clone(&processed);
+        let max = max_requests;
+        let handle = thread::Builder::new()
+            .name(format!("tish-http-w{}", idx))
+            .spawn(move || worker_loop_direct(listener, handler, stop, processed, max))
+            .expect("spawn tish-http worker");
+        worker_handles.push(handle);
+    }
+
+    // Wait until one of: stop flag set, a worker bumps `processed >= max`, or
+    // we're shutting down (parent received SIGINT).
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        if let Some(m) = max_requests {
+            if processed.load(Ordering::Relaxed) >= m {
+                stop.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // Kick each accept so its blocking `recv_timeout` wakes up promptly.
+    for _ in 0..worker_handles.len() {
+        let _ = std::net::TcpStream::connect(format!("127.0.0.1:{}", port));
+    }
+    for h in worker_handles {
+        let _ = h.join();
+    }
+
+    Value::Null
+}
+
+#[cfg(not(feature = "send-values"))]
+fn serve_impl<F>(args: &[Value], handler: F) -> Value
+where
+    F: Fn(&[Value]) -> Value,
+{
+    // Single-threaded dispatch path: multiple accept threads push onto a
+    // shared `mpsc::sync_channel`, one VM thread (this one) drains and runs
+    // the handler. Used by wasm / single-threaded Rust builds where
+    // `Value` is `Rc`-backed and not `Send`.
+    let port = match args.first() {
+        Some(Value::Number(n)) => *n as u16,
+        _ => return build_error_response("serve requires a port number"),
+    };
+    let max_requests: Option<usize> = args.get(2).and_then(|v| match v {
+        Value::Number(n) if *n >= 1.0 => Some(*n as usize),
+        _ => None,
+    });
+    ensure_date_thread();
+    let workers = num_workers();
+    let listeners = match bind_listeners(port, workers) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[tish http] failed to bind: {}", e);
+            return build_error_response(&e);
+        }
+    };
+    println!(
+        "tish http: listening on http://0.0.0.0:{} ({} worker{}, single-vm)",
+        port,
+        workers,
+        if workers == 1 { "" } else { "s" }
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::sync_channel::<Job>(workers * 256);
 
     if max_requests == Some(1) {
         let p = port;
@@ -928,6 +1049,56 @@ where
     }
 
     Value::Null
+}
+
+/// Parallel accept + dispatch loop used when `send-values` is on. The
+/// handler runs on the same OS thread that accepted the connection, so
+/// there is no cross-thread queue on the hot path. Static-route fast path
+/// is unchanged.
+#[cfg(feature = "send-values")]
+fn worker_loop_direct(
+    listener: std::net::TcpListener,
+    handler: Arc<dyn Fn(&[Value]) -> Value + Send + Sync>,
+    stop: Arc<AtomicBool>,
+    processed: Arc<AtomicUsize>,
+    max_requests: Option<usize>,
+) {
+    let server = match tiny_http::Server::from_listener(listener, None) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[tish http] worker failed to adopt listener: {}", e);
+            return;
+        }
+    };
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match server.recv_timeout(Duration::from_millis(250)) {
+            Ok(Some(mut request)) => {
+                // Static-route fast path: serve pre-baked bytes without
+                // touching the Tish VM at all.
+                if let Some(route) = lookup_static_route(request.url()) {
+                    serve_static_route(request, route);
+                } else {
+                    let req_prim = RequestPrimitive::from_tiny_http(&mut request);
+                    let req_value = req_prim.into_value();
+                    let response_value = handler(&[req_value]);
+                    let resp_prim = ResponsePrimitive::from_value(&response_value);
+                    respond_from_primitive(request, resp_prim);
+                }
+                if let Some(m) = max_requests {
+                    let p = processed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if p >= m {
+                        stop.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+            Ok(None) => {} // timeout; re-check stop flag
+            Err(_) => break,
+        }
+    }
 }
 
 fn worker_loop(

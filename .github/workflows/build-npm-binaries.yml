@@ -198,6 +198,57 @@ jobs:
           name: coverage-lcov
           path: lcov.info
 
+  perf-suite:
+    name: Bundled perf suite
+    needs: [compile]
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      PERF_SUITE_STRICT: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-workspace-crates: "true"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install wasmtime
+        run: |
+          set -euo pipefail
+          curl -sSf https://wasmtime.dev/install.sh | bash
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+          "$HOME/.wasmtime/bin/wasmtime" --version
+
+      - name: Regenerate bundled perf sources and assert up to date
+        run: |
+          set -euo pipefail
+          python3 scripts/generate_perf_ci_main.py
+          git diff --exit-code tests/main.tish tests/main.js
+
+      - name: Run bundled perf suite
+        run: |
+          set -euo pipefail
+          ./scripts/run_performance_suite.sh \
+            --release \
+            --summary-only \
+            --timeout 180 \
+            --runtimes vm,interp,rust,cranelift,llvm,wasi,node \
+            --github-step-summary
+
   build:
     needs: [compile, version]
     permissions:
@@ -301,7 +352,7 @@ jobs:
 
   release:
     name: Release (prerelease branch + GitHub API)
-    needs: [build, test, release_check]
+    needs: [build, test, release_check, perf-suite]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:

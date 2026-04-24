@@ -9,6 +9,10 @@ repository = { workspace = true }
 [features]
 default = []
 regex = ["tishlang_core/regex"]
+# Propagate `send-values` so that every native-function closure we build
+# in the VM (array / string / object methods) picks up the right
+# `Rc<dyn Fn>` vs `Arc<dyn Fn + Send + Sync>` wrapper at compile time.
+send-values = ["tishlang_core/send-values", "tishlang_builtins/send-values"]
 # For wasm32 target: use web_sys console for output
 wasm = ["dep:wasm-bindgen"]
 # Built-in modules: fs, http, process (for bytecode LoadNativeExport).
@@ -16,7 +20,9 @@ wasm = ["dep:wasm-bindgen"]
 # (some Cargo/cache combinations only saw `tishlang_runtime/http` and built VM stubs without http).
 fs = ["dep:tishlang_runtime", "tishlang_runtime/fs"]
 process = ["dep:tishlang_runtime", "tishlang_runtime/process"]
-http = ["dep:tishlang_runtime", "tishlang_runtime/http"]
+# Any HTTP build needs Send-safe values so handlers can be dispatched
+# across worker threads or processes.
+http = ["dep:tishlang_runtime", "tishlang_runtime/http", "send-values"]
 ws = ["dep:tishlang_runtime", "tishlang_runtime/ws"]
 
 [dependencies]

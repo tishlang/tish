@@ -1,6 +1,7 @@
 //! Web Fetch–aligned Response, ReadableStream, reader.read(), text()/json().
 
 use std::cell::RefCell;
+use tishlang_core::VmRef;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -56,7 +57,7 @@ impl TishPromise for FetchAllResponsesPromise {
                                 .unwrap_or_else(|e| build_error_response(&e))
                         })
                         .collect();
-                    Ok(Value::Array(Rc::new(RefCell::new(out))))
+                    Ok(Value::Array(VmRef::new(out)))
                 }
                 Ok(Err(e)) => Ok(build_error_response(&e)),
                 Err(_) => Err(Value::String("Promise dropped".into())),
@@ -86,19 +87,19 @@ impl TishPromise for ReadChunkPromise {
                     let mut o = ObjectMap::default();
                     o.insert(Arc::from("done"), Value::Bool(true));
                     o.insert(Arc::from("value"), Value::Null);
-                    Ok(Value::Object(Rc::new(RefCell::new(o))))
+                    Ok(Value::Object(VmRef::new(o)))
                 }
                 Ok(Ok(ReadChunk::Bytes(b))) => {
                     let arr: Vec<Value> = b.iter().map(|u| Value::Number(*u as f64)).collect();
                     let mut o = ObjectMap::default();
                     o.insert(Arc::from("done"), Value::Bool(false));
-                    o.insert(Arc::from("value"), Value::Array(Rc::new(RefCell::new(arr))));
-                    Ok(Value::Object(Rc::new(RefCell::new(o))))
+                    o.insert(Arc::from("value"), Value::Array(VmRef::new(arr)));
+                    Ok(Value::Object(VmRef::new(o)))
                 }
                 Ok(Err(e)) => Err({
                     let mut obj = ObjectMap::default();
                     obj.insert(Arc::from("error"), Value::String(e.into()));
-                    Value::Object(Rc::new(RefCell::new(obj)))
+                    Value::Object(VmRef::new(obj))
                 }),
                 Err(_) => Err(Value::String("Promise dropped".into())),
             }
@@ -123,13 +124,13 @@ impl TishPromise for JsonTextPromise {
                     Err(e) => Err({
                         let mut obj = ObjectMap::default();
                         obj.insert(Arc::from("error"), Value::String(e.into()));
-                        Value::Object(Rc::new(RefCell::new(obj)))
+                        Value::Object(VmRef::new(obj))
                     }),
                 },
                 Ok(Err(e)) => Err({
                     let mut obj = ObjectMap::default();
                     obj.insert(Arc::from("error"), Value::String(e.into()));
-                    Value::Object(Rc::new(RefCell::new(obj)))
+                    Value::Object(VmRef::new(obj))
                 }),
                 Err(_) => Err(Value::String("Promise dropped".into())),
             }
@@ -229,7 +230,7 @@ impl TishOpaque for HttpReadableStream {
             return None;
         }
         let body = Arc::clone(&self.body);
-        Some(Rc::new(move |_args: &[Value]| match body.take_stream() {
+        Some(Arc::new(move |_args: &[Value]| match body.take_stream() {
             Ok(stream) => {
                 let inner = Arc::new(tokio::sync::Mutex::new(StreamSlot { stream }));
                 Value::Opaque(Arc::new(HttpStreamReader {
@@ -240,7 +241,7 @@ impl TishOpaque for HttpReadableStream {
             Err(e) => {
                 let mut m = ObjectMap::default();
                 m.insert(Arc::from("error"), Value::String(e.into()));
-                Value::Object(Rc::new(RefCell::new(m)))
+                Value::Object(VmRef::new(m))
             }
         }))
     }
@@ -270,7 +271,7 @@ impl TishOpaque for HttpStreamReader {
         }
         let inner = Arc::clone(&self.inner);
         let body = Arc::clone(&self.body);
-        Some(Rc::new(move |_args: &[Value]| {
+        Some(Arc::new(move |_args: &[Value]| {
             let inner = Arc::clone(&inner);
             let body = Arc::clone(&body);
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -305,7 +306,7 @@ fn headers_to_value(headers: &reqwest::header::HeaderMap) -> Value {
             headers_obj.insert(Arc::from(key.as_str()), Value::String(v.into()));
         }
     }
-    Value::Object(Rc::new(RefCell::new(headers_obj)))
+    Value::Object(VmRef::new(headers_obj))
 }
 
 pub fn response_value_from_reqwest(response: reqwest::Response) -> Value {
@@ -319,7 +320,7 @@ pub fn response_value_from_reqwest(response: reqwest::Response) -> Value {
     let body_stream_val = Value::Opaque(stream);
     let bh_text = Arc::clone(&body_holder);
     let bh_json = Arc::clone(&body_holder);
-    let text_fn: NativeFn = Rc::new(move |_args: &[Value]| {
+    let text_fn: NativeFn = Arc::new(move |_args: &[Value]| {
         let bh = Arc::clone(&bh_text);
         let (tx, rx) = tokio::sync::oneshot::channel();
         crate::http::RUNTIME.with(|rt| {
@@ -330,7 +331,7 @@ pub fn response_value_from_reqwest(response: reqwest::Response) -> Value {
         });
         crate::promise_io::string_result_promise(rx)
     });
-    let json_fn: NativeFn = Rc::new(move |_args: &[Value]| {
+    let json_fn: NativeFn = Arc::new(move |_args: &[Value]| {
         let bh = Arc::clone(&bh_json);
         let (tx, rx) = tokio::sync::oneshot::channel();
         crate::http::RUNTIME.with(|rt| {
@@ -350,7 +351,7 @@ pub fn response_value_from_reqwest(response: reqwest::Response) -> Value {
     obj.insert(Arc::from("body"), body_stream_val);
     obj.insert(Arc::from("text"), Value::Function(text_fn));
     obj.insert(Arc::from("json"), Value::Function(json_fn));
-    Value::Object(Rc::new(RefCell::new(obj)))
+    Value::Object(VmRef::new(obj))
 }
 
 async fn send_request_parts(

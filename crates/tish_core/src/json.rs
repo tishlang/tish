@@ -1,8 +1,6 @@
 //! JSON parsing and stringification for Tish values.
 
-use crate::Value;
-use std::cell::RefCell;
-use std::rc::Rc;
+use crate::{Value, VmRef};
 use std::sync::Arc;
 
 /// Parse JSON string into a Value.
@@ -241,7 +239,7 @@ fn parse_array(input: &str) -> Result<(Value, &str), String> {
 
     input = input.trim_start();
     if let Some(rest) = input.strip_prefix(']') {
-        return Ok((Value::Array(Rc::new(RefCell::new(items))), rest));
+        return Ok((Value::Array(VmRef::new(items)), rest));
     }
 
     loop {
@@ -251,7 +249,7 @@ fn parse_array(input: &str) -> Result<(Value, &str), String> {
 
         match input.chars().next() {
             Some(',') => input = &input[1..],
-            Some(']') => return Ok((Value::Array(Rc::new(RefCell::new(items))), &input[1..])),
+            Some(']') => return Ok((Value::Array(VmRef::new(items)), &input[1..])),
             _ => return Err("Expected ',' or ']' in array".to_string()),
         }
     }
@@ -263,7 +261,7 @@ fn parse_object(input: &str) -> Result<(Value, &str), String> {
 
     input = input.trim_start();
     if let Some(rest) = input.strip_prefix('}') {
-        return Ok((Value::Object(Rc::new(RefCell::new(map))), rest));
+        return Ok((Value::Object(VmRef::new(map)), rest));
     }
 
     loop {
@@ -290,7 +288,7 @@ fn parse_object(input: &str) -> Result<(Value, &str), String> {
 
         match input.chars().next() {
             Some(',') => input = &input[1..],
-            Some('}') => return Ok((Value::Object(Rc::new(RefCell::new(map))), &input[1..])),
+            Some('}') => return Ok((Value::Object(VmRef::new(map)), &input[1..])),
             _ => return Err("Expected ',' or '}' in object".to_string()),
         }
     }

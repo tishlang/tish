@@ -13,7 +13,7 @@ pub use hooks::{
     LEGACY_ROOT_ID, RootId,
 };
 
-use tishlang_core::{ObjectMap, Value};
+use tishlang_core::{ObjectMap, Value, VmRef};
 
 /// Sentinel string for `Fragment` (native). JS/Lattish uses `Symbol`; hosts compare via equality.
 pub const FRAGMENT_SENTINEL: &str = "__tish_ui_Fragment__";
@@ -56,10 +56,10 @@ pub fn ui_h(args: &[Value]) -> Value {
         if !children_vec.is_empty() {
             merged.insert(
                 Arc::from("children"),
-                Value::Array(Rc::new(RefCell::new(children_vec.clone()))),
+                Value::Array(VmRef::new(children_vec.clone())),
             );
         }
-        return f(&[Value::Object(Rc::new(RefCell::new(merged)))]);
+        return f(&[Value::Object(VmRef::new(merged))]);
     }
 
     if is_fragment_tag(&tag) {
@@ -109,10 +109,10 @@ fn vnode_element(tag: Arc<str>, props: Value, children: Vec<Value>) -> Value {
     );
     m.insert(
         Arc::from("children"),
-        Value::Array(Rc::new(RefCell::new(children))),
+        Value::Array(VmRef::new(children)),
     );
     m.insert(Arc::from("_el"), Value::Null);
-    Value::Object(Rc::new(RefCell::new(m)))
+    Value::Object(VmRef::new(m))
 }
 
 fn vnode_fragment(children: Vec<Value>) -> Value {
@@ -121,10 +121,10 @@ fn vnode_fragment(children: Vec<Value>) -> Value {
     m.insert(Arc::from("props"), Value::Null);
     m.insert(
         Arc::from("children"),
-        Value::Array(Rc::new(RefCell::new(children))),
+        Value::Array(VmRef::new(children)),
     );
     m.insert(Arc::from("_el"), Value::Null);
-    Value::Object(Rc::new(RefCell::new(m)))
+    Value::Object(VmRef::new(m))
 }
 
 /// Pluggable UI backend (Floem, DOM, SwiftUI, …). Main-thread / single-threaded by default.

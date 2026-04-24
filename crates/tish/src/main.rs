@@ -4,6 +4,7 @@ mod cli_help;
 mod repl_completion;
 
 use std::cell::RefCell;
+use tishlang_core::VmRef;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
@@ -326,11 +327,11 @@ fn run_repl(backend: &str, no_optimize: bool, features: &[String]) -> Result<(),
     if !std::io::stdin().is_terminal() {
         eprintln!("Note: Tab completion and grey preview require an interactive terminal (TTY).");
     }
-    let vm = Rc::new(RefCell::new(tishlang_vm::Vm::with_capabilities(
+    let vm = VmRef::new(tishlang_vm::Vm::with_capabilities(
         vm_capabilities_for_cli_run(features),
-    )));
+    ));
     let completer = repl_completion::ReplCompleter {
-        vm: Rc::clone(&vm),
+        vm: vm.clone(),
         no_optimize,
     };
     let config = Config::builder()

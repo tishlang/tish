@@ -210,7 +210,7 @@ impl RustType {
                     _ => (".iter().cloned()", inner.to_value_expr("v")),
                 };
                 format!(
-                    "Value::Array(Rc::new(RefCell::new({}{}.map(|v| {}).collect())))",
+                    "Value::Array(VmRef::new({}{}.map(|v| {}).collect()))",
                     native_expr, iter_suffix, val_expr
                 )
             }

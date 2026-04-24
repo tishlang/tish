@@ -250,6 +250,14 @@ optional-chaining-profile:
 perf *ARGS:
     ./scripts/run_performance_manual.sh {{ARGS}}
 
+# Bundled perf suite (single tests/main.tish — one native link per backend; CI uses this)
+perf-suite *ARGS:
+    ./scripts/run_performance_suite.sh {{ARGS}}
+
+# Regenerate tests/main.tish + tests/main.js after changing paired pure perf tests
+perf-suite-gen:
+    python3 scripts/generate_perf_ci_main.py
+
 # Show binary sizes for different builds
 sizes:
     @echo "Building secure binary..."

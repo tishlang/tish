@@ -1,13 +1,14 @@
 //! Array builtin methods.
 
 use crate::helpers::normalize_index;
+use tishlang_core::VmRef;
 use std::cell::RefCell;
 use std::rc::Rc;
 use tishlang_core::Value;
 
 /// Create a new array Value from a Vec of Values.
 pub fn from_vec(v: Vec<Value>) -> Value {
-    Value::Array(Rc::new(RefCell::new(v)))
+    Value::Array(VmRef::new(v))
 }
 
 /// Get the length of an array.
@@ -110,7 +111,7 @@ pub fn join(arr: &Value, sep: &Value) -> Value {
 pub fn reverse(arr: &Value) -> Value {
     if let Value::Array(arr) = arr {
         arr.borrow_mut().reverse();
-        Value::Array(Rc::clone(arr))
+        Value::Array(arr.clone())
     } else {
         Value::Null
     }
@@ -122,7 +123,7 @@ pub fn shuffle(arr: &Value) -> Value {
         let mut v = arr.borrow().clone();
         use rand::seq::SliceRandom;
         v.shuffle(&mut rand::rng());
-        Value::Array(Rc::new(RefCell::new(v)))
+        Value::Array(VmRef::new(v))
     } else {
         Value::Null
     }
@@ -141,7 +142,7 @@ pub fn splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &
         let removed: Vec<Value> = arr_mut
             .splice(start_idx..start_idx + actual_delete, items.iter().cloned())
             .collect();
-        Value::Array(Rc::new(RefCell::new(removed)))
+        Value::Array(VmRef::new(removed))
     } else {
         Value::Null
     }
@@ -158,7 +159,7 @@ pub fn slice(arr: &Value, start: &Value, end: &Value) -> Value {
         } else {
             vec![]
         };
-        Value::Array(Rc::new(RefCell::new(sliced)))
+        Value::Array(VmRef::new(sliced))
     } else {
         Value::Null
     }
@@ -174,7 +175,7 @@ pub fn concat(arr: &Value, args: &[Value]) -> Value {
                 result.push(v.clone());
             }
         }
-        Value::Array(Rc::new(RefCell::new(result)))
+        Value::Array(VmRef::new(result))
     } else {
         Value::Null
     }
@@ -200,7 +201,7 @@ pub fn flat(arr: &Value, depth: &Value) -> Value {
         };
         let mut result = Vec::new();
         flatten(&arr.borrow(), d, &mut result);
-        Value::Array(Rc::new(RefCell::new(result)))
+        Value::Array(VmRef::new(result))
     } else {
         Value::Null
     }
@@ -217,7 +218,7 @@ pub fn map(arr: &Value, callback: &Value) -> Value {
             .enumerate()
             .map(|(i, v)| cb(&[v.clone(), Value::Number(i as f64)]))
             .collect();
-        Value::Array(Rc::new(RefCell::new(result)))
+        Value::Array(VmRef::new(result))
     } else {
         Value::Null
     }
@@ -238,7 +239,7 @@ pub fn filter(arr: &Value, callback: &Value) -> Value {
                 }
             })
             .collect();
-        Value::Array(Rc::new(RefCell::new(result)))
+        Value::Array(VmRef::new(result))
     } else {
         Value::Null
     }
@@ -340,7 +341,7 @@ pub fn flat_map(arr: &Value, callback: &Value) -> Value {
                 result.push(mapped);
             }
         }
-        Value::Array(Rc::new(RefCell::new(result)))
+        Value::Array(VmRef::new(result))
     } else {
         Value::Null
     }
@@ -352,7 +353,7 @@ where
 {
     if let Value::Array(arr) = arr {
         arr.borrow_mut().sort_by(cmp);
-        Value::Array(Rc::clone(arr))
+        Value::Array(arr.clone())
     } else {
         Value::Null
     }
@@ -387,7 +388,7 @@ pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
             .map(|i| std::mem::replace(&mut elements[i], Value::Null))
             .collect();
         drop(arr_mut);
-        Value::Array(Rc::clone(arr))
+        Value::Array(arr.clone())
     } else {
         Value::Null
     }

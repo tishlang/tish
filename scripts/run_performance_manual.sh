@@ -1,5 +1,6 @@
 #!/bin/bash
 # Run Tish and JS equivalents, show output and compare execution time.
+# CI / one native binary per backend: ./scripts/run_performance_suite.sh (bundled tests/main.tish + tests/main.js).
 # Usage: ./scripts/run_performance_manual.sh [--release] [--summary-only] [--no-compile] [--limit N] [--filter NAME] [--runtimes R,...]
 #   --release       use release build (recommended for fair Tish vs JS timing)
 #   --summary-only  skip individual test output, show only summary

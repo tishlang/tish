@@ -1,6 +1,7 @@
 //! Stack-based bytecode VM.
 
 use std::cell::RefCell;
+use tishlang_core::VmRef;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -12,9 +13,33 @@ use tishlang_builtins::globals as globals_builtins;
 use tishlang_builtins::math as math_builtins;
 use tishlang_builtins::string as str_builtins;
 use tishlang_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
-use tishlang_core::{ObjectMap, Value};
+use tishlang_core::{NativeFn, ObjectMap, Value};
 
-type ArrayMethodFn = Rc<dyn Fn(&[Value]) -> Value>;
+/// Wrap a closure in the right shared pointer for the current build.
+/// Under `send-values` that's `Arc<dyn Fn + Send + Sync>`; otherwise it's
+/// plain `Rc<dyn Fn>`. Call sites can stay ignorant of the distinction.
+#[cfg(feature = "send-values")]
+#[inline]
+fn make_native_fn<F>(f: F) -> NativeFn
+where
+    F: Fn(&[Value]) -> Value + Send + Sync + 'static,
+{
+    Arc::new(f)
+}
+
+#[cfg(not(feature = "send-values"))]
+#[inline]
+fn make_native_fn<F>(f: F) -> NativeFn
+where
+    F: Fn(&[Value]) -> Value + 'static,
+{
+    Rc::new(f)
+}
+
+// Array / string / object methods have the same shape as `NativeFn`, which
+// is already feature-gated (`Rc<dyn Fn>` vs `Arc<dyn Fn + Send + Sync>`).
+// Alias to that so the VM picks the right pointer type automatically.
+type ArrayMethodFn = NativeFn;
 
 /// Feature names enabled for this VM run (`tish run --feature …`). `full` enables every optional capability.
 #[cfg_attr(
@@ -51,24 +76,24 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
     #[cfg(feature = "fs")]
     if spec == "tish:fs" && cap_allows(enabled, "fs") {
         return match export_name {
-            "readFile" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            "readFile" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::read_file(args)
-            }))),
-            "writeFile" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            })),
+            "writeFile" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::write_file(args)
-            }))),
-            "fileExists" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            })),
+            "fileExists" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::file_exists(args)
-            }))),
-            "isDir" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            })),
+            "isDir" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::is_dir(args)
-            }))),
-            "readDir" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            })),
+            "readDir" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::read_dir(args)
-            }))),
-            "mkdir" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            })),
+            "mkdir" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::mkdir(args)
-            }))),
+            })),
             _ => None,
         };
     }
@@ -76,16 +101,16 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
     if spec == "tish:http" && cap_allows(enabled, "http") {
         return match export_name {
             // Bytecode compiler lowers `await expr` to `tish:http.await(promise)` (see tish_bytecode compiler).
-            "await" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            "await" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::await_promise(args.first().cloned().unwrap_or(Value::Null))
-            }))),
-            "fetch" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            })),
+            "fetch" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::fetch_promise(args.to_vec())
-            }))),
-            "fetchAll" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            })),
+            "fetchAll" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::fetch_all_promise(args.to_vec())
-            }))),
-            "serve" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            })),
+            "serve" => Some(Value::native(|args: &[Value]| {
                 // Phase-1 item 2: support `serve(port, { handler, onWorker })`
                 // in addition to `serve(port, handler)`. When an options
                 // object is given and onWorker is a function, invoke it with
@@ -115,65 +140,65 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                 } else {
                     Value::Null
                 }
-            }))),
+            })),
             _ => None,
         };
     }
     #[cfg(feature = "process")]
     if spec == "tish:process" && cap_allows(enabled, "process") {
         return match export_name {
-            "exit" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            "exit" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::process_exit(args)
-            }))),
-            "cwd" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            })),
+            "cwd" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::process_cwd(args)
-            }))),
-            "exec" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            })),
+            "exec" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::process_exec(args)
-            }))),
-            "argv" => Some(Value::Array(Rc::new(RefCell::new(
+            })),
+            "argv" => Some(Value::Array(VmRef::new(
                 std::env::args().map(|s| Value::String(s.into())).collect(),
-            )))),
-            "env" => Some(Value::Object(Rc::new(RefCell::new(
+            ))),
+            "env" => Some(Value::Object(VmRef::new(
                 std::env::vars()
                     .map(|(k, v)| (Arc::from(k.as_str()), Value::String(v.into())))
                     .collect(),
-            )))),
+            ))),
             "process" => {
                 let mut m = ObjectMap::default();
                 m.insert(
                     "exit".into(),
-                    Value::Function(Rc::new(|args: &[Value]| {
+                    Value::native(|args: &[Value]| {
                         tishlang_runtime::process_exit(args)
-                    })),
+                    }),
                 );
                 m.insert(
                     "cwd".into(),
-                    Value::Function(Rc::new(|args: &[Value]| {
+                    Value::native(|args: &[Value]| {
                         tishlang_runtime::process_cwd(args)
-                    })),
+                    }),
                 );
                 m.insert(
                     "exec".into(),
-                    Value::Function(Rc::new(|args: &[Value]| {
+                    Value::native(|args: &[Value]| {
                         tishlang_runtime::process_exec(args)
-                    })),
+                    }),
                 );
                 m.insert(
                     "argv".into(),
-                    Value::Array(Rc::new(RefCell::new(
+                    Value::Array(VmRef::new(
                         std::env::args().map(|s| Value::String(s.into())).collect(),
-                    ))),
+                    )),
                 );
                 m.insert(
                     "env".into(),
-                    Value::Object(Rc::new(RefCell::new(
+                    Value::Object(VmRef::new(
                         std::env::vars()
                             .map(|(k, v)| (Arc::from(k.as_str()), Value::String(v.into())))
                             .collect(),
-                    ))),
+                    )),
                 );
-                Some(Value::Object(Rc::new(RefCell::new(m))))
+                Some(Value::Object(VmRef::new(m)))
             }
             _ => None,
         };
@@ -181,13 +206,13 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
     #[cfg(feature = "ws")]
     if spec == "tish:ws" && cap_allows(enabled, "ws") {
         return match export_name {
-            "WebSocket" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            "WebSocket" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::web_socket_client(args)
-            }))),
-            "Server" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            })),
+            "Server" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::web_socket_server_construct(args)
-            }))),
-            "wsSend" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            })),
+            "wsSend" => Some(Value::native(|args: &[Value]| {
                 Value::Bool(tishlang_runtime::ws_send_native(
                     args.first().unwrap_or(&Value::Null),
                     &args
@@ -195,10 +220,10 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                         .map(|v| v.to_display_string())
                         .unwrap_or_default(),
                 ))
-            }))),
-            "wsBroadcast" => Some(Value::Function(Rc::new(|args: &[Value]| {
+            })),
+            "wsBroadcast" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::ws_broadcast_native(args)
-            }))),
+            })),
             _ => None,
         };
     }
@@ -241,223 +266,223 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     let mut console = ObjectMap::default();
     console.insert(
         "debug".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let s =
                 tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log(&s);
             Value::Null
-        })),
+        }),
     );
     console.insert(
         "log".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let s =
                 tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log(&s);
             Value::Null
-        })),
+        }),
     );
     console.insert(
         "info".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let s =
                 tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log(&s);
             Value::Null
-        })),
+        }),
     );
     console.insert(
         "warn".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let s =
                 tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log_err(&s);
             Value::Null
-        })),
+        }),
     );
     console.insert(
         "error".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let s =
                 tishlang_core::format_values_for_console(args, tishlang_core::use_console_colors());
             vm_log_err(&s);
             Value::Null
-        })),
+        }),
     );
     g.insert(
         "console".into(),
-        Value::Object(Rc::new(RefCell::new(console))),
+        Value::Object(VmRef::new(console)),
     );
 
     let mut math = ObjectMap::default();
     math.insert(
         "abs".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let n = args.first().and_then(|v| v.as_number()).unwrap_or(f64::NAN);
             Value::Number(n.abs())
-        })),
+        }),
     );
     math.insert(
         "sqrt".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let n = args.first().and_then(|v| v.as_number()).unwrap_or(f64::NAN);
             Value::Number(n.sqrt())
-        })),
+        }),
     );
     math.insert(
         "floor".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let n = args.first().and_then(|v| v.as_number()).unwrap_or(f64::NAN);
             Value::Number(n.floor())
-        })),
+        }),
     );
     math.insert(
         "ceil".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let n = args.first().and_then(|v| v.as_number()).unwrap_or(f64::NAN);
             Value::Number(n.ceil())
-        })),
+        }),
     );
     math.insert(
         "round".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let n = args.first().and_then(|v| v.as_number()).unwrap_or(f64::NAN);
             Value::Number(n.round())
-        })),
+        }),
     );
     math.insert(
         "random".into(),
-        Value::Function(Rc::new(|_| Value::Number(rand::random::<f64>()))),
+        Value::native(|_| Value::Number(rand::random::<f64>())),
     );
     math.insert(
         "min".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let nums: Vec<f64> = args.iter().filter_map(|v| v.as_number()).collect();
             Value::Number(nums.into_iter().fold(f64::NAN, |a, b| a.min(b)))
-        })),
+        }),
     );
     math.insert(
         "max".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let nums: Vec<f64> = args.iter().filter_map(|v| v.as_number()).collect();
             Value::Number(nums.into_iter().fold(f64::NAN, |a, b| a.max(b)))
-        })),
+        }),
     );
     math.insert(
         "pow".into(),
-        Value::Function(Rc::new(|args: &[Value]| math_builtins::pow(args))),
+        Value::native(|args: &[Value]| math_builtins::pow(args)),
     );
     math.insert(
         "sin".into(),
-        Value::Function(Rc::new(|args: &[Value]| math_builtins::sin(args))),
+        Value::native(|args: &[Value]| math_builtins::sin(args)),
     );
     math.insert(
         "cos".into(),
-        Value::Function(Rc::new(|args: &[Value]| math_builtins::cos(args))),
+        Value::native(|args: &[Value]| math_builtins::cos(args)),
     );
     math.insert(
         "tan".into(),
-        Value::Function(Rc::new(|args: &[Value]| math_builtins::tan(args))),
+        Value::native(|args: &[Value]| math_builtins::tan(args)),
     );
     math.insert(
         "log".into(),
-        Value::Function(Rc::new(|args: &[Value]| math_builtins::log(args))),
+        Value::native(|args: &[Value]| math_builtins::log(args)),
     );
     math.insert(
         "exp".into(),
-        Value::Function(Rc::new(|args: &[Value]| math_builtins::exp(args))),
+        Value::native(|args: &[Value]| math_builtins::exp(args)),
     );
     math.insert(
         "sign".into(),
-        Value::Function(Rc::new(|args: &[Value]| math_builtins::sign(args))),
+        Value::native(|args: &[Value]| math_builtins::sign(args)),
     );
     math.insert(
         "trunc".into(),
-        Value::Function(Rc::new(|args: &[Value]| math_builtins::trunc(args))),
+        Value::native(|args: &[Value]| math_builtins::trunc(args)),
     );
     math.insert("PI".into(), Value::Number(std::f64::consts::PI));
     math.insert("E".into(), Value::Number(std::f64::consts::E));
-    g.insert("Math".into(), Value::Object(Rc::new(RefCell::new(math))));
+    g.insert("Math".into(), Value::Object(VmRef::new(math)));
 
     let mut json = ObjectMap::default();
     json.insert(
         "parse".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let s = args
                 .first()
                 .map(|v| v.to_display_string())
                 .unwrap_or_default();
             tishlang_core::json_parse(&s).unwrap_or(Value::Null)
-        })),
+        }),
     );
     json.insert(
         "stringify".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let v = args.first().unwrap_or(&Value::Null);
             Value::String(tishlang_core::json_stringify(v).into())
-        })),
+        }),
     );
-    g.insert("JSON".into(), Value::Object(Rc::new(RefCell::new(json))));
+    g.insert("JSON".into(), Value::Object(VmRef::new(json)));
 
     g.insert(
         "parseInt".into(),
-        Value::Function(Rc::new(|args: &[Value]| globals_builtins::parse_int(args))),
+        Value::native(|args: &[Value]| globals_builtins::parse_int(args)),
     );
     g.insert(
         "parseFloat".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             globals_builtins::parse_float(args)
-        })),
+        }),
     );
     g.insert(
         "encodeURI".into(),
-        Value::Function(Rc::new(|args: &[Value]| globals_builtins::encode_uri(args))),
+        Value::native(|args: &[Value]| globals_builtins::encode_uri(args)),
     );
     g.insert(
         "decodeURI".into(),
-        Value::Function(Rc::new(|args: &[Value]| globals_builtins::decode_uri(args))),
+        Value::native(|args: &[Value]| globals_builtins::decode_uri(args)),
     );
     g.insert(
         "htmlEscape".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             tishlang_builtins::string::escape_html(args.first().unwrap_or(&Value::Null))
-        })),
+        }),
     );
     g.insert(
         "Boolean".into(),
-        Value::Function(Rc::new(|args: &[Value]| globals_builtins::boolean(args))),
+        Value::native(|args: &[Value]| globals_builtins::boolean(args)),
     );
     g.insert(
         "isFinite".into(),
-        Value::Function(Rc::new(|args: &[Value]| globals_builtins::is_finite(args))),
+        Value::native(|args: &[Value]| globals_builtins::is_finite(args)),
     );
     g.insert(
         "isNaN".into(),
-        Value::Function(Rc::new(|args: &[Value]| globals_builtins::is_nan(args))),
+        Value::native(|args: &[Value]| globals_builtins::is_nan(args)),
     );
     g.insert("Infinity".into(), Value::Number(f64::INFINITY));
     g.insert("NaN".into(), Value::Number(f64::NAN));
     g.insert(
         "typeof".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let v = args.first().unwrap_or(&Value::Null);
             Value::String(v.type_name().into())
-        })),
+        }),
     );
 
     // Date - at minimum Date.now() for timing
     let mut date = ObjectMap::default();
     date.insert(
         "now".into(),
-        Value::Function(Rc::new(|_args: &[Value]| {
+        Value::native(|_args: &[Value]| {
             let ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as f64;
             Value::Number(ms)
-        })),
+        }),
     );
-    g.insert("Date".into(), Value::Object(Rc::new(RefCell::new(date))));
+    g.insert("Date".into(), Value::Object(VmRef::new(date)));
 
     g.insert(
         "Uint8Array".into(),
@@ -472,102 +497,102 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     let mut object_methods = ObjectMap::default();
     object_methods.insert(
         "assign".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             globals_builtins::object_assign(args)
-        })),
+        }),
     );
     object_methods.insert(
         "fromEntries".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             globals_builtins::object_from_entries(args)
-        })),
+        }),
     );
     object_methods.insert(
         "keys".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             globals_builtins::object_keys(args)
-        })),
+        }),
     );
     object_methods.insert(
         "values".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             globals_builtins::object_values(args)
-        })),
+        }),
     );
     object_methods.insert(
         "entries".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             globals_builtins::object_entries(args)
-        })),
+        }),
     );
     g.insert(
         "Object".into(),
-        Value::Object(Rc::new(RefCell::new(object_methods))),
+        Value::Object(VmRef::new(object_methods)),
     );
 
     // Array.isArray
     let mut array_static = ObjectMap::default();
     array_static.insert(
         "isArray".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             globals_builtins::array_is_array(args)
-        })),
+        }),
     );
     g.insert(
         "Array".into(),
-        Value::Object(Rc::new(RefCell::new(array_static))),
+        Value::Object(VmRef::new(array_static)),
     );
 
     // String(value) as callable + String.fromCharCode
-    let string_convert_fn = Value::Function(Rc::new(|args: &[Value]| {
+    let string_convert_fn = Value::native(|args: &[Value]| {
         globals_builtins::string_convert(args)
-    }));
+    });
     let mut string_static = ObjectMap::default();
     string_static.insert(
         "fromCharCode".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             globals_builtins::string_from_char_code(args)
-        })),
+        }),
     );
     string_static.insert(Arc::from("__call"), string_convert_fn);
     g.insert(
         "String".into(),
-        Value::Object(Rc::new(RefCell::new(string_static))),
+        Value::Object(VmRef::new(string_static)),
     );
 
     // JSX / Lattish: stubs for bytecode VM when no DOM (e.g. console). Override via set_global in browser.
     g.insert(
         "h".into(),
-        Value::Function(Rc::new(|_args: &[Value]| Value::Null)),
+        Value::native(|_args: &[Value]| Value::Null),
     );
     g.insert(
         "Fragment".into(),
-        Value::Object(Rc::new(RefCell::new(ObjectMap::default()))),
+        Value::Object(VmRef::new(ObjectMap::default())),
     );
     g.insert(
         "createRoot".into(),
-        Value::Function(Rc::new(|_args: &[Value]| {
+        Value::native(|_args: &[Value]| {
             let mut render_obj = ObjectMap::default();
             render_obj.insert(
                 "render".into(),
-                Value::Function(Rc::new(|_args: &[Value]| Value::Null)),
+                Value::native(|_args: &[Value]| Value::Null),
             );
-            Value::Object(Rc::new(RefCell::new(render_obj)))
-        })),
+            Value::Object(VmRef::new(render_obj))
+        }),
     );
     g.insert(
         "useState".into(),
-        Value::Function(Rc::new(|args: &[Value]| {
+        Value::native(|args: &[Value]| {
             let init = args.first().cloned().unwrap_or(Value::Null);
-            let arr = vec![init, Value::Function(Rc::new(|_| Value::Null))];
-            Value::Array(Rc::new(RefCell::new(arr)))
-        })),
+            let arr = vec![init, Value::native(|_| Value::Null)];
+            Value::Array(VmRef::new(arr))
+        }),
     );
     let mut document_obj = ObjectMap::default();
     document_obj.insert("body".into(), Value::Null);
     g.insert(
         "document".into(),
-        Value::Object(Rc::new(RefCell::new(document_obj))),
+        Value::Object(VmRef::new(document_obj)),
     );
 
     #[cfg(feature = "process")]
@@ -575,39 +600,39 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         let mut process_obj = ObjectMap::default();
         process_obj.insert(
             "exit".into(),
-            Value::Function(Rc::new(|args: &[Value]| {
+            Value::native(|args: &[Value]| {
                 tishlang_runtime::process_exit(args)
-            })),
+            }),
         );
         process_obj.insert(
             "cwd".into(),
-            Value::Function(Rc::new(|args: &[Value]| {
+            Value::native(|args: &[Value]| {
                 tishlang_runtime::process_cwd(args)
-            })),
+            }),
         );
         process_obj.insert(
             "exec".into(),
-            Value::Function(Rc::new(|args: &[Value]| {
+            Value::native(|args: &[Value]| {
                 tishlang_runtime::process_exec(args)
-            })),
+            }),
         );
         process_obj.insert(
             "argv".into(),
-            Value::Array(Rc::new(RefCell::new(
+            Value::Array(VmRef::new(
                 std::env::args().map(|s| Value::String(s.into())).collect(),
-            ))),
+            )),
         );
         process_obj.insert(
             "env".into(),
-            Value::Object(Rc::new(RefCell::new(
+            Value::Object(VmRef::new(
                 std::env::vars()
                     .map(|(k, v)| (Arc::from(k.as_str()), Value::String(v.into())))
                     .collect(),
-            ))),
+            )),
         );
         g.insert(
             "process".into(),
-            Value::Object(Rc::new(RefCell::new(process_obj))),
+            Value::Object(VmRef::new(process_obj)),
         );
     }
 
@@ -615,7 +640,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     if cap_allows(enabled, "http") {
         g.insert(
             "registerStaticRoute".into(),
-            Value::Function(Rc::new(|args: &[Value]| {
+            Value::native(|args: &[Value]| {
                 let path = match args.first() {
                     Some(Value::String(s)) => s.to_string(),
                     _ => return Value::Null,
@@ -630,11 +655,11 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
                 };
                 tishlang_runtime::register_static_route(&path, &body, &ct);
                 Value::Null
-            })),
+            }),
         );
         g.insert(
             "serve".into(),
-            Value::Function(Rc::new(|args: &[Value]| {
+            Value::native(|args: &[Value]| {
                 // Phase-1 item 2 (see tish:http.serve above for full docs).
                 let raw = args.get(1).cloned().unwrap_or(Value::Null);
                 let handler_value = match raw {
@@ -661,7 +686,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
                 } else {
                     Value::Null
                 }
-            })),
+            }),
         );
     }
 
@@ -669,7 +694,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
 }
 
 /// Shared scope for closure capture (parent frame's locals).
-type ScopeMap = Rc<RefCell<ObjectMap>>;
+type ScopeMap = VmRef<ObjectMap>;
 
 /// Options for the convenience [`run_with_options`] helper (one-shot VM run from the CLI).
 #[derive(Clone, Debug, Default)]
@@ -686,14 +711,14 @@ pub struct Vm {
     scope: ObjectMap,
     /// Enclosing scope for closures (captured parent frame locals).
     enclosing: Option<ScopeMap>,
-    globals: Rc<RefCell<ObjectMap>>,
+    globals: VmRef<ObjectMap>,
     /// Capabilities for `LoadNativeExport` and globals such as `process` / `serve`.
     capabilities: Arc<HashSet<String>>,
     /// Externally registered native modules, keyed by import spec (e.g.
     /// `"cargo:tish_pg"`). Populated by embedders before `run` (see
     /// [`register_native_module`]). Phase-2 item 11: unblocks `cargo:`
     /// imports on the cranelift and llvm backends which run this VM.
-    native_modules: Rc<RefCell<HashMap<String, Rc<RefCell<ObjectMap>>>>>,
+    native_modules: VmRef<HashMap<String, VmRef<ObjectMap>>>,
 }
 
 impl Vm {
@@ -712,9 +737,9 @@ impl Vm {
             stack: Vec::new(),
             scope: ObjectMap::default(),
             enclosing: None,
-            globals: Rc::new(RefCell::new(init_globals(capabilities.as_ref()))),
+            globals: VmRef::new(init_globals(capabilities.as_ref())),
             capabilities,
-            native_modules: Rc::new(RefCell::new(HashMap::new())),
+            native_modules: VmRef::new(HashMap::new()),
         }
     }
 
@@ -727,7 +752,7 @@ impl Vm {
     pub fn register_native_module(&mut self, spec: impl Into<String>, exports: ObjectMap) {
         self.native_modules
             .borrow_mut()
-            .insert(spec.into(), Rc::new(RefCell::new(exports)));
+            .insert(spec.into(), VmRef::new(exports));
     }
 
     pub fn get_global(&self, name: &str) -> Option<Value> {
@@ -779,7 +804,7 @@ impl Vm {
         let names = &chunk.names;
 
         let mut ip = 0;
-        let local_scope: ScopeMap = Rc::new(RefCell::new(ObjectMap::default()));
+        let local_scope: ScopeMap = VmRef::new(ObjectMap::default());
         {
             let mut ls = local_scope.borrow_mut();
             let param_count = chunk.param_count as usize;
@@ -793,7 +818,7 @@ impl Vm {
                         let rest_arr: Vec<Value> = args.iter().skip(ri).cloned().collect();
                         ls.insert(
                             Arc::clone(name),
-                            Value::Array(Rc::new(RefCell::new(rest_arr))),
+                            Value::Array(VmRef::new(rest_arr)),
                         );
                     }
                 }
@@ -836,22 +861,22 @@ impl Vm {
                                 .get(*nested_idx)
                                 .ok_or_else(|| "Nested chunk index out of bounds".to_string())?;
                             let inner_clone = inner.clone();
-                            let globals = Rc::clone(&self.globals);
-                            let enclosing = Some(Rc::clone(&local_scope));
+                            let globals = self.globals.clone();
+                            let enclosing = Some(local_scope.clone());
                             let capabilities = Arc::clone(&self.capabilities);
-                            let native_modules = Rc::clone(&self.native_modules);
-                            Value::Function(Rc::new(move |args: &[Value]| {
+                            let native_modules = self.native_modules.clone();
+                            Value::native(move |args: &[Value]| {
                                 let mut vm = Vm {
                                     stack: Vec::new(),
                                     scope: ObjectMap::default(),
                                     enclosing: enclosing.clone(),
-                                    globals: Rc::clone(&globals),
+                                    globals: globals.clone(),
                                     capabilities: Arc::clone(&capabilities),
-                                    native_modules: Rc::clone(&native_modules),
+                                    native_modules: native_modules.clone(),
                                 };
                                 vm.run_chunk(&inner_clone, &inner_clone.nested, args, false)
                                     .unwrap_or(Value::Null)
-                            }))
+                            })
                         }
                     };
                     self.stack.push(v);
@@ -1025,12 +1050,12 @@ impl Vm {
                         .pop()
                         .ok_or_else(|| "Stack underflow: no callee".to_string())?;
                     let f = match &callee {
-                        Value::Function(f) => Rc::clone(f),
+                        Value::Function(f) => f.clone(),
                         Value::Object(o) => {
                             if let Some(Value::Function(call_fn)) =
                                 o.borrow().get(&Arc::from("__call"))
                             {
-                                Rc::clone(call_fn)
+                                call_fn.clone()
                             } else {
                                 return Err(format!(
                                     "Call of non-function: {}",
@@ -1064,12 +1089,12 @@ impl Vm {
                         }
                     };
                     let f = match &callee {
-                        Value::Function(f) => Rc::clone(f),
+                        Value::Function(f) => f.clone(),
                         Value::Object(o) => {
                             if let Some(Value::Function(call_fn)) =
                                 o.borrow().get(&Arc::from("__call"))
                             {
-                                Rc::clone(call_fn)
+                                call_fn.clone()
                             } else {
                                 return Err(format!(
                                     "Call of non-function: {}",
@@ -1256,7 +1281,7 @@ impl Vm {
                         );
                     }
                     elems.reverse();
-                    self.stack.push(Value::Array(Rc::new(RefCell::new(elems))));
+                    self.stack.push(Value::Array(VmRef::new(elems)));
                 }
                 Opcode::NewObject => {
                     let n = Self::read_u16(code, &mut ip) as usize;
@@ -1273,7 +1298,7 @@ impl Vm {
                         let key = key_val.to_display_string().into();
                         map.insert(key, val);
                     }
-                    self.stack.push(Value::Object(Rc::new(RefCell::new(map))));
+                    self.stack.push(Value::Object(VmRef::new(map)));
                 }
                 Opcode::EnterTry => {
                     let offset = Self::read_u16(code, &mut ip) as usize;
@@ -1313,7 +1338,7 @@ impl Vm {
                         },
                     );
                     a.extend(b);
-                    self.stack.push(Value::Array(Rc::new(RefCell::new(a))));
+                    self.stack.push(Value::Array(VmRef::new(a)));
                 }
                 Opcode::MergeObject => {
                     let right = self
@@ -1348,7 +1373,7 @@ impl Vm {
                         ));
                     }
                     self.stack
-                        .push(Value::Object(Rc::new(RefCell::new(merged))));
+                        .push(Value::Object(VmRef::new(merged)));
                 }
                 Opcode::ArraySortNumeric => {
                     let operand = Self::read_u16(code, &mut ip);
@@ -1390,7 +1415,7 @@ impl Vm {
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
                     let result = match &arr {
-                        Value::Array(a) => Value::Array(Rc::new(RefCell::new(a.borrow().clone()))),
+                        Value::Array(a) => Value::Array(VmRef::new(a.borrow().clone())),
                         _ => Value::Null,
                     };
                     self.stack.push(result);
@@ -1429,7 +1454,7 @@ impl Vm {
                                 eval_binop(binop, &l, &r).unwrap_or(Value::Null)
                             })
                             .collect();
-                        Value::Array(Rc::new(RefCell::new(mapped)))
+                        Value::Array(VmRef::new(mapped))
                     } else {
                         Value::Null
                     };
@@ -1472,7 +1497,7 @@ impl Vm {
                             })
                             .cloned()
                             .collect();
-                        Value::Array(Rc::new(RefCell::new(filtered)))
+                        Value::Array(VmRef::new(filtered))
                     } else {
                         Value::Null
                     };
@@ -1682,105 +1707,105 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             if key_s == "length" {
                 return Ok(Value::Number(a.borrow().len() as f64));
             }
-            let a_clone = Rc::clone(a);
+            let a_clone = a.clone();
             let method: ArrayMethodFn = match key_s {
-                "push" => Rc::new(move |args: &[Value]| {
-                    arr_builtins::push(&Value::Array(Rc::clone(&a_clone)), args)
+                "push" => make_native_fn(move |args: &[Value]| {
+                    arr_builtins::push(&Value::Array(a_clone.clone()), args)
                 }),
-                "pop" => Rc::new(move |_args: &[Value]| {
-                    arr_builtins::pop(&Value::Array(Rc::clone(&a_clone)))
+                "pop" => make_native_fn(move |_args: &[Value]| {
+                    arr_builtins::pop(&Value::Array(a_clone.clone()))
                 }),
-                "shift" => Rc::new(move |_args: &[Value]| {
-                    arr_builtins::shift(&Value::Array(Rc::clone(&a_clone)))
+                "shift" => make_native_fn(move |_args: &[Value]| {
+                    arr_builtins::shift(&Value::Array(a_clone.clone()))
                 }),
-                "unshift" => Rc::new(move |args: &[Value]| {
-                    arr_builtins::unshift(&Value::Array(Rc::clone(&a_clone)), args)
+                "unshift" => make_native_fn(move |args: &[Value]| {
+                    arr_builtins::unshift(&Value::Array(a_clone.clone()), args)
                 }),
-                "reverse" => Rc::new(move |_args: &[Value]| {
-                    arr_builtins::reverse(&Value::Array(Rc::clone(&a_clone)))
+                "reverse" => make_native_fn(move |_args: &[Value]| {
+                    arr_builtins::reverse(&Value::Array(a_clone.clone()))
                 }),
-                "shuffle" => Rc::new(move |_args: &[Value]| {
-                    arr_builtins::shuffle(&Value::Array(Rc::clone(&a_clone)))
+                "shuffle" => make_native_fn(move |_args: &[Value]| {
+                    arr_builtins::shuffle(&Value::Array(a_clone.clone()))
                 }),
-                "slice" => Rc::new(move |args: &[Value]| {
+                "slice" => make_native_fn(move |args: &[Value]| {
                     let start = args.first().unwrap_or(&Value::Null);
                     let end = args.get(1).unwrap_or(&Value::Null);
-                    arr_builtins::slice(&Value::Array(Rc::clone(&a_clone)), start, end)
+                    arr_builtins::slice(&Value::Array(a_clone.clone()), start, end)
                 }),
-                "concat" => Rc::new(move |args: &[Value]| {
-                    arr_builtins::concat(&Value::Array(Rc::clone(&a_clone)), args)
+                "concat" => make_native_fn(move |args: &[Value]| {
+                    arr_builtins::concat(&Value::Array(a_clone.clone()), args)
                 }),
-                "join" => Rc::new(move |args: &[Value]| {
+                "join" => make_native_fn(move |args: &[Value]| {
                     let sep = args.first().unwrap_or(&Value::Null);
-                    arr_builtins::join(&Value::Array(Rc::clone(&a_clone)), sep)
+                    arr_builtins::join(&Value::Array(a_clone.clone()), sep)
                 }),
-                "indexOf" => Rc::new(move |args: &[Value]| {
+                "indexOf" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
-                    arr_builtins::index_of(&Value::Array(Rc::clone(&a_clone)), search)
+                    arr_builtins::index_of(&Value::Array(a_clone.clone()), search)
                 }),
-                "includes" => Rc::new(move |args: &[Value]| {
+                "includes" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let from = args.get(1);
-                    arr_builtins::includes(&Value::Array(Rc::clone(&a_clone)), search, from)
+                    arr_builtins::includes(&Value::Array(a_clone.clone()), search, from)
                 }),
-                "map" => Rc::new(move |args: &[Value]| {
+                "map" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
-                    arr_builtins::map(&Value::Array(Rc::clone(&a_clone)), &cb)
+                    arr_builtins::map(&Value::Array(a_clone.clone()), &cb)
                 }),
-                "filter" => Rc::new(move |args: &[Value]| {
+                "filter" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
-                    arr_builtins::filter(&Value::Array(Rc::clone(&a_clone)), &cb)
+                    arr_builtins::filter(&Value::Array(a_clone.clone()), &cb)
                 }),
-                "reduce" => Rc::new(move |args: &[Value]| {
+                "reduce" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
                     let init = args.get(1).cloned().unwrap_or(Value::Null);
-                    arr_builtins::reduce(&Value::Array(Rc::clone(&a_clone)), &cb, &init)
+                    arr_builtins::reduce(&Value::Array(a_clone.clone()), &cb, &init)
                 }),
-                "forEach" => Rc::new(move |args: &[Value]| {
+                "forEach" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
-                    arr_builtins::for_each(&Value::Array(Rc::clone(&a_clone)), &cb)
+                    arr_builtins::for_each(&Value::Array(a_clone.clone()), &cb)
                 }),
-                "find" => Rc::new(move |args: &[Value]| {
+                "find" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
-                    arr_builtins::find(&Value::Array(Rc::clone(&a_clone)), &cb)
+                    arr_builtins::find(&Value::Array(a_clone.clone()), &cb)
                 }),
-                "findIndex" => Rc::new(move |args: &[Value]| {
+                "findIndex" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
-                    arr_builtins::find_index(&Value::Array(Rc::clone(&a_clone)), &cb)
+                    arr_builtins::find_index(&Value::Array(a_clone.clone()), &cb)
                 }),
-                "some" => Rc::new(move |args: &[Value]| {
+                "some" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
-                    arr_builtins::some(&Value::Array(Rc::clone(&a_clone)), &cb)
+                    arr_builtins::some(&Value::Array(a_clone.clone()), &cb)
                 }),
-                "every" => Rc::new(move |args: &[Value]| {
+                "every" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
-                    arr_builtins::every(&Value::Array(Rc::clone(&a_clone)), &cb)
+                    arr_builtins::every(&Value::Array(a_clone.clone()), &cb)
                 }),
-                "flat" => Rc::new(move |args: &[Value]| {
+                "flat" => make_native_fn(move |args: &[Value]| {
                     let depth = args.first().unwrap_or(&Value::Number(1.0));
-                    arr_builtins::flat(&Value::Array(Rc::clone(&a_clone)), depth)
+                    arr_builtins::flat(&Value::Array(a_clone.clone()), depth)
                 }),
-                "flatMap" => Rc::new(move |args: &[Value]| {
+                "flatMap" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
-                    arr_builtins::flat_map(&Value::Array(Rc::clone(&a_clone)), &cb)
+                    arr_builtins::flat_map(&Value::Array(a_clone.clone()), &cb)
                 }),
-                "sort" => Rc::new(move |args: &[Value]| {
+                "sort" => make_native_fn(move |args: &[Value]| {
                     let cmp = args.first();
                     if let Some(Value::Function(_)) = cmp {
                         arr_builtins::sort_with_comparator(
-                            &Value::Array(Rc::clone(&a_clone)),
+                            &Value::Array(a_clone.clone()),
                             cmp.unwrap(),
                         )
                     } else {
-                        arr_builtins::sort_default(&Value::Array(Rc::clone(&a_clone)))
+                        arr_builtins::sort_default(&Value::Array(a_clone.clone()))
                     }
                 }),
-                "splice" => Rc::new(move |args: &[Value]| {
+                "splice" => make_native_fn(move |args: &[Value]| {
                     let start = args.first().unwrap_or(&Value::Null);
                     let delete_count = args.get(1).map(|v| v as &Value);
                     let items: Vec<Value> = args.get(2..).unwrap_or(&[]).to_vec();
                     arr_builtins::splice(
-                        &Value::Array(Rc::clone(&a_clone)),
+                        &Value::Array(a_clone.clone()),
                         start,
                         delete_count,
                         &items,
@@ -1803,12 +1828,12 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             }
             let s_clone: Arc<str> = Arc::clone(s);
             let method: ArrayMethodFn = match key_s {
-                "indexOf" => Rc::new(move |args: &[Value]| {
+                "indexOf" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let from = args.get(1);
                     str_builtins::index_of(&Value::String(Arc::clone(&s_clone)), search, from)
                 }),
-                "lastIndexOf" => Rc::new(move |args: &[Value]| {
+                "lastIndexOf" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let position = args.get(1).cloned().unwrap_or(Value::Number(f64::INFINITY));
                     str_builtins::last_index_of(
@@ -1817,48 +1842,48 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                         &position,
                     )
                 }),
-                "includes" => Rc::new(move |args: &[Value]| {
+                "includes" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let from = args.get(1);
                     str_builtins::includes(&Value::String(Arc::clone(&s_clone)), search, from)
                 }),
-                "slice" => Rc::new(move |args: &[Value]| {
+                "slice" => make_native_fn(move |args: &[Value]| {
                     let start = args.first().unwrap_or(&Value::Null);
                     let end = args.get(1).unwrap_or(&Value::Null);
                     str_builtins::slice(&Value::String(Arc::clone(&s_clone)), start, end)
                 }),
-                "substring" => Rc::new(move |args: &[Value]| {
+                "substring" => make_native_fn(move |args: &[Value]| {
                     let start = args.first().unwrap_or(&Value::Null);
                     let end = args.get(1).unwrap_or(&Value::Null);
                     str_builtins::substring(&Value::String(Arc::clone(&s_clone)), start, end)
                 }),
-                "split" => Rc::new(move |args: &[Value]| {
+                "split" => make_native_fn(move |args: &[Value]| {
                     let sep = args.first().unwrap_or(&Value::Null);
                     str_builtins::split(&Value::String(Arc::clone(&s_clone)), sep)
                 }),
-                "trim" => Rc::new(move |_args: &[Value]| {
+                "trim" => make_native_fn(move |_args: &[Value]| {
                     str_builtins::trim(&Value::String(Arc::clone(&s_clone)))
                 }),
-                "toUpperCase" => Rc::new(move |_args: &[Value]| {
+                "toUpperCase" => make_native_fn(move |_args: &[Value]| {
                     str_builtins::to_upper_case(&Value::String(Arc::clone(&s_clone)))
                 }),
-                "toLowerCase" => Rc::new(move |_args: &[Value]| {
+                "toLowerCase" => make_native_fn(move |_args: &[Value]| {
                     str_builtins::to_lower_case(&Value::String(Arc::clone(&s_clone)))
                 }),
-                "startsWith" => Rc::new(move |args: &[Value]| {
+                "startsWith" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     str_builtins::starts_with(&Value::String(Arc::clone(&s_clone)), search)
                 }),
-                "endsWith" => Rc::new(move |args: &[Value]| {
+                "endsWith" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     str_builtins::ends_with(&Value::String(Arc::clone(&s_clone)), search)
                 }),
-                "replace" => Rc::new(move |args: &[Value]| {
+                "replace" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let replacement = args.get(1).unwrap_or(&Value::Null);
                     str_builtins::replace(&Value::String(Arc::clone(&s_clone)), search, replacement)
                 }),
-                "replaceAll" => Rc::new(move |args: &[Value]| {
+                "replaceAll" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let replacement = args.get(1).unwrap_or(&Value::Null);
                     str_builtins::replace_all(
@@ -1867,24 +1892,24 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                         replacement,
                     )
                 }),
-                "charAt" => Rc::new(move |args: &[Value]| {
+                "charAt" => make_native_fn(move |args: &[Value]| {
                     let idx = args.first().unwrap_or(&Value::Null);
                     str_builtins::char_at(&Value::String(Arc::clone(&s_clone)), idx)
                 }),
-                "charCodeAt" => Rc::new(move |args: &[Value]| {
+                "charCodeAt" => make_native_fn(move |args: &[Value]| {
                     let idx = args.first().unwrap_or(&Value::Null);
                     str_builtins::char_code_at(&Value::String(Arc::clone(&s_clone)), idx)
                 }),
-                "repeat" => Rc::new(move |args: &[Value]| {
+                "repeat" => make_native_fn(move |args: &[Value]| {
                     let count = args.first().unwrap_or(&Value::Null);
                     str_builtins::repeat(&Value::String(Arc::clone(&s_clone)), count)
                 }),
-                "padStart" => Rc::new(move |args: &[Value]| {
+                "padStart" => make_native_fn(move |args: &[Value]| {
                     let target_len = args.first().unwrap_or(&Value::Null);
                     let pad = args.get(1).unwrap_or(&Value::Null);
                     str_builtins::pad_start(&Value::String(Arc::clone(&s_clone)), target_len, pad)
                 }),
-                "padEnd" => Rc::new(move |args: &[Value]| {
+                "padEnd" => make_native_fn(move |args: &[Value]| {
                     let target_len = args.first().unwrap_or(&Value::Null);
                     let pad = args.get(1).unwrap_or(&Value::Null);
                     str_builtins::pad_end(&Value::String(Arc::clone(&s_clone)), target_len, pad)

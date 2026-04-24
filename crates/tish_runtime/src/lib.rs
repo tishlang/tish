@@ -15,6 +15,10 @@ use tishlang_builtins::helpers::make_error_value;
 
 pub use tishlang_core::ObjectMap;
 pub use tishlang_core::Value;
+// Re-export the shared-mutable wrapper so the Rust code emitted by
+// `tishlang_compile::codegen` can write `VmRef::new(...)` without needing
+// a direct dependency on `tishlang_core` from the generated crate.
+pub use tishlang_core::{VmReadGuard, VmRef, VmWriteGuard};
 
 pub use tishlang_builtins::construct::{
     audio_context_constructor_value as tish_audio_context_constructor, construct as tish_construct,
@@ -554,7 +558,7 @@ pub fn read_dir(args: &[Value]) -> Value {
                 .filter_map(|e| e.ok())
                 .map(|e| Value::String(e.file_name().to_string_lossy().into()))
                 .collect();
-            Value::Array(Rc::new(RefCell::new(files)))
+            Value::Array(VmRef::new(files))
         }
         Err(e) => make_error_value(e),
     }
@@ -600,17 +604,17 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
         }
         #[cfg(feature = "regex")]
         Value::RegExp(re) => {
-            let re = Rc::clone(re);
+            let re = re.clone();
             if key == "exec" {
-                Value::Function(Rc::new(move |args: &[Value]| {
+                Value::native(move |args: &[Value]| {
                     let input = args.first().unwrap_or(&Value::Null);
-                    regexp_exec(&Value::RegExp(Rc::clone(&re)), input)
-                }))
+                    regexp_exec(&Value::RegExp(re.clone()), input)
+                })
             } else if key == "test" {
-                Value::Function(Rc::new(move |args: &[Value]| {
+                Value::native(move |args: &[Value]| {
                     let input = args.first().unwrap_or(&Value::Null);
-                    regexp_test(&Value::RegExp(Rc::clone(&re)), input)
-                }))
+                    regexp_test(&Value::RegExp(re.clone()), input)
+                })
             } else {
                 Value::Null
             }
@@ -823,7 +827,7 @@ pub fn regexp_new(args: &[Value]) -> Value {
     };
 
     match TishRegExp::new(&pattern, &flags) {
-        Ok(re) => Value::RegExp(Rc::new(RefCell::new(re))),
+        Ok(re) => Value::RegExp(VmRef::new(re)),
         Err(e) => {
             eprintln!("RegExp error: {}", e);
             Value::Null
@@ -904,7 +908,7 @@ fn regexp_exec_impl(re: &mut tishlang_core::TishRegExp, input: &str) -> Value {
                 };
             }
 
-            Value::Object(Rc::new(RefCell::new(obj)))
+            Value::Object(VmRef::new(obj))
         }
         Ok(None) | Err(_) => {
             if re.flags.global || re.flags.sticky {
@@ -919,12 +923,12 @@ fn regexp_exec_impl(re: &mut tishlang_core::TishRegExp, input: &str) -> Value {
 pub fn string_split_regex(s: &Value, separator: &Value, limit: Option<usize>) -> Value {
     let input = match s {
         Value::String(s) => s.as_ref(),
-        _ => return Value::Array(Rc::new(RefCell::new(vec![s.clone()]))),
+        _ => return Value::Array(VmRef::new(vec![s.clone()])),
     };
 
     let max = limit.unwrap_or(usize::MAX);
     if max == 0 {
-        return Value::Array(Rc::new(RefCell::new(Vec::new())));
+        return Value::Array(VmRef::new(Vec::new()));
     }
 
     match separator {
@@ -950,16 +954,16 @@ pub fn string_split_regex(s: &Value, separator: &Value, limit: Option<usize>) ->
                 result.push(Value::String(input[last_end..].into()));
             }
 
-            Value::Array(Rc::new(RefCell::new(result)))
+            Value::Array(VmRef::new(result))
         }
         Value::String(sep) => {
             let parts: Vec<Value> = input
                 .splitn(max, sep.as_ref())
                 .map(|s| Value::String(s.into()))
                 .collect();
-            Value::Array(Rc::new(RefCell::new(parts)))
+            Value::Array(VmRef::new(parts))
         }
-        _ => Value::Array(Rc::new(RefCell::new(vec![Value::String(input.into())]))),
+        _ => Value::Array(VmRef::new(vec![Value::String(input.into())])),
     }
 }
 
@@ -995,7 +999,7 @@ pub fn string_match_regex(s: &Value, regexp: &Value) -> Value {
                 if matches.is_empty() {
                     Value::Null
                 } else {
-                    Value::Array(Rc::new(RefCell::new(matches)))
+                    Value::Array(VmRef::new(matches))
                 }
             } else {
                 regexp_exec_impl(&mut re, input)

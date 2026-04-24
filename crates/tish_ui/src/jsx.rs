@@ -409,7 +409,7 @@ where
                 .map(|c| emit_jsx_child_rust(c, emit_expr))
                 .collect();
             let children_rust = format!(
-                "Value::Array(Rc::new(RefCell::new(vec![{}])))",
+                "Value::Array(VmRef::new(vec![{}]))",
                 child_parts?.join(", ")
             );
             Ok(wrap_h_call_rust(&tag_rust, &props_rust, &children_rust))
@@ -420,7 +420,7 @@ where
                 .map(|c| emit_jsx_child_rust(c, emit_expr))
                 .collect();
             let children_rust = format!(
-                "Value::Array(Rc::new(RefCell::new(vec![{}])))",
+                "Value::Array(VmRef::new(vec![{}]))",
                 child_parts?.join(", ")
             );
             Ok(wrap_h_call_rust("Fragment", "Value::Null", &children_rust))
@@ -473,7 +473,7 @@ where
             }
         }
         Ok(format!(
-            "{{ let mut _obj: ObjectMap = ObjectMap::default(); {} Value::Object(Rc::new(RefCell::new(_obj))) }}",
+            "{{ let mut _obj: ObjectMap = ObjectMap::default(); {} Value::Object(VmRef::new(_obj)) }}",
             parts.join(" ")
         ))
     } else {
@@ -495,7 +495,7 @@ where
             }
         }
         Ok(format!(
-            "Value::Object(Rc::new(RefCell::new(ObjectMap::from([{}]))))",
+            "Value::Object(VmRef::new(ObjectMap::from([{}])))",
             kv.join(", ")
         ))
     }

@@ -14,3 +14,7 @@ tishlang_core = { path = "../tish_core", version = ">=0.1" }
 [features]
 default = []
 regex = ["tishlang_core/regex"]
+# Propagate the `send-values` feature from `tishlang_core` so that closures
+# handed to us via `NativeFn` pick up the `Send + Sync` bound automatically
+# when multi-threaded `Value`s are enabled upstream.
+send-values = ["tishlang_core/send-values"]

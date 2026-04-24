@@ -8,7 +8,19 @@ license-file = { workspace = true }
 repository = { workspace = true }
 [features]
 default = []
-http = ["tokio", "reqwest", "futures", "tiny_http", "tishlang_core/regex", "dep:tishlang_runtime", "tishlang_runtime/http"]
+http = [
+    "tokio",
+    "reqwest",
+    "futures",
+    "tiny_http",
+    "tishlang_core/regex",
+    "dep:tishlang_runtime",
+    "tishlang_runtime/http",
+    # Interpreter + http means the runtime's `NativeFn` is `Arc<... + Send>`,
+    # so the interpreter's `CoreFn` variant must use the same shape.
+    "tishlang_core/send-values",
+    "tishlang_builtins/send-values",
+]
 fs = []
 process = []
 regex = ["dep:fancy-regex", "tishlang_core/regex"]

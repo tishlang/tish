@@ -4,6 +4,7 @@
 //! independent of tishlang_runtime.
 
 use std::cell::RefCell;
+use tishlang_core::VmRef;
 use std::rc::Rc;
 use std::sync::Arc;
 use tishlang_core::{percent_decode, percent_encode, ObjectMap, Value};
@@ -78,9 +79,9 @@ pub fn object_keys(args: &[Value]) -> Value {
             .keys()
             .map(|k| Value::String(Arc::clone(k)))
             .collect();
-        Value::Array(Rc::new(RefCell::new(keys)))
+        Value::Array(VmRef::new(keys))
     } else {
-        Value::Array(Rc::new(RefCell::new(Vec::new())))
+        Value::Array(VmRef::new(Vec::new()))
     }
 }
 
@@ -89,9 +90,9 @@ pub fn object_values(args: &[Value]) -> Value {
     if let Some(Value::Object(obj)) = args.first() {
         let obj_borrow = obj.borrow();
         let values: Vec<Value> = obj_borrow.values().cloned().collect();
-        Value::Array(Rc::new(RefCell::new(values)))
+        Value::Array(VmRef::new(values))
     } else {
-        Value::Array(Rc::new(RefCell::new(Vec::new())))
+        Value::Array(VmRef::new(Vec::new()))
     }
 }
 
@@ -102,15 +103,15 @@ pub fn object_entries(args: &[Value]) -> Value {
         let entries: Vec<Value> = obj_borrow
             .iter()
             .map(|(k, v)| {
-                Value::Array(Rc::new(RefCell::new(vec![
+                Value::Array(VmRef::new(vec![
                     Value::String(Arc::clone(k)),
                     v.clone(),
-                ])))
+                ]))
             })
             .collect();
-        Value::Array(Rc::new(RefCell::new(entries)))
+        Value::Array(VmRef::new(entries))
     } else {
-        Value::Array(Rc::new(RefCell::new(Vec::new())))
+        Value::Array(VmRef::new(Vec::new()))
     }
 }
 
@@ -145,7 +146,7 @@ pub fn object_assign(args: &[Value]) -> Value {
         }
     }
     drop(target_mut);
-    Value::Object(Rc::clone(target))
+    Value::Object(target.clone())
 }
 
 /// parseInt(string, radix?)
@@ -203,8 +204,8 @@ pub fn object_from_entries(args: &[Value]) -> Value {
             }
         }
 
-        Value::Object(Rc::new(RefCell::new(obj)))
+        Value::Object(VmRef::new(obj))
     } else {
-        Value::Object(Rc::new(RefCell::new(ObjectMap::default())))
+        Value::Object(VmRef::new(ObjectMap::default()))
     }
 }

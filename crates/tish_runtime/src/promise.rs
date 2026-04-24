@@ -1,6 +1,7 @@
 //! Promise static methods for compiled Tish (resolve, reject, all, race).
 
 use std::cell::RefCell;
+use tishlang_core::VmRef;
 use std::rc::Rc;
 use std::sync::Arc;
 use tishlang_core::{ObjectMap, Value};
@@ -34,7 +35,7 @@ pub fn promise_all(args: &[Value]) -> Value {
                     }
                 })
                 .collect();
-            Value::Array(Rc::new(RefCell::new(resolved)))
+            Value::Array(VmRef::new(resolved))
         }
         Some(v) => v.clone(),
         None => Value::Null,
@@ -54,19 +55,19 @@ pub fn promise_object() -> Value {
     let mut map: ObjectMap = ObjectMap::default();
     map.insert(
         Arc::from("resolve"),
-        Value::Function(Rc::new(|args: &[Value]| promise_resolve(args))),
+        Value::native(|args: &[Value]| promise_resolve(args)),
     );
     map.insert(
         Arc::from("reject"),
-        Value::Function(Rc::new(|args: &[Value]| promise_reject(args))),
+        Value::native(|args: &[Value]| promise_reject(args)),
     );
     map.insert(
         Arc::from("all"),
-        Value::Function(Rc::new(|args: &[Value]| promise_all(args))),
+        Value::native(|args: &[Value]| promise_all(args)),
     );
     map.insert(
         Arc::from("race"),
-        Value::Function(Rc::new(|args: &[Value]| promise_race(args))),
+        Value::native(|args: &[Value]| promise_race(args)),
     );
-    Value::Object(Rc::new(RefCell::new(map)))
+    Value::Object(VmRef::new(map))
 }

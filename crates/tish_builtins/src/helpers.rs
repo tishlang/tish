@@ -1,6 +1,7 @@
 //! Common helper functions used across builtin implementations.
 
 use std::cell::RefCell;
+use tishlang_core::VmRef;
 use std::rc::Rc;
 use std::sync::Arc;
 use tishlang_core::{ObjectMap, Value};
@@ -25,7 +26,7 @@ pub fn normalize_index(idx: &Value, len: i64, default: usize) -> usize {
 pub fn make_error_value(e: impl std::fmt::Display) -> Value {
     let mut obj = ObjectMap::with_capacity(1);
     obj.insert(Arc::from("error"), Value::String(e.to_string().into()));
-    Value::Object(Rc::new(RefCell::new(obj)))
+    Value::Object(VmRef::new(obj))
 }
 
 /// Extract a number from a Value, returning None for non-numbers.

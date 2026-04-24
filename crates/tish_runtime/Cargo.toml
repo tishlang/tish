@@ -8,7 +8,21 @@ license-file = { workspace = true }
 repository = { workspace = true }
 [features]
 default = []
-http = ["dep:tokio", "dep:reqwest", "dep:futures", "dep:bytes", "dep:tiny_http", "dep:socket2", "dep:libc", "dep:arc-swap", "tishlang_core/regex"]
+http = [
+    "dep:tokio",
+    "dep:reqwest",
+    "dep:futures",
+    "dep:bytes",
+    "dep:tiny_http",
+    "dep:socket2",
+    "dep:libc",
+    "dep:arc-swap",
+    "tishlang_core/regex",
+    # `serve(port, handler)` dispatches handler closures across worker
+    # threads (or subprocesses, in prefork mode). Both require `Value: Send`.
+    "tishlang_core/send-values",
+    "tishlang_builtins/send-values",
+]
 # Phase-3 item 13: io_uring-backed accept + send loop (Linux only).
 # Disabled by default; enable with `--feature http,http-io-uring` on Linux
 # to pick up the experimental accept path.

@@ -4,18 +4,19 @@
 //! Functions will be migrated here from tishlang_runtime and tishlang_eval.
 
 use std::cell::RefCell;
+use tishlang_core::VmRef;
 use std::rc::Rc;
 use std::sync::Arc;
 use tishlang_core::{ObjectMap, Value};
 
 /// Create a new empty object Value.
 pub fn new() -> Value {
-    Value::Object(Rc::new(RefCell::new(ObjectMap::default())))
+    Value::Object(VmRef::new(ObjectMap::default()))
 }
 
 /// Create a new object Value with a given capacity.
 pub fn with_capacity(capacity: usize) -> Value {
-    Value::Object(Rc::new(RefCell::new(ObjectMap::with_capacity(capacity))))
+    Value::Object(VmRef::new(ObjectMap::with_capacity(capacity)))
 }
 
 /// Get the keys of an object.

@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tishlang_core::{ObjectMap, Value as CoreValue};
+use tishlang_core::{ObjectMap, Value as CoreValue, VmRef};
 
 use crate::value::{PropMap, Value};
 
@@ -20,14 +20,14 @@ pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
             for item in arr.borrow().iter() {
                 out.push(eval_to_core(item)?);
             }
-            Ok(CoreValue::Array(Rc::new(RefCell::new(out))))
+            Ok(CoreValue::Array(VmRef::new(out)))
         }
         Value::Object(map) => {
             let mut out = ObjectMap::default();
             for (k, v) in map.borrow().iter() {
                 out.insert(Arc::clone(k), eval_to_core(v)?);
             }
-            Ok(CoreValue::Object(Rc::new(RefCell::new(out))))
+            Ok(CoreValue::Object(VmRef::new(out)))
         }
         Value::Opaque(o) => Ok(CoreValue::Opaque(Arc::clone(o))),
         _ => Err(format!(
@@ -63,7 +63,9 @@ pub fn core_to_eval(v: CoreValue) -> Value {
         CoreValue::Promise(p) => Value::CorePromise(Arc::clone(&p)),
         #[cfg(not(feature = "http"))]
         CoreValue::Promise(_) => Value::Null,
-        CoreValue::Function(f) => Value::CoreFn(Rc::clone(&f)),
+        // `CoreNativeFn` is feature-gated (Rc vs Arc), so use Clone::clone
+        // which works for either.
+        CoreValue::Function(f) => Value::CoreFn(f.clone()),
         // tishlang_core gets regex from http or regex features; handle RegExp when it exists
         #[cfg(any(feature = "http", feature = "regex"))]
         CoreValue::RegExp(re) => {

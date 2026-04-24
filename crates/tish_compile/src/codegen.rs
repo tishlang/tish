@@ -744,39 +744,39 @@ impl Codegen {
     fn builtin_native_module_rust_init(&self, spec: &str, export_name: &str) -> Option<String> {
         let init = match spec {
             "tish:fs" if self.has_feature("fs") => match export_name {
-                    "readFile" => Some("Value::Function(Rc::new(|args: &[Value]| tish_read_file(args)))"),
-                    "writeFile" => Some("Value::Function(Rc::new(|args: &[Value]| tish_write_file(args)))"),
-                    "fileExists" => Some("Value::Function(Rc::new(|args: &[Value]| tish_file_exists(args)))"),
-                    "isDir" => Some("Value::Function(Rc::new(|args: &[Value]| tish_is_dir(args)))"),
-                    "readDir" => Some("Value::Function(Rc::new(|args: &[Value]| tish_read_dir(args)))"),
-                    "mkdir" => Some("Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)))"),
+                    "readFile" => Some("Value::native(|args: &[Value]| tish_read_file(args))"),
+                    "writeFile" => Some("Value::native(|args: &[Value]| tish_write_file(args))"),
+                    "fileExists" => Some("Value::native(|args: &[Value]| tish_file_exists(args))"),
+                    "isDir" => Some("Value::native(|args: &[Value]| tish_is_dir(args))"),
+                    "readDir" => Some("Value::native(|args: &[Value]| tish_read_dir(args))"),
+                    "mkdir" => Some("Value::native(|args: &[Value]| tish_mkdir(args))"),
                     _ => None,
                 },
             "tish:http" if self.has_feature("http") => match export_name {
-                    "fetch" => Some("Value::Function(Rc::new(|args: &[Value]| tish_fetch_promise(args.to_vec())))"),
-                    "fetchAll" => Some("Value::Function(Rc::new(|args: &[Value]| tish_fetch_all_promise(args.to_vec())))"),
-                    "serve" => Some("Value::Function(Rc::new(|args: &[Value]| { let port = args.first().cloned().unwrap_or(Value::Null); let handler = args.get(1).cloned().unwrap_or(Value::Null); if let Value::Function(f) = handler { tish_http_serve(args, move |req_args| f(req_args)) } else { Value::Null } }))"),
+                    "fetch" => Some("Value::native(|args: &[Value]| tish_fetch_promise(args.to_vec()))"),
+                    "fetchAll" => Some("Value::native(|args: &[Value]| tish_fetch_all_promise(args.to_vec()))"),
+                    "serve" => Some("Value::native(|args: &[Value]| { let port = args.first().cloned().unwrap_or(Value::Null); let handler = args.get(1).cloned().unwrap_or(Value::Null); if let Value::Function(f) = handler { tish_http_serve(args, move |req_args| f(req_args)) } else { Value::Null } })"),
                     "Promise" => Some("tish_promise_object()"),
-                    "setTimeout" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_set_timeout(args)))"),
-                    "setInterval" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_set_interval(args)))"),
-                    "clearTimeout" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_timeout(args)))"),
-                    "clearInterval" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_interval(args)))"),
+                    "setTimeout" => Some("Value::native(|args: &[Value]| tish_timer_set_timeout(args))"),
+                    "setInterval" => Some("Value::native(|args: &[Value]| tish_timer_set_interval(args))"),
+                    "clearTimeout" => Some("Value::native(|args: &[Value]| tish_timer_clear_timeout(args))"),
+                    "clearInterval" => Some("Value::native(|args: &[Value]| tish_timer_clear_interval(args))"),
                     _ => None,
                 },
             "tish:process" if self.has_feature("process") => match export_name {
-                    "exit" => Some("Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args)))"),
-                    "cwd" => Some("Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args)))"),
-                    "exec" => Some("Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args)))"),
-                    "argv" => Some("Value::Array(Rc::new(RefCell::new(std::env::args().map(|s| Value::String(s.into())).collect())))"),
-                    "env" => Some("Value::Object(Rc::new(RefCell::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect())))"),
-                    "process" => Some("{ let mut m = ObjectMap::default(); m.insert(Arc::from(\"exit\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args)))); m.insert(Arc::from(\"cwd\"), Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args)))); m.insert(Arc::from(\"exec\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args)))); m.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(std::env::args().map(|s| Value::String(s.into())).collect())))); m.insert(Arc::from(\"env\"), Value::Object(Rc::new(RefCell::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect::<ObjectMap>())))); Value::Object(Rc::new(RefCell::new(m))) }"),
+                    "exit" => Some("Value::native(|args: &[Value]| tish_process_exit(args))"),
+                    "cwd" => Some("Value::native(|args: &[Value]| tish_process_cwd(args))"),
+                    "exec" => Some("Value::native(|args: &[Value]| tish_process_exec(args))"),
+                    "argv" => Some("Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))"),
+                    "env" => Some("Value::Object(VmRef::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect()))"),
+                    "process" => Some("{ let mut m = ObjectMap::default(); m.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args))); m.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args))); m.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args))); m.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))); m.insert(Arc::from(\"env\"), Value::Object(VmRef::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect::<ObjectMap>()))); Value::Object(VmRef::new(m)) }"),
                     _ => None,
                 },
             "tish:ws" if self.has_feature("ws") => match export_name {
-                    "WebSocket" => Some("Value::Function(Rc::new(|args: &[Value]| tish_ws_client(args)))"),
-                    "Server" => Some("Value::Function(Rc::new(|args: &[Value]| tish_ws_server_construct(args)))"),
-                    "wsSend" => Some("Value::Function(Rc::new(|args: &[Value]| Value::Bool(tishlang_runtime::ws_send_native(args.first().unwrap_or(&Value::Null), &args.get(1).map(|v| v.to_display_string()).unwrap_or_default()))))"),
-                    "wsBroadcast" => Some("Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::ws_broadcast_native(args)))"),
+                    "WebSocket" => Some("Value::native(|args: &[Value]| tish_ws_client(args))"),
+                    "Server" => Some("Value::native(|args: &[Value]| tish_ws_server_construct(args))"),
+                    "wsSend" => Some("Value::native(|args: &[Value]| Value::Bool(tishlang_runtime::ws_send_native(args.first().unwrap_or(&Value::Null), &args.get(1).map(|v| v.to_display_string()).unwrap_or_default())))"),
+                    "wsBroadcast" => Some("Value::native(|args: &[Value]| tishlang_runtime::ws_broadcast_native(args))"),
                     _ => None,
                 },
             _ => return None,
@@ -1024,7 +1024,7 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, register_static_route as tish_register_static_route, ObjectMap, TishError, Value};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, register_static_route as tish_register_static_route, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -1077,132 +1077,132 @@ impl Codegen {
         self.indent += 1;
 
         // Initialize builtins
-        self.writeln("let mut console = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("let mut console = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"debug\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_debug(args); Value::Null }))),");
-        self.writeln("(Arc::from(\"info\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_info(args); Value::Null }))),");
-        self.writeln("(Arc::from(\"log\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_log(args); Value::Null }))),");
-        self.writeln("(Arc::from(\"warn\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_warn(args); Value::Null }))),");
-        self.writeln("(Arc::from(\"error\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_error(args); Value::Null }))),");
+        self.writeln("(Arc::from(\"debug\"), Value::native(|args: &[Value]| { tish_console_debug(args); Value::Null })),");
+        self.writeln("(Arc::from(\"info\"), Value::native(|args: &[Value]| { tish_console_info(args); Value::Null })),");
+        self.writeln("(Arc::from(\"log\"), Value::native(|args: &[Value]| { tish_console_log(args); Value::Null })),");
+        self.writeln("(Arc::from(\"warn\"), Value::native(|args: &[Value]| { tish_console_warn(args); Value::Null })),");
+        self.writeln("(Arc::from(\"error\"), Value::native(|args: &[Value]| { tish_console_error(args); Value::Null })),");
         self.indent -= 1;
-        self.writeln("]))));");
+        self.writeln("])));");
         self.writeln(
-            "let Boolean = Value::Function(Rc::new(|args: &[Value]| tish_boolean(args)));",
+            "let Boolean = Value::native(|args: &[Value]| tish_boolean(args));",
         );
         self.writeln(
-            "let parseInt = Value::Function(Rc::new(|args: &[Value]| tish_parse_int(args)));",
+            "let parseInt = Value::native(|args: &[Value]| tish_parse_int(args));",
         );
         self.writeln(
-            "let parseFloat = Value::Function(Rc::new(|args: &[Value]| tish_parse_float(args)));",
+            "let parseFloat = Value::native(|args: &[Value]| tish_parse_float(args));",
         );
         self.writeln(
-            "let decodeURI = Value::Function(Rc::new(|args: &[Value]| tish_decode_uri(args)));",
+            "let decodeURI = Value::native(|args: &[Value]| tish_decode_uri(args));",
         );
         self.writeln(
-            "let encodeURI = Value::Function(Rc::new(|args: &[Value]| tish_encode_uri(args)));",
+            "let encodeURI = Value::native(|args: &[Value]| tish_encode_uri(args));",
         );
         self.writeln(
-            r#"let registerStaticRoute = Value::Function(Rc::new(|args: &[Value]| { let path = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => return Value::Null }; let body = match args.get(1) { Some(Value::String(s)) => s.as_bytes().to_vec(), _ => return Value::Null }; let ct = match args.get(2) { Some(Value::String(s)) => s.to_string(), _ => "application/octet-stream".to_string() }; tish_register_static_route(&path, &body, &ct); Value::Null }));"#,
+            r#"let registerStaticRoute = Value::native(|args: &[Value]| { let path = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => return Value::Null }; let body = match args.get(1) { Some(Value::String(s)) => s.as_bytes().to_vec(), _ => return Value::Null }; let ct = match args.get(2) { Some(Value::String(s)) => s.to_string(), _ => "application/octet-stream".to_string() }; tish_register_static_route(&path, &body, &ct); Value::Null });"#,
         );
         self.writeln(
-            "let htmlEscape = Value::Function(Rc::new(|args: &[Value]| tish_escape_html(args.first().unwrap_or(&Value::Null))));",
+            "let htmlEscape = Value::native(|args: &[Value]| tish_escape_html(args.first().unwrap_or(&Value::Null)));",
         );
         self.writeln(
-            "let isFinite = Value::Function(Rc::new(|args: &[Value]| tish_is_finite(args)));",
+            "let isFinite = Value::native(|args: &[Value]| tish_is_finite(args));",
         );
-        self.writeln("let isNaN = Value::Function(Rc::new(|args: &[Value]| tish_is_nan(args)));");
+        self.writeln("let isNaN = Value::native(|args: &[Value]| tish_is_nan(args));");
         self.writeln("let Infinity = Value::Number(f64::INFINITY);");
         self.writeln("let NaN = Value::Number(f64::NAN);");
-        self.writeln("let Math = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("let Math = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
         self.writeln(
-            "(Arc::from(\"abs\"), Value::Function(Rc::new(|args: &[Value]| tish_math_abs(args)))),",
+            "(Arc::from(\"abs\"), Value::native(|args: &[Value]| tish_math_abs(args))),",
         );
-        self.writeln("(Arc::from(\"sqrt\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sqrt(args)))),");
+        self.writeln("(Arc::from(\"sqrt\"), Value::native(|args: &[Value]| tish_math_sqrt(args))),");
         self.writeln(
-            "(Arc::from(\"min\"), Value::Function(Rc::new(|args: &[Value]| tish_math_min(args)))),",
-        );
-        self.writeln(
-            "(Arc::from(\"max\"), Value::Function(Rc::new(|args: &[Value]| tish_math_max(args)))),",
-        );
-        self.writeln("(Arc::from(\"floor\"), Value::Function(Rc::new(|args: &[Value]| tish_math_floor(args)))),");
-        self.writeln("(Arc::from(\"ceil\"), Value::Function(Rc::new(|args: &[Value]| tish_math_ceil(args)))),");
-        self.writeln("(Arc::from(\"round\"), Value::Function(Rc::new(|args: &[Value]| tish_math_round(args)))),");
-        self.writeln("(Arc::from(\"random\"), Value::Function(Rc::new(|args: &[Value]| tish_math_random(args)))),");
-        self.writeln(
-            "(Arc::from(\"pow\"), Value::Function(Rc::new(|args: &[Value]| tish_math_pow(args)))),",
+            "(Arc::from(\"min\"), Value::native(|args: &[Value]| tish_math_min(args))),",
         );
         self.writeln(
-            "(Arc::from(\"sin\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sin(args)))),",
+            "(Arc::from(\"max\"), Value::native(|args: &[Value]| tish_math_max(args))),",
+        );
+        self.writeln("(Arc::from(\"floor\"), Value::native(|args: &[Value]| tish_math_floor(args))),");
+        self.writeln("(Arc::from(\"ceil\"), Value::native(|args: &[Value]| tish_math_ceil(args))),");
+        self.writeln("(Arc::from(\"round\"), Value::native(|args: &[Value]| tish_math_round(args))),");
+        self.writeln("(Arc::from(\"random\"), Value::native(|args: &[Value]| tish_math_random(args))),");
+        self.writeln(
+            "(Arc::from(\"pow\"), Value::native(|args: &[Value]| tish_math_pow(args))),",
         );
         self.writeln(
-            "(Arc::from(\"cos\"), Value::Function(Rc::new(|args: &[Value]| tish_math_cos(args)))),",
+            "(Arc::from(\"sin\"), Value::native(|args: &[Value]| tish_math_sin(args))),",
         );
         self.writeln(
-            "(Arc::from(\"tan\"), Value::Function(Rc::new(|args: &[Value]| tish_math_tan(args)))),",
+            "(Arc::from(\"cos\"), Value::native(|args: &[Value]| tish_math_cos(args))),",
         );
         self.writeln(
-            "(Arc::from(\"log\"), Value::Function(Rc::new(|args: &[Value]| tish_math_log(args)))),",
+            "(Arc::from(\"tan\"), Value::native(|args: &[Value]| tish_math_tan(args))),",
         );
         self.writeln(
-            "(Arc::from(\"exp\"), Value::Function(Rc::new(|args: &[Value]| tish_math_exp(args)))),",
+            "(Arc::from(\"log\"), Value::native(|args: &[Value]| tish_math_log(args))),",
         );
-        self.writeln("(Arc::from(\"sign\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sign(args)))),");
-        self.writeln("(Arc::from(\"trunc\"), Value::Function(Rc::new(|args: &[Value]| tish_math_trunc(args)))),");
+        self.writeln(
+            "(Arc::from(\"exp\"), Value::native(|args: &[Value]| tish_math_exp(args))),",
+        );
+        self.writeln("(Arc::from(\"sign\"), Value::native(|args: &[Value]| tish_math_sign(args))),");
+        self.writeln("(Arc::from(\"trunc\"), Value::native(|args: &[Value]| tish_math_trunc(args))),");
         self.writeln("(Arc::from(\"PI\"), Value::Number(std::f64::consts::PI)),");
         self.writeln("(Arc::from(\"E\"), Value::Number(std::f64::consts::E)),");
         self.indent -= 1;
-        self.writeln("]))));");
-        self.writeln("let JSON = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("])));");
+        self.writeln("let JSON = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"parse\"), Value::Function(Rc::new(|args: &[Value]| tish_json_parse(args)))),");
-        self.writeln("(Arc::from(\"stringify\"), Value::Function(Rc::new(|args: &[Value]| tish_json_stringify(args)))),");
+        self.writeln("(Arc::from(\"parse\"), Value::native(|args: &[Value]| tish_json_parse(args))),");
+        self.writeln("(Arc::from(\"stringify\"), Value::native(|args: &[Value]| tish_json_stringify(args))),");
         self.indent -= 1;
-        self.writeln("]))));");
+        self.writeln("])));");
 
-        self.writeln("let Array = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("let Array = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"isArray\"), Value::Function(Rc::new(|args: &[Value]| tish_array_is_array(args)))),");
+        self.writeln("(Arc::from(\"isArray\"), Value::native(|args: &[Value]| tish_array_is_array(args))),");
         self.indent -= 1;
-        self.writeln("]))));");
+        self.writeln("])));");
 
-        self.writeln("let String = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("let String = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"fromCharCode\"), Value::Function(Rc::new(|args: &[Value]| tish_string_from_char_code(args)))),");
+        self.writeln("(Arc::from(\"fromCharCode\"), Value::native(|args: &[Value]| tish_string_from_char_code(args))),");
         self.indent -= 1;
-        self.writeln("]))));");
+        self.writeln("])));");
 
-        self.writeln("let Date = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("let Date = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
         self.writeln(
-            "(Arc::from(\"now\"), Value::Function(Rc::new(|args: &[Value]| tish_date_now(args)))),",
+            "(Arc::from(\"now\"), Value::native(|args: &[Value]| tish_date_now(args))),",
         );
         self.indent -= 1;
-        self.writeln("]))));");
+        self.writeln("])));");
 
-        self.writeln("let Object = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("let Object = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"assign\"), Value::Function(Rc::new(|args: &[Value]| tish_object_assign(args)))),");
-        self.writeln("(Arc::from(\"keys\"), Value::Function(Rc::new(|args: &[Value]| tish_object_keys(args)))),");
-        self.writeln("(Arc::from(\"values\"), Value::Function(Rc::new(|args: &[Value]| tish_object_values(args)))),");
-        self.writeln("(Arc::from(\"entries\"), Value::Function(Rc::new(|args: &[Value]| tish_object_entries(args)))),");
-        self.writeln("(Arc::from(\"fromEntries\"), Value::Function(Rc::new(|args: &[Value]| tish_object_from_entries(args)))),");
+        self.writeln("(Arc::from(\"assign\"), Value::native(|args: &[Value]| tish_object_assign(args))),");
+        self.writeln("(Arc::from(\"keys\"), Value::native(|args: &[Value]| tish_object_keys(args))),");
+        self.writeln("(Arc::from(\"values\"), Value::native(|args: &[Value]| tish_object_values(args))),");
+        self.writeln("(Arc::from(\"entries\"), Value::native(|args: &[Value]| tish_object_entries(args))),");
+        self.writeln("(Arc::from(\"fromEntries\"), Value::native(|args: &[Value]| tish_object_from_entries(args))),");
         self.indent -= 1;
-        self.writeln("]))));");
+        self.writeln("])));");
 
         self.writeln("let Uint8Array = tish_uint8_array_constructor();");
         self.writeln("let AudioContext = tish_audio_context_constructor();");
 
         if self.has_feature("process") {
-            self.writeln("let process = Value::Object(Rc::new(RefCell::new({");
+            self.writeln("let process = Value::Object(VmRef::new({");
             self.indent += 1;
             self.writeln("let mut p = ObjectMap::default();");
-            self.writeln("p.insert(Arc::from(\"exit\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args))));");
-            self.writeln("p.insert(Arc::from(\"cwd\"), Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args))));");
-            self.writeln("p.insert(Arc::from(\"exec\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args))));");
+            self.writeln("p.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args)));");
+            self.writeln("p.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args)));");
+            self.writeln("p.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args)));");
             self.writeln("let argv: Vec<Value> = std::env::args().map(|s| Value::String(s.into())).collect();");
             self.writeln(
-                "p.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(argv))));",
+                "p.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(argv)));",
             );
             self.writeln("let mut env_obj = ObjectMap::default();");
             self.writeln("for (key, value) in std::env::vars() {");
@@ -1211,24 +1211,24 @@ impl Codegen {
             self.indent -= 1;
             self.writeln("}");
             self.writeln(
-                "p.insert(Arc::from(\"env\"), Value::Object(Rc::new(RefCell::new(env_obj))));",
+                "p.insert(Arc::from(\"env\"), Value::Object(VmRef::new(env_obj)));",
             );
             self.writeln("p");
             self.indent -= 1;
-            self.writeln("})));");
+            self.writeln("}));");
         }
 
         if self.has_feature("http") {
-            self.writeln("let fetch = Value::Function(Rc::new(|args: &[Value]| tish_fetch_promise(args.to_vec())));");
-            self.writeln("let fetchAll = Value::Function(Rc::new(|args: &[Value]| tish_fetch_all_promise(args.to_vec())));");
-            self.writeln("let setTimeout = Value::Function(Rc::new(|args: &[Value]| tish_timer_set_timeout(args)));");
-            self.writeln("let clearTimeout = Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_timeout(args)));");
-            self.writeln("let setInterval = Value::Function(Rc::new(|args: &[Value]| tish_timer_set_interval(args)));");
-            self.writeln("let clearInterval = Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_interval(args)));");
+            self.writeln("let fetch = Value::native(|args: &[Value]| tish_fetch_promise(args.to_vec()));");
+            self.writeln("let fetchAll = Value::native(|args: &[Value]| tish_fetch_all_promise(args.to_vec()));");
+            self.writeln("let setTimeout = Value::native(|args: &[Value]| tish_timer_set_timeout(args));");
+            self.writeln("let clearTimeout = Value::native(|args: &[Value]| tish_timer_clear_timeout(args));");
+            self.writeln("let setInterval = Value::native(|args: &[Value]| tish_timer_set_interval(args));");
+            self.writeln("let clearInterval = Value::native(|args: &[Value]| tish_timer_clear_interval(args));");
             if self.is_async {
                 self.writeln("let Promise = tish_promise_object();");
             }
-            self.writeln("let serve = Value::Function(Rc::new(|args: &[Value]| {");
+            self.writeln("let serve = Value::native(|args: &[Value]| {");
             self.indent += 1;
             self.writeln("let port = args.first().cloned().unwrap_or(Value::Null);");
             self.writeln("let handler = args.get(1).cloned().unwrap_or(Value::Null);");
@@ -1242,43 +1242,43 @@ impl Codegen {
             self.indent -= 1;
             self.writeln("}");
             self.indent -= 1;
-            self.writeln("}));");
+            self.writeln("});");
         }
 
         if self.has_feature("fs") {
             self.writeln(
-                "let readFile = Value::Function(Rc::new(|args: &[Value]| tish_read_file(args)));",
+                "let readFile = Value::native(|args: &[Value]| tish_read_file(args));",
             );
             self.writeln(
-                "let writeFile = Value::Function(Rc::new(|args: &[Value]| tish_write_file(args)));",
+                "let writeFile = Value::native(|args: &[Value]| tish_write_file(args));",
             );
-            self.writeln("let fileExists = Value::Function(Rc::new(|args: &[Value]| tish_file_exists(args)));");
+            self.writeln("let fileExists = Value::native(|args: &[Value]| tish_file_exists(args));");
             self.writeln(
-                "let isDir = Value::Function(Rc::new(|args: &[Value]| tish_is_dir(args)));",
-            );
-            self.writeln(
-                "let readDir = Value::Function(Rc::new(|args: &[Value]| tish_read_dir(args)));",
+                "let isDir = Value::native(|args: &[Value]| tish_is_dir(args));",
             );
             self.writeln(
-                "let mkdir = Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)));",
+                "let readDir = Value::native(|args: &[Value]| tish_read_dir(args));",
+            );
+            self.writeln(
+                "let mkdir = Value::native(|args: &[Value]| tish_mkdir(args));",
             );
         }
 
         if self.has_feature("regex") {
             self.writeln(
-                "let RegExp = Value::Function(Rc::new(|args: &[Value]| regexp_new(args)));",
+                "let RegExp = Value::native(|args: &[Value]| regexp_new(args));",
             );
         }
 
         if self.program_has_jsx {
             self.writeln("install_thread_local_host(Box::new(HeadlessHost::default()));");
             self.writeln("let Fragment = fragment_value();");
-            self.writeln("let h = Value::Function(Rc::new(|args: &[Value]| ui_h(args)));");
-            self.writeln("let text = Value::Function(Rc::new(|args: &[Value]| ui_text(args)));");
+            self.writeln("let h = Value::native(|args: &[Value]| ui_h(args));");
+            self.writeln("let text = Value::native(|args: &[Value]| ui_text(args));");
             self.writeln(
-                "let useState = Value::Function(Rc::new(|args: &[Value]| native_use_state(args)));",
+                "let useState = Value::native(|args: &[Value]| native_use_state(args));",
             );
-            self.writeln("let createRoot = Value::Function(Rc::new(|args: &[Value]| native_create_root(args)));");
+            self.writeln("let createRoot = Value::native(|args: &[Value]| native_create_root(args));");
         }
 
         // Polars, Egui etc. are emitted via VarDecl from import { X } from 'tish:...'
@@ -1289,7 +1289,7 @@ impl Codegen {
         for func_name in &top_level_funcs {
             let escaped = Self::escape_ident(func_name);
             self.writeln(&format!(
-                "let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));",
+                "let {}_cell: VmRef<Value> = VmRef::new(Value::Null);",
                 escaped
             ));
         }
@@ -1343,7 +1343,7 @@ impl Codegen {
                 for func_name in &func_names {
                     let escaped = Self::escape_ident(func_name);
                     self.writeln(&format!(
-                        "let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));",
+                        "let {}_cell: VmRef<Value> = VmRef::new(Value::Null);",
                         escaped
                     ));
                 }
@@ -1388,7 +1388,7 @@ impl Codegen {
                     if self.refcell_wrapped_vars.contains(name.as_ref()) {
                         // Closure-mutated: same Rc<RefCell<T>> pattern as Value (assignments use borrow_mut)
                         self.writeln(&format!(
-                            "let {} = std::rc::Rc::new(RefCell::new({}));",
+                            "let {} = VmRef::new({});",
                             escaped_name, expr_str
                         ));
                         self.rc_cell_storage_define(name.as_ref());
@@ -1419,7 +1419,7 @@ impl Codegen {
                             expr_str.to_string()
                         };
                         self.writeln(&format!(
-                            "let {} = std::rc::Rc::new(RefCell::new({}));",
+                            "let {} = VmRef::new({});",
                             escaped_name, init_val
                         ));
                         self.rc_cell_storage_define(name.as_ref());
@@ -1734,7 +1734,7 @@ impl Codegen {
                     .unwrap_or(false);
                 if !cell_exists {
                     self.writeln(&format!(
-                        "let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));",
+                        "let {}_cell: VmRef<Value> = VmRef::new(Value::Null);",
                         name_str
                     ));
                 }
@@ -1814,7 +1814,7 @@ impl Codegen {
                         ));
                     } else {
                         self.writeln(&format!(
-                            "let {}_cell = std::rc::Rc::new(RefCell::new({}.clone()));",
+                            "let {}_cell = VmRef::new({}.clone());",
                             var_escaped, var_escaped
                         ));
                     }
@@ -1903,7 +1903,7 @@ impl Codegen {
                         self.writeln(&format!("let {} = {}.clone();", builtin, builtin));
                     }
                 }
-                self.writeln("Value::Function(Rc::new(move |args: &[Value]| {");
+                self.writeln("Value::native(move |args: &[Value]| {");
                 self.indent += 1;
                 // Mutable outer vars: capture the RefCell so assignments use borrow_mut
                 for outer_var in &mutable_outer_vars {
@@ -1964,7 +1964,7 @@ impl Codegen {
                 }
                 if let Some(rest) = rest_param {
                     self.writeln(&format!(
-                        "let {} = Value::Array(std::rc::Rc::new(RefCell::new(args[{}..].to_vec())));",
+                        "let {} = Value::Array(VmRef::new(args[{}..].to_vec()));",
                         Self::escape_ident(rest.name.as_ref()),
                         params.len()
                     ));
@@ -1993,7 +1993,7 @@ impl Codegen {
                     for func_name in &nested_func_names {
                         let escaped = Self::escape_ident(func_name);
                         self.writeln(&format!(
-                            "let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));",
+                            "let {}_cell: VmRef<Value> = VmRef::new(Value::Null);",
                             escaped
                         ));
                     }
@@ -2024,7 +2024,7 @@ impl Codegen {
 
                 self.writeln("Value::Null");
                 self.indent -= 1;
-                self.writeln("}))");
+                self.writeln("})");
                 self.indent -= 1;
                 self.writeln("};");
                 // Update the cell with the actual function value
@@ -2121,7 +2121,7 @@ impl Codegen {
                             }
                             DestructElement::Rest(name, _) => {
                                 self.writeln(&format!(
-                                    "{} {} = match &({}) {{ Value::Array(ref _a) => {{ let _b = _a.borrow(); Value::Array(Rc::new(RefCell::new(_b.iter().skip({}).cloned().collect()))) }}, _ => Value::Array(Rc::new(RefCell::new(Vec::new()))) }};",
+                                    "{} {} = match &({}) {{ Value::Array(ref _a) => {{ let _b = _a.borrow(); Value::Array(VmRef::new(_b.iter().skip({}).cloned().collect())) }}, _ => Value::Array(VmRef::new(Vec::new())) }};",
                                     mutability,
                                     Self::escape_ident(name.as_ref()),
                                     value_expr,
@@ -2770,7 +2770,7 @@ impl Codegen {
                             }
                         }
                     }
-                    format!("{{ let mut _arr: Vec<Value> = Vec::new(); {} Value::Array(Rc::new(RefCell::new(_arr))) }}", parts.join(" "))
+                    format!("{{ let mut _arr: Vec<Value> = Vec::new(); {} Value::Array(VmRef::new(_arr)) }}", parts.join(" "))
                 } else {
                     let mut els = Vec::new();
                     for elem in elements {
@@ -2789,7 +2789,7 @@ impl Codegen {
                         }
                     }
                     format!(
-                        "Value::Array(Rc::new(RefCell::new(vec![{}])))",
+                        "Value::Array(VmRef::new(vec![{}]))",
                         els.join(", ")
                     )
                 }
@@ -2814,7 +2814,7 @@ impl Codegen {
                             }
                         }
                     }
-                    format!("{{ let mut _obj: ObjectMap = ObjectMap::default(); {} Value::Object(Rc::new(RefCell::new(_obj))) }}", parts.join(" "))
+                    format!("{{ let mut _obj: ObjectMap = ObjectMap::default(); {} Value::Object(VmRef::new(_obj)) }}", parts.join(" "))
                 } else {
                     let mut parts = Vec::new();
                     for prop in props {
@@ -2828,7 +2828,7 @@ impl Codegen {
                         }
                     }
                     format!(
-                        "Value::Object(Rc::new(RefCell::new(ObjectMap::from([{}]))))",
+                        "Value::Object(VmRef::new(ObjectMap::from([{}])))",
                         parts.join(", ")
                     )
                 }
@@ -4275,7 +4275,7 @@ impl Codegen {
                 ));
             } else {
                 code.push_str(&format!(
-                    "    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n",
+                    "    let {} = VmRef::new({}.clone());\n",
                     ref_name, param_escaped
                 ));
             }
@@ -4290,7 +4290,7 @@ impl Codegen {
                 ));
             } else {
                 code.push_str(&format!(
-                    "    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n",
+                    "    let {} = VmRef::new({}.clone());\n",
                     ref_name, var_escaped
                 ));
             }
@@ -4337,7 +4337,7 @@ impl Codegen {
             ));
         }
 
-        code.push_str("    Value::Function(Rc::new(move |args: &[Value]| {\n");
+        code.push_str("    Value::native(move |args: &[Value]| {\n");
 
         // Make captured outer params available as plain Values (from _ref RefCells)
         for outer_param in &outer_params {
@@ -4447,7 +4447,7 @@ impl Codegen {
         self.outer_params_stack.pop();
         self.outer_vars_stack.pop();
 
-        code.push_str("    }))\n");
+        code.push_str("    })\n");
         code.push('}');
 
         Ok(code)

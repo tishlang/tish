@@ -4,6 +4,7 @@
 //! JavaScript, matching .length and .charAt(). Byte offsets are never exposed.
 
 use crate::helpers::normalize_index;
+use tishlang_core::VmRef;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -194,13 +195,13 @@ pub fn split(s: &Value, sep: &Value) -> Value {
     if let Value::String(s) = s {
         let separator = match sep {
             Value::String(ss) => ss.as_ref(),
-            _ => return Value::Array(Rc::new(RefCell::new(vec![Value::String(Arc::clone(s))]))),
+            _ => return Value::Array(VmRef::new(vec![Value::String(Arc::clone(s))])),
         };
         let parts: Vec<Value> = s
             .split(separator)
             .map(|p| Value::String(p.into()))
             .collect();
-        Value::Array(Rc::new(RefCell::new(parts)))
+        Value::Array(VmRef::new(parts))
     } else {
         Value::Null
     }
@@ -510,7 +511,7 @@ mod tests {
         assert_eq!(a.borrow().len(), 2);
         assert_same!(
             split(&s("x"), &n(1.0)),
-            Value::Array(Rc::new(RefCell::new(vec![s("x")])))
+            Value::Array(VmRef::new(vec![s("x")]))
         );
         assert_same!(split(&n(1.0), &s(",")), Value::Null);
         assert_same!(trim(&s("  x  ")), s("x"));

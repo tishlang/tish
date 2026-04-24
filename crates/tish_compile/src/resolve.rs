@@ -388,7 +388,7 @@ pub fn generate_native_wrapper_rs(
          use std::cell::RefCell;\n\
          use std::rc::Rc;\n\
          use std::sync::Arc;\n\
-         use tishlang_runtime::{ObjectMap, Value};\n\n",
+         use tishlang_runtime::{ObjectMap, Value, VmRef};\n\n",
     );
     let mut any = false;
     for m in modules {
@@ -414,11 +414,11 @@ pub fn generate_native_wrapper_rs(
             let rust_fn = export_name_to_rust_ident(&export_name);
             let key_lit = format!("{:?}", export_name);
             file.push_str(&format!(
-                "    m.insert(Arc::from({}), Value::Function(Rc::new(|args: &[Value]| {{\n        {}::{}(args)\n    }})));\n",
+                "    m.insert(Arc::from({}), Value::native(|args: &[Value]| {{\n        {}::{}(args)\n    }}));\n",
                 key_lit, shim_crate, rust_fn
             ));
         }
-        file.push_str("    Value::Object(Rc::new(RefCell::new(m)))\n}\n\n");
+        file.push_str("    Value::Object(VmRef::new(m))\n}\n\n");
     }
     if !any {
         return String::new();

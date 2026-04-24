@@ -182,7 +182,7 @@ fn render_generated_lib(
          use std::cell::RefCell;\n\
          use std::rc::Rc;\n\
          use std::sync::Arc;\n\
-         use tishlang_runtime::{ObjectMap, Value};\n\n",
+         use tishlang_runtime::{ObjectMap, Value, VmRef};\n\n",
     );
 
     out.push_str(&format!(
@@ -245,15 +245,15 @@ fn json_to_tish(v: serde_json::Value) -> Value {
         serde_json::Value::Bool(b) => Value::Bool(b),
         serde_json::Value::Number(n) => Value::Number(n.as_f64().unwrap_or(0.0)),
         serde_json::Value::String(s) => Value::String(s.into()),
-        serde_json::Value::Array(a) => Value::Array(Rc::new(RefCell::new(
+        serde_json::Value::Array(a) => Value::Array(VmRef::new(
             a.into_iter().map(json_to_tish).collect(),
-        ))),
+        )),
         serde_json::Value::Object(m) => {
             let mut om = ObjectMap::default();
             for (k, v) in m {
                 om.insert(Arc::from(k), json_to_tish(v));
             }
-            Value::Object(Rc::new(RefCell::new(om)))
+            Value::Object(VmRef::new(om))
         }
     }
 }

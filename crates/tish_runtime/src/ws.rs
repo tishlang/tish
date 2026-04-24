@@ -6,6 +6,7 @@
 //! - **Broadcast** (Node pattern): `server.clients.forEach(ws => ws.send(data))` or iterate room conns and `wsSend(ws, data)` (same as `ws.send(data)`)
 
 use std::cell::RefCell;
+use tishlang_core::VmRef;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -199,36 +200,36 @@ fn conn_object(id: u32) -> Value {
     obj.insert(Arc::from("readyState"), Value::Number(1.0)); // OPEN
     obj.insert(
         Arc::from("send"),
-        Value::Function(Rc::new(move |args: &[Value]| {
+        Value::native(move |args: &[Value]| {
             let data = args
                 .first()
                 .map(|v| v.to_display_string())
                 .unwrap_or_default();
             Value::Bool(conn_send(id, data))
-        })),
+        }),
     );
     obj.insert(
         Arc::from("close"),
-        Value::Function(Rc::new(move |_args: &[Value]| {
+        Value::native(move |_args: &[Value]| {
             unregister(id);
             Value::Null
-        })),
+        }),
     );
     obj.insert(
         Arc::from("receive"),
-        Value::Function(Rc::new(move |_args: &[Value]| match conn_receive(id) {
+        Value::native(move |_args: &[Value]| match conn_receive(id) {
             Some(s) => {
                 let mut ev: ObjectMap = ObjectMap::default();
                 ev.insert(Arc::from("data"), Value::String(s.into()));
-                Value::Object(Rc::new(RefCell::new(ev)))
+                Value::Object(VmRef::new(ev))
             }
             None => Value::Null,
-        })),
+        }),
     );
     let id_timeout = id;
     obj.insert(
         Arc::from("receiveTimeout"),
-        Value::Function(Rc::new(move |args: &[Value]| {
+        Value::native(move |args: &[Value]| {
             let timeout_ms = args
                 .first()
                 .and_then(|v| match v {
@@ -242,13 +243,13 @@ fn conn_object(id: u32) -> Value {
                 Some(s) => {
                     let mut ev: ObjectMap = ObjectMap::default();
                     ev.insert(Arc::from("data"), Value::String(s.into()));
-                    Value::Object(Rc::new(RefCell::new(ev)))
+                    Value::Object(VmRef::new(ev))
                 }
                 None => Value::Null,
             }
-        })),
+        }),
     );
-    Value::Object(Rc::new(RefCell::new(obj)))
+    Value::Object(VmRef::new(obj))
 }
 
 fn parse_port(args: &[Value]) -> Option<u16> {
@@ -472,7 +473,7 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
     }
 
     // Node.js-compatible: server.clients is array of connected WebSocket instances
-    let clients: Rc<RefCell<Vec<Value>>> = Rc::new(RefCell::new(Vec::new()));
+    let clients: Rc<RefCell<Vec<Value>>> = VmRef::new(Vec::new());
 
     let on_fn = Rc::new(|args: &[Value]| {
         let Some(Value::Object(so)) = args.first() else {
@@ -489,7 +490,7 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
         Value::Null
     });
 
-    let clients_listen = Rc::clone(&clients);
+    let clients_listen = clients.clone();
     let listen_fn = Rc::new(move |args: &[Value]| {
         let Some(Value::Object(so)) = args.first() else {
             return Value::Null;
@@ -519,7 +520,7 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
         Value::Null
     });
 
-    let clients_accept = Rc::clone(&clients);
+    let clients_accept = clients.clone();
     let accept_timeout_fn = Rc::new(move |args: &[Value]| {
         let Some(Value::Object(so)) = args.first() else {
             return Value::Null;
@@ -547,7 +548,7 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
         Arc::from("acceptTimeout"),
         Value::Function(accept_timeout_fn),
     );
-    Value::Object(Rc::new(RefCell::new(m)))
+    Value::Object(VmRef::new(m))
 }
 
 #[cfg(test)]
@@ -562,7 +563,7 @@ mod tests {
         let opts = {
             let mut m: ObjectMap = ObjectMap::default();
             m.insert(Arc::from("port"), Value::Number(port as f64));
-            Value::Object(Rc::new(RefCell::new(m)))
+            Value::Object(VmRef::new(m))
         };
 
         let handle = match web_socket_server_listen(std::slice::from_ref(&opts)) {
@@ -647,7 +648,7 @@ mod tests {
         let opts = {
             let mut m: ObjectMap = ObjectMap::default();
             m.insert(Arc::from("port"), Value::Number(port as f64));
-            Value::Object(Rc::new(RefCell::new(m)))
+            Value::Object(VmRef::new(m))
         };
 
         let handle = match web_socket_server_listen(std::slice::from_ref(&opts)) {
@@ -679,8 +680,8 @@ mod tests {
                     if data.contains("\"type\":\"join\"") || data.contains("\"type\": \"join\"") {
                         let joined = r#"{"type":"joined","sessionId":"default"}"#;
                         let presence = r#"{"type":"presence","agentLanes":["ai-a"]}"#;
-                        ws_send_native(&Value::Object(Rc::clone(&wso)), joined);
-                        ws_send_native(&Value::Object(Rc::clone(&wso)), presence);
+                        ws_send_native(&Value::Object(wso.clone()), joined);
+                        ws_send_native(&Value::Object(wso.clone()), presence);
                         return;
                     }
                 }
