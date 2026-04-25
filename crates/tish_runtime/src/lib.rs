@@ -786,7 +786,7 @@ pub use http::{
 #[cfg(feature = "http")]
 pub fn http_serve<F>(args: &[tishlang_core::Value], handler: F) -> tishlang_core::Value
 where
-    F: Fn(&[tishlang_core::Value]) -> tishlang_core::Value,
+    F: Fn(&[tishlang_core::Value]) -> tishlang_core::Value + Send + Sync + 'static,
 {
     #[cfg(feature = "http-hyper")]
     {
@@ -795,6 +795,41 @@ where
         }
     }
     http::serve(args, handler)
+}
+
+/// `serve(port, { onWorker: (workerId) => handler })` — the object form of
+/// `serve`. Picks up `onWorker`, invokes it once per HTTP accept thread to
+/// build that thread's handler, then enters the normal parallel accept
+/// loop. See [`http::serve_per_worker`] for the full doc.
+///
+/// This is broadly useful for any Tish app that wants per-worker state —
+/// DB connection pools, in-process caches, counters, etc. — without a
+/// global `RwLock` or forcing everything through the single-thread
+/// dispatcher. It also plays nicely with prefork: `onWorker` sees global
+/// worker ids across processes so logs and sharded state are easy to key.
+#[cfg(feature = "http")]
+pub fn http_serve_per_worker(
+    args: &[tishlang_core::Value],
+    factory_value: tishlang_core::Value,
+) -> tishlang_core::Value {
+    use tishlang_core::Value;
+    // factory_value should be Value::Function (passed down by codegen after
+    // extracting `onWorker` from the options object).
+    let Value::Function(factory) = factory_value else {
+        eprintln!("[tish http] serve: onWorker must be a function (id) => handler");
+        return Value::Null;
+    };
+    let factory: tishlang_core::NativeFn = factory;
+    http::serve_per_worker(args, move |worker_id| {
+        let handler_val = factory(&[Value::Number(worker_id as f64)]);
+        match handler_val {
+            Value::Function(f) => f,
+            _ => panic!(
+                "onWorker returned {:?} for worker {}; must return a function",
+                handler_val, worker_id
+            ),
+        }
+    })
 }
 
 pub use timers::{

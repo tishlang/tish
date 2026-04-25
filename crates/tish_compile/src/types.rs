@@ -23,8 +23,19 @@ pub enum RustType {
     Vec(Box<RustType>),
     /// Option<T> for nullable types (T | null)
     Option(Box<RustType>),
-    /// Rc<RefCell<HashMap<Arc<str>, T>>> for typed objects
+    /// Inline object shape — used during inference / annotation lowering
+    /// before a `Named` alias has been registered. Once a corresponding
+    /// `type Foo = { ... }` declaration is found in the program, occurrences
+    /// of this shape can be canonicalised into `RustType::Named("Foo")`.
     Object(Vec<(Arc<str>, RustType)>),
+    /// User-defined named type (a struct emitted by the compiler).
+    /// The field list is duplicated here so the codegen can emit struct
+    /// literals, member access, and Value-conversion glue without going
+    /// back to a global registry on every call site.
+    Named {
+        name: Arc<str>,
+        fields: Vec<(Arc<str>, RustType)>,
+    },
     /// Fn trait for typed functions
     Function {
         params: Vec<RustType>,
@@ -33,8 +44,21 @@ pub enum RustType {
 }
 
 impl RustType {
-    /// Convert a TypeAnnotation to a RustType.
+    /// Convert a TypeAnnotation to a RustType (no alias resolution).
+    /// Use [`Self::from_annotation_with_aliases`] when a registry is
+    /// available so user-defined `type X = { ... }` aliases land as
+    /// `RustType::Named` and can drive struct emission.
     pub fn from_annotation(ann: &TypeAnnotation) -> Self {
+        Self::from_annotation_with_aliases(ann, &HashMap::new())
+    }
+
+    /// Like [`from_annotation`], but consults `aliases` so a `Simple(name)`
+    /// reference to a user-declared `type X = { ... }` resolves to a
+    /// `RustType::Named { name, fields }` carrying the struct shape.
+    pub fn from_annotation_with_aliases(
+        ann: &TypeAnnotation,
+        aliases: &HashMap<String, RustType>,
+    ) -> Self {
         match ann {
             TypeAnnotation::Simple(name) => match name.as_ref() {
                 "number" => RustType::F64,
@@ -43,19 +67,38 @@ impl RustType {
                 "void" | "undefined" => RustType::Unit,
                 "null" => RustType::Unit,
                 "any" => RustType::Value,
-                _ => RustType::Value, // Unknown types fall back to Value
+                other => {
+                    // User-declared `type X = { ... }`: lift the inline
+                    // object shape into a `Named` so the codegen can emit
+                    // a Rust struct and direct field access for it.
+                    if let Some(t) = aliases.get(other) {
+                        if let RustType::Object(fields) = t {
+                            return RustType::Named {
+                                name: Arc::from(other),
+                                fields: fields.clone(),
+                            };
+                        }
+                        return t.clone();
+                    }
+                    RustType::Value
+                }
             },
-            TypeAnnotation::Array(elem) => RustType::Vec(Box::new(Self::from_annotation(elem))),
+            TypeAnnotation::Array(elem) => RustType::Vec(Box::new(
+                Self::from_annotation_with_aliases(elem, aliases),
+            )),
             TypeAnnotation::Object(fields) => {
                 let typed_fields: Vec<_> = fields
                     .iter()
-                    .map(|(k, v)| (k.clone(), Self::from_annotation(v)))
+                    .map(|(k, v)| (k.clone(), Self::from_annotation_with_aliases(v, aliases)))
                     .collect();
                 RustType::Object(typed_fields)
             }
             TypeAnnotation::Function { params, returns } => {
-                let typed_params: Vec<_> = params.iter().map(Self::from_annotation).collect();
-                let typed_returns = Box::new(Self::from_annotation(returns));
+                let typed_params: Vec<_> = params
+                    .iter()
+                    .map(|p| Self::from_annotation_with_aliases(p, aliases))
+                    .collect();
+                let typed_returns = Box::new(Self::from_annotation_with_aliases(returns, aliases));
                 RustType::Function {
                     params: typed_params,
                     returns: typed_returns,
@@ -72,7 +115,9 @@ impl RustType {
                             |t| !matches!(t, TypeAnnotation::Simple(s) if s.as_ref() == "null"),
                         );
                         if let Some(inner) = non_null {
-                            return RustType::Option(Box::new(Self::from_annotation(inner)));
+                            return RustType::Option(Box::new(
+                                Self::from_annotation_with_aliases(inner, aliases),
+                            ));
                         }
                     }
                 }
@@ -130,9 +175,11 @@ impl RustType {
             RustType::Vec(inner) => format!("Vec<{}>", inner.to_rust_type_str()),
             RustType::Option(inner) => format!("Option<{}>", inner.to_rust_type_str()),
             RustType::Object(_) => {
-                // For now, typed objects still use Value
+                // Anonymous inline shapes don't have a Rust struct; fall
+                // back to the dynamic Value path.
                 "Value".to_string()
             }
+            RustType::Named { name, .. } => named_struct_ident(name),
             RustType::Function { params, returns } => {
                 let params_str: Vec<_> = params.iter().map(|p| p.to_rust_type_str()).collect();
                 format!(
@@ -155,6 +202,23 @@ impl RustType {
             RustType::Vec(_) => "Vec::new()".to_string(),
             RustType::Option(_) => "None".to_string(),
             RustType::Object(_) => "Value::Null".to_string(),
+            RustType::Named { fields, .. } => {
+                // Build a literal struct with each field at its own default,
+                // so unannotated decls of a typed struct still compile.
+                let init = fields
+                    .iter()
+                    .map(|(k, t)| format!("{}: {}", field_ident(k), t.default_value()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "{} {{ {} }}",
+                    named_struct_ident(match self {
+                        RustType::Named { name, .. } => name,
+                        _ => unreachable!(),
+                    }),
+                    init
+                )
+            }
             RustType::Function { .. } => "Value::Null".to_string(),
         }
     }
@@ -190,6 +254,22 @@ impl RustType {
                     value_expr, inner_conversion
                 )
             }
+            RustType::Named { name, fields } => {
+                // Each field is fetched out of the Value::Object via
+                // `get_prop` and converted to its native type. Falls back
+                // to the field's `default_value()` if the field is absent
+                // (rare — usually these come from JSON or PG).
+                let field_assigns = fields
+                    .iter()
+                    .map(|(k, ty)| {
+                        let fetch =
+                            format!("tishlang_runtime::get_prop(&{}, {:?})", value_expr, k.as_ref());
+                        format!("{}: {}", field_ident(k), ty.from_value_expr(&fetch))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{} {{ {} }}", named_struct_ident(name), field_assigns)
+            }
             _ => value_expr.to_string(), // Fallback
         }
     }
@@ -221,8 +301,54 @@ impl RustType {
                     native_expr, inner_to_value
                 )
             }
+            RustType::Named { fields, .. } => {
+                // Walk fields, build an ObjectMap, wrap in Value::Object.
+                // The boundary is paid only when crossing into untyped
+                // Tish (JSON.stringify, calling a Value::Function, etc.);
+                // direct Rust-to-Rust paths between two Named values stay
+                // as plain struct moves.
+                let inserts = fields
+                    .iter()
+                    .map(|(k, ty)| {
+                        let access = format!("{}.{}", native_expr, field_ident(k));
+                        let v_expr = ty.to_value_expr(&access);
+                        format!(
+                            "_om.insert(::std::sync::Arc::from({:?}), {});",
+                            k.as_ref(),
+                            v_expr
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!(
+                    "{{ let mut _om = ObjectMap::default(); {} Value::Object(VmRef::new(_om)) }}",
+                    inserts
+                )
+            }
             _ => native_expr.to_string(), // Fallback
         }
+    }
+}
+
+/// Map a Tish type-alias name to the Rust struct identifier we emit.
+/// Prefixed so user names can never collide with runtime types like `Value`.
+pub fn named_struct_ident(tish_name: &str) -> String {
+    format!("TishStruct_{}", tish_name)
+}
+
+/// Map a Tish field name (`randomNumber`) to a valid Rust identifier
+/// (kept identical here — non-snake-case is allowed via
+/// `#[allow(non_snake_case)]` on the struct, so JS-style camelCase keys
+/// stay readable in the generated source).
+pub fn field_ident(tish_name: &str) -> String {
+    // Reserve Rust keywords that would otherwise conflict.
+    match tish_name {
+        "type" | "ref" | "fn" | "match" | "move" | "mod" | "self" | "Self" | "super" | "use"
+        | "where" | "loop" | "yield" | "async" | "await" | "dyn" | "impl" | "trait" | "in"
+        | "as" | "box" | "crate" | "const" | "extern" | "let" | "mut" | "pub" | "static"
+        | "unsafe" | "abstract" | "become" | "do" | "final" | "macro" | "override" | "priv"
+        | "typeof" | "unsized" | "virtual" => format!("r#{}", tish_name),
+        _ => tish_name.to_string(),
     }
 }
 

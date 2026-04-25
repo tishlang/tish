@@ -7,7 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr,
-    FunParam, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp,
+    FunParam, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement,
+    TypeAnnotation, UnaryOp,
 };
 
 /// Tracks variable usage for move/clone optimization.
@@ -667,6 +668,12 @@ struct Codegen {
     usage_analyzer: Option<UsageAnalyzer>,
     /// Type context for tracking variable types (for static typing)
     type_context: TypeContext,
+    /// Registry of `type Foo = { ... }` declarations seen in the program.
+    /// Populated in a pre-pass so that any later `let x: Foo = ...` or
+    /// `fn f(x: Foo)` resolves to a `RustType::Named { name: "Foo", ... }`
+    /// and the codegen can emit a Rust struct + direct field access for
+    /// values of that type.
+    type_aliases: std::collections::HashMap<String, crate::types::RustType>,
     /// Program uses JSX; emit `tishlang_ui` imports and `h` / `Fragment` globals.
     program_has_jsx: bool,
     /// `fn` names for Rust JSX: PascalCase tags matching these use a value binding; others are string intrinsics.
@@ -697,8 +704,117 @@ impl Codegen {
             rc_cell_storage_scopes: vec![std::collections::HashSet::new()],
             usage_analyzer: None,
             type_context: TypeContext::new(),
+            type_aliases: std::collections::HashMap::new(),
             program_has_jsx: false,
             program_fun_decl_names: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Walk every `Statement::TypeAlias` in the program (including nested
+    /// ones inside blocks, ifs, loops, function bodies, and exports) and
+    /// register the resolved `RustType` under its alias name. Forward
+    /// references are handled by running this pass *before* any other
+    /// codegen step.
+    fn collect_type_aliases(&mut self, statements: &[Statement]) {
+        // Two passes so an alias `type B = A` can resolve `A` even if
+        // `A` is declared after `B` in source order.
+        let mut raw: Vec<(String, &TypeAnnotation)> = Vec::new();
+        Self::walk_type_aliases(statements, &mut raw);
+        // First-fixpoint resolution: keep iterating until no more aliases
+        // change shape. In practice 1–2 passes; capped to prevent infinite
+        // loops on (already rejected) self-referential aliases.
+        for _ in 0..8 {
+            let mut changed = false;
+            for (name, ann) in &raw {
+                let resolved = crate::types::RustType::from_annotation_with_aliases(
+                    ann,
+                    &self.type_aliases,
+                );
+                let prev: Option<crate::types::RustType> =
+                    self.type_aliases.get(name).cloned();
+                if prev.as_ref() != Some(&resolved) {
+                    self.type_aliases.insert(name.clone(), resolved);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    fn walk_type_aliases<'p>(
+        statements: &'p [Statement],
+        out: &mut Vec<(String, &'p TypeAnnotation)>,
+    ) {
+        for s in statements {
+            match s {
+                Statement::TypeAlias { name, ty, .. } => {
+                    out.push((name.to_string(), ty));
+                }
+                Statement::Block { statements, .. } => Self::walk_type_aliases(statements, out),
+                Statement::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::walk_type_aliases(std::slice::from_ref(then_branch.as_ref()), out);
+                    if let Some(e) = else_branch {
+                        Self::walk_type_aliases(std::slice::from_ref(e.as_ref()), out);
+                    }
+                }
+                Statement::For { body, .. }
+                | Statement::ForOf { body, .. }
+                | Statement::While { body, .. }
+                | Statement::DoWhile { body, .. } => {
+                    Self::walk_type_aliases(std::slice::from_ref(body.as_ref()), out);
+                }
+                Statement::Export { declaration, .. } => {
+                    if let tishlang_ast::ExportDeclaration::Named(s) = declaration.as_ref() {
+                        Self::walk_type_aliases(std::slice::from_ref(s.as_ref()), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Emit a Rust `struct` definition for every type alias whose RHS is
+    /// an object shape. Each generated struct derives `Clone` + `Debug`
+    /// (cheap; field types are all `Copy`-or-cheap-clone in practice) and
+    /// is named `TishStruct_<TishAlias>`.
+    fn emit_named_struct_decls(&mut self) {
+        // Snapshot keys + values so we can mutate `self` (writing the
+        // emitted source) inside the loop.
+        let mut entries: Vec<(String, crate::types::RustType)> =
+            self.type_aliases.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut emitted_any = false;
+        for (name, ty) in entries {
+            if let crate::types::RustType::Named { fields, .. }
+            | crate::types::RustType::Object(fields)
+            // ^^ also accept inline shapes registered as aliases — though
+            //    `from_annotation_with_aliases` should always have lifted
+            //    them to `Named` by now.
+                = &ty
+            {
+                let struct_name = crate::types::named_struct_ident(&name);
+                self.write(&format!("#[derive(Clone, Debug, Default)]\n"));
+                self.write("#[allow(non_snake_case, non_camel_case_types)]\n");
+                self.write(&format!("pub struct {} {{\n", struct_name));
+                for (k, t) in fields {
+                    self.write(&format!(
+                        "    pub {}: {},\n",
+                        crate::types::field_ident(k),
+                        t.to_rust_type_str()
+                    ));
+                }
+                self.write("}\n\n");
+                emitted_any = true;
+            }
+        }
+        if emitted_any {
+            self.write("\n");
         }
     }
 
@@ -755,7 +871,12 @@ impl Codegen {
             "tish:http" if self.has_feature("http") => match export_name {
                     "fetch" => Some("Value::native(|args: &[Value]| tish_fetch_promise(args.to_vec()))"),
                     "fetchAll" => Some("Value::native(|args: &[Value]| tish_fetch_all_promise(args.to_vec()))"),
-                    "serve" => Some("Value::native(|args: &[Value]| { let port = args.first().cloned().unwrap_or(Value::Null); let handler = args.get(1).cloned().unwrap_or(Value::Null); if let Value::Function(f) = handler { tish_http_serve(args, move |req_args| f(req_args)) } else { Value::Null } })"),
+                    // `serve(port, handler)` (single shared handler) or
+                    // `serve(port, { onWorker })` (per-worker factory). The
+                    // latter dispatches into `http_serve_per_worker`, which
+                    // calls onWorker once per accept thread to build that
+                    // thread's handler.
+                    "serve" => Some("Value::native(|args: &[Value]| { let handler = args.get(1).cloned().unwrap_or(Value::Null); match handler { Value::Function(f) => tish_http_serve(args, move |req_args| f(req_args)), Value::Object(ref opts) => { let factory = opts.borrow().get(&Arc::from(\"onWorker\")).cloned().unwrap_or(Value::Null); tishlang_runtime::http_serve_per_worker(args, factory) }, _ => Value::Null } })"),
                     "Promise" => Some("tish_promise_object()"),
                     "setTimeout" => Some("Value::native(|args: &[Value]| tish_timer_set_timeout(args))"),
                     "setInterval" => Some("Value::native(|args: &[Value]| tish_timer_set_interval(args))"),
@@ -1049,6 +1170,19 @@ impl Codegen {
         }
         self.write("\n");
 
+        // Collect every `type Foo = { ... }` declaration in the program
+        // (recursive, so they can also live inside blocks / branches) and
+        // canonicalise each into a `RustType::Named` with its field list.
+        // Aliases that resolve to a non-Object shape (e.g. `type N = number`)
+        // are stored too, so later annotations like `let x: N = 0` still
+        // pick up the right native type.
+        self.collect_type_aliases(&program.statements);
+        // Emit a Rust `struct` for every alias whose RHS is an object
+        // shape. Subsequent `let x: Foo = ...` literals lower to plain
+        // struct moves (no `VmRef::new(ObjectMap::from(..))` allocation),
+        // and `x.field` becomes a direct field access.
+        self.emit_named_struct_decls();
+
         if self.is_async {
             self.writeln("#[tokio::main]");
             self.writeln("async fn main() {");
@@ -1228,17 +1362,27 @@ impl Codegen {
             if self.is_async {
                 self.writeln("let Promise = tish_promise_object();");
             }
+            // `serve` supports two shapes:
+            //   1. serve(port, handler)            // single shared handler
+            //   2. serve(port, { onWorker: (workerId) => handler, ... })
+            //
+            // Shape (2) lets users build per-worker state (DB connection,
+            // cache, counter, ...) without a global mutex. The runtime
+            // dispatches each accept thread to its own handler, all in
+            // parallel under `send-values`.
             self.writeln("let serve = Value::native(|args: &[Value]| {");
             self.indent += 1;
-            self.writeln("let port = args.first().cloned().unwrap_or(Value::Null);");
             self.writeln("let handler = args.get(1).cloned().unwrap_or(Value::Null);");
-            self.writeln("if let Value::Function(f) = handler {");
+            self.writeln("match handler {");
             self.indent += 1;
-            self.writeln("tish_http_serve(args, move |req_args| f(req_args))");
+            self.writeln("Value::Function(f) => tish_http_serve(args, move |req_args| f(req_args)),");
+            self.writeln("Value::Object(ref opts) => {");
+            self.indent += 1;
+            self.writeln("let factory = opts.borrow().get(&Arc::from(\"onWorker\")).cloned().unwrap_or(Value::Null);");
+            self.writeln("tishlang_runtime::http_serve_per_worker(args, factory)");
             self.indent -= 1;
-            self.writeln("} else {");
-            self.indent += 1;
-            self.writeln("Value::Null");
+            self.writeln("},");
+            self.writeln("_ => Value::Null,");
             self.indent -= 1;
             self.writeln("}");
             self.indent -= 1;
@@ -1367,10 +1511,15 @@ impl Codegen {
                 init,
                 ..
             } => {
-                // Determine the Rust type from annotation
+                // Determine the Rust type from annotation, consulting the
+                // user-declared `type` aliases so a `let x: World = ...`
+                // resolves to `RustType::Named { name: "World", fields }`
+                // and we can emit a struct move instead of a Value box.
                 let rust_type = type_ann
                     .as_ref()
-                    .map(RustType::from_annotation)
+                    .map(|t| {
+                        crate::types::RustType::from_annotation_with_aliases(t, &self.type_aliases)
+                    })
                     .unwrap_or(RustType::Value);
 
                 // Track the variable type
@@ -2694,6 +2843,40 @@ impl Codegen {
                 optional,
                 ..
             } => {
+                // Fast path: typed struct member access. If `object` is
+                // a local with `RustType::Named { fields }` and `prop` is
+                // a literal field name of that struct, lower to a direct
+                // Rust field access (`obj.field`), then wrap in
+                // `Value::*` so the caller gets a `Value` as expected.
+                if !optional {
+                    if let (Expr::Ident { name: var_name, .. }, MemberProp::Name { name: prop_name, .. }) =
+                        (object.as_ref(), prop)
+                    {
+                        let var_type = self.type_context.get_type(var_name.as_ref());
+                        if let RustType::Named { fields, .. } = &var_type {
+                            if let Some((_, field_ty)) =
+                                fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                            {
+                                let var_esc = Self::escape_ident(var_name.as_ref()).into_owned();
+                                let access = if self.refcell_wrapped_vars.contains(var_name.as_ref()) {
+                                    format!(
+                                        "(*{}.borrow()).{}.clone()",
+                                        var_esc,
+                                        crate::types::field_ident(prop_name.as_ref())
+                                    )
+                                } else {
+                                    format!(
+                                        "{}.{}",
+                                        var_esc,
+                                        crate::types::field_ident(prop_name.as_ref())
+                                    )
+                                };
+                                // Caller expects a `Value`; wrap.
+                                return Ok(field_ty.to_value_expr(&access));
+                            }
+                        }
+                    }
+                }
                 let obj = self.emit_expr(object)?;
                 let key = match prop {
                     MemberProp::Name { name, .. } => format!("{:?}", name.as_ref()),
@@ -4497,6 +4680,57 @@ impl Codegen {
                 }
             }
             return Ok(format!("vec![{}]", items.join(", ")));
+        }
+
+        // Try to emit object literals directly as a Rust struct literal
+        // when the target is a `RustType::Named` (a user `type Foo = {...}`
+        // alias). Each property in source order is matched to a struct
+        // field; missing fields fall back to `default_value()` so the
+        // emit succeeds even on partial literals (rare, but harmless).
+        if let (RustType::Named { name, fields }, Expr::Object { props, .. }) =
+            (target_type, expr)
+        {
+            use std::collections::HashMap;
+            let field_types: HashMap<&str, &RustType> = fields
+                .iter()
+                .map(|(k, t)| (k.as_ref(), t))
+                .collect();
+            let mut field_inits: HashMap<String, String> = HashMap::new();
+            let mut bail = false;
+            for prop in props {
+                match prop {
+                    ObjectProp::KeyValue(key, value) => {
+                        if let Some(field_ty) = field_types.get(key.as_ref()) {
+                            let v = self.emit_native_expr(value, field_ty)?;
+                            field_inits.insert(crate::types::field_ident(key.as_ref()), v);
+                        }
+                    }
+                    // Spread can't be statically matched to struct fields:
+                    // fall back to the dynamic Value path.
+                    ObjectProp::Spread(_) => {
+                        bail = true;
+                        break;
+                    }
+                }
+            }
+            if !bail {
+                let assigns = fields
+                    .iter()
+                    .map(|(k, t)| {
+                        let fid = crate::types::field_ident(k);
+                        match field_inits.remove(&fid) {
+                            Some(v) => format!("{}: {}", fid, v),
+                            None => format!("{}: {}", fid, t.default_value()),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Ok(format!(
+                    "{} {{ {} }}",
+                    crate::types::named_struct_ident(name),
+                    assigns
+                ));
+            }
         }
 
         // Check if the identifier is already of the target type

@@ -22,7 +22,12 @@ http = [
     # threads (or subprocesses, in prefork mode). Both require `Value: Send`.
     "tishlang_core/send-values",
     "tishlang_builtins/send-values",
+    "send-values",
 ]
+# Local marker: enabled transitively by `http`. Used to gate the parallel
+# accept + per-worker handler paths inside the runtime crate itself, which
+# need to know `Value: Send + Sync` at compile time.
+send-values = []
 # Phase-3 item 13: io_uring-backed accept + send loop (Linux only).
 # Disabled by default; enable with `--feature http,http-io-uring` on Linux
 # to pick up the experimental accept path.

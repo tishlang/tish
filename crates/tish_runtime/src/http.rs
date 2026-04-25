@@ -800,7 +800,27 @@ pub fn serve<F>(args: &[Value], handler: F) -> Value
 where
     F: Fn(&[Value]) -> Value + Send + Sync + 'static,
 {
-    serve_impl(args, handler)
+    serve_impl_with_factory(args, None, Some(Arc::new(handler)))
+}
+
+/// `serve(port, { onWorker, workers? })` — each accept thread calls the
+/// factory once to build **its own** handler closure. This is the pattern
+/// for per-worker state (DB connections, caches, counters) with the same
+/// `Value: Send + Sync` parallelism as [`serve`]. The factory is invoked
+/// with a single `Value::Number(worker_id)` arg and must return a
+/// `Value::Function`. Panics at startup if the factory returns anything
+/// else.
+#[cfg(feature = "send-values")]
+pub fn serve_per_worker<FF>(args: &[Value], factory: FF) -> Value
+where
+    FF: Fn(usize) -> Arc<dyn Fn(&[Value]) -> Value + Send + Sync> + Send + Sync + 'static,
+{
+    serve_impl_with_factory(
+        args,
+        Some(Arc::new(factory)
+            as Arc<dyn Fn(usize) -> Arc<dyn Fn(&[Value]) -> Value + Send + Sync> + Send + Sync>),
+        None,
+    )
 }
 
 #[cfg(not(feature = "send-values"))]
@@ -811,11 +831,18 @@ where
     serve_impl(args, handler)
 }
 
+/// Shared implementation for [`serve`] (single handler) and
+/// [`serve_per_worker`] (per-worker factory). Exactly one of
+/// `factory` / `shared_handler` is provided; the other is `None`.
 #[cfg(feature = "send-values")]
-fn serve_impl<F>(args: &[Value], handler: F) -> Value
-where
-    F: Fn(&[Value]) -> Value + Send + Sync + 'static,
-{
+fn serve_impl_with_factory(
+    args: &[Value],
+    factory: Option<
+        Arc<dyn Fn(usize) -> Arc<dyn Fn(&[Value]) -> Value + Send + Sync> + Send + Sync>,
+    >,
+    shared_handler: Option<Arc<dyn Fn(&[Value]) -> Value + Send + Sync>>,
+) -> Value {
+    debug_assert!(factory.is_some() ^ shared_handler.is_some());
     let port = match args.first() {
         Some(Value::Number(n)) => *n as u16,
         _ => return build_error_response("serve requires a port number"),
@@ -920,22 +947,35 @@ where
         });
     }
 
-    // Shared handler — every accept thread invokes it directly. Because
-    // `Value: Send + Sync` under `send-values`, this is race-free: each
-    // request object is freshly constructed on the worker thread, and any
-    // shared Value inside the handler is protected by its own `VmRef`.
-    let handler: Arc<dyn Fn(&[Value]) -> Value + Send + Sync> = Arc::new(handler);
+    // Per-thread handler: either a single shared `Arc<dyn Fn>` or one
+    // built per worker via the user-supplied factory. Because
+    // `Value: Send + Sync` under `send-values`, both variants run in
+    // parallel on N accept threads without a dispatcher queue.
+    //
+    // The worker index passed to the factory is *global across prefork
+    // processes*: parent is 0..N-1, each child is its own id, so a 14-
+    // core + 14-process layout produces worker ids 0..13 total, never
+    // duplicated.
+    let global_worker_base = match role {
+        crate::http_prefork::PreforkRole::Child(id) => id * workers,
+        _ => 0,
+    };
 
     let processed = Arc::new(AtomicUsize::new(0));
     let mut worker_handles = Vec::with_capacity(workers);
     for (idx, listener) in listeners.into_iter().enumerate() {
-        let handler = Arc::clone(&handler);
         let stop = Arc::clone(&stop);
         let processed = Arc::clone(&processed);
         let max = max_requests;
+        let worker_handler: Arc<dyn Fn(&[Value]) -> Value + Send + Sync> =
+            if let Some(f) = &factory {
+                f(global_worker_base + idx)
+            } else {
+                Arc::clone(shared_handler.as_ref().unwrap())
+            };
         let handle = thread::Builder::new()
             .name(format!("tish-http-w{}", idx))
-            .spawn(move || worker_loop_direct(listener, handler, stop, processed, max))
+            .spawn(move || worker_loop_direct(listener, worker_handler, stop, processed, max))
             .expect("spawn tish-http worker");
         worker_handles.push(handle);
     }
