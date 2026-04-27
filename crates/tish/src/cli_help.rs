@@ -337,7 +337,9 @@ fn capabilities_section(oh: &str, t: &str, r: &str) -> String {
 
 {oh}Capabilities{r} (--feature, repeatable; comma-separated values are split):
   {t}http{r}
-          Network: fetch, serve, Promise / timers (native async)
+          Network: fetch, fetchAll, serve, Promise (and `await`); enabling http also enables timers
+  {t}timers{r}
+          setTimeout, setInterval, clearTimeout, clearInterval (global + `import from \"timers\"` / tish:timers)
   {t}fs{r}
           Filesystem: readFile, writeFile, fileExists, isDir, readDir, mkdir
   {t}process{r}
@@ -347,7 +349,7 @@ fn capabilities_section(oh: &str, t: &str, r: &str) -> String {
   {t}ws{r}
           WebSocket client / server
   {t}full{r}
-          All of the above (http, fs, process, regex, ws)
+          All of the above (http, timers, fs, process, regex, ws)
 
 Omit --feature to allow every capability compiled into this `tish` binary; pass flags to restrict what scripts may use. The CLI is normally built with all of them (Cargo default on `tishlang`)."
     )
@@ -414,7 +416,9 @@ pub fn build_after_help() -> String {
 
 {oh}Capabilities{r} (--feature, repeatable; comma-separated values are split):
   {t}http{r}
-          Network: fetch, serve, Promise / timers (native async)
+          Network: fetch, fetchAll, serve, Promise (and `await`); enabling http also enables timers
+  {t}timers{r}
+          setTimeout, setInterval, clearTimeout, clearInterval (global + `import from \"timers\"` / tish:timers)
   {t}fs{r}
           Filesystem: readFile, writeFile, fileExists, isDir, readDir, mkdir
   {t}process{r}
@@ -424,7 +428,7 @@ pub fn build_after_help() -> String {
   {t}ws{r}
           WebSocket client / server
   {t}full{r}
-          All of the above (http, fs, process, regex, ws)
+          All of the above (http, timers, fs, process, regex, ws)
 
 For `--target native`, these choose what is linked into the **output** executable (omit = same set as this `tish` binary was built with). Minimal native outputs still use a full `tish` CLI unless you built it with `cargo build -p tishlang --no-default-features`."
     )

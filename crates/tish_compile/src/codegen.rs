@@ -956,6 +956,9 @@ impl Codegen {
                     // thread's handler.
                     "serve" => Some("Value::native(|args: &[Value]| { let handler = args.get(1).cloned().unwrap_or(Value::Null); match handler { Value::Function(f) => tish_http_serve(args, move |req_args| f(req_args)), Value::Object(ref opts) => { let factory = opts.borrow().get(&Arc::from(\"onWorker\")).cloned().unwrap_or(Value::Null); tishlang_runtime::http_serve_per_worker(args, factory) }, _ => Value::Null } })"),
                     "Promise" => Some("tish_promise_object()"),
+                    _ => None,
+                },
+            "tish:timers" if self.has_feature("timers") => match export_name {
                     "setTimeout" => Some("Value::native(|args: &[Value]| tish_timer_set_timeout(args))"),
                     "setInterval" => Some("Value::native(|args: &[Value]| tish_timer_set_interval(args))"),
                     "clearTimeout" => Some("Value::native(|args: &[Value]| tish_timer_clear_timeout(args))"),
@@ -985,7 +988,7 @@ impl Codegen {
 
     fn has_feature(&self, name: &str) -> bool {
         if self.features.contains("full") {
-            matches!(name, "http" | "fs" | "process" | "regex" | "ws")
+            matches!(name, "http" | "timers" | "fs" | "process" | "regex" | "ws")
         } else {
             self.features.contains(name)
         }
@@ -1230,11 +1233,14 @@ impl Codegen {
         if self.has_feature("process") {
             self.write("use tishlang_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd, process_exec as tish_process_exec};\n");
         }
+        if self.has_feature("timers") {
+            self.write("use tishlang_runtime::{timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, timer_set_interval as tish_timer_set_interval, timer_clear_interval as tish_timer_clear_interval};\n");
+        }
         if self.has_feature("http") {
             if self.is_async {
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, timer_set_interval as tish_timer_set_interval, timer_clear_interval as tish_timer_clear_interval, promise_object as tish_promise_object, await_promise as tish_await_promise};\n");
+                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, promise_object as tish_promise_object, await_promise as tish_await_promise};\n");
             } else {
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, timer_set_interval as tish_timer_set_interval, timer_clear_interval as tish_timer_clear_interval};\n");
+                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve};\n");
             }
         }
         if self.has_feature("fs") {
@@ -1430,13 +1436,15 @@ impl Codegen {
             self.writeln("}));");
         }
 
-        if self.has_feature("http") {
-            self.writeln("let fetch = Value::native(|args: &[Value]| tish_fetch_promise(args.to_vec()));");
-            self.writeln("let fetchAll = Value::native(|args: &[Value]| tish_fetch_all_promise(args.to_vec()));");
+        if self.has_feature("timers") {
             self.writeln("let setTimeout = Value::native(|args: &[Value]| tish_timer_set_timeout(args));");
             self.writeln("let clearTimeout = Value::native(|args: &[Value]| tish_timer_clear_timeout(args));");
             self.writeln("let setInterval = Value::native(|args: &[Value]| tish_timer_set_interval(args));");
             self.writeln("let clearInterval = Value::native(|args: &[Value]| tish_timer_clear_interval(args));");
+        }
+        if self.has_feature("http") {
+            self.writeln("let fetch = Value::native(|args: &[Value]| tish_fetch_promise(args.to_vec()));");
+            self.writeln("let fetchAll = Value::native(|args: &[Value]| tish_fetch_all_promise(args.to_vec()));");
             if self.is_async {
                 self.writeln("let Promise = tish_promise_object();");
             }

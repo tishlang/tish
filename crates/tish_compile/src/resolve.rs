@@ -49,6 +49,7 @@ pub struct NativeBuildArtifacts {
 const BUILTIN_ALIASES: &[(&str, &str)] = &[
     ("fs", "tish:fs"),
     ("http", "tish:http"),
+    ("timers", "tish:timers"),
     ("process", "tish:process"),
     ("ws", "tish:ws"),
 ];
@@ -66,8 +67,8 @@ pub fn normalize_builtin_spec(spec: &str) -> Option<String> {
 
 /// Built-in modules that come from tishlang_runtime, not from package.json.
 pub fn is_builtin_native_spec(spec: &str) -> bool {
-    matches!(spec, "tish:fs" | "tish:http" | "tish:process" | "tish:ws")
-        || matches!(spec, "fs" | "http" | "process" | "ws")
+    matches!(spec, "tish:fs" | "tish:http" | "tish:timers" | "tish:process" | "tish:ws")
+        || matches!(spec, "fs" | "http" | "timers" | "process" | "ws")
 }
 
 /// Resolve all native imports in a merged program via package.json lookup.
@@ -719,7 +720,7 @@ fn load_module_recursive(
 }
 
 /// Returns true for native module imports that don't resolve to files.
-/// - fs, http, process, ws (Node-compatible aliases for tish:fs, tish:http, tish:process, tish:ws)
+/// - fs, http, timers, process, ws (Node-compatible aliases for tish:*)
 /// - tish:egui, tish:polars, etc.
 /// - cargo:… (Cargo `rustDependencies` + generated wrapper; Rust native backend)
 /// - @scope/package (npm-style)
@@ -727,7 +728,7 @@ pub fn is_native_import(spec: &str) -> bool {
     spec.starts_with("tish:")
         || spec.starts_with("cargo:")
         || spec.starts_with('@')
-        || matches!(spec, "fs" | "http" | "process" | "ws")
+        || matches!(spec, "fs" | "http" | "timers" | "process" | "ws")
 }
 
 /// Map native spec to Cargo feature name for built-in tish:* modules.

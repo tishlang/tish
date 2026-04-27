@@ -3109,7 +3109,7 @@ fn __perf_run_modules_promise() {
 __perf_run_modules_promise()
 
 fn __perf_run_modules_settimeout() {
-	// setTimeout tests (requires http feature)
+	// setTimeout tests (requires timers / full; http implies timers)
 	// Uses blocking setTimeout - delays then runs callback
 
 	console.log("Before setTimeout")

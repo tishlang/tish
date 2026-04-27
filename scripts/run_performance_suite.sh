@@ -1,7 +1,8 @@
 #!/bin/bash
 # Bundled perf suite: per-test timings (each paired .tish) + whole-program tests/main.tish (+ main.js for JS runtimes); one native binary per backend for the bundle.
 # Regenerate sources: ./scripts/generate_perf_ci_main.sh
-# Usage: ./scripts/run_performance_suite.sh [--release] [--summary-only] [--no-compile] [--timeout SEC] [--runtimes R,...] [--verbose]
+# Usage: ./scripts/run_performance_suite.sh [--release] [--summary-only] [--no-compile] [--timeout SEC] [--filter NAME] [--runtimes R,...] [--verbose]
+#   --filter NAME   run only per-file micro-tests whose tid contains NAME (e.g. array_stress, modules, modules/promise); does not skip bundled tests/main.tish
 #   --runtimes defaults to all: vm,interp,rust,cranelift,llvm,wasi,node,bun,deno,qjs (bun/deno/qjs if installed)
 #   Default: same as run_performance_manual.sh — for each micro-test and for the full bundle, print program
 #   stdout/stderr (console.log, etc.), then "${n}-run avg" timing lines, then the sorted table + bundle summary.
@@ -52,6 +53,7 @@ verbose=false
 no_compile=false
 run_timeout=120
 runtimes_filter=""
+filter_name=""
 github_step_summary=false
 
 while [[ $# -gt 0 ]]; do
@@ -60,6 +62,7 @@ while [[ $# -gt 0 ]]; do
     --summary-only) summary_only=true; shift ;;
     --no-compile) no_compile=true; shift ;;
     --timeout) run_timeout="$2"; shift 2 ;;
+    --filter) filter_name="$2"; shift 2 ;;
     --runtimes) runtimes_filter="$2"; shift 2 ;;
     --verbose|-v) verbose=true; shift ;;
     --github-step-summary) github_step_summary=true; shift ;;
@@ -616,6 +619,7 @@ want_runtime node && echo "  node"
 want_runtime bun && $has_bun && echo "  bun"
 want_runtime deno && $has_deno && echo "  deno"
 want_runtime qjs && $has_qjs && echo "  qjs"
+[[ -n "${filter_name:-}" ]] && echo "Filter (per-file micro-tests only): $filter_name"
 echo ""
 
 if ! $no_compile; then
@@ -867,7 +871,7 @@ echo "════════════════════════�
 echo "  PER-TEST (${n}-run avg, ms) — same workloads as tests/main.tish; sorted by vm/Node %, slowest first"
 echo "  Columns match the bundled summary order: vm, interp, rust, cflt, llvm, wasi, Node, Bun, Deno, qjs."
 echo "  Per-test rows: vm + interp + JS only — rust/cflt/llvm/wasi are run only in “BUNDLED PROGRAM OUTPUT” above."
-echo "  Last two rows: Σ per-file = sum of each row’s ms (49 separate programs; not one runnable total)."
+echo "  Last two rows: Σ per-file = sum of each row’s ms (one micro program per row; not one runnable total)."
 echo "                 bundle = same n-run averages as “BUNDLED PERF SUITE” (one tests/main.* program)."
 echo "════════════════════════════════════════════════════════════════════════════════════════════════════════════════"
 echo ""
@@ -891,6 +895,7 @@ while IFS="$(printf '\t')" read -r tish_f js_f; do
   [[ -f "$tish_f" && -f "$js_f" ]] || continue
   tid="${tish_f#tests/}"
   tid="${tid%.tish}"
+  [[ -n "${filter_name:-}" && "$tid" != *"$filter_name"* ]] && continue
 
   perf_tid_any_fail=0
 

@@ -43,7 +43,13 @@ type ArrayMethodFn = NativeFn;
 
 /// Feature names enabled for this VM run (`tish run --feature …`). `full` enables every optional capability.
 #[cfg_attr(
-    not(any(feature = "fs", feature = "http", feature = "process", feature = "ws")),
+    not(any(
+        feature = "fs",
+        feature = "http",
+        feature = "timers",
+        feature = "process",
+        feature = "ws"
+    )),
     allow(dead_code)
 )]
 fn cap_allows(enabled: &HashSet<String>, name: &str) -> bool {
@@ -56,6 +62,8 @@ pub fn all_compiled_capabilities() -> HashSet<String> {
     let mut s = HashSet::new();
     #[cfg(feature = "http")]
     s.insert("http".to_string());
+    #[cfg(feature = "timers")]
+    s.insert("timers".to_string());
     #[cfg(feature = "fs")]
     s.insert("fs".to_string());
     #[cfg(feature = "process")]
@@ -69,7 +77,13 @@ pub fn all_compiled_capabilities() -> HashSet<String> {
 
 /// Look up built-in module export for LoadNativeExport. Returns None if unknown or feature disabled.
 #[cfg_attr(
-    not(any(feature = "fs", feature = "http", feature = "process", feature = "ws")),
+    not(any(
+        feature = "fs",
+        feature = "http",
+        feature = "timers",
+        feature = "process",
+        feature = "ws"
+    )),
     allow(unused_variables)
 )]
 fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) -> Option<Value> {
@@ -110,6 +124,7 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             "fetchAll" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::fetch_all_promise(args.to_vec())
             })),
+            "Promise" => Some(tishlang_runtime::promise_object()),
             "serve" => Some(Value::native(|args: &[Value]| {
                 // Phase-1 item 2: support `serve(port, { handler, onWorker })`
                 // in addition to `serve(port, handler)`. When an options
@@ -140,6 +155,24 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                 } else {
                     Value::Null
                 }
+            })),
+            _ => None,
+        };
+    }
+    #[cfg(feature = "timers")]
+    if spec == "tish:timers" && cap_allows(enabled, "timers") {
+        return match export_name {
+            "setTimeout" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::timer_set_timeout(args)
+            })),
+            "setInterval" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::timer_set_interval(args)
+            })),
+            "clearTimeout" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::timer_clear_timeout(args)
+            })),
+            "clearInterval" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::timer_clear_interval(args)
             })),
             _ => None,
         };
@@ -636,18 +669,8 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         );
     }
 
-    #[cfg(feature = "http")]
-    if cap_allows(enabled, "http") {
-        // Match native codegen prelude (`codegen.rs`): globals for fetch + timers + Promise,
-        // not only `import { … } from "tish:http"` (standalone tests use `setTimeout` globally).
-        g.insert(
-            "fetch".into(),
-            Value::native(|args: &[Value]| tishlang_runtime::fetch_promise(args.to_vec())),
-        );
-        g.insert(
-            "fetchAll".into(),
-            Value::native(|args: &[Value]| tishlang_runtime::fetch_all_promise(args.to_vec())),
-        );
+    #[cfg(feature = "timers")]
+    if cap_allows(enabled, "timers") {
         g.insert(
             "setTimeout".into(),
             Value::native(|args: &[Value]| tishlang_runtime::timer_set_timeout(args)),
@@ -663,6 +686,18 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         g.insert(
             "clearInterval".into(),
             Value::native(|args: &[Value]| tishlang_runtime::timer_clear_interval(args)),
+        );
+    }
+
+    #[cfg(feature = "http")]
+    if cap_allows(enabled, "http") {
+        g.insert(
+            "fetch".into(),
+            Value::native(|args: &[Value]| tishlang_runtime::fetch_promise(args.to_vec())),
+        );
+        g.insert(
+            "fetchAll".into(),
+            Value::native(|args: &[Value]| tishlang_runtime::fetch_all_promise(args.to_vec())),
         );
         g.insert("Promise".into(), tishlang_runtime::promise_object());
         g.insert(
@@ -808,6 +843,22 @@ impl Vm {
 
     fn read_i16(code: &[u8], ip: &mut usize) -> i16 {
         Self::read_u16(code, ip) as i16
+    }
+
+    /// Pop innermost try handler, truncate stack, push thrown value, jump to catch.
+    fn unwind_throw(
+        try_handlers: &mut Vec<(usize, usize)>,
+        stack: &mut Vec<Value>,
+        ip: &mut usize,
+        v: Value,
+    ) -> Result<(), String> {
+        let (catch_ip, stack_len) = try_handlers
+            .pop()
+            .ok_or_else(|| format!("Uncaught throw: {}", v.to_display_string()))?;
+        stack.truncate(stack_len);
+        stack.push(v);
+        *ip = catch_ip;
+        Ok(())
     }
 
     pub fn run(&mut self, chunk: &Chunk) -> Result<Value, String> {
@@ -1535,12 +1586,30 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    let (catch_ip, stack_len) = try_handlers
+                    Self::unwind_throw(&mut try_handlers, &mut self.stack, &mut ip, v)?;
+                }
+                Opcode::AwaitPromise => {
+                    let v = self
+                        .stack
                         .pop()
-                        .ok_or_else(|| format!("Uncaught throw: {}", v.to_display_string()))?;
-                    self.stack.truncate(stack_len);
-                    self.stack.push(v);
-                    ip = catch_ip;
+                        .ok_or_else(|| "Stack underflow in AwaitPromise".to_string())?;
+                    #[cfg(feature = "http")]
+                    {
+                        use tishlang_core::Value as V;
+                        match v {
+                            V::Promise(p) => match p.block_until_settled() {
+                                Ok(val) => self.stack.push(val),
+                                Err(rej) => {
+                                    Self::unwind_throw(&mut try_handlers, &mut self.stack, &mut ip, rej)?;
+                                }
+                            },
+                            other => self.stack.push(tishlang_runtime::await_promise(other)),
+                        }
+                    }
+                    #[cfg(not(feature = "http"))]
+                    {
+                        self.stack.push(v);
+                    }
                 }
                 Opcode::LoadNativeExport => {
                     let spec_idx = Self::read_u16(code, &mut ip);
@@ -1598,8 +1667,8 @@ impl Vm {
             }
         }
 
-        #[cfg(feature = "http")]
-        if cap_allows(self.capabilities.as_ref(), "http") {
+        #[cfg(feature = "timers")]
+        if cap_allows(self.capabilities.as_ref(), "timers") {
             tishlang_runtime::drain_timers();
         }
 
@@ -1950,6 +2019,22 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             };
             Ok(Value::Function(method))
         }
+        #[cfg(feature = "http")]
+        Value::Promise(p) => match key.as_ref() {
+            "then" => {
+                let pc = Arc::clone(p);
+                Ok(Value::native(move |args| {
+                    tishlang_runtime::promise_instance_then(&pc, args)
+                }))
+            }
+            "catch" => {
+                let pc = Arc::clone(p);
+                Ok(Value::native(move |args| {
+                    tishlang_runtime::promise_instance_catch(&pc, args)
+                }))
+            }
+            _ => Err(format!("Property '{}' not found", key)),
+        },
         _ => Err(format!(
             "Cannot read property '{}' of {}",
             key,

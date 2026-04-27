@@ -8,7 +8,10 @@ license-file = { workspace = true }
 repository = { workspace = true }
 [features]
 default = []
+# setTimeout / setInterval / clear* (standalone or with `import { … } from "tish:timers"`).
+timers = []
 http = [
+    "timers",
     "tokio",
     "reqwest",
     "futures",

@@ -16,13 +16,13 @@ use rustyline::{Behavior, ColorMode, CompletionType, Config, Editor};
 
 use cli_help::{Cli, Commands};
 
-/// Normalize `--feature` / `--feature http,fs` / `--feature full` for VM runs and native builds.
+/// Normalize `--feature` / `--feature http,timers,fs` / `--feature full` for VM runs and native builds.
 fn normalize_capability_flags(features: &[String]) -> HashSet<String> {
     let mut out = HashSet::new();
     for s in features {
         for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
             if part == "full" {
-                for name in ["http", "fs", "process", "regex", "ws"] {
+                for name in ["http", "timers", "fs", "process", "regex", "ws"] {
                     out.insert(name.to_string());
                 }
             } else {
@@ -225,7 +225,7 @@ fn run_program(
     if backend == "interp" {
         let mut eval = tishlang_eval::Evaluator::new();
         let value = eval.eval_program(program)?;
-        #[cfg(feature = "http")]
+        #[cfg(feature = "timers")]
         {
             let _ = eval.run_timer_phase();
         }
@@ -300,7 +300,7 @@ fn run_repl(backend: &str, no_optimize: bool, features: &[String]) -> Result<(),
                 Ok(program) => {
                     match eval.eval_program(&program) {
                         Ok(v) => {
-                            #[cfg(feature = "http")]
+                            #[cfg(feature = "timers")]
                             {
                                 let _ = eval.run_timer_phase();
                             }

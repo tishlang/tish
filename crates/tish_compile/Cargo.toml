@@ -9,6 +9,7 @@ repository = { workspace = true }
 [features]
 default = []
 http = []
+timers = []
 fs = []
 process = []
 regex = []

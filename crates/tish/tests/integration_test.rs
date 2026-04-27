@@ -397,7 +397,7 @@ fn test_async_await_run() {
     }
 }
 
-/// Run Promise and setTimeout module tests (require http feature).
+/// Run Promise and setTimeout module tests (`promise` needs `http`; `settimeout` needs `timers`, which `http` enables).
 /// Ignored: tishlang_eval::run() does not run the event loop.
 #[test]
 #[cfg(feature = "http")]

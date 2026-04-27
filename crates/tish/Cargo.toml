@@ -11,16 +11,17 @@ name = "tish"
 path = "src/main.rs"
 
 [features]
-# The published `tish` CLI always includes every optional runtime (http, fs, process, regex, ws).
+# The published `tish` CLI always includes every optional runtime (http, timers, fs, process, regex, ws).
 # Use `cargo build -p tishlang --no-default-features` when you need a locked-down toolchain
 # (see workspace `justfile`). `tish run --feature …` / `tish build --feature …` gate what runs
 # or what gets linked into a *native output* binary — they are not the primary way to ship a
 # “full” vs “empty” CLI.
 default = ["full"]
 # Alias: same dependency edges as `default` (kept for `--features full` in CI and docs).
-full = ["http", "fs", "process", "regex", "ws"]
+full = ["http", "fs", "process", "regex", "ws", "timers"]
 # Individual capability flags
 http    = ["tishlang_eval/http",    "tishlang_runtime/http",    "tishlang_compile/http",    "tishlang_vm/http"]
+timers  = ["tishlang_eval/timers",  "tishlang_compile/timers",  "tishlang_vm/timers"]
 fs      = ["tishlang_eval/fs",      "tishlang_runtime/fs",      "tishlang_compile/fs",      "tishlang_vm/fs"]
 process = ["tishlang_eval/process", "tishlang_runtime/process", "tishlang_compile/process", "tishlang_vm/process"]
 regex   = ["tishlang_eval/regex",   "tishlang_runtime/regex",   "tishlang_compile/regex",   "tishlang_vm/regex"]

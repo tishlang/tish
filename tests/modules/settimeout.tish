@@ -1,4 +1,4 @@
-// setTimeout tests (requires http feature)
+// setTimeout tests (requires `timers` / `full`; `http` implies `timers`)
 // Uses blocking setTimeout - delays then runs callback
 
 console.log("Before setTimeout")

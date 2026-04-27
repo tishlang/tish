@@ -894,7 +894,7 @@ pub use timers::{
 };
 
 #[cfg(feature = "http")]
-pub use promise::promise_object;
+pub use promise::{promise_instance_catch, promise_instance_then, promise_object};
 
 #[cfg(feature = "http")]
 pub use native_promise::{await_promise, fetch_all_promise, fetch_async_promise, fetch_promise};
