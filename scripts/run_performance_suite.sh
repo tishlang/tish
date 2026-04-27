@@ -315,9 +315,9 @@ fi
 
 echo "Building tish ($profile)..."
 # Avoid split target dirs (e.g. CARGO_TARGET_DIR in some IDEs): workspace tish must match freshly built tishlang_compile.
-( unset CARGO_TARGET_DIR; cargo build -p tishlang$rel_flag --features full --target-dir "$target_dir" -q 2>/dev/null ) || true
+( unset CARGO_TARGET_DIR; cargo build -p tishlang $rel_flag --features full --target-dir "$target_dir" -q 2>/dev/null ) || true
 if [[ ! -x "$tish_bin" ]]; then
-  tish_bin="cargo run -p tishlang$rel_flag --features full --target-dir $target_dir -q --"
+  tish_bin="cargo run -p tishlang $rel_flag --features full --target-dir $target_dir -q --"
 fi
 
 cache_dir="$target_dir/perf-suite-cache-$profile"
