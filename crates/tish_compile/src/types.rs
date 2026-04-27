@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tishlang_ast::{BinOp, TypeAnnotation};
+use tishlang_ast::{BinOp, FunParam, TypeAnnotation, TypedParam};
 
 /// Concrete Rust type representation for code generation.
 #[derive(Debug, Clone, PartialEq)]
@@ -376,6 +376,23 @@ impl TypeContext {
         self.scopes.pop();
     }
 
+    /// Push a scope for a function or arrow body and record formals as [`RustType::Value`].
+    ///
+    /// Native codegen always binds parameters from `args.get(i)` as `Value`; this prevents
+    /// outer locals (e.g. a loop counter inferred as [`RustType::F64`]) from shadowing the
+    /// wrong type for the same identifier.
+    pub fn push_fun_param_scope(&mut self, params: &[FunParam], rest_param: Option<&TypedParam>) {
+        self.push_scope();
+        for p in params {
+            for name in p.bound_names() {
+                self.define(name.as_ref(), RustType::Value);
+            }
+        }
+        if let Some(rp) = rest_param {
+            self.define(rp.name.as_ref(), RustType::Value);
+        }
+    }
+
     /// Define a variable in the current scope.
     pub fn define(&mut self, name: &str, ty: RustType) {
         if let Some(scope) = self.scopes.last_mut() {
@@ -459,5 +476,26 @@ mod tests {
 
         ctx.pop_scope();
         assert_eq!(ctx.get_type("y"), RustType::Value); // y no longer visible
+    }
+
+    #[test]
+    fn push_fun_param_scope_shadows_outer() {
+        use tishlang_ast::{FunParam, Span, TypedParam};
+
+        let mut ctx = TypeContext::new();
+        ctx.define("n", RustType::F64);
+        let params = vec![FunParam::Simple(TypedParam {
+            name: "n".into(),
+            name_span: Span {
+                start: (0, 0),
+                end: (0, 0),
+            },
+            type_ann: None,
+            default: None,
+        })];
+        ctx.push_fun_param_scope(&params, None);
+        assert_eq!(ctx.get_type("n"), RustType::Value);
+        ctx.pop_scope();
+        assert_eq!(ctx.get_type("n"), RustType::F64);
     }
 }

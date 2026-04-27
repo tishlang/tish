@@ -226,6 +226,16 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install QuickJS (qjs)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y quickjs || true
+          command -v qjs && qjs --help 2>&1 | head -1 || echo "qjs not on PATH (QuickJS timings skipped)"
+
       - name: Install wasmtime
         run: |
           set -euo pipefail
@@ -236,7 +246,7 @@ jobs:
       - name: Regenerate bundled perf sources and assert up to date
         run: |
           set -euo pipefail
-          python3 scripts/generate_perf_ci_main.py
+          ./scripts/generate_perf_ci_main.sh
           git diff --exit-code tests/main.tish tests/main.js
 
       - name: Run bundled perf suite
@@ -246,7 +256,7 @@ jobs:
             --release \
             --summary-only \
             --timeout 180 \
-            --runtimes vm,interp,rust,cranelift,llvm,wasi,node \
+            --runtimes vm,interp,rust,cranelift,llvm,wasi,node,bun,qjs \
             --github-step-summary
 
   build:

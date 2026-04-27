@@ -678,6 +678,10 @@ struct Codegen {
     program_has_jsx: bool,
     /// `fn` names for Rust JSX: PascalCase tags matching these use a value binding; others are string intrinsics.
     program_fun_decl_names: std::collections::HashSet<String>,
+    /// Nesting depth inside `Value::native(move |args| {{ ... }})` user functions / arrows.
+    /// `try`/`throw` lowering uses `return Err` only at depth 0 (e.g. `run()`); inside native
+    /// closures it must not return a `Result` from a `Value`-returning closure.
+    value_fn_depth: u32,
 }
 
 impl Codegen {
@@ -707,6 +711,7 @@ impl Codegen {
             type_aliases: std::collections::HashMap::new(),
             program_has_jsx: false,
             program_fun_decl_names: std::collections::HashSet::new(),
+            value_fn_depth: 0,
         }
     }
 
@@ -809,6 +814,79 @@ impl Codegen {
                         t.to_rust_type_str()
                     ));
                 }
+                self.write("}\n\n");
+
+                // Emit a hand-rolled JSON serialiser per struct so
+                // `JSON.stringify(typed_value)` (and `Vec<TishStruct_X>`)
+                // can bypass the `Value::Object` allocation entirely —
+                // we walk the struct's fields by name and write directly
+                // into the response buffer. ASCII-fast string escape is
+                // shared with the `Value` path via the
+                // `escape_json_string_into` helper that the runtime
+                // re-exports from `tishlang_core::json`.
+                self.write(&format!("impl {} {{\n", struct_name));
+                self.write("    pub fn _tish_write_json(&self, buf: &mut String) {\n");
+                self.write("        use std::fmt::Write as _;\n");
+                self.write("        buf.push('{');\n");
+                for (i, (k, t)) in fields.iter().enumerate() {
+                    let sep = if i == 0 { "{" } else { ",{" };
+                    let prefix = if i == 0 {
+                        format!("\"\\\"{}\\\":\"", k.as_ref())
+                    } else {
+                        format!("\",\\\"{}\\\":\"", k.as_ref())
+                    };
+                    let _ = sep; // (lint silence; we built `prefix` above directly)
+                    self.write(&format!("        buf.push_str({});\n", prefix));
+                    let access = format!("self.{}", crate::types::field_ident(k));
+                    match t {
+                        crate::types::RustType::F64 => {
+                            self.write(&format!(
+                                "        if {a}.is_nan() || {a}.is_infinite() {{ buf.push_str(\"null\"); }} else {{ let _ = write!(buf, \"{{}}\", {a}); }}\n",
+                                a = access
+                            ));
+                        }
+                        crate::types::RustType::Bool => {
+                            self.write(&format!(
+                                "        buf.push_str(if {} {{ \"true\" }} else {{ \"false\" }});\n",
+                                access
+                            ));
+                        }
+                        crate::types::RustType::String => {
+                            self.write(&format!(
+                                "        buf.push('\"'); tishlang_runtime::json::escape_into(buf, {}.as_str()); buf.push('\"');\n",
+                                access
+                            ));
+                        }
+                        crate::types::RustType::Named { .. } => {
+                            self.write(&format!(
+                                "        {}._tish_write_json(buf);\n",
+                                access
+                            ));
+                        }
+                        crate::types::RustType::Vec(inner) if matches!(
+                            inner.as_ref(),
+                            crate::types::RustType::Named { .. }
+                        ) => {
+                            self.write("        buf.push('[');\n");
+                            self.write(&format!(
+                                "        for (i, item) in {}.iter().enumerate() {{ if i > 0 {{ buf.push(','); }} item._tish_write_json(buf); }}\n",
+                                access
+                            ));
+                            self.write("        buf.push(']');\n");
+                        }
+                        _ => {
+                            // Fallback: convert the field to a Value and
+                            // delegate to the dynamic stringifier.
+                            let v_expr = t.to_value_expr(&access);
+                            self.write(&format!(
+                                "        let _v: Value = {}; tishlang_runtime::json::stringify_into(buf, &_v);\n",
+                                v_expr
+                            ));
+                        }
+                    }
+                }
+                self.write("        buf.push('}');\n");
+                self.write("    }\n");
                 self.write("}\n\n");
                 emitted_any = true;
             }
@@ -1810,10 +1888,17 @@ impl Codegen {
             }
             Statement::Throw { value, .. } => {
                 let v = self.emit_expr(value)?;
-                self.writeln(&format!(
-                    "return Err(Box::new(tishlang_runtime::TishError::Throw({})) as Box<dyn std::error::Error>);",
-                    v
-                ));
+                if self.value_fn_depth > 0 {
+                    self.writeln(&format!(
+                        "{{ let _th = {}; panic!(\"uncaught throw: {{}}\", _th.to_display_string()); }}",
+                        v
+                    ));
+                } else {
+                    self.writeln(&format!(
+                        "return Err(Box::new(tishlang_runtime::TishError::Throw({})) as Box<dyn std::error::Error>);",
+                        v
+                    ));
+                }
             }
             Statement::Try {
                 body,
@@ -1843,10 +1928,22 @@ impl Codegen {
                             Self::escape_ident(param.as_ref())
                         ));
                         self.emit_statement(catch_stmt)?;
-                        self.writeln("} else { return Err(Box::new(tish_err)); }");
+                        if self.value_fn_depth > 0 {
+                            self.writeln(
+                                "} else { panic!(\"unhandled error in native Tish: {:?}\", *tish_err); }",
+                            );
+                        } else {
+                            self.writeln("} else { return Err(Box::new(tish_err)); }");
+                        }
                         self.indent -= 1;
                         self.writeln("}");
-                        self.writeln("Err(orig) => return Err(orig),");
+                        if self.value_fn_depth > 0 {
+                            self.writeln(
+                                "Err(orig) => panic!(\"non-Tish error in native Tish: {:?}\", orig),",
+                            );
+                        } else {
+                            self.writeln("Err(orig) => return Err(orig),");
+                        }
                         self.indent -= 1;
                         self.writeln("}");
                         self.indent -= 1;
@@ -1924,6 +2021,7 @@ impl Codegen {
                             "Math",
                             "JSON",
                             "Date",
+                            "Object",
                             "process",
                             "setTimeout",
                             "clearTimeout",
@@ -2021,6 +2119,7 @@ impl Codegen {
                     "Math",
                     "JSON",
                     "Date",
+                    "Object",
                     "Uint8Array",
                     "AudioContext",
                     "process",
@@ -2053,6 +2152,7 @@ impl Codegen {
                     }
                 }
                 self.writeln("Value::native(move |args: &[Value]| {");
+                self.value_fn_depth += 1;
                 self.indent += 1;
                 // Mutable outer vars: capture the RefCell so assignments use borrow_mut
                 for outer_var in &mutable_outer_vars {
@@ -2119,61 +2219,75 @@ impl Codegen {
                     ));
                 }
 
-                // Push current params to stack for nested functions
-                self.outer_params_stack.push(current_param_names);
+                self.type_context
+                    .push_fun_param_scope(params, rest_param.as_ref());
 
-                // Function bodies are sync closures (even Tish async fn) - use block_on for await
-                self.async_context_stack.push(false);
+                let fun_body_res: Result<(), CompileError> = (|| -> Result<(), CompileError> {
+                    // Push current params to stack for nested functions
+                    self.outer_params_stack.push(current_param_names);
 
-                // Mutable outer vars must be in refcell_wrapped_vars so Assign/CompoundAssign emit borrow_mut
-                let saved_refcell = self.refcell_wrapped_vars.clone();
-                for v in &mutable_outer_vars {
-                    self.refcell_wrapped_vars.insert(v.clone());
-                }
+                    // Function bodies are sync closures (even Tish async fn) - use block_on for await
+                    self.async_context_stack.push(false);
 
-                // Pre-scan body for nested functions (handles function body as Block)
-                if let Statement::Block { statements, .. } = body.as_ref() {
-                    let nested_func_names = self.prescan_function_decls(statements);
-                    self.function_scope_stack.push(nested_func_names.clone());
-                    self.outer_vars_stack.push(Vec::new());
-                    self.rc_cell_storage_scopes
-                        .push(std::collections::HashSet::new());
-                    // Create cells for nested functions
-                    for func_name in &nested_func_names {
-                        let escaped = Self::escape_ident(func_name);
-                        self.writeln(&format!(
-                            "let {}_cell: VmRef<Value> = VmRef::new(Value::Null);",
-                            escaped
-                        ));
+                    // Mutable outer vars must be in refcell_wrapped_vars so Assign/CompoundAssign emit borrow_mut
+                    let saved_refcell = self.refcell_wrapped_vars.clone();
+                    for v in &mutable_outer_vars {
+                        self.refcell_wrapped_vars.insert(v.clone());
                     }
-                    for s in statements {
-                        self.emit_statement(s)?;
+
+                    // Pre-scan body for nested functions (handles function body as Block)
+                    if let Statement::Block { statements, .. } = body.as_ref() {
+                        let nested_func_names = self.prescan_function_decls(statements);
+                        self.function_scope_stack.push(nested_func_names.clone());
+                        self.outer_vars_stack.push(Vec::new());
+                        self.rc_cell_storage_scopes
+                            .push(std::collections::HashSet::new());
+                        // Create cells for nested functions
+                        for func_name in &nested_func_names {
+                            let escaped = Self::escape_ident(func_name);
+                            self.writeln(&format!(
+                                "let {}_cell: VmRef<Value> = VmRef::new(Value::Null);",
+                                escaped
+                            ));
+                        }
+                        for s in statements {
+                            self.emit_statement(s)?;
+                        }
+                        self.function_scope_stack.pop();
+                        self.outer_vars_stack.pop();
+                        self.rc_cell_storage_scopes.pop();
+                    } else {
+                        self.function_scope_stack.push(Vec::new());
+                        self.outer_vars_stack.push(Vec::new());
+                        self.rc_cell_storage_scopes
+                            .push(std::collections::HashSet::new());
+                        self.emit_statement(body)?;
+                        self.function_scope_stack.pop();
+                        self.outer_vars_stack.pop();
+                        self.rc_cell_storage_scopes.pop();
                     }
-                    self.function_scope_stack.pop();
-                    self.outer_vars_stack.pop();
-                    self.rc_cell_storage_scopes.pop();
-                } else {
-                    self.function_scope_stack.push(Vec::new());
-                    self.outer_vars_stack.push(Vec::new());
-                    self.rc_cell_storage_scopes
-                        .push(std::collections::HashSet::new());
-                    self.emit_statement(body)?;
-                    self.function_scope_stack.pop();
-                    self.outer_vars_stack.pop();
-                    self.rc_cell_storage_scopes.pop();
+
+                    self.async_context_stack.pop();
+
+                    // Restore refcell_wrapped_vars (remove mutable outer vars we added)
+                    self.refcell_wrapped_vars = saved_refcell;
+
+                    // Pop params stack
+                    self.outer_params_stack.pop();
+
+                    Ok(())
+                })();
+
+                self.type_context.pop_scope();
+                if let Err(e) = fun_body_res {
+                    self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
+                    return Err(e);
                 }
-
-                self.async_context_stack.pop();
-
-                // Restore refcell_wrapped_vars (remove mutable outer vars we added)
-                self.refcell_wrapped_vars = saved_refcell;
-
-                // Pop params stack
-                self.outer_params_stack.pop();
 
                 self.writeln("Value::Null");
                 self.indent -= 1;
                 self.writeln("})");
+                self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
                 self.indent -= 1;
                 self.writeln("};");
                 // Update the cell with the actual function value
@@ -2409,6 +2523,51 @@ impl Codegen {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                // Typed-struct shortcut for `JSON.stringify(typedValue)`.
+                // When the single arg has a known native type that owns a
+                // hand-rolled `_tish_write_json` (struct or `Vec<struct>`),
+                // emit a direct write into a String buffer and skip the
+                // entire `Value::Object` / `Value::Array` allocation
+                // round-trip + the dynamic stringifier walk. Wraps the
+                // result in `Value::String` for the caller, which is what
+                // the existing `JSON.stringify` returned anyway.
+                if let Expr::Member {
+                    object,
+                    prop: MemberProp::Name { name: method_name, .. },
+                    ..
+                } = callee.as_ref()
+                {
+                    if method_name.as_ref() == "stringify"
+                        && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "JSON")
+                    {
+                        if args.len() == 1 {
+                            if let CallArg::Expr(arg) = &args[0] {
+                                let (arg_code, arg_ty) = self.emit_typed_expr(arg)?;
+                                match &arg_ty {
+                                    crate::types::RustType::Named { .. } => {
+                                        return Ok(format!(
+                                            "{{ let mut _buf = String::with_capacity(128); ({})._tish_write_json(&mut _buf); Value::String(_buf.into()) }}",
+                                            arg_code
+                                        ));
+                                    }
+                                    crate::types::RustType::Vec(inner)
+                                        if matches!(
+                                            inner.as_ref(),
+                                            crate::types::RustType::Named { .. }
+                                        ) =>
+                                    {
+                                        return Ok(format!(
+                                            "{{ let mut _buf = String::with_capacity(256); _buf.push('['); for (i, item) in ({}).iter().enumerate() {{ if i > 0 {{ _buf.push(','); }} item._tish_write_json(&mut _buf); }} _buf.push(']'); Value::String(_buf.into()) }}",
+                                            arg_code
+                                        ));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Compile-time embed: Polars.read_csv("<literal path>") when file exists
                 if let Some(init) = self.native_module_init.get("tish:polars") {
                     let crate_name = match init {
@@ -4425,6 +4584,25 @@ impl Codegen {
                     && !param_names.contains(name)
                     && !local_var_names.contains(name)
             })
+            .filter(|name| {
+                ![
+                    "Boolean",
+                    "console",
+                    "Math",
+                    "JSON",
+                    "Date",
+                    "Object",
+                    "process",
+                    "setTimeout",
+                    "clearTimeout",
+                    "setInterval",
+                    "clearInterval",
+                    "Promise",
+                    "RegExp",
+                    "Polars",
+                ]
+                .contains(&name.as_str())
+            })
             .collect();
 
         // Outer vars that are assigned in the body need RefCell; read-only get Value binding
@@ -4484,6 +4662,7 @@ impl Codegen {
             "Math",
             "JSON",
             "Date",
+            "Object",
             "Uint8Array",
             "AudioContext",
             "process",
@@ -4521,6 +4700,7 @@ impl Codegen {
         }
 
         code.push_str("    Value::native(move |args: &[Value]| {\n");
+        self.value_fn_depth += 1;
 
         // Make captured outer params available as plain Values (from _ref RefCells)
         for outer_param in &outer_params {
@@ -4599,11 +4779,13 @@ impl Codegen {
             self.refcell_wrapped_vars.insert(v.clone());
         }
 
-        // Emit body based on type
-        match body {
+        self.type_context.push_fun_param_scope(params, None);
+
+        let arrow_body_res: Result<(), CompileError> = match body {
             tishlang_ast::ArrowBody::Expr(expr) => {
                 let expr_code = self.emit_expr(expr)?;
                 code.push_str(&format!("        {}\n", expr_code));
+                Ok(())
             }
             tishlang_ast::ArrowBody::Block(block_stmt) => {
                 // For block bodies, emit the block statement
@@ -4622,8 +4804,17 @@ impl Codegen {
 
                 code.push_str(&body_code);
                 code.push_str("        Value::Null\n");
+                Ok(())
             }
+        };
+
+        self.type_context.pop_scope();
+        if let Err(e) = arrow_body_res {
+            self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
+            return Err(e);
         }
+
+        self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
 
         // Restore state
         self.refcell_wrapped_vars = saved_refcell_vars;

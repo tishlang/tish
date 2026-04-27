@@ -5,6 +5,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use tishlang_core::{ObjectMap, Value as CoreValue, VmRef};
+#[cfg(feature = "regex")]
+use tishlang_core::TishRegExp;
 
 use crate::value::{PropMap, Value};
 
@@ -71,7 +73,11 @@ pub fn core_to_eval(v: CoreValue) -> Value {
         CoreValue::RegExp(re) => {
             #[cfg(feature = "regex")]
             {
-                Value::RegExp(re)
+                // Core uses `VmRef<TishRegExp>` (potentially `Arc<Mutex>`),
+                // interpreter uses `Rc<RefCell<TishRegExp>>`. Clone the
+                // inner state across so the two storage shapes can coexist.
+                let inner: TishRegExp = re.borrow().clone();
+                Value::RegExp(Rc::new(RefCell::new(inner)))
             }
             #[cfg(not(feature = "regex"))]
             {

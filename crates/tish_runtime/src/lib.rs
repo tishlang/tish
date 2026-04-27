@@ -274,6 +274,50 @@ use tishlang_builtins::globals::{
 };
 use tishlang_core::{json_parse as core_json_parse, json_stringify as core_json_stringify};
 
+/// Public JSON helpers used by codegen-emitted code (specifically the
+/// `_tish_write_json` impls on user-declared `type` aliases). Re-exporting
+/// from the runtime keeps the generated source decoupled from
+/// `tishlang_core` — generated code only ever names `tishlang_runtime`.
+pub mod json {
+    pub use tishlang_core::json_stringify_into as stringify_into;
+    /// Append the JSON-escaped contents of `s` (without surrounding
+    /// quotes) to `buf`. Used by typed-struct serialisers for `String`
+    /// fields. Falls through to `tishlang_core::json_stringify_into`'s
+    /// internal helper via a `Value::String` round-trip when the inner
+    /// helper isn't directly exposed.
+    pub fn escape_into(buf: &mut String, s: &str) {
+        // Inline the same escape rules as tishlang_core::json::
+        // `escape_json_string_into`. Kept locally so we don't widen
+        // tishlang_core's public surface unnecessarily.
+        let bytes = s.as_bytes();
+        let mut start = 0usize;
+        for (i, &b) in bytes.iter().enumerate() {
+            if b < 0x20 || b == b'"' || b == b'\\' {
+                if start < i {
+                    buf.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[start..i]) });
+                }
+                match b {
+                    b'"' => buf.push_str("\\\""),
+                    b'\\' => buf.push_str("\\\\"),
+                    b'\n' => buf.push_str("\\n"),
+                    b'\r' => buf.push_str("\\r"),
+                    b'\t' => buf.push_str("\\t"),
+                    b'\x08' => buf.push_str("\\b"),
+                    b'\x0c' => buf.push_str("\\f"),
+                    _ => {
+                        use std::fmt::Write;
+                        let _ = write!(buf, "\\u{:04x}", b as u32);
+                    }
+                }
+                start = i + 1;
+            }
+        }
+        if start < bytes.len() {
+            buf.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[start..]) });
+        }
+    }
+}
+
 /// Error type for Tish throw/catch.
 #[derive(Debug, Clone)]
 pub enum TishError {
@@ -583,8 +627,12 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
     let key = key.as_ref();
     match obj {
         Value::Object(map) => {
-            let k: Arc<str> = key.into();
-            map.borrow().get(&k).cloned().unwrap_or(Value::Null)
+            // The map's key type is `Arc<str>`, which implements
+            // `Borrow<str>` — so we can look up with a borrowed `&str`
+            // directly. Previously we allocated a fresh `Arc<str>` on
+            // every call (one heap alloc per `r.field` read in tight
+            // handler loops); this version is alloc-free on the hit path.
+            map.borrow().get(key).cloned().unwrap_or(Value::Null)
         }
         Value::Array(arr) => {
             if key == "length" {
@@ -653,7 +701,15 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
 pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
     match obj {
         Value::Object(map) => {
-            map.borrow_mut().insert(Arc::from(key), val.clone());
+            // Try the in-place update path first: if the key already
+            // exists we re-use the existing `Arc<str>` and skip the
+            // alloc. Only newly-inserted keys pay for `Arc::from(key)`.
+            let mut m = map.borrow_mut();
+            if let Some(slot) = m.get_mut(key) {
+                *slot = val.clone();
+            } else {
+                m.insert(Arc::from(key), val.clone());
+            }
             val
         }
         _ => panic!("Cannot assign property on non-object"),

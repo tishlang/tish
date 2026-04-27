@@ -11,9 +11,13 @@ name = "tish"
 path = "src/main.rs"
 
 [features]
-# Default: secure mode with no dangerous capabilities
-default = []
-# Full: all capabilities enabled (for development/trusted environments)
+# The published `tish` CLI always includes every optional runtime (http, fs, process, regex, ws).
+# Use `cargo build -p tishlang --no-default-features` when you need a locked-down toolchain
+# (see workspace `justfile`). `tish run --feature …` / `tish build --feature …` gate what runs
+# or what gets linked into a *native output* binary — they are not the primary way to ship a
+# “full” vs “empty” CLI.
+default = ["full"]
+# Alias: same dependency edges as `default` (kept for `--features full` in CI and docs).
 full = ["http", "fs", "process", "regex", "ws"]
 # Individual capability flags
 http    = ["tishlang_eval/http",    "tishlang_runtime/http",    "tishlang_compile/http",    "tishlang_vm/http"]

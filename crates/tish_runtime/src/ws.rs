@@ -473,9 +473,9 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
     }
 
     // Node.js-compatible: server.clients is array of connected WebSocket instances
-    let clients: Rc<RefCell<Vec<Value>>> = VmRef::new(Vec::new());
+    let clients: VmRef<Vec<Value>> = VmRef::new(Vec::new());
 
-    let on_fn = Rc::new(|args: &[Value]| {
+    let on_fn = Value::native(|args: &[Value]| {
         let Some(Value::Object(so)) = args.first() else {
             return Value::Null;
         };
@@ -491,7 +491,7 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
     });
 
     let clients_listen = clients.clone();
-    let listen_fn = Rc::new(move |args: &[Value]| {
+    let listen_fn = Value::native(move |args: &[Value]| {
         let Some(Value::Object(so)) = args.first() else {
             return Value::Null;
         };
@@ -521,7 +521,7 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
     });
 
     let clients_accept = clients.clone();
-    let accept_timeout_fn = Rc::new(move |args: &[Value]| {
+    let accept_timeout_fn = Value::native(move |args: &[Value]| {
         let Some(Value::Object(so)) = args.first() else {
             return Value::Null;
         };
@@ -542,12 +542,9 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
     m.insert(Arc::from("_handle"), handle_val);
     m.insert(Arc::from("_onConnection"), Value::Null);
     m.insert(Arc::from("clients"), Value::Array(clients));
-    m.insert(Arc::from("on"), Value::Function(on_fn));
-    m.insert(Arc::from("listen"), Value::Function(listen_fn));
-    m.insert(
-        Arc::from("acceptTimeout"),
-        Value::Function(accept_timeout_fn),
-    );
+    m.insert(Arc::from("on"), on_fn);
+    m.insert(Arc::from("listen"), listen_fn);
+    m.insert(Arc::from("acceptTimeout"), accept_timeout_fn);
     Value::Object(VmRef::new(m))
 }
 

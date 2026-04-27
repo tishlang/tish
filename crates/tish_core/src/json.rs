@@ -17,75 +17,126 @@ pub fn json_parse(json: &str) -> Result<Value, String> {
 }
 
 /// Stringify a Value to JSON.
+///
+/// Single-buffer write strategy: all nested values append into one
+/// `String` via [`json_stringify_into`], so we never allocate a transient
+/// per-node `String` only to copy + drop it on the way back up. For a
+/// 20-row TFB `/queries` response (~40 numbers, 2 keys × 20 = ~80 string
+/// ops) that saves dozens of small allocations per request.
 pub fn json_stringify(value: &Value) -> String {
+    // 256 B is enough for typical TFB responses (`/db` is 31 B,
+    // `/queries=20` is ~700 B). Larger payloads reallocate normally.
+    let mut buf = String::with_capacity(256);
+    json_stringify_into(&mut buf, value);
+    buf
+}
+
+/// Append a JSON-stringified `value` to `buf`. Used by JSON.stringify for
+/// the recursive case so we don't pay for an intermediate `String` per
+/// node.
+pub fn json_stringify_into(buf: &mut String, value: &Value) {
     match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
+        Value::Null => buf.push_str("null"),
+        Value::Bool(true) => buf.push_str("true"),
+        Value::Bool(false) => buf.push_str("false"),
         Value::Number(n) => {
             if n.is_nan() || n.is_infinite() {
-                "null".to_string()
+                buf.push_str("null");
             } else {
-                n.to_string()
+                // `write!` avoids the heap allocation that `to_string`
+                // produces. The f64 → decimal formatter is the same
+                // either way (`std::fmt::Display`).
+                use std::fmt::Write;
+                let _ = write!(buf, "{}", n);
             }
         }
-        Value::String(s) => format!("\"{}\"", escape_json_string(s)),
+        Value::String(s) => {
+            buf.push('"');
+            escape_json_string_into(buf, s);
+            buf.push('"');
+        }
         Value::Array(arr) => {
             let borrowed = arr.borrow();
-            let mut result = String::with_capacity(borrowed.len() * 8 + 2);
-            result.push('[');
-            let mut first = true;
-            for item in borrowed.iter() {
-                if !first {
-                    result.push(',');
+            buf.push('[');
+            for (i, item) in borrowed.iter().enumerate() {
+                if i > 0 {
+                    buf.push(',');
                 }
-                first = false;
-                result.push_str(&json_stringify(item));
+                json_stringify_into(buf, item);
             }
-            result.push(']');
-            result
+            buf.push(']');
         }
         Value::Object(obj) => {
             let borrowed = obj.borrow();
-            let mut keys: Vec<_> = borrowed.keys().collect();
-            keys.sort();
-            let mut result = String::with_capacity(borrowed.len() * 16 + 2);
-            result.push('{');
-            let mut first = true;
-            for key in keys {
-                if !first {
-                    result.push(',');
+            // Sort keys for deterministic output. Pre-allocate to avoid
+            // a fresh `Vec` realloc inside `keys().collect()`.
+            let mut keys: Vec<&Arc<str>> = Vec::with_capacity(borrowed.len());
+            keys.extend(borrowed.keys());
+            keys.sort_unstable_by(|a, b| a.as_ref().cmp(b.as_ref()));
+            buf.push('{');
+            for (i, key) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    buf.push(',');
                 }
-                first = false;
-                result.push('"');
-                result.push_str(&escape_json_string(key));
-                result.push_str("\":");
-                result.push_str(&json_stringify(borrowed.get(key).unwrap()));
+                buf.push('"');
+                escape_json_string_into(buf, key);
+                buf.push_str("\":");
+                json_stringify_into(buf, borrowed.get(key).unwrap());
             }
-            result.push('}');
-            result
+            buf.push('}');
         }
-        Value::Function(_) => "null".to_string(),
-        Value::Promise(_) => "null".to_string(),
-        Value::Opaque(_) => "null".to_string(),
+        Value::Function(_) | Value::Promise(_) | Value::Opaque(_) => buf.push_str("null"),
         #[cfg(feature = "regex")]
-        Value::RegExp(_) => "null".to_string(),
+        Value::RegExp(_) => buf.push_str("null"),
     }
 }
 
-fn escape_json_string(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' => result.push_str("\\\""),
-            '\\' => result.push_str("\\\\"),
-            '\n' => result.push_str("\\n"),
-            '\r' => result.push_str("\\r"),
-            '\t' => result.push_str("\\t"),
-            c if c.is_control() => result.push_str(&format!("\\u{:04x}", c as u32)),
-            c => result.push(c),
+/// Append an escaped JSON string body (without the surrounding quotes)
+/// to `buf`. Optimised for the common case where the input is ASCII and
+/// contains no characters that need escaping — we fast-pass the bytes
+/// straight through, only falling into the per-char path on a hit.
+fn escape_json_string_into(buf: &mut String, s: &str) {
+    let bytes = s.as_bytes();
+    let mut start = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        // Anything < 0x20 is a JSON control char that must be escaped;
+        // 0x22 (`"`) and 0x5C (`\`) also need an explicit escape; bytes
+        // ≥ 0x80 are the start of a multi-byte UTF-8 sequence, which is
+        // valid JSON as-is.
+        if b < 0x20 || b == b'"' || b == b'\\' {
+            // Flush the run of clean bytes before this one in one push.
+            if start < i {
+                // SAFETY: `s` is `&str`, every byte in `start..i` was a
+                // single-byte ASCII char (we only stop on ASCII triggers
+                // below 0x80), so the slice is a valid `&str`.
+                buf.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[start..i]) });
+            }
+            match b {
+                b'"' => buf.push_str("\\\""),
+                b'\\' => buf.push_str("\\\\"),
+                b'\n' => buf.push_str("\\n"),
+                b'\r' => buf.push_str("\\r"),
+                b'\t' => buf.push_str("\\t"),
+                b'\x08' => buf.push_str("\\b"),
+                b'\x0c' => buf.push_str("\\f"),
+                _ => {
+                    use std::fmt::Write;
+                    let _ = write!(buf, "\\u{:04x}", b as u32);
+                }
+            }
+            start = i + 1;
         }
     }
-    result
+    if start < bytes.len() {
+        buf.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[start..]) });
+    }
+}
+
+#[allow(dead_code)]
+fn escape_json_string(s: &str) -> String {
+    let mut buf = String::with_capacity(s.len());
+    escape_json_string_into(&mut buf, s);
+    buf
 }
 
 fn parse_value(input: &str) -> Result<(Value, &str), String> {

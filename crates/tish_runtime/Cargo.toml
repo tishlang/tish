@@ -51,8 +51,21 @@ http-hyper = [
 fs = []
 process = []
 regex = ["tishlang_core/regex"]
-# WebSocket (JS-like API). Modular: import { WebSocket, Server } from 'tish:ws'
-ws = ["dep:tokio", "tokio/net", "tokio/io-util", "dep:tokio-tungstenite", "dep:futures-util", "dep:lazy_static"]
+# WebSocket (JS-like API). Modular: import { WebSocket, Server } from 'tish:ws'.
+# Requires `send-values` because the WS server keeps an `Arc<dyn Fn + Send +
+# Sync>`-typed listener closure that captures `VmRef`s; under `Rc<RefCell>`
+# those captures aren't `Send` and the closure won't satisfy `NativeFn`.
+ws = [
+    "dep:tokio",
+    "tokio/net",
+    "tokio/io-util",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:lazy_static",
+    "send-values",
+    "tishlang_core/send-values",
+    "tishlang_builtins/send-values",
+]
 
 [dependencies]
 tishlang_core = { path = "../tish_core", version = ">=0.1" }
