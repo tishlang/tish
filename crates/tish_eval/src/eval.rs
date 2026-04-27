@@ -222,7 +222,36 @@ impl Evaluator {
                 );
             }
 
-            // fs, http, process: use import { x } from 'tish:fs' etc. No globals.
+            // fs, process: prefer `import { x } from 'tish:fs'` etc.
+            // When `http` is enabled, also expose fetch + timers + Promise as globals so
+            // standalone scripts match the native codegen prelude and `tests/main.tish` embeds.
+            #[cfg(feature = "http")]
+            {
+                s.set("fetch".into(), Value::Native(Self::fetch_native), true);
+                s.set("fetchAll".into(), Value::Native(Self::fetch_all_native), true);
+                s.set(
+                    "setTimeout".into(),
+                    Value::TimerBuiltin(Arc::from("setTimeout")),
+                    true,
+                );
+                s.set(
+                    "setInterval".into(),
+                    Value::TimerBuiltin(Arc::from("setInterval")),
+                    true,
+                );
+                s.set(
+                    "clearTimeout".into(),
+                    Value::Native(Self::clear_timeout_native),
+                    true,
+                );
+                s.set(
+                    "clearInterval".into(),
+                    Value::Native(Self::clear_interval_native),
+                    true,
+                );
+                s.set("Promise".into(), Value::PromiseConstructor, true);
+                s.set("serve".into(), Value::Serve, true);
+            }
         }
         Self {
             scope,

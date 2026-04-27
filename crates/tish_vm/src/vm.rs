@@ -638,6 +638,33 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
 
     #[cfg(feature = "http")]
     if cap_allows(enabled, "http") {
+        // Match native codegen prelude (`codegen.rs`): globals for fetch + timers + Promise,
+        // not only `import { … } from "tish:http"` (standalone tests use `setTimeout` globally).
+        g.insert(
+            "fetch".into(),
+            Value::native(|args: &[Value]| tishlang_runtime::fetch_promise(args.to_vec())),
+        );
+        g.insert(
+            "fetchAll".into(),
+            Value::native(|args: &[Value]| tishlang_runtime::fetch_all_promise(args.to_vec())),
+        );
+        g.insert(
+            "setTimeout".into(),
+            Value::native(|args: &[Value]| tishlang_runtime::timer_set_timeout(args)),
+        );
+        g.insert(
+            "clearTimeout".into(),
+            Value::native(|args: &[Value]| tishlang_runtime::timer_clear_timeout(args)),
+        );
+        g.insert(
+            "setInterval".into(),
+            Value::native(|args: &[Value]| tishlang_runtime::timer_set_interval(args)),
+        );
+        g.insert(
+            "clearInterval".into(),
+            Value::native(|args: &[Value]| tishlang_runtime::timer_clear_interval(args)),
+        );
+        g.insert("Promise".into(), tishlang_runtime::promise_object());
         g.insert(
             "registerStaticRoute".into(),
             Value::native(|args: &[Value]| {
@@ -1569,6 +1596,11 @@ impl Vm {
                     return Err(format!("Unhandled opcode: {:?}", opcode));
                 }
             }
+        }
+
+        #[cfg(feature = "http")]
+        if cap_allows(self.capabilities.as_ref(), "http") {
+            tishlang_runtime::drain_timers();
         }
 
         Ok(self.stack.pop().unwrap_or(Value::Null))

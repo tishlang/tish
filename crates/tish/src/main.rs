@@ -225,6 +225,10 @@ fn run_program(
     if backend == "interp" {
         let mut eval = tishlang_eval::Evaluator::new();
         let value = eval.eval_program(program)?;
+        #[cfg(feature = "http")]
+        {
+            let _ = eval.run_timer_phase();
+        }
         if !matches!(value, tishlang_eval::Value::Null) {
             println!(
                 "{}",
@@ -296,6 +300,10 @@ fn run_repl(backend: &str, no_optimize: bool, features: &[String]) -> Result<(),
                 Ok(program) => {
                     match eval.eval_program(&program) {
                         Ok(v) => {
+                            #[cfg(feature = "http")]
+                            {
+                                let _ = eval.run_timer_phase();
+                            }
                             if !matches!(v, tishlang_eval::Value::Null) {
                                 println!(
                                     "{}",
