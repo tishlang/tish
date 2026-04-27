@@ -117,6 +117,11 @@ impl Opcode {
             | Opcode::Dup
             | Opcode::Return
             | Opcode::ExitTry
+            | Opcode::ConcatArray
+            | Opcode::MergeObject
+            | Opcode::GetIndex
+            | Opcode::SetIndex
+            | Opcode::Throw
             | Opcode::ArrayMapIdentity
             | Opcode::CallSpread
             | Opcode::ConstructSpread
