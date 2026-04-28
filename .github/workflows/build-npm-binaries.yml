@@ -216,6 +216,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Add wasm32-wasip1 target (WASI bundle build)
+        run: rustup target add wasm32-wasip1
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:

@@ -3,6 +3,7 @@
 //! Compiles Tish to bytecode, then produces a .wasm VM binary + loader.
 //! The VM runs in the browser; your program runs as serialized bytecode.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
@@ -229,7 +230,7 @@ pub fn compile_to_wasi(
     let (chunk, program) = resolve_and_compile_to_chunk(entry_path, project_root, optimize)?;
     if has_external_native_imports(&program) {
         return Err(WasmError {
-            message: "WASI backend does not support external native imports (tish:egui, @scope/pkg). Built-in tish:fs, tish:http, tish:process are supported.".to_string(),
+            message: "WASI backend does not support external native imports (tish:egui, @scope/pkg). Built-in tish:fs, tish:http, tish:process, tish:timers are supported.".to_string(),
         });
     }
     let wasi_features = extract_native_import_features(&program);
@@ -276,18 +277,18 @@ pub fn compile_to_wasi(
         .to_string_lossy()
         .replace('\\', "/");
 
-    let features_str = if wasi_features.is_empty() {
-        String::new()
-    } else {
-        format!(
-            ", features = [{}]",
-            wasi_features
-                .iter()
-                .map(|f| format!("{:?}", f))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
+    // Bundled perf (`tests/main.tish`) and many scripts use global setTimeout without a top-level
+    // `import` (so `extract_native_import_features` is empty). Always link timers for WASI VM.
+    let mut wasi_feature_set: BTreeSet<String> = wasi_features.into_iter().collect();
+    wasi_feature_set.insert("timers".to_string());
+    let features_str = format!(
+        ", features = [{}]",
+        wasi_feature_set
+            .iter()
+            .map(|f| format!("{:?}", f))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     let cargo_toml = format!(
         r#"[package]
 name = "tish_wasi_{stem}"

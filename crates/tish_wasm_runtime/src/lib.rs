@@ -2,7 +2,7 @@
 //!
 //! Two targets:
 //! - **Browser** (wasm32-unknown-unknown): use `--features browser`, wasm-bindgen, console output
-//! - **WASI/Wasmtime** (wasm32-wasi): no features, println! via WASI, run with `wasmtime app.wasm`
+//! - **WASI/Wasmtime** (wasm32-wasip1): optional `timers` / `http` / … via Cargo features; `compile_to_wasi` enables `timers` by default.
 
 use tishlang_bytecode::deserialize;
 use tishlang_vm::Vm;
