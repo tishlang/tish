@@ -318,11 +318,18 @@ pub fn run_cargo_build(build_dir: &Path, target_dir: Option<&Path>) -> Result<()
     } else {
         format!("{} -C target-cpu=native", existing_rustflags)
     };
+    // Nested `cargo build` (e.g. `tish build --native-backend rust`) inherits the parent
+    // environment. CI often sets `RUSTC_WRAPPER=sccache`; wrapping this inner compile too can
+    // cause flaky or failed builds (LTO / temp-crate paths). Use plain rustc here; the main
+    // workspace build still benefits from the wrapper.
     let output = Command::new("cargo")
         .args(["build", "--release", "--target-dir"])
         .arg(&target_dir)
         .current_dir(build_dir)
         .env_remove("CARGO_TARGET_DIR")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
         .env("CARGO_TERM_PROGRESS", "always")
         .env("RUSTFLAGS", &merged_rustflags)
         .output()

@@ -631,6 +631,9 @@ if ! $no_compile; then
       echo -n "rust "
     else
       echo -n "rust-fail "
+      if [[ -s "$_suite_build_log" ]]; then
+        cp "$_suite_build_log" "$compile_dir/last_rust_native_build.log" 2>/dev/null || true
+      fi
       if ! $summary_only && [[ -s "$_suite_build_log" ]]; then
         echo ""
         echo "  (rust native build — last 50 lines:)"
@@ -1336,6 +1339,14 @@ fi
 if [[ "${PERF_SUITE_STRICT:-}" == "1" ]]; then
   if want_runtime rust && ! $compile_ok; then
     echo "ERROR: PERF_SUITE_STRICT=1 but rust native binary missing or failed to build"
+    if [[ -s "$compile_dir/last_rust_native_build.log" ]]; then
+      echo "  (saved rust native cargo log — last 80 lines:)"
+      tail -80 "$compile_dir/last_rust_native_build.log" | sed 's/^/  | /'
+    fi
+    if [[ -e "$native_bin" ]]; then
+      echo "  (native output path exists but is not executable — ls -la:)"
+      ls -la "$native_bin" 2>&1 | sed 's/^/  | /' || true
+    fi
     exit 1
   fi
   if want_runtime cranelift && ! $cranelift_ok; then
