@@ -79,10 +79,10 @@ PERF_DIM=$'\033[0;90m'
 PERF_RST=$'\033[0m'
 perf_use_color=false
 [[ -t 1 ]] && perf_use_color=true
-_perf_r() { $perf_use_color && printf %s "$PERF_RED" || true; }
-_perf_g() { $perf_use_color && printf %s "$PERF_GRN" || true; }
-_perf_d() { $perf_use_color && printf %s "$PERF_DIM" || true; }
-_perf_x() { $perf_use_color && printf %s "$PERF_RST" || true; }
+_perf_r() { [ "$perf_use_color" = true ] && printf %s "$PERF_RED" || true; }
+_perf_g() { [ "$perf_use_color" = true ] && printf %s "$PERF_GRN" || true; }
+_perf_d() { [ "$perf_use_color" = true ] && printf %s "$PERF_DIM" || true; }
+_perf_x() { [ "$perf_use_color" = true ] && printf %s "$PERF_RST" || true; }
 
 # True if log file + exit code indicate failure (stderr is merged into log when we capture with 2>&1).
 # Exit 0 with empty or whitespace-only captured output counts as failure (silent success is suspicious for perf fixtures).
@@ -101,26 +101,26 @@ _perf_has_error_signal() {
   return 1
 }
 
-# Run with wall-clock timeout; preserve exit code (no trailing "|| true"). Stderr: shown only if $verbose.
+# Run with wall-clock timeout; preserve exit code (no trailing "|| true"). Stderr: shown only if [ "$verbose" = true ].
 _rtc() {
   local ec=0
   if [[ $run_timeout -le 0 ]]; then
-    if $verbose; then "$@"; else "$@" 2>&1; fi
+    if [ "$verbose" = true ]; then "$@"; else "$@" 2>&1; fi
     ec=$?
     return "$ec"
   fi
   if command -v timeout &>/dev/null; then
-    if $verbose; then timeout "$run_timeout" "$@"; else timeout "$run_timeout" "$@" 2>&1; fi
+    if [ "$verbose" = true ]; then timeout "$run_timeout" "$@"; else timeout "$run_timeout" "$@" 2>&1; fi
     ec=$?
     return "$ec"
   fi
   if command -v gtimeout &>/dev/null; then
-    if $verbose; then gtimeout "$run_timeout" "$@"; else gtimeout "$run_timeout" "$@" 2>&1; fi
+    if [ "$verbose" = true ]; then gtimeout "$run_timeout" "$@"; else gtimeout "$run_timeout" "$@" 2>&1; fi
     ec=$?
     return "$ec"
   fi
   if command -v perl &>/dev/null; then
-    if $verbose; then
+    if [ "$verbose" = true ]; then
       perl -e '
         my $t=shift;
         my $pid=fork;
@@ -230,7 +230,7 @@ _perf_run_show() {
 # Discard child output; return non-zero if child failed or timed out (used for warmups + avg loops).
 _perf_rtc_discard() {
   set +e
-  if $verbose; then
+  if [ "$verbose" = true ]; then
     _rtc "$@" >/dev/null
   else
     _rtc "$@" >/dev/null 2>&1
@@ -268,19 +268,19 @@ perf_bundle_failed=0
 
 run_with_timeout() {
   if [[ $run_timeout -le 0 ]]; then
-    if $verbose; then "$@" || true; else "$@" 2>/dev/null || true; fi
+    if [ "$verbose" = true ]; then "$@" || true; else "$@" 2>/dev/null || true; fi
     return
   fi
   if command -v timeout &>/dev/null; then
-    if $verbose; then timeout "$run_timeout" "$@" || true; else timeout "$run_timeout" "$@" 2>/dev/null || true; fi
+    if [ "$verbose" = true ]; then timeout "$run_timeout" "$@" || true; else timeout "$run_timeout" "$@" 2>/dev/null || true; fi
     return
   fi
   if command -v gtimeout &>/dev/null; then
-    if $verbose; then gtimeout "$run_timeout" "$@" || true; else gtimeout "$run_timeout" "$@" 2>/dev/null || true; fi
+    if [ "$verbose" = true ]; then gtimeout "$run_timeout" "$@" || true; else gtimeout "$run_timeout" "$@" 2>/dev/null || true; fi
     return
   fi
   if command -v perl &>/dev/null; then
-    if $verbose; then
+    if [ "$verbose" = true ]; then
       perl -e '
         my $t=shift;
         my $pid=fork;
@@ -321,7 +321,7 @@ if [[ ! -x "$tish_bin" ]]; then
 fi
 
 cache_dir="$target_dir/perf-suite-cache-$profile"
-if $no_compile; then
+if [ "$no_compile" = true ]; then
   compile_dir="$cache_dir"
   if [[ ! -d "$compile_dir" ]]; then
     echo "Error: No cached binaries at $compile_dir"
@@ -347,7 +347,7 @@ _avg_run_ms() {
   for _ in $(seq 1 "$n"); do
     t0=$(ms)
     set +e
-    if $verbose; then
+    if [ "$verbose" = true ]; then
       _rtc "$@" >/dev/null
     else
       _rtc "$@" >/dev/null 2>&1
@@ -400,8 +400,7 @@ _pt_avg_node() {
   fi
   perf_last_avg_fail=0
   set +e
-  "$node_cmd" "$j" >/dev/null 2>&1
-  [[ $? -ne 0 ]] && perf_last_avg_fail=1
+  if ! "$node_cmd" "$j" >/dev/null 2>&1; then perf_last_avg_fail=1; fi
   set -e
   for _ in $(seq 1 "$n"); do
     t0=$(ms)
@@ -418,15 +417,14 @@ _pt_avg_node() {
 }
 _pt_avg_bun() {
   local j="$1" sum=0 _ t0 t1 ec
-  if ! want_runtime bun || ! $has_bun; then
+  if ! want_runtime bun || [ "$has_bun" != true ]; then
     _pt_avg_last_ms=0
     _pt_avg_last_fail=0
     return
   fi
   perf_last_avg_fail=0
   set +e
-  "$bun_cmd" "$j" >/dev/null 2>&1
-  [[ $? -ne 0 ]] && perf_last_avg_fail=1
+  if ! "$bun_cmd" "$j" >/dev/null 2>&1; then perf_last_avg_fail=1; fi
   set -e
   for _ in $(seq 1 "$n"); do
     t0=$(ms)
@@ -443,15 +441,14 @@ _pt_avg_bun() {
 }
 _pt_avg_deno() {
   local j="$1" sum=0 _ t0 t1 ec
-  if ! want_runtime deno || ! $has_deno; then
+  if ! want_runtime deno || [ "$has_deno" != true ]; then
     _pt_avg_last_ms=0
     _pt_avg_last_fail=0
     return
   fi
   perf_last_avg_fail=0
   set +e
-  "$deno_cmd" run --allow-all "$j" >/dev/null 2>&1
-  [[ $? -ne 0 ]] && perf_last_avg_fail=1
+  if ! "$deno_cmd" run --allow-all "$j" >/dev/null 2>&1; then perf_last_avg_fail=1; fi
   set -e
   for _ in $(seq 1 "$n"); do
     t0=$(ms)
@@ -468,15 +465,14 @@ _pt_avg_deno() {
 }
 _pt_avg_qjs() {
   local j="$1" sum=0 _ t0 t1 ec
-  if ! want_runtime qjs || ! $has_qjs; then
+  if ! want_runtime qjs || [ "$has_qjs" != true ]; then
     _pt_avg_last_ms=0
     _pt_avg_last_fail=0
     return
   fi
   perf_last_avg_fail=0
   set +e
-  "$qjs_cmd" "$j" >/dev/null 2>&1
-  [[ $? -ne 0 ]] && perf_last_avg_fail=1
+  if ! "$qjs_cmd" "$j" >/dev/null 2>&1; then perf_last_avg_fail=1; fi
   set -e
   for _ in $(seq 1 "$n"); do
     t0=$(ms)
@@ -552,7 +548,7 @@ _show_suite_bundle_output() {
   fi
   if want_runtime wasi; then
     echo "Tish (wasi):"
-    if $has_wasmtime && [[ -f "$wasi_bin" ]]; then
+    if [ "$has_wasmtime" = true ] && [[ -f "$wasi_bin" ]]; then
       perf_bundle_checks=$((perf_bundle_checks + 1))
       _perf_run_show "bundle wasi (wasmtime)" wasmtime --dir /tmp "$wasi_bin"
       [[ $perf_last_subfail -eq 1 ]] && perf_bundle_failed=$((perf_bundle_failed + 1))
@@ -572,21 +568,21 @@ _show_suite_bundle_output() {
     [[ $perf_last_subfail -eq 1 ]] && perf_bundle_failed=$((perf_bundle_failed + 1))
     echo ""
   fi
-  if want_runtime bun && $has_bun; then
+  if want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ]; then
     echo "Bun:"
     perf_bundle_checks=$((perf_bundle_checks + 1))
     _perf_run_show "bundle Bun ($js_file)" "$bun_cmd" "$js_file"
     [[ $perf_last_subfail -eq 1 ]] && perf_bundle_failed=$((perf_bundle_failed + 1))
     echo ""
   fi
-  if want_runtime deno && $has_deno; then
+  if want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ]; then
     echo "Deno:"
     perf_bundle_checks=$((perf_bundle_checks + 1))
     _perf_run_show "bundle Deno ($js_file)" "$deno_cmd" run --allow-all "$js_file"
     [[ $perf_last_subfail -eq 1 ]] && perf_bundle_failed=$((perf_bundle_failed + 1))
     echo ""
   fi
-  if want_runtime qjs && $has_qjs; then
+  if want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ]; then
     echo "QuickJS:"
     perf_bundle_checks=$((perf_bundle_checks + 1))
     _perf_run_show "bundle QuickJS ($js_file)" "$qjs_cmd" "$js_file"
@@ -616,13 +612,13 @@ want_runtime cranelift && echo "  cranelift (tish JIT)"
 want_runtime llvm && echo "  llvm (tish native via clang)"
 want_runtime wasi && echo "  wasi (wasmtime)"
 want_runtime node && echo "  node"
-want_runtime bun && $has_bun && echo "  bun"
-want_runtime deno && $has_deno && echo "  deno"
-want_runtime qjs && $has_qjs && echo "  qjs"
+want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && echo "  bun"
+want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && echo "  deno"
+want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && echo "  qjs"
 [[ -n "${filter_name:-}" ]] && echo "Filter (per-file micro-tests only): $filter_name"
 echo ""
 
-if ! $no_compile; then
+if [ "$no_compile" != true ]; then
   echo "Compiling suite (rust / cranelift / llvm / wasi)..."
   echo -n "  $test_id: "
   _suite_build_log=$(mktemp)
@@ -634,7 +630,7 @@ if ! $no_compile; then
       if [[ -s "$_suite_build_log" ]]; then
         cp "$_suite_build_log" "$compile_dir/last_rust_native_build.log" 2>/dev/null || true
       fi
-      if ! $summary_only && [[ -s "$_suite_build_log" ]]; then
+      if [ "$summary_only" != true ] && [[ -s "$_suite_build_log" ]]; then
         echo ""
         echo "  (rust native build — last 50 lines:)"
         tail -50 "$_suite_build_log" | sed 's/^/  | /'
@@ -647,7 +643,7 @@ if ! $no_compile; then
       echo -n "cranelift "
     else
       echo -n "cranelift-fail "
-      if ! $summary_only && [[ -s "$_suite_build_log" ]]; then
+      if [ "$summary_only" != true ] && [[ -s "$_suite_build_log" ]]; then
         echo ""
         echo "  (cranelift build — last 50 lines:)"
         tail -50 "$_suite_build_log" | sed 's/^/  | /'
@@ -660,7 +656,7 @@ if ! $no_compile; then
       echo -n "llvm "
     else
       echo -n "llvm-fail "
-      if ! $summary_only && [[ -s "$_suite_build_log" ]]; then
+      if [ "$summary_only" != true ] && [[ -s "$_suite_build_log" ]]; then
         echo ""
         echo "  (llvm build — last 50 lines:)"
         tail -50 "$_suite_build_log" | sed 's/^/  | /'
@@ -669,12 +665,12 @@ if ! $no_compile; then
     fi
   fi
   if want_runtime wasi; then
-    if $has_wasmtime; then
+    if [ "$has_wasmtime" = true ]; then
       if "$tish_bin" build "$entry_tish" -o "$compile_dir/${cache_key}_wasi" --target wasi >"$_suite_build_log" 2>&1; then
         echo -n "wasi"
       else
         echo -n "wasi-fail"
-        if ! $summary_only && [[ -s "$_suite_build_log" ]]; then
+        if [ "$summary_only" != true ] && [[ -s "$_suite_build_log" ]]; then
           echo ""
           echo "  (wasi build — last 50 lines:)"
           tail -50 "$_suite_build_log" | sed 's/^/  | /'
@@ -709,11 +705,11 @@ want_runtime interp && { _perf_rtc_discard "$tish_bin" run "$entry_tish" --backe
 want_runtime rust && [[ -x "$native_bin" ]] && { _perf_rtc_discard "$native_bin" || perf_bundle_timing_fail=1; }
 want_runtime cranelift && [[ -x "$cranelift_bin" ]] && { _perf_rtc_discard "$cranelift_bin" || perf_bundle_timing_fail=1; }
 want_runtime llvm && [[ -x "$llvm_bin" ]] && { _perf_rtc_discard "$llvm_bin" || perf_bundle_timing_fail=1; }
-want_runtime wasi && $has_wasmtime && [[ -f "$wasi_bin" ]] && { _perf_rtc_discard wasmtime --dir /tmp "$wasi_bin" || perf_bundle_timing_fail=1; }
+want_runtime wasi && "$has_wasmtime"&& "$has_wasmtime" [ "$has_wasmtime" = true ] && [[ -f "$wasi_bin" ]] && { _perf_rtc_discard wasmtime --dir /tmp "$wasi_bin" || perf_bundle_timing_fail=1; }
 want_runtime node && { _perf_rtc_discard "$node_cmd" "$js_file" || perf_bundle_timing_fail=1; }
-want_runtime bun && $has_bun && { _perf_rtc_discard "$bun_cmd" "$js_file" || perf_bundle_timing_fail=1; }
-want_runtime deno && $has_deno && { _perf_rtc_discard "$deno_cmd" run --allow-all "$js_file" || perf_bundle_timing_fail=1; }
-want_runtime qjs && $has_qjs && { _perf_rtc_discard "$qjs_cmd" "$js_file" || perf_bundle_timing_fail=1; }
+want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && { _perf_rtc_discard "$bun_cmd" "$js_file" || perf_bundle_timing_fail=1; }
+want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && { _perf_rtc_discard "$deno_cmd" run --allow-all "$js_file" || perf_bundle_timing_fail=1; }
+want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && { _perf_rtc_discard "$qjs_cmd" "$js_file" || perf_bundle_timing_fail=1; }
 
 if want_runtime vm; then
   for _ in $(seq 1 "$n"); do
@@ -762,7 +758,7 @@ if want_runtime llvm && [[ -x "$llvm_bin" ]]; then
   done
 fi
 wasi_ok=false
-if want_runtime wasi && $has_wasmtime && [[ -f "$wasi_bin" ]]; then
+if want_runtime wasi && "$has_wasmtime"&& "$has_wasmtime" [ "$has_wasmtime" = true ] && [[ -f "$wasi_bin" ]]; then
   wasi_ok=true
   for _ in $(seq 1 "$n"); do
     t0=$(ms)
@@ -779,7 +775,7 @@ if want_runtime node; then
     node_times+=($((t1 - t0)))
   done
 fi
-if want_runtime bun && $has_bun; then
+if want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ]; then
   for _ in $(seq 1 "$n"); do
     t0=$(ms)
     _perf_rtc_discard "$bun_cmd" "$js_file" || perf_bundle_timing_fail=1
@@ -787,7 +783,7 @@ if want_runtime bun && $has_bun; then
     bun_times+=($((t1 - t0)))
   done
 fi
-if want_runtime deno && $has_deno; then
+if want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ]; then
   for _ in $(seq 1 "$n"); do
     t0=$(ms)
     _perf_rtc_discard "$deno_cmd" run --allow-all "$js_file" || perf_bundle_timing_fail=1
@@ -795,7 +791,7 @@ if want_runtime deno && $has_deno; then
     deno_times+=($((t1 - t0)))
   done
 fi
-if want_runtime qjs && $has_qjs; then
+if want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ]; then
   for _ in $(seq 1 "$n"); do
     t0=$(ms)
     _perf_rtc_discard "$qjs_cmd" "$js_file" || perf_bundle_timing_fail=1
@@ -839,9 +835,9 @@ node_avg=$((node_sum / n))
 bun_avg=0
 deno_avg=0
 qjs_avg=0
-want_runtime bun && $has_bun && [[ ${#bun_times[@]} -eq $n ]] && bun_avg=$((bun_sum / n))
-want_runtime deno && $has_deno && [[ ${#deno_times[@]} -eq $n ]] && deno_avg=$((deno_sum / n))
-want_runtime qjs && $has_qjs && [[ ${#qjs_times[@]} -eq $n ]] && qjs_avg=$((qjs_sum / n))
+want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && [[ ${#bun_times[@]} -eq $n ]] && bun_avg=$((bun_sum / n))
+want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && [[ ${#deno_times[@]} -eq $n ]] && deno_avg=$((deno_sum / n))
+want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && [[ ${#qjs_times[@]} -eq $n ]] && qjs_avg=$((qjs_sum / n))
 
 # Always show bundled runs (rust / cranelift / llvm / wasi only exist for this single entry).
 # Previously skipped under --summary-only, which hid native backends entirely.
@@ -886,7 +882,7 @@ total_bun=0
 total_deno=0
 total_qjs=0
 
-if $summary_only; then
+if [ "$summary_only" = true ]; then
   echo "Running per-file micro-benchmarks (timing only; use default mode for program output per test)..."
   echo ""
 else
@@ -902,7 +898,7 @@ while IFS="$(printf '\t')" read -r tish_f js_f; do
 
   perf_tid_any_fail=0
 
-  if ! $summary_only; then
+  if [ "$summary_only" != true ]; then
     echo "─────────────────────────────────────────"
     echo "▶ $tid"
     echo "─────────────────────────────────────────"
@@ -933,7 +929,7 @@ while IFS="$(printf '\t')" read -r tish_f js_f; do
       fi
       echo ""
     fi
-    if want_runtime bun && $has_bun; then
+    if want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ]; then
       echo "Bun:"
       _perf_run_show "micro $tid bun ($js_f)" "$bun_cmd" "$js_f"
       if [[ $perf_last_subfail -eq 1 ]]; then
@@ -942,7 +938,7 @@ while IFS="$(printf '\t')" read -r tish_f js_f; do
       fi
       echo ""
     fi
-    if want_runtime deno && $has_deno; then
+    if want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ]; then
       echo "Deno:"
       _perf_run_show "micro $tid deno ($js_f)" "$deno_cmd" run --allow-all "$js_f"
       if [[ $perf_last_subfail -eq 1 ]]; then
@@ -951,7 +947,7 @@ while IFS="$(printf '\t')" read -r tish_f js_f; do
       fi
       echo ""
     fi
-    if want_runtime qjs && $has_qjs; then
+    if want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ]; then
       echo "QuickJS:"
       _perf_run_show "micro $tid qjs ($js_f)" "$qjs_cmd" "$js_f"
       if [[ $perf_last_subfail -eq 1 ]]; then
@@ -982,19 +978,19 @@ while IFS="$(printf '\t')" read -r tish_f js_f; do
   fi
   _pt_avg_bun "$js_f"
   vb=$_pt_avg_last_ms
-  if want_runtime bun && $has_bun && [[ $_pt_avg_last_fail -eq 1 ]]; then
+  if want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && [[ $_pt_avg_last_fail -eq 1 ]]; then
     perf_tid_any_fail=1
     _micro_mark_col "$micro_col_fail_bun" "$tid"
   fi
   _pt_avg_deno "$js_f"
   vd=$_pt_avg_last_ms
-  if want_runtime deno && $has_deno && [[ $_pt_avg_last_fail -eq 1 ]]; then
+  if want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && [[ $_pt_avg_last_fail -eq 1 ]]; then
     perf_tid_any_fail=1
     _micro_mark_col "$micro_col_fail_deno" "$tid"
   fi
   _pt_avg_qjs "$js_f"
   vq=$_pt_avg_last_ms
-  if want_runtime qjs && $has_qjs && [[ $_pt_avg_last_fail -eq 1 ]]; then
+  if want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && [[ $_pt_avg_last_fail -eq 1 ]]; then
     perf_tid_any_fail=1
     _micro_mark_col "$micro_col_fail_qjs" "$tid"
   fi
@@ -1016,14 +1012,14 @@ while IFS="$(printf '\t')" read -r tish_f js_f; do
   total_deno=$((total_deno + vd))
   total_qjs=$((total_qjs + vq))
 
-  if ! $summary_only; then
+  if [ "$summary_only" != true ]; then
     echo "Time (${n}-run avg, ms):"
     want_runtime vm && echo "  Tish (vm):        ${va}ms"
     want_runtime interp && echo "  Tish (interp):    ${vi}ms"
     want_runtime node && echo "  Node.js:          ${vn}ms"
-    want_runtime bun && $has_bun && echo "  Bun:              ${vb}ms"
-    want_runtime deno && $has_deno && echo "  Deno:             ${vd}ms"
-    want_runtime qjs && $has_qjs && echo "  QuickJS:          ${vq}ms"
+    want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && echo "  Bun:              ${vb}ms"
+    want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && echo "  Deno:             ${vd}ms"
+    want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && echo "  QuickJS:          ${vq}ms"
     want_runtime vm && want_runtime node && echo "  Tish(vm)/Node ratio: ${ratio}%"
     if [[ $perf_tid_any_fail -eq 1 ]]; then
       _perf_r
@@ -1050,9 +1046,9 @@ want_runtime cranelift && printf "%7s" "cflt"
 want_runtime llvm && printf "%7s" "llvm"
 want_runtime wasi && printf "%7s" "wasi"
 want_runtime node && printf "%7s" "Node"
-want_runtime bun && $has_bun && printf "%7s" "Bun"
-want_runtime deno && $has_deno && printf "%7s" "Deno"
-want_runtime qjs && $has_qjs && printf "%7s" "qjs"
+want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && printf "%7s" "Bun"
+want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && printf "%7s" "Deno"
+want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && printf "%7s" "qjs"
 want_runtime vm && want_runtime node && printf "%9s" "vm/Node%"
 printf "\n"
 
@@ -1064,9 +1060,9 @@ want_runtime cranelift && printf "%7s" "──────"
 want_runtime llvm && printf "%7s" "──────"
 want_runtime wasi && printf "%7s" "──────"
 want_runtime node && printf "%7s" "──────"
-want_runtime bun && $has_bun && printf "%7s" "──────"
-want_runtime deno && $has_deno && printf "%7s" "──────"
-want_runtime qjs && $has_qjs && printf "%7s" "──────"
+want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && printf "%7s" "──────"
+want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && printf "%7s" "──────"
+want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && printf "%7s" "──────"
 want_runtime vm && want_runtime node && printf "%9s" "─────────"
 printf "\n"
 
@@ -1081,9 +1077,9 @@ sort -t "$(printf '\t')" -k1,1nr -k2,2 "$per_row_file" | while IFS="$(printf '\t
   want_runtime vm && _micro_col_has "$tid" "$micro_col_fail_vm" && f_vm=1
   want_runtime interp && _micro_col_has "$tid" "$micro_col_fail_interp" && f_interp=1
   want_runtime node && _micro_col_has "$tid" "$micro_col_fail_node" && f_node=1
-  want_runtime bun && $has_bun && _micro_col_has "$tid" "$micro_col_fail_bun" && f_bun=1
-  want_runtime deno && $has_deno && _micro_col_has "$tid" "$micro_col_fail_deno" && f_deno=1
-  want_runtime qjs && $has_qjs && _micro_col_has "$tid" "$micro_col_fail_qjs" && f_qjs=1
+  want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && _micro_col_has "$tid" "$micro_col_fail_bun" && f_bun=1
+  want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && _micro_col_has "$tid" "$micro_col_fail_deno" && f_deno=1
+  want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && _micro_col_has "$tid" "$micro_col_fail_qjs" && f_qjs=1
   if want_runtime vm && want_runtime node && { [[ $f_vm -eq 1 ]] || [[ $f_node -eq 1 ]]; }; then
     f_pct=1
   fi
@@ -1095,9 +1091,9 @@ sort -t "$(printf '\t')" -k1,1nr -k2,2 "$per_row_file" | while IFS="$(printf '\t
   want_runtime llvm && printf "%7s" "—"
   want_runtime wasi && printf "%7s" "—"
   want_runtime node && _perf_tbl_int7 "$f_node" "$vn"
-  want_runtime bun && $has_bun && _perf_tbl_int7 "$f_bun" "$vb"
-  want_runtime deno && $has_deno && _perf_tbl_int7 "$f_deno" "$vd"
-  want_runtime qjs && $has_qjs && _perf_tbl_int7 "$f_qjs" "$vq"
+  want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && _perf_tbl_int7 "$f_bun" "$vb"
+  want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && _perf_tbl_int7 "$f_deno" "$vd"
+  want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && _perf_tbl_int7 "$f_qjs" "$vq"
   if want_runtime vm && want_runtime node && [[ "$vn" -gt 0 ]]; then
     if [[ $f_pct -eq 1 ]]; then
       _perf_r
@@ -1122,9 +1118,9 @@ sig_pct=0
 want_runtime vm && [[ -s "$micro_col_fail_vm" ]] && sig_vm=1
 want_runtime interp && [[ -s "$micro_col_fail_interp" ]] && sig_interp=1
 want_runtime node && [[ -s "$micro_col_fail_node" ]] && sig_node=1
-want_runtime bun && $has_bun && [[ -s "$micro_col_fail_bun" ]] && sig_bun=1
-want_runtime deno && $has_deno && [[ -s "$micro_col_fail_deno" ]] && sig_deno=1
-want_runtime qjs && $has_qjs && [[ -s "$micro_col_fail_qjs" ]] && sig_qjs=1
+want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && [[ -s "$micro_col_fail_bun" ]] && sig_bun=1
+want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && [[ -s "$micro_col_fail_deno" ]] && sig_deno=1
+want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && [[ -s "$micro_col_fail_qjs" ]] && sig_qjs=1
 if want_runtime vm && want_runtime node && { [[ $sig_vm -eq 1 ]] || [[ $sig_node -eq 1 ]]; }; then
   sig_pct=1
 fi
@@ -1137,9 +1133,9 @@ want_runtime cranelift && printf "%7s" "—"
 want_runtime llvm && printf "%7s" "—"
 want_runtime wasi && printf "%7s" "—"
 want_runtime node && _perf_tbl_int7 "$sig_node" "$total_node"
-want_runtime bun && $has_bun && _perf_tbl_int7 "$sig_bun" "$total_bun"
-want_runtime deno && $has_deno && _perf_tbl_int7 "$sig_deno" "$total_deno"
-want_runtime qjs && $has_qjs && _perf_tbl_int7 "$sig_qjs" "$total_qjs"
+want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && _perf_tbl_int7 "$sig_bun" "$total_bun"
+want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && _perf_tbl_int7 "$sig_deno" "$total_deno"
+want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && _perf_tbl_int7 "$sig_qjs" "$total_qjs"
 tot_ratio=0
 if want_runtime vm && want_runtime node && [[ "$total_node" -gt 0 ]]; then
   tot_ratio=$((total_vm * 100 / total_node))
@@ -1159,16 +1155,16 @@ printf "%-24s" "bundle (full program)"
 want_runtime vm && printf "%7d" "$tish_vm_avg"
 want_runtime interp && printf "%7d" "$tish_interp_avg"
 want_runtime rust && if $compile_ok; then printf "%7d" "$tish_native_avg"; else printf "%7s" "—"; fi
-want_runtime cranelift && if $cranelift_ok; then printf "%7d" "$tish_cranelift_avg"; else printf "%7s" "—"; fi
-want_runtime llvm && if $llvm_ok; then printf "%7d" "$tish_llvm_avg"; else printf "%7s" "—"; fi
-want_runtime wasi && if $wasi_ok; then printf "%7d" "$tish_wasi_avg"; else printf "%7s" "—"; fi
+want_runtime cranelift && if [ "$cranelift_ok" = true ]; then printf "%7d" "$tish_cranelift_avg"; else printf "%7s" "—"; fi
+want_runtime llvm && if [ "$llvm_ok" = true ]; then printf "%7d" "$tish_llvm_avg"; else printf "%7s" "—"; fi
+want_runtime wasi && if [ "$wasi_ok" = true ]; then printf "%7d" "$tish_wasi_avg"; else printf "%7s" "—"; fi
 want_runtime node && printf "%7d" "$node_avg"
-want_runtime bun && $has_bun && [[ ${#bun_times[@]} -eq $n ]] && printf "%7d" "$bun_avg"
-want_runtime bun && $has_bun && [[ ${#bun_times[@]} -ne $n ]] && printf "%7s" "—"
-want_runtime deno && $has_deno && [[ ${#deno_times[@]} -eq $n ]] && printf "%7d" "$deno_avg"
-want_runtime deno && $has_deno && [[ ${#deno_times[@]} -ne $n ]] && printf "%7s" "—"
-want_runtime qjs && $has_qjs && [[ ${#qjs_times[@]} -eq $n ]] && printf "%7d" "$qjs_avg"
-want_runtime qjs && $has_qjs && [[ ${#qjs_times[@]} -ne $n ]] && printf "%7s" "—"
+want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && [[ ${#bun_times[@]} -eq $n ]] && printf "%7d" "$bun_avg"
+want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && [[ ${#bun_times[@]} -ne $n ]] && printf "%7s" "—"
+want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && [[ ${#deno_times[@]} -eq $n ]] && printf "%7d" "$deno_avg"
+want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && [[ ${#deno_times[@]} -ne $n ]] && printf "%7s" "—"
+want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && [[ ${#qjs_times[@]} -eq $n ]] && printf "%7d" "$qjs_avg"
+want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && [[ ${#qjs_times[@]} -ne $n ]] && printf "%7s" "—"
 if want_runtime vm && want_runtime node && [[ "$node_avg" -gt 0 ]]; then
   printf "%8d%%" "$((tish_vm_avg * 100 / node_avg))"
 elif want_runtime vm && want_runtime node; then
@@ -1202,21 +1198,21 @@ if want_runtime node && [[ -s "$micro_col_fail_node" ]]; then
   _perf_x
   sort -u "$micro_col_fail_node" | sed 's/^/    /'
 fi
-if want_runtime bun && $has_bun && [[ -s "$micro_col_fail_bun" ]]; then
+if want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && [[ -s "$micro_col_fail_bun" ]]; then
   _micro_fail_any=1
   _perf_r
   printf '%s\n' "  Bun — $(sort -u "$micro_col_fail_bun" | wc -l | tr -d ' ') tid(s):"
   _perf_x
   sort -u "$micro_col_fail_bun" | sed 's/^/    /'
 fi
-if want_runtime deno && $has_deno && [[ -s "$micro_col_fail_deno" ]]; then
+if want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && [[ -s "$micro_col_fail_deno" ]]; then
   _micro_fail_any=1
   _perf_r
   printf '%s\n' "  Deno — $(sort -u "$micro_col_fail_deno" | wc -l | tr -d ' ') tid(s):"
   _perf_x
   sort -u "$micro_col_fail_deno" | sed 's/^/    /'
 fi
-if want_runtime qjs && $has_qjs && [[ -s "$micro_col_fail_qjs" ]]; then
+if want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && [[ -s "$micro_col_fail_qjs" ]]; then
   _micro_fail_any=1
   _perf_r
   printf '%s\n' "  qjs — $(sort -u "$micro_col_fail_qjs" | wc -l | tr -d ' ') tid(s):"
@@ -1229,7 +1225,7 @@ fi
 echo "─────────────────────────────────────────"
 echo ""
 
-if $github_step_summary && [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+if [ "$github_step_summary" = true ] && [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
   {
     echo "### Per-test (${n}-run avg, ms)"
     echo ""
@@ -1256,11 +1252,11 @@ if $github_step_summary && [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     br_wasi="—"
     $wasi_ok && br_wasi="$tish_wasi_avg"
     br_bun="—"
-    want_runtime bun && $has_bun && [[ ${#bun_times[@]} -eq $n ]] && br_bun="$bun_avg"
+    want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && [[ ${#bun_times[@]} -eq $n ]] && br_bun="$bun_avg"
     br_deno="—"
-    want_runtime deno && $has_deno && [[ ${#deno_times[@]} -eq $n ]] && br_deno="$deno_avg"
+    want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && [[ ${#deno_times[@]} -eq $n ]] && br_deno="$deno_avg"
     br_qjs="—"
-    want_runtime qjs && $has_qjs && [[ ${#qjs_times[@]} -eq $n ]] && br_qjs="$qjs_avg"
+    want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && [[ ${#qjs_times[@]} -eq $n ]] && br_qjs="$qjs_avg"
     bpct="-"
     want_runtime vm && want_runtime node && [[ "$node_avg" -gt 0 ]] && bpct="$((tish_vm_avg * 100 / node_avg))%"
     echo "| **bundle (full program)** | **${tish_vm_avg}** | **${tish_interp_avg}** | **${br_rust}** | **${br_cflt}** | **${br_llvm}** | **${br_wasi}** | **${node_avg}** | **${br_bun}** | **${br_deno}** | **${br_qjs}** | **${bpct}** |"
@@ -1286,9 +1282,9 @@ want_runtime cranelift && $cranelift_ok && echo "  Tish (cranelift): ${tish_cran
 want_runtime llvm && $llvm_ok && echo "  Tish (llvm):      ${tish_llvm_avg}ms"
 want_runtime wasi && $wasi_ok && echo "  Tish (wasi):      ${tish_wasi_avg}ms"
 want_runtime node && echo "  Node.js:          ${node_avg}ms"
-want_runtime bun && $has_bun && [[ ${#bun_times[@]} -eq $n ]] && echo "  Bun:              ${bun_avg}ms"
-want_runtime deno && $has_deno && [[ ${#deno_times[@]} -eq $n ]] && echo "  Deno:             ${deno_avg}ms"
-want_runtime qjs && $has_qjs && [[ ${#qjs_times[@]} -eq $n ]] && echo "  QuickJS:          ${qjs_avg}ms"
+want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && [[ ${#bun_times[@]} -eq $n ]] && echo "  Bun:              ${bun_avg}ms"
+want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && [[ ${#deno_times[@]} -eq $n ]] && echo "  Deno:             ${deno_avg}ms"
+want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && [[ ${#qjs_times[@]} -eq $n ]] && echo "  QuickJS:          ${qjs_avg}ms"
 want_runtime vm && want_runtime node && echo "  Tish(vm)/Node:    ${ratio}%"
 echo ""
 
@@ -1314,7 +1310,7 @@ fi
 echo "─────────────────────────────────────────"
 echo ""
 
-if $github_step_summary && [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+if [ "$github_step_summary" = true ] && [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
   {
     echo "## Bundled perf suite (\`tests/main.tish\`)"
     echo ""
@@ -1327,9 +1323,9 @@ if $github_step_summary && [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     want_runtime llvm && $llvm_ok && echo "| llvm | ${tish_llvm_avg} |"
     want_runtime wasi && $wasi_ok && echo "| wasi (wasmtime) | ${tish_wasi_avg} |"
     want_runtime node && echo "| Node | ${node_avg} |"
-    want_runtime bun && $has_bun && [[ ${#bun_times[@]} -eq $n ]] && echo "| Bun | ${bun_avg} |"
-    want_runtime deno && $has_deno && [[ ${#deno_times[@]} -eq $n ]] && echo "| Deno | ${deno_avg} |"
-    want_runtime qjs && $has_qjs && [[ ${#qjs_times[@]} -eq $n ]] && echo "| QuickJS | ${qjs_avg} |"
+    want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && [[ ${#bun_times[@]} -eq $n ]] && echo "| Bun | ${bun_avg} |"
+    want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && [[ ${#deno_times[@]} -eq $n ]] && echo "| Deno | ${deno_avg} |"
+    want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && [[ ${#qjs_times[@]} -eq $n ]] && echo "| QuickJS | ${qjs_avg} |"
     want_runtime vm && want_runtime node && echo "| **Tish(vm)/Node %** | **${ratio}** |"
     echo ""
     echo "Profile: \`${profile}\`. ${n} timed runs after warmup; timeout ${run_timeout}s per invocation."
@@ -1345,7 +1341,7 @@ if [[ "${PERF_SUITE_STRICT:-}" == "1" ]]; then
     fi
     if [[ -e "$native_bin" ]]; then
       echo "  (native output path exists but is not executable — ls -la:)"
-      ls -la "$native_bin" 2>&1 | sed 's/^/  | /' || true
+      ls -la "$native_bin" # codacy-disable-line 2>&1 | sed 's/^/  | /' || true
     fi
     exit 1
   fi
@@ -1357,7 +1353,7 @@ if [[ "${PERF_SUITE_STRICT:-}" == "1" ]]; then
     echo "ERROR: PERF_SUITE_STRICT=1 but llvm binary missing or failed to build"
     exit 1
   fi
-  if want_runtime wasi && $has_wasmtime && ! $wasi_ok; then
+  if want_runtime wasi && "$has_wasmtime"&& "$has_wasmtime" [ "$has_wasmtime" = true ] && ! "$wasi_ok"&& ! "$wasi_ok" [ "$wasi_ok" != true ]; then
     echo "ERROR: PERF_SUITE_STRICT=1 but wasi build failed or wasm missing"
     exit 1
   fi
