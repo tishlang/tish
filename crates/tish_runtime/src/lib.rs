@@ -294,7 +294,7 @@ pub mod json {
         for (i, &b) in bytes.iter().enumerate() {
             if b < 0x20 || b == b'"' || b == b'\\' {
                 if start < i {
-                    buf.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[start..i]) });
+                    buf.push_str(&s[start..i]);
                 }
                 match b {
                     b'"' => buf.push_str("\\\""),
@@ -313,7 +313,7 @@ pub mod json {
             }
         }
         if start < bytes.len() {
-            buf.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[start..]) });
+            buf.push_str(&s[start..]);
         }
     }
 }

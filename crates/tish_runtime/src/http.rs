@@ -698,18 +698,7 @@ fn serve_static_route(request: tiny_http::Request, route: StaticRoute) {
 
 #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
 fn set_reuse_port(s: &socket2::Socket) {
-    use std::os::fd::AsRawFd;
-    let fd = s.as_raw_fd();
-    let on: libc::c_int = 1;
-    unsafe {
-        let _ = libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_REUSEPORT,
-            &on as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&on) as libc::socklen_t,
-        );
-    }
+    let _ = s.set_reuse_port(true);
 }
 
 fn bind_listeners(port: u16, n: usize) -> Result<Vec<std::net::TcpListener>, String> {

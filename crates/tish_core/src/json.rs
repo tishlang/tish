@@ -109,7 +109,7 @@ fn escape_json_string_into(buf: &mut String, s: &str) {
                 // SAFETY: `s` is `&str`, every byte in `start..i` was a
                 // single-byte ASCII char (we only stop on ASCII triggers
                 // below 0x80), so the slice is a valid `&str`.
-                buf.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[start..i]) });
+                buf.push_str(&s[start..i]);
             }
             match b {
                 b'"' => buf.push_str("\\\""),
@@ -128,7 +128,7 @@ fn escape_json_string_into(buf: &mut String, s: &str) {
         }
     }
     if start < bytes.len() {
-        buf.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[start..]) });
+        buf.push_str(&s[start..]);
     }
 }
 

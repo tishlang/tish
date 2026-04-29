@@ -301,7 +301,7 @@ run_with_timeout() {
     fi
     return
   fi
-  ( set +e; set -m; "$@" 2>/dev/null & pid=$!; ( sleep $run_timeout; kill -TERM -$pid 2>/dev/null; sleep 2; kill -KILL -$pid 2>/dev/null ) & k=$!; wait $pid 2>/dev/null; kill $k 2>/dev/null; wait $k 2>/dev/null ) || true
+  ( set +e; set -m; "$@" 2>/dev/null & pid=$!; ( sleep "$run_timeout"; kill -TERM "-$pid" 2>/dev/null; sleep 2; kill -KILL "-$pid" 2>/dev/null ) & k=$!; wait "$pid" 2>/dev/null; kill "$k" 2>/dev/null; wait "$k" 2>/dev/null ) || true
 }
 
 tish_bin="$target_dir/$profile/tish"
@@ -373,8 +373,8 @@ _pt_avg_vm() {
     return
   fi
   perf_last_avg_fail=0
-  _perf_rtc_discard $tish_bin run "$f" --backend vm || perf_last_avg_fail=1
-  _avg_run_ms $tish_bin run "$f" --backend vm
+  _perf_rtc_discard "$tish_bin" run "$f" --backend vm || perf_last_avg_fail=1
+  _avg_run_ms "$tish_bin" run "$f" --backend vm
   _pt_avg_last_ms=$_avg_run_last_ms
   _pt_avg_last_fail=$perf_last_avg_fail
 }
@@ -386,8 +386,8 @@ _pt_avg_interp() {
     return
   fi
   perf_last_avg_fail=0
-  _perf_rtc_discard $tish_bin run "$f" --backend interp || perf_last_avg_fail=1
-  _avg_run_ms $tish_bin run "$f" --backend interp
+  _perf_rtc_discard "$tish_bin" run "$f" --backend interp || perf_last_avg_fail=1
+  _avg_run_ms "$tish_bin" run "$f" --backend interp
   _pt_avg_last_ms=$_avg_run_last_ms
   _pt_avg_last_fail=$perf_last_avg_fail
 }
@@ -497,14 +497,14 @@ _show_suite_bundle_output() {
   if want_runtime vm; then
     echo "Tish (vm):"
     perf_bundle_checks=$((perf_bundle_checks + 1))
-    _perf_run_show "bundle vm ($entry_tish)" $tish_bin run "$entry_tish" --backend vm
+    _perf_run_show "bundle vm ($entry_tish)" "$tish_bin" run "$entry_tish" --backend vm
     [[ $perf_last_subfail -eq 1 ]] && perf_bundle_failed=$((perf_bundle_failed + 1))
     echo ""
   fi
   if want_runtime interp; then
     echo "Tish (interp):"
     perf_bundle_checks=$((perf_bundle_checks + 1))
-    _perf_run_show "bundle interp ($entry_tish)" $tish_bin run "$entry_tish" --backend interp
+    _perf_run_show "bundle interp ($entry_tish)" "$tish_bin" run "$entry_tish" --backend interp
     [[ $perf_last_subfail -eq 1 ]] && perf_bundle_failed=$((perf_bundle_failed + 1))
     echo ""
   fi
@@ -627,7 +627,7 @@ if ! $no_compile; then
   echo -n "  $test_id: "
   _suite_build_log=$(mktemp)
   if want_runtime rust; then
-    if $tish_bin build "$entry_tish" -o "$native_bin" --native-backend rust >"$_suite_build_log" 2>&1; then
+    if "$tish_bin" build "$entry_tish" -o "$native_bin" --native-backend rust >"$_suite_build_log" 2>&1; then
       echo -n "rust "
     else
       echo -n "rust-fail "
@@ -643,7 +643,7 @@ if ! $no_compile; then
     fi
   fi
   if want_runtime cranelift; then
-    if $tish_bin build "$entry_tish" -o "$cranelift_bin" --native-backend cranelift >"$_suite_build_log" 2>&1; then
+    if "$tish_bin" build "$entry_tish" -o "$cranelift_bin" --native-backend cranelift >"$_suite_build_log" 2>&1; then
       echo -n "cranelift "
     else
       echo -n "cranelift-fail "
@@ -656,7 +656,7 @@ if ! $no_compile; then
     fi
   fi
   if want_runtime llvm; then
-    if $tish_bin build "$entry_tish" -o "$llvm_bin" --native-backend llvm >"$_suite_build_log" 2>&1; then
+    if "$tish_bin" build "$entry_tish" -o "$llvm_bin" --native-backend llvm >"$_suite_build_log" 2>&1; then
       echo -n "llvm "
     else
       echo -n "llvm-fail "
@@ -670,7 +670,7 @@ if ! $no_compile; then
   fi
   if want_runtime wasi; then
     if $has_wasmtime; then
-      if $tish_bin build "$entry_tish" -o "$compile_dir/${cache_key}_wasi" --target wasi >"$_suite_build_log" 2>&1; then
+      if "$tish_bin" build "$entry_tish" -o "$compile_dir/${cache_key}_wasi" --target wasi >"$_suite_build_log" 2>&1; then
         echo -n "wasi"
       else
         echo -n "wasi-fail"
@@ -704,8 +704,8 @@ deno_times=()
 qjs_times=()
 
 perf_bundle_timing_fail=0
-want_runtime vm && { _perf_rtc_discard $tish_bin run "$entry_tish" --backend vm || perf_bundle_timing_fail=1; }
-want_runtime interp && { _perf_rtc_discard $tish_bin run "$entry_tish" --backend interp || perf_bundle_timing_fail=1; }
+want_runtime vm && { _perf_rtc_discard "$tish_bin" run "$entry_tish" --backend vm || perf_bundle_timing_fail=1; }
+want_runtime interp && { _perf_rtc_discard "$tish_bin" run "$entry_tish" --backend interp || perf_bundle_timing_fail=1; }
 want_runtime rust && [[ -x "$native_bin" ]] && { _perf_rtc_discard "$native_bin" || perf_bundle_timing_fail=1; }
 want_runtime cranelift && [[ -x "$cranelift_bin" ]] && { _perf_rtc_discard "$cranelift_bin" || perf_bundle_timing_fail=1; }
 want_runtime llvm && [[ -x "$llvm_bin" ]] && { _perf_rtc_discard "$llvm_bin" || perf_bundle_timing_fail=1; }
@@ -718,7 +718,7 @@ want_runtime qjs && $has_qjs && { _perf_rtc_discard "$qjs_cmd" "$js_file" || per
 if want_runtime vm; then
   for _ in $(seq 1 "$n"); do
     t0=$(ms)
-    _perf_rtc_discard $tish_bin run "$entry_tish" --backend vm || perf_bundle_timing_fail=1
+    _perf_rtc_discard "$tish_bin" run "$entry_tish" --backend vm || perf_bundle_timing_fail=1
     t1=$(ms)
     tish_vm_times+=($((t1 - t0)))
   done
@@ -726,7 +726,7 @@ fi
 if want_runtime interp; then
   for _ in $(seq 1 "$n"); do
     t0=$(ms)
-    _perf_rtc_discard $tish_bin run "$entry_tish" --backend interp || perf_bundle_timing_fail=1
+    _perf_rtc_discard "$tish_bin" run "$entry_tish" --backend interp || perf_bundle_timing_fail=1
     t1=$(ms)
     tish_interp_times+=($((t1 - t0)))
   done
@@ -873,9 +873,9 @@ echo ""
 echo "════════════════════════════════════════════════════════════════════════════════════════════════════════════════"
 echo "  PER-TEST (${n}-run avg, ms) — same workloads as tests/main.tish; sorted by vm/Node %, slowest first"
 echo "  Columns match the bundled summary order: vm, interp, rust, cflt, llvm, wasi, Node, Bun, Deno, qjs."
-echo "  Per-test rows: vm + interp + JS only — rust/cflt/llvm/wasi are run only in “BUNDLED PROGRAM OUTPUT” above."
+echo "  Per-test rows: vm + interp + JS only — rust/cflt/llvm/wasi are run only in "BUNDLED PROGRAM OUTPUT" above."
 echo "  Last two rows: Σ per-file = sum of each row’s ms (one micro program per row; not one runnable total)."
-echo "                 bundle = same n-run averages as “BUNDLED PERF SUITE” (one tests/main.* program)."
+echo "                 bundle = same n-run averages as "BUNDLED PERF SUITE" (one tests/main.* program)."
 echo "════════════════════════════════════════════════════════════════════════════════════════════════════════════════"
 echo ""
 
@@ -908,7 +908,7 @@ while IFS="$(printf '\t')" read -r tish_f js_f; do
     echo "─────────────────────────────────────────"
     if want_runtime vm; then
       echo "Tish (vm):"
-      _perf_run_show "micro $tid vm ($tish_f)" $tish_bin run "$tish_f" --backend vm
+      _perf_run_show "micro $tid vm ($tish_f)" "$tish_bin" run "$tish_f" --backend vm
       if [[ $perf_last_subfail -eq 1 ]]; then
         perf_tid_any_fail=1
         _micro_mark_col "$micro_col_fail_vm" "$tid"
@@ -917,7 +917,7 @@ while IFS="$(printf '\t')" read -r tish_f js_f; do
     fi
     if want_runtime interp; then
       echo "Tish (interp):"
-      _perf_run_show "micro $tid interp ($tish_f)" $tish_bin run "$tish_f" --backend interp
+      _perf_run_show "micro $tid interp ($tish_f)" "$tish_bin" run "$tish_f" --backend interp
       if [[ $perf_last_subfail -eq 1 ]]; then
         perf_tid_any_fail=1
         _micro_mark_col "$micro_col_fail_interp" "$tid"

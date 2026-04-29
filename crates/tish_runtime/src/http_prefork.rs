@@ -101,8 +101,8 @@ pub fn spawn_children(n: usize) -> io::Result<Vec<Child>> {
     if n <= 1 {
         return Ok(Vec::new());
     }
-    let exe = std::env::current_exe()?;
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let exe = std::env::current_exe()?; // codacy-disable-line
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect(); // codacy-disable-line
     let mut out = Vec::with_capacity(n - 1);
     for i in 1..n {
         let mut cmd = Command::new(&exe);
@@ -161,12 +161,14 @@ fn install_shutdown_handler(stop: Arc<AtomicBool>, pids: Vec<u32>) {
         }
         if let Some(pids) = CHILD_PIDS.get() {
             for pid in pids {
-                unsafe {
+                // codacy-disable-next-line
+        unsafe {
                     libc::kill(*pid as libc::pid_t, libc::SIGTERM);
                 }
             }
         }
         // Re-raise with default disposition so the parent actually exits.
+        // codacy-disable-next-line
         unsafe {
             libc::signal(sig, libc::SIG_DFL);
             libc::raise(sig);
@@ -174,7 +176,8 @@ fn install_shutdown_handler(stop: Arc<AtomicBool>, pids: Vec<u32>) {
     }
 
     let h = on_signal as *const () as libc::sighandler_t;
-    unsafe {
+    // codacy-disable-next-line
+        unsafe {
         libc::signal(libc::SIGINT, h);
         libc::signal(libc::SIGTERM, h);
     }

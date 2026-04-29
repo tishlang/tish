@@ -107,7 +107,7 @@ run_with_timeout() {
     fi
     return
   fi
-  ( set +e; set -m; "$@" 2>/dev/null & pid=$!; ( sleep $run_timeout; kill -TERM -$pid 2>/dev/null; sleep 2; kill -KILL -$pid 2>/dev/null ) & k=$!; wait $pid 2>/dev/null; kill $k 2>/dev/null; wait $k 2>/dev/null ) || true
+  ( set +e; set -m; "$@" 2>/dev/null & pid=$!; ( sleep "$run_timeout"; kill -TERM "-$pid" 2>/dev/null; sleep 2; kill -KILL "-$pid" 2>/dev/null ) & k=$!; wait "$pid" 2>/dev/null; kill "$k" 2>/dev/null; wait "$k" 2>/dev/null ) || true
 }
 
 tish_bin="$target_dir/$profile/tish"
@@ -221,7 +221,7 @@ else
     echo -n "  $test_id: "
     # Rust native (default backend)
     if want_runtime rust; then
-      if $tish_bin build "$tish_file" -o "$compile_dir/${cache_key}_native" --native-backend rust >/dev/null 2>&1; then
+      if "$tish_bin" build "$tish_file" -o "$compile_dir/${cache_key}_native" --native-backend rust >/dev/null 2>&1; then
         echo -n "rust "
         rust_ok=$((rust_ok + 1))
       else
@@ -231,7 +231,7 @@ else
     fi
     # Cranelift (pure Tish, no native imports)
     if want_runtime cranelift; then
-      if $tish_bin build "$tish_file" -o "$compile_dir/${cache_key}_cranelift" --native-backend cranelift >/dev/null 2>&1; then
+      if "$tish_bin" build "$tish_file" -o "$compile_dir/${cache_key}_cranelift" --native-backend cranelift >/dev/null 2>&1; then
         echo -n "cranelift "
         cranelift_ok=$((cranelift_ok + 1))
       else
@@ -241,7 +241,7 @@ else
     fi
     # LLVM (pure Tish, no native imports; uses clang)
     if want_runtime llvm; then
-      if $tish_bin build "$tish_file" -o "$compile_dir/${cache_key}_llvm" --native-backend llvm >/dev/null 2>&1; then
+      if "$tish_bin" build "$tish_file" -o "$compile_dir/${cache_key}_llvm" --native-backend llvm >/dev/null 2>&1; then
         echo -n "llvm "
         llvm_ok=$((llvm_ok + 1))
       else
@@ -252,7 +252,7 @@ else
     # WASI (for wasmtime)
     if want_runtime wasi; then
       if $has_wasmtime; then
-        if $tish_bin build "$tish_file" -o "$compile_dir/${cache_key}_wasi" --target wasi >/dev/null 2>&1; then
+        if "$tish_bin" build "$tish_file" -o "$compile_dir/${cache_key}_wasi" --target wasi >/dev/null 2>&1; then
           echo -n "wasi"
           wasi_ok=$((wasi_ok + 1))
         else
@@ -307,7 +307,7 @@ for perf_dir in "${perf_dirs[@]}"; do
     # Output (use timeout to avoid hangs on intensive tests)
     if want_runtime run; then
       echo "Tish (run):"
-      run_with_timeout $tish_bin run "$tish_file" 2>&1 || true
+      run_with_timeout "$tish_bin" run "$tish_file" 2>&1 || true
       echo ""
     fi
 
@@ -393,8 +393,8 @@ for perf_dir in "${perf_dirs[@]}"; do
   qjs_times=()
 
   # Warmup runs (discard - warms disk cache and JIT; use timeout to avoid hangs)
-  want_runtime vm && run_with_timeout $tish_bin run "$tish_file" --backend vm >/dev/null 2>&1 || true
-  want_runtime interp && run_with_timeout $tish_bin run "$tish_file" --backend interp >/dev/null 2>&1 || true
+  want_runtime vm && run_with_timeout "$tish_bin" run "$tish_file" --backend vm >/dev/null 2>&1 || true
+  want_runtime interp && run_with_timeout "$tish_bin" run "$tish_file" --backend interp >/dev/null 2>&1 || true
   want_runtime rust && [[ -x "$native_bin" ]] && run_with_timeout "$native_bin" >/dev/null 2>&1 || true
   want_runtime cranelift && [[ -x "$cranelift_bin" ]] && run_with_timeout "$cranelift_bin" >/dev/null 2>&1 || true
   want_runtime llvm && [[ -x "$llvm_bin" ]] && run_with_timeout "$llvm_bin" >/dev/null 2>&1 || true
@@ -408,7 +408,7 @@ for perf_dir in "${perf_dirs[@]}"; do
   if want_runtime vm; then
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
-      run_with_timeout $tish_bin run "$tish_file" --backend vm >/dev/null 2>&1 || true
+      run_with_timeout "$tish_bin" run "$tish_file" --backend vm >/dev/null 2>&1 || true
       t1=$(ms)
       tish_vm_times+=($((t1 - t0)))
     done
@@ -418,7 +418,7 @@ for perf_dir in "${perf_dirs[@]}"; do
   if want_runtime interp; then
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
-      run_with_timeout $tish_bin run "$tish_file" --backend interp >/dev/null 2>&1 || true
+      run_with_timeout "$tish_bin" run "$tish_file" --backend interp >/dev/null 2>&1 || true
       t1=$(ms)
       tish_interp_times+=($((t1 - t0)))
     done
