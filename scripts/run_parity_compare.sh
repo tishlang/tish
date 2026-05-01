@@ -161,21 +161,21 @@ for f in "$core_dir"/*.tish; do
     rust)
       rust_bin="$cache_dir/${base}_native"
       if ! $no_compile; then
-        $tish_bin compile "$f" -o "$rust_bin" --native-backend rust >/dev/null 2>&1 || true
+        $tish_bin build "$f" -o "$rust_bin" --native-backend rust >/dev/null 2>&1 || true
       fi
       [[ -x "$rust_bin" ]] && ref_out=$(run_and_capture "$rust_bin" || true)
       ;;
     cranelift)
       cl_bin="$cache_dir/${base}_cranelift"
       if ! $no_compile; then
-        $tish_bin compile "$f" -o "$cl_bin" --native-backend cranelift >/dev/null 2>&1 || true
+        $tish_bin build "$f" -o "$cl_bin" --native-backend cranelift >/dev/null 2>&1 || true
       fi
       [[ -x "$cl_bin" ]] && ref_out=$(run_and_capture "$cl_bin" || true)
       ;;
     llvm)
       llvm_bin="$cache_dir/${base}_llvm"
       if ! $no_compile; then
-        $tish_bin compile "$f" -o "$llvm_bin" --native-backend llvm >/dev/null 2>&1 || true
+        $tish_bin build "$f" -o "$llvm_bin" --native-backend llvm >/dev/null 2>&1 || true
       fi
       [[ -x "$llvm_bin" ]] && ref_out=$(run_and_capture "$llvm_bin" || true)
       ;;
@@ -209,7 +209,7 @@ for f in "$core_dir"/*.tish; do
   if want_runtime rust && [[ "$reference" != "rust" ]]; then
     rust_bin="$cache_dir/${base}_native"
     if ! $no_compile; then
-      $tish_bin compile "$f" -o "$rust_bin" --native-backend rust >/dev/null 2>&1 || true
+      $tish_bin build "$f" -o "$rust_bin" --native-backend rust >/dev/null 2>&1 || true
     fi
     if [[ -x "$rust_bin" ]]; then
       out=$(normalize_timing "$(run_and_capture "$rust_bin" || true)")
@@ -227,7 +227,7 @@ for f in "$core_dir"/*.tish; do
   if want_runtime cranelift && [[ "$reference" != "cranelift" ]]; then
     cl_bin="$cache_dir/${base}_cranelift"
     if ! $no_compile; then
-      $tish_bin compile "$f" -o "$cl_bin" --native-backend cranelift >/dev/null 2>&1 || true
+      $tish_bin build "$f" -o "$cl_bin" --native-backend cranelift >/dev/null 2>&1 || true
     fi
     if [[ -x "$cl_bin" ]]; then
       out=$(normalize_timing "$(run_and_capture "$cl_bin" || true)")
@@ -245,7 +245,7 @@ for f in "$core_dir"/*.tish; do
   if want_runtime llvm && [[ "$reference" != "llvm" ]]; then
     llvm_bin="$cache_dir/${base}_llvm"
     if ! $no_compile; then
-      $tish_bin compile "$f" -o "$llvm_bin" --native-backend llvm >/dev/null 2>&1 || true
+      $tish_bin build "$f" -o "$llvm_bin" --native-backend llvm >/dev/null 2>&1 || true
     fi
     if [[ -x "$llvm_bin" ]]; then
       out=$(normalize_timing "$(run_and_capture "$llvm_bin" || true)")
@@ -263,7 +263,7 @@ for f in "$core_dir"/*.tish; do
   if want_runtime wasi && $has_wasmtime; then
     wasi_bin="$cache_dir/${base}_wasi.wasm"
     if ! $no_compile; then
-      $tish_bin compile "$f" -o "$cache_dir/${base}_wasi" --target wasi >/dev/null 2>&1 || true
+      $tish_bin build "$f" -o "$cache_dir/${base}_wasi" --target wasi >/dev/null 2>&1 || true
     fi
     if [[ -f "$wasi_bin" ]]; then
       out=$(normalize_timing "$(run_and_capture wasmtime "$wasi_bin" || true)")

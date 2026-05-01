@@ -11,7 +11,7 @@ else
 fi
 DIST=dist
 mkdir -p $DIST
-$TISH compile src/math.tish -o $DIST/math --target wasi
-$TISH compile src/greet.tish -o $DIST/greet --target wasi
-$TISH compile src/main.tish -o $DIST/main --target wasi
+$TISH build src/math.tish -o $DIST/math --target wasi
+$TISH build src/greet.tish -o $DIST/greet --target wasi
+$TISH build src/main.tish -o $DIST/main --target wasi
 echo "Built: $DIST/main.wasm, $DIST/math.wasm, $DIST/greet.wasm"
