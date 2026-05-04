@@ -18,7 +18,11 @@ path = "src/main.rs"
 # “full” vs “empty” CLI.
 default = ["full"]
 # Alias: same dependency edges as `default` (kept for `--features full` in CI and docs).
-full = ["http", "fs", "process", "regex", "ws", "timers"]
+# Includes `pg` so `tish run` can resolve `import … from 'tish-pg'` (`cargo:tish_pg`) on the bytecode VM.
+# Requires `tish-pg` next to this workspace root (`…/tish/tish-pg`); CI runs `scripts/ci/ensure-tish-pg.sh`.
+full = ["http", "fs", "process", "regex", "ws", "timers", "pg"]
+# Opt-out: build without Postgres (`cargo build -p tishlang --no-default-features --features http,...`).
+pg = ["dep:tish_pg"]
 # Individual capability flags
 http    = ["tishlang_eval/http",    "tishlang_runtime/http",    "tishlang_compile/http",    "tishlang_vm/http"]
 timers  = ["tishlang_eval/timers",  "tishlang_compile/timers",  "tishlang_vm/timers"]
@@ -45,6 +49,7 @@ tishlang_runtime = { path = "../tish_runtime", version = ">=0.1" }
 tishlang_core = { path = "../tish_core", version = ">=0.1" }
 tishlang_js_to_tish = { path = "../js_to_tish", version = ">=0.1" }
 clap = { version = "4.6.0", features = ["derive", "color"] }
+tish_pg = { path = "../../../tish-pg", package = "tish-pg", optional = true }
 
 [dev-dependencies]
 rayon = "1.11"

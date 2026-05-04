@@ -25,6 +25,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Ensure tish-pg (path dep for default full / pg)
+        run: bash scripts/ci/ensure-tish-pg.sh
+
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -137,6 +140,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Ensure tish-pg (path dep for default full / pg)
+        run: bash scripts/ci/ensure-tish-pg.sh
+
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -209,6 +215,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Ensure tish-pg (path dep for default full / pg)
+        run: bash scripts/ci/ensure-tish-pg.sh
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -298,6 +307,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Ensure tish-pg (path dep for default full / pg)
+        run: bash scripts/ci/ensure-tish-pg.sh
 
       - name: Set Cargo version for binary
         shell: bash

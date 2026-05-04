@@ -5,3 +5,7 @@ edition = "2021"
 description = "Shared build utilities for Tish (workspace discovery, path resolution)"
 license-file = { workspace = true }
 repository = { workspace = true }
+
+[dependencies]
+# Bundled `protoc` for nested `cargo build` (Lance / prost-build) when none is on PATH.
+protoc-bin-vendored = "3"

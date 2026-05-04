@@ -737,32 +737,52 @@ pub fn native_spec_to_feature(spec: &str) -> Option<String> {
     canonical.strip_prefix("tish:").map(|s| s.to_string())
 }
 
-/// Resolve a bare specifier (e.g. "lattish") to a path via node_modules.
-/// Resolve a bare package name (npm-style) to the package entry `.tish` file, walking `node_modules`
-/// from `from_dir` upward.
+/// Resolve `package.json` at `pkg_root` to the package's main `.tish` entry, if `name` matches `spec`.
+fn resolve_package_root_to_entry(pkg_root: &Path, spec: &str) -> Option<PathBuf> {
+    let pkg_json = pkg_root.join("package.json");
+    if !pkg_json.exists() {
+        return None;
+    }
+    if read_package_name(&pkg_json).as_deref() != Some(spec) {
+        return None;
+    }
+    let content = std::fs::read_to_string(&pkg_json).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let entry = json
+        .get("tish")
+        .and_then(|t| t.get("module"))
+        .and_then(|m| m.as_str())
+        .or_else(|| json.get("main").and_then(|m| m.as_str()))
+        .unwrap_or("index.tish");
+    let entry_clean = entry.trim_start_matches("./");
+    let resolved = pkg_root.join(entry_clean);
+    if !resolved.exists() {
+        return None;
+    }
+    match resolved.canonicalize() {
+        Ok(p) => Some(p),
+        Err(_) => Some(resolved),
+    }
+}
+
+/// Resolve a bare specifier (e.g. "lattish") to the package entry `.tish` file.
+///
+/// Walks upward from `from_dir` and, at each level, checks (same order as native [`find_package_dir`]):
+/// - `node_modules/<spec>/`
+/// - `<spec>/` as a sibling directory (monorepo: `…/tish/tish-candle` next to `…/tish/tish-hub`)
+/// - the search directory itself if its `package.json` name matches `spec`
 pub fn resolve_bare_spec(spec: &str, from_dir: &Path, _project_root: &Path) -> Option<PathBuf> {
     let mut search = from_dir.to_path_buf();
     loop {
-        let node_mod = search.join("node_modules").join(spec);
-        let pkg_json = node_mod.join("package.json");
-        if pkg_json.exists() {
-            if let Some(name) = read_package_name(&pkg_json) {
-                if name == spec {
-                    let content = std::fs::read_to_string(&pkg_json).ok()?;
-                    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-                    let entry = json
-                        .get("tish")
-                        .and_then(|t| t.get("module"))
-                        .and_then(|m| m.as_str())
-                        .or_else(|| json.get("main").and_then(|m| m.as_str()));
-                    let entry = entry.unwrap_or("index.tish");
-                    let entry_clean = entry.trim_start_matches("./");
-                    let resolved = node_mod.join(entry_clean);
-                    if resolved.exists() {
-                        return resolved.canonicalize().ok();
-                    }
-                }
-            }
+        if let Some(p) = resolve_package_root_to_entry(&search.join("node_modules").join(spec), spec)
+        {
+            return Some(p);
+        }
+        if let Some(p) = resolve_package_root_to_entry(&search.join(spec), spec) {
+            return Some(p);
+        }
+        if let Some(p) = resolve_package_root_to_entry(&search, spec) {
+            return Some(p);
         }
         if let Some(parent) = search.parent() {
             if parent == search {
@@ -793,7 +813,7 @@ fn resolve_import_path(
             return Ok(path);
         }
         return Err(format!(
-            "Package '{}' not found in node_modules. Install it with: npm install {}",
+            "Package '{}' not found. Install with `npm install {}`, or place the package under node_modules/ or as a sibling directory (same layout as native `find_package_dir`).",
             spec, spec
         ));
     }

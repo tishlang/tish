@@ -24,10 +24,13 @@ http = [
     "tishlang_builtins/send-values",
     "send-values",
 ]
-# Local marker: enabled transitively by `http`. Used to gate the parallel
-# accept + per-worker handler paths inside the runtime crate itself, which
-# need to know `Value: Send + Sync` at compile time.
-send-values = []
+# Enables `Arc`/`Mutex` values in `tishlang_core` so `Value: Send + Sync`.
+# Used by `http` / `ws` and by dependents (e.g. `tish-callbacks`) that keep
+# `Value` in a `static` registry and dispatch from multi-threaded async libs.
+send-values = [
+    "tishlang_core/send-values",
+    "tishlang_builtins/send-values",
+]
 # Phase-3 item 13: io_uring-backed accept + send loop (Linux only).
 # Disabled by default; enable with `--feature http,http-io-uring` on Linux
 # to pick up the experimental accept path.

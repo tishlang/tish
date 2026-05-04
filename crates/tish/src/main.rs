@@ -1,5 +1,6 @@
 //! Tish CLI - run, REPL, build to native or other targets.
 
+mod cargo_native_registry;
 mod cli_help;
 mod repl_completion;
 
@@ -247,13 +248,9 @@ fn run_program(
         tishlang_bytecode::compile(program).map_err(|e| e.to_string())?
     };
     let caps = vm_capabilities_for_cli_run(features);
-    let value = tishlang_vm::run_with_options(
-        &chunk,
-        tishlang_vm::VmRunOptions {
-            repl_mode: false,
-            capabilities: caps,
-        },
-    )?;
+    let mut vm = tishlang_vm::Vm::with_capabilities(caps);
+    cargo_native_registry::register_bytecode_native_modules(&mut vm);
+    let value = vm.run_with_options(&chunk, false)?;
     if !matches!(value, tishlang_core::Value::Null) {
         println!(
             "{}",
@@ -335,9 +332,9 @@ fn run_repl(backend: &str, no_optimize: bool, features: &[String]) -> Result<(),
     if !std::io::stdin().is_terminal() {
         eprintln!("Note: Tab completion and grey preview require an interactive terminal (TTY).");
     }
-    let vm = VmRef::new(tishlang_vm::Vm::with_capabilities(
-        vm_capabilities_for_cli_run(features),
-    ));
+    let mut vm0 = tishlang_vm::Vm::with_capabilities(vm_capabilities_for_cli_run(features));
+    cargo_native_registry::register_bytecode_native_modules(&mut vm0);
+    let vm = VmRef::new(vm0);
     let completer = repl_completion::ReplCompleter {
         vm: vm.clone(),
         no_optimize,
