@@ -12,6 +12,7 @@ members = [
     "crates/tish_opt",
     "crates/tish_eval",
     "crates/tish_runtime",
+    "crates/tish_pg",
     "crates/tish_compile",
     "crates/tish_ui",
     "crates/tish_jsx_web",

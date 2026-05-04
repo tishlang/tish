@@ -1,0 +1,11 @@
+import { connect, migrate, close } from '@tishlang/pg'
+
+const client = connect(process.env.DATABASE_URL ?? 'postgres://localhost/tishhub_dev')
+if (typeof client === 'object') {
+  console.error('connect failed:', client.error)
+  process.exit(1)
+}
+
+const result = migrate(client, './migrations')
+console.log('migrations applied:', result.applied)
+close(client)

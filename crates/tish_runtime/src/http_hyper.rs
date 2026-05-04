@@ -35,7 +35,7 @@
 //! The Tish handler returns a synchronous `Value`. We call it from inside
 //! a tokio task via `tokio::task::spawn_blocking`, which:
 //!   * detaches onto tokio's blocking thread pool,
-//!   * lets `tish-pg`'s `block_on` detect no ambient runtime and block
+//!   * lets `tishlang_pg`'s `block_on` detect no ambient runtime and block
 //!     directly (no extra thread spawn per query),
 //!   * unblocks hyper's reactor to serve other connections while the VM
 //!     runs.

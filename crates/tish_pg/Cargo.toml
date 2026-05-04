@@ -1,0 +1,34 @@
+[package]
+name = "tishlang_pg"
+version = "0.1.0"
+edition = "2021"
+description = "PostgreSQL driver for the Tish native runtime — tokio-postgres + deadpool"
+license-file = { workspace = true }
+repository = { workspace = true }
+
+[lib]
+name = "tishlang_pg"
+crate-type = ["rlib"]
+
+[features]
+default = ["tish-bindings"]
+# Exposes sync `pub fn(args: &[Value]) -> Value` wrappers for the bytecode VM
+# (`cargo:tish_pg` module URL, registered by the `tishlang` CLI when built with `pg`).
+tish-bindings = ["dep:tishlang_runtime", "dep:once_cell", "dep:slab"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-uuid-1", "with-chrono-0_4"] }
+futures = "0.3"
+deadpool = "0.12"
+deadpool-postgres = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+url = "2"
+tishlang_runtime = { path = "../tish_runtime", version = ">=0.1", optional = true, features = ["send-values"] }
+once_cell = { version = "1", optional = true }
+slab = { version = "0.4", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

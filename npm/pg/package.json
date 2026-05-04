@@ -1,0 +1,29 @@
+{
+  "name": "@tishlang/pg",
+  "version": "0.1.0",
+  "description": "PostgreSQL driver for Tish (Rust-backed via tishlang_pg).",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tishlang/tish.git",
+    "directory": "npm/pg"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "tish": {
+    "module": "./src/index.tish",
+    "rustDependencies": {
+      "tishlang_pg": { "package": "tishlang_pg", "version": ">=0.1" }
+    }
+  },
+  "main": "./src/index.tish",
+  "exports": {
+    ".": {
+      "tish": "./src/index.tish",
+      "default": "./src/index.tish"
+    }
+  },
+  "files": ["src/", "README.md"],
+  "keywords": ["tish", "postgres", "postgresql", "tokio-postgres"]
+}
