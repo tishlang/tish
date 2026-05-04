@@ -1,0 +1,36 @@
+// @tishlang/pg — public Tish API.
+//
+// Postgres connection (pool or per-worker client), prepared statements,
+// pipelined batch queries, and a tiny migrations runner.
+//
+//   const client = perWorkerClient(connectionString)
+//   const stmt = prepare(client, 'SELECT id, message FROM fortune')
+//   const rows = queryPrepared(client, stmt, [])
+//
+//   // Many queries pipelined on one client (concurrent on the wire,
+//   // sequential on the server side):
+//   const results = queryAll(client, [
+//     [stmt1, [1]],
+//     [stmt1, [2]],
+//   ])
+//
+//   // Idempotent migrations from a directory of *.sql files:
+//   migrate(client, './migrations')
+
+import {
+  per_worker_client as _perWorkerClient,
+  connect as _connect,
+  prepare as _prepare,
+  query_prepared as _queryPrepared,
+  query_all as _queryAll,
+  migrate as _migrate,
+  close as _close
+} from 'cargo:tish_pg'
+
+export const perWorkerClient = _perWorkerClient
+export const connect = _connect
+export const prepare = _prepare
+export const queryPrepared = _queryPrepared
+export const queryAll = _queryAll
+export const migrate = _migrate
+export const close = _close

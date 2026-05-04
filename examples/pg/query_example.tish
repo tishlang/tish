@@ -1,0 +1,10 @@
+// Example: intended Tish-only app code once the `pg` feature is enabled.
+// Requires native Tish with `tishlang_pg` linked — NOT Node.
+
+import { Pool } from "pg"
+
+fn main() {
+  // Pool.connect({ connectionString, max? }) -> Pool
+  // pool.query(sql, params[]) -> { rows, rowCount, fields }
+  // pool.end()
+}

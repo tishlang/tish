@@ -3063,31 +3063,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
-name = "tish-pg"
-version = "0.1.0"
-dependencies = [
- "deadpool",
- "deadpool-postgres",
- "futures",
- "once_cell",
- "serde",
- "serde_json",
- "slab",
- "thiserror 1.0.69",
- "tishlang_runtime",
- "tokio",
- "tokio-postgres",
- "url",
-]
-
-[[package]]
 name = "tishlang"
 version = "0.0.0-dev"
 dependencies = [
  "clap",
  "rayon",
  "rustyline",
- "tish-pg",
  "tishlang_ast",
  "tishlang_bytecode",
  "tishlang_compile",
@@ -3100,6 +3081,7 @@ dependencies = [
  "tishlang_native",
  "tishlang_opt",
  "tishlang_parser",
+ "tishlang_pg",
  "tishlang_runtime",
  "tishlang_vm",
  "tishlang_wasm",
@@ -3332,6 +3314,24 @@ version = "0.1.0"
 dependencies = [
  "tishlang_ast",
  "tishlang_lexer",
+]
+
+[[package]]
+name = "tishlang_pg"
+version = "0.1.0"
+dependencies = [
+ "deadpool",
+ "deadpool-postgres",
+ "futures",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "slab",
+ "thiserror 1.0.69",
+ "tishlang_runtime",
+ "tokio",
+ "tokio-postgres",
+ "url",
 ]
 
 [[package]]
