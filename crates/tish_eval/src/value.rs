@@ -61,7 +61,7 @@ pub enum Value {
     #[cfg(feature = "http")]
     BoundPromiseMethod(crate::promise::PromiseRef, std::sync::Arc<str>),
     /// Timer builtins: setTimeout, setInterval. Need evaluator for callback.
-    #[cfg(feature = "http")]
+    #[cfg(feature = "timers")]
     TimerBuiltin(std::sync::Arc<str>),
     /// Native `tishlang_core` Promise (fetch / reader.read / response.text).
     #[cfg(feature = "http")]
@@ -101,7 +101,9 @@ impl std::fmt::Debug for Value {
             #[cfg(feature = "http")]
             Value::PromiseConstructor => write!(f, "[Function: Promise]"),
             #[cfg(feature = "http")]
-            Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => write!(f, "[Function]"),
+            Value::BoundPromiseMethod(_, _) => write!(f, "[Function]"),
+            #[cfg(feature = "timers")]
+            Value::TimerBuiltin(_) => write!(f, "[Function]"),
             #[cfg(feature = "http")]
             Value::CorePromise(_) => write!(f, "Promise"),
             Value::CoreFn(_) => write!(f, "CoreFn"),
@@ -156,7 +158,9 @@ impl std::fmt::Display for Value {
             #[cfg(feature = "http")]
             Value::PromiseConstructor => write!(f, "function Promise() {{ [native code] }}"),
             #[cfg(feature = "http")]
-            Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => write!(f, "[Function]"),
+            Value::BoundPromiseMethod(_, _) => write!(f, "[Function]"),
+            #[cfg(feature = "timers")]
+            Value::TimerBuiltin(_) => write!(f, "[Function]"),
             #[cfg(feature = "http")]
             Value::CorePromise(_) => write!(f, "[Promise]"),
             Value::CoreFn(_) => write!(f, "[Function]"),

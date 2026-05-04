@@ -6,7 +6,8 @@ use std::path::Path;
 use tishlang_compile::ResolvedNativeModule;
 
 /// `tishlang_runtime` Cargo feature names (subset of CLI / compile feature names).
-const RUNTIME_CARGO_FEATURES: &[&str] = &["http", "fs", "process", "regex", "ws"];
+const RUNTIME_CARGO_FEATURES: &[&str] =
+    &["http", "http-hyper", "http-io-uring", "fs", "process", "regex", "ws"];
 
 /// Map CLI/compile features to flags passed to `tishlang_runtime` in the temp crate's Cargo.toml.
 /// `full` enables every optional runtime capability (matches `tish build --feature full` / LANGUAGE.md).
@@ -122,7 +123,7 @@ path = "src/main.rs"
 strip = true
 panic = "abort"
 codegen-units = 1
-lto = "thin"
+lto = "fat"
 
 [dependencies]
 tishlang_runtime = {{ path = {:?}{} }}

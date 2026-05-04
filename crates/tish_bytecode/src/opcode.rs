@@ -93,13 +93,16 @@ pub enum Opcode {
     ExitBlock = 41,
     /// Like [`DeclareVar`] but does not record block-scope undo (for `for`/`for-of` header bindings).
     DeclareVarPlain = 42,
+    /// Pop the `await` operand value; if it is a `Promise`, block until settled, push the result,
+    /// or unwind to `catch` like `Throw` on rejection.
+    AwaitPromise = 43,
 }
 
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=42 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=43 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 42 {
+        if b <= 43 {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None
@@ -114,11 +117,17 @@ impl Opcode {
             | Opcode::Dup
             | Opcode::Return
             | Opcode::ExitTry
+            | Opcode::ConcatArray
+            | Opcode::MergeObject
+            | Opcode::GetIndex
+            | Opcode::SetIndex
+            | Opcode::Throw
             | Opcode::ArrayMapIdentity
             | Opcode::CallSpread
             | Opcode::ConstructSpread
             | Opcode::EnterBlock
-            | Opcode::ExitBlock => 1,
+            | Opcode::ExitBlock
+            | Opcode::AwaitPromise => 1,
             Opcode::ArraySortByProperty
             | Opcode::ArrayMapBinOp
             | Opcode::ArrayFilterBinOp

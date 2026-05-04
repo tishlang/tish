@@ -4,7 +4,7 @@
 
 | Crate | Role |
 |-------|------|
-| `tish` | Binary **`tish`** only — run, repl, compile, dump-ast (no fmt/lint). |
+| `tish` | Binary **`tish`** only — run, repl, build, dump-ast (no fmt/lint). |
 | `tish_parser` / `tish_ast` | Shared by compiler, LSP, fmt, lint |
 | `tish_resolve` | Lexical resolution (LSP positions, go-to-def, completion names) |
 | `tish_fmt` | Library + binary **`tish-fmt`** |

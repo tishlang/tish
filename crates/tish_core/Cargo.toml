@@ -9,6 +9,14 @@ repository = { workspace = true }
 [features]
 default = []
 regex = ["dep:fancy-regex"]
+# Make `Value` (and its array / object / regex payloads) `Send + Sync` by
+# switching the interior `Rc<RefCell<T>>` to `Arc<Mutex<T>>` and the native
+# function type from `Rc<dyn Fn>` to `Arc<dyn Fn + Send + Sync>`. Enabled
+# transitively by any crate that needs to pass `Value`s across threads —
+# most notably `tishlang_runtime/http`, which dispatches HTTP handlers
+# across a worker pool. Off by default so wasm / wasi / cranelift / llvm /
+# interpreter builds pay no atomic-ref-count or mutex overhead.
+send-values = []
 
 [dependencies]
 ahash = "0.8.11"

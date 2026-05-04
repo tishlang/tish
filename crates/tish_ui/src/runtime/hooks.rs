@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use tishlang_core::{ObjectMap, Value};
+use tishlang_core::{ObjectMap, Value, VmRef};
 
 use super::Host;
 
@@ -218,13 +218,13 @@ pub fn native_use_state(args: &[Value]) -> Value {
         let st = map.entry(root_id).or_default();
         let i = st.cursor;
         st.cursor += 1;
-        let slots = Rc::clone(&st.state_slots);
+        let slots = &st.state_slots.clone();
         while i >= slots.borrow().len() {
             slots.borrow_mut().push(initial.clone());
         }
         let current = slots.borrow()[i].clone();
         let idx = i;
-        let setter = Value::Function(Rc::new(move |a: &[Value]| {
+        let setter = Value::native(move |a: &[Value]| {
             let arg = a.first().cloned().unwrap_or(Value::Null);
             HOOKS.with(|hooks| {
                 if let Some(st) = hooks.borrow_mut().get_mut(&root_id) {
@@ -249,8 +249,8 @@ pub fn native_use_state(args: &[Value]) -> Value {
                 drain_flush_queue();
             }
             Value::Null
-        }));
-        Value::Array(Rc::new(RefCell::new(vec![current, setter])))
+        });
+        Value::Array(VmRef::new(vec![current, setter]))
     })
 }
 
@@ -259,7 +259,7 @@ pub fn native_use_memo(args: &[Value]) -> Value {
     let Some(Value::Function(factory)) = args.first() else {
         return Value::Null;
     };
-    let factory = Rc::clone(factory);
+    let factory = factory.clone();
     let deps: Vec<Value> = match args.get(1) {
         Some(Value::Array(a)) => a.borrow().clone(),
         Some(other) => vec![other.clone()],
@@ -272,7 +272,7 @@ pub fn native_use_memo(args: &[Value]) -> Value {
         let st = map.entry(root_id).or_default();
         let i = st.memo_cursor;
         st.memo_cursor += 1;
-        let cache = Rc::clone(&st.memo_cache);
+        let cache = &st.memo_cache.clone();
         let mut c = cache.borrow_mut();
         while c.len() <= i {
             c.push(None);
@@ -296,7 +296,7 @@ pub fn native_use_effect(args: &[Value]) -> Value {
     let Some(Value::Function(effect_fn)) = args.first() else {
         return Value::Null;
     };
-    let effect_fn = Rc::clone(effect_fn);
+    let effect_fn = effect_fn.clone();
     let deps: Vec<Value> = match args.get(1) {
         Some(Value::Array(a)) => a.borrow().clone(),
         Some(other) => vec![other.clone()],
@@ -309,7 +309,7 @@ pub fn native_use_effect(args: &[Value]) -> Value {
         let st = map.entry(root_id).or_default();
         let i = st.effect_cursor;
         st.effect_cursor += 1;
-        let cells = Rc::clone(&st.effect_cells);
+        let cells = &st.effect_cells.clone();
         let mut cells_b = cells.borrow_mut();
         while cells_b.len() <= i {
             cells_b.push(EffectCell::default());
@@ -341,7 +341,7 @@ fn flush_pending_effects(root_id: RootId) {
     let cells_rc = HOOKS.with(|h| {
         h.borrow()
             .get(&root_id)
-            .map(|st| Rc::clone(&st.effect_cells))
+            .map(|st| st.effect_cells.clone())
     });
     let Some(cells_rc) = cells_rc else {
         return;
@@ -393,7 +393,7 @@ fn parse_root_id_arg(args: &[Value]) -> RootId {
 pub fn native_create_root(args: &[Value]) -> Value {
     let root_id = parse_root_id_arg(args);
     ensure_hook_entry(root_id);
-    let render_fn = Value::Function(Rc::new(move |app_args: &[Value]| {
+    let render_fn = Value::native(move |app_args: &[Value]| {
         let app = app_args.first().cloned().unwrap_or(Value::Null);
         HOOKS.with(|h| {
             let mut map = h.borrow_mut();
@@ -404,11 +404,11 @@ pub fn native_create_root(args: &[Value]) -> Value {
         });
         drain_flush_queue();
         Value::Null
-    }));
-    Value::Object(Rc::new(RefCell::new(ObjectMap::from([(
+    });
+    Value::Object(VmRef::new(ObjectMap::from([(
         std::sync::Arc::from("render"),
         render_fn,
-    )]))))
+    )])))
 }
 
 /// Request a re-render (coalesced; safe if called during flush).

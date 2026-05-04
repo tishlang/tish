@@ -137,6 +137,39 @@ fn tish_root_from_project_cargo_files(mut start: PathBuf) -> Option<PathBuf> {
 /// Returns the directory containing the workspace Cargo.toml (with [workspace]).
 /// Used when building native binaries, WASM, or locating runtime crates.
 pub fn find_workspace_root() -> Result<PathBuf, String> {
+    // Strategy 0: explicit checkout (e.g. tish-hub `npm run dev` / native build from a JS-only tree)
+    if let Ok(root) = std::env::var("TISHLANG_WORKSPACE") {
+        let trimmed = root.trim();
+        if !trimmed.is_empty() {
+            let p = PathBuf::from(trimmed);
+            if p.is_dir() && is_tish_workspace_root(&p) {
+                return p.canonicalize().map_err(|e| {
+                    format!(
+                        "TISHLANG_WORKSPACE is set but not a usable directory: {}",
+                        e
+                    )
+                });
+            }
+            // Non-empty but invalid: fall through (sibling `tish/` discovery may still apply).
+        }
+    }
+
+    // Strategy 0b: monorepo layout `…/<parent>/tish-hub` (cwd) next to `…/<parent>/tish` (language repo).
+    // Works without `TISHLANG_WORKSPACE` so older `tish` binaries still find the compiler tree.
+    if let Ok(mut dir) = std::env::current_dir() {
+        for _ in 0..24 {
+            let candidate = dir.join("tish");
+            if is_tish_workspace_root(&candidate) {
+                return candidate.canonicalize().map_err(|e| {
+                    format!("Cannot canonicalize Tish workspace {}: {}", candidate.display(), e)
+                });
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+
     // Strategy 1: CARGO_MANIFEST_DIR (works during cargo build/run from workspace)
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let path = PathBuf::from(&manifest_dir);
@@ -301,18 +334,70 @@ pub fn create_build_dir(prefix: &str, out_name: &str) -> Result<PathBuf, String>
     Ok(build_dir)
 }
 
+/// `PROTOC` for prost-build in transitive crates (e.g. lance-encoding) during nested `cargo build`.
+/// Respects an existing `PROTOC`, then `protoc` on `PATH`, then `protoc-bin-vendored`.
+fn protoc_for_nested_cargo() -> Option<PathBuf> {
+    // Empty or non-file PROTOC must not short-circuit: prost-build treats "" like a missing binary.
+    if let Some(v) = std::env::var_os("PROTOC") {
+        if !v.is_empty() {
+            let p = PathBuf::from(&v);
+            if p.is_file() {
+                return None;
+            }
+        }
+    }
+    // Prefer vendored protoc over PATH: a broken or non-executable `protoc` on PATH still passes `is_file()`.
+    if let Ok(p) = protoc_bin_vendored::protoc_bin_path() {
+        return Some(p);
+    }
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    let name = format!("protoc{}", ext);
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join(&name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 /// Run cargo build in the given directory.
 /// If target_dir is Some, use that for --target-dir (e.g. workspace target for caching).
 pub fn run_cargo_build(build_dir: &Path, target_dir: Option<&Path>) -> Result<(), String> {
     let target_dir = target_dir
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| build_dir.join("target"));
-    let output = Command::new("cargo")
-        .args(["build", "--release", "--target-dir"])
+    // Default to target-cpu=native so the emitted binary uses every SIMD / ISA
+    // extension the build host supports. Callers can override by pre-setting
+    // RUSTFLAGS in the environment.
+    let existing_rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
+    let merged_rustflags = if existing_rustflags.is_empty() {
+        "-C target-cpu=native".to_string()
+    } else if existing_rustflags.contains("target-cpu") {
+        existing_rustflags
+    } else {
+        format!("{} -C target-cpu=native", existing_rustflags)
+    };
+    // Nested `cargo build` (e.g. `tish build --native-backend rust`) inherits the parent
+    // environment. CI often sets `RUSTC_WRAPPER=sccache`; wrapping this inner compile too can
+    // cause flaky or failed builds (LTO / temp-crate paths). Use plain rustc here; the main
+    // workspace build still benefits from the wrapper.
+    let mut cmd = Command::new("cargo");
+    cmd.args(["build", "--release", "--target-dir"])
         .arg(&target_dir)
         .current_dir(build_dir)
         .env_remove("CARGO_TARGET_DIR")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
         .env("CARGO_TERM_PROGRESS", "always")
+        .env("RUSTFLAGS", &merged_rustflags);
+    if let Some(protoc) = protoc_for_nested_cargo() {
+        cmd.env("PROTOC", protoc);
+    }
+    let output = cmd
         .output()
         .map_err(|e| format!("Failed to run cargo: {}", e))?;
 
@@ -325,6 +410,24 @@ pub fn run_cargo_build(build_dir: &Path, target_dir: Option<&Path>) -> Result<()
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod protoc_tests {
+    use super::*;
+
+    #[test]
+    fn protoc_for_nested_cargo_without_env_uses_vendored_or_path() {
+        let _lock = std::sync::Mutex::new(());
+        let _guard = _lock.lock().unwrap();
+        std::env::remove_var("PROTOC");
+        let p = protoc_for_nested_cargo().expect("expected vendored or PATH protoc");
+        assert!(
+            p.exists(),
+            "resolved protoc should exist: {}",
+            p.display()
+        );
+    }
 }
 
 /// Find the built binary in target/release.

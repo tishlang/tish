@@ -17,6 +17,7 @@ pub struct VirtualModule {
 const BUILTIN_ALIASES: &[(&str, &str)] = &[
     ("fs", "tish:fs"),
     ("http", "tish:http"),
+    ("timers", "tish:timers"),
     ("process", "tish:process"),
     ("ws", "tish:ws"),
 ];
@@ -35,7 +36,7 @@ fn is_native_import(spec: &str) -> bool {
     spec.starts_with("tish:")
         || spec.starts_with("cargo:")
         || spec.starts_with('@')
-        || matches!(spec, "fs" | "http" | "process" | "ws")
+        || matches!(spec, "fs" | "http" | "timers" | "process" | "ws")
 }
 
 /// Normalize a virtual path: resolve . and .. components.

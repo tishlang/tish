@@ -7,7 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr,
-    FunParam, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, UnaryOp,
+    FunParam, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement,
+    TypeAnnotation, UnaryOp,
 };
 
 /// Tracks variable usage for move/clone optimization.
@@ -667,10 +668,20 @@ struct Codegen {
     usage_analyzer: Option<UsageAnalyzer>,
     /// Type context for tracking variable types (for static typing)
     type_context: TypeContext,
+    /// Registry of `type Foo = { ... }` declarations seen in the program.
+    /// Populated in a pre-pass so that any later `let x: Foo = ...` or
+    /// `fn f(x: Foo)` resolves to a `RustType::Named { name: "Foo", ... }`
+    /// and the codegen can emit a Rust struct + direct field access for
+    /// values of that type.
+    type_aliases: std::collections::HashMap<String, crate::types::RustType>,
     /// Program uses JSX; emit `tishlang_ui` imports and `h` / `Fragment` globals.
     program_has_jsx: bool,
     /// `fn` names for Rust JSX: PascalCase tags matching these use a value binding; others are string intrinsics.
     program_fun_decl_names: std::collections::HashSet<String>,
+    /// Nesting depth inside `Value::native(move |args| {{ ... }})` user functions / arrows.
+    /// `try`/`throw` lowering uses `return Err` only at depth 0 (e.g. `run()`); inside native
+    /// closures it must not return a `Result` from a `Value`-returning closure.
+    value_fn_depth: u32,
 }
 
 impl Codegen {
@@ -697,8 +708,191 @@ impl Codegen {
             rc_cell_storage_scopes: vec![std::collections::HashSet::new()],
             usage_analyzer: None,
             type_context: TypeContext::new(),
+            type_aliases: std::collections::HashMap::new(),
             program_has_jsx: false,
             program_fun_decl_names: std::collections::HashSet::new(),
+            value_fn_depth: 0,
+        }
+    }
+
+    /// Walk every `Statement::TypeAlias` in the program (including nested
+    /// ones inside blocks, ifs, loops, function bodies, and exports) and
+    /// register the resolved `RustType` under its alias name. Forward
+    /// references are handled by running this pass *before* any other
+    /// codegen step.
+    fn collect_type_aliases(&mut self, statements: &[Statement]) {
+        // Two passes so an alias `type B = A` can resolve `A` even if
+        // `A` is declared after `B` in source order.
+        let mut raw: Vec<(String, &TypeAnnotation)> = Vec::new();
+        Self::walk_type_aliases(statements, &mut raw);
+        // First-fixpoint resolution: keep iterating until no more aliases
+        // change shape. In practice 1–2 passes; capped to prevent infinite
+        // loops on (already rejected) self-referential aliases.
+        for _ in 0..8 {
+            let mut changed = false;
+            for (name, ann) in &raw {
+                let resolved = crate::types::RustType::from_annotation_with_aliases(
+                    ann,
+                    &self.type_aliases,
+                );
+                let prev: Option<crate::types::RustType> =
+                    self.type_aliases.get(name).cloned();
+                if prev.as_ref() != Some(&resolved) {
+                    self.type_aliases.insert(name.clone(), resolved);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    fn walk_type_aliases<'p>(
+        statements: &'p [Statement],
+        out: &mut Vec<(String, &'p TypeAnnotation)>,
+    ) {
+        for s in statements {
+            match s {
+                Statement::TypeAlias { name, ty, .. } => {
+                    out.push((name.to_string(), ty));
+                }
+                Statement::Block { statements, .. } => Self::walk_type_aliases(statements, out),
+                Statement::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::walk_type_aliases(std::slice::from_ref(then_branch.as_ref()), out);
+                    if let Some(e) = else_branch {
+                        Self::walk_type_aliases(std::slice::from_ref(e.as_ref()), out);
+                    }
+                }
+                Statement::For { body, .. }
+                | Statement::ForOf { body, .. }
+                | Statement::While { body, .. }
+                | Statement::DoWhile { body, .. } => {
+                    Self::walk_type_aliases(std::slice::from_ref(body.as_ref()), out);
+                }
+                Statement::Export { declaration, .. } => {
+                    if let tishlang_ast::ExportDeclaration::Named(s) = declaration.as_ref() {
+                        Self::walk_type_aliases(std::slice::from_ref(s.as_ref()), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Emit a Rust `struct` definition for every type alias whose RHS is
+    /// an object shape. Each generated struct derives `Clone` + `Debug`
+    /// (cheap; field types are all `Copy`-or-cheap-clone in practice) and
+    /// is named `TishStruct_<TishAlias>`.
+    fn emit_named_struct_decls(&mut self) {
+        // Snapshot keys + values so we can mutate `self` (writing the
+        // emitted source) inside the loop.
+        let mut entries: Vec<(String, crate::types::RustType)> =
+            self.type_aliases.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut emitted_any = false;
+        for (name, ty) in entries {
+            if let crate::types::RustType::Named { fields, .. }
+            | crate::types::RustType::Object(fields)
+            // ^^ also accept inline shapes registered as aliases — though
+            //    `from_annotation_with_aliases` should always have lifted
+            //    them to `Named` by now.
+                = &ty
+            {
+                let struct_name = crate::types::named_struct_ident(&name);
+                self.write(&format!("#[derive(Clone, Debug, Default)]\n"));
+                self.write("#[allow(non_snake_case, non_camel_case_types)]\n");
+                self.write(&format!("pub struct {} {{\n", struct_name));
+                for (k, t) in fields {
+                    self.write(&format!(
+                        "    pub {}: {},\n",
+                        crate::types::field_ident(k),
+                        t.to_rust_type_str()
+                    ));
+                }
+                self.write("}\n\n");
+
+                // Emit a hand-rolled JSON serialiser per struct so
+                // `JSON.stringify(typed_value)` (and `Vec<TishStruct_X>`)
+                // can bypass the `Value::Object` allocation entirely —
+                // we walk the struct's fields by name and write directly
+                // into the response buffer. ASCII-fast string escape is
+                // shared with the `Value` path via the
+                // `escape_json_string_into` helper that the runtime
+                // re-exports from `tishlang_core::json`.
+                self.write(&format!("impl {} {{\n", struct_name));
+                self.write("    pub fn _tish_write_json(&self, buf: &mut String) {\n");
+                self.write("        use std::fmt::Write as _;\n");
+                self.write("        buf.push('{');\n");
+                for (i, (k, t)) in fields.iter().enumerate() {
+                    let sep = if i == 0 { "{" } else { ",{" };
+                    let prefix = if i == 0 {
+                        format!("\"\\\"{}\\\":\"", k.as_ref())
+                    } else {
+                        format!("\",\\\"{}\\\":\"", k.as_ref())
+                    };
+                    let _ = sep; // (lint silence; we built `prefix` above directly)
+                    self.write(&format!("        buf.push_str({});\n", prefix));
+                    let access = format!("self.{}", crate::types::field_ident(k));
+                    match t {
+                        crate::types::RustType::F64 => {
+                            self.write(&format!(
+                                "        if {a}.is_nan() || {a}.is_infinite() {{ buf.push_str(\"null\"); }} else {{ let _ = write!(buf, \"{{}}\", {a}); }}\n",
+                                a = access
+                            ));
+                        }
+                        crate::types::RustType::Bool => {
+                            self.write(&format!(
+                                "        buf.push_str(if {} {{ \"true\" }} else {{ \"false\" }});\n",
+                                access
+                            ));
+                        }
+                        crate::types::RustType::String => {
+                            self.write(&format!(
+                                "        buf.push('\"'); tishlang_runtime::json::escape_into(buf, {}.as_str()); buf.push('\"');\n",
+                                access
+                            ));
+                        }
+                        crate::types::RustType::Named { .. } => {
+                            self.write(&format!(
+                                "        {}._tish_write_json(buf);\n",
+                                access
+                            ));
+                        }
+                        crate::types::RustType::Vec(inner) if matches!(
+                            inner.as_ref(),
+                            crate::types::RustType::Named { .. }
+                        ) => {
+                            self.write("        buf.push('[');\n");
+                            self.write(&format!(
+                                "        for (i, item) in {}.iter().enumerate() {{ if i > 0 {{ buf.push(','); }} item._tish_write_json(buf); }}\n",
+                                access
+                            ));
+                            self.write("        buf.push(']');\n");
+                        }
+                        _ => {
+                            // Fallback: convert the field to a Value and
+                            // delegate to the dynamic stringifier.
+                            let v_expr = t.to_value_expr(&access);
+                            self.write(&format!(
+                                "        let _v: Value = {}; tishlang_runtime::json::stringify_into(buf, &_v);\n",
+                                v_expr
+                            ));
+                        }
+                    }
+                }
+                self.write("        buf.push('}');\n");
+                self.write("    }\n");
+                self.write("}\n\n");
+                emitted_any = true;
+            }
+        }
+        if emitted_any {
+            self.write("\n");
         }
     }
 
@@ -744,39 +938,47 @@ impl Codegen {
     fn builtin_native_module_rust_init(&self, spec: &str, export_name: &str) -> Option<String> {
         let init = match spec {
             "tish:fs" if self.has_feature("fs") => match export_name {
-                    "readFile" => Some("Value::Function(Rc::new(|args: &[Value]| tish_read_file(args)))"),
-                    "writeFile" => Some("Value::Function(Rc::new(|args: &[Value]| tish_write_file(args)))"),
-                    "fileExists" => Some("Value::Function(Rc::new(|args: &[Value]| tish_file_exists(args)))"),
-                    "isDir" => Some("Value::Function(Rc::new(|args: &[Value]| tish_is_dir(args)))"),
-                    "readDir" => Some("Value::Function(Rc::new(|args: &[Value]| tish_read_dir(args)))"),
-                    "mkdir" => Some("Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)))"),
+                    "readFile" => Some("Value::native(|args: &[Value]| tish_read_file(args))"),
+                    "writeFile" => Some("Value::native(|args: &[Value]| tish_write_file(args))"),
+                    "fileExists" => Some("Value::native(|args: &[Value]| tish_file_exists(args))"),
+                    "isDir" => Some("Value::native(|args: &[Value]| tish_is_dir(args))"),
+                    "readDir" => Some("Value::native(|args: &[Value]| tish_read_dir(args))"),
+                    "mkdir" => Some("Value::native(|args: &[Value]| tish_mkdir(args))"),
                     _ => None,
                 },
             "tish:http" if self.has_feature("http") => match export_name {
-                    "fetch" => Some("Value::Function(Rc::new(|args: &[Value]| tish_fetch_promise(args.to_vec())))"),
-                    "fetchAll" => Some("Value::Function(Rc::new(|args: &[Value]| tish_fetch_all_promise(args.to_vec())))"),
-                    "serve" => Some("Value::Function(Rc::new(|args: &[Value]| { let port = args.first().cloned().unwrap_or(Value::Null); let handler = args.get(1).cloned().unwrap_or(Value::Null); if let Value::Function(f) = handler { tish_http_serve(args, move |req_args| f(req_args)) } else { Value::Null } }))"),
+                    "fetch" => Some("Value::native(|args: &[Value]| tish_fetch_promise(args.to_vec()))"),
+                    "fetchAll" => Some("Value::native(|args: &[Value]| tish_fetch_all_promise(args.to_vec()))"),
+                    // `serve(port, handler)` (single shared handler) or
+                    // `serve(port, { onWorker })` (per-worker factory). The
+                    // latter dispatches into `http_serve_per_worker`, which
+                    // calls onWorker once per accept thread to build that
+                    // thread's handler.
+                    "serve" => Some("Value::native(|args: &[Value]| { let handler = args.get(1).cloned().unwrap_or(Value::Null); match handler { Value::Function(f) => tish_http_serve(args, move |req_args| f(req_args)), Value::Object(ref opts) => { let factory = opts.borrow().get(&Arc::from(\"onWorker\")).cloned().unwrap_or(Value::Null); tishlang_runtime::http_serve_per_worker(args, factory) }, _ => Value::Null } })"),
                     "Promise" => Some("tish_promise_object()"),
-                    "setTimeout" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_set_timeout(args)))"),
-                    "setInterval" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_set_interval(args)))"),
-                    "clearTimeout" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_timeout(args)))"),
-                    "clearInterval" => Some("Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_interval(args)))"),
+                    _ => None,
+                },
+            "tish:timers" if self.has_feature("timers") => match export_name {
+                    "setTimeout" => Some("Value::native(|args: &[Value]| tish_timer_set_timeout(args))"),
+                    "setInterval" => Some("Value::native(|args: &[Value]| tish_timer_set_interval(args))"),
+                    "clearTimeout" => Some("Value::native(|args: &[Value]| tish_timer_clear_timeout(args))"),
+                    "clearInterval" => Some("Value::native(|args: &[Value]| tish_timer_clear_interval(args))"),
                     _ => None,
                 },
             "tish:process" if self.has_feature("process") => match export_name {
-                    "exit" => Some("Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args)))"),
-                    "cwd" => Some("Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args)))"),
-                    "exec" => Some("Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args)))"),
-                    "argv" => Some("Value::Array(Rc::new(RefCell::new(std::env::args().map(|s| Value::String(s.into())).collect())))"),
-                    "env" => Some("Value::Object(Rc::new(RefCell::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect())))"),
-                    "process" => Some("{ let mut m = ObjectMap::default(); m.insert(Arc::from(\"exit\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args)))); m.insert(Arc::from(\"cwd\"), Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args)))); m.insert(Arc::from(\"exec\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args)))); m.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(std::env::args().map(|s| Value::String(s.into())).collect())))); m.insert(Arc::from(\"env\"), Value::Object(Rc::new(RefCell::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect::<ObjectMap>())))); Value::Object(Rc::new(RefCell::new(m))) }"),
+                    "exit" => Some("Value::native(|args: &[Value]| tish_process_exit(args))"),
+                    "cwd" => Some("Value::native(|args: &[Value]| tish_process_cwd(args))"),
+                    "exec" => Some("Value::native(|args: &[Value]| tish_process_exec(args))"),
+                    "argv" => Some("Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))"),
+                    "env" => Some("Value::Object(VmRef::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect()))"),
+                    "process" => Some("{ let mut m = ObjectMap::default(); m.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args))); m.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args))); m.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args))); m.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))); m.insert(Arc::from(\"env\"), Value::Object(VmRef::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect::<ObjectMap>()))); Value::Object(VmRef::new(m)) }"),
                     _ => None,
                 },
             "tish:ws" if self.has_feature("ws") => match export_name {
-                    "WebSocket" => Some("Value::Function(Rc::new(|args: &[Value]| tish_ws_client(args)))"),
-                    "Server" => Some("Value::Function(Rc::new(|args: &[Value]| tish_ws_server_construct(args)))"),
-                    "wsSend" => Some("Value::Function(Rc::new(|args: &[Value]| Value::Bool(tishlang_runtime::ws_send_native(args.first().unwrap_or(&Value::Null), &args.get(1).map(|v| v.to_display_string()).unwrap_or_default()))))"),
-                    "wsBroadcast" => Some("Value::Function(Rc::new(|args: &[Value]| tishlang_runtime::ws_broadcast_native(args)))"),
+                    "WebSocket" => Some("Value::native(|args: &[Value]| tish_ws_client(args))"),
+                    "Server" => Some("Value::native(|args: &[Value]| tish_ws_server_construct(args))"),
+                    "wsSend" => Some("Value::native(|args: &[Value]| Value::Bool(tishlang_runtime::ws_send_native(args.first().unwrap_or(&Value::Null), &args.get(1).map(|v| v.to_display_string()).unwrap_or_default())))"),
+                    "wsBroadcast" => Some("Value::native(|args: &[Value]| tishlang_runtime::ws_broadcast_native(args))"),
                     _ => None,
                 },
             _ => return None,
@@ -786,7 +988,7 @@ impl Codegen {
 
     fn has_feature(&self, name: &str) -> bool {
         if self.features.contains("full") {
-            matches!(name, "http" | "fs" | "process" | "regex" | "ws")
+            matches!(name, "http" | "timers" | "fs" | "process" | "regex" | "ws")
         } else {
             self.features.contains(name)
         }
@@ -1024,18 +1226,21 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, register_static_route as tish_register_static_route, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
         if self.has_feature("process") {
             self.write("use tishlang_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd, process_exec as tish_process_exec};\n");
         }
+        if self.has_feature("timers") {
+            self.write("use tishlang_runtime::{timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, timer_set_interval as tish_timer_set_interval, timer_clear_interval as tish_timer_clear_interval};\n");
+        }
         if self.has_feature("http") {
             if self.is_async {
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, timer_set_interval as tish_timer_set_interval, timer_clear_interval as tish_timer_clear_interval, promise_object as tish_promise_object, await_promise as tish_await_promise};\n");
+                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, promise_object as tish_promise_object, await_promise as tish_await_promise};\n");
             } else {
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, timer_set_interval as tish_timer_set_interval, timer_clear_interval as tish_timer_clear_interval};\n");
+                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve};\n");
             }
         }
         if self.has_feature("fs") {
@@ -1048,6 +1253,19 @@ impl Codegen {
             self.write("use tishlang_runtime::regexp_new;\n");
         }
         self.write("\n");
+
+        // Collect every `type Foo = { ... }` declaration in the program
+        // (recursive, so they can also live inside blocks / branches) and
+        // canonicalise each into a `RustType::Named` with its field list.
+        // Aliases that resolve to a non-Object shape (e.g. `type N = number`)
+        // are stored too, so later annotations like `let x: N = 0` still
+        // pick up the right native type.
+        self.collect_type_aliases(&program.statements);
+        // Emit a Rust `struct` for every alias whose RHS is an object
+        // shape. Subsequent `let x: Foo = ...` literals lower to plain
+        // struct moves (no `VmRef::new(ObjectMap::from(..))` allocation),
+        // and `x.field` becomes a direct field access.
+        self.emit_named_struct_decls();
 
         if self.is_async {
             self.writeln("#[tokio::main]");
@@ -1077,126 +1295,132 @@ impl Codegen {
         self.indent += 1;
 
         // Initialize builtins
-        self.writeln("let mut console = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("let mut console = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"debug\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_debug(args); Value::Null }))),");
-        self.writeln("(Arc::from(\"info\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_info(args); Value::Null }))),");
-        self.writeln("(Arc::from(\"log\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_log(args); Value::Null }))),");
-        self.writeln("(Arc::from(\"warn\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_warn(args); Value::Null }))),");
-        self.writeln("(Arc::from(\"error\"), Value::Function(Rc::new(|args: &[Value]| { tish_console_error(args); Value::Null }))),");
+        self.writeln("(Arc::from(\"debug\"), Value::native(|args: &[Value]| { tish_console_debug(args); Value::Null })),");
+        self.writeln("(Arc::from(\"info\"), Value::native(|args: &[Value]| { tish_console_info(args); Value::Null })),");
+        self.writeln("(Arc::from(\"log\"), Value::native(|args: &[Value]| { tish_console_log(args); Value::Null })),");
+        self.writeln("(Arc::from(\"warn\"), Value::native(|args: &[Value]| { tish_console_warn(args); Value::Null })),");
+        self.writeln("(Arc::from(\"error\"), Value::native(|args: &[Value]| { tish_console_error(args); Value::Null })),");
         self.indent -= 1;
-        self.writeln("]))));");
+        self.writeln("])));");
         self.writeln(
-            "let Boolean = Value::Function(Rc::new(|args: &[Value]| tish_boolean(args)));",
+            "let Boolean = Value::native(|args: &[Value]| tish_boolean(args));",
         );
         self.writeln(
-            "let parseInt = Value::Function(Rc::new(|args: &[Value]| tish_parse_int(args)));",
+            "let parseInt = Value::native(|args: &[Value]| tish_parse_int(args));",
         );
         self.writeln(
-            "let parseFloat = Value::Function(Rc::new(|args: &[Value]| tish_parse_float(args)));",
+            "let parseFloat = Value::native(|args: &[Value]| tish_parse_float(args));",
         );
         self.writeln(
-            "let decodeURI = Value::Function(Rc::new(|args: &[Value]| tish_decode_uri(args)));",
+            "let decodeURI = Value::native(|args: &[Value]| tish_decode_uri(args));",
         );
         self.writeln(
-            "let encodeURI = Value::Function(Rc::new(|args: &[Value]| tish_encode_uri(args)));",
+            "let encodeURI = Value::native(|args: &[Value]| tish_encode_uri(args));",
         );
         self.writeln(
-            "let isFinite = Value::Function(Rc::new(|args: &[Value]| tish_is_finite(args)));",
+            r#"let registerStaticRoute = Value::native(|args: &[Value]| { let path = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => return Value::Null }; let body = match args.get(1) { Some(Value::String(s)) => s.as_bytes().to_vec(), _ => return Value::Null }; let ct = match args.get(2) { Some(Value::String(s)) => s.to_string(), _ => "application/octet-stream".to_string() }; tish_register_static_route(&path, &body, &ct); Value::Null });"#,
         );
-        self.writeln("let isNaN = Value::Function(Rc::new(|args: &[Value]| tish_is_nan(args)));");
+        self.writeln(
+            "let htmlEscape = Value::native(|args: &[Value]| tish_escape_html(args.first().unwrap_or(&Value::Null)));",
+        );
+        self.writeln(
+            "let isFinite = Value::native(|args: &[Value]| tish_is_finite(args));",
+        );
+        self.writeln("let isNaN = Value::native(|args: &[Value]| tish_is_nan(args));");
         self.writeln("let Infinity = Value::Number(f64::INFINITY);");
         self.writeln("let NaN = Value::Number(f64::NAN);");
-        self.writeln("let Math = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("let Math = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
         self.writeln(
-            "(Arc::from(\"abs\"), Value::Function(Rc::new(|args: &[Value]| tish_math_abs(args)))),",
+            "(Arc::from(\"abs\"), Value::native(|args: &[Value]| tish_math_abs(args))),",
         );
-        self.writeln("(Arc::from(\"sqrt\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sqrt(args)))),");
+        self.writeln("(Arc::from(\"sqrt\"), Value::native(|args: &[Value]| tish_math_sqrt(args))),");
         self.writeln(
-            "(Arc::from(\"min\"), Value::Function(Rc::new(|args: &[Value]| tish_math_min(args)))),",
-        );
-        self.writeln(
-            "(Arc::from(\"max\"), Value::Function(Rc::new(|args: &[Value]| tish_math_max(args)))),",
-        );
-        self.writeln("(Arc::from(\"floor\"), Value::Function(Rc::new(|args: &[Value]| tish_math_floor(args)))),");
-        self.writeln("(Arc::from(\"ceil\"), Value::Function(Rc::new(|args: &[Value]| tish_math_ceil(args)))),");
-        self.writeln("(Arc::from(\"round\"), Value::Function(Rc::new(|args: &[Value]| tish_math_round(args)))),");
-        self.writeln("(Arc::from(\"random\"), Value::Function(Rc::new(|args: &[Value]| tish_math_random(args)))),");
-        self.writeln(
-            "(Arc::from(\"pow\"), Value::Function(Rc::new(|args: &[Value]| tish_math_pow(args)))),",
+            "(Arc::from(\"min\"), Value::native(|args: &[Value]| tish_math_min(args))),",
         );
         self.writeln(
-            "(Arc::from(\"sin\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sin(args)))),",
+            "(Arc::from(\"max\"), Value::native(|args: &[Value]| tish_math_max(args))),",
+        );
+        self.writeln("(Arc::from(\"floor\"), Value::native(|args: &[Value]| tish_math_floor(args))),");
+        self.writeln("(Arc::from(\"ceil\"), Value::native(|args: &[Value]| tish_math_ceil(args))),");
+        self.writeln("(Arc::from(\"round\"), Value::native(|args: &[Value]| tish_math_round(args))),");
+        self.writeln("(Arc::from(\"random\"), Value::native(|args: &[Value]| tish_math_random(args))),");
+        self.writeln(
+            "(Arc::from(\"pow\"), Value::native(|args: &[Value]| tish_math_pow(args))),",
         );
         self.writeln(
-            "(Arc::from(\"cos\"), Value::Function(Rc::new(|args: &[Value]| tish_math_cos(args)))),",
+            "(Arc::from(\"sin\"), Value::native(|args: &[Value]| tish_math_sin(args))),",
         );
         self.writeln(
-            "(Arc::from(\"tan\"), Value::Function(Rc::new(|args: &[Value]| tish_math_tan(args)))),",
+            "(Arc::from(\"cos\"), Value::native(|args: &[Value]| tish_math_cos(args))),",
         );
         self.writeln(
-            "(Arc::from(\"log\"), Value::Function(Rc::new(|args: &[Value]| tish_math_log(args)))),",
+            "(Arc::from(\"tan\"), Value::native(|args: &[Value]| tish_math_tan(args))),",
         );
         self.writeln(
-            "(Arc::from(\"exp\"), Value::Function(Rc::new(|args: &[Value]| tish_math_exp(args)))),",
+            "(Arc::from(\"log\"), Value::native(|args: &[Value]| tish_math_log(args))),",
         );
-        self.writeln("(Arc::from(\"sign\"), Value::Function(Rc::new(|args: &[Value]| tish_math_sign(args)))),");
-        self.writeln("(Arc::from(\"trunc\"), Value::Function(Rc::new(|args: &[Value]| tish_math_trunc(args)))),");
+        self.writeln(
+            "(Arc::from(\"exp\"), Value::native(|args: &[Value]| tish_math_exp(args))),",
+        );
+        self.writeln("(Arc::from(\"sign\"), Value::native(|args: &[Value]| tish_math_sign(args))),");
+        self.writeln("(Arc::from(\"trunc\"), Value::native(|args: &[Value]| tish_math_trunc(args))),");
         self.writeln("(Arc::from(\"PI\"), Value::Number(std::f64::consts::PI)),");
         self.writeln("(Arc::from(\"E\"), Value::Number(std::f64::consts::E)),");
         self.indent -= 1;
-        self.writeln("]))));");
-        self.writeln("let JSON = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("])));");
+        self.writeln("let JSON = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"parse\"), Value::Function(Rc::new(|args: &[Value]| tish_json_parse(args)))),");
-        self.writeln("(Arc::from(\"stringify\"), Value::Function(Rc::new(|args: &[Value]| tish_json_stringify(args)))),");
+        self.writeln("(Arc::from(\"parse\"), Value::native(|args: &[Value]| tish_json_parse(args))),");
+        self.writeln("(Arc::from(\"stringify\"), Value::native(|args: &[Value]| tish_json_stringify(args))),");
         self.indent -= 1;
-        self.writeln("]))));");
+        self.writeln("])));");
 
-        self.writeln("let Array = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("let Array = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"isArray\"), Value::Function(Rc::new(|args: &[Value]| tish_array_is_array(args)))),");
+        self.writeln("(Arc::from(\"isArray\"), Value::native(|args: &[Value]| tish_array_is_array(args))),");
         self.indent -= 1;
-        self.writeln("]))));");
+        self.writeln("])));");
 
-        self.writeln("let String = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("let String = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"fromCharCode\"), Value::Function(Rc::new(|args: &[Value]| tish_string_from_char_code(args)))),");
+        self.writeln("(Arc::from(\"fromCharCode\"), Value::native(|args: &[Value]| tish_string_from_char_code(args))),");
         self.indent -= 1;
-        self.writeln("]))));");
+        self.writeln("])));");
 
-        self.writeln("let Date = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("let Date = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
         self.writeln(
-            "(Arc::from(\"now\"), Value::Function(Rc::new(|args: &[Value]| tish_date_now(args)))),",
+            "(Arc::from(\"now\"), Value::native(|args: &[Value]| tish_date_now(args))),",
         );
         self.indent -= 1;
-        self.writeln("]))));");
+        self.writeln("])));");
 
-        self.writeln("let Object = Value::Object(Rc::new(RefCell::new(ObjectMap::from([");
+        self.writeln("let Object = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"assign\"), Value::Function(Rc::new(|args: &[Value]| tish_object_assign(args)))),");
-        self.writeln("(Arc::from(\"keys\"), Value::Function(Rc::new(|args: &[Value]| tish_object_keys(args)))),");
-        self.writeln("(Arc::from(\"values\"), Value::Function(Rc::new(|args: &[Value]| tish_object_values(args)))),");
-        self.writeln("(Arc::from(\"entries\"), Value::Function(Rc::new(|args: &[Value]| tish_object_entries(args)))),");
-        self.writeln("(Arc::from(\"fromEntries\"), Value::Function(Rc::new(|args: &[Value]| tish_object_from_entries(args)))),");
+        self.writeln("(Arc::from(\"assign\"), Value::native(|args: &[Value]| tish_object_assign(args))),");
+        self.writeln("(Arc::from(\"keys\"), Value::native(|args: &[Value]| tish_object_keys(args))),");
+        self.writeln("(Arc::from(\"values\"), Value::native(|args: &[Value]| tish_object_values(args))),");
+        self.writeln("(Arc::from(\"entries\"), Value::native(|args: &[Value]| tish_object_entries(args))),");
+        self.writeln("(Arc::from(\"fromEntries\"), Value::native(|args: &[Value]| tish_object_from_entries(args))),");
         self.indent -= 1;
-        self.writeln("]))));");
+        self.writeln("])));");
 
         self.writeln("let Uint8Array = tish_uint8_array_constructor();");
         self.writeln("let AudioContext = tish_audio_context_constructor();");
 
         if self.has_feature("process") {
-            self.writeln("let process = Value::Object(Rc::new(RefCell::new({");
+            self.writeln("let process = Value::Object(VmRef::new({");
             self.indent += 1;
             self.writeln("let mut p = ObjectMap::default();");
-            self.writeln("p.insert(Arc::from(\"exit\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exit(args))));");
-            self.writeln("p.insert(Arc::from(\"cwd\"), Value::Function(Rc::new(|args: &[Value]| tish_process_cwd(args))));");
-            self.writeln("p.insert(Arc::from(\"exec\"), Value::Function(Rc::new(|args: &[Value]| tish_process_exec(args))));");
+            self.writeln("p.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args)));");
+            self.writeln("p.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args)));");
+            self.writeln("p.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args)));");
             self.writeln("let argv: Vec<Value> = std::env::args().map(|s| Value::String(s.into())).collect();");
             self.writeln(
-                "p.insert(Arc::from(\"argv\"), Value::Array(Rc::new(RefCell::new(argv))));",
+                "p.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(argv)));",
             );
             self.writeln("let mut env_obj = ObjectMap::default();");
             self.writeln("for (key, value) in std::env::vars() {");
@@ -1205,74 +1429,86 @@ impl Codegen {
             self.indent -= 1;
             self.writeln("}");
             self.writeln(
-                "p.insert(Arc::from(\"env\"), Value::Object(Rc::new(RefCell::new(env_obj))));",
+                "p.insert(Arc::from(\"env\"), Value::Object(VmRef::new(env_obj)));",
             );
             self.writeln("p");
-            self.indent -= 1;
-            self.writeln("})));");
-        }
-
-        if self.has_feature("http") {
-            self.writeln("let fetch = Value::Function(Rc::new(|args: &[Value]| tish_fetch_promise(args.to_vec())));");
-            self.writeln("let fetchAll = Value::Function(Rc::new(|args: &[Value]| tish_fetch_all_promise(args.to_vec())));");
-            self.writeln("let setTimeout = Value::Function(Rc::new(|args: &[Value]| tish_timer_set_timeout(args)));");
-            self.writeln("let clearTimeout = Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_timeout(args)));");
-            self.writeln("let setInterval = Value::Function(Rc::new(|args: &[Value]| tish_timer_set_interval(args)));");
-            self.writeln("let clearInterval = Value::Function(Rc::new(|args: &[Value]| tish_timer_clear_interval(args)));");
-            if self.is_async {
-                self.writeln("let Promise = tish_promise_object();");
-            }
-            self.writeln("let serve = Value::Function(Rc::new(|args: &[Value]| {");
-            self.indent += 1;
-            self.writeln("let port = args.first().cloned().unwrap_or(Value::Null);");
-            self.writeln("let handler = args.get(1).cloned().unwrap_or(Value::Null);");
-            self.writeln("if let Value::Function(f) = handler {");
-            self.indent += 1;
-            self.writeln("tish_http_serve(args, move |req_args| f(req_args))");
-            self.indent -= 1;
-            self.writeln("} else {");
-            self.indent += 1;
-            self.writeln("Value::Null");
-            self.indent -= 1;
-            self.writeln("}");
             self.indent -= 1;
             self.writeln("}));");
         }
 
+        if self.has_feature("timers") {
+            self.writeln("let setTimeout = Value::native(|args: &[Value]| tish_timer_set_timeout(args));");
+            self.writeln("let clearTimeout = Value::native(|args: &[Value]| tish_timer_clear_timeout(args));");
+            self.writeln("let setInterval = Value::native(|args: &[Value]| tish_timer_set_interval(args));");
+            self.writeln("let clearInterval = Value::native(|args: &[Value]| tish_timer_clear_interval(args));");
+        }
+        if self.has_feature("http") {
+            self.writeln("let fetch = Value::native(|args: &[Value]| tish_fetch_promise(args.to_vec()));");
+            self.writeln("let fetchAll = Value::native(|args: &[Value]| tish_fetch_all_promise(args.to_vec()));");
+            if self.is_async {
+                self.writeln("let Promise = tish_promise_object();");
+            }
+            // `serve` supports two shapes:
+            //   1. serve(port, handler)            // single shared handler
+            //   2. serve(port, { onWorker: (workerId) => handler, ... })
+            //
+            // Shape (2) lets users build per-worker state (DB connection,
+            // cache, counter, ...) without a global mutex. The runtime
+            // dispatches each accept thread to its own handler, all in
+            // parallel under `send-values`.
+            self.writeln("let serve = Value::native(|args: &[Value]| {");
+            self.indent += 1;
+            self.writeln("let handler = args.get(1).cloned().unwrap_or(Value::Null);");
+            self.writeln("match handler {");
+            self.indent += 1;
+            self.writeln("Value::Function(f) => tish_http_serve(args, move |req_args| f(req_args)),");
+            self.writeln("Value::Object(ref opts) => {");
+            self.indent += 1;
+            self.writeln("let factory = opts.borrow().get(&Arc::from(\"onWorker\")).cloned().unwrap_or(Value::Null);");
+            self.writeln("tishlang_runtime::http_serve_per_worker(args, factory)");
+            self.indent -= 1;
+            self.writeln("},");
+            self.writeln("_ => Value::Null,");
+            self.indent -= 1;
+            self.writeln("}");
+            self.indent -= 1;
+            self.writeln("});");
+        }
+
         if self.has_feature("fs") {
             self.writeln(
-                "let readFile = Value::Function(Rc::new(|args: &[Value]| tish_read_file(args)));",
+                "let readFile = Value::native(|args: &[Value]| tish_read_file(args));",
             );
             self.writeln(
-                "let writeFile = Value::Function(Rc::new(|args: &[Value]| tish_write_file(args)));",
+                "let writeFile = Value::native(|args: &[Value]| tish_write_file(args));",
             );
-            self.writeln("let fileExists = Value::Function(Rc::new(|args: &[Value]| tish_file_exists(args)));");
+            self.writeln("let fileExists = Value::native(|args: &[Value]| tish_file_exists(args));");
             self.writeln(
-                "let isDir = Value::Function(Rc::new(|args: &[Value]| tish_is_dir(args)));",
-            );
-            self.writeln(
-                "let readDir = Value::Function(Rc::new(|args: &[Value]| tish_read_dir(args)));",
+                "let isDir = Value::native(|args: &[Value]| tish_is_dir(args));",
             );
             self.writeln(
-                "let mkdir = Value::Function(Rc::new(|args: &[Value]| tish_mkdir(args)));",
+                "let readDir = Value::native(|args: &[Value]| tish_read_dir(args));",
+            );
+            self.writeln(
+                "let mkdir = Value::native(|args: &[Value]| tish_mkdir(args));",
             );
         }
 
         if self.has_feature("regex") {
             self.writeln(
-                "let RegExp = Value::Function(Rc::new(|args: &[Value]| regexp_new(args)));",
+                "let RegExp = Value::native(|args: &[Value]| regexp_new(args));",
             );
         }
 
         if self.program_has_jsx {
             self.writeln("install_thread_local_host(Box::new(HeadlessHost::default()));");
             self.writeln("let Fragment = fragment_value();");
-            self.writeln("let h = Value::Function(Rc::new(|args: &[Value]| ui_h(args)));");
-            self.writeln("let text = Value::Function(Rc::new(|args: &[Value]| ui_text(args)));");
+            self.writeln("let h = Value::native(|args: &[Value]| ui_h(args));");
+            self.writeln("let text = Value::native(|args: &[Value]| ui_text(args));");
             self.writeln(
-                "let useState = Value::Function(Rc::new(|args: &[Value]| native_use_state(args)));",
+                "let useState = Value::native(|args: &[Value]| native_use_state(args));",
             );
-            self.writeln("let createRoot = Value::Function(Rc::new(|args: &[Value]| native_create_root(args)));");
+            self.writeln("let createRoot = Value::native(|args: &[Value]| native_create_root(args));");
         }
 
         // Polars, Egui etc. are emitted via VarDecl from import { X } from 'tish:...'
@@ -1283,7 +1519,7 @@ impl Codegen {
         for func_name in &top_level_funcs {
             let escaped = Self::escape_ident(func_name);
             self.writeln(&format!(
-                "let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));",
+                "let {}_cell: VmRef<Value> = VmRef::new(Value::Null);",
                 escaped
             ));
         }
@@ -1337,7 +1573,7 @@ impl Codegen {
                 for func_name in &func_names {
                     let escaped = Self::escape_ident(func_name);
                     self.writeln(&format!(
-                        "let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));",
+                        "let {}_cell: VmRef<Value> = VmRef::new(Value::Null);",
                         escaped
                     ));
                 }
@@ -1361,10 +1597,15 @@ impl Codegen {
                 init,
                 ..
             } => {
-                // Determine the Rust type from annotation
+                // Determine the Rust type from annotation, consulting the
+                // user-declared `type` aliases so a `let x: World = ...`
+                // resolves to `RustType::Named { name: "World", fields }`
+                // and we can emit a struct move instead of a Value box.
                 let rust_type = type_ann
                     .as_ref()
-                    .map(RustType::from_annotation)
+                    .map(|t| {
+                        crate::types::RustType::from_annotation_with_aliases(t, &self.type_aliases)
+                    })
                     .unwrap_or(RustType::Value);
 
                 // Track the variable type
@@ -1382,7 +1623,7 @@ impl Codegen {
                     if self.refcell_wrapped_vars.contains(name.as_ref()) {
                         // Closure-mutated: same Rc<RefCell<T>> pattern as Value (assignments use borrow_mut)
                         self.writeln(&format!(
-                            "let {} = std::rc::Rc::new(RefCell::new({}));",
+                            "let {} = VmRef::new({});",
                             escaped_name, expr_str
                         ));
                         self.rc_cell_storage_define(name.as_ref());
@@ -1413,7 +1654,7 @@ impl Codegen {
                             expr_str.to_string()
                         };
                         self.writeln(&format!(
-                            "let {} = std::rc::Rc::new(RefCell::new({}));",
+                            "let {} = VmRef::new({});",
                             escaped_name, init_val
                         ));
                         self.rc_cell_storage_define(name.as_ref());
@@ -1655,10 +1896,17 @@ impl Codegen {
             }
             Statement::Throw { value, .. } => {
                 let v = self.emit_expr(value)?;
-                self.writeln(&format!(
-                    "return Err(Box::new(tishlang_runtime::TishError::Throw({})) as Box<dyn std::error::Error>);",
-                    v
-                ));
+                if self.value_fn_depth > 0 {
+                    self.writeln(&format!(
+                        "{{ let _th = {}; panic!(\"uncaught throw: {{}}\", _th.to_display_string()); }}",
+                        v
+                    ));
+                } else {
+                    self.writeln(&format!(
+                        "return Err(Box::new(tishlang_runtime::TishError::Throw({})) as Box<dyn std::error::Error>);",
+                        v
+                    ));
+                }
             }
             Statement::Try {
                 body,
@@ -1688,10 +1936,22 @@ impl Codegen {
                             Self::escape_ident(param.as_ref())
                         ));
                         self.emit_statement(catch_stmt)?;
-                        self.writeln("} else { return Err(Box::new(tish_err)); }");
+                        if self.value_fn_depth > 0 {
+                            self.writeln(
+                                "} else { panic!(\"unhandled error in native Tish: {:?}\", *tish_err); }",
+                            );
+                        } else {
+                            self.writeln("} else { return Err(Box::new(tish_err)); }");
+                        }
                         self.indent -= 1;
                         self.writeln("}");
-                        self.writeln("Err(orig) => return Err(orig),");
+                        if self.value_fn_depth > 0 {
+                            self.writeln(
+                                "Err(orig) => panic!(\"non-Tish error in native Tish: {:?}\", orig),",
+                            );
+                        } else {
+                            self.writeln("Err(orig) => return Err(orig),");
+                        }
                         self.indent -= 1;
                         self.writeln("}");
                         self.indent -= 1;
@@ -1728,7 +1988,7 @@ impl Codegen {
                     .unwrap_or(false);
                 if !cell_exists {
                     self.writeln(&format!(
-                        "let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));",
+                        "let {}_cell: VmRef<Value> = VmRef::new(Value::Null);",
                         name_str
                     ));
                 }
@@ -1769,6 +2029,7 @@ impl Codegen {
                             "Math",
                             "JSON",
                             "Date",
+                            "Object",
                             "process",
                             "setTimeout",
                             "clearTimeout",
@@ -1808,7 +2069,7 @@ impl Codegen {
                         ));
                     } else {
                         self.writeln(&format!(
-                            "let {}_cell = std::rc::Rc::new(RefCell::new({}.clone()));",
+                            "let {}_cell = VmRef::new({}.clone());",
                             var_escaped, var_escaped
                         ));
                     }
@@ -1866,6 +2127,7 @@ impl Codegen {
                     "Math",
                     "JSON",
                     "Date",
+                    "Object",
                     "Uint8Array",
                     "AudioContext",
                     "process",
@@ -1876,12 +2138,29 @@ impl Codegen {
                     "Promise",
                     "RegExp",
                     "Polars",
+                    // Free-standing global functions used inside user-defined
+                    // functions also need to be cloned into the closure
+                    // capture, or the emitted Rust hits E0382 (moved value)
+                    // at the closure's defining `let`.
+                    "parseInt",
+                    "parseFloat",
+                    "isNaN",
+                    "isFinite",
+                    "encodeURI",
+                    "decodeURI",
+                    "htmlEscape",
+                    "registerStaticRoute",
+                    "String",
+                    "Infinity",
+                    "NaN",
+                    "serve",
                 ] {
                     if referenced.contains(*builtin) {
                         self.writeln(&format!("let {} = {}.clone();", builtin, builtin));
                     }
                 }
-                self.writeln("Value::Function(Rc::new(move |args: &[Value]| {");
+                self.writeln("Value::native(move |args: &[Value]| {");
+                self.value_fn_depth += 1;
                 self.indent += 1;
                 // Mutable outer vars: capture the RefCell so assignments use borrow_mut
                 for outer_var in &mutable_outer_vars {
@@ -1942,67 +2221,81 @@ impl Codegen {
                 }
                 if let Some(rest) = rest_param {
                     self.writeln(&format!(
-                        "let {} = Value::Array(std::rc::Rc::new(RefCell::new(args[{}..].to_vec())));",
+                        "let {} = Value::Array(VmRef::new(args[{}..].to_vec()));",
                         Self::escape_ident(rest.name.as_ref()),
                         params.len()
                     ));
                 }
 
-                // Push current params to stack for nested functions
-                self.outer_params_stack.push(current_param_names);
+                self.type_context
+                    .push_fun_param_scope(params, rest_param.as_ref());
 
-                // Function bodies are sync closures (even Tish async fn) - use block_on for await
-                self.async_context_stack.push(false);
+                let fun_body_res: Result<(), CompileError> = (|| -> Result<(), CompileError> {
+                    // Push current params to stack for nested functions
+                    self.outer_params_stack.push(current_param_names);
 
-                // Mutable outer vars must be in refcell_wrapped_vars so Assign/CompoundAssign emit borrow_mut
-                let saved_refcell = self.refcell_wrapped_vars.clone();
-                for v in &mutable_outer_vars {
-                    self.refcell_wrapped_vars.insert(v.clone());
-                }
+                    // Function bodies are sync closures (even Tish async fn) - use block_on for await
+                    self.async_context_stack.push(false);
 
-                // Pre-scan body for nested functions (handles function body as Block)
-                if let Statement::Block { statements, .. } = body.as_ref() {
-                    let nested_func_names = self.prescan_function_decls(statements);
-                    self.function_scope_stack.push(nested_func_names.clone());
-                    self.outer_vars_stack.push(Vec::new());
-                    self.rc_cell_storage_scopes
-                        .push(std::collections::HashSet::new());
-                    // Create cells for nested functions
-                    for func_name in &nested_func_names {
-                        let escaped = Self::escape_ident(func_name);
-                        self.writeln(&format!(
-                            "let {}_cell: Rc<RefCell<Value>> = Rc::new(RefCell::new(Value::Null));",
-                            escaped
-                        ));
+                    // Mutable outer vars must be in refcell_wrapped_vars so Assign/CompoundAssign emit borrow_mut
+                    let saved_refcell = self.refcell_wrapped_vars.clone();
+                    for v in &mutable_outer_vars {
+                        self.refcell_wrapped_vars.insert(v.clone());
                     }
-                    for s in statements {
-                        self.emit_statement(s)?;
+
+                    // Pre-scan body for nested functions (handles function body as Block)
+                    if let Statement::Block { statements, .. } = body.as_ref() {
+                        let nested_func_names = self.prescan_function_decls(statements);
+                        self.function_scope_stack.push(nested_func_names.clone());
+                        self.outer_vars_stack.push(Vec::new());
+                        self.rc_cell_storage_scopes
+                            .push(std::collections::HashSet::new());
+                        // Create cells for nested functions
+                        for func_name in &nested_func_names {
+                            let escaped = Self::escape_ident(func_name);
+                            self.writeln(&format!(
+                                "let {}_cell: VmRef<Value> = VmRef::new(Value::Null);",
+                                escaped
+                            ));
+                        }
+                        for s in statements {
+                            self.emit_statement(s)?;
+                        }
+                        self.function_scope_stack.pop();
+                        self.outer_vars_stack.pop();
+                        self.rc_cell_storage_scopes.pop();
+                    } else {
+                        self.function_scope_stack.push(Vec::new());
+                        self.outer_vars_stack.push(Vec::new());
+                        self.rc_cell_storage_scopes
+                            .push(std::collections::HashSet::new());
+                        self.emit_statement(body)?;
+                        self.function_scope_stack.pop();
+                        self.outer_vars_stack.pop();
+                        self.rc_cell_storage_scopes.pop();
                     }
-                    self.function_scope_stack.pop();
-                    self.outer_vars_stack.pop();
-                    self.rc_cell_storage_scopes.pop();
-                } else {
-                    self.function_scope_stack.push(Vec::new());
-                    self.outer_vars_stack.push(Vec::new());
-                    self.rc_cell_storage_scopes
-                        .push(std::collections::HashSet::new());
-                    self.emit_statement(body)?;
-                    self.function_scope_stack.pop();
-                    self.outer_vars_stack.pop();
-                    self.rc_cell_storage_scopes.pop();
+
+                    self.async_context_stack.pop();
+
+                    // Restore refcell_wrapped_vars (remove mutable outer vars we added)
+                    self.refcell_wrapped_vars = saved_refcell;
+
+                    // Pop params stack
+                    self.outer_params_stack.pop();
+
+                    Ok(())
+                })();
+
+                self.type_context.pop_scope();
+                if let Err(e) = fun_body_res {
+                    self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
+                    return Err(e);
                 }
-
-                self.async_context_stack.pop();
-
-                // Restore refcell_wrapped_vars (remove mutable outer vars we added)
-                self.refcell_wrapped_vars = saved_refcell;
-
-                // Pop params stack
-                self.outer_params_stack.pop();
 
                 self.writeln("Value::Null");
                 self.indent -= 1;
-                self.writeln("}))");
+                self.writeln("})");
+                self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
                 self.indent -= 1;
                 self.writeln("};");
                 // Update the cell with the actual function value
@@ -2099,7 +2392,7 @@ impl Codegen {
                             }
                             DestructElement::Rest(name, _) => {
                                 self.writeln(&format!(
-                                    "{} {} = match &({}) {{ Value::Array(ref _a) => {{ let _b = _a.borrow(); Value::Array(Rc::new(RefCell::new(_b.iter().skip({}).cloned().collect()))) }}, _ => Value::Array(Rc::new(RefCell::new(Vec::new()))) }};",
+                                    "{} {} = match &({}) {{ Value::Array(ref _a) => {{ let _b = _a.borrow(); Value::Array(VmRef::new(_b.iter().skip({}).cloned().collect())) }}, _ => Value::Array(VmRef::new(Vec::new())) }};",
                                     mutability,
                                     Self::escape_ident(name.as_ref()),
                                     value_expr,
@@ -2238,6 +2531,51 @@ impl Codegen {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                // Typed-struct shortcut for `JSON.stringify(typedValue)`.
+                // When the single arg has a known native type that owns a
+                // hand-rolled `_tish_write_json` (struct or `Vec<struct>`),
+                // emit a direct write into a String buffer and skip the
+                // entire `Value::Object` / `Value::Array` allocation
+                // round-trip + the dynamic stringifier walk. Wraps the
+                // result in `Value::String` for the caller, which is what
+                // the existing `JSON.stringify` returned anyway.
+                if let Expr::Member {
+                    object,
+                    prop: MemberProp::Name { name: method_name, .. },
+                    ..
+                } = callee.as_ref()
+                {
+                    if method_name.as_ref() == "stringify"
+                        && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "JSON")
+                    {
+                        if args.len() == 1 {
+                            if let CallArg::Expr(arg) = &args[0] {
+                                let (arg_code, arg_ty) = self.emit_typed_expr(arg)?;
+                                match &arg_ty {
+                                    crate::types::RustType::Named { .. } => {
+                                        return Ok(format!(
+                                            "{{ let mut _buf = String::with_capacity(128); ({})._tish_write_json(&mut _buf); Value::String(_buf.into()) }}",
+                                            arg_code
+                                        ));
+                                    }
+                                    crate::types::RustType::Vec(inner)
+                                        if matches!(
+                                            inner.as_ref(),
+                                            crate::types::RustType::Named { .. }
+                                        ) =>
+                                    {
+                                        return Ok(format!(
+                                            "{{ let mut _buf = String::with_capacity(256); _buf.push('['); for (i, item) in ({}).iter().enumerate() {{ if i > 0 {{ _buf.push(','); }} item._tish_write_json(&mut _buf); }} _buf.push(']'); Value::String(_buf.into()) }}",
+                                            arg_code
+                                        ));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Compile-time embed: Polars.read_csv("<literal path>") when file exists
                 if let Some(init) = self.native_module_init.get("tish:polars") {
                     let crate_name = match init {
@@ -2672,6 +3010,40 @@ impl Codegen {
                 optional,
                 ..
             } => {
+                // Fast path: typed struct member access. If `object` is
+                // a local with `RustType::Named { fields }` and `prop` is
+                // a literal field name of that struct, lower to a direct
+                // Rust field access (`obj.field`), then wrap in
+                // `Value::*` so the caller gets a `Value` as expected.
+                if !optional {
+                    if let (Expr::Ident { name: var_name, .. }, MemberProp::Name { name: prop_name, .. }) =
+                        (object.as_ref(), prop)
+                    {
+                        let var_type = self.type_context.get_type(var_name.as_ref());
+                        if let RustType::Named { fields, .. } = &var_type {
+                            if let Some((_, field_ty)) =
+                                fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                            {
+                                let var_esc = Self::escape_ident(var_name.as_ref()).into_owned();
+                                let access = if self.refcell_wrapped_vars.contains(var_name.as_ref()) {
+                                    format!(
+                                        "(*{}.borrow()).{}.clone()",
+                                        var_esc,
+                                        crate::types::field_ident(prop_name.as_ref())
+                                    )
+                                } else {
+                                    format!(
+                                        "{}.{}",
+                                        var_esc,
+                                        crate::types::field_ident(prop_name.as_ref())
+                                    )
+                                };
+                                // Caller expects a `Value`; wrap.
+                                return Ok(field_ty.to_value_expr(&access));
+                            }
+                        }
+                    }
+                }
                 let obj = self.emit_expr(object)?;
                 let key = match prop {
                     MemberProp::Name { name, .. } => format!("{:?}", name.as_ref()),
@@ -2748,7 +3120,7 @@ impl Codegen {
                             }
                         }
                     }
-                    format!("{{ let mut _arr: Vec<Value> = Vec::new(); {} Value::Array(Rc::new(RefCell::new(_arr))) }}", parts.join(" "))
+                    format!("{{ let mut _arr: Vec<Value> = Vec::new(); {} Value::Array(VmRef::new(_arr)) }}", parts.join(" "))
                 } else {
                     let mut els = Vec::new();
                     for elem in elements {
@@ -2767,7 +3139,7 @@ impl Codegen {
                         }
                     }
                     format!(
-                        "Value::Array(Rc::new(RefCell::new(vec![{}])))",
+                        "Value::Array(VmRef::new(vec![{}]))",
                         els.join(", ")
                     )
                 }
@@ -2792,7 +3164,7 @@ impl Codegen {
                             }
                         }
                     }
-                    format!("{{ let mut _obj: ObjectMap = ObjectMap::default(); {} Value::Object(Rc::new(RefCell::new(_obj))) }}", parts.join(" "))
+                    format!("{{ let mut _obj: ObjectMap = ObjectMap::default(); {} Value::Object(VmRef::new(_obj)) }}", parts.join(" "))
                 } else {
                     let mut parts = Vec::new();
                     for prop in props {
@@ -2806,7 +3178,7 @@ impl Codegen {
                         }
                     }
                     format!(
-                        "Value::Object(Rc::new(RefCell::new(ObjectMap::from([{}]))))",
+                        "Value::Object(VmRef::new(ObjectMap::from([{}])))",
                         parts.join(", ")
                     )
                 }
@@ -4220,6 +4592,25 @@ impl Codegen {
                     && !param_names.contains(name)
                     && !local_var_names.contains(name)
             })
+            .filter(|name| {
+                ![
+                    "Boolean",
+                    "console",
+                    "Math",
+                    "JSON",
+                    "Date",
+                    "Object",
+                    "process",
+                    "setTimeout",
+                    "clearTimeout",
+                    "setInterval",
+                    "clearInterval",
+                    "Promise",
+                    "RegExp",
+                    "Polars",
+                ]
+                .contains(&name.as_str())
+            })
             .collect();
 
         // Outer vars that are assigned in the body need RefCell; read-only get Value binding
@@ -4253,7 +4644,7 @@ impl Codegen {
                 ));
             } else {
                 code.push_str(&format!(
-                    "    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n",
+                    "    let {} = VmRef::new({}.clone());\n",
                     ref_name, param_escaped
                 ));
             }
@@ -4268,7 +4659,7 @@ impl Codegen {
                 ));
             } else {
                 code.push_str(&format!(
-                    "    let {} = std::rc::Rc::new(RefCell::new({}.clone()));\n",
+                    "    let {} = VmRef::new({}.clone());\n",
                     ref_name, var_escaped
                 ));
             }
@@ -4279,6 +4670,7 @@ impl Codegen {
             "Math",
             "JSON",
             "Date",
+            "Object",
             "Uint8Array",
             "AudioContext",
             "process",
@@ -4315,7 +4707,8 @@ impl Codegen {
             ));
         }
 
-        code.push_str("    Value::Function(Rc::new(move |args: &[Value]| {\n");
+        code.push_str("    Value::native(move |args: &[Value]| {\n");
+        self.value_fn_depth += 1;
 
         // Make captured outer params available as plain Values (from _ref RefCells)
         for outer_param in &outer_params {
@@ -4394,11 +4787,13 @@ impl Codegen {
             self.refcell_wrapped_vars.insert(v.clone());
         }
 
-        // Emit body based on type
-        match body {
+        self.type_context.push_fun_param_scope(params, None);
+
+        let arrow_body_res: Result<(), CompileError> = match body {
             tishlang_ast::ArrowBody::Expr(expr) => {
                 let expr_code = self.emit_expr(expr)?;
                 code.push_str(&format!("        {}\n", expr_code));
+                Ok(())
             }
             tishlang_ast::ArrowBody::Block(block_stmt) => {
                 // For block bodies, emit the block statement
@@ -4417,15 +4812,24 @@ impl Codegen {
 
                 code.push_str(&body_code);
                 code.push_str("        Value::Null\n");
+                Ok(())
             }
+        };
+
+        self.type_context.pop_scope();
+        if let Err(e) = arrow_body_res {
+            self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
+            return Err(e);
         }
+
+        self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
 
         // Restore state
         self.refcell_wrapped_vars = saved_refcell_vars;
         self.outer_params_stack.pop();
         self.outer_vars_stack.pop();
 
-        code.push_str("    }))\n");
+        code.push_str("    })\n");
         code.push('}');
 
         Ok(code)
@@ -4475,6 +4879,57 @@ impl Codegen {
                 }
             }
             return Ok(format!("vec![{}]", items.join(", ")));
+        }
+
+        // Try to emit object literals directly as a Rust struct literal
+        // when the target is a `RustType::Named` (a user `type Foo = {...}`
+        // alias). Each property in source order is matched to a struct
+        // field; missing fields fall back to `default_value()` so the
+        // emit succeeds even on partial literals (rare, but harmless).
+        if let (RustType::Named { name, fields }, Expr::Object { props, .. }) =
+            (target_type, expr)
+        {
+            use std::collections::HashMap;
+            let field_types: HashMap<&str, &RustType> = fields
+                .iter()
+                .map(|(k, t)| (k.as_ref(), t))
+                .collect();
+            let mut field_inits: HashMap<String, String> = HashMap::new();
+            let mut bail = false;
+            for prop in props {
+                match prop {
+                    ObjectProp::KeyValue(key, value) => {
+                        if let Some(field_ty) = field_types.get(key.as_ref()) {
+                            let v = self.emit_native_expr(value, field_ty)?;
+                            field_inits.insert(crate::types::field_ident(key.as_ref()), v);
+                        }
+                    }
+                    // Spread can't be statically matched to struct fields:
+                    // fall back to the dynamic Value path.
+                    ObjectProp::Spread(_) => {
+                        bail = true;
+                        break;
+                    }
+                }
+            }
+            if !bail {
+                let assigns = fields
+                    .iter()
+                    .map(|(k, t)| {
+                        let fid = crate::types::field_ident(k);
+                        match field_inits.remove(&fid) {
+                            Some(v) => format!("{}: {}", fid, v),
+                            None => format!("{}: {}", fid, t.default_value()),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Ok(format!(
+                    "{} {{ {} }}",
+                    crate::types::named_struct_ident(name),
+                    assigns
+                ));
+            }
         }
 
         // Check if the identifier is already of the target type

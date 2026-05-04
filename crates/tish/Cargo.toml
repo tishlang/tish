@@ -11,12 +11,21 @@ name = "tish"
 path = "src/main.rs"
 
 [features]
-# Default: secure mode with no dangerous capabilities
-default = []
-# Full: all capabilities enabled (for development/trusted environments)
-full = ["http", "fs", "process", "regex", "ws"]
+# The published `tish` CLI always includes every optional runtime (http, timers, fs, process, regex, ws).
+# Use `cargo build -p tishlang --no-default-features` when you need a locked-down toolchain
+# (see workspace `justfile`). `tish run --feature …` / `tish build --feature …` gate what runs
+# or what gets linked into a *native output* binary — they are not the primary way to ship a
+# “full” vs “empty” CLI.
+default = ["full"]
+# Alias: same dependency edges as `default` (kept for `--features full` in CI and docs).
+# Includes `pg` so `tish run` can resolve `import … from 'tish-pg'` (`cargo:tish_pg`) on the bytecode VM.
+# Requires `tish-pg` next to this workspace root (`…/tish/tish-pg`); CI runs `scripts/ci/ensure-tish-pg.sh`.
+full = ["http", "fs", "process", "regex", "ws", "timers", "pg"]
+# Opt-out: build without Postgres (`cargo build -p tishlang --no-default-features --features http,...`).
+pg = ["dep:tish_pg"]
 # Individual capability flags
 http    = ["tishlang_eval/http",    "tishlang_runtime/http",    "tishlang_compile/http",    "tishlang_vm/http"]
+timers  = ["tishlang_eval/timers",  "tishlang_compile/timers",  "tishlang_vm/timers"]
 fs      = ["tishlang_eval/fs",      "tishlang_runtime/fs",      "tishlang_compile/fs",      "tishlang_vm/fs"]
 process = ["tishlang_eval/process", "tishlang_runtime/process", "tishlang_compile/process", "tishlang_vm/process"]
 regex   = ["tishlang_eval/regex",   "tishlang_runtime/regex",   "tishlang_compile/regex",   "tishlang_vm/regex"]
@@ -40,6 +49,7 @@ tishlang_runtime = { path = "../tish_runtime", version = ">=0.1" }
 tishlang_core = { path = "../tish_core", version = ">=0.1" }
 tishlang_js_to_tish = { path = "../js_to_tish", version = ">=0.1" }
 clap = { version = "4.6.0", features = ["derive", "color"] }
+tish_pg = { path = "../../../tish-pg", package = "tish-pg", optional = true }
 
 [dev-dependencies]
 rayon = "1.11"

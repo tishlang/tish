@@ -66,12 +66,20 @@ fn file_content_hash(path: &Path) -> u64 {
 ///
 /// Cache is keyed by backend (native, cranelift, js, wasi) so e.g. cranelift and wasi
 /// compiles of the same file do not overwrite each other: .../cranelift/<stem>_<hash> vs .../wasi/<stem>_<hash>.wasm.
+///
+/// The artifact **basename** must be unique per `(stem, hash, backend)`: nested `tish build`
+/// uses it as the Cargo binary name under the workspace `target/release/`. If native and
+/// cranelift both used `strict_equality_<hash>`, parallel `cargo nextest` could run those
+/// tests concurrently and corrupt the same `target/release/...` output (Linux: ETXTBSY when
+/// executing a binary still being written).
 fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
     let stem = path.file_stem().unwrap().to_string_lossy();
     let hash = file_content_hash(path);
     let hash8 = &format!("{:016x}", hash)[..8];
     let cache_base = integration_compile_cache_dir().join(backend);
     let _ = std::fs::create_dir_all(&cache_base);
+    // Include `backend` in the leaf name so nested cargo bin names never collide across backends.
+    let leaf = format!("{}__{}__{}", stem, backend, hash8);
 
     let (artifact_path, compile_args): (PathBuf, Vec<OsString>) = match backend {
         "native" => {
@@ -80,7 +88,7 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
             } else {
                 ""
             };
-            let cached = cache_base.join(format!("{}_{}{}", stem, hash8, ext));
+            let cached = cache_base.join(format!("{}{}", leaf, ext));
             let args = vec![
                 OsString::from("build"),
                 OsString::from(path),
@@ -95,7 +103,7 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
             } else {
                 ""
             };
-            let cached = cache_base.join(format!("{}_{}{}", stem, hash8, ext));
+            let cached = cache_base.join(format!("{}{}", leaf, ext));
             let args = vec![
                 OsString::from("build"),
                 OsString::from(path),
@@ -107,7 +115,7 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
             (cached, args)
         }
         "js" => {
-            let cached = cache_base.join(format!("{}_{}.js", stem, hash8));
+            let cached = cache_base.join(format!("{}.js", leaf));
             let args = vec![
                 OsString::from("build"),
                 OsString::from(path),
@@ -119,7 +127,7 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
             (cached, args)
         }
         "wasi" => {
-            let out_base = cache_base.join(format!("{}_{}", stem, hash8));
+            let out_base = cache_base.join(&leaf);
             let artifact = out_base.with_extension("wasm");
             let args = vec![
                 OsString::from("build"),
@@ -397,7 +405,7 @@ fn test_async_await_run() {
     }
 }
 
-/// Run Promise and setTimeout module tests (require http feature).
+/// Run Promise and setTimeout module tests (`promise` needs `http`; `settimeout` needs `timers`, which `http` enables).
 /// Ignored: tishlang_eval::run() does not run the event loop.
 #[test]
 #[cfg(feature = "http")]

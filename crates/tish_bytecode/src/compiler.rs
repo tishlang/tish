@@ -1514,14 +1514,9 @@ impl<'a> Compiler<'a> {
                 self.compile_jsx_fragment(children)?;
             }
             Expr::Await { operand, .. } => {
-                // await expr => LoadNativeExport("tish:http","await"), compile(operand), Call(1)
-                let spec_idx = self.constant_idx(Constant::String(Arc::from("tish:http")));
-                let await_idx = self.constant_idx(Constant::String(Arc::from("await")));
-                self.emit(Opcode::LoadNativeExport);
-                self.chunk.write_u16(spec_idx);
-                self.chunk.write_u16(await_idx);
+                // await expr => evaluate operand, then VM Opcode::AwaitPromise (throw on reject).
                 self.compile_expr(operand)?;
-                self.emit_u16(Opcode::Call, 1);
+                self.emit(Opcode::AwaitPromise);
             }
             Expr::LogicalAssign {
                 name, op, value, ..

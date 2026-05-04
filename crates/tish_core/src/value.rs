@@ -1,10 +1,10 @@
 //! Unified Value type for Tish runtime values.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use ahash::AHashMap;
+
+use crate::vmref::VmRef;
 
 /// Property map for objects and other `Arc<str>` → `Value` tables (VM globals, scopes).
 /// Uses a faster hasher than `std::collections::HashMap` for string-heavy workloads.
@@ -14,8 +14,17 @@ pub type ObjectMap = AHashMap<Arc<str>, Value>;
 use fancy_regex::Regex;
 
 /// Native function signature.
-/// Returns Value directly (not Result) for simplicity and backward compatibility.
-pub type NativeFn = Rc<dyn Fn(&[Value]) -> Value>;
+///
+/// When the `send-values` feature is enabled this is
+/// `Arc<dyn Fn + Send + Sync>`, so handler closures can be dispatched across
+/// HTTP worker threads (`tishlang_runtime::http::serve`). Otherwise it stays
+/// `Rc<dyn Fn>` for zero-overhead single-threaded execution (wasm / wasi /
+/// interpreter / cranelift / llvm VMs and any Rust native build without
+/// `http`).
+#[cfg(feature = "send-values")]
+pub type NativeFn = Arc<dyn Fn(&[Value]) -> Value + Send + Sync>;
+#[cfg(not(feature = "send-values"))]
+pub type NativeFn = std::rc::Rc<dyn Fn(&[Value]) -> Value>;
 
 /// Trait for opaque Rust types exposed to Tish (e.g. Polars DataFrame).
 /// Implementors provide method dispatch so Tish can call methods on the value.
@@ -202,17 +211,21 @@ impl TishRegExp {
 
 /// Runtime value for Tish programs.
 /// Used by both interpreter and compiled code.
+///
+/// **Thread safety**: `Value: Send + Sync`. Mutable payloads live inside
+/// [`VmRef`], a `Send + Sync` `Arc<Mutex<T>>` wrapper that preserves the
+/// `RefCell`-style borrow API. Functions are `Arc<dyn Fn + Send + Sync>`.
 #[derive(Clone)]
 pub enum Value {
     Number(f64),
     String(Arc<str>),
     Bool(bool),
     Null,
-    Array(Rc<RefCell<Vec<Value>>>),
-    Object(Rc<RefCell<ObjectMap>>),
+    Array(VmRef<Vec<Value>>),
+    Object(VmRef<ObjectMap>),
     Function(NativeFn),
     #[cfg(feature = "regex")]
-    RegExp(Rc<RefCell<TishRegExp>>),
+    RegExp(VmRef<TishRegExp>),
     /// Promise (for native compile). Interpreter uses tishlang_eval::Value::Promise.
     Promise(Arc<dyn TishPromise>),
     /// Opaque handle to a native Rust type (e.g. Polars DataFrame).
@@ -308,35 +321,60 @@ impl Value {
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
-            (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
-            (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
-            (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
+            (Value::Array(a), Value::Array(b)) => VmRef::ptr_eq(a, b),
+            (Value::Object(a), Value::Object(b)) => VmRef::ptr_eq(a, b),
+            #[cfg(feature = "send-values")]
+            (Value::Function(a), Value::Function(b)) => Arc::ptr_eq(a, b),
+            #[cfg(not(feature = "send-values"))]
+            (Value::Function(a), Value::Function(b)) => std::rc::Rc::ptr_eq(a, b),
             #[cfg(feature = "regex")]
-            (Value::RegExp(a), Value::RegExp(b)) => Rc::ptr_eq(a, b),
+            (Value::RegExp(a), Value::RegExp(b)) => VmRef::ptr_eq(a, b),
             (Value::Promise(a), Value::Promise(b)) => Arc::ptr_eq(a, b),
             (Value::Opaque(a), Value::Opaque(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
 
+    /// Wrap a Rust closure in a `Value::Function`. Automatically picks
+    /// `Rc<dyn Fn>` or `Arc<dyn Fn + Send + Sync>` based on the
+    /// `send-values` feature, so callers don't have to `cfg`-gate their
+    /// code. The input bound tracks the feature too: when `send-values`
+    /// is enabled the closure must be `Send + Sync`, otherwise any `Fn`
+    /// is accepted.
+    #[cfg(feature = "send-values")]
+    pub fn native<F>(f: F) -> Self
+    where
+        F: Fn(&[Value]) -> Value + Send + Sync + 'static,
+    {
+        Value::Function(Arc::new(f))
+    }
+
+    #[cfg(not(feature = "send-values"))]
+    pub fn native<F>(f: F) -> Self
+    where
+        F: Fn(&[Value]) -> Value + 'static,
+    {
+        Value::Function(std::rc::Rc::new(f))
+    }
+
     /// Create a new array Value from a Vec.
     pub fn array(items: Vec<Value>) -> Self {
-        Value::Array(Rc::new(RefCell::new(items)))
+        Value::Array(VmRef::new(items))
     }
 
     /// Create a new object Value from a property map.
     pub fn object(map: ObjectMap) -> Self {
-        Value::Object(Rc::new(RefCell::new(map)))
+        Value::Object(VmRef::new(map))
     }
 
     /// Create an empty array Value.
     pub fn empty_array() -> Self {
-        Value::Array(Rc::new(RefCell::new(Vec::new())))
+        Value::Array(VmRef::new(Vec::new()))
     }
 
     /// Create an empty object Value.
     pub fn empty_object() -> Self {
-        Value::Object(Rc::new(RefCell::new(ObjectMap::default())))
+        Value::Object(VmRef::new(ObjectMap::default()))
     }
 
     /// Extract the number value, if this is a Number.

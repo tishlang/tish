@@ -64,7 +64,7 @@ if $compile_native; then
   echo ""
   echo "Compiling to native..."
   native_out="$target_dir/async_combined_validation"
-  "$tish_bin" compile "$script" -o "$native_out" || { echo "Compile failed"; exit 1; }
+  "$tish_bin" build "$script" -o "$native_out" || { echo "Compile failed"; exit 1; }
   echo "Running compiled binary..."
   output2=$("$native_out" 2>&1) || true
   echo "$output2"

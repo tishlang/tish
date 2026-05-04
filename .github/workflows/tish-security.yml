@@ -28,6 +28,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Ensure tish-pg (path dep for workspace resolve)
+        run: bash scripts/ci/ensure-tish-pg.sh
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2

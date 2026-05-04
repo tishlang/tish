@@ -1,5 +1,6 @@
 // async/await + Promise + setTimeout + fetch / fetchAll
-import { fetch, fetchAll, Promise, setTimeout } from 'http'
+import { fetch, fetchAll, Promise } from 'http'
+import { setTimeout } from 'timers'
 
 console.log("ASYNC_VALIDATION_START")
 

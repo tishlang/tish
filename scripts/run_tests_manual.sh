@@ -26,7 +26,7 @@ for f in "$core_dir"/*.tish; do
 
   if $run_native; then
     out="/tmp/tish_manual_$(basename "$f" .tish)"
-    if $tish_bin compile "$f" -o "$out" 2>/dev/null; then
+    if $tish_bin build "$f" -o "$out" 2>/dev/null; then
       echo "▶ $name (native)"
       echo "─────────────────────────────────────────"
       "$out" 2>&1 || true

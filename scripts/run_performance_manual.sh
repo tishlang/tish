@@ -1,5 +1,6 @@
 #!/bin/bash
 # Run Tish and JS equivalents, show output and compare execution time.
+# CI / one native binary per backend: ./scripts/run_performance_suite.sh (bundled tests/main.tish + tests/main.js).
 # Usage: ./scripts/run_performance_manual.sh [--release] [--summary-only] [--no-compile] [--limit N] [--filter NAME] [--runtimes R,...]
 #   --release       use release build (recommended for fair Tish vs JS timing)
 #   --summary-only  skip individual test output, show only summary
@@ -72,20 +73,20 @@ done
 # When verbose=true, stderr is shown; otherwise suppressed.
 run_with_timeout() {
   if [[ $run_timeout -le 0 ]]; then
-    if $verbose; then "$@" || true; else "$@" 2>/dev/null || true; fi
+    if [ "$verbose" = true ]; then "$@" || true; else "$@" 2>/dev/null || true; fi
     return
   fi
   if command -v timeout &>/dev/null; then
-    if $verbose; then timeout "$run_timeout" "$@" || true; else timeout "$run_timeout" "$@" 2>/dev/null || true; fi
+    if [ "$verbose" = true ]; then timeout "$run_timeout" "$@" || true; else timeout "$run_timeout" "$@" 2>/dev/null || true; fi
     return
   fi
   if command -v gtimeout &>/dev/null; then
-    if $verbose; then gtimeout "$run_timeout" "$@" || true; else gtimeout "$run_timeout" "$@" 2>/dev/null || true; fi
+    if [ "$verbose" = true ]; then gtimeout "$run_timeout" "$@" || true; else gtimeout "$run_timeout" "$@" 2>/dev/null || true; fi
     return
   fi
   if command -v perl &>/dev/null; then
     # Fork; child uses setsid+exec so we can kill process group (handles cargo->tish)
-    if $verbose; then
+    if [ "$verbose" = true ]; then
       perl -e '
         my $t=shift;
         my $pid=fork;
@@ -106,7 +107,7 @@ run_with_timeout() {
     fi
     return
   fi
-  ( set +e; set -m; "$@" 2>/dev/null & pid=$!; ( sleep $run_timeout; kill -TERM -$pid 2>/dev/null; sleep 2; kill -KILL -$pid 2>/dev/null ) & k=$!; wait $pid 2>/dev/null; kill $k 2>/dev/null; wait $k 2>/dev/null ) || true
+  ( set +e; set -m; "$@" 2>/dev/null & pid=$!; ( sleep "$run_timeout"; kill -TERM "-$pid" 2>/dev/null; sleep 2; kill -KILL "-$pid" 2>/dev/null ) & k=$!; wait "$pid" 2>/dev/null; kill "$k" 2>/dev/null; wait "$k" 2>/dev/null ) || true
 }
 
 tish_bin="$target_dir/$profile/tish"
@@ -114,14 +115,15 @@ rel_flag=""
 [[ "$profile" == "release" ]] && rel_flag="--release"
 # Always build tish so we use latest codegen (cargo skips if unchanged)
 echo "Building tish ($profile)..."
-cargo build -p tishlang$rel_flag --features full --target-dir "$target_dir" -q 2>/dev/null || true
+# Keep workspace target in sync with this tish binary (avoid stale codegen if CARGO_TARGET_DIR points elsewhere).
+( unset CARGO_TARGET_DIR; cargo build -p tishlang $rel_flag --features full --target-dir "$target_dir" -q 2>/dev/null ) || true
 if [[ ! -x "$tish_bin" ]]; then
-  tish_bin="cargo run -p tishlang$rel_flag --features full --target-dir $target_dir -q --"
+  tish_bin="cargo run -p tishlang $rel_flag --features full --target-dir $target_dir -q --"
 fi
 
 # Directory for compiled outputs - use cache or temp
 cache_dir="$target_dir/perf-cache-$profile"
-if $no_compile; then
+if [ "$no_compile" = true ]; then
   compile_dir="$cache_dir"
   if [[ ! -d "$compile_dir" ]]; then
     echo "Error: No cached binaries found at $compile_dir"
@@ -173,15 +175,15 @@ want_runtime cranelift && echo "  cranelift (tish JIT)"
 want_runtime llvm && echo "  llvm (tish native via clang)"
 want_runtime wasi && echo "  wasi (wasmtime)"
 want_runtime node && echo "  node"
-want_runtime bun && $has_bun && echo "  bun"
-want_runtime deno && $has_deno && echo "  deno"
-want_runtime qjs && $has_qjs && echo "  qjs"
+want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && echo "  bun"
+want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && echo "  deno"
+want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && echo "  qjs"
 [[ -n "$filter_name" ]] && echo "Filter: $filter_name"
 [[ $limit -gt 0 ]] && echo "Limit: $limit"
 echo ""
 
 # Phase 1: Pre-compile all Tish binaries (rust native, cranelift, wasi)
-if $no_compile; then
+if [ "$no_compile" = true ]; then
   cached_native=$(find "$compile_dir" -name '*_native' -type f \( -perm +111 -o -perm +1 \) 2>/dev/null | wc -l | tr -d ' ')
   cached_cranelift=$(find "$compile_dir" -name '*_cranelift' -type f \( -perm +111 -o -perm +1 \) 2>/dev/null | wc -l | tr -d ' ')
   cached_llvm=$(find "$compile_dir" -name '*_llvm' -type f \( -perm +111 -o -perm +1 \) 2>/dev/null | wc -l | tr -d ' ')
@@ -219,7 +221,7 @@ else
     echo -n "  $test_id: "
     # Rust native (default backend)
     if want_runtime rust; then
-      if $tish_bin build "$tish_file" -o "$compile_dir/${cache_key}_native" --native-backend rust >/dev/null 2>&1; then
+      if "$tish_bin" build "$tish_file" -o "$compile_dir/${cache_key}_native" --native-backend rust >/dev/null 2>&1; then
         echo -n "rust "
         rust_ok=$((rust_ok + 1))
       else
@@ -229,7 +231,7 @@ else
     fi
     # Cranelift (pure Tish, no native imports)
     if want_runtime cranelift; then
-      if $tish_bin build "$tish_file" -o "$compile_dir/${cache_key}_cranelift" --native-backend cranelift >/dev/null 2>&1; then
+      if "$tish_bin" build "$tish_file" -o "$compile_dir/${cache_key}_cranelift" --native-backend cranelift >/dev/null 2>&1; then
         echo -n "cranelift "
         cranelift_ok=$((cranelift_ok + 1))
       else
@@ -239,7 +241,7 @@ else
     fi
     # LLVM (pure Tish, no native imports; uses clang)
     if want_runtime llvm; then
-      if $tish_bin build "$tish_file" -o "$compile_dir/${cache_key}_llvm" --native-backend llvm >/dev/null 2>&1; then
+      if "$tish_bin" build "$tish_file" -o "$compile_dir/${cache_key}_llvm" --native-backend llvm >/dev/null 2>&1; then
         echo -n "llvm "
         llvm_ok=$((llvm_ok + 1))
       else
@@ -249,8 +251,8 @@ else
     fi
     # WASI (for wasmtime)
     if want_runtime wasi; then
-      if $has_wasmtime; then
-        if $tish_bin build "$tish_file" -o "$compile_dir/${cache_key}_wasi" --target wasi >/dev/null 2>&1; then
+      if [ "$has_wasmtime" = true ]; then
+        if "$tish_bin" build "$tish_file" -o "$compile_dir/${cache_key}_wasi" --target wasi >/dev/null 2>&1; then
           echo -n "wasi"
           wasi_ok=$((wasi_ok + 1))
         else
@@ -297,7 +299,7 @@ for perf_dir in "${perf_dirs[@]}"; do
   llvm_bin="$compile_dir/${cache_key}_llvm"
   wasi_bin="$compile_dir/${cache_key}_wasi.wasm"
 
-  if ! $summary_only; then
+  if [ "$summary_only" != true ]; then
     echo "─────────────────────────────────────────"
     echo "▶ $test_id"
     echo "─────────────────────────────────────────"
@@ -305,7 +307,7 @@ for perf_dir in "${perf_dirs[@]}"; do
     # Output (use timeout to avoid hangs on intensive tests)
     if want_runtime run; then
       echo "Tish (run):"
-      run_with_timeout $tish_bin run "$tish_file" 2>&1 || true
+      run_with_timeout "$tish_bin" run "$tish_file" 2>&1 || true
       echo ""
     fi
 
@@ -341,7 +343,7 @@ for perf_dir in "${perf_dirs[@]}"; do
 
     if want_runtime wasi; then
       echo "Tish (wasi):"
-      if $has_wasmtime && [[ -f "$wasi_bin" ]]; then
+      if [ "$has_wasmtime" = true ] && [[ -f "$wasi_bin" ]]; then
         run_with_timeout wasmtime --dir /tmp "$wasi_bin" 2>&1 || true
       else
         echo "(not built or wasmtime not found)"
@@ -355,19 +357,19 @@ for perf_dir in "${perf_dirs[@]}"; do
       echo ""
     fi
 
-    if want_runtime bun && $has_bun; then
+    if want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ]; then
       echo "Bun:"
       "$bun_cmd" "$f" 2>&1 || true
       echo ""
     fi
 
-    if want_runtime deno && $has_deno; then
+    if want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ]; then
       echo "Deno:"
       "$deno_cmd" run --allow-all "$f" 2>&1 || true
       echo ""
     fi
 
-    if want_runtime qjs && $has_qjs; then
+    if want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ]; then
       echo "QuickJS:"
       "$qjs_cmd" "$f" 2>&1 || true
       echo ""
@@ -391,22 +393,22 @@ for perf_dir in "${perf_dirs[@]}"; do
   qjs_times=()
 
   # Warmup runs (discard - warms disk cache and JIT; use timeout to avoid hangs)
-  want_runtime vm && run_with_timeout $tish_bin run "$tish_file" --backend vm >/dev/null 2>&1 || true
-  want_runtime interp && run_with_timeout $tish_bin run "$tish_file" --backend interp >/dev/null 2>&1 || true
+  want_runtime vm && run_with_timeout "$tish_bin" run "$tish_file" --backend vm >/dev/null 2>&1 || true
+  want_runtime interp && run_with_timeout "$tish_bin" run "$tish_file" --backend interp >/dev/null 2>&1 || true
   want_runtime rust && [[ -x "$native_bin" ]] && run_with_timeout "$native_bin" >/dev/null 2>&1 || true
   want_runtime cranelift && [[ -x "$cranelift_bin" ]] && run_with_timeout "$cranelift_bin" >/dev/null 2>&1 || true
   want_runtime llvm && [[ -x "$llvm_bin" ]] && run_with_timeout "$llvm_bin" >/dev/null 2>&1 || true
-  want_runtime wasi && $has_wasmtime && [[ -f "$wasi_bin" ]] && run_with_timeout wasmtime "$wasi_bin" >/dev/null 2>&1 || true
+  want_runtime wasi && "$has_wasmtime"&& "$has_wasmtime" [ "$has_wasmtime" = true ] && [[ -f "$wasi_bin" ]] && run_with_timeout wasmtime "$wasi_bin" >/dev/null 2>&1 || true
   want_runtime node && "$node_cmd" "$f" >/dev/null 2>&1 || true
-  want_runtime bun && $has_bun && "$bun_cmd" "$f" >/dev/null 2>&1 || true
-  want_runtime deno && $has_deno && "$deno_cmd" run --allow-all "$f" >/dev/null 2>&1 || true
-  want_runtime qjs && $has_qjs && "$qjs_cmd" "$f" >/dev/null 2>&1 || true
+  want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && "$bun_cmd" "$f" >/dev/null 2>&1 || true
+  want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && "$deno_cmd" run --allow-all "$f" >/dev/null 2>&1 || true
+  want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && "$qjs_cmd" "$f" >/dev/null 2>&1 || true
 
   # Tish VM (run --backend vm)
   if want_runtime vm; then
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
-      run_with_timeout $tish_bin run "$tish_file" --backend vm >/dev/null 2>&1 || true
+      run_with_timeout "$tish_bin" run "$tish_file" --backend vm >/dev/null 2>&1 || true
       t1=$(ms)
       tish_vm_times+=($((t1 - t0)))
     done
@@ -416,7 +418,7 @@ for perf_dir in "${perf_dirs[@]}"; do
   if want_runtime interp; then
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
-      run_with_timeout $tish_bin run "$tish_file" --backend interp >/dev/null 2>&1 || true
+      run_with_timeout "$tish_bin" run "$tish_file" --backend interp >/dev/null 2>&1 || true
       t1=$(ms)
       tish_interp_times+=($((t1 - t0)))
     done
@@ -460,7 +462,7 @@ for perf_dir in "${perf_dirs[@]}"; do
 
   # Tish WASI (wasmtime)
   wasi_ok=false
-  if want_runtime wasi && $has_wasmtime && [[ -f "$wasi_bin" ]]; then
+  if want_runtime wasi && "$has_wasmtime"&& "$has_wasmtime" [ "$has_wasmtime" = true ] && [[ -f "$wasi_bin" ]]; then
     wasi_ok=true
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
@@ -481,7 +483,7 @@ for perf_dir in "${perf_dirs[@]}"; do
   fi
 
   # Bun
-  if want_runtime bun && $has_bun; then
+  if want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ]; then
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
       "$bun_cmd" "$f" >/dev/null 2>&1 || true
@@ -491,7 +493,7 @@ for perf_dir in "${perf_dirs[@]}"; do
   fi
 
   # Deno
-  if want_runtime deno && $has_deno; then
+  if want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ]; then
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
       "$deno_cmd" run --allow-all "$f" >/dev/null 2>&1 || true
@@ -501,7 +503,7 @@ for perf_dir in "${perf_dirs[@]}"; do
   fi
 
   # QuickJS
-  if want_runtime qjs && $has_qjs; then
+  if want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ]; then
     for _ in $(seq 1 "$n"); do
       t0=$(ms)
       "$qjs_cmd" "$f" >/dev/null 2>&1 || true
@@ -546,17 +548,17 @@ for perf_dir in "${perf_dirs[@]}"; do
   qjs_avg=0
   ratio=0
 
-  if $has_bun; then
+  if "$has_bun"; then
     for t in "${bun_times[@]}"; do bun_sum=$((bun_sum + t)); done
     bun_avg=$((bun_sum / n))
   fi
 
-  if $has_deno; then
+  if "$has_deno"; then
     for t in "${deno_times[@]}"; do deno_sum=$((deno_sum + t)); done
     deno_avg=$((deno_sum / n))
   fi
 
-  if $has_qjs; then
+  if "$has_qjs"; then
     for t in "${qjs_times[@]}"; do qjs_sum=$((qjs_sum + t)); done
     qjs_avg=$((qjs_sum / n))
   fi
@@ -579,7 +581,7 @@ for perf_dir in "${perf_dirs[@]}"; do
   summary_qjs+=("$qjs_avg")
   summary_ratio+=("$ratio")
 
-  if ! $summary_only; then
+  if [ "$summary_only" != true ]; then
     echo "Time (${n} runs avg):"
     want_runtime vm && echo "  Tish (vm):        ${tish_vm_avg}ms"
     want_runtime interp && echo "  Tish (interp):    ${tish_interp_avg}ms"
@@ -588,9 +590,9 @@ for perf_dir in "${perf_dirs[@]}"; do
     want_runtime llvm && $llvm_ok && echo "  Tish (llvm):      ${tish_llvm_avg}ms"
     want_runtime wasi && $wasi_ok && echo "  Tish (wasi):      ${tish_wasi_avg}ms"
     want_runtime node && echo "  Node.js:          ${node_avg}ms"
-    want_runtime bun && $has_bun && echo "  Bun:             ${bun_avg}ms"
-    want_runtime deno && $has_deno && echo "  Deno:            ${deno_avg}ms"
-    want_runtime qjs && $has_qjs && echo "  QuickJS:         ${qjs_avg}ms"
+    want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && echo "  Bun:             ${bun_avg}ms"
+    want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && echo "  Deno:            ${deno_avg}ms"
+    want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && echo "  QuickJS:         ${qjs_avg}ms"
     want_runtime node && want_runtime vm && echo "  Tish(vm)/Node ratio: ${ratio}%"
     echo ""
   else
@@ -612,7 +614,7 @@ sorted_indices=()
 for i in "${!summary_ratio[@]}"; do
   sorted_indices+=("${summary_ratio[$i]}:$i")
 done
-IFS=$'\n' sorted_indices=($(sort -t: -k1 -nr <<<"${sorted_indices[*]}")); unset IFS
+mapfile -t sorted_indices < <(sort -t: -k1 -nr <<<"${sorted_indices[*]}")
 
 # Build header dynamically based on selected runtimes
 header="%-20s"
@@ -626,13 +628,13 @@ want_runtime cranelift && { header="$header %8s"; header_args+=("cranelift"); di
 want_runtime llvm && { header="$header %8s"; header_args+=("llvm"); div_args+=("──────"); }
 want_runtime wasi && { header="$header %8s"; header_args+=("wasi"); div_args+=("──────"); }
 want_runtime node && { header="$header %8s"; header_args+=("Node"); div_args+=("──────"); }
-want_runtime bun && $has_bun && { header="$header %8s"; header_args+=("Bun"); div_args+=("──────"); }
-want_runtime deno && $has_deno && { header="$header %8s"; header_args+=("Deno"); div_args+=("──────"); }
-want_runtime qjs && $has_qjs && { header="$header %8s"; header_args+=("QuickJS"); div_args+=("──────"); }
+want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && { header="$header %8s"; header_args+=("Bun"); div_args+=("──────"); }
+want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && { header="$header %8s"; header_args+=("Deno"); div_args+=("──────"); }
+want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && { header="$header %8s"; header_args+=("QuickJS"); div_args+=("──────"); }
 want_runtime vm && want_runtime node && { header="$header %10s"; header_args+=("vm/Node%"); div_args+=("──────────"); }
 header="$header\n"
 
-printf "$header" "${header_args[@]}"
+printf "%s" "$header" "${header_args[@]}"
 printf "%-20s" "$divider"
 for d in "${div_args[@]}"; do printf " %8s" "$d"; done
 printf "\n"
@@ -709,13 +711,13 @@ for entry in "${sorted_indices[@]}"; do
   want_runtime llvm && { row="$row %8s"; row_args+=("$llvm_display"); }
   want_runtime wasi && { row="$row %8s"; row_args+=("$wasi_display"); }
   want_runtime node && { row="$row %8d"; row_args+=("$node"); }
-  want_runtime bun && $has_bun && { row="$row %8d"; row_args+=("$bun"); }
-  want_runtime deno && $has_deno && { row="$row %8d"; row_args+=("$deno"); }
-  want_runtime qjs && $has_qjs && { row="$row %8d"; row_args+=("$qjs"); }
+  want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && { row="$row %8d"; row_args+=("$bun"); }
+  want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && { row="$row %8d"; row_args+=("$deno"); }
+  want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && { row="$row %8d"; row_args+=("$qjs"); }
   want_runtime vm && want_runtime node && { row="$row %9d%%"; row_args+=("$ratio"); }
   row="$row\n"
 
-  printf "${color}${row}${reset}" "${row_args[@]}"
+  printf "%s%s%s" "${color}" "${row}" "${reset}" "${row_args[@]}"
 done
 
 # Print totals
@@ -748,13 +750,13 @@ want_runtime cranelift && { row="$row %8s"; row_args+=("$cranelift_total_display
 want_runtime llvm && { row="$row %8s"; row_args+=("$llvm_total_display"); }
 want_runtime wasi && { row="$row %8s"; row_args+=("$wasi_total_display"); }
 want_runtime node && { row="$row %8d"; row_args+=("$total_node"); }
-want_runtime bun && $has_bun && { row="$row %8d"; row_args+=("$total_bun"); }
-want_runtime deno && $has_deno && { row="$row %8d"; row_args+=("$total_deno"); }
-want_runtime qjs && $has_qjs && { row="$row %8d"; row_args+=("$total_qjs"); }
+want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && { row="$row %8d"; row_args+=("$total_bun"); }
+want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && { row="$row %8d"; row_args+=("$total_deno"); }
+want_runtime qjs && "$has_qjs"&& "$has_qjs" [ "$has_qjs" = true ] && { row="$row %8d"; row_args+=("$total_qjs"); }
 want_runtime vm && want_runtime node && { row="$row %9d%%"; row_args+=("$total_ratio"); }
 row="$row\n"
 
-printf "$row" "${row_args[@]}"
+printf "%s" "$row" "${row_args[@]}"
 
 echo ""
 echo "Legend: Green = <150% | Yellow = 200-500% | Red = >500%"

@@ -15,6 +15,10 @@ use tishlang_builtins::helpers::make_error_value;
 
 pub use tishlang_core::ObjectMap;
 pub use tishlang_core::Value;
+// Re-export the shared-mutable wrapper so the Rust code emitted by
+// `tishlang_compile::codegen` can write `VmRef::new(...)` without needing
+// a direct dependency on `tishlang_core` from the generated crate.
+pub use tishlang_core::{VmReadGuard, VmRef, VmWriteGuard};
 
 pub use tishlang_builtins::construct::{
     audio_context_constructor_value as tish_audio_context_constructor, construct as tish_construct,
@@ -38,11 +42,12 @@ pub use tishlang_builtins::array::{
 // Re-export string methods from tishlang_builtins
 pub use tishlang_builtins::string::{
     char_at as string_char_at_impl, char_code_at as string_char_code_at_impl,
-    ends_with as string_ends_with_impl, includes as string_includes_impl,
-    index_of as string_index_of_impl, last_index_of as string_last_index_of_impl,
-    pad_end as string_pad_end_impl, pad_start as string_pad_start_impl,
-    repeat as string_repeat_impl, replace as string_replace_impl,
-    replace_all as string_replace_all_impl, slice as string_slice_impl, split as string_split_impl,
+    ends_with as string_ends_with_impl, escape_html as string_escape_html_impl,
+    includes as string_includes_impl, index_of as string_index_of_impl,
+    last_index_of as string_last_index_of_impl, pad_end as string_pad_end_impl,
+    pad_start as string_pad_start_impl, repeat as string_repeat_impl,
+    replace as string_replace_impl, replace_all as string_replace_all_impl,
+    slice as string_slice_impl, split as string_split_impl,
     starts_with as string_starts_with_impl, substring as string_substring_impl,
     to_lower_case as string_to_lower_case, to_upper_case as string_to_upper_case,
     trim as string_trim,
@@ -268,6 +273,50 @@ use tishlang_builtins::globals::{
     string_from_char_code as builtins_string_from_char_code,
 };
 use tishlang_core::{json_parse as core_json_parse, json_stringify as core_json_stringify};
+
+/// Public JSON helpers used by codegen-emitted code (specifically the
+/// `_tish_write_json` impls on user-declared `type` aliases). Re-exporting
+/// from the runtime keeps the generated source decoupled from
+/// `tishlang_core` — generated code only ever names `tishlang_runtime`.
+pub mod json {
+    pub use tishlang_core::json_stringify_into as stringify_into;
+    /// Append the JSON-escaped contents of `s` (without surrounding
+    /// quotes) to `buf`. Used by typed-struct serialisers for `String`
+    /// fields. Falls through to `tishlang_core::json_stringify_into`'s
+    /// internal helper via a `Value::String` round-trip when the inner
+    /// helper isn't directly exposed.
+    pub fn escape_into(buf: &mut String, s: &str) {
+        // Inline the same escape rules as tishlang_core::json::
+        // `escape_json_string_into`. Kept locally so we don't widen
+        // tishlang_core's public surface unnecessarily.
+        let bytes = s.as_bytes();
+        let mut start = 0usize;
+        for (i, &b) in bytes.iter().enumerate() {
+            if b < 0x20 || b == b'"' || b == b'\\' {
+                if start < i {
+                    buf.push_str(&s[start..i]);
+                }
+                match b {
+                    b'"' => buf.push_str("\\\""),
+                    b'\\' => buf.push_str("\\\\"),
+                    b'\n' => buf.push_str("\\n"),
+                    b'\r' => buf.push_str("\\r"),
+                    b'\t' => buf.push_str("\\t"),
+                    b'\x08' => buf.push_str("\\b"),
+                    b'\x0c' => buf.push_str("\\f"),
+                    _ => {
+                        use std::fmt::Write;
+                        let _ = write!(buf, "\\u{:04x}", b as u32);
+                    }
+                }
+                start = i + 1;
+            }
+        }
+        if start < bytes.len() {
+            buf.push_str(&s[start..]);
+        }
+    }
+}
 
 /// Error type for Tish throw/catch.
 #[derive(Debug, Clone)]
@@ -553,7 +602,7 @@ pub fn read_dir(args: &[Value]) -> Value {
                 .filter_map(|e| e.ok())
                 .map(|e| Value::String(e.file_name().to_string_lossy().into()))
                 .collect();
-            Value::Array(Rc::new(RefCell::new(files)))
+            Value::Array(VmRef::new(files))
         }
         Err(e) => make_error_value(e),
     }
@@ -578,8 +627,12 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
     let key = key.as_ref();
     match obj {
         Value::Object(map) => {
-            let k: Arc<str> = key.into();
-            map.borrow().get(&k).cloned().unwrap_or(Value::Null)
+            // The map's key type is `Arc<str>`, which implements
+            // `Borrow<str>` — so we can look up with a borrowed `&str`
+            // directly. Previously we allocated a fresh `Arc<str>` on
+            // every call (one heap alloc per `r.field` read in tight
+            // handler loops); this version is alloc-free on the hit path.
+            map.borrow().get(key).cloned().unwrap_or(Value::Null)
         }
         Value::Array(arr) => {
             if key == "length" {
@@ -599,17 +652,17 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
         }
         #[cfg(feature = "regex")]
         Value::RegExp(re) => {
-            let re = Rc::clone(re);
+            let re = re.clone();
             if key == "exec" {
-                Value::Function(Rc::new(move |args: &[Value]| {
+                Value::native(move |args: &[Value]| {
                     let input = args.first().unwrap_or(&Value::Null);
-                    regexp_exec(&Value::RegExp(Rc::clone(&re)), input)
-                }))
+                    regexp_exec(&Value::RegExp(re.clone()), input)
+                })
             } else if key == "test" {
-                Value::Function(Rc::new(move |args: &[Value]| {
+                Value::native(move |args: &[Value]| {
                     let input = args.first().unwrap_or(&Value::Null);
-                    regexp_test(&Value::RegExp(Rc::clone(&re)), input)
-                }))
+                    regexp_test(&Value::RegExp(re.clone()), input)
+                })
             } else {
                 Value::Null
             }
@@ -648,7 +701,15 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
 pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
     match obj {
         Value::Object(map) => {
-            map.borrow_mut().insert(Arc::from(key), val.clone());
+            // Try the in-place update path first: if the key already
+            // exists we re-use the existing `Arc<str>` and skip the
+            // alloc. Only newly-inserted keys pay for `Arc::from(key)`.
+            let mut m = map.borrow_mut();
+            if let Some(slot) = m.get_mut(key) {
+                *slot = val.clone();
+            } else {
+                m.insert(Arc::from(key), val.clone());
+            }
             val
         }
         _ => panic!("Cannot assign property on non-object"),
@@ -735,6 +796,15 @@ mod promise_io;
 mod http;
 
 #[cfg(feature = "http")]
+mod http_prefork;
+
+#[cfg(feature = "http-io-uring")]
+mod http_io_uring;
+
+#[cfg(feature = "http-hyper")]
+mod http_hyper;
+
+#[cfg(feature = "http")]
 mod http_fetch;
 
 mod timers;
@@ -756,8 +826,67 @@ pub use ws::{
 
 #[cfg(feature = "http")]
 pub use http::{
-    await_fetch as http_await_fetch, await_fetch_all as http_await_fetch_all, serve as http_serve,
+    await_fetch as http_await_fetch, await_fetch_all as http_await_fetch_all,
+    register_static_route,
 };
+
+// `serve` is the user-facing entry point for Tish's HTTP server. By default
+// it uses the tiny_http + SO_REUSEPORT path in `http.rs`. When compiled with
+// `--features http-hyper` and the `TISH_HTTP_BACKEND=hyper` env var is set
+// at runtime, it dispatches to the hyper backend in `http_hyper.rs`.
+//
+// The env-var switch (rather than a cargo feature switch) means one built
+// binary can toggle backends for A/B benchmarking and production rollout
+// without rebuilding. When `http-hyper` is not compiled in, the switch is a
+// no-op and the tiny_http path is used unconditionally.
+#[cfg(feature = "http")]
+pub fn http_serve<F>(args: &[tishlang_core::Value], handler: F) -> tishlang_core::Value
+where
+    F: Fn(&[tishlang_core::Value]) -> tishlang_core::Value + Send + Sync + 'static,
+{
+    #[cfg(feature = "http-hyper")]
+    {
+        if http_hyper::is_enabled_via_env() {
+            return http_hyper::serve(args, handler);
+        }
+    }
+    http::serve(args, handler)
+}
+
+/// `serve(port, { onWorker: (workerId) => handler })` — the object form of
+/// `serve`. Picks up `onWorker`, invokes it once per HTTP accept thread to
+/// build that thread's handler, then enters the normal parallel accept
+/// loop. See [`http::serve_per_worker`] for the full doc.
+///
+/// This is broadly useful for any Tish app that wants per-worker state —
+/// DB connection pools, in-process caches, counters, etc. — without a
+/// global `RwLock` or forcing everything through the single-thread
+/// dispatcher. It also plays nicely with prefork: `onWorker` sees global
+/// worker ids across processes so logs and sharded state are easy to key.
+#[cfg(feature = "http")]
+pub fn http_serve_per_worker(
+    args: &[tishlang_core::Value],
+    factory_value: tishlang_core::Value,
+) -> tishlang_core::Value {
+    use tishlang_core::Value;
+    // factory_value should be Value::Function (passed down by codegen after
+    // extracting `onWorker` from the options object).
+    let Value::Function(factory) = factory_value else {
+        eprintln!("[tish http] serve: onWorker must be a function (id) => handler");
+        return Value::Null;
+    };
+    let factory: tishlang_core::NativeFn = factory;
+    http::serve_per_worker(args, move |worker_id| {
+        let handler_val = factory(&[Value::Number(worker_id as f64)]);
+        match handler_val {
+            Value::Function(f) => f,
+            _ => panic!(
+                "onWorker returned {:?} for worker {}; must return a function",
+                handler_val, worker_id
+            ),
+        }
+    })
+}
 
 pub use timers::{
     clear_interval as timer_clear_interval, clear_timeout as timer_clear_timeout, drain_timers,
@@ -765,7 +894,7 @@ pub use timers::{
 };
 
 #[cfg(feature = "http")]
-pub use promise::promise_object;
+pub use promise::{promise_instance_catch, promise_instance_then, promise_object};
 
 #[cfg(feature = "http")]
 pub use native_promise::{await_promise, fetch_all_promise, fetch_async_promise, fetch_promise};
@@ -789,7 +918,7 @@ pub fn regexp_new(args: &[Value]) -> Value {
     };
 
     match TishRegExp::new(&pattern, &flags) {
-        Ok(re) => Value::RegExp(Rc::new(RefCell::new(re))),
+        Ok(re) => Value::RegExp(VmRef::new(re)),
         Err(e) => {
             eprintln!("RegExp error: {}", e);
             Value::Null
@@ -870,7 +999,7 @@ fn regexp_exec_impl(re: &mut tishlang_core::TishRegExp, input: &str) -> Value {
                 };
             }
 
-            Value::Object(Rc::new(RefCell::new(obj)))
+            Value::Object(VmRef::new(obj))
         }
         Ok(None) | Err(_) => {
             if re.flags.global || re.flags.sticky {
@@ -885,12 +1014,12 @@ fn regexp_exec_impl(re: &mut tishlang_core::TishRegExp, input: &str) -> Value {
 pub fn string_split_regex(s: &Value, separator: &Value, limit: Option<usize>) -> Value {
     let input = match s {
         Value::String(s) => s.as_ref(),
-        _ => return Value::Array(Rc::new(RefCell::new(vec![s.clone()]))),
+        _ => return Value::Array(VmRef::new(vec![s.clone()])),
     };
 
     let max = limit.unwrap_or(usize::MAX);
     if max == 0 {
-        return Value::Array(Rc::new(RefCell::new(Vec::new())));
+        return Value::Array(VmRef::new(Vec::new()));
     }
 
     match separator {
@@ -916,16 +1045,16 @@ pub fn string_split_regex(s: &Value, separator: &Value, limit: Option<usize>) ->
                 result.push(Value::String(input[last_end..].into()));
             }
 
-            Value::Array(Rc::new(RefCell::new(result)))
+            Value::Array(VmRef::new(result))
         }
         Value::String(sep) => {
             let parts: Vec<Value> = input
                 .splitn(max, sep.as_ref())
                 .map(|s| Value::String(s.into()))
                 .collect();
-            Value::Array(Rc::new(RefCell::new(parts)))
+            Value::Array(VmRef::new(parts))
         }
-        _ => Value::Array(Rc::new(RefCell::new(vec![Value::String(input.into())]))),
+        _ => Value::Array(VmRef::new(vec![Value::String(input.into())])),
     }
 }
 
@@ -961,7 +1090,7 @@ pub fn string_match_regex(s: &Value, regexp: &Value) -> Value {
                 if matches.is_empty() {
                     Value::Null
                 } else {
-                    Value::Array(Rc::new(RefCell::new(matches)))
+                    Value::Array(VmRef::new(matches))
                 }
             } else {
                 regexp_exec_impl(&mut re, input)

@@ -250,6 +250,14 @@ optional-chaining-profile:
 perf *ARGS:
     ./scripts/run_performance_manual.sh {{ARGS}}
 
+# Bundled perf suite: per-test table + whole-program timings (tests/main.tish); add --verbose for full stdout
+perf-suite *ARGS:
+    ./scripts/run_performance_suite.sh {{ARGS}}
+
+# Regenerate tests/main.tish + tests/main.js after changing paired pure perf tests
+perf-suite-gen:
+    ./scripts/generate_perf_ci_main.sh
+
 # Show binary sizes for different builds
 sizes:
     @echo "Building secure binary..."

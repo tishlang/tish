@@ -49,6 +49,7 @@ pub struct NativeBuildArtifacts {
 const BUILTIN_ALIASES: &[(&str, &str)] = &[
     ("fs", "tish:fs"),
     ("http", "tish:http"),
+    ("timers", "tish:timers"),
     ("process", "tish:process"),
     ("ws", "tish:ws"),
 ];
@@ -66,8 +67,8 @@ pub fn normalize_builtin_spec(spec: &str) -> Option<String> {
 
 /// Built-in modules that come from tishlang_runtime, not from package.json.
 pub fn is_builtin_native_spec(spec: &str) -> bool {
-    matches!(spec, "tish:fs" | "tish:http" | "tish:process" | "tish:ws")
-        || matches!(spec, "fs" | "http" | "process" | "ws")
+    matches!(spec, "tish:fs" | "tish:http" | "tish:timers" | "tish:process" | "tish:ws")
+        || matches!(spec, "fs" | "http" | "timers" | "process" | "ws")
 }
 
 /// Resolve all native imports in a merged program via package.json lookup.
@@ -388,7 +389,7 @@ pub fn generate_native_wrapper_rs(
          use std::cell::RefCell;\n\
          use std::rc::Rc;\n\
          use std::sync::Arc;\n\
-         use tishlang_runtime::{ObjectMap, Value};\n\n",
+         use tishlang_runtime::{ObjectMap, Value, VmRef};\n\n",
     );
     let mut any = false;
     for m in modules {
@@ -414,11 +415,11 @@ pub fn generate_native_wrapper_rs(
             let rust_fn = export_name_to_rust_ident(&export_name);
             let key_lit = format!("{:?}", export_name);
             file.push_str(&format!(
-                "    m.insert(Arc::from({}), Value::Function(Rc::new(|args: &[Value]| {{\n        {}::{}(args)\n    }})));\n",
+                "    m.insert(Arc::from({}), Value::native(|args: &[Value]| {{\n        {}::{}(args)\n    }}));\n",
                 key_lit, shim_crate, rust_fn
             ));
         }
-        file.push_str("    Value::Object(Rc::new(RefCell::new(m)))\n}\n\n");
+        file.push_str("    Value::Object(VmRef::new(m))\n}\n\n");
     }
     if !any {
         return String::new();
@@ -719,7 +720,7 @@ fn load_module_recursive(
 }
 
 /// Returns true for native module imports that don't resolve to files.
-/// - fs, http, process, ws (Node-compatible aliases for tish:fs, tish:http, tish:process, tish:ws)
+/// - fs, http, timers, process, ws (Node-compatible aliases for tish:*)
 /// - tish:egui, tish:polars, etc.
 /// - cargo:… (Cargo `rustDependencies` + generated wrapper; Rust native backend)
 /// - @scope/package (npm-style)
@@ -727,7 +728,7 @@ pub fn is_native_import(spec: &str) -> bool {
     spec.starts_with("tish:")
         || spec.starts_with("cargo:")
         || spec.starts_with('@')
-        || matches!(spec, "fs" | "http" | "process" | "ws")
+        || matches!(spec, "fs" | "http" | "timers" | "process" | "ws")
 }
 
 /// Map native spec to Cargo feature name for built-in tish:* modules.
@@ -736,32 +737,52 @@ pub fn native_spec_to_feature(spec: &str) -> Option<String> {
     canonical.strip_prefix("tish:").map(|s| s.to_string())
 }
 
-/// Resolve a bare specifier (e.g. "lattish") to a path via node_modules.
-/// Resolve a bare package name (npm-style) to the package entry `.tish` file, walking `node_modules`
-/// from `from_dir` upward.
+/// Resolve `package.json` at `pkg_root` to the package's main `.tish` entry, if `name` matches `spec`.
+fn resolve_package_root_to_entry(pkg_root: &Path, spec: &str) -> Option<PathBuf> {
+    let pkg_json = pkg_root.join("package.json");
+    if !pkg_json.exists() {
+        return None;
+    }
+    if read_package_name(&pkg_json).as_deref() != Some(spec) {
+        return None;
+    }
+    let content = std::fs::read_to_string(&pkg_json).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let entry = json
+        .get("tish")
+        .and_then(|t| t.get("module"))
+        .and_then(|m| m.as_str())
+        .or_else(|| json.get("main").and_then(|m| m.as_str()))
+        .unwrap_or("index.tish");
+    let entry_clean = entry.trim_start_matches("./");
+    let resolved = pkg_root.join(entry_clean);
+    if !resolved.exists() {
+        return None;
+    }
+    match resolved.canonicalize() {
+        Ok(p) => Some(p),
+        Err(_) => Some(resolved),
+    }
+}
+
+/// Resolve a bare specifier (e.g. "lattish") to the package entry `.tish` file.
+///
+/// Walks upward from `from_dir` and, at each level, checks (same order as native [`find_package_dir`]):
+/// - `node_modules/<spec>/`
+/// - `<spec>/` as a sibling directory (monorepo: `…/tish/tish-candle` next to `…/tish/tish-hub`)
+/// - the search directory itself if its `package.json` name matches `spec`
 pub fn resolve_bare_spec(spec: &str, from_dir: &Path, _project_root: &Path) -> Option<PathBuf> {
     let mut search = from_dir.to_path_buf();
     loop {
-        let node_mod = search.join("node_modules").join(spec);
-        let pkg_json = node_mod.join("package.json");
-        if pkg_json.exists() {
-            if let Some(name) = read_package_name(&pkg_json) {
-                if name == spec {
-                    let content = std::fs::read_to_string(&pkg_json).ok()?;
-                    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-                    let entry = json
-                        .get("tish")
-                        .and_then(|t| t.get("module"))
-                        .and_then(|m| m.as_str())
-                        .or_else(|| json.get("main").and_then(|m| m.as_str()));
-                    let entry = entry.unwrap_or("index.tish");
-                    let entry_clean = entry.trim_start_matches("./");
-                    let resolved = node_mod.join(entry_clean);
-                    if resolved.exists() {
-                        return resolved.canonicalize().ok();
-                    }
-                }
-            }
+        if let Some(p) = resolve_package_root_to_entry(&search.join("node_modules").join(spec), spec)
+        {
+            return Some(p);
+        }
+        if let Some(p) = resolve_package_root_to_entry(&search.join(spec), spec) {
+            return Some(p);
+        }
+        if let Some(p) = resolve_package_root_to_entry(&search, spec) {
+            return Some(p);
         }
         if let Some(parent) = search.parent() {
             if parent == search {
@@ -792,7 +813,7 @@ fn resolve_import_path(
             return Ok(path);
         }
         return Err(format!(
-            "Package '{}' not found in node_modules. Install it with: npm install {}",
+            "Package '{}' not found. Install with `npm install {}`, or place the package under node_modules/ or as a sibling directory (same layout as native `find_package_dir`).",
             spec, spec
         ));
     }

@@ -8,7 +8,7 @@ mod natives;
 mod promise;
 #[cfg(feature = "regex")]
 pub mod regex;
-#[cfg(feature = "http")]
+#[cfg(feature = "timers")]
 mod timers;
 mod value;
 pub mod value_convert;
@@ -36,7 +36,7 @@ pub fn run(source: &str) -> Result<Value, String> {
     let program = tishlang_parser::parse(source)?;
     let mut eval = Evaluator::new();
     let result = eval.eval_program(&program)?;
-    #[cfg(feature = "http")]
+    #[cfg(feature = "timers")]
     eval.run_timer_phase()?;
     Ok(result)
 }
@@ -64,7 +64,7 @@ pub fn run_file(
     let mut eval = Evaluator::new();
     eval.set_current_dir(project_root.or(path.parent()));
     let result = eval.eval_program(&program)?;
-    #[cfg(feature = "http")]
+    #[cfg(feature = "timers")]
     eval.run_timer_phase()?;
     Ok(result)
 }

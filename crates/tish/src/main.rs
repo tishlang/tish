@@ -1,9 +1,11 @@
 //! Tish CLI - run, REPL, build to native or other targets.
 
+mod cargo_native_registry;
 mod cli_help;
 mod repl_completion;
 
 use std::cell::RefCell;
+use tishlang_core::VmRef;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
@@ -15,13 +17,13 @@ use rustyline::{Behavior, ColorMode, CompletionType, Config, Editor};
 
 use cli_help::{Cli, Commands};
 
-/// Normalize `--feature` / `--feature http,fs` / `--feature full` for VM runs and native builds.
+/// Normalize `--feature` / `--feature http,timers,fs` / `--feature full` for VM runs and native builds.
 fn normalize_capability_flags(features: &[String]) -> HashSet<String> {
     let mut out = HashSet::new();
     for s in features {
         for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
             if part == "full" {
-                for name in ["http", "fs", "process", "regex", "ws"] {
+                for name in ["http", "timers", "fs", "process", "regex", "ws"] {
                     out.insert(name.to_string());
                 }
             } else {
@@ -224,6 +226,10 @@ fn run_program(
     if backend == "interp" {
         let mut eval = tishlang_eval::Evaluator::new();
         let value = eval.eval_program(program)?;
+        #[cfg(feature = "timers")]
+        {
+            let _ = eval.run_timer_phase();
+        }
         if !matches!(value, tishlang_eval::Value::Null) {
             println!(
                 "{}",
@@ -242,13 +248,9 @@ fn run_program(
         tishlang_bytecode::compile(program).map_err(|e| e.to_string())?
     };
     let caps = vm_capabilities_for_cli_run(features);
-    let value = tishlang_vm::run_with_options(
-        &chunk,
-        tishlang_vm::VmRunOptions {
-            repl_mode: false,
-            capabilities: caps,
-        },
-    )?;
+    let mut vm = tishlang_vm::Vm::with_capabilities(caps);
+    cargo_native_registry::register_bytecode_native_modules(&mut vm);
+    let value = vm.run_with_options(&chunk, false)?;
     if !matches!(value, tishlang_core::Value::Null) {
         println!(
             "{}",
@@ -295,6 +297,10 @@ fn run_repl(backend: &str, no_optimize: bool, features: &[String]) -> Result<(),
                 Ok(program) => {
                     match eval.eval_program(&program) {
                         Ok(v) => {
+                            #[cfg(feature = "timers")]
+                            {
+                                let _ = eval.run_timer_phase();
+                            }
                             if !matches!(v, tishlang_eval::Value::Null) {
                                 println!(
                                     "{}",
@@ -326,11 +332,11 @@ fn run_repl(backend: &str, no_optimize: bool, features: &[String]) -> Result<(),
     if !std::io::stdin().is_terminal() {
         eprintln!("Note: Tab completion and grey preview require an interactive terminal (TTY).");
     }
-    let vm = Rc::new(RefCell::new(tishlang_vm::Vm::with_capabilities(
-        vm_capabilities_for_cli_run(features),
-    )));
+    let mut vm0 = tishlang_vm::Vm::with_capabilities(vm_capabilities_for_cli_run(features));
+    cargo_native_registry::register_bytecode_native_modules(&mut vm0);
+    let vm = VmRef::new(vm0);
     let completer = repl_completion::ReplCompleter {
-        vm: Rc::clone(&vm),
+        vm: vm.clone(),
         no_optimize,
     };
     let config = Config::builder()

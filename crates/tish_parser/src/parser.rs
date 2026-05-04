@@ -537,8 +537,13 @@ impl<'a> Parser<'a> {
                     let typ = self.parse_type_annotation()?;
                     props.push((key, typ));
                     if !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
-                        // Allow trailing comma or require comma between items
-                        if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                        // Accept `,` or `;` between items (TypeScript-style
+                        // semicolons are common in interface/object type
+                        // declarations); also tolerate a trailing separator.
+                        if matches!(
+                            self.peek_kind(),
+                            Some(TokenKind::Comma) | Some(TokenKind::Semicolon)
+                        ) {
                             self.advance();
                         }
                     }

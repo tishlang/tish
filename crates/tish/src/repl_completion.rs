@@ -2,8 +2,8 @@
 //! Grey preview hint below the line (like Node) and Tab for full list.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
-use std::rc::Rc;
+
+use tishlang_core::VmRef;
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
@@ -29,7 +29,7 @@ const ANSI_RESET: &str = "\x1b[0m";
 
 /// Tab completer that evaluates the expression before the last `.` and suggests property/method names.
 pub struct ReplCompleter {
-    pub vm: Rc<RefCell<Vm>>,
+    pub vm: VmRef<Vm>,
     pub no_optimize: bool,
 }
 

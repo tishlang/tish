@@ -109,6 +109,7 @@ impl Evaluator {
             );
             s.set("decodeURI".into(), Value::Native(natives::decode_uri), true);
             s.set("encodeURI".into(), Value::Native(natives::encode_uri), true);
+            s.set("htmlEscape".into(), Value::Native(natives::html_escape), true);
             s.set(
                 "Boolean".into(),
                 Value::Native(natives::boolean_native),
@@ -221,7 +222,37 @@ impl Evaluator {
                 );
             }
 
-            // fs, http, process: use import { x } from 'tish:fs' etc. No globals.
+            // fs, process: prefer `import { x } from 'tish:fs'` etc.
+            #[cfg(feature = "timers")]
+            {
+                s.set(
+                    "setTimeout".into(),
+                    Value::TimerBuiltin(Arc::from("setTimeout")),
+                    true,
+                );
+                s.set(
+                    "setInterval".into(),
+                    Value::TimerBuiltin(Arc::from("setInterval")),
+                    true,
+                );
+                s.set(
+                    "clearTimeout".into(),
+                    Value::Native(Self::clear_timeout_native),
+                    true,
+                );
+                s.set(
+                    "clearInterval".into(),
+                    Value::Native(Self::clear_interval_native),
+                    true,
+                );
+            }
+            #[cfg(feature = "http")]
+            {
+                s.set("fetch".into(), Value::Native(Self::fetch_native), true);
+                s.set("fetchAll".into(), Value::Native(Self::fetch_all_native), true);
+                s.set("Promise".into(), Value::PromiseConstructor, true);
+                s.set("serve".into(), Value::Serve, true);
+            }
         }
         Self {
             scope,
@@ -729,6 +760,19 @@ impl Evaluator {
                     exports.insert("fetchAll".into(), Value::Native(Self::fetch_all_native));
                     exports.insert("serve".into(), Value::Serve);
                     exports.insert("Promise".into(), Value::PromiseConstructor);
+                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
+                }
+                #[cfg(not(feature = "http"))]
+                {
+                    return Err(EvalError::Error(
+                        "tish:http requires the http feature. Rebuild with: cargo build -p tishlang --features http".into(),
+                    ));
+                }
+            }
+            "tish:timers" => {
+                #[cfg(feature = "timers")]
+                {
+                    let mut exports: PropMap = PropMap::default();
                     exports.insert(
                         "setTimeout".into(),
                         Value::TimerBuiltin(Arc::from("setTimeout")),
@@ -747,10 +791,10 @@ impl Evaluator {
                     );
                     return Ok(Value::Object(Rc::new(RefCell::new(exports))));
                 }
-                #[cfg(not(feature = "http"))]
+                #[cfg(not(feature = "timers"))]
                 {
                     return Err(EvalError::Error(
-                        "tish:http requires the http feature. Rebuild with: cargo build -p tishlang --features http".into(),
+                        "tish:timers requires the timers feature. Rebuild with: cargo build -p tishlang --features timers".into(),
                     ));
                 }
             }
@@ -818,7 +862,7 @@ impl Evaluator {
             }
             _ => {
                 return Err(EvalError::Error(format!(
-                    "Unknown built-in module: {}. Supported: tish:fs, tish:http, tish:process, tish:ws (plus any registered by native modules)",
+                    "Unknown built-in module: {}. Supported: tish:fs, tish:http, tish:timers, tish:process, tish:ws (plus any registered by native modules)",
                     spec
                 )));
             }
@@ -1758,7 +1802,9 @@ impl Evaluator {
                     Value::Serve
                     | Value::PromiseResolver(_)
                     | Value::PromiseConstructor
-                    | Value::BoundPromiseMethod(_, _) | Value::TimerBuiltin(_) => "function".into(),
+                    | Value::BoundPromiseMethod(_, _) => "function".into(),
+                    #[cfg(feature = "timers")]
+                    Value::TimerBuiltin(_) => "function".into(),
                     #[cfg(feature = "http")]
                     Value::Promise(_) => "object".into(),
                     #[cfg(feature = "regex")]
@@ -2331,8 +2377,9 @@ impl Evaluator {
             #[cfg(feature = "http")]
             Value::PromiseConstructor
             | Value::Serve
-            | Value::BoundPromiseMethod(_, _)
-            | Value::TimerBuiltin(_) => self.call_func(callee, args),
+            | Value::BoundPromiseMethod(_, _) => self.call_func(callee, args),
+            #[cfg(feature = "timers")]
+            Value::TimerBuiltin(_) => self.call_func(callee, args),
             Value::OpaqueMethod(_, _) => self.call_func(callee, args),
             _ => Ok(Value::Null),
         }
@@ -2419,7 +2466,7 @@ impl Evaluator {
             Value::BoundPromiseMethod(promise_ref, method) => {
                 self.run_promise_method(promise_ref, method.as_ref(), args)
             }
-            #[cfg(feature = "http")]
+            #[cfg(feature = "timers")]
             Value::TimerBuiltin(name) => self.run_timer_builtin(name.as_ref(), args),
             Value::OpaqueMethod(opaque, method_name) => {
                 let method = opaque.get_method(method_name.as_ref()).ok_or_else(|| {
@@ -2637,7 +2684,7 @@ impl Evaluator {
         Ok(promise)
     }
 
-    #[cfg(feature = "http")]
+    #[cfg(feature = "timers")]
     fn run_timer_builtin(&self, name: &str, args: &[Value]) -> Result<Value, EvalError> {
         let callback = args
             .first()
@@ -2658,7 +2705,7 @@ impl Evaluator {
         Ok(Value::Number(id as f64))
     }
 
-    #[cfg(feature = "http")]
+    #[cfg(feature = "timers")]
     fn clear_timeout_native(args: &[Value]) -> Result<Value, String> {
         if let Some(Value::Number(n)) = args.first() {
             crate::timers::clearTimer(*n as u64);
@@ -2666,7 +2713,7 @@ impl Evaluator {
         Ok(Value::Null)
     }
 
-    #[cfg(feature = "http")]
+    #[cfg(feature = "timers")]
     fn clear_interval_native(args: &[Value]) -> Result<Value, String> {
         if let Some(Value::Number(n)) = args.first() {
             crate::timers::clearTimer(*n as u64);
@@ -2676,7 +2723,7 @@ impl Evaluator {
 
     /// Run all due timer callbacks. Called after the script completes so setTimeout/setInterval
     /// callbacks run without blocking the main script. Loops until no timers are due.
-    #[cfg(feature = "http")]
+    #[cfg(feature = "timers")]
     pub fn run_timer_phase(&mut self) -> Result<(), String> {
         const MAX_ITERATIONS: u32 = 1_000_000; // avoid infinite loop if setInterval never cleared
         let mut iterations = 0;
@@ -3254,8 +3301,9 @@ impl Evaluator {
             | Value::Promise(_)
             | Value::PromiseResolver(_)
             | Value::PromiseConstructor
-            | Value::BoundPromiseMethod(_, _)
-            | Value::TimerBuiltin(_) => "null".to_string(),
+            | Value::BoundPromiseMethod(_, _) => "null".to_string(),
+            #[cfg(feature = "timers")]
+            Value::TimerBuiltin(_) => "null".to_string(),
             #[cfg(feature = "regex")]
             Value::RegExp(_) => "null".to_string(),
             Value::Opaque(_) | Value::OpaqueMethod(_, _) => "null".to_string(),

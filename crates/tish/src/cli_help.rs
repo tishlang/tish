@@ -337,7 +337,9 @@ fn capabilities_section(oh: &str, t: &str, r: &str) -> String {
 
 {oh}Capabilities{r} (--feature, repeatable; comma-separated values are split):
   {t}http{r}
-          Network: fetch, serve, Promise / timers (native async)
+          Network: fetch, fetchAll, serve, Promise (and `await`); enabling http also enables timers
+  {t}timers{r}
+          setTimeout, setInterval, clearTimeout, clearInterval (global + `import from \"timers\"` / tish:timers)
   {t}fs{r}
           Filesystem: readFile, writeFile, fileExists, isDir, readDir, mkdir
   {t}process{r}
@@ -347,9 +349,9 @@ fn capabilities_section(oh: &str, t: &str, r: &str) -> String {
   {t}ws{r}
           WebSocket client / server
   {t}full{r}
-          All of the above (http, fs, process, regex, ws)
+          All of the above (http, timers, fs, process, regex, ws)
 
-Omit --feature to use every capability linked into this binary."
+Omit --feature to allow every capability compiled into this `tish` binary; pass flags to restrict what scripts may use. The CLI is normally built with all of them (Cargo default on `tishlang`)."
     )
 }
 
@@ -414,7 +416,9 @@ pub fn build_after_help() -> String {
 
 {oh}Capabilities{r} (--feature, repeatable; comma-separated values are split):
   {t}http{r}
-          Network: fetch, serve, Promise / timers (native async)
+          Network: fetch, fetchAll, serve, Promise (and `await`); enabling http also enables timers
+  {t}timers{r}
+          setTimeout, setInterval, clearTimeout, clearInterval (global + `import from \"timers\"` / tish:timers)
   {t}fs{r}
           Filesystem: readFile, writeFile, fileExists, isDir, readDir, mkdir
   {t}process{r}
@@ -424,10 +428,9 @@ pub fn build_after_help() -> String {
   {t}ws{r}
           WebSocket client / server
   {t}full{r}
-          All of the above (http, fs, process, regex, ws)
+          All of the above (http, timers, fs, process, regex, ws)
 
-Omit --feature to use every capability linked into this binary.
-Build `tish` with matching Cargo features (e.g. cargo build -p tishlang --features full)."
+For `--target native`, these choose what is linked into the **output** executable (omit = same set as this `tish` binary was built with). Minimal native outputs still use a full `tish` CLI unless you built it with `cargo build -p tishlang --no-default-features`."
     )
 }
 
@@ -458,7 +461,7 @@ pub(crate) struct RunArgs {
         help_heading = "Options"
     )]
     pub backend: String,
-    /// Subset of capabilities (see `tish --help` for the full list).
+    /// Restrict which platform APIs the script may use (omit = all capabilities compiled into this `tish`).
     #[arg(
         long = "feature",
         value_name = "NAME",
@@ -481,7 +484,7 @@ pub(crate) struct ReplArgs {
         help_heading = "Options"
     )]
     pub backend: String,
-    /// Subset of capabilities (see `tish --help` for the full list).
+    /// Restrict which platform APIs the REPL may use (omit = all capabilities compiled into this `tish`).
     #[arg(
         long = "feature",
         value_name = "NAME",
@@ -519,7 +522,7 @@ pub(crate) struct BuildArgs {
         help_heading = "Options"
     )]
     pub native_backend: String,
-    /// Capability subset for native output (see long help below).
+    /// For `--target native`: which capabilities to link into the produced binary (omit = same as this `tish`; see long help).
     #[arg(
         long = "feature",
         value_name = "NAME",

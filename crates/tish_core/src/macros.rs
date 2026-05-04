@@ -23,14 +23,14 @@
 #[macro_export]
 macro_rules! tish_module {
     ($($name:expr => $fn:expr),* $(,)?) => {{
-        use std::cell::RefCell;
-        use std::rc::Rc;
         use std::sync::Arc;
-        use $crate::{ObjectMap, Value};
+        use $crate::{ObjectMap, Value, VmRef};
         let mut map = ObjectMap::default();
         $(
-            map.insert(Arc::from($name), Value::Function(Rc::new($fn)));
+            // `Value::native` picks the right Rc / Arc wrapper depending on
+            // whether the `send-values` feature is enabled upstream.
+            map.insert(Arc::from($name), Value::native($fn));
         )*
-        Value::Object(Rc::new(RefCell::new(map)))
+        Value::Object(VmRef::new(map))
     }};
 }
