@@ -4,12 +4,12 @@
 class TishBindgen < Formula
   desc "CLI to generate Rust glue for Tish cargo: imports (tishlang-cargo-bindgen)"
   homepage "https://github.com/tishlang/tish"
-  version "1.9.0"
+  version "1.9.1"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/tishlang/tish/releases/download/v1.9.0/tish-bindgen-darwin-arm64"
+      url "https://github.com/tishlang/tish/releases/download/v1.9.1/tish-bindgen-darwin-arm64"
       sha256 "f8ef92aec9ef6cbba513d706dfa4ced38e52a437e6c2fa3443454d6f64077fed"
 
       def install
@@ -17,7 +17,7 @@ class TishBindgen < Formula
       end
     end
     if Hardware::CPU.intel?
-      url "https://github.com/tishlang/tish/releases/download/v1.9.0/tish-bindgen-darwin-x64"
+      url "https://github.com/tishlang/tish/releases/download/v1.9.1/tish-bindgen-darwin-x64"
       sha256 "f8f1bf08994cd6628e784274d8b123d47fadbd1136ff028042d7acef66614896"
 
       def install
@@ -28,7 +28,7 @@ class TishBindgen < Formula
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/tishlang/tish/releases/download/v1.9.0/tish-bindgen-linux-arm64"
+      url "https://github.com/tishlang/tish/releases/download/v1.9.1/tish-bindgen-linux-arm64"
       sha256 "df412f94479899833f45e3396554826f0d26be4c241fd5cc9c5703aa7167c6d0"
 
       def install
@@ -36,7 +36,7 @@ class TishBindgen < Formula
       end
     end
     if Hardware::CPU.intel?
-      url "https://github.com/tishlang/tish/releases/download/v1.9.0/tish-bindgen-linux-x64"
+      url "https://github.com/tishlang/tish/releases/download/v1.9.1/tish-bindgen-linux-x64"
       sha256 "ba8334d273395549feb85543be597eca100a452b9cf9d4b1bdf17ab753106b0b"
 
       def install
