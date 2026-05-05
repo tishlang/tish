@@ -828,9 +828,12 @@ fn test_mvp_programs_native() {
             .unwrap_or_else(|e| panic!("compile_many_to_native: {}", e.message));
     }
 
+    // Run each binary sequentially. Parallel `fs::copy` + `exec` caused Linux ETXTBSY (errno 26)
+    // in CI when several threads replaced/ran temp executables under load.
     let errors: Vec<String> = entries_owned
-        .par_iter()
-        .filter_map(|(path, cached_bin)| {
+        .iter()
+        .enumerate()
+        .filter_map(|(run_index, (path, cached_bin))| {
             let expected = match get_expected(path) {
                 Some(e) => e,
                 None => return Some(format!("missing expected: {}", path.display())),
@@ -844,10 +847,11 @@ fn test_mvp_programs_native() {
                 .map(|e| e.to_string_lossy().to_string())
                 .unwrap_or_default();
             let temp_dest = std::env::temp_dir().join(format!(
-                "tish_mvp_native_{}_{:x}_{}",
+                "tish_mvp_native_{}_{:x}_{}_{}",
                 stem,
                 file_content_hash(path),
-                std::process::id()
+                std::process::id(),
+                run_index
             ));
             let temp_dest = if ext_bin.is_empty() {
                 temp_dest
