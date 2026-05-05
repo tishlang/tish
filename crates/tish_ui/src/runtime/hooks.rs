@@ -189,20 +189,14 @@ fn memo_dep_eq(a: &Value, b: &Value) -> bool {
             if ab.len() != bb.len() {
                 return false;
             }
-            ab.iter()
-                .zip(bb.iter())
-                .all(|(x, y)| memo_dep_eq(x, y))
+            ab.iter().zip(bb.iter()).all(|(x, y)| memo_dep_eq(x, y))
         }
         _ => false,
     }
 }
 
 fn memo_deps_unchanged(prev: &[Value], next: &[Value]) -> bool {
-    prev.len() == next.len()
-        && prev
-            .iter()
-            .zip(next.iter())
-            .all(|(a, b)| memo_dep_eq(a, b))
+    prev.len() == next.len() && prev.iter().zip(next.iter()).all(|(a, b)| memo_dep_eq(a, b))
 }
 
 fn root_id_for_hooks() -> RootId {
@@ -338,11 +332,7 @@ fn flush_pending_effects(root_id: RootId) {
             .map(|st| std::mem::take(&mut *st.pending_effects.borrow_mut()))
             .unwrap_or_default()
     });
-    let cells_rc = HOOKS.with(|h| {
-        h.borrow()
-            .get(&root_id)
-            .map(|st| st.effect_cells.clone())
-    });
+    let cells_rc = HOOKS.with(|h| h.borrow().get(&root_id).map(|st| st.effect_cells.clone()));
     let Some(cells_rc) = cells_rc else {
         return;
     };

@@ -22,7 +22,9 @@ mod metadata;
 
 pub use classify::SignatureClass;
 pub use discover::rust_public_fn_location;
-pub use metadata::{resolve_dependency_from_manifest, resolve_registry_dependency, ResolvedDependency};
+pub use metadata::{
+    resolve_dependency_from_manifest, resolve_registry_dependency, ResolvedDependency,
+};
 
 use std::fs;
 use std::io;
@@ -69,7 +71,10 @@ pub fn generate_from_manifest(
     generate_from_resolved(cfg, &resolved)
 }
 
-fn generate_from_resolved(cfg: &BindgenConfig, resolved: &ResolvedDependency) -> Result<(), String> {
+fn generate_from_resolved(
+    cfg: &BindgenConfig,
+    resolved: &ResolvedDependency,
+) -> Result<(), String> {
     let root = resolved.source_root();
     let fns = discover::discover_public_functions(&root)?;
 
@@ -102,17 +107,9 @@ fn generate_from_resolved(cfg: &BindgenConfig, resolved: &ResolvedDependency) ->
         emitted.push((export.clone(), class));
     }
 
-    let lib_rs = render_generated_lib(
-        &cfg.dependency_name,
-        &emitted,
-        need_json_helpers,
-    )?;
+    let lib_rs = render_generated_lib(&cfg.dependency_name, &emitted, need_json_helpers)?;
 
-    let cargo_toml = render_output_cargo_toml(
-        cfg,
-        resolved.version(),
-        need_json_helpers,
-    )?;
+    let cargo_toml = render_output_cargo_toml(cfg, resolved.version(), need_json_helpers)?;
 
     fs::create_dir_all(cfg.out_dir.join("src")).map_err(|e| e.to_string())?;
     fs::write(cfg.out_dir.join("Cargo.toml"), cargo_toml).map_err(|e| e.to_string())?;
@@ -128,16 +125,18 @@ impl BindgenConfig {
     }
 }
 
-fn render_output_cargo_toml(cfg: &BindgenConfig, dep_exact_version: &str, need_serde_json: bool) -> Result<String, String> {
+fn render_output_cargo_toml(
+    cfg: &BindgenConfig,
+    dep_exact_version: &str,
+    need_serde_json: bool,
+) -> Result<String, String> {
     let rt_line = match &cfg.tishlang_runtime {
-        TishlangRuntimeDep::Path(p) => format!(
-            "tishlang_runtime = {{ path = {} }}\n",
-            toml_string_value(p)
-        ),
-        TishlangRuntimeDep::Version(req) => format!(
-            "tishlang_runtime = {}\n",
-            toml_string_value(req)
-        ),
+        TishlangRuntimeDep::Path(p) => {
+            format!("tishlang_runtime = {{ path = {} }}\n", toml_string_value(p))
+        }
+        TishlangRuntimeDep::Version(req) => {
+            format!("tishlang_runtime = {}\n", toml_string_value(req))
+        }
     };
     let dep_line = format!(
         "{} = {}\n",
@@ -185,10 +184,7 @@ fn render_generated_lib(
          use tishlang_runtime::{ObjectMap, Value, VmRef};\n\n",
     );
 
-    out.push_str(&format!(
-        "use {} as _tish_upstream;\n\n",
-        crate_ident
-    ));
+    out.push_str(&format!("use {} as _tish_upstream;\n\n", crate_ident));
 
     if need_json_helpers {
         out.push_str(JSON_HELPERS);
@@ -318,7 +314,10 @@ fn canonical_path_string(p: &Path) -> Result<String, String> {
 }
 
 /// Relative path from `out_dir` to `runtime` for Cargo.toml `path =`.
-pub fn runtime_path_relative_to_out_dir(out_dir: &Path, runtime: impl AsRef<Path>) -> Result<String, String> {
+pub fn runtime_path_relative_to_out_dir(
+    out_dir: &Path,
+    runtime: impl AsRef<Path>,
+) -> Result<String, String> {
     let abs_rt = runtime
         .as_ref()
         .canonicalize()

@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use clap::Parser;
 use tishlang_cargo_bindgen::{
     generate_from_manifest, generate_from_registry_dependency, infer,
-    resolve_runtime_path_for_output, runtime_path_relative_to_out_dir, BindgenConfig, TishlangRuntimeDep,
+    resolve_runtime_path_for_output, runtime_path_relative_to_out_dir, BindgenConfig,
+    TishlangRuntimeDep,
 };
 
 #[derive(Parser, Debug)]
@@ -83,49 +84,51 @@ fn run() -> Result<(), String> {
 
     let current_dir = std::env::current_dir().map_err(|e| e.to_string())?;
 
-    let (
-        output_crate_name,
-        out_dir,
-        dependency_name,
-        dependency_version_req,
-        search_root,
-    ) = if let Some(dep) = args.dependency.as_ref() {
-        if let Some(out) = args.out_dir.as_ref() {
+    let (output_crate_name, out_dir, dependency_name, dependency_version_req, search_root) =
+        if let Some(dep) = args.dependency.as_ref() {
+            if let Some(out) = args.out_dir.as_ref() {
+                let root = args
+                    .project_root
+                    .clone()
+                    .unwrap_or_else(|| out.parent().unwrap_or(out).to_path_buf());
+                (
+                    args.crate_name
+                        .clone()
+                        .unwrap_or_else(|| "tish_serde_json".into()),
+                    out.clone(),
+                    dep.clone(),
+                    args.dependency_version.clone(),
+                    root,
+                )
+            } else {
+                let root = args
+                    .project_root
+                    .clone()
+                    .unwrap_or_else(|| current_dir.clone());
+                let (crate_key, od) =
+                    infer::infer_glue_paths_only(&root, args.crate_name.as_deref())?;
+                (
+                    crate_key,
+                    od,
+                    dep.clone(),
+                    args.dependency_version.clone(),
+                    root,
+                )
+            }
+        } else {
             let root = args
                 .project_root
                 .clone()
-                .unwrap_or_else(|| out.parent().unwrap_or(out).to_path_buf());
+                .unwrap_or_else(|| current_dir.clone());
+            let inf = infer::infer_from_project_root(&root, args.crate_name.as_deref())?;
             (
-                args.crate_name
-                    .clone()
-                    .unwrap_or_else(|| "tish_serde_json".into()),
-                out.clone(),
-                dep.clone(),
-                args.dependency_version.clone(),
+                inf.output_crate_name,
+                inf.out_dir,
+                inf.dependency_name,
+                inf.dependency_version_req,
                 root,
             )
-        } else {
-            let root = args.project_root.clone().unwrap_or_else(|| current_dir.clone());
-            let (crate_key, od) = infer::infer_glue_paths_only(&root, args.crate_name.as_deref())?;
-            (
-                crate_key,
-                od,
-                dep.clone(),
-                args.dependency_version.clone(),
-                root,
-            )
-        }
-    } else {
-        let root = args.project_root.clone().unwrap_or_else(|| current_dir.clone());
-        let inf = infer::infer_from_project_root(&root, args.crate_name.as_deref())?;
-        (
-            inf.output_crate_name,
-            inf.out_dir,
-            inf.dependency_name,
-            inf.dependency_version_req,
-            root,
-        )
-    };
+        };
 
     let tishlang_runtime = if let Some(req) = args.tishlang_runtime_version.clone() {
         TishlangRuntimeDep::Version(req)

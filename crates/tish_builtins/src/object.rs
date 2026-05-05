@@ -4,9 +4,9 @@
 //! Functions will be migrated here from tishlang_runtime and tishlang_eval.
 
 use std::cell::RefCell;
-use tishlang_core::VmRef;
 use std::rc::Rc;
 use std::sync::Arc;
+use tishlang_core::VmRef;
 use tishlang_core::{ObjectMap, Value};
 
 /// Create a new empty object Value.

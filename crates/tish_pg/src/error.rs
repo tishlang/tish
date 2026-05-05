@@ -1,5 +1,5 @@
-use std::fmt::Write as _;
 use std::error::Error as StdError;
+use std::fmt::Write as _;
 
 use deadpool::managed::PoolError;
 use thiserror::Error;

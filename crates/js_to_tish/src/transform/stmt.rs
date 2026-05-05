@@ -247,9 +247,10 @@ fn convert_for_of_statement(
             if v.declarations.len() == 1 {
                 let d = &v.declarations[0];
                 match &d.id {
-                    oxc::ast::ast::BindingPattern::BindingIdentifier(b) => {
-                        (b.name.as_str(), span_util::oxc_span_to_tish(ctx.1, b.as_ref()))
-                    }
+                    oxc::ast::ast::BindingPattern::BindingIdentifier(b) => (
+                        b.name.as_str(),
+                        span_util::oxc_span_to_tish(ctx.1, b.as_ref()),
+                    ),
                     _ => {
                         return Err(ConvertError::new(ConvertErrorKind::Incompatible {
                             what: "for-of with destructuring".into(),
@@ -368,16 +369,14 @@ fn convert_function_decl(
     span: Span,
 ) -> Result<Statement, ConvertError> {
     let async_ = f.r#async;
-    let name: Arc<str> = f
-        .id
-        .as_ref()
-        .map(|id| Arc::from(id.name.as_str()))
-        .unwrap_or_else(|| Arc::from(""));
-    let name_span = f
-        .id
-        .as_ref()
-        .map(|id| span_util::oxc_span_to_tish(ctx.1, id))
-        .unwrap_or_else(span_util::stub_span);
+    let name: Arc<str> =
+        f.id.as_ref()
+            .map(|id| Arc::from(id.name.as_str()))
+            .unwrap_or_else(|| Arc::from(""));
+    let name_span =
+        f.id.as_ref()
+            .map(|id| span_util::oxc_span_to_tish(ctx.1, id))
+            .unwrap_or_else(span_util::stub_span);
     let (params, rest_param) = expr::convert_params(&f.params, ctx)?;
     let body = match &f.body {
         Some(fb) => {

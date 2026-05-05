@@ -9,11 +9,11 @@ use regex::Regex;
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
 use tishlang_ast::{ImportSpecifier, Program, Statement};
-use tishlang_resolve::member_access_chain_at_cursor;
 use tishlang_compile::{
     export_name_to_rust_ident, is_builtin_native_spec, is_cargo_native_spec, is_native_import,
     normalize_builtin_spec, read_project_tish_config, resolve_bare_spec, resolve_native_modules,
 };
+use tishlang_resolve::member_access_chain_at_cursor;
 
 /// Pick a workspace / project root for resolving `package.json` and `node_modules`.
 fn infer_project_root(file_path: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
@@ -43,7 +43,10 @@ fn location_from_rust_path(path: &Path, line: u32, col: u32) -> Option<Location>
     Some(Location {
         uri,
         range: Range {
-            start: Position { line, character: col },
+            start: Position {
+                line,
+                character: col,
+            },
             end: Position {
                 line,
                 character: end_char.max(col.saturating_add(1)),
@@ -63,13 +66,10 @@ fn resolve_cargo_dep_crate_root(
             Ok(r.source_root())
         }
         serde_json::Value::Object(map) => {
-            let path_str = map
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    "cargo:… rustDependencies entry must be a version string or an object with \"path\""
-                        .to_string()
-                })?;
+            let path_str = map.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                "cargo:… rustDependencies entry must be a version string or an object with \"path\""
+                    .to_string()
+            })?;
             let glue = Path::new(path_str);
             let glue = if glue.is_absolute() {
                 glue.to_path_buf()
@@ -79,7 +79,8 @@ fn resolve_cargo_dep_crate_root(
             let glue = glue.canonicalize().unwrap_or(glue);
             let glue_cargo = glue.join("Cargo.toml");
             if glue_cargo.is_file() {
-                match tishlang_cargo_bindgen::resolve_dependency_from_manifest(&glue_cargo, dep_key) {
+                match tishlang_cargo_bindgen::resolve_dependency_from_manifest(&glue_cargo, dep_key)
+                {
                     Ok(r) => Ok(r.source_root()),
                     Err(_) if glue.join("src").is_dir() => Ok(glue),
                     Err(e) => Err(e),
@@ -128,7 +129,8 @@ fn rust_def_for_crate_root(crate_root: &Path, tish_export: &str) -> Option<Locat
         if name.is_empty() {
             continue;
         }
-        if let Ok((path, line, col)) = tishlang_cargo_bindgen::rust_public_fn_location(crate_root, name)
+        if let Ok((path, line, col)) =
+            tishlang_cargo_bindgen::rust_public_fn_location(crate_root, name)
         {
             return location_from_rust_path(&path, line, col);
         }
@@ -218,11 +220,11 @@ fn try_rust_member_on_crate(
 }
 
 /// Optional `| …` hover line after the 1-based line in a native package’s `lsp-pragmas.d.tish`.
-fn parse_lsp_pragmas_native(src: &str) -> HashMap<String, (crate::builtin_goto::BuiltinDef, Option<String>)> {
-    let re = Regex::new(
-        r"(?m)^\s*//\s*@tish-source\s+(\S+)\s+(\S+)\s+(\d+)(?:\s*\|\s*(.*?))?\s*$",
-    )
-    .expect("native lsp pragma regex");
+fn parse_lsp_pragmas_native(
+    src: &str,
+) -> HashMap<String, (crate::builtin_goto::BuiltinDef, Option<String>)> {
+    let re = Regex::new(r"(?m)^\s*//\s*@tish-source\s+(\S+)\s+(\S+)\s+(\d+)(?:\s*\|\s*(.*?))?\s*$")
+        .expect("native lsp pragma regex");
     let mut m = HashMap::new();
     for cap in re.captures_iter(src) {
         let sym = cap[1].to_string();
@@ -256,7 +258,11 @@ fn pragma_key_for_native_member(
     }
     match imported_for_prefix {
         Some(prefix) => {
-            let tail: String = members.iter().map(|m| m.as_ref()).collect::<Vec<_>>().join(".");
+            let tail: String = members
+                .iter()
+                .map(|m| m.as_ref())
+                .collect::<Vec<_>>()
+                .join(".");
             if tail.is_empty() {
                 None
             } else {
@@ -375,14 +381,16 @@ pub fn native_member_definition(
                     .get("rustDependencies")
                     .and_then(|v| v.get(dep_key))
                     .cloned()?;
-                cargo_crate_root_cached(&project_root, &spec, dep_key, &raw, cargo_src_cache).ok()?
+                cargo_crate_root_cached(&project_root, &spec, dep_key, &raw, cargo_src_cache)
+                    .ok()?
             } else {
                 let mods = resolve_native_modules(program, &project_root).ok()?;
                 let m = mods.iter().find(|mm| mm.spec == spec)?;
                 m.crate_path.clone()
             };
 
-            if let Some(loc) = try_rust_member_on_crate(&crate_root, &members, imported_for_prefix) {
+            if let Some(loc) = try_rust_member_on_crate(&crate_root, &members, imported_for_prefix)
+            {
                 return Some(NativeMemberDefinition {
                     location: loc,
                     doc: None,
@@ -492,9 +500,14 @@ pub fn definition_for_import(
                         .get("rustDependencies")
                         .and_then(|v| v.get(dep_key))
                         .cloned()?;
-                    let crate_root =
-                        cargo_crate_root_cached(&project_root, &spec, dep_key, &raw, cargo_src_cache)
-                            .ok()?;
+                    let crate_root = cargo_crate_root_cached(
+                        &project_root,
+                        &spec,
+                        dep_key,
+                        &raw,
+                        cargo_src_cache,
+                    )
+                    .ok()?;
                     return rust_def_for_crate_root(&crate_root, imported);
                 }
 

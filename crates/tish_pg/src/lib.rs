@@ -90,15 +90,9 @@ fn params_to_sql(values: &[JsonValue]) -> Result<Vec<Box<dyn ToSql + Sync + Send
                 } else if let Some(u) = n.as_u64() {
                     Box::new(u as i64)
                 } else if let Some(f) = n.as_f64() {
-                    if f.fract() == 0.0
-                        && f >= i32::MIN as f64
-                        && f <= i32::MAX as f64
-                    {
+                    if f.fract() == 0.0 && f >= i32::MIN as f64 && f <= i32::MAX as f64 {
                         Box::new(f as i32)
-                    } else if f.fract() == 0.0
-                        && f >= i64::MIN as f64
-                        && f <= i64::MAX as f64
-                    {
+                    } else if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
                         Box::new(f as i64)
                     } else {
                         Box::new(f)
@@ -110,7 +104,9 @@ fn params_to_sql(values: &[JsonValue]) -> Result<Vec<Box<dyn ToSql + Sync + Send
                 }
             }
             JsonValue::String(s) => Box::new(s.clone()),
-            JsonValue::Array(_) | JsonValue::Object(_) => Box::new(tokio_postgres::types::Json(v.clone())),
+            JsonValue::Array(_) | JsonValue::Object(_) => {
+                Box::new(tokio_postgres::types::Json(v.clone()))
+            }
         };
         out.push(b);
     }
@@ -378,8 +374,8 @@ pub struct PerWorkerClient {
 impl PerWorkerClient {
     /// Open a single direct connection (no pool).
     pub async fn connect(connection_string: &str) -> Result<Self> {
-        let cfg = parse_connection_string(connection_string)
-            .map_err(TishPgError::BadConnectionString)?;
+        let cfg =
+            parse_connection_string(connection_string).map_err(TishPgError::BadConnectionString)?;
         let (client, connection) = cfg.connect(NoTls).await?;
         let driver = tokio::spawn(async move {
             if let Err(e) = connection.await {
@@ -534,9 +530,8 @@ mod tish_sync {
     use tishlang_runtime::Value as TishValue;
     use tokio::runtime::Runtime as TokioRuntime;
 
-    static RT: Lazy<TokioRuntime> = Lazy::new(|| {
-        TokioRuntime::new().expect("tish_pg: failed to build tokio runtime")
-    });
+    static RT: Lazy<TokioRuntime> =
+        Lazy::new(|| TokioRuntime::new().expect("tish_pg: failed to build tokio runtime"));
     // `RwLock` (not `Mutex`) on the registries: hot path is read-only —
     // every query does `get_client(id)` + `get_statement(id)`. Inserts
     // happen once per `connect`/`prepare` at startup. With multiple HTTP
@@ -544,8 +539,7 @@ mod tish_sync {
     // serialised every query through one global lock; `RwLock` lets all
     // concurrent reads run lock-free against each other.
     use std::sync::RwLock;
-    static CLIENTS: Lazy<RwLock<Slab<PerWorkerClient>>> =
-        Lazy::new(|| RwLock::new(Slab::new()));
+    static CLIENTS: Lazy<RwLock<Slab<PerWorkerClient>>> = Lazy::new(|| RwLock::new(Slab::new()));
     static STATEMENTS: Lazy<RwLock<Slab<(usize, Statement)>>> =
         Lazy::new(|| RwLock::new(Slab::new()));
 
@@ -609,9 +603,7 @@ mod tish_sync {
                 .map(JsonValue::Number)
                 .unwrap_or(JsonValue::Null),
             TishValue::String(s) => JsonValue::String(s.to_string()),
-            TishValue::Array(a) => {
-                JsonValue::Array(a.borrow().iter().map(tish_to_json).collect())
-            }
+            TishValue::Array(a) => JsonValue::Array(a.borrow().iter().map(tish_to_json).collect()),
             TishValue::Object(o) => {
                 let mut m = serde_json::Map::new();
                 for (k, v) in o.borrow().iter() {
@@ -665,9 +657,7 @@ mod tish_sync {
     fn rows_to_value(res: QueryResult) -> TishValue {
         use std::cell::RefCell;
         use std::rc::Rc;
-        TishValue::Array(VmRef::new(
-            res.rows.into_iter().map(json_to_tish).collect(),
-        ))
+        TishValue::Array(VmRef::new(res.rows.into_iter().map(json_to_tish).collect()))
     }
 
     /// `perWorkerClient(connection_string) -> client_handle` (blocking).
@@ -682,7 +672,10 @@ mod tish_sync {
                 let id = g.insert(c);
                 TishValue::Number(id as f64)
             }
-            Err(e) => tish_err(format!("perWorkerClient: {}", crate::format_tish_pg_error(&e))),
+            Err(e) => tish_err(format!(
+                "perWorkerClient: {}",
+                crate::format_tish_pg_error(&e)
+            )),
         }
     }
 
@@ -754,11 +747,7 @@ mod tish_sync {
             return tish_err("queryPrepared: expected (client, stmt, params)");
         };
         let params = match args.get(2) {
-            Some(TishValue::Array(a)) => a
-                .borrow()
-                .iter()
-                .map(tish_to_json)
-                .collect::<Vec<_>>(),
+            Some(TishValue::Array(a)) => a.borrow().iter().map(tish_to_json).collect::<Vec<_>>(),
             Some(TishValue::Null) | None => Vec::new(),
             Some(v) => vec![tish_to_json(v)],
         };
@@ -773,7 +762,10 @@ mod tish_sync {
         // produces. Fewer allocations + interned column-name `Arc`s.
         match block_on(client.query_prepared_to_values(&stmt, &params)) {
             Ok(rows) => TishValue::Array(VmRef::new(rows)),
-            Err(e) => tish_err(format!("queryPrepared: {}", crate::format_tish_pg_error(&e))),
+            Err(e) => tish_err(format!(
+                "queryPrepared: {}",
+                crate::format_tish_pg_error(&e)
+            )),
         }
     }
 
@@ -895,10 +887,8 @@ mod tish_sync {
             let rows = raw_client
                 .query("SELECT name FROM _tish_pg_migrations", &[])
                 .await?;
-            let already: std::collections::HashSet<String> = rows
-                .iter()
-                .map(|r| r.get::<_, String>(0))
-                .collect();
+            let already: std::collections::HashSet<String> =
+                rows.iter().map(|r| r.get::<_, String>(0)).collect();
 
             let mut applied_now: Vec<String> = Vec::new();
             for (name, path) in &files {

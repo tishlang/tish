@@ -26,8 +26,10 @@ pub fn discover_public_functions(crate_root: &Path) -> Result<HashMap<String, It
         .filter(|e| e.path().extension().map(|x| x == "rs").unwrap_or(false))
     {
         let path = entry.path();
-        let text = fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
-        let file = syn::parse_file(&text).map_err(|e| format!("parse {}: {}", path.display(), e))?;
+        let text =
+            fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+        let file =
+            syn::parse_file(&text).map_err(|e| format!("parse {}: {}", path.display(), e))?;
 
         for item in file.items {
             if let Item::Fn(f) = item {
@@ -70,8 +72,10 @@ pub fn rust_public_fn_location(
         .filter(|e| e.path().extension().map(|x| x == "rs").unwrap_or(false))
     {
         let path = entry.path();
-        let text = fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
-        let file = syn::parse_file(&text).map_err(|e| format!("parse {}: {}", path.display(), e))?;
+        let text =
+            fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+        let file =
+            syn::parse_file(&text).map_err(|e| format!("parse {}: {}", path.display(), e))?;
 
         for item in file.items {
             if let Item::Fn(f) = item {
@@ -85,7 +89,8 @@ pub fn rust_public_fn_location(
                 let line = u32::try_from(lc.line)
                     .map_err(|_| "span line out of range".to_string())?
                     .saturating_sub(1);
-                let col = u32::try_from(lc.column).map_err(|_| "span column out of range".to_string())?;
+                let col =
+                    u32::try_from(lc.column).map_err(|_| "span column out of range".to_string())?;
                 return Ok((path.to_path_buf(), line, col));
             }
         }

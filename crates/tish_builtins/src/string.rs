@@ -4,11 +4,11 @@
 //! JavaScript, matching .length and .charAt(). Byte offsets are never exposed.
 
 use crate::helpers::normalize_index;
-use tishlang_core::VmRef;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use tishlang_core::Value;
+use tishlang_core::VmRef;
 
 /// Byte offset -> character index.
 fn byte_to_char_index(s: &str, byte_offset: usize) -> usize {

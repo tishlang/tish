@@ -209,11 +209,11 @@ impl<'a> Parser<'a> {
         let opened_with_brace = matches!(self.peek_kind(), Some(TokenKind::LBrace));
         if opened_with_brace {
             self.advance(); // {
-            // After `{`, the lexer often emits `Indent` for the first indented line of the body.
-            // `parse_statement` treats a leading `Indent` as starting a *nested* indent-block, so
-            // without consuming this token we get `Block { Block { let ... } ; ... }` and the first
-            // `let`/`const` is scoped too narrowly (JS ReferenceError). This indent is layout for
-            // *this* brace block, not an inner block.
+                            // After `{`, the lexer often emits `Indent` for the first indented line of the body.
+                            // `parse_statement` treats a leading `Indent` as starting a *nested* indent-block, so
+                            // without consuming this token we get `Block { Block { let ... } ; ... }` and the first
+                            // `let`/`const` is scoped too narrowly (JS ReferenceError). This indent is layout for
+                            // *this* brace block, not an inner block.
             if matches!(self.peek_kind(), Some(TokenKind::Indent)) {
                 self.advance();
             }
@@ -291,10 +291,7 @@ impl<'a> Parser<'a> {
             start: name_tok.span.start,
             end: name_tok.span.end,
         };
-        let name = name_tok
-            .literal
-            .clone()
-            .ok_or("Expected identifier")?;
+        let name = name_tok.literal.clone().ok_or("Expected identifier")?;
 
         // Optional type annotation: `: Type`
         let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
@@ -348,10 +345,7 @@ impl<'a> Parser<'a> {
                     start: name_tok.span.start,
                     end: name_tok.span.end,
                 };
-                let name = name_tok
-                    .literal
-                    .clone()
-                    .ok_or("Expected identifier")?;
+                let name = name_tok.literal.clone().ok_or("Expected identifier")?;
                 elements.push(Some(DestructElement::Rest(name, name_span)));
                 break;
             }
@@ -368,10 +362,7 @@ impl<'a> Parser<'a> {
                         start: name_tok.span.start,
                         end: name_tok.span.end,
                     };
-                    let name = name_tok
-                        .literal
-                        .clone()
-                        .ok_or("Expected identifier")?;
+                    let name = name_tok.literal.clone().ok_or("Expected identifier")?;
                     DestructElement::Ident(name, name_span)
                 }
                 _ => return Err("Expected identifier or pattern in destructuring".to_string()),
@@ -399,10 +390,7 @@ impl<'a> Parser<'a> {
                 start: key_tok.span.start,
                 end: key_tok.span.end,
             };
-            let key = key_tok
-                .literal
-                .clone()
-                .ok_or("Expected identifier")?;
+            let key = key_tok.literal.clone().ok_or("Expected identifier")?;
 
             let value = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
                 self.advance();
@@ -418,10 +406,7 @@ impl<'a> Parser<'a> {
                             start: name_tok.span.start,
                             end: name_tok.span.end,
                         };
-                        let name = name_tok
-                            .literal
-                            .clone()
-                            .ok_or("Expected identifier")?;
+                        let name = name_tok.literal.clone().ok_or("Expected identifier")?;
                         DestructElement::Ident(name, name_span)
                     }
                     _ => return Err("Expected identifier or pattern after ':'".to_string()),
@@ -474,10 +459,7 @@ impl<'a> Parser<'a> {
             start: param_tok.span.start,
             end: param_tok.span.end,
         };
-        let param_name = param_tok
-            .literal
-            .clone()
-            .ok_or("Expected param name")?;
+        let param_name = param_tok.literal.clone().ok_or("Expected param name")?;
         let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
             self.advance();
             Some(self.parse_type_annotation()?)
@@ -601,10 +583,7 @@ impl<'a> Parser<'a> {
             start: name_tok.span.start,
             end: name_tok.span.end,
         };
-        let name = name_tok
-            .literal
-            .clone()
-            .ok_or("Expected function name")?;
+        let name = name_tok.literal.clone().ok_or("Expected function name")?;
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::with_capacity(4);
         let mut rest_param = None;
@@ -616,10 +595,7 @@ impl<'a> Parser<'a> {
                     start: rest_tok.span.start,
                     end: rest_tok.span.end,
                 };
-                let param_name = rest_tok
-                    .literal
-                    .clone()
-                    .ok_or("Expected rest param name")?;
+                let param_name = rest_tok.literal.clone().ok_or("Expected rest param name")?;
                 // Optional type annotation for rest param
                 let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
                     self.advance();
@@ -702,10 +678,7 @@ impl<'a> Parser<'a> {
             start: name_tok.span.start,
             end: name_tok.span.end,
         };
-        let name = name_tok
-            .literal
-            .clone()
-            .ok_or("Expected type alias name")?;
+        let name = name_tok.literal.clone().ok_or("Expected type alias name")?;
         self.expect(TokenKind::Assign)?;
         let ty = self.parse_type_annotation()?;
         Ok(Statement::TypeAlias {
@@ -747,10 +720,7 @@ impl<'a> Parser<'a> {
             start: name_tok.span.start,
             end: name_tok.span.end,
         };
-        let name = name_tok
-            .literal
-            .clone()
-            .ok_or("Expected identifier")?;
+        let name = name_tok.literal.clone().ok_or("Expected identifier")?;
         let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
             self.advance();
             Some(self.parse_type_annotation()?)
@@ -780,10 +750,7 @@ impl<'a> Parser<'a> {
             start: name_tok.span.start,
             end: name_tok.span.end,
         };
-        let name = name_tok
-            .literal
-            .clone()
-            .ok_or("Expected function name")?;
+        let name = name_tok.literal.clone().ok_or("Expected function name")?;
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::with_capacity(4);
         let mut rest_param = None;
@@ -795,10 +762,7 @@ impl<'a> Parser<'a> {
                     start: rest_tok.span.start,
                     end: rest_tok.span.end,
                 };
-                let param_name = rest_tok
-                    .literal
-                    .clone()
-                    .ok_or("Expected rest param name")?;
+                let param_name = rest_tok.literal.clone().ok_or("Expected rest param name")?;
                 let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
                     self.advance();
                     Some(self.parse_type_annotation()?)
@@ -893,10 +857,7 @@ impl<'a> Parser<'a> {
                 start: for_name_tok.span.start,
                 end: for_name_tok.span.end,
             };
-            let name = for_name_tok
-                .literal
-                .clone()
-                .ok_or("Expected identifier")?;
+            let name = for_name_tok.literal.clone().ok_or("Expected identifier")?;
             if matches!(self.peek_kind(), Some(TokenKind::Of)) {
                 self.advance();
                 let iterable = self.parse_expr()?;
@@ -1186,10 +1147,7 @@ impl<'a> Parser<'a> {
                 start: def_tok.span.start,
                 end: def_tok.span.end,
             };
-            let name = def_tok
-                .literal
-                .clone()
-                .ok_or("Expected identifier")?;
+            let name = def_tok.literal.clone().ok_or("Expected identifier")?;
             vec![ImportSpecifier::Default { name, name_span }]
         } else {
             return Err("Expected { }, * as name, or default import".to_string());
@@ -1271,7 +1229,9 @@ impl<'a> Parser<'a> {
             // Member assignment: obj.prop = val
             if let Expr::Member {
                 object,
-                prop: MemberProp::Name { name: prop_name, .. },
+                prop: MemberProp::Name {
+                    name: prop_name, ..
+                },
                 ..
             } = &left
             {
@@ -1510,10 +1470,7 @@ impl<'a> Parser<'a> {
                     let optional = kind == TokenKind::OptionalChain;
                     self.advance();
                     let prop_tok = self.expect_ident_or_type_member_name()?;
-                    let prop = prop_tok
-                        .literal
-                        .clone()
-                        .ok_or("Expected property name")?;
+                    let prop = prop_tok.literal.clone().ok_or("Expected property name")?;
                     let prop_span = Span {
                         start: prop_tok.span.start,
                         end: prop_tok.span.end,
@@ -1630,10 +1587,7 @@ impl<'a> Parser<'a> {
                     let optional = kind == TokenKind::OptionalChain;
                     self.advance();
                     let prop_tok = self.expect_ident_or_type_member_name()?;
-                    let prop = prop_tok
-                        .literal
-                        .clone()
-                        .ok_or("Expected property name")?;
+                    let prop = prop_tok.literal.clone().ok_or("Expected property name")?;
                     let prop_span = Span {
                         start: prop_tok.span.start,
                         end: prop_tok.span.end,

@@ -28,7 +28,8 @@ pub fn select_glue_crate_from_package_json(
             e
         )
     })?;
-    let j: Value = serde_json::from_str(&raw).map_err(|e| format!("{}: {}", pkg_json_path.display(), e))?;
+    let j: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("{}: {}", pkg_json_path.display(), e))?;
     let rust_deps = j
         .get("tish")
         .and_then(|t| t.get("rustDependencies"))
@@ -123,7 +124,8 @@ fn dep_version_req_string_glue(spec: &toml::Value) -> Result<String, String> {
 }
 
 /// Crates we ignore when inferring bindgen **upstream** from the **app** `Cargo.toml` (not the glue crate).
-const ROOT_MANIFEST_SKIP_DEPS: &[&str] = &["tishlang_runtime", "tishlang_core", "tishlang_build_utils"];
+const ROOT_MANIFEST_SKIP_DEPS: &[&str] =
+    &["tishlang_runtime", "tishlang_core", "tishlang_build_utils"];
 
 /// Registry semver for bindgen metadata probe; skips path/git/workspace-only entries (project root fallback).
 fn dep_version_req_string_root(spec: &toml::Value) -> Option<String> {
@@ -136,7 +138,9 @@ fn dep_version_req_string_root(spec: &toml::Value) -> Option<String> {
             if t.get("path").is_some() || t.get("git").is_some() {
                 return None;
             }
-            t.get("version").and_then(|v| v.as_str()).map(|s| s.to_string())
+            t.get("version")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
         }
         _ => None,
     }
@@ -209,13 +213,15 @@ fn disambiguate_upstream_candidates(
 /// disambiguating when `serde_json` is present as a JSON-bridge helper alongside another crate.
 pub fn parse_upstream_from_glue_cargo(cargo_toml_path: &Path) -> Result<(String, String), String> {
     let s = fs::read_to_string(cargo_toml_path).map_err(|e| e.to_string())?;
-    let root: toml::Value = toml::from_str(&s).map_err(|e| format!("{}: {}", cargo_toml_path.display(), e))?;
+    let root: toml::Value =
+        toml::from_str(&s).map_err(|e| format!("{}: {}", cargo_toml_path.display(), e))?;
     let deps = root
         .get("dependencies")
         .and_then(|d| d.as_table())
         .ok_or_else(|| format!("{} has no [dependencies]", cargo_toml_path.display()))?;
 
-    let candidates = collect_upstream_candidates_from_table(deps, &[], dep_version_req_string_glue)?;
+    let candidates =
+        collect_upstream_candidates_from_table(deps, &[], dep_version_req_string_glue)?;
     disambiguate_upstream_candidates(
         candidates,
         cargo_toml_path,
@@ -226,9 +232,12 @@ pub fn parse_upstream_from_glue_cargo(cargo_toml_path: &Path) -> Result<(String,
 /// Infer upstream from the **project** `Cargo.toml` when the glue crate does not exist yet.
 /// Uses `[dependencies]` and `[dev-dependencies]`, skips Tish toolchain path crates (`tishlang_core`, …),
 /// and only keeps entries with a registry semver (skips bare `path =` / `git` deps).
-pub fn parse_upstream_from_root_package_cargo(cargo_toml_path: &Path) -> Result<(String, String), String> {
+pub fn parse_upstream_from_root_package_cargo(
+    cargo_toml_path: &Path,
+) -> Result<(String, String), String> {
     let s = fs::read_to_string(cargo_toml_path).map_err(|e| e.to_string())?;
-    let root: toml::Value = toml::from_str(&s).map_err(|e| format!("{}: {}", cargo_toml_path.display(), e))?;
+    let root: toml::Value =
+        toml::from_str(&s).map_err(|e| format!("{}: {}", cargo_toml_path.display(), e))?;
 
     let mut candidates = root
         .get("dependencies")
@@ -255,7 +264,8 @@ pub fn infer_from_project_root(
     project_root: &Path,
     rust_dep_key: Option<&str>,
 ) -> Result<InferredProjectBindgen, String> {
-    let (output_crate_name, out_dir) = select_glue_crate_from_package_json(project_root, rust_dep_key)?;
+    let (output_crate_name, out_dir) =
+        select_glue_crate_from_package_json(project_root, rust_dep_key)?;
     let glue_cargo = out_dir.join("Cargo.toml");
     let root_cargo = project_root.join("Cargo.toml");
 

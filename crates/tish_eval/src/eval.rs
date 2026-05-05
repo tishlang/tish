@@ -109,7 +109,11 @@ impl Evaluator {
             );
             s.set("decodeURI".into(), Value::Native(natives::decode_uri), true);
             s.set("encodeURI".into(), Value::Native(natives::encode_uri), true);
-            s.set("htmlEscape".into(), Value::Native(natives::html_escape), true);
+            s.set(
+                "htmlEscape".into(),
+                Value::Native(natives::html_escape),
+                true,
+            );
             s.set(
                 "Boolean".into(),
                 Value::Native(natives::boolean_native),
@@ -249,7 +253,11 @@ impl Evaluator {
             #[cfg(feature = "http")]
             {
                 s.set("fetch".into(), Value::Native(Self::fetch_native), true);
-                s.set("fetchAll".into(), Value::Native(Self::fetch_all_native), true);
+                s.set(
+                    "fetchAll".into(),
+                    Value::Native(Self::fetch_all_native),
+                    true,
+                );
                 s.set("Promise".into(), Value::PromiseConstructor, true);
                 s.set("serve".into(), Value::Serve, true);
             }
@@ -619,9 +627,9 @@ impl Evaluator {
                 }
                 Ok(Value::Null)
             }
-            Statement::TypeAlias { .. } | Statement::DeclareVar { .. } | Statement::DeclareFun { .. } => {
-                Ok(Value::Null)
-            }
+            Statement::TypeAlias { .. }
+            | Statement::DeclareVar { .. }
+            | Statement::DeclareFun { .. } => Ok(Value::Null),
         }
     }
 
@@ -2375,9 +2383,9 @@ impl Evaluator {
                 self.call_func(callee, args)
             }
             #[cfg(feature = "http")]
-            Value::PromiseConstructor
-            | Value::Serve
-            | Value::BoundPromiseMethod(_, _) => self.call_func(callee, args),
+            Value::PromiseConstructor | Value::Serve | Value::BoundPromiseMethod(_, _) => {
+                self.call_func(callee, args)
+            }
             #[cfg(feature = "timers")]
             Value::TimerBuiltin(_) => self.call_func(callee, args),
             Value::OpaqueMethod(_, _) => self.call_func(callee, args),

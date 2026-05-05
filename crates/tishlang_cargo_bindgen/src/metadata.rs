@@ -35,7 +35,10 @@ fn from_package(pkg: &Package) -> ResolvedDependency {
 }
 
 /// Build a tiny probe crate, run `cargo metadata`, and return the named package.
-pub fn resolve_registry_dependency(name: &str, version_req: &str) -> Result<ResolvedDependency, String> {
+pub fn resolve_registry_dependency(
+    name: &str,
+    version_req: &str,
+) -> Result<ResolvedDependency, String> {
     let probe_dir = tempfile::tempdir().map_err(|e| format!("tempdir: {}", e))?;
     let probe_toml = format!(
         r#"[package]

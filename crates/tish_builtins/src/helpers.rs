@@ -1,9 +1,9 @@
 //! Common helper functions used across builtin implementations.
 
 use std::cell::RefCell;
-use tishlang_core::VmRef;
 use std::rc::Rc;
 use std::sync::Arc;
+use tishlang_core::VmRef;
 use tishlang_core::{ObjectMap, Value};
 
 /// Normalize an array index, handling negative indices.

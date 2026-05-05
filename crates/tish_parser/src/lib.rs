@@ -320,10 +320,13 @@ mod tests {
             Statement::Block { statements, .. } => statements,
             _ => panic!("expected block body"),
         };
-        assert_eq!(stmts.len(), 3, "expected expr; const; if as siblings — got {stmts:?}");
+        assert_eq!(
+            stmts.len(),
+            3,
+            "expected expr; const; if as siblings — got {stmts:?}"
+        );
         assert!(matches!(stmts[0], Statement::ExprStmt { .. }));
         assert!(matches!(stmts[1], Statement::VarDecl { .. }));
         assert!(matches!(stmts[2], Statement::If { .. }));
     }
-
 }

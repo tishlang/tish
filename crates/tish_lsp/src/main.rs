@@ -8,15 +8,15 @@ use regex::Regex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse,
-    CompletionTriggerKind, Diagnostic, DiagnosticSeverity, DiagnosticTag, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams,
-    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
-    Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-    Location, MarkupContent, MarkupKind, MessageType, NumberOrString, OneOf, Position, Range,
-    ReferenceParams, RenameOptions, RenameParams, ServerCapabilities, ServerInfo,
-    WorkDoneProgressOptions,
-    SymbolInformation, SymbolKind, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Url, WorkspaceEdit, WorkspaceSymbolParams,
+    CompletionTriggerKind, Diagnostic, DiagnosticSeverity, DiagnosticTag,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, Location, MarkupContent, MarkupKind, MessageType,
+    NumberOrString, OneOf, Position, Range, ReferenceParams, RenameOptions, RenameParams,
+    ServerCapabilities, ServerInfo, SymbolInformation, SymbolKind, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions, WorkspaceEdit,
+    WorkspaceSymbolParams,
 };
 use tower_lsp::lsp_types::{PrepareRenameResponse, TextEdit};
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -115,10 +115,7 @@ fn publish_parse_and_lint(client: &Client, uri: Url, text: &str) {
                         "tish-unused-parameter",
                     ),
                     tishlang_resolve::UnusedBindingKind::Variable => (
-                        format!(
-                            "`{}` is declared but its value is never read",
-                            ub.name
-                        ),
+                        format!("`{}` is declared but its value is never read", ub.name),
                         "tish-unused-variable",
                     ),
                 };
@@ -432,7 +429,9 @@ impl LanguageServer for Backend {
             }
             None => {
                 if tishlang_resolve::is_runtime_global_ident(use_site.name.as_ref()) {
-                    md.push_str("\n\n_Interpreter root global (no lexical declaration in this file)._");
+                    md.push_str(
+                        "\n\n_Interpreter root global (no lexical declaration in this file)._",
+                    );
                     let word = word_at_position(&text, pos);
                     if !word.is_empty() {
                         if let Some(root) = self.tishlang_source_root.read().unwrap().clone() {
@@ -583,12 +582,8 @@ impl LanguageServer for Backend {
         else {
             return Ok(None);
         };
-        let spans = tishlang_resolve::reference_spans_for_def(
-            &program,
-            &text,
-            nu.name.as_ref(),
-            def,
-        );
+        let spans =
+            tishlang_resolve::reference_spans_for_def(&program, &text, nu.name.as_ref(), def);
         let mut edits: Vec<TextEdit> = spans
             .into_iter()
             .map(|sp| TextEdit {
@@ -598,10 +593,8 @@ impl LanguageServer for Backend {
             .collect();
         // Apply from end of document so earlier ranges stay valid when lengths change.
         edits.sort_by(|a, b| {
-            (b.range.start.line, b.range.start.character).cmp(&(
-                a.range.start.line,
-                a.range.start.character,
-            ))
+            (b.range.start.line, b.range.start.character)
+                .cmp(&(a.range.start.line, a.range.start.character))
         });
         let mut m = HashMap::new();
         m.insert(uri, edits);
@@ -689,9 +682,7 @@ fn collect_workspace_syms(
 ) {
     match s {
         tishlang_ast::Statement::FunDecl {
-            name,
-            name_span,
-            ..
+            name, name_span, ..
         } => {
             if name.to_lowercase().contains(query) {
                 out.push(SymbolInformation {
@@ -708,9 +699,7 @@ fn collect_workspace_syms(
             }
         }
         tishlang_ast::Statement::VarDecl {
-            name,
-            name_span,
-            ..
+            name, name_span, ..
         } => {
             if name.to_lowercase().contains(query) {
                 out.push(SymbolInformation {
@@ -744,9 +733,7 @@ pub(crate) fn find_export(
     for s in &program.statements {
         match s {
             tishlang_ast::Statement::FunDecl {
-                name: n,
-                name_span,
-                ..
+                name: n, name_span, ..
             } if n.as_ref() == name => {
                 return Some(Location {
                     uri: uri.clone(),
@@ -754,9 +741,7 @@ pub(crate) fn find_export(
                 });
             }
             tishlang_ast::Statement::VarDecl {
-                name: n,
-                name_span,
-                ..
+                name: n, name_span, ..
             } if n.as_ref() == name => {
                 return Some(Location {
                     uri: uri.clone(),
@@ -785,17 +770,13 @@ fn find_decl_in_stmt(
 ) -> Option<Location> {
     match s {
         tishlang_ast::Statement::FunDecl {
-            name,
-            name_span,
-            ..
+            name, name_span, ..
         } if name.as_ref() == word => Some(Location {
             uri: uri.clone(),
             range: span_to_range(name_span, text),
         }),
         tishlang_ast::Statement::VarDecl {
-            name,
-            name_span,
-            ..
+            name, name_span, ..
         } if name.as_ref() == word => Some(Location {
             uri: uri.clone(),
             range: span_to_range(name_span, text),
@@ -915,15 +896,26 @@ fn value_completion_kind_stmt(
             finally_body,
             ..
         } => value_completion_kind_stmt(body, name)
-            .or_else(|| catch_body.as_ref().and_then(|b| value_completion_kind_stmt(b, name)))
-            .or_else(|| finally_body.as_ref().and_then(|b| value_completion_kind_stmt(b, name))),
+            .or_else(|| {
+                catch_body
+                    .as_ref()
+                    .and_then(|b| value_completion_kind_stmt(b, name))
+            })
+            .or_else(|| {
+                finally_body
+                    .as_ref()
+                    .and_then(|b| value_completion_kind_stmt(b, name))
+            }),
         tishlang_ast::Statement::Switch {
             cases,
             default_body,
             ..
         } => {
             for (_e, stmts) in cases {
-                if let Some(k) = stmts.iter().find_map(|st| value_completion_kind_stmt(st, name)) {
+                if let Some(k) = stmts
+                    .iter()
+                    .find_map(|st| value_completion_kind_stmt(st, name))
+                {
                     return Some(k);
                 }
             }
@@ -934,7 +926,9 @@ fn value_completion_kind_stmt(
             })
         }
         tishlang_ast::Statement::Export { declaration, .. } => match declaration.as_ref() {
-            tishlang_ast::ExportDeclaration::Named(inner) => value_completion_kind_stmt(inner, name),
+            tishlang_ast::ExportDeclaration::Named(inner) => {
+                value_completion_kind_stmt(inner, name)
+            }
             tishlang_ast::ExportDeclaration::Default(_) => None,
         },
         _ => None,

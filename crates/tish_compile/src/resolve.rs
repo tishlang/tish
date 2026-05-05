@@ -67,8 +67,10 @@ pub fn normalize_builtin_spec(spec: &str) -> Option<String> {
 
 /// Built-in modules that come from tishlang_runtime, not from package.json.
 pub fn is_builtin_native_spec(spec: &str) -> bool {
-    matches!(spec, "tish:fs" | "tish:http" | "tish:timers" | "tish:process" | "tish:ws")
-        || matches!(spec, "fs" | "http" | "timers" | "process" | "ws")
+    matches!(
+        spec,
+        "tish:fs" | "tish:http" | "tish:timers" | "tish:process" | "tish:ws"
+    ) || matches!(spec, "fs" | "http" | "timers" | "process" | "ws")
 }
 
 /// Resolve all native imports in a merged program via package.json lookup.
@@ -774,7 +776,8 @@ fn resolve_package_root_to_entry(pkg_root: &Path, spec: &str) -> Option<PathBuf>
 pub fn resolve_bare_spec(spec: &str, from_dir: &Path, _project_root: &Path) -> Option<PathBuf> {
     let mut search = from_dir.to_path_buf();
     loop {
-        if let Some(p) = resolve_package_root_to_entry(&search.join("node_modules").join(spec), spec)
+        if let Some(p) =
+            resolve_package_root_to_entry(&search.join("node_modules").join(spec), spec)
         {
             return Some(p);
         }

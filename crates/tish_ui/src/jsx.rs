@@ -344,7 +344,9 @@ fn collect_fun_decl_names_expr(expr: &Expr, names: &mut HashSet<String>) {
         | Expr::PrefixInc { .. }
         | Expr::PostfixDec { .. }
         | Expr::PrefixDec { .. } => {}
-        Expr::JsxElement { props, children, .. } => {
+        Expr::JsxElement {
+            props, children, ..
+        } => {
             for p in props {
                 match p {
                     JsxProp::Attr { value, .. } => {

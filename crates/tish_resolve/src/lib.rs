@@ -6,13 +6,15 @@
 
 mod pos;
 
-pub use pos::{lsp_position_for_span_start, span_contains_lsp_position, span_to_lsp_range_exclusive};
+pub use pos::{
+    lsp_position_for_span_start, span_contains_lsp_position, span_to_lsp_range_exclusive,
+};
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use tishlang_ast::{
-    ArrowBody, CallArg, DestructElement, DestructPattern, Expr, ExportDeclaration, FunParam,
+    ArrowBody, CallArg, DestructElement, DestructPattern, ExportDeclaration, Expr, FunParam,
     ImportSpecifier, MemberProp, Program, Statement, TypedParam,
 };
 
@@ -24,7 +26,12 @@ pub struct NameUse {
 }
 
 /// Find the tightest name under the cursor (identifier reference or binding).
-pub fn name_at_cursor(program: &Program, source: &str, lsp_line: u32, lsp_character: u32) -> Option<NameUse> {
+pub fn name_at_cursor(
+    program: &Program,
+    source: &str,
+    lsp_line: u32,
+    lsp_character: u32,
+) -> Option<NameUse> {
     let mut best: Option<(u64, NameUse)> = None;
     for s in &program.statements {
         collect_stmt(s, source, lsp_line, lsp_character, &mut best);
@@ -50,10 +57,7 @@ fn consider(
         return;
     }
     let sz = span_size(source, span);
-    let nu = NameUse {
-        name,
-        span: *span,
-    };
+    let nu = NameUse { name, span: *span };
     match best {
         None => *best = Some((sz, nu)),
         Some((osz, _)) if sz < *osz => *best = Some((sz, nu)),
@@ -211,7 +215,10 @@ fn collect_stmt(
                         alias,
                         alias_span,
                     } => {
-                        let local = alias.as_ref().map(|a| a.clone()).unwrap_or_else(|| name.clone());
+                        let local = alias
+                            .as_ref()
+                            .map(|a| a.clone())
+                            .unwrap_or_else(|| name.clone());
                         let spn = alias_span.as_ref().unwrap_or(name_span);
                         consider(source, lsp_line, lsp_char, spn, local, best);
                     }
@@ -225,13 +232,19 @@ fn collect_stmt(
             }
         }
         Statement::Export { declaration, .. } => match declaration.as_ref() {
-            ExportDeclaration::Named(inner) => collect_stmt(inner, source, lsp_line, lsp_char, best),
+            ExportDeclaration::Named(inner) => {
+                collect_stmt(inner, source, lsp_line, lsp_char, best)
+            }
             ExportDeclaration::Default(e) => collect_expr(e, source, lsp_line, lsp_char, best),
         },
-        Statement::TypeAlias { name, name_span, .. } => {
+        Statement::TypeAlias {
+            name, name_span, ..
+        } => {
             consider(source, lsp_line, lsp_char, name_span, name.clone(), best);
         }
-        Statement::DeclareVar { name, name_span, .. } => {
+        Statement::DeclareVar {
+            name, name_span, ..
+        } => {
             consider(source, lsp_line, lsp_char, name_span, name.clone(), best);
         }
         Statement::DeclareFun {
@@ -335,7 +348,9 @@ fn collect_expr(
     best: &mut Option<(u64, NameUse)>,
 ) {
     match expr {
-        Expr::Ident { name, span } => consider(source, lsp_line, lsp_char, span, name.clone(), best),
+        Expr::Ident { name, span } => {
+            consider(source, lsp_line, lsp_char, span, name.clone(), best)
+        }
         Expr::Literal { .. } => {}
         Expr::Binary { left, right, .. } => {
             collect_expr(left, source, lsp_line, lsp_char, best);
@@ -425,17 +440,17 @@ fn collect_expr(
             let sp = synthetic_name_span(span.start, name.as_ref());
             consider(source, lsp_line, lsp_char, &sp, name.clone(), best);
         }
-        Expr::CompoundAssign { name, span, value, .. }
-        | Expr::LogicalAssign { name, span, value, .. } => {
+        Expr::CompoundAssign {
+            name, span, value, ..
+        }
+        | Expr::LogicalAssign {
+            name, span, value, ..
+        } => {
             let sp = synthetic_name_span(span.start, name.as_ref());
             consider(source, lsp_line, lsp_char, &sp, name.clone(), best);
             collect_expr(value, source, lsp_line, lsp_char, best);
         }
-        Expr::MemberAssign {
-            object,
-            value,
-            ..
-        } => {
+        Expr::MemberAssign { object, value, .. } => {
             collect_expr(object, source, lsp_line, lsp_char, best);
             collect_expr(value, source, lsp_line, lsp_char, best);
         }
@@ -464,7 +479,9 @@ fn collect_expr(
             }
         }
         Expr::Await { operand, .. } => collect_expr(operand, source, lsp_line, lsp_char, best),
-        Expr::JsxElement { props, children, .. } => {
+        Expr::JsxElement {
+            props, children, ..
+        } => {
             for p in props {
                 match p {
                     tishlang_ast::JsxProp::Attr { value, .. } => match value {
@@ -580,13 +597,19 @@ fn member_chain_collect_expr(
             member_chain_collect_expr(left, source, lsp_line, lsp_char, best);
             member_chain_collect_expr(right, source, lsp_line, lsp_char, best);
         }
-        Expr::Unary { operand, .. } => member_chain_collect_expr(operand, source, lsp_line, lsp_char, best),
+        Expr::Unary { operand, .. } => {
+            member_chain_collect_expr(operand, source, lsp_line, lsp_char, best)
+        }
         Expr::Call { callee, args, .. } => {
             member_chain_collect_expr(callee, source, lsp_line, lsp_char, best);
             for a in args {
                 match a {
-                    CallArg::Expr(e) => member_chain_collect_expr(e, source, lsp_line, lsp_char, best),
-                    CallArg::Spread(e) => member_chain_collect_expr(e, source, lsp_line, lsp_char, best),
+                    CallArg::Expr(e) => {
+                        member_chain_collect_expr(e, source, lsp_line, lsp_char, best)
+                    }
+                    CallArg::Spread(e) => {
+                        member_chain_collect_expr(e, source, lsp_line, lsp_char, best)
+                    }
                 }
             }
         }
@@ -594,8 +617,12 @@ fn member_chain_collect_expr(
             member_chain_collect_expr(callee, source, lsp_line, lsp_char, best);
             for a in args {
                 match a {
-                    CallArg::Expr(e) => member_chain_collect_expr(e, source, lsp_line, lsp_char, best),
-                    CallArg::Spread(e) => member_chain_collect_expr(e, source, lsp_line, lsp_char, best),
+                    CallArg::Expr(e) => {
+                        member_chain_collect_expr(e, source, lsp_line, lsp_char, best)
+                    }
+                    CallArg::Spread(e) => {
+                        member_chain_collect_expr(e, source, lsp_line, lsp_char, best)
+                    }
                 }
             }
         }
@@ -660,10 +687,14 @@ fn member_chain_collect_expr(
                 }
             }
         }
-        Expr::Assign { value, .. } | Expr::CompoundAssign { value, .. } | Expr::LogicalAssign { value, .. } => {
+        Expr::Assign { value, .. }
+        | Expr::CompoundAssign { value, .. }
+        | Expr::LogicalAssign { value, .. } => {
             member_chain_collect_expr(value, source, lsp_line, lsp_char, best);
         }
-        Expr::TypeOf { operand, .. } => member_chain_collect_expr(operand, source, lsp_line, lsp_char, best),
+        Expr::TypeOf { operand, .. } => {
+            member_chain_collect_expr(operand, source, lsp_line, lsp_char, best)
+        }
         Expr::PostfixInc { .. }
         | Expr::PostfixDec { .. }
         | Expr::PrefixInc { .. }
@@ -687,8 +718,12 @@ fn member_chain_collect_expr(
                 member_chain_collect_fun_param(p, source, lsp_line, lsp_char, best);
             }
             match body {
-                ArrowBody::Expr(e) => member_chain_collect_expr(e, source, lsp_line, lsp_char, best),
-                ArrowBody::Block(b) => member_chain_collect_stmt(b, source, lsp_line, lsp_char, best),
+                ArrowBody::Expr(e) => {
+                    member_chain_collect_expr(e, source, lsp_line, lsp_char, best)
+                }
+                ArrowBody::Block(b) => {
+                    member_chain_collect_stmt(b, source, lsp_line, lsp_char, best)
+                }
             }
         }
         Expr::TemplateLiteral { exprs, .. } => {
@@ -696,8 +731,12 @@ fn member_chain_collect_expr(
                 member_chain_collect_expr(e, source, lsp_line, lsp_char, best);
             }
         }
-        Expr::Await { operand, .. } => member_chain_collect_expr(operand, source, lsp_line, lsp_char, best),
-        Expr::JsxElement { props, children, .. } => {
+        Expr::Await { operand, .. } => {
+            member_chain_collect_expr(operand, source, lsp_line, lsp_char, best)
+        }
+        Expr::JsxElement {
+            props, children, ..
+        } => {
             for p in props {
                 match p {
                     tishlang_ast::JsxProp::Attr { value, .. } => {
@@ -758,9 +797,9 @@ fn member_chain_collect_destruct_pattern(
                 if let Some(el) = el {
                     match el {
                         DestructElement::Ident(_, _) => {}
-                        DestructElement::Pattern(inner) => {
-                            member_chain_collect_destruct_pattern(inner, source, lsp_line, lsp_char, best)
-                        }
+                        DestructElement::Pattern(inner) => member_chain_collect_destruct_pattern(
+                            inner, source, lsp_line, lsp_char, best,
+                        ),
                         DestructElement::Rest(_, _) => {}
                     }
                 }
@@ -770,9 +809,9 @@ fn member_chain_collect_destruct_pattern(
             for pr in props {
                 match &pr.value {
                     DestructElement::Ident(_, _) => {}
-                    DestructElement::Pattern(inner) => {
-                        member_chain_collect_destruct_pattern(inner, source, lsp_line, lsp_char, best)
-                    }
+                    DestructElement::Pattern(inner) => member_chain_collect_destruct_pattern(
+                        inner, source, lsp_line, lsp_char, best,
+                    ),
                     DestructElement::Rest(_, _) => {}
                 }
             }
@@ -797,7 +836,9 @@ fn member_chain_collect_stmt(
             member_chain_collect_destruct_pattern(pattern, source, lsp_line, lsp_char, best);
             member_chain_collect_expr(init, source, lsp_line, lsp_char, best);
         }
-        Statement::ExprStmt { expr, .. } => member_chain_collect_expr(expr, source, lsp_line, lsp_char, best),
+        Statement::ExprStmt { expr, .. } => {
+            member_chain_collect_expr(expr, source, lsp_line, lsp_char, best)
+        }
         Statement::If {
             cond,
             then_branch,
@@ -874,7 +915,9 @@ fn member_chain_collect_stmt(
             member_chain_collect_stmt(body, source, lsp_line, lsp_char, best);
             member_chain_collect_expr(cond, source, lsp_line, lsp_char, best);
         }
-        Statement::Throw { value, .. } => member_chain_collect_expr(value, source, lsp_line, lsp_char, best),
+        Statement::Throw { value, .. } => {
+            member_chain_collect_expr(value, source, lsp_line, lsp_char, best)
+        }
         Statement::Try {
             body,
             catch_body,
@@ -890,8 +933,12 @@ fn member_chain_collect_stmt(
             }
         }
         Statement::Export { declaration, .. } => match declaration.as_ref() {
-            ExportDeclaration::Named(inner) => member_chain_collect_stmt(inner, source, lsp_line, lsp_char, best),
-            ExportDeclaration::Default(e) => member_chain_collect_expr(e, source, lsp_line, lsp_char, best),
+            ExportDeclaration::Named(inner) => {
+                member_chain_collect_stmt(inner, source, lsp_line, lsp_char, best)
+            }
+            ExportDeclaration::Default(e) => {
+                member_chain_collect_expr(e, source, lsp_line, lsp_char, best)
+            }
         },
         Statement::Import { .. }
         | Statement::Break { .. }
@@ -985,7 +1032,12 @@ fn walk_expr_resolve(
             }
             walk_expr_resolve(value, scopes, target)
         }
-        Expr::CompoundAssign { name, span, value, .. } | Expr::LogicalAssign { name, span, value, .. } => {
+        Expr::CompoundAssign {
+            name, span, value, ..
+        }
+        | Expr::LogicalAssign {
+            name, span, value, ..
+        } => {
             let sp = synthetic_name_span(span.start, name.as_ref());
             if sp == tgt && name.as_ref() == target.name.as_ref() {
                 return scopes.resolve(name.as_ref());
@@ -1023,20 +1075,18 @@ fn walk_expr_resolve(
                 None
             })
         }
-        Expr::New { callee, args, .. } => {
-            walk_expr_resolve(callee, scopes, target).or_else(|| {
-                for a in args {
-                    let e = match a {
-                        CallArg::Expr(e) => e,
-                        CallArg::Spread(e) => e,
-                    };
-                    if let Some(s) = walk_expr_resolve(e, scopes, target) {
-                        return Some(s);
-                    }
+        Expr::New { callee, args, .. } => walk_expr_resolve(callee, scopes, target).or_else(|| {
+            for a in args {
+                let e = match a {
+                    CallArg::Expr(e) => e,
+                    CallArg::Spread(e) => e,
+                };
+                if let Some(s) = walk_expr_resolve(e, scopes, target) {
+                    return Some(s);
                 }
-                None
-            })
-        }
+            }
+            None
+        }),
         Expr::Member { object, .. } => walk_expr_resolve(object, scopes, target),
         Expr::Index { object, index, .. } => walk_expr_resolve(object, scopes, target)
             .or_else(|| walk_expr_resolve(index, scopes, target)),
@@ -1105,7 +1155,9 @@ fn walk_expr_resolve(
             None
         }
         Expr::Await { operand, .. } => walk_expr_resolve(operand, scopes, target),
-        Expr::JsxElement { props, children, .. } => {
+        Expr::JsxElement {
+            props, children, ..
+        } => {
             for p in props {
                 match p {
                     tishlang_ast::JsxProp::Attr { value, .. } => {
@@ -1172,11 +1224,7 @@ fn walk_stmt_resolve(
             scopes.define(name.as_ref(), *name_span);
             None
         }
-        Statement::VarDeclDestructure {
-            pattern,
-            init,
-            ..
-        } => {
+        Statement::VarDeclDestructure { pattern, init, .. } => {
             if let Some(s) = walk_expr_resolve(init, scopes, target) {
                 return Some(s);
             }
@@ -1189,14 +1237,15 @@ fn walk_stmt_resolve(
             then_branch,
             else_branch,
             ..
-        } => {
-            walk_expr_resolve(cond, scopes, target)
-                .or_else(|| walk_stmt_implicit(then_branch, scopes, target))
-                .or_else(|| else_branch.as_ref().and_then(|b| walk_stmt_implicit(b, scopes, target)))
-        }
-        Statement::While { cond, body, .. } => {
-            walk_expr_resolve(cond, scopes, target).or_else(|| walk_stmt_implicit(body, scopes, target))
-        }
+        } => walk_expr_resolve(cond, scopes, target)
+            .or_else(|| walk_stmt_implicit(then_branch, scopes, target))
+            .or_else(|| {
+                else_branch
+                    .as_ref()
+                    .and_then(|b| walk_stmt_implicit(b, scopes, target))
+            }),
+        Statement::While { cond, body, .. } => walk_expr_resolve(cond, scopes, target)
+            .or_else(|| walk_stmt_implicit(body, scopes, target)),
         Statement::For {
             init,
             cond,
@@ -1246,9 +1295,9 @@ fn walk_stmt_resolve(
             scopes.pop();
             r
         }
-        Statement::Return { value, .. } => {
-            value.as_ref().and_then(|e| walk_expr_resolve(e, scopes, target))
-        }
+        Statement::Return { value, .. } => value
+            .as_ref()
+            .and_then(|e| walk_expr_resolve(e, scopes, target)),
         Statement::Block { statements, .. } => {
             scopes.push();
             let mut out = None;
@@ -1363,7 +1412,10 @@ fn walk_stmt_resolve(
                         alias,
                         alias_span,
                     } => {
-                        let local = alias.as_ref().map(|a| a.clone()).unwrap_or_else(|| name.clone());
+                        let local = alias
+                            .as_ref()
+                            .map(|a| a.clone())
+                            .unwrap_or_else(|| name.clone());
                         let spn = alias_span.as_ref().unwrap_or(name_span);
                         if *spn == tgt_span && local.as_ref() == target.name.as_ref() {
                             return Some(*spn);
@@ -1390,14 +1442,18 @@ fn walk_stmt_resolve(
             ExportDeclaration::Named(inner) => walk_stmt_resolve(inner, scopes, target),
             ExportDeclaration::Default(e) => walk_expr_resolve(e, scopes, target),
         },
-        Statement::TypeAlias { name, name_span, .. } => {
+        Statement::TypeAlias {
+            name, name_span, ..
+        } => {
             if *name_span == tgt_span && name.as_ref() == target.name.as_ref() {
                 return Some(*name_span);
             }
             scopes.define(name.as_ref(), *name_span);
             None
         }
-        Statement::DeclareVar { name, name_span, .. } => {
+        Statement::DeclareVar {
+            name, name_span, ..
+        } => {
             if *name_span == tgt_span && name.as_ref() == target.name.as_ref() {
                 return Some(*name_span);
             }
@@ -1479,7 +1535,12 @@ pub fn is_runtime_global_ident(name: &str) -> bool {
     )
 }
 
-fn record_unresolved(scopes: &ScopeStack, name: &Arc<str>, span: tishlang_ast::Span, out: &mut Vec<UnresolvedIdentifier>) {
+fn record_unresolved(
+    scopes: &ScopeStack,
+    name: &Arc<str>,
+    span: tishlang_ast::Span,
+    out: &mut Vec<UnresolvedIdentifier>,
+) {
     if is_runtime_global_ident(name.as_ref()) {
         return;
     }
@@ -1499,7 +1560,12 @@ fn check_unresolved_expr(expr: &Expr, scopes: &ScopeStack, out: &mut Vec<Unresol
             record_unresolved(scopes, name, sp, out);
             check_unresolved_expr(value, scopes, out);
         }
-        Expr::CompoundAssign { name, span, value, .. } | Expr::LogicalAssign { name, span, value, .. } => {
+        Expr::CompoundAssign {
+            name, span, value, ..
+        }
+        | Expr::LogicalAssign {
+            name, span, value, ..
+        } => {
             let sp = synthetic_name_span(span.start, name.as_ref());
             record_unresolved(scopes, name, sp, out);
             check_unresolved_expr(value, scopes, out);
@@ -1611,7 +1677,9 @@ fn check_unresolved_expr(expr: &Expr, scopes: &ScopeStack, out: &mut Vec<Unresol
             }
         }
         Expr::Await { operand, .. } => check_unresolved_expr(operand, scopes, out),
-        Expr::JsxElement { props, children, .. } => {
+        Expr::JsxElement {
+            props, children, ..
+        } => {
             for p in props {
                 match p {
                     tishlang_ast::JsxProp::Attr { value, .. } => {
@@ -1639,7 +1707,11 @@ fn check_unresolved_expr(expr: &Expr, scopes: &ScopeStack, out: &mut Vec<Unresol
     }
 }
 
-fn check_stmt_implicit_unresolved(stmt: &Statement, scopes: &mut ScopeStack, out: &mut Vec<UnresolvedIdentifier>) {
+fn check_stmt_implicit_unresolved(
+    stmt: &Statement,
+    scopes: &mut ScopeStack,
+    out: &mut Vec<UnresolvedIdentifier>,
+) {
     if matches!(stmt, Statement::Block { .. }) {
         check_unresolved_stmt(stmt, scopes, out);
     } else {
@@ -1649,7 +1721,11 @@ fn check_stmt_implicit_unresolved(stmt: &Statement, scopes: &mut ScopeStack, out
     }
 }
 
-fn check_unresolved_stmt(stmt: &Statement, scopes: &mut ScopeStack, out: &mut Vec<UnresolvedIdentifier>) {
+fn check_unresolved_stmt(
+    stmt: &Statement,
+    scopes: &mut ScopeStack,
+    out: &mut Vec<UnresolvedIdentifier>,
+) {
     match stmt {
         Statement::VarDecl {
             name,
@@ -1799,7 +1875,10 @@ fn check_unresolved_stmt(stmt: &Statement, scopes: &mut ScopeStack, out: &mut Ve
                         alias,
                         alias_span,
                     } => {
-                        let local = alias.as_ref().map(|a| a.clone()).unwrap_or_else(|| name.clone());
+                        let local = alias
+                            .as_ref()
+                            .map(|a| a.clone())
+                            .unwrap_or_else(|| name.clone());
                         let spn = alias_span.as_ref().unwrap_or(name_span);
                         scopes.define(local.as_ref(), *spn);
                     }
@@ -1816,10 +1895,14 @@ fn check_unresolved_stmt(stmt: &Statement, scopes: &mut ScopeStack, out: &mut Ve
             ExportDeclaration::Named(inner) => check_unresolved_stmt(inner, scopes, out),
             ExportDeclaration::Default(e) => check_unresolved_expr(e, scopes, out),
         },
-        Statement::TypeAlias { name, name_span, .. } => {
+        Statement::TypeAlias {
+            name, name_span, ..
+        } => {
             scopes.define(name.as_ref(), *name_span);
         }
-        Statement::DeclareVar { name, name_span, .. } => {
+        Statement::DeclareVar {
+            name, name_span, ..
+        } => {
             scopes.define(name.as_ref(), *name_span);
         }
         Statement::DeclareFun {
@@ -1942,9 +2025,7 @@ fn enumerate_fun_param(p: &FunParam, exported: bool, out: &mut Vec<BindingSite>)
             }
         }
         FunParam::Destructure {
-            pattern,
-            default,
-            ..
+            pattern, default, ..
         } => {
             enumerate_pattern_bindings(pattern, UnusedBindingKind::Parameter, exported, out);
             if let Some(e) = default {
@@ -2063,7 +2144,9 @@ fn enumerate_expr(expr: &Expr, exported: bool, out: &mut Vec<BindingSite>) {
             }
         }
         Expr::Await { operand, .. } => enumerate_expr(operand, exported, out),
-        Expr::JsxElement { props, children, .. } => {
+        Expr::JsxElement {
+            props, children, ..
+        } => {
             for p in props {
                 match p {
                     tishlang_ast::JsxProp::Attr { value, .. } => {
@@ -2101,7 +2184,10 @@ fn enumerate_stmt(stmt: &Statement, exported: bool, out: &mut Vec<BindingSite>) 
                         alias,
                         alias_span,
                     } => {
-                        let local = alias.as_ref().map(|a| a.clone()).unwrap_or_else(|| name.clone());
+                        let local = alias
+                            .as_ref()
+                            .map(|a| a.clone())
+                            .unwrap_or_else(|| name.clone());
                         let spn = alias_span.as_ref().unwrap_or(name_span);
                         out.push(BindingSite {
                             name: local,
@@ -2289,7 +2375,9 @@ fn enumerate_stmt(stmt: &Statement, exported: bool, out: &mut Vec<BindingSite>) 
                 enumerate_stmt(fb, exported, out);
             }
         }
-        Statement::TypeAlias { name, name_span, .. } => {
+        Statement::TypeAlias {
+            name, name_span, ..
+        } => {
             out.push(BindingSite {
                 name: name.clone(),
                 span: *name_span,
@@ -2297,7 +2385,9 @@ fn enumerate_stmt(stmt: &Statement, exported: bool, out: &mut Vec<BindingSite>) 
                 exported,
             });
         }
-        Statement::DeclareVar { name, name_span, .. } => {
+        Statement::DeclareVar {
+            name, name_span, ..
+        } => {
             out.push(BindingSite {
                 name: name.clone(),
                 span: *name_span,
@@ -2402,29 +2492,19 @@ fn collect_block_locals(
                 for st in statements {
                     match st {
                         Statement::VarDecl {
-                            name,
-                            name_span,
-                            ..
+                            name, name_span, ..
                         } => out.push((name.clone(), *name_span)),
                         Statement::FunDecl {
-                            name,
-                            name_span,
-                            ..
+                            name, name_span, ..
                         } => out.push((name.clone(), *name_span)),
                         Statement::TypeAlias {
-                            name,
-                            name_span,
-                            ..
+                            name, name_span, ..
                         } => out.push((name.clone(), *name_span)),
                         Statement::DeclareVar {
-                            name,
-                            name_span,
-                            ..
+                            name, name_span, ..
                         } => out.push((name.clone(), *name_span)),
                         Statement::DeclareFun {
-                            name,
-                            name_span,
-                            ..
+                            name, name_span, ..
                         } => out.push((name.clone(), *name_span)),
                         _ => {}
                     }
@@ -2445,7 +2525,12 @@ fn collect_block_locals(
             ..
         } => {
             if pos::span_contains_lsp_position(source, span, lsp_line, lsp_char)
-                && pos::span_contains_lsp_position(source, &body.as_ref().span(), lsp_line, lsp_char)
+                && pos::span_contains_lsp_position(
+                    source,
+                    &body.as_ref().span(),
+                    lsp_line,
+                    lsp_char,
+                )
             {
                 out.push((name.clone(), *name_span));
             }
@@ -2467,7 +2552,9 @@ fn collect_block_locals(
             }
             collect_block_locals(body, source, lsp_line, lsp_char, out);
         }
-        Statement::DoWhile { body, .. } => collect_block_locals(body, source, lsp_line, lsp_char, out),
+        Statement::DoWhile { body, .. } => {
+            collect_block_locals(body, source, lsp_line, lsp_char, out)
+        }
         Statement::Try {
             body,
             catch_param,
@@ -2478,7 +2565,8 @@ fn collect_block_locals(
         } => {
             collect_block_locals(body, source, lsp_line, lsp_char, out);
             if let (Some(n), Some(ps), Some(cb)) = (catch_param, catch_param_span, catch_body) {
-                if pos::span_contains_lsp_position(source, &cb.as_ref().span(), lsp_line, lsp_char) {
+                if pos::span_contains_lsp_position(source, &cb.as_ref().span(), lsp_line, lsp_char)
+                {
                     out.push((n.clone(), *ps));
                 }
                 collect_block_locals(cb, source, lsp_line, lsp_char, out);
@@ -2487,7 +2575,11 @@ fn collect_block_locals(
                 collect_block_locals(fb, source, lsp_line, lsp_char, out);
             }
         }
-        Statement::Switch { cases, default_body, .. } => {
+        Statement::Switch {
+            cases,
+            default_body,
+            ..
+        } => {
             for (_ce, stmts) in cases {
                 for st in stmts {
                     collect_block_locals(st, source, lsp_line, lsp_char, out);
@@ -2529,7 +2621,9 @@ fn collect_pattern_binding_names(pattern: &DestructPattern, out: &mut Vec<Arc<st
                 if let Some(el) = el {
                     match el {
                         DestructElement::Ident(n, _) => out.push(n.clone()),
-                        DestructElement::Pattern(inner) => collect_pattern_binding_names(inner, out),
+                        DestructElement::Pattern(inner) => {
+                            collect_pattern_binding_names(inner, out)
+                        }
                         DestructElement::Rest(n, _) => out.push(n.clone()),
                     }
                 }
@@ -2547,10 +2641,7 @@ fn collect_pattern_binding_names(pattern: &DestructPattern, out: &mut Vec<Arc<st
     }
 }
 
-fn record_callable_stack(
-    stack: &[Vec<Arc<str>>],
-    best: &mut Option<(usize, Vec<Arc<str>>)>,
-) {
+fn record_callable_stack(stack: &[Vec<Arc<str>>], best: &mut Option<(usize, Vec<Arc<str>>)>) {
     let depth = stack.len();
     let flat: Vec<Arc<str>> = stack
         .iter()
@@ -2588,14 +2679,18 @@ fn walk_expr_completion(
                             walk_expr_completion(e, source, lsp_line, lsp_char, stack, best);
                         }
                     }
-                    FunParam::Destructure { default: Some(e), .. } => {
+                    FunParam::Destructure {
+                        default: Some(e), ..
+                    } => {
                         walk_expr_completion(e, source, lsp_line, lsp_char, stack, best);
                     }
                     _ => {}
                 }
             }
             match body {
-                ArrowBody::Expr(e) => walk_expr_completion(e, source, lsp_line, lsp_char, stack, best),
+                ArrowBody::Expr(e) => {
+                    walk_expr_completion(e, source, lsp_line, lsp_char, stack, best)
+                }
                 ArrowBody::Block(b) => {
                     walk_stmt_completion(b, source, lsp_line, lsp_char, stack, best);
                 }
@@ -2606,7 +2701,9 @@ fn walk_expr_completion(
             walk_expr_completion(left, source, lsp_line, lsp_char, stack, best);
             walk_expr_completion(right, source, lsp_line, lsp_char, stack, best);
         }
-        Expr::Unary { operand, .. } => walk_expr_completion(operand, source, lsp_line, lsp_char, stack, best),
+        Expr::Unary { operand, .. } => {
+            walk_expr_completion(operand, source, lsp_line, lsp_char, stack, best)
+        }
         Expr::Call { callee, args, .. } => {
             walk_expr_completion(callee, source, lsp_line, lsp_char, stack, best);
             for a in args {
@@ -2627,7 +2724,9 @@ fn walk_expr_completion(
                 walk_expr_completion(e, source, lsp_line, lsp_char, stack, best);
             }
         }
-        Expr::Member { object, .. } => walk_expr_completion(object, source, lsp_line, lsp_char, stack, best),
+        Expr::Member { object, .. } => {
+            walk_expr_completion(object, source, lsp_line, lsp_char, stack, best)
+        }
         Expr::Index { object, index, .. } => {
             walk_expr_completion(object, source, lsp_line, lsp_char, stack, best);
             walk_expr_completion(index, source, lsp_line, lsp_char, stack, best);
@@ -2669,7 +2768,9 @@ fn walk_expr_completion(
         | Expr::LogicalAssign { value, .. } => {
             walk_expr_completion(value, source, lsp_line, lsp_char, stack, best);
         }
-        Expr::TypeOf { operand, .. } => walk_expr_completion(operand, source, lsp_line, lsp_char, stack, best),
+        Expr::TypeOf { operand, .. } => {
+            walk_expr_completion(operand, source, lsp_line, lsp_char, stack, best)
+        }
         Expr::MemberAssign { object, value, .. } => {
             walk_expr_completion(object, source, lsp_line, lsp_char, stack, best);
             walk_expr_completion(value, source, lsp_line, lsp_char, stack, best);
@@ -2689,8 +2790,12 @@ fn walk_expr_completion(
                 walk_expr_completion(e, source, lsp_line, lsp_char, stack, best);
             }
         }
-        Expr::Await { operand, .. } => walk_expr_completion(operand, source, lsp_line, lsp_char, stack, best),
-        Expr::JsxElement { props, children, .. } => {
+        Expr::Await { operand, .. } => {
+            walk_expr_completion(operand, source, lsp_line, lsp_char, stack, best)
+        }
+        Expr::JsxElement {
+            props, children, ..
+        } => {
             for p in props {
                 match p {
                     tishlang_ast::JsxProp::Attr { value, .. } => {
@@ -2823,7 +2928,9 @@ fn walk_stmt_completion(
                             walk_expr_completion(e, source, lsp_line, lsp_char, stack, best);
                         }
                     }
-                    FunParam::Destructure { default: Some(e), .. } => {
+                    FunParam::Destructure {
+                        default: Some(e), ..
+                    } => {
                         walk_expr_completion(e, source, lsp_line, lsp_char, stack, best);
                     }
                     _ => {}
@@ -2943,14 +3050,10 @@ pub fn shallow_module_bindings(program: &Program) -> Vec<(Arc<str>, tishlang_ast
     for s in &program.statements {
         match s {
             Statement::VarDecl {
-                name,
-                name_span,
-                ..
+                name, name_span, ..
             } => out.push((name.clone(), *name_span)),
             Statement::FunDecl {
-                name,
-                name_span,
-                ..
+                name, name_span, ..
             } => out.push((name.clone(), *name_span)),
             Statement::Import { specifiers, .. } => {
                 for sp in specifiers {
@@ -2961,7 +3064,10 @@ pub fn shallow_module_bindings(program: &Program) -> Vec<(Arc<str>, tishlang_ast
                             alias,
                             alias_span,
                         } => {
-                            let local = alias.as_ref().map(|a| a.clone()).unwrap_or_else(|| name.clone());
+                            let local = alias
+                                .as_ref()
+                                .map(|a| a.clone())
+                                .unwrap_or_else(|| name.clone());
                             let spn = alias_span.as_ref().unwrap_or(name_span);
                             out.push((local, *spn));
                         }
@@ -2978,14 +3084,10 @@ pub fn shallow_module_bindings(program: &Program) -> Vec<(Arc<str>, tishlang_ast
                 if let ExportDeclaration::Named(inner) = declaration.as_ref() {
                     match inner.as_ref() {
                         Statement::VarDecl {
-                            name,
-                            name_span,
-                            ..
+                            name, name_span, ..
                         } => out.push((name.clone(), *name_span)),
                         Statement::FunDecl {
-                            name,
-                            name_span,
-                            ..
+                            name, name_span, ..
                         } => out.push((name.clone(), *name_span)),
                         _ => {}
                     }
@@ -3027,7 +3129,9 @@ fn refs_stmt(
                 refs_expr(e, program, source, name, def_span, out);
             }
         }
-        Statement::VarDeclDestructure { init, .. } => refs_expr(init, program, source, name, def_span, out),
+        Statement::VarDeclDestructure { init, .. } => {
+            refs_expr(init, program, source, name, def_span, out)
+        }
         Statement::ExprStmt { expr, .. } => refs_expr(expr, program, source, name, def_span, out),
         Statement::If {
             cond,
@@ -3063,11 +3167,7 @@ fn refs_stmt(
             }
             refs_stmt(body, program, source, name, def_span, out);
         }
-        Statement::ForOf {
-            iterable,
-            body,
-            ..
-        } => {
+        Statement::ForOf { iterable, body, .. } => {
             refs_expr(iterable, program, source, name, def_span, out);
             refs_stmt(body, program, source, name, def_span, out);
         }
@@ -3087,7 +3187,10 @@ fn refs_stmt(
                     if let Some(e) = &tp.default {
                         refs_expr(e, program, source, name, def_span, out);
                     }
-                } else if let FunParam::Destructure { default: Some(e), .. } = p {
+                } else if let FunParam::Destructure {
+                    default: Some(e), ..
+                } = p
+                {
                     refs_expr(e, program, source, name, def_span, out);
                 }
             }
@@ -3148,17 +3251,18 @@ fn refs_expr(
     def_span: tishlang_ast::Span,
     out: &mut Vec<tishlang_ast::Span>,
 ) {
-    let maybe_push = |span: &tishlang_ast::Span, n: &Arc<str>, out: &mut Vec<tishlang_ast::Span>| {
-        if n.as_ref() != name {
-            return;
-        }
-        let Some((l, c)) = pos::lsp_position_for_span_start(source, span) else {
-            return;
+    let maybe_push =
+        |span: &tishlang_ast::Span, n: &Arc<str>, out: &mut Vec<tishlang_ast::Span>| {
+            if n.as_ref() != name {
+                return;
+            }
+            let Some((l, c)) = pos::lsp_position_for_span_start(source, span) else {
+                return;
+            };
+            if definition_span(program, source, l, c) == Some(def_span) {
+                out.push(*span);
+            }
         };
-        if definition_span(program, source, l, c) == Some(def_span) {
-            out.push(*span);
-        }
-    };
 
     match expr {
         Expr::Ident { name: n, span } => maybe_push(span, n, out),
@@ -3230,7 +3334,11 @@ fn refs_expr(
                 }
             }
         }
-        Expr::Assign { name: n, span, value } => {
+        Expr::Assign {
+            name: n,
+            span,
+            value,
+        } => {
             let sp = synthetic_name_span(span.start, n.as_ref());
             maybe_push(&sp, n, out);
             refs_expr(value, program, source, name, def_span, out);
@@ -3244,8 +3352,18 @@ fn refs_expr(
             let sp = synthetic_name_span(span.start, n.as_ref());
             maybe_push(&sp, n, out);
         }
-        Expr::CompoundAssign { name: n, span, value, .. }
-        | Expr::LogicalAssign { name: n, span, value, .. } => {
+        Expr::CompoundAssign {
+            name: n,
+            span,
+            value,
+            ..
+        }
+        | Expr::LogicalAssign {
+            name: n,
+            span,
+            value,
+            ..
+        } => {
             let sp = synthetic_name_span(span.start, n.as_ref());
             maybe_push(&sp, n, out);
             refs_expr(value, program, source, name, def_span, out);
@@ -3270,7 +3388,10 @@ fn refs_expr(
                     if let Some(e) = &tp.default {
                         refs_expr(e, program, source, name, def_span, out);
                     }
-                } else if let FunParam::Destructure { default: Some(e), .. } = p {
+                } else if let FunParam::Destructure {
+                    default: Some(e), ..
+                } = p
+                {
                     refs_expr(e, program, source, name, def_span, out);
                 }
             }
@@ -3285,7 +3406,9 @@ fn refs_expr(
             }
         }
         Expr::Await { operand, .. } => refs_expr(operand, program, source, name, def_span, out),
-        Expr::JsxElement { props, children, .. } => {
+        Expr::JsxElement {
+            props, children, ..
+        } => {
             for p in props {
                 match p {
                     tishlang_ast::JsxProp::Attr { value, .. } => {
@@ -3293,7 +3416,9 @@ fn refs_expr(
                             refs_expr(e, program, source, name, def_span, out);
                         }
                     }
-                    tishlang_ast::JsxProp::Spread(e) => refs_expr(e, program, source, name, def_span, out),
+                    tishlang_ast::JsxProp::Spread(e) => {
+                        refs_expr(e, program, source, name, def_span, out)
+                    }
                 }
             }
             for ch in children {

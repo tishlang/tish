@@ -9,8 +9,8 @@ use std::sync::Arc;
 pub use hooks::{
     alloc_root_id, current_root_id, drop_host_for_root, install_host_for_root, native_create_root,
     native_use_effect, native_use_memo, native_use_state, run_with_current_root, schedule_flush,
-    unregister_root, unregister_root_hooks_and_effects, with_host_for_root, HookState,
-    LEGACY_ROOT_ID, RootId,
+    unregister_root, unregister_root_hooks_and_effects, with_host_for_root, HookState, RootId,
+    LEGACY_ROOT_ID,
 };
 
 use tishlang_core::{ObjectMap, Value, VmRef};
@@ -107,10 +107,7 @@ fn vnode_element(tag: Arc<str>, props: Value, children: Vec<Value>) -> Value {
             props
         },
     );
-    m.insert(
-        Arc::from("children"),
-        Value::Array(VmRef::new(children)),
-    );
+    m.insert(Arc::from("children"), Value::Array(VmRef::new(children)));
     m.insert(Arc::from("_el"), Value::Null);
     Value::Object(VmRef::new(m))
 }
@@ -119,10 +116,7 @@ fn vnode_fragment(children: Vec<Value>) -> Value {
     let mut m = ObjectMap::default();
     m.insert(Arc::from("tag"), fragment_value());
     m.insert(Arc::from("props"), Value::Null);
-    m.insert(
-        Arc::from("children"),
-        Value::Array(VmRef::new(children)),
-    );
+    m.insert(Arc::from("children"), Value::Array(VmRef::new(children)));
     m.insert(Arc::from("_el"), Value::Null);
     Value::Object(VmRef::new(m))
 }

@@ -72,7 +72,11 @@ impl Codegen {
     }
 
     fn output_line(&self) -> u32 {
-        self.output.as_bytes().iter().filter(|&&b| b == b'\n').count() as u32
+        self.output
+            .as_bytes()
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count() as u32
     }
 
     fn escape_ident(s: &str) -> String {
@@ -779,7 +783,8 @@ fn compile_project_js_inner(
     let modules = tishlang_compile::resolve_project(entry_path, project_root)
         .map_err(|e| CompileError { message: e })?;
     tishlang_compile::detect_cycles(&modules).map_err(|e| CompileError { message: e })?;
-    let merged = tishlang_compile::merge_modules(modules).map_err(|e| CompileError { message: e })?;
+    let merged =
+        tishlang_compile::merge_modules(modules).map_err(|e| CompileError { message: e })?;
     let program = if optimize {
         tishlang_opt::optimize(&merged.program)
     } else {
@@ -862,7 +867,5 @@ pub fn compile_project_with_jsx(
     } else {
         format!("{stem}.js")
     };
-    Ok(
-        compile_project_js_inner(entry_path, project_root, optimize, false, &out_name)?.js,
-    )
+    Ok(compile_project_js_inner(entry_path, project_root, optimize, false, &out_name)?.js)
 }

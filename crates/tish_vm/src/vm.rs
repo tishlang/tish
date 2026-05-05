@@ -1,10 +1,10 @@
 //! Stack-based bytecode VM.
 
 use std::cell::RefCell;
-use tishlang_core::VmRef;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use tishlang_core::VmRef;
 
 use tishlang_ast::{BinOp, UnaryOp};
 use tishlang_builtins::array as arr_builtins;
@@ -201,21 +201,15 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                 let mut m = ObjectMap::default();
                 m.insert(
                     "exit".into(),
-                    Value::native(|args: &[Value]| {
-                        tishlang_runtime::process_exit(args)
-                    }),
+                    Value::native(|args: &[Value]| tishlang_runtime::process_exit(args)),
                 );
                 m.insert(
                     "cwd".into(),
-                    Value::native(|args: &[Value]| {
-                        tishlang_runtime::process_cwd(args)
-                    }),
+                    Value::native(|args: &[Value]| tishlang_runtime::process_cwd(args)),
                 );
                 m.insert(
                     "exec".into(),
-                    Value::native(|args: &[Value]| {
-                        tishlang_runtime::process_exec(args)
-                    }),
+                    Value::native(|args: &[Value]| tishlang_runtime::process_exec(args)),
                 );
                 m.insert(
                     "argv".into(),
@@ -342,10 +336,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             Value::Null
         }),
     );
-    g.insert(
-        "console".into(),
-        Value::Object(VmRef::new(console)),
-    );
+    g.insert("console".into(), Value::Object(VmRef::new(console)));
 
     let mut math = ObjectMap::default();
     math.insert(
@@ -463,9 +454,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     );
     g.insert(
         "parseFloat".into(),
-        Value::native(|args: &[Value]| {
-            globals_builtins::parse_float(args)
-        }),
+        Value::native(|args: &[Value]| globals_builtins::parse_float(args)),
     );
     g.insert(
         "encodeURI".into(),
@@ -530,74 +519,46 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     let mut object_methods = ObjectMap::default();
     object_methods.insert(
         "assign".into(),
-        Value::native(|args: &[Value]| {
-            globals_builtins::object_assign(args)
-        }),
+        Value::native(|args: &[Value]| globals_builtins::object_assign(args)),
     );
     object_methods.insert(
         "fromEntries".into(),
-        Value::native(|args: &[Value]| {
-            globals_builtins::object_from_entries(args)
-        }),
+        Value::native(|args: &[Value]| globals_builtins::object_from_entries(args)),
     );
     object_methods.insert(
         "keys".into(),
-        Value::native(|args: &[Value]| {
-            globals_builtins::object_keys(args)
-        }),
+        Value::native(|args: &[Value]| globals_builtins::object_keys(args)),
     );
     object_methods.insert(
         "values".into(),
-        Value::native(|args: &[Value]| {
-            globals_builtins::object_values(args)
-        }),
+        Value::native(|args: &[Value]| globals_builtins::object_values(args)),
     );
     object_methods.insert(
         "entries".into(),
-        Value::native(|args: &[Value]| {
-            globals_builtins::object_entries(args)
-        }),
+        Value::native(|args: &[Value]| globals_builtins::object_entries(args)),
     );
-    g.insert(
-        "Object".into(),
-        Value::Object(VmRef::new(object_methods)),
-    );
+    g.insert("Object".into(), Value::Object(VmRef::new(object_methods)));
 
     // Array.isArray
     let mut array_static = ObjectMap::default();
     array_static.insert(
         "isArray".into(),
-        Value::native(|args: &[Value]| {
-            globals_builtins::array_is_array(args)
-        }),
+        Value::native(|args: &[Value]| globals_builtins::array_is_array(args)),
     );
-    g.insert(
-        "Array".into(),
-        Value::Object(VmRef::new(array_static)),
-    );
+    g.insert("Array".into(), Value::Object(VmRef::new(array_static)));
 
     // String(value) as callable + String.fromCharCode
-    let string_convert_fn = Value::native(|args: &[Value]| {
-        globals_builtins::string_convert(args)
-    });
+    let string_convert_fn = Value::native(|args: &[Value]| globals_builtins::string_convert(args));
     let mut string_static = ObjectMap::default();
     string_static.insert(
         "fromCharCode".into(),
-        Value::native(|args: &[Value]| {
-            globals_builtins::string_from_char_code(args)
-        }),
+        Value::native(|args: &[Value]| globals_builtins::string_from_char_code(args)),
     );
     string_static.insert(Arc::from("__call"), string_convert_fn);
-    g.insert(
-        "String".into(),
-        Value::Object(VmRef::new(string_static)),
-    );
+    g.insert("String".into(), Value::Object(VmRef::new(string_static)));
 
     // JSX / Lattish: stubs for bytecode VM when no DOM (e.g. console). Override via set_global in browser.
-    g.insert(
-        "h".into(),
-        Value::native(|_args: &[Value]| Value::Null),
-    );
+    g.insert("h".into(), Value::native(|_args: &[Value]| Value::Null));
     g.insert(
         "Fragment".into(),
         Value::Object(VmRef::new(ObjectMap::default())),
@@ -623,31 +584,22 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     );
     let mut document_obj = ObjectMap::default();
     document_obj.insert("body".into(), Value::Null);
-    g.insert(
-        "document".into(),
-        Value::Object(VmRef::new(document_obj)),
-    );
+    g.insert("document".into(), Value::Object(VmRef::new(document_obj)));
 
     #[cfg(feature = "process")]
     if cap_allows(enabled, "process") {
         let mut process_obj = ObjectMap::default();
         process_obj.insert(
             "exit".into(),
-            Value::native(|args: &[Value]| {
-                tishlang_runtime::process_exit(args)
-            }),
+            Value::native(|args: &[Value]| tishlang_runtime::process_exit(args)),
         );
         process_obj.insert(
             "cwd".into(),
-            Value::native(|args: &[Value]| {
-                tishlang_runtime::process_cwd(args)
-            }),
+            Value::native(|args: &[Value]| tishlang_runtime::process_cwd(args)),
         );
         process_obj.insert(
             "exec".into(),
-            Value::native(|args: &[Value]| {
-                tishlang_runtime::process_exec(args)
-            }),
+            Value::native(|args: &[Value]| tishlang_runtime::process_exec(args)),
         );
         process_obj.insert(
             "argv".into(),
@@ -663,10 +615,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
                     .collect(),
             )),
         );
-        g.insert(
-            "process".into(),
-            Value::Object(VmRef::new(process_obj)),
-        );
+        g.insert("process".into(), Value::Object(VmRef::new(process_obj)));
     }
 
     #[cfg(feature = "timers")]
@@ -894,10 +843,7 @@ impl Vm {
                         ls.insert(Arc::clone(name), v);
                     } else if i == ri {
                         let rest_arr: Vec<Value> = args.iter().skip(ri).cloned().collect();
-                        ls.insert(
-                            Arc::clone(name),
-                            Value::Array(VmRef::new(rest_arr)),
-                        );
+                        ls.insert(Arc::clone(name), Value::Array(VmRef::new(rest_arr)));
                     }
                 }
             } else {
@@ -1450,8 +1396,7 @@ impl Vm {
                             right.to_display_string()
                         ));
                     }
-                    self.stack
-                        .push(Value::Object(VmRef::new(merged)));
+                    self.stack.push(Value::Object(VmRef::new(merged)));
                 }
                 Opcode::ArraySortNumeric => {
                     let operand = Self::read_u16(code, &mut ip);
@@ -1600,7 +1545,12 @@ impl Vm {
                             V::Promise(p) => match p.block_until_settled() {
                                 Ok(val) => self.stack.push(val),
                                 Err(rej) => {
-                                    Self::unwind_throw(&mut try_handlers, &mut self.stack, &mut ip, rej)?;
+                                    Self::unwind_throw(
+                                        &mut try_handlers,
+                                        &mut self.stack,
+                                        &mut ip,
+                                        rej,
+                                    )?;
                                 }
                             },
                             other => self.stack.push(tishlang_runtime::await_promise(other)),

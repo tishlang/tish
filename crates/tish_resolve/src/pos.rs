@@ -104,7 +104,12 @@ pub fn byte_offset_to_lsp(source: &str, byte: usize) -> Option<(u32, u32)> {
 }
 
 /// True if LSP position lies inside `span` (half-open in byte space).
-pub fn span_contains_lsp_position(source: &str, span: &Span, lsp_line: u32, lsp_character: u32) -> bool {
+pub fn span_contains_lsp_position(
+    source: &str,
+    span: &Span,
+    lsp_line: u32,
+    lsp_character: u32,
+) -> bool {
     let Some(b) = lsp_position_to_byte_offset(source, lsp_line, lsp_character) else {
         return false;
     };
@@ -117,7 +122,10 @@ pub fn span_contains_lsp_position(source: &str, span: &Span, lsp_line: u32, lsp_
 /// LSP start (inclusive) and end (exclusive) positions for a lexer span.
 pub fn span_to_lsp_range_exclusive(source: &str, span: &Span) -> Option<((u32, u32), (u32, u32))> {
     let (lo, hi) = lex_span_byte_range(source, span)?;
-    Some((byte_offset_to_lsp(source, lo)?, byte_offset_to_lsp(source, hi)?))
+    Some((
+        byte_offset_to_lsp(source, lo)?,
+        byte_offset_to_lsp(source, hi)?,
+    ))
 }
 
 #[cfg(test)]
