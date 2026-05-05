@@ -4,9 +4,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tishlang_core::{ObjectMap, Value as CoreValue, VmRef};
 #[cfg(feature = "regex")]
 use tishlang_core::TishRegExp;
+use tishlang_core::{ObjectMap, Value as CoreValue, VmRef};
 
 use crate::value::{PropMap, Value};
 

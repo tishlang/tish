@@ -2,9 +2,9 @@
 //! Browser-exact behavior remains on `tish build --target js`.
 
 use std::cell::RefCell;
-use tishlang_core::VmRef;
 use std::rc::Rc;
 use std::sync::Arc;
+use tishlang_core::VmRef;
 
 use tishlang_core::{ObjectMap, Value};
 
@@ -79,10 +79,7 @@ fn buffer_source_stub() -> Value {
     m.insert(Arc::from("buffer"), Value::Null);
     m.insert(Arc::from("loop"), Value::Bool(false));
     m.insert(Arc::from("connect"), connect_fn());
-    m.insert(
-        Arc::from("start"),
-        Value::native(|_| Value::Null),
-    );
+    m.insert(Arc::from("start"), Value::native(|_| Value::Null));
     m.insert(Arc::from("stop"), Value::native(|_| Value::Null));
     Value::Object(VmRef::new(m))
 }
@@ -92,10 +89,7 @@ fn oscillator_stub() -> Value {
     m.insert(Arc::from("frequency"), param(440.0));
     m.insert(Arc::from("type"), Value::String("sine".into()));
     m.insert(Arc::from("connect"), connect_fn());
-    m.insert(
-        Arc::from("start"),
-        Value::native(|_| Value::Null),
-    );
+    m.insert(Arc::from("start"), Value::native(|_| Value::Null));
     m.insert(Arc::from("stop"), Value::native(|_| Value::Null));
     Value::Object(VmRef::new(m))
 }
@@ -140,10 +134,7 @@ fn audio_context_instance() -> Value {
         Arc::from("createOscillator"),
         Value::native(|_| oscillator_stub()),
     );
-    ctx.insert(
-        Arc::from("decodeAudioData"),
-        Value::native(|_| Value::Null),
-    );
+    ctx.insert(Arc::from("decodeAudioData"), Value::native(|_| Value::Null));
 
     Value::Object(VmRef::new(ctx))
 }

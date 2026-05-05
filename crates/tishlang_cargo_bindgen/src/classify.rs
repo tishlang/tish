@@ -1,8 +1,6 @@
 //! Classify a `pub fn` from syn for glue emission (driven by signature shape, not crate name).
 
-use syn::{
-    FnArg, GenericArgument, ItemFn, PathArguments, ReturnType, Type, TypeReference,
-};
+use syn::{FnArg, GenericArgument, ItemFn, PathArguments, ReturnType, Type, TypeReference};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignatureClass {

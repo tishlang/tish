@@ -701,11 +701,16 @@ mod tests {
     #[test]
     fn line_comment_does_not_emit_spurious_indent_before_next_line() {
         let with_comment = "fn f() {\n  return {\n    a: 1, // c\n    b: 2\n  }\n}\n";
-        let tokens: Vec<_> = Lexer::new(with_comment).collect::<Result<Vec<_>, _>>().unwrap();
+        let tokens: Vec<_> = Lexer::new(with_comment)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert!(
             !tokens.iter().any(|t| t.kind == TokenKind::Indent),
             "unexpected Indent after line comment: {:?}",
-            tokens.iter().map(|t| format!("{:?}", t.kind)).collect::<Vec<_>>()
+            tokens
+                .iter()
+                .map(|t| format!("{:?}", t.kind))
+                .collect::<Vec<_>>()
         );
     }
 }

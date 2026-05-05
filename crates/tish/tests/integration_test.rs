@@ -5,6 +5,7 @@
 //! - Generate/update expected files: `REGENERATE_EXPECTED=1 cargo test -p tishlangtest_mvp_programs_interpreter`
 //!   then commit the new/updated `tests/core/*.tish.expected` files.
 //! - Compiled outputs are cached under `target/integration_compile_cache/` per backend.
+//!   MVP native tests use `native_many/<hash>/` plus one batched nested Cargo build.
 
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::OsString;
@@ -14,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rayon::prelude::*;
+use tishlang_native::compile_many_to_native;
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -48,6 +50,62 @@ fn target_dir() -> PathBuf {
 /// Cache dir for tish build outputs (under target/ so CI rust-cache restores it).
 fn integration_compile_cache_dir() -> PathBuf {
     target_dir().join("integration_compile_cache")
+}
+
+/// Match `tish build` with no `--feature`: link every capability compiled into this `tish` binary.
+fn native_build_features_for_integration_test() -> Vec<String> {
+    let mut v: Vec<String> = tishlang_vm::all_compiled_capabilities()
+        .into_iter()
+        .collect();
+    v.sort();
+    v
+}
+
+fn combined_mvp_native_inputs_hash(paths: &[PathBuf]) -> u64 {
+    let mut h = DefaultHasher::new();
+    let feats = native_build_features_for_integration_test();
+    feats.len().hash(&mut h);
+    for f in &feats {
+        f.hash(&mut h);
+    }
+    paths.len().hash(&mut h);
+    for p in paths {
+        p.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .hash(&mut h);
+        file_content_hash(p).hash(&mut h);
+    }
+    h.finish()
+}
+
+fn mvp_native_batch_cache_dir(combined: u64) -> PathBuf {
+    integration_compile_cache_dir()
+        .join("native_many")
+        .join(format!("{:016x}", combined))
+}
+
+/// Restores the previous process env when dropped (for `TISH_FAST_NATIVE_BUILD` in batch tests).
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            None => std::env::remove_var(self.key),
+            Some(v) => std::env::set_var(self.key, v),
+        }
+    }
 }
 
 fn file_content_hash(path: &Path) -> u64 {
@@ -714,6 +772,7 @@ fn test_mvp_programs_interp_vm_stdout_parity() {
 /// Compile each .tish file to native, run, and compare stdout to static expected (parallelized).
 #[test]
 fn test_mvp_programs_native() {
+    let _fast_native = EnvVarGuard::set("TISH_FAST_NATIVE_BUILD", "1");
     let core_dir = core_dir();
     let bin = tish_bin();
     assert!(
@@ -721,18 +780,86 @@ fn test_mvp_programs_native() {
         "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
-    let errors: Vec<String> = MVP_TEST_FILES
-        .par_iter()
+
+    let mut paths: Vec<PathBuf> = MVP_TEST_FILES
+        .iter()
         .filter_map(|name| {
-            let path = core_dir.join(name);
-            if !path.exists() {
-                return None;
+            let p = core_dir.join(name);
+            if p.exists() {
+                Some(p)
+            } else {
+                None
             }
-            let expected = match get_expected(&path) {
+        })
+        .collect();
+    paths.sort();
+
+    if paths.is_empty() {
+        return;
+    }
+
+    let combined = combined_mvp_native_inputs_hash(&paths);
+    let cache_dir = mvp_native_batch_cache_dir(combined);
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let ext = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
+
+    let entries_owned: Vec<(PathBuf, PathBuf)> = paths
+        .iter()
+        .map(|p| {
+            let stem = p.file_stem().unwrap().to_string_lossy();
+            let cached = cache_dir.join(format!("{}{}", stem, ext));
+            (p.clone(), cached)
+        })
+        .collect();
+
+    let need_build = entries_owned.iter().any(|(_, o)| !o.exists());
+    if need_build {
+        let refs: Vec<(&Path, &Path)> = entries_owned
+            .iter()
+            .map(|(a, b)| (a.as_path(), b.as_path()))
+            .collect();
+        let feats = native_build_features_for_integration_test();
+        compile_many_to_native(&refs, Some(workspace_root().as_path()), &feats, true)
+            .unwrap_or_else(|e| panic!("compile_many_to_native: {}", e.message));
+    }
+
+    // Run each binary sequentially. Parallel `fs::copy` + `exec` caused Linux ETXTBSY (errno 26)
+    // in CI when several threads replaced/ran temp executables under load.
+    let errors: Vec<String> = entries_owned
+        .iter()
+        .enumerate()
+        .filter_map(|(run_index, (path, cached_bin))| {
+            let expected = match get_expected(path) {
                 Some(e) => e,
                 None => return Some(format!("missing expected: {}", path.display())),
             };
-            let out_bin = compile_cached(&bin, &path, "native");
+            if !cached_bin.exists() {
+                return Some(format!("missing cached binary: {}", cached_bin.display()));
+            }
+            let stem = path.file_stem().unwrap().to_string_lossy();
+            let ext_bin = cached_bin
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let temp_dest = std::env::temp_dir().join(format!(
+                "tish_mvp_native_{}_{:x}_{}_{}",
+                stem,
+                file_content_hash(path),
+                std::process::id(),
+                run_index
+            ));
+            let temp_dest = if ext_bin.is_empty() {
+                temp_dest
+            } else {
+                temp_dest.with_extension(&ext_bin)
+            };
+            std::fs::copy(cached_bin, &temp_dest).expect("copy cached native bin to temp");
+            let out_bin = temp_dest;
             let out = match Command::new(&out_bin)
                 .current_dir(workspace_root())
                 .output()

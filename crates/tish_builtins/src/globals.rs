@@ -4,9 +4,9 @@
 //! independent of tishlang_runtime.
 
 use std::cell::RefCell;
-use tishlang_core::VmRef;
 use std::rc::Rc;
 use std::sync::Arc;
+use tishlang_core::VmRef;
 use tishlang_core::{percent_decode, percent_encode, ObjectMap, Value};
 
 /// Boolean(value) - coerce to bool
@@ -102,12 +102,7 @@ pub fn object_entries(args: &[Value]) -> Value {
         let obj_borrow = obj.borrow();
         let entries: Vec<Value> = obj_borrow
             .iter()
-            .map(|(k, v)| {
-                Value::Array(VmRef::new(vec![
-                    Value::String(Arc::clone(k)),
-                    v.clone(),
-                ]))
-            })
+            .map(|(k, v)| Value::Array(VmRef::new(vec![Value::String(Arc::clone(k)), v.clone()])))
             .collect();
         Value::Array(VmRef::new(entries))
     } else {

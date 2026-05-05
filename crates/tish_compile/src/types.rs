@@ -83,9 +83,9 @@ impl RustType {
                     RustType::Value
                 }
             },
-            TypeAnnotation::Array(elem) => RustType::Vec(Box::new(
-                Self::from_annotation_with_aliases(elem, aliases),
-            )),
+            TypeAnnotation::Array(elem) => {
+                RustType::Vec(Box::new(Self::from_annotation_with_aliases(elem, aliases)))
+            }
             TypeAnnotation::Object(fields) => {
                 let typed_fields: Vec<_> = fields
                     .iter()
@@ -115,9 +115,9 @@ impl RustType {
                             |t| !matches!(t, TypeAnnotation::Simple(s) if s.as_ref() == "null"),
                         );
                         if let Some(inner) = non_null {
-                            return RustType::Option(Box::new(
-                                Self::from_annotation_with_aliases(inner, aliases),
-                            ));
+                            return RustType::Option(Box::new(Self::from_annotation_with_aliases(
+                                inner, aliases,
+                            )));
                         }
                     }
                 }

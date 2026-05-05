@@ -1,10 +1,10 @@
 //! Array builtin methods.
 
 use crate::helpers::normalize_index;
-use tishlang_core::VmRef;
 use std::cell::RefCell;
 use std::rc::Rc;
 use tishlang_core::Value;
+use tishlang_core::VmRef;
 
 /// Create a new array Value from a Vec of Values.
 pub fn from_vec(v: Vec<Value>) -> Value {

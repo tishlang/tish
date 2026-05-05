@@ -129,15 +129,9 @@ pub enum ImportSpecifier {
         alias_span: Option<Span>,
     },
     /// Namespace: * as M
-    Namespace {
-        name: Arc<str>,
-        name_span: Span,
-    },
+    Namespace { name: Arc<str>, name_span: Span },
     /// Default: import X from "..."
-    Default {
-        name: Arc<str>,
-        name_span: Span,
-    },
+    Default { name: Arc<str>, name_span: Span },
 }
 
 /// Export declaration: named (const/let/fn) or default
@@ -616,7 +610,7 @@ impl Statement {
             | Statement::DoWhile { span, .. }
             | Statement::Throw { span, .. }
             | Statement::Try { span, .. }
-            |             Statement::Import { span, .. }
+            | Statement::Import { span, .. }
             | Statement::Export { span, .. }
             | Statement::TypeAlias { span, .. }
             | Statement::DeclareVar { span, .. }

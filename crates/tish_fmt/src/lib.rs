@@ -1023,7 +1023,10 @@ mod tests {
     fn jsx_multiline_when_mixed_children() {
         let src = "let x = <div>a{b}</div>\n";
         let out = format_source(src).unwrap();
-        assert!(out.contains('\n'), "expected line breaks in formatted JSX: {out:?}");
+        assert!(
+            out.contains('\n'),
+            "expected line breaks in formatted JSX: {out:?}"
+        );
         let _ = tishlang_parser::parse(&out).unwrap();
     }
 }

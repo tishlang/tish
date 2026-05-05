@@ -560,15 +560,13 @@ pub fn compile_project_full(
             message: e,
             span: None,
         })?;
-    let native_build = resolve::compute_native_build_artifacts(
-        &merged.program,
-        root,
-        &native_modules,
-    )
-        .map_err(|e| CompileError {
-            message: e,
-            span: None,
-        })?;
+    let native_build =
+        resolve::compute_native_build_artifacts(&merged.program, root, &native_modules).map_err(
+            |e| CompileError {
+                message: e,
+                span: None,
+            },
+        )?;
     let mut all_features: Vec<String> = features.to_vec();
     for f in resolve::extract_native_import_features(&merged.program) {
         if !all_features.contains(&f) {
@@ -731,12 +729,9 @@ impl Codegen {
         for _ in 0..8 {
             let mut changed = false;
             for (name, ann) in &raw {
-                let resolved = crate::types::RustType::from_annotation_with_aliases(
-                    ann,
-                    &self.type_aliases,
-                );
-                let prev: Option<crate::types::RustType> =
-                    self.type_aliases.get(name).cloned();
+                let resolved =
+                    crate::types::RustType::from_annotation_with_aliases(ann, &self.type_aliases);
+                let prev: Option<crate::types::RustType> = self.type_aliases.get(name).cloned();
                 if prev.as_ref() != Some(&resolved) {
                     self.type_aliases.insert(name.clone(), resolved);
                     changed = true;
@@ -791,8 +786,11 @@ impl Codegen {
     fn emit_named_struct_decls(&mut self) {
         // Snapshot keys + values so we can mutate `self` (writing the
         // emitted source) inside the loop.
-        let mut entries: Vec<(String, crate::types::RustType)> =
-            self.type_aliases.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut entries: Vec<(String, crate::types::RustType)> = self
+            .type_aliases
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         let mut emitted_any = false;
         for (name, ty) in entries {
@@ -1304,83 +1302,71 @@ impl Codegen {
         self.writeln("(Arc::from(\"error\"), Value::native(|args: &[Value]| { tish_console_error(args); Value::Null })),");
         self.indent -= 1;
         self.writeln("])));");
-        self.writeln(
-            "let Boolean = Value::native(|args: &[Value]| tish_boolean(args));",
-        );
-        self.writeln(
-            "let parseInt = Value::native(|args: &[Value]| tish_parse_int(args));",
-        );
-        self.writeln(
-            "let parseFloat = Value::native(|args: &[Value]| tish_parse_float(args));",
-        );
-        self.writeln(
-            "let decodeURI = Value::native(|args: &[Value]| tish_decode_uri(args));",
-        );
-        self.writeln(
-            "let encodeURI = Value::native(|args: &[Value]| tish_encode_uri(args));",
-        );
+        self.writeln("let Boolean = Value::native(|args: &[Value]| tish_boolean(args));");
+        self.writeln("let parseInt = Value::native(|args: &[Value]| tish_parse_int(args));");
+        self.writeln("let parseFloat = Value::native(|args: &[Value]| tish_parse_float(args));");
+        self.writeln("let decodeURI = Value::native(|args: &[Value]| tish_decode_uri(args));");
+        self.writeln("let encodeURI = Value::native(|args: &[Value]| tish_encode_uri(args));");
         self.writeln(
             r#"let registerStaticRoute = Value::native(|args: &[Value]| { let path = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => return Value::Null }; let body = match args.get(1) { Some(Value::String(s)) => s.as_bytes().to_vec(), _ => return Value::Null }; let ct = match args.get(2) { Some(Value::String(s)) => s.to_string(), _ => "application/octet-stream".to_string() }; tish_register_static_route(&path, &body, &ct); Value::Null });"#,
         );
         self.writeln(
             "let htmlEscape = Value::native(|args: &[Value]| tish_escape_html(args.first().unwrap_or(&Value::Null)));",
         );
-        self.writeln(
-            "let isFinite = Value::native(|args: &[Value]| tish_is_finite(args));",
-        );
+        self.writeln("let isFinite = Value::native(|args: &[Value]| tish_is_finite(args));");
         self.writeln("let isNaN = Value::native(|args: &[Value]| tish_is_nan(args));");
         self.writeln("let Infinity = Value::Number(f64::INFINITY);");
         self.writeln("let NaN = Value::Number(f64::NAN);");
         self.writeln("let Math = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
+        self.writeln("(Arc::from(\"abs\"), Value::native(|args: &[Value]| tish_math_abs(args))),");
         self.writeln(
-            "(Arc::from(\"abs\"), Value::native(|args: &[Value]| tish_math_abs(args))),",
+            "(Arc::from(\"sqrt\"), Value::native(|args: &[Value]| tish_math_sqrt(args))),",
         );
-        self.writeln("(Arc::from(\"sqrt\"), Value::native(|args: &[Value]| tish_math_sqrt(args))),");
+        self.writeln("(Arc::from(\"min\"), Value::native(|args: &[Value]| tish_math_min(args))),");
+        self.writeln("(Arc::from(\"max\"), Value::native(|args: &[Value]| tish_math_max(args))),");
         self.writeln(
-            "(Arc::from(\"min\"), Value::native(|args: &[Value]| tish_math_min(args))),",
-        );
-        self.writeln(
-            "(Arc::from(\"max\"), Value::native(|args: &[Value]| tish_math_max(args))),",
-        );
-        self.writeln("(Arc::from(\"floor\"), Value::native(|args: &[Value]| tish_math_floor(args))),");
-        self.writeln("(Arc::from(\"ceil\"), Value::native(|args: &[Value]| tish_math_ceil(args))),");
-        self.writeln("(Arc::from(\"round\"), Value::native(|args: &[Value]| tish_math_round(args))),");
-        self.writeln("(Arc::from(\"random\"), Value::native(|args: &[Value]| tish_math_random(args))),");
-        self.writeln(
-            "(Arc::from(\"pow\"), Value::native(|args: &[Value]| tish_math_pow(args))),",
+            "(Arc::from(\"floor\"), Value::native(|args: &[Value]| tish_math_floor(args))),",
         );
         self.writeln(
-            "(Arc::from(\"sin\"), Value::native(|args: &[Value]| tish_math_sin(args))),",
+            "(Arc::from(\"ceil\"), Value::native(|args: &[Value]| tish_math_ceil(args))),",
         );
         self.writeln(
-            "(Arc::from(\"cos\"), Value::native(|args: &[Value]| tish_math_cos(args))),",
+            "(Arc::from(\"round\"), Value::native(|args: &[Value]| tish_math_round(args))),",
         );
         self.writeln(
-            "(Arc::from(\"tan\"), Value::native(|args: &[Value]| tish_math_tan(args))),",
+            "(Arc::from(\"random\"), Value::native(|args: &[Value]| tish_math_random(args))),",
+        );
+        self.writeln("(Arc::from(\"pow\"), Value::native(|args: &[Value]| tish_math_pow(args))),");
+        self.writeln("(Arc::from(\"sin\"), Value::native(|args: &[Value]| tish_math_sin(args))),");
+        self.writeln("(Arc::from(\"cos\"), Value::native(|args: &[Value]| tish_math_cos(args))),");
+        self.writeln("(Arc::from(\"tan\"), Value::native(|args: &[Value]| tish_math_tan(args))),");
+        self.writeln("(Arc::from(\"log\"), Value::native(|args: &[Value]| tish_math_log(args))),");
+        self.writeln("(Arc::from(\"exp\"), Value::native(|args: &[Value]| tish_math_exp(args))),");
+        self.writeln(
+            "(Arc::from(\"sign\"), Value::native(|args: &[Value]| tish_math_sign(args))),",
         );
         self.writeln(
-            "(Arc::from(\"log\"), Value::native(|args: &[Value]| tish_math_log(args))),",
+            "(Arc::from(\"trunc\"), Value::native(|args: &[Value]| tish_math_trunc(args))),",
         );
-        self.writeln(
-            "(Arc::from(\"exp\"), Value::native(|args: &[Value]| tish_math_exp(args))),",
-        );
-        self.writeln("(Arc::from(\"sign\"), Value::native(|args: &[Value]| tish_math_sign(args))),");
-        self.writeln("(Arc::from(\"trunc\"), Value::native(|args: &[Value]| tish_math_trunc(args))),");
         self.writeln("(Arc::from(\"PI\"), Value::Number(std::f64::consts::PI)),");
         self.writeln("(Arc::from(\"E\"), Value::Number(std::f64::consts::E)),");
         self.indent -= 1;
         self.writeln("])));");
         self.writeln("let JSON = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"parse\"), Value::native(|args: &[Value]| tish_json_parse(args))),");
+        self.writeln(
+            "(Arc::from(\"parse\"), Value::native(|args: &[Value]| tish_json_parse(args))),",
+        );
         self.writeln("(Arc::from(\"stringify\"), Value::native(|args: &[Value]| tish_json_stringify(args))),");
         self.indent -= 1;
         self.writeln("])));");
 
         self.writeln("let Array = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"isArray\"), Value::native(|args: &[Value]| tish_array_is_array(args))),");
+        self.writeln(
+            "(Arc::from(\"isArray\"), Value::native(|args: &[Value]| tish_array_is_array(args))),",
+        );
         self.indent -= 1;
         self.writeln("])));");
 
@@ -1392,18 +1378,24 @@ impl Codegen {
 
         self.writeln("let Date = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln(
-            "(Arc::from(\"now\"), Value::native(|args: &[Value]| tish_date_now(args))),",
-        );
+        self.writeln("(Arc::from(\"now\"), Value::native(|args: &[Value]| tish_date_now(args))),");
         self.indent -= 1;
         self.writeln("])));");
 
         self.writeln("let Object = Value::Object(VmRef::new(ObjectMap::from([");
         self.indent += 1;
-        self.writeln("(Arc::from(\"assign\"), Value::native(|args: &[Value]| tish_object_assign(args))),");
-        self.writeln("(Arc::from(\"keys\"), Value::native(|args: &[Value]| tish_object_keys(args))),");
-        self.writeln("(Arc::from(\"values\"), Value::native(|args: &[Value]| tish_object_values(args))),");
-        self.writeln("(Arc::from(\"entries\"), Value::native(|args: &[Value]| tish_object_entries(args))),");
+        self.writeln(
+            "(Arc::from(\"assign\"), Value::native(|args: &[Value]| tish_object_assign(args))),",
+        );
+        self.writeln(
+            "(Arc::from(\"keys\"), Value::native(|args: &[Value]| tish_object_keys(args))),",
+        );
+        self.writeln(
+            "(Arc::from(\"values\"), Value::native(|args: &[Value]| tish_object_values(args))),",
+        );
+        self.writeln(
+            "(Arc::from(\"entries\"), Value::native(|args: &[Value]| tish_object_entries(args))),",
+        );
         self.writeln("(Arc::from(\"fromEntries\"), Value::native(|args: &[Value]| tish_object_from_entries(args))),");
         self.indent -= 1;
         self.writeln("])));");
@@ -1419,31 +1411,33 @@ impl Codegen {
             self.writeln("p.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args)));");
             self.writeln("p.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args)));");
             self.writeln("let argv: Vec<Value> = std::env::args().map(|s| Value::String(s.into())).collect();");
-            self.writeln(
-                "p.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(argv)));",
-            );
+            self.writeln("p.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(argv)));");
             self.writeln("let mut env_obj = ObjectMap::default();");
             self.writeln("for (key, value) in std::env::vars() {");
             self.indent += 1;
             self.writeln("env_obj.insert(Arc::from(key.as_str()), Value::String(value.into()));");
             self.indent -= 1;
             self.writeln("}");
-            self.writeln(
-                "p.insert(Arc::from(\"env\"), Value::Object(VmRef::new(env_obj)));",
-            );
+            self.writeln("p.insert(Arc::from(\"env\"), Value::Object(VmRef::new(env_obj)));");
             self.writeln("p");
             self.indent -= 1;
             self.writeln("}));");
         }
 
         if self.has_feature("timers") {
-            self.writeln("let setTimeout = Value::native(|args: &[Value]| tish_timer_set_timeout(args));");
+            self.writeln(
+                "let setTimeout = Value::native(|args: &[Value]| tish_timer_set_timeout(args));",
+            );
             self.writeln("let clearTimeout = Value::native(|args: &[Value]| tish_timer_clear_timeout(args));");
-            self.writeln("let setInterval = Value::native(|args: &[Value]| tish_timer_set_interval(args));");
+            self.writeln(
+                "let setInterval = Value::native(|args: &[Value]| tish_timer_set_interval(args));",
+            );
             self.writeln("let clearInterval = Value::native(|args: &[Value]| tish_timer_clear_interval(args));");
         }
         if self.has_feature("http") {
-            self.writeln("let fetch = Value::native(|args: &[Value]| tish_fetch_promise(args.to_vec()));");
+            self.writeln(
+                "let fetch = Value::native(|args: &[Value]| tish_fetch_promise(args.to_vec()));",
+            );
             self.writeln("let fetchAll = Value::native(|args: &[Value]| tish_fetch_all_promise(args.to_vec()));");
             if self.is_async {
                 self.writeln("let Promise = tish_promise_object();");
@@ -1461,7 +1455,9 @@ impl Codegen {
             self.writeln("let handler = args.get(1).cloned().unwrap_or(Value::Null);");
             self.writeln("match handler {");
             self.indent += 1;
-            self.writeln("Value::Function(f) => tish_http_serve(args, move |req_args| f(req_args)),");
+            self.writeln(
+                "Value::Function(f) => tish_http_serve(args, move |req_args| f(req_args)),",
+            );
             self.writeln("Value::Object(ref opts) => {");
             self.indent += 1;
             self.writeln("let factory = opts.borrow().get(&Arc::from(\"onWorker\")).cloned().unwrap_or(Value::Null);");
@@ -1476,28 +1472,18 @@ impl Codegen {
         }
 
         if self.has_feature("fs") {
+            self.writeln("let readFile = Value::native(|args: &[Value]| tish_read_file(args));");
+            self.writeln("let writeFile = Value::native(|args: &[Value]| tish_write_file(args));");
             self.writeln(
-                "let readFile = Value::native(|args: &[Value]| tish_read_file(args));",
+                "let fileExists = Value::native(|args: &[Value]| tish_file_exists(args));",
             );
-            self.writeln(
-                "let writeFile = Value::native(|args: &[Value]| tish_write_file(args));",
-            );
-            self.writeln("let fileExists = Value::native(|args: &[Value]| tish_file_exists(args));");
-            self.writeln(
-                "let isDir = Value::native(|args: &[Value]| tish_is_dir(args));",
-            );
-            self.writeln(
-                "let readDir = Value::native(|args: &[Value]| tish_read_dir(args));",
-            );
-            self.writeln(
-                "let mkdir = Value::native(|args: &[Value]| tish_mkdir(args));",
-            );
+            self.writeln("let isDir = Value::native(|args: &[Value]| tish_is_dir(args));");
+            self.writeln("let readDir = Value::native(|args: &[Value]| tish_read_dir(args));");
+            self.writeln("let mkdir = Value::native(|args: &[Value]| tish_mkdir(args));");
         }
 
         if self.has_feature("regex") {
-            self.writeln(
-                "let RegExp = Value::native(|args: &[Value]| regexp_new(args));",
-            );
+            self.writeln("let RegExp = Value::native(|args: &[Value]| regexp_new(args));");
         }
 
         if self.program_has_jsx {
@@ -1505,10 +1491,10 @@ impl Codegen {
             self.writeln("let Fragment = fragment_value();");
             self.writeln("let h = Value::native(|args: &[Value]| ui_h(args));");
             self.writeln("let text = Value::native(|args: &[Value]| ui_text(args));");
+            self.writeln("let useState = Value::native(|args: &[Value]| native_use_state(args));");
             self.writeln(
-                "let useState = Value::native(|args: &[Value]| native_use_state(args));",
+                "let createRoot = Value::native(|args: &[Value]| native_create_root(args));",
             );
-            self.writeln("let createRoot = Value::native(|args: &[Value]| native_create_root(args));");
         }
 
         // Polars, Egui etc. are emitted via VarDecl from import { X } from 'tish:...'
@@ -1622,10 +1608,7 @@ impl Codegen {
                     };
                     if self.refcell_wrapped_vars.contains(name.as_ref()) {
                         // Closure-mutated: same Rc<RefCell<T>> pattern as Value (assignments use borrow_mut)
-                        self.writeln(&format!(
-                            "let {} = VmRef::new({});",
-                            escaped_name, expr_str
-                        ));
+                        self.writeln(&format!("let {} = VmRef::new({});", escaped_name, expr_str));
                         self.rc_cell_storage_define(name.as_ref());
                     } else {
                         let type_str = rust_type.to_rust_type_str();
@@ -1653,10 +1636,7 @@ impl Codegen {
                         } else {
                             expr_str.to_string()
                         };
-                        self.writeln(&format!(
-                            "let {} = VmRef::new({});",
-                            escaped_name, init_val
-                        ));
+                        self.writeln(&format!("let {} = VmRef::new({});", escaped_name, init_val));
                         self.rc_cell_storage_define(name.as_ref());
                     } else if clone_needed {
                         self.writeln(&format!(
@@ -4886,14 +4866,11 @@ impl Codegen {
         // alias). Each property in source order is matched to a struct
         // field; missing fields fall back to `default_value()` so the
         // emit succeeds even on partial literals (rare, but harmless).
-        if let (RustType::Named { name, fields }, Expr::Object { props, .. }) =
-            (target_type, expr)
+        if let (RustType::Named { name, fields }, Expr::Object { props, .. }) = (target_type, expr)
         {
             use std::collections::HashMap;
-            let field_types: HashMap<&str, &RustType> = fields
-                .iter()
-                .map(|(k, t)| (k.as_ref(), t))
-                .collect();
+            let field_types: HashMap<&str, &RustType> =
+                fields.iter().map(|(k, t)| (k.as_ref(), t)).collect();
             let mut field_inits: HashMap<String, String> = HashMap::new();
             let mut bail = false;
             for prop in props {

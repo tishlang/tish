@@ -539,9 +539,10 @@ pub fn convert_params(
         let fp = p;
         {
             let (name, name_span) = match &fp.pattern {
-                oxc::ast::ast::BindingPattern::BindingIdentifier(b) => {
-                    (b.name.as_str(), crate::span_util::oxc_span_to_tish(ctx.1, b.as_ref()))
-                }
+                oxc::ast::ast::BindingPattern::BindingIdentifier(b) => (
+                    b.name.as_str(),
+                    crate::span_util::oxc_span_to_tish(ctx.1, b.as_ref()),
+                ),
                 _ => {
                     return Err(ConvertError::new(ConvertErrorKind::Unsupported {
                         what: "destructuring in params".into(),
@@ -565,9 +566,10 @@ pub fn convert_params(
     if rest_param.is_none() {
         if let Some(rest) = &params.rest {
             let (rest_name, rest_name_span) = match &rest.rest.argument {
-                oxc::ast::ast::BindingPattern::BindingIdentifier(b) => {
-                    (b.name.as_str(), crate::span_util::oxc_span_to_tish(ctx.1, b.as_ref()))
-                }
+                oxc::ast::ast::BindingPattern::BindingIdentifier(b) => (
+                    b.name.as_str(),
+                    crate::span_util::oxc_span_to_tish(ctx.1, b.as_ref()),
+                ),
                 _ => {
                     return Err(ConvertError::new(ConvertErrorKind::Unsupported {
                         what: "rest param with non-identifier".into(),

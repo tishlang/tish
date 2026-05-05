@@ -5,12 +5,12 @@ mod cli_help;
 mod repl_completion;
 
 use std::cell::RefCell;
-use tishlang_core::VmRef;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use tishlang_core::VmRef;
 
 use clap::FromArgMatches;
 use rustyline::{Behavior, ColorMode, CompletionType, Config, Editor};
@@ -516,13 +516,14 @@ fn compile_to_js(
         } else {
             program
         };
-        let js = tishlang_compile_js::compile_with_jsx(&p, optimize).map_err(|e| format!("{}", e))?;
+        let js =
+            tishlang_compile_js::compile_with_jsx(&p, optimize).map_err(|e| format!("{}", e))?;
         (js, None)
     } else if input_path.extension().map(|e| e == "js") == Some(true) {
         let source = fs::read_to_string(input_path).map_err(|e| format!("{}", e))?;
         let program = tishlang_js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        let js =
-            tishlang_compile_js::compile_with_jsx(&program, optimize).map_err(|e| format!("{}", e))?;
+        let js = tishlang_compile_js::compile_with_jsx(&program, optimize)
+            .map_err(|e| format!("{}", e))?;
         (js, None)
     } else if source_map {
         let bundle = tishlang_compile_js::compile_project_with_jsx_and_source_map(
@@ -545,7 +546,8 @@ fn compile_to_js(
     let mut js_out = js;
     if let Some(map) = &map_json {
         let map_path = out_path.with_extension("js.map");
-        fs::write(&map_path, map).map_err(|e| format!("Cannot write {}: {}", map_path.display(), e))?;
+        fs::write(&map_path, map)
+            .map_err(|e| format!("Cannot write {}: {}", map_path.display(), e))?;
         let map_url = map_path
             .file_name()
             .and_then(|s| s.to_str())
@@ -553,7 +555,8 @@ fn compile_to_js(
         js_out.push_str(&format!("\n//# sourceMappingURL={map_url}\n"));
         println!("Built: {}", map_path.display());
     }
-    fs::write(&out_path, js_out).map_err(|e| format!("Cannot write {}: {}", out_path.display(), e))?;
+    fs::write(&out_path, js_out)
+        .map_err(|e| format!("Cannot write {}: {}", out_path.display(), e))?;
     println!("Built: {}", out_path.display());
     Ok(())
 }

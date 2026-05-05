@@ -133,9 +133,15 @@ jobs:
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
+      TISH_FAST_NATIVE_BUILD: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install mold (fast nested native test links)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9

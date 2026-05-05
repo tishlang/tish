@@ -47,8 +47,8 @@ fn resolve_and_compile_to_chunk(
         let prog = merge_modules(modules)
             .map(|m| m.program)
             .map_err(|e| WasmError {
-            message: e.to_string(),
-        })?;
+                message: e.to_string(),
+            })?;
         if optimize {
             tishlang_opt::optimize(&prog)
         } else {

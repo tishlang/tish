@@ -6,6 +6,18 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+
+/// Serialize nested `cargo build` calls that share the workspace `target/` dir (tests + `tish build`).
+static NESTED_CARGO_MUTEX: Mutex<()> = Mutex::new(());
+
+fn mold_available() -> bool {
+    Command::new("mold")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
 
 /// True if `root` looks like the Tish language repo (has `crates/tish_runtime`).
 ///
@@ -161,7 +173,11 @@ pub fn find_workspace_root() -> Result<PathBuf, String> {
             let candidate = dir.join("tish");
             if is_tish_workspace_root(&candidate) {
                 return candidate.canonicalize().map_err(|e| {
-                    format!("Cannot canonicalize Tish workspace {}: {}", candidate.display(), e)
+                    format!(
+                        "Cannot canonicalize Tish workspace {}: {}",
+                        candidate.display(),
+                        e
+                    )
                 });
             }
             if !dir.pop() {
@@ -366,20 +382,31 @@ fn protoc_for_nested_cargo() -> Option<PathBuf> {
 /// Run cargo build in the given directory.
 /// If target_dir is Some, use that for --target-dir (e.g. workspace target for caching).
 pub fn run_cargo_build(build_dir: &Path, target_dir: Option<&Path>) -> Result<(), String> {
+    let _nested_guard = NESTED_CARGO_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let target_dir = target_dir
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| build_dir.join("target"));
+    let fast_native = std::env::var("TISH_FAST_NATIVE_BUILD").as_deref() == Ok("1");
+
     // Default to target-cpu=native so the emitted binary uses every SIMD / ISA
     // extension the build host supports. Callers can override by pre-setting
-    // RUSTFLAGS in the environment.
-    let existing_rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
-    let merged_rustflags = if existing_rustflags.is_empty() {
-        "-C target-cpu=native".to_string()
-    } else if existing_rustflags.contains("target-cpu") {
-        existing_rustflags
-    } else {
-        format!("{} -C target-cpu=native", existing_rustflags)
-    };
+    // RUSTFLAGS in the environment. Skipped for fast nested builds (integration tests).
+    let mut merged_rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
+    if fast_native {
+        if cfg!(target_os = "linux")
+            && mold_available()
+            && !merged_rustflags.contains("fuse-ld=mold")
+        {
+            merged_rustflags = format!("{} -C link-arg=-fuse-ld=mold", merged_rustflags.trim());
+            merged_rustflags = merged_rustflags.trim().to_string();
+        }
+    } else if merged_rustflags.is_empty() {
+        merged_rustflags = "-C target-cpu=native".to_string();
+    } else if !merged_rustflags.contains("target-cpu") {
+        merged_rustflags = format!("{} -C target-cpu=native", merged_rustflags);
+    }
+
     // Nested `cargo build` (e.g. `tish build --native-backend rust`) inherits the parent
     // environment. CI often sets `RUSTC_WRAPPER=sccache`; wrapping this inner compile too can
     // cause flaky or failed builds (LTO / temp-crate paths). Use plain rustc here; the main
@@ -394,6 +421,11 @@ pub fn run_cargo_build(build_dir: &Path, target_dir: Option<&Path>) -> Result<()
         .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
         .env("CARGO_TERM_PROGRESS", "always")
         .env("RUSTFLAGS", &merged_rustflags);
+    if fast_native {
+        cmd.env("CARGO_INCREMENTAL", "1");
+    } else {
+        cmd.env_remove("CARGO_INCREMENTAL");
+    }
     if let Some(protoc) = protoc_for_nested_cargo() {
         cmd.env("PROTOC", protoc);
     }
@@ -422,11 +454,7 @@ mod protoc_tests {
         let _guard = _lock.lock().unwrap();
         std::env::remove_var("PROTOC");
         let p = protoc_for_nested_cargo().expect("expected vendored or PATH protoc");
-        assert!(
-            p.exists(),
-            "resolved protoc should exist: {}",
-            p.display()
-        );
+        assert!(p.exists(), "resolved protoc should exist: {}", p.display());
     }
 }
 

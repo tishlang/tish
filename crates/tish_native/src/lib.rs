@@ -93,8 +93,8 @@ pub fn compile_to_native(
                 let prog = tishlang_compile::merge_modules(modules)
                     .map(|m| m.program)
                     .map_err(|e| NativeError {
-                    message: e.to_string(),
-                })?;
+                        message: e.to_string(),
+                    })?;
                 if optimize {
                     tishlang_opt::optimize(&prog)
                 } else {
@@ -138,8 +138,8 @@ pub fn compile_to_native(
                 let prog = tishlang_compile::merge_modules(modules)
                     .map(|m| m.program)
                     .map_err(|e| NativeError {
-                    message: e.to_string(),
-                })?;
+                        message: e.to_string(),
+                    })?;
                 if optimize {
                     tishlang_opt::optimize(&prog)
                 } else {
@@ -280,6 +280,74 @@ pub fn compile_program_to_native(
                 .map_err(|e| NativeError { message: e.message })
         }
     }
+}
+
+/// Compile multiple entry `.tish` files to native binaries in **one** nested Cargo build.
+///
+/// Intended for integration tests and batch tooling; keeps production [`compile_to_native`] behavior
+/// unchanged when `TISH_FAST_NATIVE_BUILD` is unset.
+pub fn compile_many_to_native(
+    entries: &[(&Path, &Path)],
+    project_root: Option<&Path>,
+    features: &[String],
+    optimize: bool,
+) -> Result<(), NativeError> {
+    let mut bins: Vec<(String, String, Option<String>)> = Vec::with_capacity(entries.len());
+    let mut merged_native_modules: Vec<tishlang_compile::ResolvedNativeModule> = Vec::new();
+    let mut merged_features: Vec<String> = features.to_vec();
+    let mut merged_extra_deps = String::new();
+    let mut needs_tokio = false;
+    let mut needs_ui = false;
+
+    for (entry_path, _) in entries {
+        let (rust_code, native_modules, effective_features, native_build) =
+            tishlang_compile::compile_project_full(entry_path, project_root, features, optimize)
+                .map_err(|e| NativeError {
+                    message: e.to_string(),
+                })?;
+        let stem = entry_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| NativeError {
+                message: format!("invalid entry path: {}", entry_path.display()),
+            })?
+            .to_string();
+
+        for f in &effective_features {
+            if !merged_features.contains(f) {
+                merged_features.push(f.clone());
+            }
+        }
+        for m in native_modules {
+            let dup = merged_native_modules
+                .iter()
+                .any(|x| x.package_name == m.package_name && x.crate_path == m.crate_path);
+            if !dup {
+                merged_native_modules.push(m);
+            }
+        }
+        let extra = native_build.rust_dependencies_toml.trim();
+        if !extra.is_empty() {
+            merged_extra_deps.push_str(extra);
+            merged_extra_deps.push('\n');
+        }
+        needs_tokio |= rust_code.contains("#[tokio::main]");
+        needs_ui |= rust_code.contains("tishlang_ui");
+        bins.push((stem, rust_code, native_build.generated_native_rs));
+    }
+
+    let merged_extra = merged_extra_deps.trim();
+    crate::build::build_many_via_cargo(
+        bins,
+        merged_native_modules,
+        &merged_features,
+        merged_extra,
+        needs_tokio,
+        needs_ui,
+        entries,
+        project_root,
+    )
+    .map_err(|e| NativeError { message: e })
 }
 
 enum Backend {
