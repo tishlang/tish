@@ -4,6 +4,7 @@ Internal and contributor-facing docs. User-facing docs live in the **[tishlang.c
 
 | File | Purpose |
 |------|---------|
+| `js-emit-philosophy.md` | **Normative:** Tish is not JS; JS emit scope; “obvious failures” vs feature creep; `type` keyword exceptions |
 | `ecma-alignment.md` | ECMA-262 / test262 mapping (source of truth; tish-docs summarizes) |
 | `LANGUAGE.md` | Canonical language reference (syntax, semantics, builtins; LLM/tool friendly) |
 | `plan-gap-analysis.md` | Implementation audit, MVP checklist, next steps |

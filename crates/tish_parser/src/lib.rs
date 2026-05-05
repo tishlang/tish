@@ -252,4 +252,78 @@ mod tests {
         parse(SRC).expect("stdlib/builtins.d.tish should parse");
     }
 
+    #[test]
+    fn for_empty_head_parses() {
+        let src = r#"fn f() {
+  for (;;)
+    const x = 1
+}"#;
+        let program = parse(src).expect("for (;;)");
+        let body = match &program.statements[0] {
+            Statement::FunDecl { body, .. } => body,
+            _ => panic!("expected fn"),
+        };
+        let stmts = match body.as_ref() {
+            Statement::Block { statements, .. } => statements,
+            _ => panic!("expected block body"),
+        };
+        assert!(
+            matches!(
+                stmts.iter().find(|s| matches!(s, Statement::For { .. })),
+                Some(Statement::For {
+                    init: None,
+                    cond: None,
+                    update: None,
+                    ..
+                })
+            ),
+            "expected for (;;)"
+        );
+    }
+
+    #[test]
+    fn brace_function_body_does_not_nest_block_around_first_let() {
+        let src = "fn h() {\n  let a = 1\n  let b = 2\n}\n";
+        let program = parse(src).expect("parse");
+        let body = match &program.statements[0] {
+            Statement::FunDecl { body, .. } => body,
+            _ => panic!("expected fn"),
+        };
+        let stmts = match body.as_ref() {
+            Statement::Block { statements, .. } => statements,
+            _ => panic!("expected block body"),
+        };
+        assert_eq!(
+            stmts.len(),
+            2,
+            "expected two top-level lets in fn body, not Block(let) + let — got {stmts:?}"
+        );
+        assert!(matches!(stmts[0], Statement::VarDecl { .. }));
+        assert!(matches!(stmts[1], Statement::VarDecl { .. }));
+    }
+
+    #[test]
+    fn member_access_allows_type_property_name() {
+        let src = "fn f() {\n  const label = 0\n  label.type = \"button\"\n}\n";
+        parse(src).expect("label.type should parse: `type` is a keyword but valid after `.`");
+    }
+
+    #[test]
+    fn brace_block_stmt_then_const_then_if_are_siblings() {
+        let src = "fn g() {\n  f()\n  const x = 1\n  if (x) {\n    f()\n  }\n}\n";
+        let program = parse(src).expect("parse");
+        let body = match &program.statements[0] {
+            Statement::FunDecl { body, .. } => body,
+            _ => panic!("expected fn"),
+        };
+        let stmts = match body.as_ref() {
+            Statement::Block { statements, .. } => statements,
+            _ => panic!("expected block body"),
+        };
+        assert_eq!(stmts.len(), 3, "expected expr; const; if as siblings — got {stmts:?}");
+        assert!(matches!(stmts[0], Statement::ExprStmt { .. }));
+        assert!(matches!(stmts[1], Statement::VarDecl { .. }));
+        assert!(matches!(stmts[2], Statement::If { .. }));
+    }
+
 }
