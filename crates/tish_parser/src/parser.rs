@@ -99,6 +99,18 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// After `.` / `?.`, allow `type` as a member name (`TokenKind::Type`); see `docs/js-emit-philosophy.md`.
+    fn expect_ident_or_type_member_name(&mut self) -> Result<&Token, String> {
+        match self.peek_kind() {
+            Some(TokenKind::Ident) => self.expect(TokenKind::Ident),
+            Some(TokenKind::Type) => self.expect(TokenKind::Type),
+            other => Err(format!(
+                "Expected property name after `.` or `?.`, got {:?}",
+                other
+            )),
+        }
+    }
+
     fn span_end(&self, start: (usize, usize)) -> Span {
         let end = self.peek().map(|t| t.span.start).unwrap_or(start);
         Span { start, end }
@@ -194,8 +206,17 @@ impl<'a> Parser<'a> {
     fn parse_block(&mut self) -> Result<Statement, String> {
         let span_start = self.peek().ok_or("Unexpected EOF")?.span.start;
 
-        if matches!(self.peek_kind(), Some(TokenKind::LBrace)) {
+        let opened_with_brace = matches!(self.peek_kind(), Some(TokenKind::LBrace));
+        if opened_with_brace {
             self.advance(); // {
+            // After `{`, the lexer often emits `Indent` for the first indented line of the body.
+            // `parse_statement` treats a leading `Indent` as starting a *nested* indent-block, so
+            // without consuming this token we get `Block { Block { let ... } ; ... }` and the first
+            // `let`/`const` is scoped too narrowly (JS ReferenceError). This indent is layout for
+            // *this* brace block, not an inner block.
+            if matches!(self.peek_kind(), Some(TokenKind::Indent)) {
+                self.advance();
+            }
         } else if matches!(self.peek_kind(), Some(TokenKind::Indent)) {
             self.advance(); // Indent
         }
@@ -938,6 +959,11 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::Semicolon)?;
             Some(c)
         };
+        // `for (init; ; update)` — when the condition is empty we matched `;` above but did not
+        // consume it; skip it so `update` / `)` parse correctly (e.g. `for (;;)`).
+        if cond.is_none() && matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
+            self.advance();
+        }
         let update = if matches!(self.peek_kind(), Some(TokenKind::RParen)) {
             None
         } else {
@@ -1483,7 +1509,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Dot | TokenKind::OptionalChain => {
                     let optional = kind == TokenKind::OptionalChain;
                     self.advance();
-                    let prop_tok = self.expect(TokenKind::Ident)?;
+                    let prop_tok = self.expect_ident_or_type_member_name()?;
                     let prop = prop_tok
                         .literal
                         .clone()
@@ -1603,7 +1629,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Dot | TokenKind::OptionalChain => {
                     let optional = kind == TokenKind::OptionalChain;
                     self.advance();
-                    let prop_tok = self.expect(TokenKind::Ident)?;
+                    let prop_tok = self.expect_ident_or_type_member_name()?;
                     let prop = prop_tok
                         .literal
                         .clone()
@@ -1997,7 +2023,8 @@ impl<'a> Parser<'a> {
                     self.expect(TokenKind::RBrace)?; // }
                     props.push(JsxProp::Spread(expr));
                 }
-                Some(TokenKind::Ident) => {
+                // `type` is `TokenKind::Type` but valid as a JSX attr name; see docs/js-emit-philosophy.md.
+                Some(TokenKind::Ident) | Some(TokenKind::Type) => {
                     let name_tok = self.advance().unwrap();
                     let name = name_tok.literal.clone().ok_or("Expected attr name")?;
                     if matches!(self.peek_kind(), Some(TokenKind::Assign)) {

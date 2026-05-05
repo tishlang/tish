@@ -303,4 +303,48 @@ fn factory() {
             &js[..800.min(js.len())]
         );
     }
+
+    #[test]
+    fn fn_body_two_lets_not_split_by_closing_brace() {
+        let src = "fn h() {\n  let a = 1\n  let b = 2\n}\n";
+        let program = parse(src).expect("parse");
+        let js = compile_with_jsx(&program, false).expect("compile");
+        let i = js.find("let a = 1").expect("let a");
+        let j = js.find("let b = 2").expect("let b");
+        assert!(
+            !js[i..j].contains('}'),
+            "first let must not end in an inner block before second let (regression #43): {:?}",
+            &js[i..j]
+        );
+    }
+
+    #[test]
+    fn control_flow_wraps_lexical_decl_body_in_block_for_valid_js() {
+        let src = r#"fn f() {
+  if (true)
+    const x = 1
+  while (false)
+    let y = 2
+  for (;;)
+    const z = 3
+  for (const v of [])
+    let w = 4
+}"#;
+        let program = parse(src).expect("parse");
+        let js = compile_with_jsx(&program, false).expect("compile");
+        for (label, key, decl) in [
+            ("if", "if (true)", "const x = 1"),
+            ("while", "while (false)", "let y = 2"),
+            ("for", "for (; ; )", "const z = 3"),
+            ("for-of", "for (const v of [])", "let w = 4"),
+        ] {
+            let i = js.find(key).expect(label);
+            let j = js.find(decl).expect(label);
+            assert!(
+                i < j && js[i..j].contains('{'),
+                "{label}: expected '{{' between {key:?} and {decl:?}, got {:?}",
+                &js[i..j]
+            );
+        }
+    }
 }

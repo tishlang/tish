@@ -34,6 +34,29 @@ impl Codegen {
         }
     }
 
+    /// ECMAScript does not allow `if (c) const x = 1` / `while (c) let y = 2` without a block.
+    fn stmt_needs_braces_in_js_control_head(stmt: &Statement) -> bool {
+        matches!(
+            stmt,
+            Statement::VarDecl { .. } | Statement::VarDeclDestructure { .. }
+        )
+    }
+
+    fn emit_js_control_body(&mut self, body: &Statement) -> Result<(), CompileError> {
+        if Self::stmt_needs_braces_in_js_control_head(body) {
+            self.writeln("{");
+            self.indent += 1;
+            self.emit_statement(body)?;
+            self.indent -= 1;
+            self.writeln("}");
+        } else {
+            self.indent += 1;
+            self.emit_statement(body)?;
+            self.indent -= 1;
+        }
+        Ok(())
+    }
+
     fn indent_str(&self) -> String {
         "  ".repeat(self.indent)
     }
@@ -155,22 +178,16 @@ impl Codegen {
             } => {
                 let c = self.emit_expr(cond)?;
                 self.writeln(&format!("if ({})", c));
-                self.indent += 1;
-                self.emit_statement(then_branch)?;
-                self.indent -= 1;
+                self.emit_js_control_body(then_branch)?;
                 if let Some(eb) = else_branch {
                     self.writeln("else");
-                    self.indent += 1;
-                    self.emit_statement(eb)?;
-                    self.indent -= 1;
+                    self.emit_js_control_body(eb)?;
                 }
             }
             Statement::While { cond, body, .. } => {
                 let c = self.emit_expr(cond)?;
                 self.writeln(&format!("while ({})", c));
-                self.indent += 1;
-                self.emit_statement(body)?;
-                self.indent -= 1;
+                self.emit_js_control_body(body)?;
             }
             Statement::For {
                 init,
@@ -179,7 +196,10 @@ impl Codegen {
                 body,
                 ..
             } => {
-                self.write("for (");
+                // Keep the whole `for (...)` on one line with normal statement indentation (do not
+                // mix bare `write("for (")` with `writeln(")")`, which indents `)` on a new line).
+                let mut header = self.indent_str();
+                header.push_str("for (");
                 if let Some(i) = init {
                     match i.as_ref() {
                         Statement::VarDecl {
@@ -192,32 +212,32 @@ impl Codegen {
                             let escaped = Self::escape_ident(name.as_ref());
                             if let Some(e) = opt_init {
                                 let ex = self.emit_expr(e)?;
-                                self.write(&format!("{} {} = {}", decl, escaped, ex));
+                                header.push_str(&format!("{} {} = {}", decl, escaped, ex));
                             } else {
-                                self.write(&format!("{} {}", decl, escaped));
+                                header.push_str(&format!("{} {}", decl, escaped));
                             }
                         }
                         Statement::ExprStmt { expr, .. } => {
                             let ex = self.emit_expr(expr)?;
-                            self.write(&ex);
+                            header.push_str(&ex);
                         }
                         _ => return Err(CompileError::new("Unsupported for init")),
                     }
                 }
-                self.write("; ");
+                header.push_str("; ");
                 if let Some(c) = cond {
                     let ce = self.emit_expr(c)?;
-                    self.write(&ce);
+                    header.push_str(&ce);
                 }
-                self.write("; ");
+                header.push_str("; ");
                 if let Some(u) = update {
                     let ue = self.emit_expr(u)?;
-                    self.write(&ue);
+                    header.push_str(&ue);
                 }
-                self.writeln(")");
-                self.indent += 1;
-                self.emit_statement(body)?;
-                self.indent -= 1;
+                header.push(')');
+                header.push('\n');
+                self.output.push_str(&header);
+                self.emit_js_control_body(body)?;
             }
             Statement::ForOf {
                 name,
@@ -228,9 +248,7 @@ impl Codegen {
                 let escaped = Self::escape_ident(name.as_ref());
                 let it = self.emit_expr(iterable)?;
                 self.writeln(&format!("for (const {} of {})", escaped, it));
-                self.indent += 1;
-                self.emit_statement(body)?;
-                self.indent -= 1;
+                self.emit_js_control_body(body)?;
             }
             Statement::Return { value, .. } => {
                 if let Some(v) = value {
