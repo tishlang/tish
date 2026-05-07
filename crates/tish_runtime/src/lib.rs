@@ -13,6 +13,7 @@ use tishlang_builtins::helpers::extract_num;
 #[cfg(feature = "fs")]
 use tishlang_builtins::helpers::make_error_value;
 
+pub use tishlang_builtins::symbol::symbol_object;
 pub use tishlang_core::ObjectMap;
 pub use tishlang_core::Value;
 // Re-export the shared-mutable wrapper so the Rust code emitted by
@@ -632,7 +633,7 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
             // directly. Previously we allocated a fresh `Arc<str>` on
             // every call (one heap alloc per `r.field` read in tight
             // handler loops); this version is alloc-free on the hit path.
-            map.borrow().get(key).cloned().unwrap_or(Value::Null)
+            map.borrow().strings.get(key).cloned().unwrap_or(Value::Null)
         }
         Value::Array(arr) => {
             if key == "length" {
@@ -685,14 +686,7 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
             };
             arr.borrow().get(idx).cloned().unwrap_or(Value::Null)
         }
-        Value::Object(map) => {
-            let key: Arc<str> = match index {
-                Value::Number(n) => n.to_string().into(),
-                Value::String(s) => Arc::clone(s),
-                _ => return Value::Null,
-            };
-            map.borrow().get(&key).cloned().unwrap_or(Value::Null)
-        }
+        Value::Object(_) => tishlang_core::object_get(obj, index).unwrap_or(Value::Null),
         _ => Value::Null,
     }
 }
@@ -705,10 +699,10 @@ pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
             // exists we re-use the existing `Arc<str>` and skip the
             // alloc. Only newly-inserted keys pay for `Arc::from(key)`.
             let mut m = map.borrow_mut();
-            if let Some(slot) = m.get_mut(key) {
+            if let Some(slot) = m.strings.get_mut(key) {
                 *slot = val.clone();
             } else {
-                m.insert(Arc::from(key), val.clone());
+                m.strings.insert(Arc::from(key), val.clone());
             }
             val
         }
@@ -731,13 +725,8 @@ pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
             arr_mut[index] = val.clone();
             val
         }
-        Value::Object(map) => {
-            let key: Arc<str> = match idx {
-                Value::Number(n) => n.to_string().into(),
-                Value::String(s) => Arc::clone(s),
-                _ => panic!("Object key must be string or number"),
-            };
-            map.borrow_mut().insert(key, val.clone());
+        Value::Object(_) => {
+            tishlang_core::object_set(obj, idx, val.clone()).expect("object set");
             val
         }
         _ => panic!("Cannot index assign on non-array/object"),
@@ -745,26 +734,24 @@ pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
 }
 
 pub fn in_operator(key: &Value, obj: &Value) -> Value {
-    let key_str: Arc<str> = match key {
-        Value::String(s) => Arc::clone(s),
-        Value::Number(n) => n.to_string().into(),
-        _ => return Value::Bool(false),
-    };
-
-    let result = match obj {
-        Value::Object(map) => map.borrow().contains_key(&key_str),
+    match obj {
+        Value::Object(_) => Value::Bool(tishlang_core::object_has(obj, key)),
         Value::Array(arr) => {
-            key_str.as_ref() == "length"
+            let key_str: Arc<str> = match key {
+                Value::String(s) => Arc::clone(s),
+                Value::Number(n) => n.to_string().into(),
+                _ => return Value::Bool(false),
+            };
+            let result = key_str.as_ref() == "length"
                 || key_str
                     .parse::<usize>()
                     .ok()
                     .map(|i| i < arr.borrow().len())
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+            Value::Bool(result)
         }
-        _ => false,
-    };
-
-    Value::Bool(result)
+        _ => Value::Bool(false),
+    }
 }
 
 // Object functions - delegate to tishlang_builtins::globals
@@ -999,7 +986,7 @@ fn regexp_exec_impl(re: &mut tishlang_core::TishRegExp, input: &str) -> Value {
                 };
             }
 
-            Value::Object(VmRef::new(obj))
+            Value::object(obj)
         }
         Ok(None) | Err(_) => {
             if re.flags.global || re.flags.sticky {

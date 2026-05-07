@@ -24,13 +24,13 @@
 macro_rules! tish_module {
     ($($name:expr => $fn:expr),* $(,)?) => {{
         use std::sync::Arc;
-        use $crate::{ObjectMap, Value, VmRef};
+        use $crate::{ObjectMap, Value};
         let mut map = ObjectMap::default();
         $(
             // `Value::native` picks the right Rc / Arc wrapper depending on
             // whether the `send-values` feature is enabled upstream.
             map.insert(Arc::from($name), Value::native($fn));
         )*
-        Value::Object(VmRef::new(map))
+        Value::object(map)
     }};
 }

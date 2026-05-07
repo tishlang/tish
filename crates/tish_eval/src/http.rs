@@ -46,16 +46,13 @@ pub fn request_to_value(request: &mut tiny_http::Request) -> Value {
             Value::String(header.value.as_str().into()),
         );
     }
-    obj.insert(
-        Arc::from("headers"),
-        Value::Object(std::rc::Rc::new(std::cell::RefCell::new(headers_obj))),
-    );
+    obj.insert(Arc::from("headers"), Value::object(headers_obj));
 
     let mut body = String::new();
     let _ = request.as_reader().read_to_string(&mut body);
     obj.insert(Arc::from("body"), Value::String(body.into()));
 
-    Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
+    Value::object(obj)
 }
 
 /// Extract response data from a Tish Value object.
@@ -68,7 +65,8 @@ pub fn value_to_response(value: &Value) -> (u16, Vec<(String, String)>, String) 
             let obj_ref = obj.borrow();
 
             let status = obj_ref
-                .get(&Arc::from("status"))
+                .strings
+                .get("status")
                 .and_then(|v| match v {
                     Value::Number(n) => Some(*n as u16),
                     _ => None,
@@ -76,15 +74,18 @@ pub fn value_to_response(value: &Value) -> (u16, Vec<(String, String)>, String) 
                 .unwrap_or(default_status);
 
             let body = obj_ref
-                .get(&Arc::from("body"))
+                .strings
+                .get("body")
                 .map(|v| v.to_string())
                 .unwrap_or_default();
 
             let headers = obj_ref
-                .get(&Arc::from("headers"))
+                .strings
+                .get("headers")
                 .and_then(|v| match v {
                     Value::Object(h) => Some(
                         h.borrow()
+                            .strings
                             .iter()
                             .map(|(k, v)| (k.to_string(), v.to_string()))
                             .collect(),
@@ -110,23 +111,26 @@ pub(crate) fn extract_file_from_response(
         return None;
     };
     let obj_ref = obj.borrow();
-    let file_val = obj_ref.get(&Arc::from("file"))?;
+    let file_val = obj_ref.strings.get("file")?;
     let Value::String(file_path) = file_val else {
         return None;
     };
     let file_path = file_path.to_string();
     let status = obj_ref
-        .get(&Arc::from("status"))
+        .strings
+        .get("status")
         .and_then(|v| match v {
             Value::Number(n) => Some(*n as u16),
             _ => None,
         })
         .unwrap_or(200);
     let headers = obj_ref
-        .get(&Arc::from("headers"))
+        .strings
+        .get("headers")
         .and_then(|v| match v {
             Value::Object(h) => Some(
                 h.borrow()
+                    .strings
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),

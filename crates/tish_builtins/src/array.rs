@@ -434,6 +434,7 @@ fn get_prop_number(v: &Value, prop: &std::sync::Arc<str>) -> f64 {
     match v {
         Value::Object(o) => o
             .borrow()
+            .strings
             .get(prop.as_ref())
             .map(|v| v.as_number().unwrap_or(f64::NAN))
             .unwrap_or(f64::NAN),

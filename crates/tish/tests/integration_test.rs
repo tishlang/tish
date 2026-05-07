@@ -641,6 +641,7 @@ const MVP_TEST_FILES: &[&str] = &[
     "break_continue.tish",
     "length.tish",
     "objects.tish",
+    "symbol.tish",
     "conditional.tish",
     "switch.tish",
     "do_while.tish",

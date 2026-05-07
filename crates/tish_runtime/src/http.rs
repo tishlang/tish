@@ -74,7 +74,7 @@ pub fn await_fetch_all(args: Vec<Value>) -> Value {
 pub(crate) fn extract_method(options: Option<&Value>) -> String {
     options
         .and_then(|v| match v {
-            Value::Object(obj) => obj.borrow().get(&Arc::from("method")).cloned(),
+            Value::Object(obj) => obj.borrow().strings.get("method").cloned(),
             _ => None,
         })
         .map(|v| v.to_display_string().to_uppercase())
@@ -84,12 +84,13 @@ pub(crate) fn extract_method(options: Option<&Value>) -> String {
 pub(crate) fn extract_headers(options: Option<&Value>) -> Vec<(String, String)> {
     options
         .and_then(|v| match v {
-            Value::Object(obj) => obj.borrow().get(&Arc::from("headers")).cloned(),
+            Value::Object(obj) => obj.borrow().strings.get("headers").cloned(),
             _ => None,
         })
         .map(|v| match v {
             Value::Object(obj) => obj
                 .borrow()
+                .strings
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_display_string()))
                 .collect(),
@@ -102,7 +103,8 @@ pub(crate) fn extract_body(options: Option<&Value>) -> Option<String> {
     options.and_then(|v| match v {
         Value::Object(obj) => obj
             .borrow()
-            .get(&Arc::from("body"))
+            .strings
+            .get("body")
             .map(|v| v.to_display_string()),
         _ => None,
     })
@@ -112,7 +114,7 @@ pub(crate) fn build_error_response(error: &str) -> Value {
     let mut obj: ObjectMap = ObjectMap::with_capacity(2);
     obj.insert(Arc::from("error"), Value::String(error.into()));
     obj.insert(Arc::from("ok"), Value::Bool(false));
-    Value::Object(VmRef::new(obj))
+    Value::object(obj)
 }
 
 // -------- cached Date header -----------------------------------------------
@@ -270,10 +272,10 @@ impl RequestPrimitive {
             }
             obj.insert(
                 Arc::clone(&keys.headers),
-                Value::Object(VmRef::new(h)),
+                Value::object(h),
             );
             obj.insert(Arc::clone(&keys.body), Value::String(self.body.into()));
-            Value::Object(VmRef::new(obj))
+            Value::object(obj)
         })
     }
 }
@@ -331,16 +333,17 @@ impl ResponsePrimitive {
                 let obj_ref = obj.borrow();
 
                 let status = obj_ref
-                    .get(&Arc::from("status"))
+                    .strings
+                    .get("status")
                     .and_then(|v| match v {
                         Value::Number(n) => Some(*n as u16),
                         _ => None,
                     })
                     .unwrap_or(default_status);
 
-                let has_error = obj_ref.contains_key(&Arc::from("error"));
+                let has_error = obj_ref.strings.contains_key("error");
 
-                let body: ResponseBody = if let Some(bb) = obj_ref.get(&Arc::from("bodyBytes")) {
+                let body: ResponseBody = if let Some(bb) = obj_ref.strings.get("bodyBytes") {
                     match bb {
                         Value::Array(a) => {
                             let v: Vec<u8> = a
@@ -355,9 +358,9 @@ impl ResponsePrimitive {
                         }
                         _ => ResponseBody::Text(Arc::from(bb.to_display_string())),
                     }
-                } else if let Some(b) = obj_ref.get(&Arc::from("body")) {
+                } else if let Some(b) = obj_ref.strings.get("body") {
                     match b {
-                        Value::String(s) => ResponseBody::Text(Arc::clone(s)),
+                        Value::String(s) => ResponseBody::Text(Arc::clone(&s)),
                         Value::Array(a) => {
                             let borrow = a.borrow();
                             if !borrow.is_empty()
@@ -381,7 +384,8 @@ impl ResponsePrimitive {
                 } else if has_error {
                     ResponseBody::Text(Arc::from(
                         obj_ref
-                            .get(&Arc::from("error"))
+                            .strings
+                            .get("error")
                             .map(|v| v.to_display_string())
                             .unwrap_or_default(),
                     ))
@@ -396,10 +400,12 @@ impl ResponsePrimitive {
                 };
 
                 let headers = obj_ref
-                    .get(&Arc::from("headers"))
+                    .strings
+                    .get("headers")
                     .and_then(|v| match v {
                         Value::Object(h) => Some(
                             h.borrow()
+                                .strings
                                 .iter()
                                 .map(|(k, v)| (k.to_string(), v.to_display_string()))
                                 .collect(),
@@ -451,22 +457,25 @@ fn extract_file_from_response(value: &Value) -> Option<(u16, Vec<(String, String
         return None;
     };
     let obj_ref = obj.borrow();
-    let Value::String(file_path) = obj_ref.get(&Arc::from("file"))? else {
+    let Value::String(file_path) = obj_ref.strings.get("file")? else {
         return None;
     };
     let file_path = file_path.to_string();
     let status = obj_ref
-        .get(&Arc::from("status"))
+        .strings
+        .get("status")
         .and_then(|v| match v {
             Value::Number(n) => Some(*n as u16),
             _ => None,
         })
         .unwrap_or(200);
     let headers = obj_ref
-        .get(&Arc::from("headers"))
+        .strings
+        .get("headers")
         .and_then(|v| match v {
             Value::Object(h) => Some(
                 h.borrow()
+                    .strings
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_display_string()))
                     .collect(),

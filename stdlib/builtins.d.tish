@@ -65,6 +65,10 @@
 // @tish-source Date crates/tish_eval/src/eval.rs 195
 // @tish-source Date.now crates/tish_eval/src/natives.rs 239
 
+// @tish-source Symbol crates/tish_builtins/src/symbol.rs 54
+// @tish-source Symbol.for crates/tish_builtins/src/symbol.rs 56
+// @tish-source Symbol.keyFor crates/tish_builtins/src/symbol.rs 42
+
 // @tish-source Uint8Array crates/tish_eval/src/eval.rs 200
 // @tish-source AudioContext crates/tish_eval/src/eval.rs 207
 // @tish-source RegExp crates/tish_eval/src/eval.rs 218
@@ -133,6 +137,12 @@ declare const String: {
 
 declare const Date: {
   now: AnyFn,
+}
+
+declare const Symbol: {
+  (description?: string): symbol,
+  for: (key: string) => symbol,
+  keyFor: (sym: symbol) => string | null,
 }
 
 declare let parseInt: AnyFn

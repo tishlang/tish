@@ -213,7 +213,7 @@ pub fn promise_object() -> Value {
         Arc::from("race"),
         Value::native(|args: &[Value]| promise_race(args)),
     );
-    Value::Object(VmRef::new(map))
+    Value::object(map)
 }
 
 /// `.then(onFulfilled, onRejected)` for a `Value::Promise` instance (VM `GetMember`).

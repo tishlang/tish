@@ -4,7 +4,7 @@
 
 Tish is a minimal JS/TS-like language: same source runs in a **tree-walking interpreter**, a **bytecode VM**, or **compiled targets** — Rust transpilation linked to **`tishlang_runtime`**, standalone binaries that **embed bytecode and run the same VM**, **WASM/WASI**, or **JavaScript**. Tish is **not** JavaScript; the JS path is a **compile target** with deliberate limits (wrong scope, invalid emit, and a few keyword collisions with DOM/JSX are fixed; arbitrary ECMAScript surface is not a goal). See **[js-emit-philosophy.md](js-emit-philosophy.md)**. See **Native compile (implementation status)** for what each path does today versus the long-term goal (primitive lowering, true AOT). **Secure-by-default:** network, filesystem, and process APIs are feature-gated.
 
-**No `undefined`** — use `null`. **`typeof null`** is `"null"` (not `"object"`). **Strict equality only:** `===` / `!==`. **`let` / `const` only** (no `var`). **No `this`**, prototypes, or `class` / `super`. Plain objects and arrays. **`?.` yields `null`**, not undefined. Parser also accepts **`new`** expressions (no class syntax; uncommon in idiomatic Tish).
+**No `undefined`** — use `null`. **`typeof null`** is `"null"` (not `"object"`). **`typeof`** for a symbol value is `"symbol"`. **Strict equality only:** `===` / `!==`. **`let` / `const` only** (no `var`). **No `this`**, prototypes, or `class` / `super`. Plain objects and arrays. **`?.` yields `null`**, not undefined. Parser also accepts **`new`** expressions (no class syntax; uncommon in idiomatic Tish).
 
 ---
 
@@ -48,6 +48,7 @@ Tish is a minimal JS/TS-like language: same source runs in a **tree-walking inte
 - **URI:** `encodeURI`, `decodeURI`
 - **Parsing:** `parseInt`, `parseFloat`, `isFinite`, `isNaN`
 - **Globals:** `Infinity`, `NaN`
+- **Symbol:** `Symbol(description?)`, `Symbol.for(key)`, `Symbol.keyFor(sym)` — primitive symbols and a global registry for `for` / `keyFor`. **`new Symbol(...)`** is accepted on native / VM paths and delegates like `Symbol(...)` (not a spec-accurate `TypeError`). Symbol values stringify for display; **`JSON.stringify`** omits symbol keys on objects and encodes symbol *values* as JSON `null`. **`Object.keys` / `values` / `entries`** enumerate string-keyed properties only.
 - **Number:** `n.toFixed(digits?)` → string (0–20 digits)
 - **Object:** `keys`, `values`, `entries`
 - **Array:** usual methods (`map`, `filter`, `reduce`, `slice`, `push`, `pop`, …)
@@ -204,6 +205,6 @@ serve(8080, handleRequest)
 
 ## Omitted vs typical JS
 
-No `==`, `var`, `this`, `class`, prototypes, `instanceof`, `delete`, `for..in`, generators, `Symbol`, `BigInt`, `Map`, `Set` (as in spec); prefer Tish docs and tests under `examples/` and `tests/` for edge cases.
+No `==`, `var`, `this`, `class`, prototypes, `instanceof`, `delete`, `for..in`, generators, `BigInt`, `Map`, `Set` (as in spec); **`Symbol`** is a small subset (`Symbol`, `Symbol.for`, `Symbol.keyFor`, symbol keys on objects). Prefer Tish docs and tests under `examples/` and `tests/` for edge cases.
 
 **VM note:** The default bytecode VM applies peephole jump chaining. An implementation bug (fixed) once followed `JumpIfFalse` like an unconditional `Jump`, which miscompiled `===` with `||` when nested as an outer `if` condition. See [ecma-alignment.md — Bytecode VM: jump peephole](ecma-alignment.md#bytecode-vm-jump-peephole-implementation).

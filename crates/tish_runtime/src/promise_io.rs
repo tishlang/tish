@@ -11,7 +11,7 @@ fn error_value(msg: String) -> Value {
     let mut obj: ObjectMap = ObjectMap::with_capacity(2);
     obj.insert(Arc::from("error"), Value::String(msg.into()));
     obj.insert(Arc::from("ok"), Value::Bool(false));
-    Value::Object(VmRef::new(obj))
+    Value::object(obj)
 }
 
 pub struct StringResultPromise {

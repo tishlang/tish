@@ -12,9 +12,83 @@ use std::sync::Arc;
 use ahash::AHashMap;
 use tishlang_ast::{FunParam, Statement};
 use tishlang_core::NativeFn as CoreNativeFn;
+use tishlang_core::TishSymbol;
 
-/// Property map for interpreter `Value::Object` (uses `eval::Value`, not `tishlang_core::Value`).
+/// Property map for interpreter object string keys (uses `eval::Value`, not `tishlang_core::Value`).
 pub type PropMap = AHashMap<Arc<str>, Value>;
+
+/// Interpreter object: string keys plus optional symbol-keyed properties.
+#[derive(Clone, Debug, Default)]
+pub struct EvalObjectData {
+    pub strings: PropMap,
+    pub symbols: Option<AHashMap<u64, Value>>,
+}
+
+impl EvalObjectData {
+    pub fn from_strings(strings: PropMap) -> Self {
+        Self {
+            strings,
+            symbols: None,
+        }
+    }
+}
+
+pub fn eval_object_get(obj: &Value, key: &Value) -> Option<Value> {
+    let Value::Object(od) = obj else {
+        return None;
+    };
+    let b = od.borrow();
+    match key {
+        Value::Symbol(s) => b.symbols.as_ref()?.get(&s.id).cloned(),
+        Value::Number(n) => {
+            let k: Arc<str> = n.to_string().into();
+            b.strings.get(&k).cloned()
+        }
+        Value::String(k) => b.strings.get(k.as_ref()).cloned(),
+        _ => None,
+    }
+}
+
+pub fn eval_object_set(obj: &Value, key: &Value, val: Value) -> Result<(), String> {
+    let Value::Object(od) = obj else {
+        return Err("Cannot set property on non-object".to_string());
+    };
+    let mut b = od.borrow_mut();
+    match key {
+        Value::Symbol(s) => {
+            if b.symbols.is_none() {
+                b.symbols = Some(AHashMap::default());
+            }
+            b.symbols.as_mut().unwrap().insert(s.id, val);
+            Ok(())
+        }
+        Value::Number(n) => {
+            b.strings.insert(n.to_string().into(), val);
+            Ok(())
+        }
+        Value::String(k) => {
+            b.strings.insert(Arc::clone(k), val);
+            Ok(())
+        }
+        _ => Err("Object key must be string, number, or symbol".to_string()),
+    }
+}
+
+pub fn eval_object_has(obj: &Value, key: &Value) -> bool {
+    let Value::Object(od) = obj else {
+        return false;
+    };
+    let b = od.borrow();
+    match key {
+        Value::Symbol(s) => b.symbols.as_ref().is_some_and(|m| m.contains_key(&s.id)),
+        Value::Number(n) => {
+            let k: Arc<str> = n.to_string().into();
+            b.strings.contains_key(&k)
+        }
+        Value::String(k) => b.strings.contains_key(k.as_ref()),
+        _ => false,
+    }
+}
 use tishlang_core::TishOpaque;
 #[cfg(feature = "http")]
 use tishlang_core::TishPromise;
@@ -34,7 +108,8 @@ pub enum Value {
     Bool(bool),
     Null,
     Array(Rc<RefCell<Vec<Value>>>),
-    Object(Rc<RefCell<PropMap>>),
+    Object(Rc<RefCell<EvalObjectData>>),
+    Symbol(Arc<TishSymbol>),
     /// User-defined function with AST body
     Function {
         formals: Arc<[FunParam]>,
@@ -109,6 +184,7 @@ impl std::fmt::Debug for Value {
             Value::CoreFn(_) => write!(f, "CoreFn"),
             Value::Opaque(o) => write!(f, "{}(opaque)", o.type_name()),
             Value::OpaqueMethod(_, _) => write!(f, "[Function]"),
+            Value::Symbol(s) => write!(f, "Symbol({})", s.id),
         }
     }
 }
@@ -137,10 +213,18 @@ impl std::fmt::Display for Value {
             Value::Object(obj) => {
                 let inner: Vec<String> = obj
                     .borrow()
+                    .strings
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k.as_ref(), v))
                     .collect();
                 write!(f, "{{{}}}", inner.join(", "))
+            }
+            Value::Symbol(s) => {
+                if let Some(d) = &s.description {
+                    write!(f, "Symbol({})", d)
+                } else {
+                    write!(f, "Symbol()")
+                }
             }
             Value::Function { .. } => write!(f, "[Function]"),
             Value::Native(_) => write!(f, "[NativeFunction]"),
@@ -195,6 +279,7 @@ impl Value {
             (Value::Null, Value::Null) => true,
             (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
             (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
+            (Value::Symbol(a), Value::Symbol(b)) => Arc::ptr_eq(a, b),
             (Value::Opaque(a), Value::Opaque(b)) => Arc::ptr_eq(a, b),
             (Value::OpaqueMethod(a, ak), Value::OpaqueMethod(b, bk)) => {
                 Arc::ptr_eq(a, b) && ak == bk
@@ -210,7 +295,7 @@ impl Value {
 
     /// Create a new object Value from a property map.
     pub fn object(map: PropMap) -> Self {
-        Value::Object(Rc::new(RefCell::new(map)))
+        Value::Object(Rc::new(RefCell::new(EvalObjectData::from_strings(map))))
     }
 
     /// Create an empty array Value.
@@ -220,7 +305,7 @@ impl Value {
 
     /// Create an empty object Value.
     pub fn empty_object() -> Self {
-        Value::Object(Rc::new(RefCell::new(PropMap::default())))
+        Value::Object(Rc::new(RefCell::new(EvalObjectData::default())))
     }
 
     /// Extract the number value, if this is a Number.

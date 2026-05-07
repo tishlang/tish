@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 #[cfg(feature = "regex")]
 use tishlang_core::TishRegExp;
-use tishlang_core::{ObjectMap, Value as CoreValue, VmRef};
+use ahash::AHashMap;
+use tishlang_core::{ObjectData, ObjectMap, Value as CoreValue, VmRef};
 
-use crate::value::{PropMap, Value};
+use crate::value::{EvalObjectData, PropMap, Value};
 
 /// Convert interpreter Value to core Value. Fails for interpreter-only variants.
 pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
@@ -25,12 +26,23 @@ pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
             Ok(CoreValue::Array(VmRef::new(out)))
         }
         Value::Object(map) => {
-            let mut out = ObjectMap::default();
-            for (k, v) in map.borrow().iter() {
-                out.insert(Arc::clone(k), eval_to_core(v)?);
+            let b = map.borrow();
+            let mut strings = ObjectMap::default();
+            for (k, v) in b.strings.iter() {
+                strings.insert(Arc::clone(k), eval_to_core(v)?);
             }
-            Ok(CoreValue::Object(VmRef::new(out)))
+            let symbols = if let Some(ss) = &b.symbols {
+                let mut sm = AHashMap::default();
+                for (id, v) in ss.iter() {
+                    sm.insert(*id, eval_to_core(v)?);
+                }
+                Some(sm)
+            } else {
+                None
+            };
+            Ok(CoreValue::Object(VmRef::new(ObjectData { strings, symbols })))
         }
+        Value::Symbol(s) => Ok(CoreValue::Symbol(Arc::clone(s))),
         Value::Opaque(o) => Ok(CoreValue::Opaque(Arc::clone(o))),
         _ => Err(format!(
             "Cannot pass {:?} to native function (unsupported type)",
@@ -54,12 +66,22 @@ pub fn core_to_eval(v: CoreValue) -> Value {
             Value::Array(Rc::new(RefCell::new(out)))
         }
         CoreValue::Object(map) => {
+            let b = map.borrow();
             let mut out = PropMap::default();
-            for (k, v) in map.borrow().iter() {
+            for (k, v) in b.strings.iter() {
                 out.insert(Arc::clone(k), core_to_eval(v.clone()));
             }
-            Value::Object(Rc::new(RefCell::new(out)))
+            let mut eod = EvalObjectData::from_strings(out);
+            if let Some(ss) = &b.symbols {
+                let mut es = AHashMap::default();
+                for (id, v) in ss.iter() {
+                    es.insert(*id, core_to_eval(v.clone()));
+                }
+                eod.symbols = Some(es);
+            }
+            Value::Object(Rc::new(RefCell::new(eod)))
         }
+        CoreValue::Symbol(s) => Value::Symbol(Arc::clone(&s)),
         CoreValue::Opaque(o) => Value::Opaque(o),
         #[cfg(feature = "http")]
         CoreValue::Promise(p) => Value::CorePromise(Arc::clone(&p)),

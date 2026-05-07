@@ -70,8 +70,8 @@ pub fn json_stringify_into(buf: &mut String, value: &Value) {
             let borrowed = obj.borrow();
             // Sort keys for deterministic output. Pre-allocate to avoid
             // a fresh `Vec` realloc inside `keys().collect()`.
-            let mut keys: Vec<&Arc<str>> = Vec::with_capacity(borrowed.len());
-            keys.extend(borrowed.keys());
+            let mut keys: Vec<&Arc<str>> = Vec::with_capacity(borrowed.strings.len());
+            keys.extend(borrowed.strings.keys());
             keys.sort_unstable_by(|a, b| a.as_ref().cmp(b.as_ref()));
             buf.push('{');
             for (i, key) in keys.into_iter().enumerate() {
@@ -81,11 +81,13 @@ pub fn json_stringify_into(buf: &mut String, value: &Value) {
                 buf.push('"');
                 escape_json_string_into(buf, key);
                 buf.push_str("\":");
-                json_stringify_into(buf, borrowed.get(key).unwrap());
+                json_stringify_into(buf, borrowed.strings.get(key).unwrap());
             }
             buf.push('}');
         }
-        Value::Function(_) | Value::Promise(_) | Value::Opaque(_) => buf.push_str("null"),
+        Value::Function(_) | Value::Promise(_) | Value::Opaque(_) | Value::Symbol(_) => {
+            buf.push_str("null");
+        }
         #[cfg(feature = "regex")]
         Value::RegExp(_) => buf.push_str("null"),
     }
@@ -312,7 +314,10 @@ fn parse_object(input: &str) -> Result<(Value, &str), String> {
 
     input = input.trim_start();
     if let Some(rest) = input.strip_prefix('}') {
-        return Ok((Value::Object(VmRef::new(map)), rest));
+        return Ok((
+            Value::Object(VmRef::new(crate::ObjectData::from_strings(map))),
+            rest,
+        ));
     }
 
     loop {
@@ -339,7 +344,12 @@ fn parse_object(input: &str) -> Result<(Value, &str), String> {
 
         match input.chars().next() {
             Some(',') => input = &input[1..],
-            Some('}') => return Ok((Value::Object(VmRef::new(map)), &input[1..])),
+            Some('}') => {
+                return Ok((
+                    Value::Object(VmRef::new(crate::ObjectData::from_strings(map))),
+                    &input[1..],
+                ));
+            }
             _ => return Err("Expected ',' or '}' in object".to_string()),
         }
     }
@@ -369,7 +379,7 @@ mod tests {
 
         match (&value, &reparsed) {
             (Value::Object(a), Value::Object(b)) => {
-                assert_eq!(a.borrow().len(), b.borrow().len());
+                assert_eq!(a.borrow().len_entries(), b.borrow().len_entries());
             }
             _ => panic!("Expected objects"),
         }

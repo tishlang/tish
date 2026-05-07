@@ -4,9 +4,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use tishlang_core::VmRef;
-
-use tishlang_core::{ObjectMap, Value};
+use tishlang_core::{ObjectMap, Value, VmRef};
 
 const CONSTRUCT: &str = "__construct";
 
@@ -16,7 +14,7 @@ pub fn construct(callee: &Value, args: &[Value]) -> Value {
         Value::Function(f) => f(args),
         Value::Object(o) => {
             let b = o.borrow();
-            if let Some(Value::Function(ctor)) = b.get(&Arc::from(CONSTRUCT)) {
+            if let Some(Value::Function(ctor)) = b.strings.get(&Arc::from(CONSTRUCT)) {
                 let c = ctor.clone();
                 drop(b);
                 return c(args);
@@ -30,7 +28,7 @@ pub fn construct(callee: &Value, args: &[Value]) -> Value {
 fn param(initial: f64) -> Value {
     let mut m = ObjectMap::default();
     m.insert(Arc::from("value"), Value::Number(initial));
-    Value::Object(VmRef::new(m))
+    Value::object(m)
 }
 
 fn connect_fn() -> Value {
@@ -45,21 +43,21 @@ fn audio_node_stub() -> Value {
     m.insert(Arc::from("frequency"), param(440.0));
     m.insert(Arc::from("Q"), param(1.0));
     m.insert(Arc::from("type"), Value::String("peaking".into()));
-    Value::Object(VmRef::new(m))
+    Value::object(m)
 }
 
 fn analyser_stub() -> Value {
     let mut m = ObjectMap::default();
     m.insert(Arc::from("connect"), connect_fn());
     m.insert(Arc::from("fftSize"), Value::Number(2048.0));
-    Value::Object(VmRef::new(m))
+    Value::object(m)
 }
 
 fn stereo_panner_stub() -> Value {
     let mut m = ObjectMap::default();
     m.insert(Arc::from("connect"), connect_fn());
     m.insert(Arc::from("pan"), param(0.0));
-    Value::Object(VmRef::new(m))
+    Value::object(m)
 }
 
 fn audio_buffer_stub(len: usize) -> Value {
@@ -71,7 +69,7 @@ fn audio_buffer_stub(len: usize) -> Value {
         Arc::from("getChannelData"),
         Value::native(move |_args| Value::Array(data2.clone())),
     );
-    Value::Object(VmRef::new(m))
+    Value::object(m)
 }
 
 fn buffer_source_stub() -> Value {
@@ -81,7 +79,7 @@ fn buffer_source_stub() -> Value {
     m.insert(Arc::from("connect"), connect_fn());
     m.insert(Arc::from("start"), Value::native(|_| Value::Null));
     m.insert(Arc::from("stop"), Value::native(|_| Value::Null));
-    Value::Object(VmRef::new(m))
+    Value::object(m)
 }
 
 fn oscillator_stub() -> Value {
@@ -91,7 +89,7 @@ fn oscillator_stub() -> Value {
     m.insert(Arc::from("connect"), connect_fn());
     m.insert(Arc::from("start"), Value::native(|_| Value::Null));
     m.insert(Arc::from("stop"), Value::native(|_| Value::Null));
-    Value::Object(VmRef::new(m))
+    Value::object(m)
 }
 
 fn audio_context_instance() -> Value {
@@ -136,7 +134,7 @@ fn audio_context_instance() -> Value {
     );
     ctx.insert(Arc::from("decodeAudioData"), Value::native(|_| Value::Null));
 
-    Value::Object(VmRef::new(ctx))
+    Value::object(ctx)
 }
 
 /// Global `Uint8Array` for native/VM: `new Uint8Array(n)` → numeric array of zeros (not real bytes).
@@ -151,7 +149,7 @@ pub fn uint8_array_constructor_value() -> Value {
     });
     let mut m = ObjectMap::default();
     m.insert(Arc::from(CONSTRUCT), ctor);
-    Value::Object(VmRef::new(m))
+    Value::object(m)
 }
 
 /// Global `AudioContext` for native/VM: stub graph (no real audio).
@@ -159,5 +157,5 @@ pub fn audio_context_constructor_value() -> Value {
     let ctor = Value::native(|_args: &[Value]| audio_context_instance());
     let mut m = ObjectMap::default();
     m.insert(Arc::from(CONSTRUCT), ctor);
-    Value::Object(VmRef::new(m))
+    Value::object(m)
 }

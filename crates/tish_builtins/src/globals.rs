@@ -76,6 +76,7 @@ pub fn object_keys(args: &[Value]) -> Value {
     if let Some(Value::Object(obj)) = args.first() {
         let obj_borrow = obj.borrow();
         let keys: Vec<Value> = obj_borrow
+            .strings
             .keys()
             .map(|k| Value::String(Arc::clone(k)))
             .collect();
@@ -89,7 +90,7 @@ pub fn object_keys(args: &[Value]) -> Value {
 pub fn object_values(args: &[Value]) -> Value {
     if let Some(Value::Object(obj)) = args.first() {
         let obj_borrow = obj.borrow();
-        let values: Vec<Value> = obj_borrow.values().cloned().collect();
+        let values: Vec<Value> = obj_borrow.strings.values().cloned().collect();
         Value::Array(VmRef::new(values))
     } else {
         Value::Array(VmRef::new(Vec::new()))
@@ -101,6 +102,7 @@ pub fn object_entries(args: &[Value]) -> Value {
     if let Some(Value::Object(obj)) = args.first() {
         let obj_borrow = obj.borrow();
         let entries: Vec<Value> = obj_borrow
+            .strings
             .iter()
             .map(|(k, v)| Value::Array(VmRef::new(vec![Value::String(Arc::clone(k)), v.clone()])))
             .collect();
@@ -122,7 +124,7 @@ pub fn object_assign(args: &[Value]) -> Value {
         .skip(1)
         .map(|source| {
             if let Value::Object(src) = source {
-                src.borrow().len()
+                src.borrow().len_entries()
             } else {
                 0
             }
@@ -130,13 +132,20 @@ pub fn object_assign(args: &[Value]) -> Value {
         .sum();
 
     let mut target_mut = target.borrow_mut();
-    target_mut.reserve(additional_capacity);
+    target_mut.strings.reserve(additional_capacity);
 
     for source in args.iter().skip(1) {
         if let Value::Object(src) = source {
             let src_borrow = src.borrow();
-            for (k, v) in src_borrow.iter() {
-                target_mut.insert(Arc::clone(k), v.clone());
+            for (k, v) in src_borrow.strings.iter() {
+                target_mut.strings.insert(Arc::clone(k), v.clone());
+            }
+            if let Some(ss) = &src_borrow.symbols {
+                if target_mut.symbols.is_none() {
+                    target_mut.symbols = Some(Default::default());
+                }
+                let dst = target_mut.symbols.as_mut().unwrap();
+                dst.extend(ss.iter().map(|(id, v)| (*id, v.clone())));
             }
         }
     }
@@ -199,8 +208,8 @@ pub fn object_from_entries(args: &[Value]) -> Value {
             }
         }
 
-        Value::Object(VmRef::new(obj))
+        Value::object(obj)
     } else {
-        Value::Object(VmRef::new(ObjectMap::default()))
+        Value::empty_object()
     }
 }

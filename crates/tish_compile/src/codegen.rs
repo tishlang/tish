@@ -952,8 +952,9 @@ impl Codegen {
                     // latter dispatches into `http_serve_per_worker`, which
                     // calls onWorker once per accept thread to build that
                     // thread's handler.
-                    "serve" => Some("Value::native(|args: &[Value]| { let handler = args.get(1).cloned().unwrap_or(Value::Null); match handler { Value::Function(f) => tish_http_serve(args, move |req_args| f(req_args)), Value::Object(ref opts) => { let factory = opts.borrow().get(&Arc::from(\"onWorker\")).cloned().unwrap_or(Value::Null); tishlang_runtime::http_serve_per_worker(args, factory) }, _ => Value::Null } })"),
+                    "serve" => Some("Value::native(|args: &[Value]| { let handler = args.get(1).cloned().unwrap_or(Value::Null); match handler { Value::Function(f) => tish_http_serve(args, move |req_args| f(req_args)), Value::Object(ref opts) => { let factory = opts.borrow().strings.get(\"onWorker\").cloned().unwrap_or(Value::Null); tishlang_runtime::http_serve_per_worker(args, factory) }, _ => Value::Null } })"),
                     "Promise" => Some("tish_promise_object()"),
+                    "Symbol" => Some("tish_symbol_object()"),
                     _ => None,
                 },
             "tish:timers" if self.has_feature("timers") => match export_name {
@@ -968,8 +969,8 @@ impl Codegen {
                     "cwd" => Some("Value::native(|args: &[Value]| tish_process_cwd(args))"),
                     "exec" => Some("Value::native(|args: &[Value]| tish_process_exec(args))"),
                     "argv" => Some("Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))"),
-                    "env" => Some("Value::Object(VmRef::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect()))"),
-                    "process" => Some("{ let mut m = ObjectMap::default(); m.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args))); m.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args))); m.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args))); m.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))); m.insert(Arc::from(\"env\"), Value::Object(VmRef::new(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect::<ObjectMap>()))); Value::Object(VmRef::new(m)) }"),
+                    "env" => Some("Value::object(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect())"),
+                    "process" => Some("{ let mut m = ObjectMap::default(); m.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args))); m.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args))); m.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args))); m.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))); m.insert(Arc::from(\"env\"), Value::object(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect::<ObjectMap>())); Value::object(m) }"),
                     _ => None,
                 },
             "tish:ws" if self.has_feature("ws") => match export_name {
@@ -1224,7 +1225,7 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, register_static_route as tish_register_static_route, ObjectMap, TishError, Value, VmRef};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, register_static_route as tish_register_static_route, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -1293,7 +1294,7 @@ impl Codegen {
         self.indent += 1;
 
         // Initialize builtins
-        self.writeln("let mut console = Value::Object(VmRef::new(ObjectMap::from([");
+        self.writeln("let mut console = Value::object(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"debug\"), Value::native(|args: &[Value]| { tish_console_debug(args); Value::Null })),");
         self.writeln("(Arc::from(\"info\"), Value::native(|args: &[Value]| { tish_console_info(args); Value::Null })),");
@@ -1301,7 +1302,7 @@ impl Codegen {
         self.writeln("(Arc::from(\"warn\"), Value::native(|args: &[Value]| { tish_console_warn(args); Value::Null })),");
         self.writeln("(Arc::from(\"error\"), Value::native(|args: &[Value]| { tish_console_error(args); Value::Null })),");
         self.indent -= 1;
-        self.writeln("])));");
+        self.writeln("]));");
         self.writeln("let Boolean = Value::native(|args: &[Value]| tish_boolean(args));");
         self.writeln("let parseInt = Value::native(|args: &[Value]| tish_parse_int(args));");
         self.writeln("let parseFloat = Value::native(|args: &[Value]| tish_parse_float(args));");
@@ -1317,7 +1318,7 @@ impl Codegen {
         self.writeln("let isNaN = Value::native(|args: &[Value]| tish_is_nan(args));");
         self.writeln("let Infinity = Value::Number(f64::INFINITY);");
         self.writeln("let NaN = Value::Number(f64::NAN);");
-        self.writeln("let Math = Value::Object(VmRef::new(ObjectMap::from([");
+        self.writeln("let Math = Value::object(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"abs\"), Value::native(|args: &[Value]| tish_math_abs(args))),");
         self.writeln(
@@ -1352,37 +1353,39 @@ impl Codegen {
         self.writeln("(Arc::from(\"PI\"), Value::Number(std::f64::consts::PI)),");
         self.writeln("(Arc::from(\"E\"), Value::Number(std::f64::consts::E)),");
         self.indent -= 1;
-        self.writeln("])));");
-        self.writeln("let JSON = Value::Object(VmRef::new(ObjectMap::from([");
+        self.writeln("]));");
+        self.writeln("let JSON = Value::object(ObjectMap::from([");
         self.indent += 1;
         self.writeln(
             "(Arc::from(\"parse\"), Value::native(|args: &[Value]| tish_json_parse(args))),",
         );
         self.writeln("(Arc::from(\"stringify\"), Value::native(|args: &[Value]| tish_json_stringify(args))),");
         self.indent -= 1;
-        self.writeln("])));");
+        self.writeln("]));");
 
-        self.writeln("let Array = Value::Object(VmRef::new(ObjectMap::from([");
+        self.writeln("let Array = Value::object(ObjectMap::from([");
         self.indent += 1;
         self.writeln(
             "(Arc::from(\"isArray\"), Value::native(|args: &[Value]| tish_array_is_array(args))),",
         );
         self.indent -= 1;
-        self.writeln("])));");
+        self.writeln("]));");
 
-        self.writeln("let String = Value::Object(VmRef::new(ObjectMap::from([");
+        self.writeln("let String = Value::object(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"fromCharCode\"), Value::native(|args: &[Value]| tish_string_from_char_code(args))),");
         self.indent -= 1;
-        self.writeln("])));");
+        self.writeln("]));");
 
-        self.writeln("let Date = Value::Object(VmRef::new(ObjectMap::from([");
+        self.writeln("let Date = Value::object(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"now\"), Value::native(|args: &[Value]| tish_date_now(args))),");
         self.indent -= 1;
-        self.writeln("])));");
+        self.writeln("]));");
 
-        self.writeln("let Object = Value::Object(VmRef::new(ObjectMap::from([");
+        self.writeln("let Symbol = tish_symbol_object();");
+
+        self.writeln("let Object = Value::object(ObjectMap::from([");
         self.indent += 1;
         self.writeln(
             "(Arc::from(\"assign\"), Value::native(|args: &[Value]| tish_object_assign(args))),",
@@ -1398,13 +1401,13 @@ impl Codegen {
         );
         self.writeln("(Arc::from(\"fromEntries\"), Value::native(|args: &[Value]| tish_object_from_entries(args))),");
         self.indent -= 1;
-        self.writeln("])));");
+        self.writeln("]));");
 
         self.writeln("let Uint8Array = tish_uint8_array_constructor();");
         self.writeln("let AudioContext = tish_audio_context_constructor();");
 
         if self.has_feature("process") {
-            self.writeln("let process = Value::Object(VmRef::new({");
+            self.writeln("let process = Value::object({");
             self.indent += 1;
             self.writeln("let mut p = ObjectMap::default();");
             self.writeln("p.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args)));");
@@ -1418,10 +1421,10 @@ impl Codegen {
             self.writeln("env_obj.insert(Arc::from(key.as_str()), Value::String(value.into()));");
             self.indent -= 1;
             self.writeln("}");
-            self.writeln("p.insert(Arc::from(\"env\"), Value::Object(VmRef::new(env_obj)));");
+            self.writeln("p.insert(Arc::from(\"env\"), Value::object(env_obj));");
             self.writeln("p");
             self.indent -= 1;
-            self.writeln("}));");
+            self.writeln("});");
         }
 
         if self.has_feature("timers") {
@@ -1460,7 +1463,7 @@ impl Codegen {
             );
             self.writeln("Value::Object(ref opts) => {");
             self.indent += 1;
-            self.writeln("let factory = opts.borrow().get(&Arc::from(\"onWorker\")).cloned().unwrap_or(Value::Null);");
+            self.writeln("let factory = opts.borrow().strings.get(\"onWorker\").cloned().unwrap_or(Value::Null);");
             self.writeln("tishlang_runtime::http_serve_per_worker(args, factory)");
             self.indent -= 1;
             self.writeln("},");
@@ -2016,6 +2019,7 @@ impl Codegen {
                             "setInterval",
                             "clearInterval",
                             "Promise",
+                            "Symbol",
                             "RegExp",
                             "Polars",
                         ]
@@ -2116,6 +2120,7 @@ impl Codegen {
                     "setInterval",
                     "clearInterval",
                     "Promise",
+                    "Symbol",
                     "RegExp",
                     "Polars",
                     // Free-standing global functions used inside user-defined
@@ -3140,11 +3145,11 @@ impl Codegen {
                             }
                             ObjectProp::Spread(e) => {
                                 let val = self.emit_expr(e)?;
-                                parts.push(format!("if let Value::Object(ref _spread) = {} {{ for (k, v) in _spread.borrow().iter() {{ _obj.insert(Arc::clone(k), v.clone()); }} }}", val));
+                                parts.push(format!("if let Value::Object(ref _spread) = {} {{ for (k, v) in _spread.borrow().strings.iter() {{ _obj.insert(Arc::clone(k), v.clone()); }} }}", val));
                             }
                         }
                     }
-                    format!("{{ let mut _obj: ObjectMap = ObjectMap::default(); {} Value::Object(VmRef::new(_obj)) }}", parts.join(" "))
+                    format!("{{ let mut _obj: ObjectMap = ObjectMap::default(); {} Value::object(_obj) }}", parts.join(" "))
                 } else {
                     let mut parts = Vec::new();
                     for prop in props {
@@ -3158,7 +3163,7 @@ impl Codegen {
                         }
                     }
                     format!(
-                        "Value::Object(VmRef::new(ObjectMap::from([{}])))",
+                        "Value::object(ObjectMap::from([{}]))",
                         parts.join(", ")
                     )
                 }
@@ -4586,6 +4591,7 @@ impl Codegen {
                     "setInterval",
                     "clearInterval",
                     "Promise",
+                    "Symbol",
                     "RegExp",
                     "Polars",
                 ]
@@ -4659,6 +4665,7 @@ impl Codegen {
             "setInterval",
             "clearInterval",
             "Promise",
+            "Symbol",
             "RegExp",
             "Polars",
         ] {

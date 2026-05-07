@@ -87,19 +87,19 @@ impl TishPromise for ReadChunkPromise {
                     let mut o = ObjectMap::default();
                     o.insert(Arc::from("done"), Value::Bool(true));
                     o.insert(Arc::from("value"), Value::Null);
-                    Ok(Value::Object(VmRef::new(o)))
+                    Ok(Value::object(o))
                 }
                 Ok(Ok(ReadChunk::Bytes(b))) => {
                     let arr: Vec<Value> = b.iter().map(|u| Value::Number(*u as f64)).collect();
                     let mut o = ObjectMap::default();
                     o.insert(Arc::from("done"), Value::Bool(false));
                     o.insert(Arc::from("value"), Value::Array(VmRef::new(arr)));
-                    Ok(Value::Object(VmRef::new(o)))
+                    Ok(Value::object(o))
                 }
                 Ok(Err(e)) => Err({
                     let mut obj = ObjectMap::default();
                     obj.insert(Arc::from("error"), Value::String(e.into()));
-                    Value::Object(VmRef::new(obj))
+                    Value::object(obj)
                 }),
                 Err(_) => Err(Value::String("Promise dropped".into())),
             }
@@ -124,13 +124,13 @@ impl TishPromise for JsonTextPromise {
                     Err(e) => Err({
                         let mut obj = ObjectMap::default();
                         obj.insert(Arc::from("error"), Value::String(e.into()));
-                        Value::Object(VmRef::new(obj))
+                        Value::object(obj)
                     }),
                 },
                 Ok(Err(e)) => Err({
                     let mut obj = ObjectMap::default();
                     obj.insert(Arc::from("error"), Value::String(e.into()));
-                    Value::Object(VmRef::new(obj))
+                    Value::object(obj)
                 }),
                 Err(_) => Err(Value::String("Promise dropped".into())),
             }
@@ -241,7 +241,7 @@ impl TishOpaque for HttpReadableStream {
             Err(e) => {
                 let mut m = ObjectMap::default();
                 m.insert(Arc::from("error"), Value::String(e.into()));
-                Value::Object(VmRef::new(m))
+                Value::object(m)
             }
         }))
     }
@@ -306,7 +306,7 @@ fn headers_to_value(headers: &reqwest::header::HeaderMap) -> Value {
             headers_obj.insert(Arc::from(key.as_str()), Value::String(v.into()));
         }
     }
-    Value::Object(VmRef::new(headers_obj))
+    Value::object(headers_obj)
 }
 
 pub fn response_value_from_reqwest(response: reqwest::Response) -> Value {
@@ -351,7 +351,7 @@ pub fn response_value_from_reqwest(response: reqwest::Response) -> Value {
     obj.insert(Arc::from("body"), body_stream_val);
     obj.insert(Arc::from("text"), Value::Function(text_fn));
     obj.insert(Arc::from("json"), Value::Function(json_fn));
-    Value::Object(VmRef::new(obj))
+    Value::object(obj)
 }
 
 async fn send_request_parts(
@@ -424,7 +424,8 @@ pub fn fetch_all_promise_from_args(args: Vec<Value>) -> Value {
             Value::Object(obj) => {
                 let obj_ref = obj.borrow();
                 match obj_ref
-                    .get(&Arc::from("url"))
+                    .strings
+                    .get("url")
                     .map(|v| v.to_display_string())
                 {
                     Some(u) => (u, Some(req.clone())),

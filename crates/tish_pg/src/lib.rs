@@ -218,7 +218,7 @@ fn row_to_value_direct(row: &Row) -> tishlang_runtime::Value {
         };
         om.insert(key, v);
     }
-    RtValue::Object(VmRef::new(om))
+    RtValue::object(om)
 }
 
 fn row_to_object(row: &Row) -> Result<JsonValue> {
@@ -606,7 +606,7 @@ mod tish_sync {
             TishValue::Array(a) => JsonValue::Array(a.borrow().iter().map(tish_to_json).collect()),
             TishValue::Object(o) => {
                 let mut m = serde_json::Map::new();
-                for (k, v) in o.borrow().iter() {
+                for (k, v) in o.borrow().strings.iter() {
                     m.insert(k.to_string(), tish_to_json(v));
                 }
                 JsonValue::Object(m)
@@ -640,7 +640,7 @@ mod tish_sync {
                 for (k, v) in m {
                     om.insert(Arc::from(k), json_to_tish(v));
                 }
-                TishValue::Object(VmRef::new(om))
+                TishValue::object(om)
             }
         }
     }
@@ -651,7 +651,7 @@ mod tish_sync {
         let mut om = ObjectMap::with_capacity(2);
         om.insert(Arc::from("error"), TishValue::String(msg.into().into()));
         om.insert(Arc::from("ok"), TishValue::Bool(false));
-        TishValue::Object(VmRef::new(om))
+        TishValue::object(om)
     }
 
     fn rows_to_value(res: QueryResult) -> TishValue {
@@ -689,7 +689,7 @@ mod tish_sync {
             Some(TishValue::Object(obj)) => {
                 use std::sync::Arc;
                 let b = obj.borrow();
-                match b.get(&Arc::from("connectionString")) {
+                match b.strings.get("connectionString") {
                     Some(TishValue::String(s)) => s.to_string(),
                     _ => return tish_err("connect: options.connectionString missing"),
                 }
@@ -932,7 +932,7 @@ mod tish_sync {
         let mut om = ObjectMap::with_capacity(2);
         om.insert(Arc::from("ok"), TishValue::Bool(true));
         om.insert(Arc::from("applied"), TishValue::Array(VmRef::new(applied)));
-        TishValue::Object(VmRef::new(om))
+        TishValue::object(om)
     }
 }
 

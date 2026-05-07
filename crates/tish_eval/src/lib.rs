@@ -68,3 +68,32 @@ pub fn run_file(
     eval.run_timer_phase()?;
     Ok(result)
 }
+
+#[cfg(test)]
+mod global_scope_tests {
+    use super::*;
+
+    #[test]
+    fn symbol_global_loads() {
+        let mut e = Evaluator::new();
+        let program = tishlang_parser::parse("Symbol").expect("parse");
+        let r = e.eval_program(&program);
+        assert!(
+            r.is_ok(),
+            "expected Symbol global, got {:?}",
+            r.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn symbol_call_under_typeof_loads() {
+        let mut e = Evaluator::new();
+        let program = tishlang_parser::parse("typeof Symbol(\"z\")").expect("parse");
+        let r = e.eval_program(&program);
+        assert!(
+            r.is_ok(),
+            "expected Symbol global for typeof Symbol(\"z\"), got {:?}",
+            r.as_ref().err()
+        );
+    }
+}
