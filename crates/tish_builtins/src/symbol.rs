@@ -68,3 +68,16 @@ pub fn symbol_object() -> Value {
     m.insert(Arc::from("keyFor"), key_for);
     Value::object(m)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tishlang_core::value_call;
+
+    #[test]
+    fn symbol_global_value_call() {
+        let o = symbol_object();
+        let r = value_call(&o, &[Value::String("hi".into())]);
+        assert!(matches!(r, Value::Symbol(_)));
+    }
+}

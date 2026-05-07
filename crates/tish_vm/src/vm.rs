@@ -2031,6 +2031,35 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
                 .cloned()
                 .unwrap_or(Value::Null))
         }
+        Value::String(s) => {
+            let i = match idx {
+                Value::Number(n) => {
+                    let n = *n;
+                    if n < 0.0 || n.fract() != 0.0 {
+                        return Err(format!(
+                            "String index must be non-negative integer, got {}",
+                            n
+                        ));
+                    }
+                    let i = n as usize;
+                    let len = s.chars().count();
+                    if i >= len {
+                        return Err("Index out of bounds".to_string());
+                    }
+                    i
+                }
+                _ => {
+                    return Err(format!(
+                        "String index must be number, got {}",
+                        idx.type_name()
+                    ));
+                }
+            };
+            match s.chars().nth(i) {
+                Some(c) => Ok(Value::String(Arc::from(c.to_string()))),
+                None => Err("Index out of bounds".to_string()),
+            }
+        }
         Value::Object(_) => object_get(obj, idx).ok_or_else(|| {
             format!(
                 "Property '{}' not found",

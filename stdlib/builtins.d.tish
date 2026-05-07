@@ -140,9 +140,9 @@ declare const Date: {
 }
 
 declare const Symbol: {
-  (description?: string): symbol,
-  for: (key: string) => symbol,
-  keyFor: (sym: symbol) => string | null,
+  __call: AnyFn,
+  for: (string) => symbol,
+  keyFor: (symbol) => string | null,
 }
 
 declare let parseInt: AnyFn

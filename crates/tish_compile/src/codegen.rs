@@ -926,7 +926,7 @@ impl Codegen {
                 }
             };
             format!(
-                "{{ let _ns = {}; match _ns {{ Value::Object(ref _o) => _o.borrow().get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }} }}",
+                "{{ let _ns = {}; match _ns {{ Value::Object(ref _o) => _o.borrow().strings.get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }} }}",
                 init_expr, export_name
             )
         })
@@ -2394,7 +2394,7 @@ impl Codegen {
                     match &prop.value {
                         DestructElement::Ident(name, _) => {
                             self.writeln(&format!(
-                                "{} {} = match &({}) {{ Value::Object(ref _o) => _o.borrow().get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
+                                "{} {} = match &({}) {{ Value::Object(ref _o) => _o.borrow().strings.get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
                                 mutability,
                                 Self::escape_ident(name.as_ref()),
                                 value_expr,
@@ -2404,7 +2404,7 @@ impl Codegen {
                         DestructElement::Pattern(nested) => {
                             let nested_var = format!("_nested_obj_{}", key);
                             self.writeln(&format!(
-                                "let {} = match &({}) {{ Value::Object(ref _o) => _o.borrow().get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
+                                "let {} = match &({}) {{ Value::Object(ref _o) => _o.borrow().strings.get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
                                 nested_var, value_expr, key
                             ));
                             self.emit_destruct_bindings(nested, &nested_var, mutability, span)?;
@@ -2965,7 +2965,7 @@ impl Codegen {
                 if has_spread {
                     let args_code = self.emit_call_args(args)?;
                     return Ok(format!(
-                        "{{ let _callee = &{}; let _spread_args = {}; match _callee {{ Value::Function(cb) => cb(&_spread_args), other => panic!(\"Not a function: tried to call {{:?}} as a function (e.g. method on Null when read failed)\", other) }} }}",
+                        "{{ let _callee = ({}).clone(); let _spread_args = {}; tishlang_runtime::value_call(&_callee, _spread_args.as_slice()) }}",
                         callee_expr, args_code
                     ));
                 }
@@ -2979,8 +2979,8 @@ impl Codegen {
                     .join(", ");
                 format!(
                     "({{\n\
-                     {}    let _callee = &{};\n\
-                     {}    match _callee {{ Value::Function(cb) => cb(&[{}]), other => panic!(\"Not a function: tried to call {{:?}} as a function (e.g. method on Null when read failed)\", other) }}\n\
+                     {}    let _callee = ({}).clone();\n\
+                     {}    tishlang_runtime::value_call(&_callee, &[{}])\n\
                      {}}})",
                     "    ".repeat(self.indent),
                     callee_expr,
@@ -3259,7 +3259,8 @@ impl Codegen {
                      Value::Number(_) => \"number\".into(), Value::String(_) => \"string\".into(), \
                      Value::Bool(_) => \"boolean\".into(), Value::Null => \"null\".into(), \
                      Value::Array(_) => \"object\".into(), Value::Object(_) => \"object\".into(), \
-                     Value::Function(_) => \"function\".into(), _ => \"object\".into() }})",
+                     Value::Function(_) => \"function\".into(), Value::Symbol(_) => \"symbol\".into(), \
+                     _ => \"object\".into() }})",
                     o
                 )
             }

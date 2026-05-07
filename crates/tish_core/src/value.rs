@@ -361,6 +361,27 @@ pub fn object_has(obj: &Value, key: &Value) -> bool {
     }
 }
 
+/// Invoke a callable [`Value`]: [`Value::Function`], or an object exposing `__call` (e.g. `Symbol`).
+pub fn value_call(callee: &Value, args: &[Value]) -> Value {
+    match callee {
+        Value::Function(f) => f(args),
+        Value::Object(o) => {
+            let inner = o.borrow().strings.get("__call").cloned();
+            if let Some(inner) = inner {
+                return value_call(&inner, args);
+            }
+            panic!(
+                "Not a function: tried to call {:?} as a function (e.g. method on Null when read failed)",
+                callee
+            );
+        }
+        _ => panic!(
+            "Not a function: tried to call {:?} as a function (e.g. method on Null when read failed)",
+            callee
+        ),
+    }
+}
+
 /// Merge two object payloads (spread / VM MergeObject).
 pub fn merge_object_data(left: &VmRef<ObjectData>, right: &VmRef<ObjectData>) -> ObjectData {
     let l = left.borrow();

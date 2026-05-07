@@ -531,11 +531,27 @@ impl<'a> Parser<'a> {
                 self.advance(); // {
                 let mut props = Vec::new();
                 while !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
-                    let key = self
-                        .expect(TokenKind::Ident)?
-                        .literal
-                        .clone()
-                        .ok_or("Expected property name")?;
+                    // `for` is a keyword but a common method name (`Symbol.for`); allow it here.
+                    let key: Arc<str> = match self.peek_kind() {
+                        Some(TokenKind::Ident) => {
+                            let tok = self.expect(TokenKind::Ident)?;
+                            Arc::from(
+                                tok.literal
+                                    .as_deref()
+                                    .ok_or("Expected property name")?,
+                            )
+                        }
+                        Some(TokenKind::For) => {
+                            self.advance();
+                            Arc::from("for")
+                        }
+                        _ => {
+                            return Err(format!(
+                                "Expected Ident or `for` as object type property name, got {:?}",
+                                self.peek_kind()
+                            ));
+                        }
+                    };
                     self.expect(TokenKind::Colon)?;
                     let typ = self.parse_type_annotation()?;
                     props.push((key, typ));

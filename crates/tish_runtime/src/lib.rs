@@ -16,6 +16,8 @@ use tishlang_builtins::helpers::make_error_value;
 pub use tishlang_builtins::symbol::symbol_object;
 pub use tishlang_core::ObjectMap;
 pub use tishlang_core::Value;
+/// Used by native codegen for `f()` / `obj()` dispatch (`Value::Function` or `__call` on objects).
+pub use tishlang_core::value_call;
 // Re-export the shared-mutable wrapper so the Rust code emitted by
 // `tishlang_compile::codegen` can write `VmRef::new(...)` without needing
 // a direct dependency on `tishlang_core` from the generated crate.
