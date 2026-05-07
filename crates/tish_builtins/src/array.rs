@@ -1,8 +1,6 @@
 //! Array builtin methods.
 
 use crate::helpers::normalize_index;
-use std::cell::RefCell;
-use std::rc::Rc;
 use tishlang_core::Value;
 use tishlang_core::VmRef;
 

@@ -1,9 +1,10 @@
 //! Stack-based bytecode VM.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 use std::sync::Arc;
+
+#[cfg(not(feature = "send-values"))]
+use std::rc::Rc;
 use tishlang_core::VmRef;
 
 use tishlang_ast::{BinOp, UnaryOp};
@@ -59,6 +60,14 @@ fn value_object_from_map(m: ObjectMap) -> Value {
     Value::Object(VmRef::new(ObjectData::from_strings(m)))
 }
 
+#[cfg(any(
+    feature = "fs",
+    feature = "http",
+    feature = "timers",
+    feature = "process",
+    feature = "ws"
+))]
+#[inline]
 fn cap_allows(enabled: &HashSet<String>, name: &str) -> bool {
     enabled.contains("full") || enabled.contains(name)
 }

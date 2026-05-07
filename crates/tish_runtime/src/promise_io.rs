@@ -1,8 +1,5 @@
 //! Promises carrying only Send payloads (string results for text(), etc.).
 
-use std::cell::RefCell;
-use tishlang_core::VmRef;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tishlang_core::{ObjectMap, TishPromise, Value};
 use tokio::sync::oneshot;

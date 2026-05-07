@@ -5,10 +5,8 @@
 //! - **Connection**: `send(data)`, `close()`, `readyState` (1=OPEN), `receive()` / `receiveTimeout(ms)`
 //! - **Broadcast** (Node pattern): `server.clients.forEach(ws => ws.send(data))` or iterate room conns and `wsSend(ws, data)` (same as `ws.send(data)`)
 
-use std::cell::RefCell;
 use tishlang_core::VmRef;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};

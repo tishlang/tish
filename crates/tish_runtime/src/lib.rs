@@ -3,11 +3,7 @@
 //! Re-exports core types from tishlang_core and provides console, Math,
 //! and other builtin functions for compiled Tish programs.
 
-#[cfg(feature = "regex")]
-use std::cell::RefCell;
 use std::fmt;
-#[cfg(feature = "regex")]
-use std::rc::Rc;
 use std::sync::OnceLock;
 use tishlang_builtins::helpers::extract_num;
 #[cfg(feature = "fs")]
@@ -593,8 +589,6 @@ pub fn is_dir(args: &[Value]) -> Value {
 
 #[cfg(feature = "fs")]
 pub fn read_dir(args: &[Value]) -> Value {
-    use std::cell::RefCell;
-    use std::rc::Rc;
     let path = args
         .first()
         .map(|v| v.to_display_string())

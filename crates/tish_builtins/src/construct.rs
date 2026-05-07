@@ -1,8 +1,6 @@
 //! `new` lowering for non-JS targets: `construct(callee, args)` approximates JS `[[Construct]]`.
 //! Browser-exact behavior remains on `tish build --target js`.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
 use tishlang_core::{ObjectMap, Value, VmRef};
 

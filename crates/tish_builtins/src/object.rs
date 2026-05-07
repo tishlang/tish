@@ -3,8 +3,6 @@
 //! This module will contain shared object method implementations.
 //! Functions will be migrated here from tishlang_runtime and tishlang_eval.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
 use tishlang_core::{ObjectData, ObjectMap, Value, VmRef};
 

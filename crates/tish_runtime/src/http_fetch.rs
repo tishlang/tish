@@ -1,10 +1,9 @@
 //! Web Fetch–aligned Response, ReadableStream, reader.read(), text()/json().
 
-use std::cell::RefCell;
-use tishlang_core::VmRef;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+
+use tishlang_core::VmRef;
 
 use bytes::Bytes;
 use futures::Stream;

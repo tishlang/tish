@@ -4,12 +4,10 @@ mod cargo_native_registry;
 mod cli_help;
 mod repl_completion;
 
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use tishlang_core::VmRef;
 
 use clap::FromArgMatches;

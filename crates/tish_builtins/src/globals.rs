@@ -3,8 +3,6 @@
 //! Used by both tishlang_vm (bytecode) and tishlang_runtime (compiled). Keeps tishlang_vm
 //! independent of tishlang_runtime.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
 use tishlang_core::VmRef;
 use tishlang_core::{percent_decode, percent_encode, ObjectMap, Value};

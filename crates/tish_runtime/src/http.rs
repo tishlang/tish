@@ -10,8 +10,8 @@
 //! gets its own tiny_http connection pool but the accept queue is shared at
 //! the kernel level.
 //!
-//! The Tish handler closure captures `Value::Function(Rc<…>)` which is
-//! `!Send`, so handler execution stays on the VM (caller) thread:
+//! Without `send-values`, the handler captures `Value::Function` backed by
+//! `Rc` and is `!Send`, so handler execution stays on a single VM thread:
 //!
 //! ```text
 //!   worker 0 ──┐
@@ -24,14 +24,15 @@
 //! threaded VM guarantee. Cached `Date:` header + shared `Arc<str>` response
 //! bodies round out the hot-path optimisations.
 
-use std::cell::RefCell;
-use tishlang_core::VmRef;
-use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+
+#[cfg(not(feature = "send-values"))]
+use std::collections::VecDeque;
+#[cfg(not(feature = "send-values"))]
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -194,12 +195,6 @@ fn ensure_date_thread() -> &'static arc_swap::ArcSwap<String> {
 /// clone (single atomic ref-count inc).
 pub fn cached_date_header_arc() -> Arc<String> {
     ensure_date_thread().load_full()
-}
-
-/// Back-compat String flavour (allocates). New hot-path code should use
-/// `cached_date_header_arc`.
-pub fn cached_date_header() -> String {
-    cached_date_header_arc().as_str().to_string()
 }
 
 // -------- Send-safe request/response primitives ----------------------------
@@ -779,8 +774,6 @@ pub(crate) fn num_prefork_workers() -> usize {
 
 // -------- serve() ----------------------------------------------------------
 
-type Job = (RequestPrimitive, mpsc::SyncSender<ResponsePrimitive>);
-
 /// Start an HTTP server that handles requests using the provided handler function.
 ///
 /// When `send-values` is enabled (required for the `http` feature) the
@@ -1005,6 +998,9 @@ fn serve_impl_with_factory(
 }
 
 #[cfg(not(feature = "send-values"))]
+type Job = (RequestPrimitive, mpsc::SyncSender<ResponsePrimitive>);
+
+#[cfg(not(feature = "send-values"))]
 fn serve_impl<F>(args: &[Value], handler: F) -> Value
 where
     F: Fn(&[Value]) -> Value,
@@ -1139,6 +1135,7 @@ fn worker_loop_direct(
     }
 }
 
+#[cfg(not(feature = "send-values"))]
 fn worker_loop(
     listener: std::net::TcpListener,
     dispatch: mpsc::SyncSender<Job>,
@@ -1209,12 +1206,6 @@ fn worker_loop(
             Err(_) => drop(req),
         }
     }
-}
-
-#[allow(dead_code)]
-pub fn create_server(port: u16) -> Result<tiny_http::Server, String> {
-    let addr = format!("0.0.0.0:{}", port);
-    tiny_http::Server::http(&addr).map_err(|e| format!("Failed to start server: {}", e))
 }
 
 // -------- public shims for alternate HTTP backends ------------------------
