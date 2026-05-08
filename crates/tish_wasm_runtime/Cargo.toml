@@ -12,11 +12,14 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # For wasm32-unknown-unknown (browser): wasm-bindgen, console output
 browser = ["dep:wasm-bindgen", "tishlang_vm/wasm"]
-# Built-in modules for WASI (wasm32-wasip1): file I/O, process, http, timers
+# Built-in modules for WASI (wasm32-wasip1): align with `tishlang_cranelift_runtime` / CLI caps
 fs = ["tishlang_vm/fs"]
 process = ["tishlang_vm/process"]
 http = ["tishlang_vm/http"]
+promise = ["tishlang_vm/promise"]
 timers = ["tishlang_vm/timers"]
+regex = ["tishlang_vm/regex"]
+ws = ["tishlang_vm/ws"]
 
 [dependencies]
 tishlang_bytecode = { path = "../tish_bytecode", version = ">=0.1" }

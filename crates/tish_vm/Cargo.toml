@@ -25,6 +25,8 @@ timers = ["dep:tishlang_runtime"]
 # Any HTTP build needs Send-safe values so handlers can be dispatched
 # across worker threads or processes. HTTP implies timers (fetch/Promise often pair with setTimeout).
 http = ["dep:tishlang_runtime", "tishlang_runtime/http", "send-values", "timers"]
+# Promise + `tish:http.await` / `Promise` export without the full HTTP client stack (e.g. wasm32-wasip1).
+promise = ["dep:tishlang_runtime", "tishlang_runtime/promise", "send-values"]
 ws = ["dep:tishlang_runtime", "tishlang_runtime/ws"]
 
 [dependencies]

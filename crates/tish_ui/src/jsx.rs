@@ -468,14 +468,14 @@ where
                 JsxProp::Spread(e) => {
                     let val = emit_expr(e)?;
                     parts.push(format!(
-                        "if let Value::Object(ref _spread) = {} {{ for (k, v) in _spread.borrow().iter() {{ _obj.insert(Arc::clone(k), v.clone()); }} }}",
+                        "if let Value::Object(ref _spread) = {} {{ for (k, v) in _spread.borrow().strings.iter() {{ _obj.insert(Arc::clone(k), v.clone()); }} }}",
                         val
                     ));
                 }
             }
         }
         Ok(format!(
-            "{{ let mut _obj: ObjectMap = ObjectMap::default(); {} Value::Object(VmRef::new(_obj)) }}",
+            "{{ let mut _obj: ObjectMap = ObjectMap::default(); {} Value::object(_obj) }}",
             parts.join(" ")
         ))
     } else {
@@ -497,7 +497,7 @@ where
             }
         }
         Ok(format!(
-            "Value::Object(VmRef::new(ObjectMap::from([{}])))",
+            "Value::object(ObjectMap::from([{}]))",
             kv.join(", ")
         ))
     }

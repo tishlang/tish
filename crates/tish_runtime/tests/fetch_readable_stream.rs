@@ -52,11 +52,15 @@ fn fetch_readable_stream_read_chunks() {
         _ => panic!("expected object response, got {:?}", resp),
     };
     assert!(obj
+        .strings
         .get(&std::sync::Arc::from("ok"))
         .map(|v| matches!(v, Value::Bool(true)))
         .unwrap_or(false));
 
-    let body = obj.get(&std::sync::Arc::from("body")).expect("body");
+    let body = obj
+        .strings
+        .get(&std::sync::Arc::from("body"))
+        .expect("body");
     let stream = match body {
         Value::Opaque(s) => s.as_ref(),
         _ => panic!("expected ReadableStream opaque"),
@@ -74,14 +78,12 @@ fn fetch_readable_stream_read_chunks() {
         let (done, chunk_bytes) = match chunk {
             Value::Object(o) => {
                 let m = o.borrow();
-                let done = m
-                    .get(&std::sync::Arc::from("done"))
-                    .and_then(|v| match v {
-                        Value::Bool(b) => Some(*b),
-                        _ => None,
-                    })
-                    .unwrap_or(true);
+                let done = match m.strings.get(&std::sync::Arc::from("done")) {
+                    Some(Value::Bool(b)) => *b,
+                    _ => true,
+                };
                 let bytes = m
+                    .strings
                     .get(&std::sync::Arc::from("value"))
                     .map(|v| byte_array_to_vec(v))
                     .unwrap_or_default();

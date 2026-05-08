@@ -351,6 +351,8 @@ mod tests {
     #[test]
     fn runtime_features_merges_full_and_specific() {
         let f = runtime_features_for_cargo(&["full".to_string(), "http".to_string()]);
-        assert_eq!(f.len(), 5);
+        // `full` expands to every RUNTIME_CARGO_FEATURES entry; redundant `http` must not duplicate.
+        assert_eq!(f.len(), super::RUNTIME_CARGO_FEATURES.len());
+        assert_eq!(f.iter().filter(|x| *x == "http").count(), 1);
     }
 }

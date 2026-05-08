@@ -4,12 +4,10 @@ mod cargo_native_registry;
 mod cli_help;
 mod repl_completion;
 
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use tishlang_core::VmRef;
 
 use clap::FromArgMatches;
@@ -614,11 +612,13 @@ fn build_file(
                 Some(p)
             }
         });
+        let features = native_build_features_from_cli(cli_features);
         return tishlang_wasm::compile_to_wasi(
             &input_path,
             project_root,
             Path::new(output_path),
             optimize,
+            &features,
         )
         .map_err(|e| e.to_string());
     }

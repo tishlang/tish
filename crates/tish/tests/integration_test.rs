@@ -76,6 +76,16 @@ fn combined_mvp_native_inputs_hash(paths: &[PathBuf]) -> u64 {
             .hash(&mut h);
         file_content_hash(p).hash(&mut h);
     }
+    // Native batch cache must invalidate when the emitter or `value_call` changes — not only
+    // when `.tish` sources change; otherwise CI/rust-cache can keep stale nested binaries.
+    let codegen_rs = workspace_root().join("crates/tish_compile/src/codegen.rs");
+    if codegen_rs.is_file() {
+        file_content_hash(&codegen_rs).hash(&mut h);
+    }
+    let value_rs = workspace_root().join("crates/tish_core/src/value.rs");
+    if value_rs.is_file() {
+        file_content_hash(&value_rs).hash(&mut h);
+    }
     h.finish()
 }
 
@@ -641,6 +651,7 @@ const MVP_TEST_FILES: &[&str] = &[
     "break_continue.tish",
     "length.tish",
     "objects.tish",
+    "symbol.tish",
     "conditional.tish",
     "switch.tish",
     "do_while.tish",

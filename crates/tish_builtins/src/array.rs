@@ -1,8 +1,6 @@
 //! Array builtin methods.
 
 use crate::helpers::normalize_index;
-use std::cell::RefCell;
-use std::rc::Rc;
 use tishlang_core::Value;
 use tishlang_core::VmRef;
 
@@ -434,6 +432,7 @@ fn get_prop_number(v: &Value, prop: &std::sync::Arc<str>) -> f64 {
     match v {
         Value::Object(o) => o
             .borrow()
+            .strings
             .get(prop.as_ref())
             .map(|v| v.as_number().unwrap_or(f64::NAN))
             .unwrap_or(f64::NAN),

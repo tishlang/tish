@@ -218,7 +218,7 @@ fn row_to_value_direct(row: &Row) -> tishlang_runtime::Value {
         };
         om.insert(key, v);
     }
-    RtValue::Object(VmRef::new(om))
+    RtValue::object(om)
 }
 
 fn row_to_object(row: &Row) -> Result<JsonValue> {
@@ -526,7 +526,6 @@ mod tish_sync {
     use super::*;
     use once_cell::sync::Lazy;
     use slab::Slab;
-    use std::sync::Mutex;
     use tishlang_runtime::Value as TishValue;
     use tokio::runtime::Runtime as TokioRuntime;
 
@@ -606,7 +605,7 @@ mod tish_sync {
             TishValue::Array(a) => JsonValue::Array(a.borrow().iter().map(tish_to_json).collect()),
             TishValue::Object(o) => {
                 let mut m = serde_json::Map::new();
-                for (k, v) in o.borrow().iter() {
+                for (k, v) in o.borrow().strings.iter() {
                     m.insert(k.to_string(), tish_to_json(v));
                 }
                 JsonValue::Object(m)
@@ -615,35 +614,35 @@ mod tish_sync {
         }
     }
 
-    fn json_to_tish(v: JsonValue) -> TishValue {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-        use std::sync::Arc;
-        use tishlang_runtime::ObjectMap;
-        match v {
-            JsonValue::Null => TishValue::Null,
-            JsonValue::Bool(b) => TishValue::Bool(b),
-            JsonValue::Number(n) => TishValue::Number(n.as_f64().unwrap_or(0.0)),
-            JsonValue::String(s) => TishValue::String(s.into()),
-            JsonValue::Array(a) => {
-                let mut out = Vec::with_capacity(a.len());
-                for item in a {
-                    out.push(json_to_tish(item));
-                }
-                TishValue::Array(VmRef::new(out))
-            }
-            JsonValue::Object(m) => {
-                // Pre-allocate ObjectMap capacity so HashMap doesn't rehash
-                // on every insert. Common TFB rows are 2 columns (id,
-                // randomnumber or id, message).
-                let mut om = ObjectMap::with_capacity(m.len());
-                for (k, v) in m {
-                    om.insert(Arc::from(k), json_to_tish(v));
-                }
-                TishValue::Object(VmRef::new(om))
-            }
-        }
-    }
+    // fn json_to_tish(v: JsonValue) -> TishValue {
+    //     use std::cell::RefCell;
+    //     use std::rc::Rc;
+    //     use std::sync::Arc;
+    //     use tishlang_runtime::ObjectMap;
+    //     match v {
+    //         JsonValue::Null => TishValue::Null,
+    //         JsonValue::Bool(b) => TishValue::Bool(b),
+    //         JsonValue::Number(n) => TishValue::Number(n.as_f64().unwrap_or(0.0)),
+    //         JsonValue::String(s) => TishValue::String(s.into()),
+    //         JsonValue::Array(a) => {
+    //             let mut out = Vec::with_capacity(a.len());
+    //             for item in a {
+    //                 out.push(json_to_tish(item));
+    //             }
+    //             TishValue::Array(VmRef::new(out))
+    //         }
+    //         JsonValue::Object(m) => {
+    //             // Pre-allocate ObjectMap capacity so HashMap doesn't rehash
+    //             // on every insert. Common TFB rows are 2 columns (id,
+    //             // randomnumber or id, message).
+    //             let mut om = ObjectMap::with_capacity(m.len());
+    //             for (k, v) in m {
+    //                 om.insert(Arc::from(k), json_to_tish(v));
+    //             }
+    //             TishValue::object(om)
+    //         }
+    //     }
+    // }
 
     fn tish_err(msg: impl Into<String>) -> TishValue {
         use std::sync::Arc;
@@ -651,14 +650,14 @@ mod tish_sync {
         let mut om = ObjectMap::with_capacity(2);
         om.insert(Arc::from("error"), TishValue::String(msg.into().into()));
         om.insert(Arc::from("ok"), TishValue::Bool(false));
-        TishValue::Object(VmRef::new(om))
+        TishValue::object(om)
     }
 
-    fn rows_to_value(res: QueryResult) -> TishValue {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-        TishValue::Array(VmRef::new(res.rows.into_iter().map(json_to_tish).collect()))
-    }
+    // fn rows_to_value(res: QueryResult) -> TishValue {
+    //     use std::cell::RefCell;
+    //     use std::rc::Rc;
+    //     TishValue::Array(VmRef::new(res.rows.into_iter().map(json_to_tish).collect()))
+    // }
 
     /// `perWorkerClient(connection_string) -> client_handle` (blocking).
     pub fn per_worker_client(args: &[TishValue]) -> TishValue {
@@ -687,9 +686,8 @@ mod tish_sync {
         let cs = match args.first() {
             Some(TishValue::String(s)) => s.to_string(),
             Some(TishValue::Object(obj)) => {
-                use std::sync::Arc;
                 let b = obj.borrow();
-                match b.get(&Arc::from("connectionString")) {
+                match b.strings.get("connectionString") {
                     Some(TishValue::String(s)) => s.to_string(),
                     _ => return tish_err("connect: options.connectionString missing"),
                 }
@@ -932,7 +930,7 @@ mod tish_sync {
         let mut om = ObjectMap::with_capacity(2);
         om.insert(Arc::from("ok"), TishValue::Bool(true));
         om.insert(Arc::from("applied"), TishValue::Array(VmRef::new(applied)));
-        TishValue::Object(VmRef::new(om))
+        TishValue::object(om)
     }
 }
 

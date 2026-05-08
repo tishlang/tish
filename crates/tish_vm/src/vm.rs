@@ -1,9 +1,10 @@
 //! Stack-based bytecode VM.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 use std::sync::Arc;
+
+#[cfg(not(feature = "send-values"))]
+use std::rc::Rc;
 use tishlang_core::VmRef;
 
 use tishlang_ast::{BinOp, UnaryOp};
@@ -13,7 +14,9 @@ use tishlang_builtins::globals as globals_builtins;
 use tishlang_builtins::math as math_builtins;
 use tishlang_builtins::string as str_builtins;
 use tishlang_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
-use tishlang_core::{NativeFn, ObjectMap, Value};
+use tishlang_core::{
+    merge_object_data, object_get, object_has, object_set, NativeFn, ObjectData, ObjectMap, Value,
+};
 
 /// Wrap a closure in the right shared pointer for the current build.
 /// Under `send-values` that's `Arc<dyn Fn + Send + Sync>`; otherwise it's
@@ -46,12 +49,27 @@ type ArrayMethodFn = NativeFn;
     not(any(
         feature = "fs",
         feature = "http",
+        feature = "promise",
         feature = "timers",
         feature = "process",
         feature = "ws"
     )),
     allow(dead_code)
 )]
+#[inline]
+fn value_object_from_map(m: ObjectMap) -> Value {
+    Value::Object(VmRef::new(ObjectData::from_strings(m)))
+}
+
+#[cfg(any(
+    feature = "fs",
+    feature = "http",
+    feature = "promise",
+    feature = "timers",
+    feature = "process",
+    feature = "ws"
+))]
+#[inline]
 fn cap_allows(enabled: &HashSet<String>, name: &str) -> bool {
     enabled.contains("full") || enabled.contains(name)
 }
@@ -62,6 +80,8 @@ pub fn all_compiled_capabilities() -> HashSet<String> {
     let mut s = HashSet::new();
     #[cfg(feature = "http")]
     s.insert("http".to_string());
+    #[cfg(feature = "promise")]
+    s.insert("promise".to_string());
     #[cfg(feature = "timers")]
     s.insert("timers".to_string());
     #[cfg(feature = "fs")]
@@ -80,6 +100,7 @@ pub fn all_compiled_capabilities() -> HashSet<String> {
     not(any(
         feature = "fs",
         feature = "http",
+        feature = "promise",
         feature = "timers",
         feature = "process",
         feature = "ws"
@@ -136,12 +157,12 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                     Value::Object(ref obj) => {
                         let obj_ref = obj.borrow();
                         if let Some(Value::Function(on_worker)) =
-                            obj_ref.get(&std::sync::Arc::from("onWorker")).cloned()
+                            obj_ref.strings.get(&std::sync::Arc::from("onWorker")).cloned()
                         {
                             let args_for_init = [Value::Number(0.0)];
                             on_worker(&args_for_init)
                         } else if let Some(h) =
-                            obj_ref.get(&std::sync::Arc::from("handler")).cloned()
+                            obj_ref.strings.get(&std::sync::Arc::from("handler")).cloned()
                         {
                             h
                         } else {
@@ -155,6 +176,16 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                 } else {
                     Value::Null
                 }
+            })),
+            _ => None,
+        };
+    }
+    #[cfg(all(feature = "promise", not(feature = "http")))]
+    if spec == "tish:http" && cap_allows(enabled, "promise") {
+        return match export_name {
+            "Promise" => Some(tishlang_runtime::promise_object()),
+            "await" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::await_promise(args.first().cloned().unwrap_or(Value::Null))
             })),
             _ => None,
         };
@@ -192,11 +223,11 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             "argv" => Some(Value::Array(VmRef::new(
                 std::env::args().map(|s| Value::String(s.into())).collect(),
             ))),
-            "env" => Some(Value::Object(VmRef::new(
+            "env" => Some(value_object_from_map(
                 std::env::vars()
                     .map(|(k, v)| (Arc::from(k.as_str()), Value::String(v.into())))
                     .collect(),
-            ))),
+            )),
             "process" => {
                 let mut m = ObjectMap::default();
                 m.insert(
@@ -219,13 +250,13 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                 );
                 m.insert(
                     "env".into(),
-                    Value::Object(VmRef::new(
+                    value_object_from_map(
                         std::env::vars()
                             .map(|(k, v)| (Arc::from(k.as_str()), Value::String(v.into())))
                             .collect(),
-                    )),
+                    ),
                 );
-                Some(Value::Object(VmRef::new(m)))
+                Some(value_object_from_map(m))
             }
             _ => None,
         };
@@ -336,7 +367,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             Value::Null
         }),
     );
-    g.insert("console".into(), Value::Object(VmRef::new(console)));
+    g.insert("console".into(), value_object_from_map(console));
 
     let mut math = ObjectMap::default();
     math.insert(
@@ -426,7 +457,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     );
     math.insert("PI".into(), Value::Number(std::f64::consts::PI));
     math.insert("E".into(), Value::Number(std::f64::consts::E));
-    g.insert("Math".into(), Value::Object(VmRef::new(math)));
+    g.insert("Math".into(), value_object_from_map(math));
 
     let mut json = ObjectMap::default();
     json.insert(
@@ -446,7 +477,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             Value::String(tishlang_core::json_stringify(v).into())
         }),
     );
-    g.insert("JSON".into(), Value::Object(VmRef::new(json)));
+    g.insert("JSON".into(), value_object_from_map(json));
 
     g.insert(
         "parseInt".into(),
@@ -491,6 +522,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             Value::String(v.type_name().into())
         }),
     );
+    g.insert(
+        "Symbol".into(),
+        tishlang_builtins::symbol::symbol_object(),
+    );
 
     // Date - at minimum Date.now() for timing
     let mut date = ObjectMap::default();
@@ -504,7 +539,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             Value::Number(ms)
         }),
     );
-    g.insert("Date".into(), Value::Object(VmRef::new(date)));
+    g.insert("Date".into(), value_object_from_map(date));
 
     g.insert(
         "Uint8Array".into(),
@@ -537,7 +572,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         "entries".into(),
         Value::native(|args: &[Value]| globals_builtins::object_entries(args)),
     );
-    g.insert("Object".into(), Value::Object(VmRef::new(object_methods)));
+    g.insert("Object".into(), value_object_from_map(object_methods));
 
     // Array.isArray
     let mut array_static = ObjectMap::default();
@@ -545,7 +580,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         "isArray".into(),
         Value::native(|args: &[Value]| globals_builtins::array_is_array(args)),
     );
-    g.insert("Array".into(), Value::Object(VmRef::new(array_static)));
+    g.insert("Array".into(), value_object_from_map(array_static));
 
     // String(value) as callable + String.fromCharCode
     let string_convert_fn = Value::native(|args: &[Value]| globals_builtins::string_convert(args));
@@ -555,13 +590,13 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         Value::native(|args: &[Value]| globals_builtins::string_from_char_code(args)),
     );
     string_static.insert(Arc::from("__call"), string_convert_fn);
-    g.insert("String".into(), Value::Object(VmRef::new(string_static)));
+    g.insert("String".into(), value_object_from_map(string_static));
 
     // JSX / Lattish: stubs for bytecode VM when no DOM (e.g. console). Override via set_global in browser.
     g.insert("h".into(), Value::native(|_args: &[Value]| Value::Null));
     g.insert(
         "Fragment".into(),
-        Value::Object(VmRef::new(ObjectMap::default())),
+        value_object_from_map(ObjectMap::default()),
     );
     g.insert(
         "createRoot".into(),
@@ -571,7 +606,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
                 "render".into(),
                 Value::native(|_args: &[Value]| Value::Null),
             );
-            Value::Object(VmRef::new(render_obj))
+            value_object_from_map(render_obj)
         }),
     );
     g.insert(
@@ -584,7 +619,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     );
     let mut document_obj = ObjectMap::default();
     document_obj.insert("body".into(), Value::Null);
-    g.insert("document".into(), Value::Object(VmRef::new(document_obj)));
+    g.insert("document".into(), value_object_from_map(document_obj));
 
     #[cfg(feature = "process")]
     if cap_allows(enabled, "process") {
@@ -609,13 +644,13 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         );
         process_obj.insert(
             "env".into(),
-            Value::Object(VmRef::new(
+            value_object_from_map(
                 std::env::vars()
                     .map(|(k, v)| (Arc::from(k.as_str()), Value::String(v.into())))
                     .collect(),
-            )),
+            ),
         );
-        g.insert("process".into(), Value::Object(VmRef::new(process_obj)));
+        g.insert("process".into(), value_object_from_map(process_obj));
     }
 
     #[cfg(feature = "timers")]
@@ -648,7 +683,6 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             "fetchAll".into(),
             Value::native(|args: &[Value]| tishlang_runtime::fetch_all_promise(args.to_vec())),
         );
-        g.insert("Promise".into(), tishlang_runtime::promise_object());
         g.insert(
             "registerStaticRoute".into(),
             Value::native(|args: &[Value]| {
@@ -678,12 +712,12 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
                     Value::Object(ref obj) => {
                         let obj_ref = obj.borrow();
                         if let Some(Value::Function(on_worker)) =
-                            obj_ref.get(&std::sync::Arc::from("onWorker")).cloned()
+                            obj_ref.strings.get(&std::sync::Arc::from("onWorker")).cloned()
                         {
                             let args_for_init = [Value::Number(0.0)];
                             on_worker(&args_for_init)
                         } else if let Some(h) =
-                            obj_ref.get(&std::sync::Arc::from("handler")).cloned()
+                            obj_ref.strings.get(&std::sync::Arc::from("handler")).cloned()
                         {
                             h
                         } else {
@@ -699,6 +733,11 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
                 }
             }),
         );
+    }
+
+    #[cfg(any(feature = "http", feature = "promise"))]
+    if cap_allows(enabled, "http") || cap_allows(enabled, "promise") {
+        g.insert("Promise".into(), tishlang_runtime::promise_object());
     }
 
     g
@@ -1077,7 +1116,7 @@ impl Vm {
                         Value::Function(f) => f.clone(),
                         Value::Object(o) => {
                             if let Some(Value::Function(call_fn)) =
-                                o.borrow().get(&Arc::from("__call"))
+                                o.borrow().strings.get("__call")
                             {
                                 call_fn.clone()
                             } else {
@@ -1116,7 +1155,7 @@ impl Vm {
                         Value::Function(f) => f.clone(),
                         Value::Object(o) => {
                             if let Some(Value::Function(call_fn)) =
-                                o.borrow().get(&Arc::from("__call"))
+                                o.borrow().strings.get("__call")
                             {
                                 call_fn.clone()
                             } else {
@@ -1322,7 +1361,7 @@ impl Vm {
                         let key = key_val.to_display_string().into();
                         map.insert(key, val);
                     }
-                    self.stack.push(Value::Object(VmRef::new(map)));
+                    self.stack.push(value_object_from_map(map));
                 }
                 Opcode::EnterTry => {
                     let offset = Self::read_u16(code, &mut ip) as usize;
@@ -1373,30 +1412,19 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    let cap = match (&left, &right) {
-                        (Value::Object(l), Value::Object(r)) => l.borrow().len() + r.borrow().len(),
-                        _ => 0,
-                    };
-                    let mut merged: ObjectMap = ObjectMap::with_capacity(cap.max(8));
-                    if let Value::Object(l) = &left {
-                        merged.extend(l.borrow().iter().map(|(k, v)| (Arc::clone(k), v.clone())));
-                    } else {
-                        return Err(format!(
-                            "MergeObject: left must be object, got {}",
-                            left.to_display_string()
-                        ));
-                    }
-                    if let Value::Object(r) = &right {
-                        for (k, v) in r.borrow().iter() {
-                            merged.insert(Arc::clone(k), v.clone());
+                    match (&left, &right) {
+                        (Value::Object(l), Value::Object(r)) => {
+                            let merged = merge_object_data(l, r);
+                            self.stack.push(Value::Object(VmRef::new(merged)));
                         }
-                    } else {
-                        return Err(format!(
-                            "MergeObject: right must be object, got {}",
-                            right.to_display_string()
-                        ));
+                        _ => {
+                            return Err(format!(
+                                "MergeObject: expected two objects, got {} and {}",
+                                left.to_display_string(),
+                                right.to_display_string()
+                            ));
+                        }
                     }
-                    self.stack.push(Value::Object(VmRef::new(merged)));
                 }
                 Opcode::ArraySortNumeric => {
                     let operand = Self::read_u16(code, &mut ip);
@@ -1538,7 +1566,7 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow in AwaitPromise".to_string())?;
-                    #[cfg(feature = "http")]
+                    #[cfg(any(feature = "http", feature = "promise"))]
                     {
                         use tishlang_core::Value as V;
                         match v {
@@ -1556,7 +1584,7 @@ impl Vm {
                             other => self.stack.push(tishlang_runtime::await_promise(other)),
                         }
                     }
-                    #[cfg(not(feature = "http"))]
+                    #[cfg(not(any(feature = "http", feature = "promise")))]
                     {
                         self.stack.push(v);
                     }
@@ -1703,26 +1731,24 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
         BitXor => Ok(Number((ln as i32 ^ rn as i32) as f64)),
         Shl => Ok(Number(((ln as i32) << (rn as i32)) as f64)),
         Shr => Ok(Number(((ln as i32) >> (rn as i32)) as f64)),
-        In => {
-            let key_s: Arc<str> = match l {
-                Value::String(s) => Arc::clone(s),
-                Value::Number(n) => n.to_string().into(),
-                _ => l.to_display_string().into(),
-            };
-            Ok(Bool(match r {
-                Value::Object(m) => m.borrow().contains_key(key_s.as_ref()),
-                Value::Array(a) => {
-                    if key_s.as_ref() == "length" {
-                        true
-                    } else if let Ok(idx) = key_s.parse::<usize>() {
-                        idx < a.borrow().len()
-                    } else {
-                        false
-                    }
+        In => Ok(Bool(match r {
+            Value::Object(_) => object_has(r, l),
+            Value::Array(a) => {
+                let key_s: Arc<str> = match l {
+                    Value::String(s) => Arc::clone(s),
+                    Value::Number(n) => n.to_string().into(),
+                    _ => l.to_display_string().into(),
+                };
+                if key_s.as_ref() == "length" {
+                    true
+                } else if let Ok(idx) = key_s.parse::<usize>() {
+                    idx < a.borrow().len()
+                } else {
+                    false
                 }
-                _ => false,
-            }))
-        }
+            }
+            _ => false,
+        })),
     }
 }
 
@@ -1742,7 +1768,8 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
     match obj {
         Value::Object(m) => {
             let map = m.borrow();
-            map.get(key.as_ref())
+            map.strings
+                .get(key.as_ref())
                 .cloned()
                 .ok_or_else(|| format!("Property '{}' not found", key))
         }
@@ -1969,7 +1996,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             };
             Ok(Value::Function(method))
         }
-        #[cfg(feature = "http")]
+        #[cfg(any(feature = "http", feature = "promise"))]
         Value::Promise(p) => match key.as_ref() {
             "then" => {
                 let pc = Arc::clone(p);
@@ -1996,7 +2023,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
 fn set_member(obj: &Value, key: &Arc<str>, val: Value) -> Result<(), String> {
     match obj {
         Value::Object(m) => {
-            m.borrow_mut().insert(Arc::clone(key), val);
+            m.borrow_mut().strings.insert(Arc::clone(key), val);
             Ok(())
         }
         Value::Array(a) => {
@@ -2015,13 +2042,101 @@ fn set_member(obj: &Value, key: &Arc<str>, val: Value) -> Result<(), String> {
 }
 
 fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
-    let key: Arc<str> = idx.to_display_string().into();
-    get_member(obj, &key)
+    match obj {
+        Value::Array(a) => {
+            let i = match idx {
+                Value::Number(n) => *n as usize,
+                _ => {
+                    return Err(format!(
+                        "Array index must be number, got {}",
+                        idx.type_name()
+                    ));
+                }
+            };
+            Ok(a
+                .borrow()
+                .get(i)
+                .cloned()
+                .unwrap_or(Value::Null))
+        }
+        Value::String(s) => {
+            let i = match idx {
+                Value::Number(n) => {
+                    let n = *n;
+                    if n < 0.0 || n.fract() != 0.0 {
+                        return Err(format!(
+                            "String index must be non-negative integer, got {}",
+                            n
+                        ));
+                    }
+                    let i = n as usize;
+                    let len = s.chars().count();
+                    if i >= len {
+                        return Err("Index out of bounds".to_string());
+                    }
+                    i
+                }
+                _ => {
+                    return Err(format!(
+                        "String index must be number, got {}",
+                        idx.type_name()
+                    ));
+                }
+            };
+            match s.chars().nth(i) {
+                Some(c) => Ok(Value::String(Arc::from(c.to_string()))),
+                None => Err("Index out of bounds".to_string()),
+            }
+        }
+        Value::Object(_) => object_get(obj, idx).ok_or_else(|| {
+            format!(
+                "Property '{}' not found",
+                idx.to_display_string()
+            )
+        }),
+        #[cfg(any(feature = "http", feature = "promise"))]
+        Value::Promise(_) => {
+            let key_arc: std::sync::Arc<str> = match idx {
+                Value::String(s) => std::sync::Arc::clone(s),
+                _ => {
+                    return Err(format!(
+                        "Promise bracket access requires a string key, got {}",
+                        idx.type_name()
+                    ));
+                }
+            };
+            get_member(obj, &key_arc)
+        },
+        _ => Err(format!(
+            "Cannot read property '{}' of {}",
+            idx.to_display_string(),
+            obj.type_name()
+        )),
+    }
 }
 
 fn set_index(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
-    let key: Arc<str> = idx.to_display_string().into();
-    set_member(obj, &key, val)
+    match obj {
+        Value::Array(a) => {
+            let i = match idx {
+                Value::Number(n) => *n as usize,
+                _ => {
+                    return Err(format!(
+                        "Array index must be number, got {}",
+                        idx.type_name()
+                    ));
+                }
+            };
+            let mut arr = a.borrow_mut();
+            while arr.len() <= i {
+                arr.push(Value::Null);
+            }
+            arr[i] = val;
+            Ok(())
+        }
+        Value::Object(_) => object_set(obj, idx, val),
+        _ => Err(format!("Cannot set property of {}", obj.type_name())),
+    }
 }
 
 /// Run a chunk with every capability linked into this `tishlang_vm` build (tests, embedders).

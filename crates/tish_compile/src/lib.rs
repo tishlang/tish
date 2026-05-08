@@ -106,6 +106,28 @@ fn factory() {
         );
     }
 
+    /// `value_call` must take `&Value` to a **local** (`let _callee = (<expr>).clone(); … &_callee`):
+    /// `&<temporary>` can dangle in release, and `let _callee = <ident>` would move globals like `Symbol`.
+    #[test]
+    fn native_emit_value_call_materializes_callee() {
+        use std::path::PathBuf;
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest.join("../../tests/core/symbol.tish").canonicalize().unwrap();
+        let (rust, _, _, _) = compile_project_full(&path, path.parent(), &[], true).unwrap();
+        assert!(
+            rust.contains("let _callee = (tishlang_runtime::get_index"),
+            "fixture should bracket-call via get_index with callee stored in a local"
+        );
+        assert!(
+            !rust.contains("let _callee = &tishlang_runtime::get_index"),
+            "expected callee materialization, found reference-to-temporary pattern"
+        );
+        assert!(
+            rust.contains("tishlang_runtime::value_call"),
+            "expected value_call via runtime re-export for nested Cargo builds"
+        );
+    }
+
     #[test]
     fn loop_var_decl_clone_via_project_full() {
         // With the inference pass, `let outerVar = 42` is inferred as f64 (Copy) — no clone needed.

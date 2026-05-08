@@ -13,14 +13,3 @@ pub fn fetch_all_promise(args: Vec<Value>) -> Value {
 pub fn fetch_async_promise(args: Vec<Value>) -> Value {
     fetch_promise(args)
 }
-
-pub fn await_promise(v: Value) -> Value {
-    if let Value::Promise(p) = v {
-        match p.block_until_settled() {
-            Ok(val) => val,
-            Err(rejection) => rejection,
-        }
-    } else {
-        v
-    }
-}

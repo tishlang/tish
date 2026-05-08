@@ -63,7 +63,7 @@ pub fn regexp_exec(re: &mut TishRegExp, input: &str) -> Value {
                 };
             }
 
-            Value::Object(Rc::new(RefCell::new(obj)))
+            Value::object(obj)
         }
         Ok(None) | Err(_) => {
             if re.flags.global || re.flags.sticky {

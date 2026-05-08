@@ -3,7 +3,6 @@
 mod hooks;
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
 
 pub use hooks::{
@@ -15,7 +14,9 @@ pub use hooks::{
 
 use tishlang_core::{ObjectMap, Value, VmRef};
 
-/// Sentinel string for `Fragment` (native). JS/Lattish uses `Symbol`; hosts compare via equality.
+/// Sentinel string for `Fragment` (native). Full runtimes may also use `Symbol.for("tish.fragment")`
+/// when the global `Symbol` is present; [`is_fragment_tag`] accepts both that registry symbol and
+/// this string for compatibility.
 pub const FRAGMENT_SENTINEL: &str = "__tish_ui_Fragment__";
 
 /// `Fragment` marker value for `h(Fragment, null, children)`.
@@ -25,7 +26,11 @@ pub fn fragment_value() -> Value {
 
 /// Returns true if `tag` refers to [`fragment_value`].
 pub fn is_fragment_tag(tag: &Value) -> bool {
-    matches!(tag, Value::String(s) if s.as_ref() == FRAGMENT_SENTINEL)
+    match tag {
+        Value::String(s) => s.as_ref() == FRAGMENT_SENTINEL,
+        Value::Symbol(s) => s.registry_key.as_deref() == Some("tish.fragment"),
+        _ => false,
+    }
 }
 
 /// `text(s)` helper — returns string as `Value::String` for JSX text nodes.
@@ -49,7 +54,7 @@ pub fn ui_h(args: &[Value]) -> Value {
         let mut merged = if matches!(props, Value::Null) {
             ObjectMap::default()
         } else if let Value::Object(obj) = props {
-            obj.borrow().clone()
+            obj.borrow().strings.clone()
         } else {
             ObjectMap::default()
         };
@@ -59,7 +64,7 @@ pub fn ui_h(args: &[Value]) -> Value {
                 Value::Array(VmRef::new(children_vec.clone())),
             );
         }
-        return f(&[Value::Object(VmRef::new(merged))]);
+        return f(&[Value::object(merged)]);
     }
 
     if is_fragment_tag(&tag) {
@@ -109,7 +114,7 @@ fn vnode_element(tag: Arc<str>, props: Value, children: Vec<Value>) -> Value {
     );
     m.insert(Arc::from("children"), Value::Array(VmRef::new(children)));
     m.insert(Arc::from("_el"), Value::Null);
-    Value::Object(VmRef::new(m))
+    Value::object(m)
 }
 
 fn vnode_fragment(children: Vec<Value>) -> Value {
@@ -118,7 +123,7 @@ fn vnode_fragment(children: Vec<Value>) -> Value {
     m.insert(Arc::from("props"), Value::Null);
     m.insert(Arc::from("children"), Value::Array(VmRef::new(children)));
     m.insert(Arc::from("_el"), Value::Null);
-    Value::Object(VmRef::new(m))
+    Value::object(m)
 }
 
 /// Pluggable UI backend (Floem, DOM, SwiftUI, …). Main-thread / single-threaded by default.

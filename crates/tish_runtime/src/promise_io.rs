@@ -1,8 +1,5 @@
 //! Promises carrying only Send payloads (string results for text(), etc.).
 
-use std::cell::RefCell;
-use tishlang_core::VmRef;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tishlang_core::{ObjectMap, TishPromise, Value};
 use tokio::sync::oneshot;
@@ -11,7 +8,7 @@ fn error_value(msg: String) -> Value {
     let mut obj: ObjectMap = ObjectMap::with_capacity(2);
     obj.insert(Arc::from("error"), Value::String(msg.into()));
     obj.insert(Arc::from("ok"), Value::Bool(false));
-    Value::Object(VmRef::new(obj))
+    Value::object(obj)
 }
 
 pub struct StringResultPromise {

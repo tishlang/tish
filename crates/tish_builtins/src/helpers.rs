@@ -1,9 +1,6 @@
 //! Common helper functions used across builtin implementations.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
-use tishlang_core::VmRef;
 use tishlang_core::{ObjectMap, Value};
 
 /// Normalize an array index, handling negative indices.
@@ -26,7 +23,7 @@ pub fn normalize_index(idx: &Value, len: i64, default: usize) -> usize {
 pub fn make_error_value(e: impl std::fmt::Display) -> Value {
     let mut obj = ObjectMap::with_capacity(1);
     obj.insert(Arc::from("error"), Value::String(e.to_string().into()));
-    Value::Object(VmRef::new(obj))
+    Value::object(obj)
 }
 
 /// Extract a number from a Value, returning None for non-numbers.

@@ -84,6 +84,7 @@ fn format_value_styled_inner(value: &Value, colors: bool, quote_strings: bool) -
         Value::Object(obj) => {
             let inner: Vec<String> = obj
                 .borrow()
+                .strings
                 .iter()
                 .map(|(k, v)| {
                     format!(
@@ -95,6 +96,14 @@ fn format_value_styled_inner(value: &Value, colors: bool, quote_strings: bool) -
                 .collect();
             let sep = format!("{PUNCT}, {RESET}");
             format!("{PUNCT}{{{RESET} {} {PUNCT}}}{RESET}", inner.join(&sep))
+        }
+        Value::Symbol(s) => {
+            let body = s
+                .description
+                .as_ref()
+                .map(|d| d.as_ref())
+                .unwrap_or("");
+            format!("{SPECIAL}Symbol({body}){RESET}")
         }
         Value::Function(_) => format!("{SPECIAL}[Function]{RESET}"),
         Value::Promise(_) => format!("{SPECIAL}[object Promise]{RESET}"),

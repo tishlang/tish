@@ -395,10 +395,10 @@ pub fn native_create_root(args: &[Value]) -> Value {
         drain_flush_queue();
         Value::Null
     });
-    Value::Object(VmRef::new(ObjectMap::from([(
+    Value::object(ObjectMap::from([(
         std::sync::Arc::from("render"),
         render_fn,
-    )])))
+    )]))
 }
 
 /// Request a re-render (coalesced; safe if called during flush).

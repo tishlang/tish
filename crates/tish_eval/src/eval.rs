@@ -15,7 +15,11 @@ use tishlang_ast::{
 
 #[cfg(any(feature = "fs", feature = "process"))]
 use crate::natives;
-use crate::value::{PropMap, Value};
+use ahash::AHashMap;
+
+use crate::value::{
+    eval_object_get, eval_object_has, eval_object_set, EvalObjectData, PropMap, Value,
+};
 
 struct Scope {
     vars: PropMap,
@@ -98,7 +102,7 @@ impl Evaluator {
             console.insert("error".into(), Value::Native(natives::console_error));
             s.set(
                 "console".into(),
-                Value::Object(Rc::new(RefCell::new(console))),
+                Value::object(console),
                 true,
             );
             s.set("parseInt".into(), Value::Native(natives::parse_int), true);
@@ -144,7 +148,7 @@ impl Evaluator {
             math.insert("E".into(), Value::Number(std::f64::consts::E));
             s.set(
                 "Math".into(),
-                Value::Object(Rc::new(RefCell::new(math))),
+                Value::object(math),
                 true,
             );
 
@@ -156,7 +160,7 @@ impl Evaluator {
             );
             s.set(
                 "JSON".into(),
-                Value::Object(Rc::new(RefCell::new(json))),
+                Value::object(json),
                 true,
             );
 
@@ -171,7 +175,7 @@ impl Evaluator {
             );
             s.set(
                 "Object".into(),
-                Value::Object(Rc::new(RefCell::new(object))),
+                Value::object(object),
                 true,
             );
 
@@ -179,7 +183,7 @@ impl Evaluator {
             array_obj.insert("isArray".into(), Value::Native(natives::array_is_array));
             s.set(
                 "Array".into(),
-                Value::Object(Rc::new(RefCell::new(array_obj))),
+                Value::object(array_obj),
                 true,
             );
 
@@ -190,7 +194,7 @@ impl Evaluator {
             );
             s.set(
                 "String".into(),
-                Value::Object(Rc::new(RefCell::new(string_obj))),
+                Value::object(string_obj),
                 true,
             );
 
@@ -198,10 +202,15 @@ impl Evaluator {
             date.insert("now".into(), Value::Native(natives::date_now));
             s.set(
                 "Date".into(),
-                Value::Object(Rc::new(RefCell::new(date))),
+                Value::object(date),
                 true,
             );
 
+            s.set(
+                "Symbol".into(),
+                crate::value_convert::core_to_eval(tishlang_builtins::symbol::symbol_object()),
+                true,
+            );
             s.set(
                 "Uint8Array".into(),
                 crate::value_convert::core_to_eval(
@@ -596,7 +605,7 @@ impl Evaluator {
                 for spec in specifiers {
                     match spec {
                         ImportSpecifier::Named { name, alias, .. } => {
-                            let v = exports.get(name.as_ref()).ok_or_else(|| {
+                            let v = exports.strings.get(name.as_ref()).ok_or_else(|| {
                                 EvalError::Error(format!("Module does not export '{}'", name))
                             })?;
                             let bind = alias.as_deref().unwrap_or(name.as_ref());
@@ -606,7 +615,7 @@ impl Evaluator {
                             scope.set(Arc::clone(name), exports_val.clone(), false);
                         }
                         ImportSpecifier::Default { name, .. } => {
-                            let v = exports.get("default").ok_or_else(|| {
+                            let v = exports.strings.get("default").ok_or_else(|| {
                                 EvalError::Error("Module does not have default export".to_string())
                             })?;
                             scope.set(Arc::clone(name), v.clone(), false);
@@ -702,7 +711,7 @@ impl Evaluator {
         }
         *self.current_dir.borrow_mut() = parent_dir;
         self.scope = prev_scope;
-        let exports_val = Value::Object(Rc::new(RefCell::new(exports)));
+        let exports_val = Value::object(exports);
         self.module_cache
             .borrow_mut()
             .insert(path, exports_val.clone());
@@ -751,7 +760,7 @@ impl Evaluator {
                     exports.insert("isDir".into(), Value::Native(natives::is_dir));
                     exports.insert("readDir".into(), Value::Native(natives::read_dir));
                     exports.insert("mkdir".into(), Value::Native(natives::mkdir));
-                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
+                    return Ok(Value::object(exports));
                 }
                 #[cfg(not(feature = "fs"))]
                 {
@@ -768,7 +777,7 @@ impl Evaluator {
                     exports.insert("fetchAll".into(), Value::Native(Self::fetch_all_native));
                     exports.insert("serve".into(), Value::Serve);
                     exports.insert("Promise".into(), Value::PromiseConstructor);
-                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
+                    return Ok(Value::object(exports));
                 }
                 #[cfg(not(feature = "http"))]
                 {
@@ -797,7 +806,7 @@ impl Evaluator {
                         "clearInterval".into(),
                         Value::Native(Self::clear_interval_native),
                     );
-                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
+                    return Ok(Value::object(exports));
                 }
                 #[cfg(not(feature = "timers"))]
                 {
@@ -820,7 +829,7 @@ impl Evaluator {
                         "wsBroadcast".into(),
                         Value::Native(Self::ws_broadcast_native),
                     );
-                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
+                    return Ok(Value::object(exports));
                 }
                 #[cfg(not(feature = "ws"))]
                 {
@@ -847,19 +856,19 @@ impl Evaluator {
                         .collect();
                     exports.insert(
                         "env".into(),
-                        Value::Object(Rc::new(RefCell::new(env_obj.clone()))),
+                        Value::object(env_obj.clone()),
                     );
                     let mut process_obj = PropMap::default();
                     process_obj.insert("exit".into(), Value::Native(natives::process_exit));
                     process_obj.insert("cwd".into(), Value::Native(natives::process_cwd));
                     process_obj.insert("exec".into(), Value::Native(natives::process_exec));
                     process_obj.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv))));
-                    process_obj.insert("env".into(), Value::Object(Rc::new(RefCell::new(env_obj))));
+                    process_obj.insert("env".into(), Value::object(env_obj));
                     exports.insert(
                         "process".into(),
-                        Value::Object(Rc::new(RefCell::new(process_obj))),
+                        Value::object(process_obj),
                     );
-                    return Ok(Value::Object(Rc::new(RefCell::new(exports))));
+                    return Ok(Value::object(exports));
                 }
                 #[cfg(not(feature = "process"))]
                 {
@@ -883,9 +892,13 @@ impl Evaluator {
             Value::Object(m) => m.borrow().clone(),
             _ => return Err(EvalError::Error("Built-in module must be object".into())),
         };
-        exports.get(export_name).cloned().ok_or_else(|| {
-            EvalError::Error(format!("Module {} does not export '{}'", spec, export_name))
-        })
+        exports
+            .strings
+            .get(export_name)
+            .cloned()
+            .ok_or_else(|| {
+                EvalError::Error(format!("Module {} does not export '{}'", spec, export_name))
+            })
     }
 
     fn eval_expr(&self, expr: &Expr) -> Result<Value, EvalError> {
@@ -1755,23 +1768,35 @@ impl Evaluator {
                 Ok(Value::Array(Rc::new(RefCell::new(vals))))
             }
             Expr::Object { props, .. } => {
-                let mut map = PropMap::default();
+                let mut data = EvalObjectData::default();
                 for prop in props {
                     match prop {
                         tishlang_ast::ObjectProp::KeyValue(k, v) => {
-                            map.insert(Arc::clone(k), self.eval_expr(v)?);
+                            data
+                                .strings
+                                .insert(Arc::clone(k), self.eval_expr(v)?);
                         }
                         tishlang_ast::ObjectProp::Spread(e) => {
                             let spread_val = self.eval_expr(e)?;
                             if let Value::Object(obj) = spread_val {
-                                for (k, v) in obj.borrow().iter() {
-                                    map.insert(Arc::clone(k), v.clone());
+                                let b = obj.borrow();
+                                for (k, v) in b.strings.iter() {
+                                    data.strings.insert(Arc::clone(k), v.clone());
+                                }
+                                if let Some(ref sm) = b.symbols {
+                                    if data.symbols.is_none() {
+                                        data.symbols = Some(AHashMap::default());
+                                    }
+                                    let dm = data.symbols.as_mut().unwrap();
+                                    for (id, v) in sm.iter() {
+                                        dm.insert(*id, v.clone());
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                Ok(Value::Object(Rc::new(RefCell::new(map))))
+                Ok(Value::Object(Rc::new(RefCell::new(data))))
             }
             Expr::Assign { name, value, .. } => {
                 let v = self.eval_expr(value)?;
@@ -1802,6 +1827,7 @@ impl Evaluator {
                     Value::Null => "null".into(),
                     Value::Array(_) => "object".into(),
                     Value::Object(_) => "object".into(),
+                    Value::Symbol(_) => "symbol".into(),
                     Value::Function { .. } | Value::Native(_) => "function".into(),
                     Value::CoreFn(_) => "function".into(),
                     #[cfg(feature = "http")]
@@ -1932,7 +1958,9 @@ impl Evaluator {
                 let val = self.eval_expr(value)?;
                 match obj_val {
                     Value::Object(map) => {
-                        map.borrow_mut().insert(Arc::clone(prop), val.clone());
+                        map.borrow_mut()
+                            .strings
+                            .insert(Arc::clone(prop), val.clone());
                         Ok(val)
                     }
                     _ => Err(EvalError::Error(format!(
@@ -1962,16 +1990,9 @@ impl Evaluator {
                         arr_mut[idx] = val.clone();
                         Ok(val)
                     }
-                    Value::Object(map) => {
-                        let key: Arc<str> = match &idx_val {
-                            Value::Number(n) => n.to_string().into(),
-                            Value::String(s) => Arc::clone(s),
-                            _ => return Err(EvalError::Error(format!(
-                                "Object key must be string or number, got {:?}",
-                                idx_val
-                            ))),
-                        };
-                        map.borrow_mut().insert(key, val.clone());
+                    Value::Object(_) => {
+                        eval_object_set(&obj_val, &idx_val, val.clone())
+                            .map_err(EvalError::Error)?;
                         Ok(val)
                     }
                     _ => Err(EvalError::Error(format!(
@@ -2059,14 +2080,19 @@ impl Evaluator {
             BinOp::Shl => self.binop_int32(l, r, |a, b| Value::Number((a << b) as f64)),
             BinOp::Shr => self.binop_int32(l, r, |a, b| Value::Number((a >> b) as f64)),
             BinOp::In => {
-                let key: Arc<str> = match l {
-                    Value::String(s) => Arc::clone(s),
-                    Value::Number(n) => n.to_string().into(),
-                    _ => return Err(format!("'in' requires string or number key, got {:?}", l)),
-                };
                 let ok = match r {
-                    Value::Object(map) => map.borrow().contains_key(&key),
+                    Value::Object(_) => eval_object_has(r, l),
                     Value::Array(arr) => {
+                        let key: Arc<str> = match l {
+                            Value::String(s) => Arc::clone(s),
+                            Value::Number(n) => n.to_string().into(),
+                            _ => {
+                                return Err(format!(
+                                    "'in' requires string or number key on array, got {:?}",
+                                    l
+                                ))
+                            }
+                        };
                         key.as_ref() == "length"
                             || key
                                 .parse::<usize>()
@@ -2357,6 +2383,7 @@ impl Evaluator {
                 Value::Object(o) => {
                     let result = o
                         .borrow()
+                        .strings
                         .get(name.as_ref())
                         .cloned()
                         .unwrap_or(Value::Null);
@@ -2374,8 +2401,13 @@ impl Evaluator {
     /// Host `new`: `__construct` on objects; otherwise same callables as `call_func`, else null.
     fn construct_value(&self, callee: &Value, args: &[Value]) -> Result<Value, EvalError> {
         if let Value::Object(o) = callee {
-            if let Some(ctor) = o.borrow().get(&Arc::from("__construct")) {
-                return self.call_func(ctor, args);
+            if let Some(ctor) = o
+                .borrow()
+                .strings
+                .get("__construct")
+                .cloned()
+            {
+                return self.call_func(&ctor, args);
             }
         }
         match callee {
@@ -2395,6 +2427,12 @@ impl Evaluator {
 
     fn call_func(&self, f: &Value, args: &[Value]) -> Result<Value, EvalError> {
         match f {
+            Value::Object(o) => {
+                if let Some(call) = o.borrow().strings.get("__call").cloned() {
+                    return self.call_func(&call, args);
+                }
+                Err(EvalError::Error("Not a function".to_string()))
+            }
             Value::Native(native_fn) => native_fn(args).map_err(EvalError::Error),
             #[cfg(feature = "http")]
             Value::PromiseResolver(r) => {
@@ -2813,13 +2851,13 @@ impl Evaluator {
                     let mut err_obj: PropMap = PropMap::with_capacity(2);
                     err_obj.insert(Arc::from("status"), Value::Number(500.0));
                     err_obj.insert(Arc::from("body"), Value::String(v.to_string().into()));
-                    Value::Object(Rc::new(RefCell::new(err_obj)))
+                    Value::object(err_obj)
                 }
                 Err(e) => {
                     let mut err_obj: PropMap = PropMap::with_capacity(2);
                     err_obj.insert(Arc::from("status"), Value::Number(500.0));
                     err_obj.insert(Arc::from("body"), Value::String(e.to_string().into()));
-                    Value::Object(Rc::new(RefCell::new(err_obj)))
+                    Value::object(err_obj)
                 }
             };
 
@@ -2910,7 +2948,11 @@ impl Evaluator {
                 };
 
                 for prop in props {
-                    let val = obj.get(&prop.key).cloned().unwrap_or(Value::Null);
+                    let val = obj
+                        .strings
+                        .get(prop.key.as_ref())
+                        .cloned()
+                        .unwrap_or(Value::Null);
                     match &prop.value {
                         tishlang_ast::DestructElement::Ident(name, _) => {
                             scope.borrow_mut().set(Arc::clone(name), val, mutable);
@@ -2963,7 +3005,12 @@ impl Evaluator {
 
     fn get_prop(&self, obj: &Value, key: &str) -> Result<Value, String> {
         match obj {
-            Value::Object(map) => Ok(map.borrow().get(key).cloned().unwrap_or(Value::Null)),
+            Value::Object(map) => Ok(map
+                .borrow()
+                .strings
+                .get(key)
+                .cloned()
+                .unwrap_or(Value::Null)),
             Value::Array(arr) => {
                 if key == "length" {
                     Ok(Value::Number(arr.borrow().len() as f64))
@@ -3042,14 +3089,7 @@ impl Evaluator {
                 };
                 Ok(arr.borrow().get(idx).cloned().unwrap_or(Value::Null))
             }
-            Value::Object(map) => {
-                let key: Arc<str> = match index {
-                    Value::Number(n) => n.to_string().into(),
-                    Value::String(s) => Arc::clone(s),
-                    _ => return Ok(Value::Null),
-                };
-                Ok(map.borrow().get(&key).cloned().unwrap_or(Value::Null))
-            }
+            Value::Object(_) => Ok(eval_object_get(obj, index).unwrap_or(Value::Null)),
             #[cfg(feature = "http")]
             Value::Promise(_) | Value::CorePromise(_) => {
                 let key = match index {
@@ -3162,7 +3202,7 @@ impl Evaluator {
     fn json_parse_object(s: &str) -> Result<Value, ()> {
         let s = s[1..].trim_start();
         if s.starts_with('}') {
-            return Ok(Value::Object(Rc::new(RefCell::new(PropMap::default()))));
+            return Ok(Value::object(PropMap::default()));
         }
         let mut map = PropMap::default();
         let mut rest = s;
@@ -3191,7 +3231,7 @@ impl Evaluator {
             }
             rest = rest[1..].trim_start();
         }
-        Ok(Value::Object(Rc::new(RefCell::new(map))))
+        Ok(Value::object(map))
     }
 
     fn json_parse_one(s: &str) -> Result<(Value, &str), ()> {
@@ -3278,6 +3318,7 @@ impl Evaluator {
             Value::Object(map) => {
                 let mut entries: Vec<_> = map
                     .borrow()
+                    .strings
                     .iter()
                     .map(|(k, v)| {
                         (
@@ -3300,6 +3341,7 @@ impl Evaluator {
                         .join(",")
                 )
             }
+            Value::Symbol(_) => "null".to_string(),
             Value::Function { .. } | Value::Native(_) => "null".to_string(),
             #[cfg(feature = "http")]
             Value::CorePromise(_) => "null".to_string(),
@@ -3333,6 +3375,7 @@ impl Evaluator {
         if let Some(Value::Object(obj)) = args.first() {
             let keys: Vec<Value> = obj
                 .borrow()
+                .strings
                 .keys()
                 .map(|k| Value::String(Arc::clone(k)))
                 .collect();
@@ -3344,7 +3387,7 @@ impl Evaluator {
 
     fn object_values(args: &[Value]) -> Result<Value, String> {
         if let Some(Value::Object(obj)) = args.first() {
-            let values: Vec<Value> = obj.borrow().values().cloned().collect();
+            let values: Vec<Value> = obj.borrow().strings.values().cloned().collect();
             Ok(Value::Array(Rc::new(RefCell::new(values))))
         } else {
             Ok(Value::Array(Rc::new(RefCell::new(Vec::new()))))
@@ -3355,6 +3398,7 @@ impl Evaluator {
         if let Some(Value::Object(obj)) = args.first() {
             let entries: Vec<Value> = obj
                 .borrow()
+                .strings
                 .iter()
                 .map(|(k, v)| {
                     Value::Array(Rc::new(RefCell::new(vec![
@@ -3374,8 +3418,18 @@ impl Evaluator {
             let mut t = target.borrow_mut();
             for src in args.iter().skip(1) {
                 if let Value::Object(src_obj) = src {
-                    for (k, v) in src_obj.borrow().iter() {
-                        t.insert(Arc::clone(k), v.clone());
+                    let s = src_obj.borrow();
+                    for (k, v) in s.strings.iter() {
+                        t.strings.insert(Arc::clone(k), v.clone());
+                    }
+                    if let Some(ref sm) = s.symbols {
+                        if t.symbols.is_none() {
+                            t.symbols = Some(AHashMap::default());
+                        }
+                        let tm = t.symbols.as_mut().unwrap();
+                        for (id, v) in sm.iter() {
+                            tm.insert(*id, v.clone());
+                        }
                     }
                 }
             }
@@ -3398,9 +3452,9 @@ impl Evaluator {
                     }
                 }
             }
-            Ok(Value::Object(Rc::new(RefCell::new(map))))
+            Ok(Value::object(map))
         } else {
-            Ok(Value::Object(Rc::new(RefCell::new(PropMap::default()))))
+            Ok(Value::object(PropMap::default()))
         }
     }
 

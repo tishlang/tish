@@ -14,6 +14,22 @@ mod build;
 use std::path::Path;
 use tishlang_ast::Program;
 
+/// Features for the embeddable VM (`cranelift` / `llvm` backends): merge CLI capability flags
+/// (same set as `tish run` / `tish build --target native`) with features inferred from
+/// `import … from 'tish:…'`. Programs that use globals only (`Promise`, `fetch`, `setTimeout`)
+/// still need the former so [`tishlang_cranelift_runtime`] links `tishlang_vm` with matching gates.
+fn merged_embed_runtime_features(cli: &[String], program: &Program) -> Vec<String> {
+    let mut out = cli.to_vec();
+    for f in tishlang_compile::extract_native_import_features(program) {
+        if !out.contains(&f) {
+            out.push(f);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Error from native compilation.
 #[derive(Debug)]
 pub struct NativeError {
@@ -118,7 +134,7 @@ pub fn compile_to_native(
                 })?
             };
 
-            let cranelift_features = tishlang_compile::extract_native_import_features(&program);
+            let cranelift_features = merged_embed_runtime_features(features, &program);
             tishlang_cranelift::compile_chunk_to_native(&chunk, output_path, &cranelift_features)
                 .map_err(|e| NativeError {
                     message: e.to_string(),
@@ -160,7 +176,7 @@ pub fn compile_to_native(
                     message: e.to_string(),
                 })?
             };
-            let llvm_features = tishlang_compile::extract_native_import_features(&program);
+            let llvm_features = merged_embed_runtime_features(features, &program);
             tishlang_llvm::compile_chunk_to_native(&chunk, output_path, &llvm_features)
                 .map_err(|e| NativeError { message: e.message })
         }
@@ -249,7 +265,7 @@ pub fn compile_program_to_native(
                     message: e.to_string(),
                 })?
             };
-            let cranelift_features = tishlang_compile::extract_native_import_features(&program);
+            let cranelift_features = merged_embed_runtime_features(features, &program);
             tishlang_cranelift::compile_chunk_to_native(&chunk, output_path, &cranelift_features)
                 .map_err(|e| NativeError {
                     message: e.to_string(),
@@ -275,7 +291,7 @@ pub fn compile_program_to_native(
                     message: e.to_string(),
                 })?
             };
-            let llvm_features = tishlang_compile::extract_native_import_features(&program);
+            let llvm_features = merged_embed_runtime_features(features, &program);
             tishlang_llvm::compile_chunk_to_native(&chunk, output_path, &llvm_features)
                 .map_err(|e| NativeError { message: e.message })
         }

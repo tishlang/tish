@@ -5,10 +5,8 @@
 //! - **Connection**: `send(data)`, `close()`, `readyState` (1=OPEN), `receive()` / `receiveTimeout(ms)`
 //! - **Broadcast** (Node pattern): `server.clients.forEach(ws => ws.send(data))` or iterate room conns and `wsSend(ws, data)` (same as `ws.send(data)`)
 
-use std::cell::RefCell;
 use tishlang_core::VmRef;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -151,7 +149,7 @@ fn conn_id_from_value(v: &Value) -> Option<u32> {
         Value::Object(o) => {
             let b = o.borrow();
             // Direct conn: { _id, send, ... }
-            if let Some(idv) = b.get(&Arc::from("_id")) {
+            if let Some(idv) = b.strings.get("_id") {
                 if let Value::Number(n) = idv {
                     if n.is_finite() && *n >= 0.0 {
                         return Some(*n as u32);
@@ -159,7 +157,7 @@ fn conn_id_from_value(v: &Value) -> Option<u32> {
                 }
             }
             // Wrapper: { ws: conn, ... }
-            if let Some(ws) = b.get(&Arc::from("ws")) {
+            if let Some(ws) = b.strings.get("ws") {
                 return conn_id_from_value(ws);
             }
             None
@@ -221,7 +219,7 @@ fn conn_object(id: u32) -> Value {
             Some(s) => {
                 let mut ev: ObjectMap = ObjectMap::default();
                 ev.insert(Arc::from("data"), Value::String(s.into()));
-                Value::Object(VmRef::new(ev))
+                Value::object(ev)
             }
             None => Value::Null,
         }),
@@ -243,18 +241,18 @@ fn conn_object(id: u32) -> Value {
                 Some(s) => {
                     let mut ev: ObjectMap = ObjectMap::default();
                     ev.insert(Arc::from("data"), Value::String(s.into()));
-                    Value::Object(VmRef::new(ev))
+                    Value::object(ev)
                 }
                 None => Value::Null,
             }
         }),
     );
-    Value::Object(VmRef::new(obj))
+    Value::object(obj)
 }
 
 fn parse_port(args: &[Value]) -> Option<u16> {
     args.first().and_then(|v| match v {
-        Value::Object(o) => o.borrow().get(&Arc::from("port")).and_then(|v| match v {
+        Value::Object(o) => o.borrow().strings.get("port").and_then(|v| match v {
             Value::Number(n) if n.is_finite() && *n >= 0.0 => Some(*n as u16),
             _ => None,
         }),
@@ -485,7 +483,9 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
             .unwrap_or_default();
         let cb = args.get(2).cloned().unwrap_or(Value::Null);
         if event == "connection" {
-            so.borrow_mut().insert(Arc::from("_onConnection"), cb);
+            so.borrow_mut()
+                .strings
+                .insert(Arc::from("_onConnection"), cb);
         }
         Value::Null
     });
@@ -498,14 +498,20 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
         loop {
             let handle_n = {
                 let b = so.borrow();
-                match b.get(&Arc::from("_handle")).cloned().unwrap_or(Value::Null) {
+                match b
+                    .strings
+                    .get("_handle")
+                    .cloned()
+                    .unwrap_or(Value::Null)
+                {
                     Value::Number(n) if n.is_finite() && n >= 0.0 => n,
                     _ => break,
                 }
             };
             let cb = so
                 .borrow()
-                .get(&Arc::from("_onConnection"))
+                .strings
+                .get("_onConnection")
                 .cloned()
                 .unwrap_or(Value::Null);
             let ws = web_socket_server_accept(&[Value::Number(handle_n)]);
@@ -527,7 +533,8 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
         };
         let handle_n = so
             .borrow()
-            .get(&Arc::from("_handle"))
+            .strings
+            .get("_handle")
             .cloned()
             .unwrap_or(Value::Null);
         let timeout_ms = args.get(1).cloned().unwrap_or(Value::Number(100.0));
@@ -545,7 +552,7 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
     m.insert(Arc::from("on"), on_fn);
     m.insert(Arc::from("listen"), listen_fn);
     m.insert(Arc::from("acceptTimeout"), accept_timeout_fn);
-    Value::Object(VmRef::new(m))
+    Value::object(m)
 }
 
 #[cfg(test)]
@@ -560,7 +567,7 @@ mod tests {
         let opts = {
             let mut m: ObjectMap = ObjectMap::default();
             m.insert(Arc::from("port"), Value::Number(port as f64));
-            Value::Object(VmRef::new(m))
+            Value::object(m)
         };
 
         let handle = match web_socket_server_listen(std::slice::from_ref(&opts)) {
@@ -575,20 +582,21 @@ mod tests {
             };
             // Echo one message
             for _ in 0..50 {
-                let recv_fn = wso.borrow().get(&Arc::from("receive")).cloned();
+                let recv_fn = wso.borrow().strings.get("receive").cloned();
                 if let Some(Value::Function(rf)) = recv_fn {
                     let msg = rf(&[]);
                     if !matches!(msg, Value::Null) {
                         let data = match msg {
                             Value::Object(ev) => ev
                                 .borrow()
-                                .get(&Arc::from("data"))
+                                .strings
+                                .get("data")
                                 .map(|v| v.to_display_string())
                                 .unwrap_or_default(),
                             _ => String::new(),
                         };
                         if let Some(Value::Function(sf)) =
-                            wso.borrow().get(&Arc::from("send")).cloned()
+                            wso.borrow().strings.get("send").cloned()
                         {
                             let _ = sf(&[Value::String(data.into())]);
                         }
@@ -607,13 +615,13 @@ mod tests {
         let Value::Object(co) = client else {
             panic!("client not object");
         };
-        let send = co.borrow().get(&Arc::from("send")).cloned().unwrap();
+        let send = co.borrow().strings.get("send").cloned().unwrap();
         let Value::Function(send_f) = send else {
             panic!("no send");
         };
         let _ = send_f(&[Value::String("hello".into())]);
 
-        let recv = co.borrow().get(&Arc::from("receive")).cloned().unwrap();
+        let recv = co.borrow().strings.get("receive").cloned().unwrap();
         let Value::Function(recv_f) = recv else {
             panic!("no receive");
         };
@@ -630,7 +638,8 @@ mod tests {
         };
         let data = ev
             .borrow()
-            .get(&Arc::from("data"))
+            .strings
+            .get("data")
             .map(|v| v.to_display_string())
             .unwrap_or_default();
         assert_eq!(data, "hello");
@@ -645,7 +654,7 @@ mod tests {
         let opts = {
             let mut m: ObjectMap = ObjectMap::default();
             m.insert(Arc::from("port"), Value::Number(port as f64));
-            Value::Object(VmRef::new(m))
+            Value::object(m)
         };
 
         let handle = match web_socket_server_listen(std::slice::from_ref(&opts)) {
@@ -658,7 +667,7 @@ mod tests {
             let Value::Object(wso) = ws else {
                 panic!("accept failed");
             };
-            let recv_fn = wso.borrow().get(&Arc::from("receive")).cloned();
+            let recv_fn = wso.borrow().strings.get("receive").cloned();
             let Value::Function(rf) = recv_fn.unwrap() else {
                 panic!("no receive");
             };
@@ -669,7 +678,8 @@ mod tests {
                     let data = match &msg {
                         Value::Object(ev) => ev
                             .borrow()
-                            .get(&Arc::from("data"))
+                            .strings
+                            .get("data")
                             .map(|v| v.to_display_string())
                             .unwrap_or_default(),
                         _ => String::new(),
@@ -695,7 +705,7 @@ mod tests {
         let Value::Object(co) = client else {
             panic!("client not object");
         };
-        let send = co.borrow().get(&Arc::from("send")).cloned().unwrap();
+        let send = co.borrow().strings.get("send").cloned().unwrap();
         let Value::Function(send_f) = send else {
             panic!("no send");
         };
@@ -705,7 +715,8 @@ mod tests {
         // Client uses receiveTimeout like the agent
         let recv_timeout = co
             .borrow()
-            .get(&Arc::from("receiveTimeout"))
+            .strings
+            .get("receiveTimeout")
             .cloned()
             .unwrap();
         let Value::Function(recv_timeout_f) = recv_timeout else {
@@ -719,7 +730,8 @@ mod tests {
         };
         let data1 = ev1
             .borrow()
-            .get(&Arc::from("data"))
+            .strings
+            .get("data")
             .map(|v| v.to_display_string())
             .unwrap_or_default();
         assert!(
@@ -734,7 +746,8 @@ mod tests {
         };
         let data2 = ev2
             .borrow()
-            .get(&Arc::from("data"))
+            .strings
+            .get("data")
             .map(|v| v.to_display_string())
             .unwrap_or_default();
         assert!(

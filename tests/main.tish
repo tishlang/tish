@@ -2885,6 +2885,39 @@ fn __perf_run_core_switch() {
 }
 __perf_run_core_switch()
 
+fn __perf_run_core_symbol() {
+	// Symbol: typeof, for/keyFor, ===, object index, in, JSON.stringify, Object.keys
+	console.log(typeof Symbol("z"))
+
+	let u1 = Symbol("u")
+	let u2 = Symbol("u")
+	console.log(u1 === u2)
+
+	let r1 = Symbol["for"]("sym.tish.test")
+	let r2 = Symbol["for"]("sym.tish.test")
+	console.log(r1 === r2)
+
+	let r3 = Symbol["for"]("sym.tish.other")
+	console.log(r1 === r3)
+
+	console.log(Symbol["keyFor"](r1))
+	console.log(Symbol["keyFor"](u1))
+
+	let sk = Symbol("sk")
+	let o = { a: 1 }
+	o[sk] = 42
+	o["b"] = 2
+	console.log(o["a"])
+	console.log(o["b"])
+	console.log(sk in o)
+	console.log("a" in o)
+	console.log("c" in o)
+	console.log(JSON.stringify(o))
+	let keys = Object.keys(o)
+	console.log(keys.length)
+}
+__perf_run_core_symbol()
+
 fn __perf_run_core_tab_indent() {
 	// MVP test: tab vs space - use tabs for indentation
 	let x = 1

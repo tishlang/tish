@@ -1,5 +1,6 @@
 //! Unified Value type for Tish runtime values.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use ahash::AHashMap;
@@ -9,6 +10,47 @@ use crate::vmref::VmRef;
 /// Property map for objects and other `Arc<str>` → `Value` tables (VM globals, scopes).
 /// Uses a faster hasher than `std::collections::HashMap` for string-heavy workloads.
 pub type ObjectMap = AHashMap<Arc<str>, Value>;
+
+static NEXT_SYMBOL_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_symbol_id() -> u64 {
+    NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Allocate a unique symbol id (for `Symbol()` and first-time `Symbol.for` entries).
+#[inline]
+pub fn alloc_symbol_id() -> u64 {
+    next_symbol_id()
+}
+
+/// Primitive Symbol (ECMAScript-style): identity is `Arc` pointer equality.
+#[derive(Debug)]
+pub struct TishSymbol {
+    pub id: u64,
+    pub description: Option<Arc<str>>,
+    /// Set when created via `Symbol.for(key)` (global registry).
+    pub registry_key: Option<Arc<str>>,
+}
+
+impl TishSymbol {
+    /// Unique symbol (`Symbol("desc")`).
+    pub fn new_unique(description: Option<Arc<str>>) -> Arc<Self> {
+        Arc::new(Self {
+            id: next_symbol_id(),
+            description,
+            registry_key: None,
+        })
+    }
+
+    /// Registry symbol (`Symbol.for`): stable `id` for this registry key.
+    pub fn new_registry(id: u64, registry_key: Arc<str>, description: Option<Arc<str>>) -> Arc<Self> {
+        Arc::new(Self {
+            id,
+            description,
+            registry_key: Some(registry_key),
+        })
+    }
+}
 
 #[cfg(feature = "regex")]
 use fancy_regex::Regex;
@@ -222,7 +264,9 @@ pub enum Value {
     Bool(bool),
     Null,
     Array(VmRef<Vec<Value>>),
-    Object(VmRef<ObjectMap>),
+    Object(VmRef<ObjectData>),
+    /// ECMAScript-style primitive symbol (identity by `Arc`).
+    Symbol(Arc<TishSymbol>),
     Function(NativeFn),
     #[cfg(feature = "regex")]
     RegExp(VmRef<TishRegExp>),
@@ -230,6 +274,134 @@ pub enum Value {
     Promise(Arc<dyn TishPromise>),
     /// Opaque handle to a native Rust type (e.g. Polars DataFrame).
     Opaque(Arc<dyn TishOpaque>),
+}
+
+/// Ordinary object: string-keyed properties plus optional symbol-keyed side map.
+#[derive(Clone, Debug, Default)]
+pub struct ObjectData {
+    pub strings: ObjectMap,
+    pub symbols: Option<AHashMap<u64, Value>>,
+}
+
+impl ObjectData {
+    #[inline]
+    pub fn from_strings(strings: ObjectMap) -> Self {
+        Self {
+            strings,
+            symbols: None,
+        }
+    }
+
+    #[inline]
+    pub fn len_entries(&self) -> usize {
+        self.strings.len() + self.symbols.as_ref().map(|s| s.len()).unwrap_or(0)
+    }
+}
+
+/// Read a property from an object value.
+pub fn object_get(obj: &Value, key: &Value) -> Option<Value> {
+    let Value::Object(od) = obj else {
+        return None;
+    };
+    let b = od.borrow();
+    match key {
+        Value::Symbol(s) => b.symbols.as_ref()?.get(&s.id).cloned(),
+        Value::Number(n) => {
+            let k: Arc<str> = n.to_string().into();
+            b.strings.get(&k).cloned()
+        }
+        Value::String(k) => b.strings.get(k.as_ref()).cloned(),
+        _ => None,
+    }
+}
+
+/// Set a property on an object.
+pub fn object_set(obj: &Value, key: &Value, val: Value) -> Result<(), String> {
+    let Value::Object(od) = obj else {
+        return Err(format!("Cannot set property on {}", obj.type_name()));
+    };
+    let mut b = od.borrow_mut();
+    match key {
+        Value::Symbol(s) => {
+            if b.symbols.is_none() {
+                b.symbols = Some(AHashMap::default());
+            }
+            b.symbols.as_mut().unwrap().insert(s.id, val);
+            Ok(())
+        }
+        Value::Number(n) => {
+            b.strings.insert(n.to_string().into(), val);
+            Ok(())
+        }
+        Value::String(k) => {
+            b.strings.insert(Arc::clone(k), val);
+            Ok(())
+        }
+        _ => Err(format!(
+            "Object key must be string, number, or symbol, got {}",
+            key.type_name()
+        )),
+    }
+}
+
+/// `key in obj` for objects.
+pub fn object_has(obj: &Value, key: &Value) -> bool {
+    let Value::Object(od) = obj else {
+        return false;
+    };
+    let b = od.borrow();
+    match key {
+        Value::Symbol(s) => b.symbols.as_ref().is_some_and(|m| m.contains_key(&s.id)),
+        Value::Number(n) => {
+            let k: Arc<str> = n.to_string().into();
+            b.strings.contains_key(&k)
+        }
+        Value::String(k) => b.strings.contains_key(k.as_ref()),
+        _ => false,
+    }
+}
+
+/// Invoke a callable [`Value`]: [`Value::Function`], or an object exposing `__call` (e.g. `Symbol`).
+pub fn value_call(callee: &Value, args: &[Value]) -> Value {
+    match callee {
+        Value::Function(f) => f(args),
+        Value::Object(o) => {
+            let inner = o.borrow().strings.get("__call").cloned();
+            if let Some(inner) = inner {
+                return value_call(&inner, args);
+            }
+            panic!(
+                "Not a function: tried to call {:?} as a function (e.g. method on Null when read failed)",
+                callee
+            );
+        }
+        _ => panic!(
+            "Not a function: tried to call {:?} as a function (e.g. method on Null when read failed)",
+            callee
+        ),
+    }
+}
+
+/// Merge two object payloads (spread / VM MergeObject).
+pub fn merge_object_data(left: &VmRef<ObjectData>, right: &VmRef<ObjectData>) -> ObjectData {
+    let l = left.borrow();
+    let r = right.borrow();
+    let mut strings = ObjectMap::with_capacity(l.strings.len() + r.strings.len());
+    strings.extend(l.strings.iter().map(|(k, v)| (Arc::clone(k), v.clone())));
+    strings.extend(r.strings.iter().map(|(k, v)| (Arc::clone(k), v.clone())));
+    let mut symbols: Option<AHashMap<u64, Value>> = None;
+    if let Some(ls) = &l.symbols {
+        symbols = Some(ls.clone());
+    }
+    if let Some(rs) = &r.symbols {
+        match &mut symbols {
+            Some(m) => {
+                m.extend(rs.iter().map(|(k, v)| (*k, v.clone())));
+            }
+            None => symbols = Some(rs.clone()),
+        }
+    }
+    ObjectData { strings, symbols }
 }
 
 impl std::fmt::Debug for Value {
@@ -241,6 +413,7 @@ impl std::fmt::Debug for Value {
             Value::Null => write!(f, "Null"),
             Value::Array(arr) => write!(f, "Array({:?})", arr.borrow()),
             Value::Object(obj) => write!(f, "Object({:?})", obj.borrow()),
+            Value::Symbol(s) => write!(f, "Symbol({})", s.id),
             Value::Function(_) => write!(f, "Function"),
             #[cfg(feature = "regex")]
             Value::RegExp(re) => write!(
@@ -281,10 +454,18 @@ impl Value {
             Value::Object(obj) => {
                 let inner: Vec<String> = obj
                     .borrow()
+                    .strings
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k.as_ref(), v.to_display_string()))
                     .collect();
                 format!("{{{}}}", inner.join(", "))
+            }
+            Value::Symbol(s) => {
+                if let Some(d) = &s.description {
+                    format!("Symbol({})", d)
+                } else {
+                    "Symbol()".to_string()
+                }
             }
             Value::Function(_) => "[Function]".to_string(),
             Value::Promise(_) => "[object Promise]".to_string(),
@@ -331,6 +512,7 @@ impl Value {
             (Value::RegExp(a), Value::RegExp(b)) => VmRef::ptr_eq(a, b),
             (Value::Promise(a), Value::Promise(b)) => Arc::ptr_eq(a, b),
             (Value::Opaque(a), Value::Opaque(b)) => Arc::ptr_eq(a, b),
+            (Value::Symbol(a), Value::Symbol(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -364,7 +546,7 @@ impl Value {
 
     /// Create a new object Value from a property map.
     pub fn object(map: ObjectMap) -> Self {
-        Value::Object(VmRef::new(map))
+        Value::Object(VmRef::new(ObjectData::from_strings(map)))
     }
 
     /// Create an empty array Value.
@@ -374,7 +556,7 @@ impl Value {
 
     /// Create an empty object Value.
     pub fn empty_object() -> Self {
-        Value::Object(VmRef::new(ObjectMap::default()))
+        Value::Object(VmRef::new(ObjectData::default()))
     }
 
     /// Extract the number value, if this is a Number.
@@ -399,6 +581,7 @@ impl Value {
             Value::RegExp(_) => "object",
             Value::Promise(_) => "object",
             Value::Opaque(o) => o.type_name(),
+            Value::Symbol(_) => "symbol",
         }
     }
 
@@ -406,7 +589,12 @@ impl Value {
     pub fn completion_keys(&self) -> Vec<String> {
         match self {
             Value::Object(m) => {
-                let mut keys: Vec<String> = m.borrow().keys().map(|k| k.to_string()).collect();
+                let mut keys: Vec<String> = m
+                    .borrow()
+                    .strings
+                    .keys()
+                    .map(|k| k.to_string())
+                    .collect();
                 keys.sort();
                 keys
             }

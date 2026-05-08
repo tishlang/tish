@@ -30,6 +30,22 @@ impl std::fmt::Display for WasmError {
 
 impl std::error::Error for WasmError {}
 
+/// Map CLI / import capability names to `tishlang_wasm_runtime` Cargo features for wasm32-wasip1.
+/// The full `http` stack (tokio/socket2/…) does not build on WASI here; `http` maps to `promise`
+/// so `Promise` / `await` work. `ws` is skipped for the same reason.
+fn insert_wasi_runtime_cap(out: &mut BTreeSet<String>, cap: &str) {
+    match cap {
+        "http" => {
+            out.insert("promise".to_string());
+        }
+        "ws" => {}
+        "fs" | "process" | "promise" | "timers" | "regex" => {
+            out.insert(cap.to_string());
+        }
+        _ => {}
+    }
+}
+
 /// Resolve project, merge modules, and compile to bytecode chunk.
 /// Returns (Chunk, Program) so WASI can extract features for the runtime.
 fn resolve_and_compile_to_chunk(
@@ -221,11 +237,16 @@ pub fn compile_to_wasm(
 /// `wasmtime {output}.wasm`
 ///
 /// Requires: `rustup target add wasm32-wasip1`
+///
+/// `capabilities` is the same capability list as `tish build --target native` (e.g. from
+/// `native_build_features_from_cli`): merged with `import`-inferred features so globals like
+/// `Promise` / `fetch` work without a top-level `import … from 'http'`.
 pub fn compile_to_wasi(
     entry_path: &Path,
     project_root: Option<&Path>,
     output_path: &Path,
     optimize: bool,
+    capabilities: &[String],
 ) -> Result<(), WasmError> {
     let (chunk, program) = resolve_and_compile_to_chunk(entry_path, project_root, optimize)?;
     if has_external_native_imports(&program) {
@@ -233,7 +254,16 @@ pub fn compile_to_wasi(
             message: "WASI backend does not support external native imports (tish:egui, @scope/pkg). Built-in tish:fs, tish:http, tish:process, tish:timers are supported.".to_string(),
         });
     }
-    let wasi_features = extract_native_import_features(&program);
+    let mut wasi_feature_set: BTreeSet<String> = BTreeSet::new();
+    for f in extract_native_import_features(&program) {
+        insert_wasi_runtime_cap(&mut wasi_feature_set, f.as_str());
+    }
+    for f in capabilities {
+        insert_wasi_runtime_cap(&mut wasi_feature_set, f.as_str());
+    }
+    // Many scripts use global setTimeout without `import` from timers.
+    wasi_feature_set.insert("timers".to_string());
+
     let chunk_bytes = serialize(&chunk);
 
     let stem = output_path
@@ -277,10 +307,6 @@ pub fn compile_to_wasi(
         .to_string_lossy()
         .replace('\\', "/");
 
-    // Bundled perf (`tests/main.tish`) and many scripts use global setTimeout without a top-level
-    // `import` (so `extract_native_import_features` is empty). Always link timers for WASI VM.
-    let mut wasi_feature_set: BTreeSet<String> = wasi_features.into_iter().collect();
-    wasi_feature_set.insert("timers".to_string());
     let features_str = format!(
         ", features = [{}]",
         wasi_feature_set

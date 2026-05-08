@@ -11,5 +11,6 @@ pub mod helpers;
 pub mod math;
 pub mod object;
 pub mod string;
+pub mod symbol;
 
 pub use tishlang_core::Value;

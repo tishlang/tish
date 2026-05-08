@@ -10,13 +10,13 @@ use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse,
     CompletionTriggerKind, Diagnostic, DiagnosticSeverity, DiagnosticTag,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, Location, MarkupContent, MarkupKind, MessageType,
-    NumberOrString, OneOf, Position, Range, ReferenceParams, RenameOptions, RenameParams,
-    ServerCapabilities, ServerInfo, SymbolInformation, SymbolKind, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions, WorkspaceEdit,
-    WorkspaceSymbolParams,
+    DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, InitializeParams, InitializeResult, Location, MarkupContent,
+    MarkupKind, MessageType, NumberOrString, OneOf, Position, Range, ReferenceParams,
+    RenameOptions, RenameParams, ServerCapabilities, ServerInfo, SymbolInformation, SymbolKind,
+    SymbolTag, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    WorkDoneProgressOptions, WorkspaceEdit, WorkspaceSymbolParams,
 };
 use tower_lsp::lsp_types::{PrepareRenameResponse, TextEdit};
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -75,6 +75,49 @@ fn diag_range(line: u32, col: u32, text: &str) -> Range {
     Range {
         start: pos(line, col),
         end: pos(line, end_char.min(col + 80)),
+    }
+}
+
+/// `lsp-types` still requires the `deprecated` field on these structs, but marks it
+/// `#[deprecated(note = "Use tags instead")]`. Use `tags` with [`SymbolTag::Deprecated`] when a
+/// symbol is actually deprecated; this helper keeps a single `#[allow(deprecated)]` boundary.
+#[allow(deprecated)]
+fn symbol_information(
+    name: String,
+    kind: SymbolKind,
+    tags: Option<Vec<SymbolTag>>,
+    location: Location,
+    container_name: Option<String>,
+) -> SymbolInformation {
+    SymbolInformation {
+        name,
+        kind,
+        tags,
+        deprecated: None,
+        location,
+        container_name,
+    }
+}
+
+#[allow(deprecated)]
+fn document_symbol(
+    name: String,
+    detail: Option<String>,
+    kind: SymbolKind,
+    tags: Option<Vec<SymbolTag>>,
+    range: Range,
+    selection_range: Range,
+    children: Option<Vec<DocumentSymbol>>,
+) -> DocumentSymbol {
+    DocumentSymbol {
+        name,
+        detail,
+        kind,
+        tags,
+        deprecated: None,
+        range,
+        selection_range,
+        children,
     }
 }
 
@@ -314,7 +357,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let mut syms: Vec<tower_lsp::lsp_types::DocumentSymbol> = Vec::new();
+        let mut syms: Vec<DocumentSymbol> = Vec::new();
         for s in &program.statements {
             doc_symbol_stmt(s, &text, &mut syms);
         }
@@ -685,34 +728,32 @@ fn collect_workspace_syms(
             name, name_span, ..
         } => {
             if name.to_lowercase().contains(query) {
-                out.push(SymbolInformation {
-                    name: name.to_string(),
-                    kind: SymbolKind::FUNCTION,
-                    tags: None,
-                    deprecated: None,
-                    location: Location {
+                out.push(symbol_information(
+                    name.to_string(),
+                    SymbolKind::FUNCTION,
+                    None,
+                    Location {
                         uri: uri.clone(),
                         range: span_to_range(name_span, text),
                     },
-                    container_name: None,
-                });
+                    None,
+                ));
             }
         }
         tishlang_ast::Statement::VarDecl {
             name, name_span, ..
         } => {
             if name.to_lowercase().contains(query) {
-                out.push(SymbolInformation {
-                    name: name.to_string(),
-                    kind: SymbolKind::VARIABLE,
-                    tags: None,
-                    deprecated: None,
-                    location: Location {
+                out.push(symbol_information(
+                    name.to_string(),
+                    SymbolKind::VARIABLE,
+                    None,
+                    Location {
                         uri: uri.clone(),
                         range: span_to_range(name_span, text),
                     },
-                    container_name: None,
-                });
+                    None,
+                ));
             }
         }
         tishlang_ast::Statement::Block { statements, .. } => {
@@ -938,7 +979,7 @@ fn value_completion_kind_stmt(
 fn doc_symbol_stmt(
     s: &tishlang_ast::Statement,
     text: &str,
-    out: &mut Vec<tower_lsp::lsp_types::DocumentSymbol>,
+    out: &mut Vec<DocumentSymbol>,
 ) {
     match s {
         tishlang_ast::Statement::FunDecl {
@@ -950,20 +991,19 @@ fn doc_symbol_stmt(
         } => {
             let mut children = Vec::new();
             collect_child_syms(body, text, &mut children);
-            out.push(tower_lsp::lsp_types::DocumentSymbol {
-                name: name.to_string(),
-                detail: None,
-                kind: tower_lsp::lsp_types::SymbolKind::FUNCTION,
-                tags: None,
-                deprecated: None,
-                range: span_to_range(span, text),
-                selection_range: span_to_range(name_span, text),
-                children: if children.is_empty() {
+            out.push(document_symbol(
+                name.to_string(),
+                None,
+                SymbolKind::FUNCTION,
+                None,
+                span_to_range(span, text),
+                span_to_range(name_span, text),
+                if children.is_empty() {
                     None
                 } else {
                     Some(children)
                 },
-            });
+            ));
         }
         tishlang_ast::Statement::VarDecl {
             name,
@@ -971,16 +1011,15 @@ fn doc_symbol_stmt(
             span,
             ..
         } => {
-            out.push(tower_lsp::lsp_types::DocumentSymbol {
-                name: name.to_string(),
-                detail: None,
-                kind: tower_lsp::lsp_types::SymbolKind::VARIABLE,
-                tags: None,
-                deprecated: None,
-                range: span_to_range(span, text),
-                selection_range: span_to_range(name_span, text),
-                children: None,
-            });
+            out.push(document_symbol(
+                name.to_string(),
+                None,
+                SymbolKind::VARIABLE,
+                None,
+                span_to_range(span, text),
+                span_to_range(name_span, text),
+                None,
+            ));
         }
         tishlang_ast::Statement::Block { statements, .. } => {
             for x in statements {
@@ -994,7 +1033,7 @@ fn doc_symbol_stmt(
 fn collect_child_syms(
     s: &tishlang_ast::Statement,
     text: &str,
-    out: &mut Vec<tower_lsp::lsp_types::DocumentSymbol>,
+    out: &mut Vec<DocumentSymbol>,
 ) {
     match s {
         tishlang_ast::Statement::Block { statements, .. } => {

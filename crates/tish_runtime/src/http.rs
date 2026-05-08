@@ -10,8 +10,8 @@
 //! gets its own tiny_http connection pool but the accept queue is shared at
 //! the kernel level.
 //!
-//! The Tish handler closure captures `Value::Function(Rc<…>)` which is
-//! `!Send`, so handler execution stays on the VM (caller) thread:
+//! Without `send-values`, the handler captures `Value::Function` backed by
+//! `Rc` and is `!Send`, so handler execution stays on a single VM thread:
 //!
 //! ```text
 //!   worker 0 ──┐
@@ -24,14 +24,15 @@
 //! threaded VM guarantee. Cached `Date:` header + shared `Arc<str>` response
 //! bodies round out the hot-path optimisations.
 
-use std::cell::RefCell;
-use tishlang_core::VmRef;
-use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+
+#[cfg(not(feature = "send-values"))]
+use std::collections::VecDeque;
+#[cfg(not(feature = "send-values"))]
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -64,17 +65,17 @@ where
 }
 
 pub fn await_fetch(args: Vec<Value>) -> Value {
-    crate::native_promise::await_promise(crate::native_promise::fetch_promise(args))
+    crate::promise::await_promise(crate::native_promise::fetch_promise(args))
 }
 
 pub fn await_fetch_all(args: Vec<Value>) -> Value {
-    crate::native_promise::await_promise(crate::native_promise::fetch_all_promise(args))
+    crate::promise::await_promise(crate::native_promise::fetch_all_promise(args))
 }
 
 pub(crate) fn extract_method(options: Option<&Value>) -> String {
     options
         .and_then(|v| match v {
-            Value::Object(obj) => obj.borrow().get(&Arc::from("method")).cloned(),
+            Value::Object(obj) => obj.borrow().strings.get("method").cloned(),
             _ => None,
         })
         .map(|v| v.to_display_string().to_uppercase())
@@ -84,12 +85,13 @@ pub(crate) fn extract_method(options: Option<&Value>) -> String {
 pub(crate) fn extract_headers(options: Option<&Value>) -> Vec<(String, String)> {
     options
         .and_then(|v| match v {
-            Value::Object(obj) => obj.borrow().get(&Arc::from("headers")).cloned(),
+            Value::Object(obj) => obj.borrow().strings.get("headers").cloned(),
             _ => None,
         })
         .map(|v| match v {
             Value::Object(obj) => obj
                 .borrow()
+                .strings
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_display_string()))
                 .collect(),
@@ -102,7 +104,8 @@ pub(crate) fn extract_body(options: Option<&Value>) -> Option<String> {
     options.and_then(|v| match v {
         Value::Object(obj) => obj
             .borrow()
-            .get(&Arc::from("body"))
+            .strings
+            .get("body")
             .map(|v| v.to_display_string()),
         _ => None,
     })
@@ -112,7 +115,7 @@ pub(crate) fn build_error_response(error: &str) -> Value {
     let mut obj: ObjectMap = ObjectMap::with_capacity(2);
     obj.insert(Arc::from("error"), Value::String(error.into()));
     obj.insert(Arc::from("ok"), Value::Bool(false));
-    Value::Object(VmRef::new(obj))
+    Value::object(obj)
 }
 
 // -------- cached Date header -----------------------------------------------
@@ -194,12 +197,6 @@ pub fn cached_date_header_arc() -> Arc<String> {
     ensure_date_thread().load_full()
 }
 
-/// Back-compat String flavour (allocates). New hot-path code should use
-/// `cached_date_header_arc`.
-pub fn cached_date_header() -> String {
-    cached_date_header_arc().as_str().to_string()
-}
-
 // -------- Send-safe request/response primitives ----------------------------
 
 #[derive(Debug, Clone)]
@@ -270,10 +267,10 @@ impl RequestPrimitive {
             }
             obj.insert(
                 Arc::clone(&keys.headers),
-                Value::Object(VmRef::new(h)),
+                Value::object(h),
             );
             obj.insert(Arc::clone(&keys.body), Value::String(self.body.into()));
-            Value::Object(VmRef::new(obj))
+            Value::object(obj)
         })
     }
 }
@@ -331,16 +328,17 @@ impl ResponsePrimitive {
                 let obj_ref = obj.borrow();
 
                 let status = obj_ref
-                    .get(&Arc::from("status"))
+                    .strings
+                    .get("status")
                     .and_then(|v| match v {
                         Value::Number(n) => Some(*n as u16),
                         _ => None,
                     })
                     .unwrap_or(default_status);
 
-                let has_error = obj_ref.contains_key(&Arc::from("error"));
+                let has_error = obj_ref.strings.contains_key("error");
 
-                let body: ResponseBody = if let Some(bb) = obj_ref.get(&Arc::from("bodyBytes")) {
+                let body: ResponseBody = if let Some(bb) = obj_ref.strings.get("bodyBytes") {
                     match bb {
                         Value::Array(a) => {
                             let v: Vec<u8> = a
@@ -355,9 +353,9 @@ impl ResponsePrimitive {
                         }
                         _ => ResponseBody::Text(Arc::from(bb.to_display_string())),
                     }
-                } else if let Some(b) = obj_ref.get(&Arc::from("body")) {
+                } else if let Some(b) = obj_ref.strings.get("body") {
                     match b {
-                        Value::String(s) => ResponseBody::Text(Arc::clone(s)),
+                        Value::String(s) => ResponseBody::Text(Arc::clone(&s)),
                         Value::Array(a) => {
                             let borrow = a.borrow();
                             if !borrow.is_empty()
@@ -381,7 +379,8 @@ impl ResponsePrimitive {
                 } else if has_error {
                     ResponseBody::Text(Arc::from(
                         obj_ref
-                            .get(&Arc::from("error"))
+                            .strings
+                            .get("error")
                             .map(|v| v.to_display_string())
                             .unwrap_or_default(),
                     ))
@@ -396,10 +395,12 @@ impl ResponsePrimitive {
                 };
 
                 let headers = obj_ref
-                    .get(&Arc::from("headers"))
+                    .strings
+                    .get("headers")
                     .and_then(|v| match v {
                         Value::Object(h) => Some(
                             h.borrow()
+                                .strings
                                 .iter()
                                 .map(|(k, v)| (k.to_string(), v.to_display_string()))
                                 .collect(),
@@ -451,22 +452,25 @@ fn extract_file_from_response(value: &Value) -> Option<(u16, Vec<(String, String
         return None;
     };
     let obj_ref = obj.borrow();
-    let Value::String(file_path) = obj_ref.get(&Arc::from("file"))? else {
+    let Value::String(file_path) = obj_ref.strings.get("file")? else {
         return None;
     };
     let file_path = file_path.to_string();
     let status = obj_ref
-        .get(&Arc::from("status"))
+        .strings
+        .get("status")
         .and_then(|v| match v {
             Value::Number(n) => Some(*n as u16),
             _ => None,
         })
         .unwrap_or(200);
     let headers = obj_ref
-        .get(&Arc::from("headers"))
+        .strings
+        .get("headers")
         .and_then(|v| match v {
             Value::Object(h) => Some(
                 h.borrow()
+                    .strings
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_display_string()))
                     .collect(),
@@ -770,8 +774,6 @@ pub(crate) fn num_prefork_workers() -> usize {
 
 // -------- serve() ----------------------------------------------------------
 
-type Job = (RequestPrimitive, mpsc::SyncSender<ResponsePrimitive>);
-
 /// Start an HTTP server that handles requests using the provided handler function.
 ///
 /// When `send-values` is enabled (required for the `http` feature) the
@@ -996,6 +998,9 @@ fn serve_impl_with_factory(
 }
 
 #[cfg(not(feature = "send-values"))]
+type Job = (RequestPrimitive, mpsc::SyncSender<ResponsePrimitive>);
+
+#[cfg(not(feature = "send-values"))]
 fn serve_impl<F>(args: &[Value], handler: F) -> Value
 where
     F: Fn(&[Value]) -> Value,
@@ -1130,6 +1135,7 @@ fn worker_loop_direct(
     }
 }
 
+#[cfg(not(feature = "send-values"))]
 fn worker_loop(
     listener: std::net::TcpListener,
     dispatch: mpsc::SyncSender<Job>,
@@ -1200,12 +1206,6 @@ fn worker_loop(
             Err(_) => drop(req),
         }
     }
-}
-
-#[allow(dead_code)]
-pub fn create_server(port: u16) -> Result<tiny_http::Server, String> {
-    let addr = format!("0.0.0.0:{}", port);
-    tiny_http::Server::http(&addr).map_err(|e| format!("Failed to start server: {}", e))
 }
 
 // -------- public shims for alternate HTTP backends ------------------------

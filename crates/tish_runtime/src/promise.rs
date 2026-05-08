@@ -213,7 +213,7 @@ pub fn promise_object() -> Value {
         Arc::from("race"),
         Value::native(|args: &[Value]| promise_race(args)),
     );
-    Value::Object(VmRef::new(map))
+    Value::object(map)
 }
 
 /// `.then(onFulfilled, onRejected)` for a `Value::Promise` instance (VM `GetMember`).
@@ -232,4 +232,17 @@ pub fn promise_instance_catch(p: &Arc<dyn TishPromise>, args: &[Value]) -> Value
         on_fulfilled: None,
         on_rejected: args.first().cloned(),
     }))
+}
+
+/// Unwrap a settled [`Value::Promise`], or pass non-promise values through (VM `AwaitPromise` /
+/// `tish:http.await`). Fetch promises still require the `http` feature.
+pub fn await_promise(v: Value) -> Value {
+    if let Value::Promise(p) = v {
+        match p.block_until_settled() {
+            Ok(val) => val,
+            Err(rejection) => rejection,
+        }
+    } else {
+        v
+    }
 }

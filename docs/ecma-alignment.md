@@ -7,7 +7,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 | Clause | Decision | Notes |
 |--------|----------|-------|
 | §5 Notational | Follow | |
-| §6 Types | Follow | Undefined→Null; `typeof null` is `"null"`. Boolean, Number, String, Object. No Symbol/BigInt in MVP. |
+| §6 Types | Follow / Simplify | Undefined→Null; `typeof null` is `"null"`; `typeof` a symbol is `"symbol"`. Boolean, Number, String, Object. **Symbol:** primitive symbols + `Symbol.for` registry (see builtins). No BigInt in MVP. |
 | §7 Type conversion | Simplify | ToBoolean, ToNumber, ToString only as needed. No loose equality. |
 | §7.2 Testing | Follow | Strict Equality only |
 | §7.3 Operations on objects | Simplify | GetV, HasProperty, Call, CreateDataProperty. `new` is parsed and lowered to host `construct` (not full ECMA `[[Construct]]` on VM / interpreter / native Rust; JS compile target emits native `new`). |
@@ -19,7 +19,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 | §16 Errors | Follow | throw, try/catch |
 | §17 Literals | Follow | number, string, boolean, null, [], {}. Omit template/BigInt. |
 | §18 Global | Follow | Single global |
-| §19 Fundamental | Follow | Object, Function, Error. Symbol Omit. |
+| §19 Fundamental | Follow / Simplify | Object, Function, Error. **Symbol** subset: `Symbol`, `Symbol.for`, `Symbol.keyFor`; symbol-keyed own properties (optional side map); not full §19.4. |
 | §20–21 Numbers, Math, String | Follow subset | BigInt, Date, RegExp Omit or optional |
 | §22–24 Array | Follow (simplify) | TypedArray, Map, Set, JSON Omit or optional |
 | §25 Control abstraction | Simplify | Iteration follow; async/await Follow (simplify); Generator Omit; Promise Follow (ECMA-262 §27.2) |
@@ -59,7 +59,8 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **generators, yield** — Omit
 - **class, super, this** — Omit
 - **new** — Simplify (host `construct` on VM / interpreter / native Rust; native `new` on JS emit); see [LANGUAGE.md](LANGUAGE.md) “Semantics” and the site doc [Tish vs JavaScript](https://tishlang.com/docs/language/vs-javascript)
-- **delete, in, instanceof** — Omit or Simplify
+- **delete, instanceof** — Omit or Simplify
+- **`in`** — Simplify — `key in obj` for objects (string, number, or symbol key) and arrays (string `length` or numeric index); not full `HasProperty` for all exotic objects
 - **static import / export** — Simplify (builtins, `tish:*`, multi-file resolver); not arbitrary npm on all targets
 - **dynamic-import, import.meta** — Omit
 - **tagged-template, template-literal** — Omit
@@ -90,7 +91,8 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **decodeURI, encodeURI** — Follow
 - **ArrayBuffer, BigInt, Date, Map, Set** — Omit or optional
 - **Promise** — Follow (§27.2): `Promise(executor)`, `.then`, `.catch`, `.finally`, `Promise.resolve`, `Promise.reject`, `Promise.all`, `Promise.race`. Host APIs: `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`.
-- **Proxy, Reflect, Symbol** — Omit
+- **Proxy, Reflect** — Omit
+- **Symbol** — Simplify — `Symbol` / `Symbol.for` / `Symbol.keyFor`; object symbol properties; `typeof` is `"symbol"`; `JSON.stringify` skips symbol keys; `Object.keys` (and `values` / `entries`) string keys only
 - **RegExp** — Omit or optional
 
 ## Where Tish Differs from JavaScript
