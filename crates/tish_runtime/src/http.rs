@@ -65,11 +65,11 @@ where
 }
 
 pub fn await_fetch(args: Vec<Value>) -> Value {
-    crate::native_promise::await_promise(crate::native_promise::fetch_promise(args))
+    crate::promise::await_promise(crate::native_promise::fetch_promise(args))
 }
 
 pub fn await_fetch_all(args: Vec<Value>) -> Value {
-    crate::native_promise::await_promise(crate::native_promise::fetch_all_promise(args))
+    crate::promise::await_promise(crate::native_promise::fetch_all_promise(args))
 }
 
 pub(crate) fn extract_method(options: Option<&Value>) -> String {

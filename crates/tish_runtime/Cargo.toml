@@ -31,6 +31,9 @@ send-values = [
     "tishlang_core/send-values",
     "tishlang_builtins/send-values",
 ]
+# Promise / `await` on settled values only (no `fetch` / HTTP stack). Used for WASI and other
+# targets where the full `http` feature does not compile.
+promise = ["send-values"]
 # Phase-3 item 13: io_uring-backed accept + send loop (Linux only).
 # Disabled by default; enable with `--feature http,http-io-uring` on Linux
 # to pick up the experimental accept path.

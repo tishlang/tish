@@ -27,6 +27,15 @@ want_runtime() {
   return 1
 }
 
+# WASI embed enables `promise` (+ timers/fs/…) but not full `http` (tokio/socket2 do not build for wasm32-wasip1).
+# Tests that call outbound `fetch` / httpbin need the native HTTP stack — skip wasmtime for those.
+wasi_needs_full_http_runtime() {
+  case "$1" in
+    async_promise_settimeout) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Runtime detection
 node_cmd="${NODE:-node}"
 bun_cmd="${BUN:-bun}"
@@ -251,7 +260,11 @@ else
     fi
     # WASI (for wasmtime)
     if want_runtime wasi; then
-      if [ "$has_wasmtime" = true ]; then
+      if wasi_needs_full_http_runtime "$base"; then
+        rm -f "$compile_dir/${cache_key}_wasi.wasm"
+        echo -n "wasi-skip (needs full HTTP/fetch) "
+        wasi_skip=$((wasi_skip + 1))
+      elif [ "$has_wasmtime" = true ]; then
         if "$tish_bin" build "$tish_file" -o "$compile_dir/${cache_key}_wasi" --target wasi >/dev/null 2>&1; then
           echo -n "wasi"
           wasi_ok=$((wasi_ok + 1))
@@ -343,7 +356,9 @@ for perf_dir in "${perf_dirs[@]}"; do
 
     if want_runtime wasi; then
       echo "Tish (wasi):"
-      if [ "$has_wasmtime" = true ] && [[ -f "$wasi_bin" ]]; then
+      if wasi_needs_full_http_runtime "$base"; then
+        echo "(skipped: WASI embed has Promise/timers only, not outbound fetch — use vm/llvm for this test)"
+      elif [ "$has_wasmtime" = true ] && [[ -f "$wasi_bin" ]]; then
         run_with_timeout wasmtime --dir /tmp "$wasi_bin" 2>&1 || true
       else
         echo "(not built or wasmtime not found)"
@@ -398,7 +413,7 @@ for perf_dir in "${perf_dirs[@]}"; do
   want_runtime rust && [[ -x "$native_bin" ]] && run_with_timeout "$native_bin" >/dev/null 2>&1 || true
   want_runtime cranelift && [[ -x "$cranelift_bin" ]] && run_with_timeout "$cranelift_bin" >/dev/null 2>&1 || true
   want_runtime llvm && [[ -x "$llvm_bin" ]] && run_with_timeout "$llvm_bin" >/dev/null 2>&1 || true
-  want_runtime wasi && "$has_wasmtime"&& "$has_wasmtime" [ "$has_wasmtime" = true ] && [[ -f "$wasi_bin" ]] && run_with_timeout wasmtime "$wasi_bin" >/dev/null 2>&1 || true
+  want_runtime wasi && ! wasi_needs_full_http_runtime "$base" && "$has_wasmtime"&& "$has_wasmtime" [ "$has_wasmtime" = true ] && [[ -f "$wasi_bin" ]] && run_with_timeout wasmtime "$wasi_bin" >/dev/null 2>&1 || true
   want_runtime node && "$node_cmd" "$f" >/dev/null 2>&1 || true
   want_runtime bun && "$has_bun"&& "$has_bun" [ "$has_bun" = true ] && "$bun_cmd" "$f" >/dev/null 2>&1 || true
   want_runtime deno && "$has_deno"&& "$has_deno" [ "$has_deno" = true ] && "$deno_cmd" run --allow-all "$f" >/dev/null 2>&1 || true
@@ -462,7 +477,7 @@ for perf_dir in "${perf_dirs[@]}"; do
 
   # Tish WASI (wasmtime)
   wasi_ok=false
-  if want_runtime wasi && "$has_wasmtime"&& "$has_wasmtime" [ "$has_wasmtime" = true ] && [[ -f "$wasi_bin" ]]; then
+  if want_runtime wasi && ! wasi_needs_full_http_runtime "$base" && "$has_wasmtime"&& "$has_wasmtime" [ "$has_wasmtime" = true ] && [[ -f "$wasi_bin" ]]; then
     wasi_ok=true
     for _ in $(seq 1 "$n"); do
       t0=$(ms)

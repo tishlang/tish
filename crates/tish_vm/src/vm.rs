@@ -49,6 +49,7 @@ type ArrayMethodFn = NativeFn;
     not(any(
         feature = "fs",
         feature = "http",
+        feature = "promise",
         feature = "timers",
         feature = "process",
         feature = "ws"
@@ -63,6 +64,7 @@ fn value_object_from_map(m: ObjectMap) -> Value {
 #[cfg(any(
     feature = "fs",
     feature = "http",
+    feature = "promise",
     feature = "timers",
     feature = "process",
     feature = "ws"
@@ -78,6 +80,8 @@ pub fn all_compiled_capabilities() -> HashSet<String> {
     let mut s = HashSet::new();
     #[cfg(feature = "http")]
     s.insert("http".to_string());
+    #[cfg(feature = "promise")]
+    s.insert("promise".to_string());
     #[cfg(feature = "timers")]
     s.insert("timers".to_string());
     #[cfg(feature = "fs")]
@@ -96,6 +100,7 @@ pub fn all_compiled_capabilities() -> HashSet<String> {
     not(any(
         feature = "fs",
         feature = "http",
+        feature = "promise",
         feature = "timers",
         feature = "process",
         feature = "ws"
@@ -171,6 +176,16 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                 } else {
                     Value::Null
                 }
+            })),
+            _ => None,
+        };
+    }
+    #[cfg(all(feature = "promise", not(feature = "http")))]
+    if spec == "tish:http" && cap_allows(enabled, "promise") {
+        return match export_name {
+            "Promise" => Some(tishlang_runtime::promise_object()),
+            "await" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::await_promise(args.first().cloned().unwrap_or(Value::Null))
             })),
             _ => None,
         };
@@ -668,7 +683,6 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             "fetchAll".into(),
             Value::native(|args: &[Value]| tishlang_runtime::fetch_all_promise(args.to_vec())),
         );
-        g.insert("Promise".into(), tishlang_runtime::promise_object());
         g.insert(
             "registerStaticRoute".into(),
             Value::native(|args: &[Value]| {
@@ -719,6 +733,11 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
                 }
             }),
         );
+    }
+
+    #[cfg(any(feature = "http", feature = "promise"))]
+    if cap_allows(enabled, "http") || cap_allows(enabled, "promise") {
+        g.insert("Promise".into(), tishlang_runtime::promise_object());
     }
 
     g
@@ -1547,7 +1566,7 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow in AwaitPromise".to_string())?;
-                    #[cfg(feature = "http")]
+                    #[cfg(any(feature = "http", feature = "promise"))]
                     {
                         use tishlang_core::Value as V;
                         match v {
@@ -1565,7 +1584,7 @@ impl Vm {
                             other => self.stack.push(tishlang_runtime::await_promise(other)),
                         }
                     }
-                    #[cfg(not(feature = "http"))]
+                    #[cfg(not(any(feature = "http", feature = "promise")))]
                     {
                         self.stack.push(v);
                     }
@@ -1977,7 +1996,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             };
             Ok(Value::Function(method))
         }
-        #[cfg(feature = "http")]
+        #[cfg(any(feature = "http", feature = "promise"))]
         Value::Promise(p) => match key.as_ref() {
             "then" => {
                 let pc = Arc::clone(p);
@@ -2075,6 +2094,19 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
                 idx.to_display_string()
             )
         }),
+        #[cfg(any(feature = "http", feature = "promise"))]
+        Value::Promise(_) => {
+            let key_arc: std::sync::Arc<str> = match idx {
+                Value::String(s) => std::sync::Arc::clone(s),
+                _ => {
+                    return Err(format!(
+                        "Promise bracket access requires a string key, got {}",
+                        idx.type_name()
+                    ));
+                }
+            };
+            get_member(obj, &key_arc)
+        },
         _ => Err(format!(
             "Cannot read property '{}' of {}",
             idx.to_display_string(),

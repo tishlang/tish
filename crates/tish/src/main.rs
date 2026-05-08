@@ -612,11 +612,13 @@ fn build_file(
                 Some(p)
             }
         });
+        let features = native_build_features_from_cli(cli_features);
         return tishlang_wasm::compile_to_wasi(
             &input_path,
             project_root,
             Path::new(output_path),
             optimize,
+            &features,
         )
         .map_err(|e| e.to_string());
     }

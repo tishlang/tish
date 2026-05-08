@@ -2,7 +2,8 @@
 //!
 //! Two targets:
 //! - **Browser** (wasm32-unknown-unknown): use `--features browser`, wasm-bindgen, console output
-//! - **WASI/Wasmtime** (wasm32-wasip1): optional `timers` / `http` / … via Cargo features; `compile_to_wasi` enables `timers` by default.
+//! - **WASI/Wasmtime** (wasm32-wasip1): optional `timers` / `http` / … via Cargo features; `compile_to_wasi`
+//!   merges CLI capability flags with imports and always enables `timers` when globals use `setTimeout`.
 
 use tishlang_bytecode::deserialize;
 use tishlang_vm::Vm;

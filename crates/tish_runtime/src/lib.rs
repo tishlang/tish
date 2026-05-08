@@ -792,7 +792,7 @@ mod http_fetch;
 
 mod timers;
 
-#[cfg(feature = "http")]
+#[cfg(any(feature = "http", feature = "promise"))]
 mod promise;
 
 #[cfg(feature = "http")]
@@ -876,11 +876,11 @@ pub use timers::{
     set_interval as timer_set_interval, set_timeout as timer_set_timeout,
 };
 
-#[cfg(feature = "http")]
-pub use promise::{promise_instance_catch, promise_instance_then, promise_object};
+#[cfg(any(feature = "http", feature = "promise"))]
+pub use promise::{await_promise, promise_instance_catch, promise_instance_then, promise_object};
 
 #[cfg(feature = "http")]
-pub use native_promise::{await_promise, fetch_all_promise, fetch_async_promise, fetch_promise};
+pub use native_promise::{fetch_all_promise, fetch_async_promise, fetch_promise};
 
 // RegExp Support
 #[cfg(feature = "regex")]
