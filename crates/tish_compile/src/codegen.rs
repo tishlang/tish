@@ -541,6 +541,33 @@ pub fn compile_project_full(
     ),
     CompileError,
 > {
+    compile_project_full_emit(
+        entry_path,
+        project_root,
+        features,
+        optimize,
+        crate::NativeEmitMode::DesktopBin,
+        None,
+    )
+}
+
+/// Like [`compile_project_full`], with emit mode and optional feature cap (e.g. iOS sandbox).
+pub fn compile_project_full_emit(
+    entry_path: &Path,
+    project_root: Option<&Path>,
+    features: &[String],
+    optimize: bool,
+    emit_mode: crate::NativeEmitMode,
+    feature_cap: Option<&std::collections::HashSet<String>>,
+) -> Result<
+    (
+        String,
+        Vec<crate::resolve::ResolvedNativeModule>,
+        Vec<String>,
+        crate::resolve::NativeBuildArtifacts,
+    ),
+    CompileError,
+> {
     use crate::resolve;
     let root = project_root.unwrap_or_else(|| entry_path.parent().unwrap_or(Path::new(".")));
     let modules = resolve::resolve_project(entry_path, project_root).map_err(|e| CompileError {
@@ -573,13 +600,17 @@ pub fn compile_project_full(
             all_features.push(f);
         }
     }
-    let rust = compile_with_native_modules(
+    if let Some(cap) = feature_cap {
+        all_features.retain(|f| cap.contains(f));
+    }
+    let rust = compile_with_native_modules_emit(
         &merged.program,
         project_root,
         &all_features,
         &native_modules,
         &native_build.native_init,
         optimize,
+        emit_mode,
     )?;
     Ok((rust, native_modules, all_features, native_build))
 }
@@ -603,6 +634,26 @@ pub fn compile_with_native_modules(
     native_modules: &[crate::resolve::ResolvedNativeModule],
     native_init: &std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
     optimize: bool,
+) -> Result<String, CompileError> {
+    compile_with_native_modules_emit(
+        program,
+        project_root,
+        features,
+        native_modules,
+        native_init,
+        optimize,
+        crate::NativeEmitMode::DesktopBin,
+    )
+}
+
+pub fn compile_with_native_modules_emit(
+    program: &Program,
+    project_root: Option<&Path>,
+    features: &[String],
+    native_modules: &[crate::resolve::ResolvedNativeModule],
+    native_init: &std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
+    optimize: bool,
+    emit_mode: crate::NativeEmitMode,
 ) -> Result<String, CompileError> {
     let program = if optimize {
         tishlang_opt::optimize(program)
@@ -630,6 +681,13 @@ pub fn compile_with_native_modules(
             native_init.clone()
         };
     let mut g = Codegen::new_with_native_modules(project_root, features, map);
+    g.emit_mode = emit_mode;
+    g.has_native_ui_host = native_modules.iter().any(|m| {
+        m.package_name == "tish-macos"
+            || m.package_name == "tish-ios"
+            || m.crate_name == "tishlang_macos"
+            || m.crate_name == "tishlang_ios"
+    });
     g.emit_program(&program)?;
     Ok(g.output)
 }
@@ -680,6 +738,9 @@ struct Codegen {
     /// `try`/`throw` lowering uses `return Err` only at depth 0 (e.g. `run()`); inside native
     /// closures it must not return a `Result` from a `Value`-returning closure.
     value_fn_depth: u32,
+    emit_mode: crate::NativeEmitMode,
+    /// Program links `tish:macos` / `tish:ios` — skip HeadlessHost install.
+    has_native_ui_host: bool,
 }
 
 impl Codegen {
@@ -710,6 +771,8 @@ impl Codegen {
             program_has_jsx: false,
             program_fun_decl_names: std::collections::HashSet::new(),
             value_fn_depth: 0,
+            emit_mode: crate::NativeEmitMode::DesktopBin,
+            has_native_ui_host: false,
         }
     }
 
@@ -1269,25 +1332,29 @@ impl Codegen {
         if self.is_async {
             self.writeln("#[tokio::main]");
             self.writeln("async fn main() {");
-        } else {
+        } else if self.emit_mode == crate::NativeEmitMode::DesktopBin {
             self.writeln("fn main() {");
         }
-        self.indent += 1;
-        if self.is_async {
-            self.writeln("if let Err(e) = run().await {");
-        } else {
-            self.writeln("if let Err(e) = run() {");
+        if self.emit_mode == crate::NativeEmitMode::DesktopBin {
+            self.indent += 1;
+            if self.is_async {
+                self.writeln("if let Err(e) = run().await {");
+            } else {
+                self.writeln("if let Err(e) = run() {");
+            }
+            self.indent += 1;
+            self.writeln("eprintln!(\"Error: {}\", e);");
+            self.writeln("std::process::exit(1);");
+            self.indent -= 1;
+            self.writeln("}");
+            self.indent -= 1;
+            self.writeln("}");
+            self.writeln("");
         }
-        self.indent += 1;
-        self.writeln("eprintln!(\"Error: {}\", e);");
-        self.writeln("std::process::exit(1);");
-        self.indent -= 1;
-        self.writeln("}");
-        self.indent -= 1;
-        self.writeln("}");
-        self.writeln("");
         if self.is_async {
             self.writeln("async fn run() -> Result<(), Box<dyn std::error::Error>> {");
+        } else if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
+            self.writeln("pub fn run() -> Result<(), Box<dyn std::error::Error>> {");
         } else {
             self.writeln("fn run() -> Result<(), Box<dyn std::error::Error>> {");
         }
@@ -1489,7 +1556,7 @@ impl Codegen {
             self.writeln("let RegExp = Value::native(|args: &[Value]| regexp_new(args));");
         }
 
-        if self.program_has_jsx {
+        if self.program_has_jsx && !self.has_native_ui_host {
             self.writeln("install_thread_local_host(Box::new(HeadlessHost::default()));");
             self.writeln("let Fragment = fragment_value();");
             self.writeln("let h = Value::native(|args: &[Value]| ui_h(args));");
@@ -1537,6 +1604,20 @@ impl Codegen {
         self.writeln("Ok(())");
         self.indent -= 1;
         self.writeln("}");
+        if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
+            self.writeln("");
+            self.writeln("#[no_mangle]");
+            self.writeln("pub extern \"C\" fn tish_ios_launch() {");
+            self.indent += 1;
+            if self.is_async {
+                self.writeln("let rt = tokio::runtime::Runtime::new().expect(\"tokio runtime\");");
+                self.writeln("let _ = rt.block_on(run());");
+            } else {
+                self.writeln("let _ = run();");
+            }
+            self.indent -= 1;
+            self.writeln("}");
+        }
         Ok(())
     }
 

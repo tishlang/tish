@@ -10,6 +10,9 @@
 //! emit Rust using `Vec<f64>` / fixed primitives instead of `Value` on hot paths.
 
 mod build;
+mod config;
+
+pub use config::{ios_runtime_features, NativeArtifact, NativeBuildConfig};
 
 use std::path::Path;
 use tishlang_ast::Program;
@@ -57,6 +60,27 @@ pub fn compile_to_native(
     native_backend: &str,
     optimize: bool,
 ) -> Result<(), NativeError> {
+    compile_to_native_with_config(
+        entry_path,
+        project_root,
+        output_path,
+        features,
+        native_backend,
+        optimize,
+        &NativeBuildConfig::desktop(),
+    )
+}
+
+/// Compile a Tish project to a native binary or static library.
+pub fn compile_to_native_with_config(
+    entry_path: &Path,
+    project_root: Option<&Path>,
+    output_path: &Path,
+    features: &[String],
+    native_backend: &str,
+    optimize: bool,
+    build_config: &NativeBuildConfig,
+) -> Result<(), NativeError> {
     let backend = match native_backend {
         "rust" => Backend::Rust,
         "cranelift" => Backend::Cranelift,
@@ -73,25 +97,44 @@ pub fn compile_to_native(
 
     match backend {
         Backend::Rust => {
+            let ios_cap = build_config.cargo_target.as_ref().map(|_| {
+                ios_runtime_features(features)
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>()
+            });
+            let compile_features = if ios_cap.is_some() {
+                ios_runtime_features(features)
+            } else {
+                features.to_vec()
+            };
             let (rust_code, native_modules, effective_features, native_build) =
-                tishlang_compile::compile_project_full(
+                tishlang_compile::compile_project_full_emit(
                     entry_path,
                     project_root,
-                    features,
+                    &compile_features,
                     optimize,
+                    build_config.emit_mode,
+                    ios_cap.as_ref(),
                 )
                 .map_err(|e| NativeError {
                     message: e.to_string(),
                 })?;
 
-            crate::build::build_via_cargo(
+            let features_for_cargo = if build_config.cargo_target.is_some() {
+                ios_runtime_features(&effective_features)
+            } else {
+                effective_features
+            };
+
+            crate::build::build_via_cargo_with_config(
                 &rust_code,
                 native_modules,
                 output_path,
-                &effective_features,
+                &features_for_cargo,
                 &native_build.rust_dependencies_toml,
                 native_build.generated_native_rs.as_deref(),
                 project_root,
+                build_config,
             )
             .map_err(|e| NativeError { message: e })
         }

@@ -5,6 +5,8 @@ use std::path::Path;
 
 use tishlang_compile::ResolvedNativeModule;
 
+use crate::config::{NativeArtifact, NativeBuildConfig};
+
 /// `tishlang_runtime` Cargo feature names (subset of CLI / compile feature names).
 const RUNTIME_CARGO_FEATURES: &[&str] = &[
     "http",
@@ -78,11 +80,34 @@ pub fn build_via_cargo(
     generated_native_rs: Option<&str>,
     project_root: Option<&Path>,
 ) -> Result<(), String> {
-    let out_name = output_path
+    build_via_cargo_with_config(
+        rust_code,
+        native_modules,
+        output_path,
+        features,
+        extra_dependencies_toml,
+        generated_native_rs,
+        project_root,
+        &NativeBuildConfig::desktop(),
+    )
+}
+
+pub fn build_via_cargo_with_config(
+    rust_code: &str,
+    native_modules: Vec<ResolvedNativeModule>,
+    output_path: &Path,
+    features: &[String],
+    extra_dependencies_toml: &str,
+    generated_native_rs: Option<&str>,
+    project_root: Option<&Path>,
+    build_config: &NativeBuildConfig,
+) -> Result<(), String> {
+    let out_stem = output_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("tish_out");
-    let build_dir = tishlang_build_utils::create_build_dir("tish_build", out_name)?;
+    let cargo_name = tishlang_build_utils::cargo_target_name(out_stem);
+    let build_dir = tishlang_build_utils::create_build_dir("tish_build", out_stem)?;
 
     let runtime_path = tishlang_build_utils::find_runtime_path_for_project(project_root)?;
 
@@ -139,22 +164,42 @@ pub fn build_via_cargo(
     };
 
     let profile = nested_release_profile_toml();
+    let src_file = if build_config.artifact == NativeArtifact::StaticLib {
+        "lib.rs"
+    } else {
+        "main.rs"
+    };
+    let crate_section = if build_config.artifact == NativeArtifact::StaticLib {
+        format!(
+            r#"[lib]
+name = "{}"
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+"#,
+            cargo_name
+        )
+    } else {
+        format!(
+            r#"[[bin]]
+name = "{}"
+path = "src/main.rs"
+
+"#,
+            cargo_name
+        )
+    };
     let cargo_toml = format!(
         r#"[package]
 name = "tish_output"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "{}"
-path = "src/main.rs"
-
-{}
-
+{}{}
 [dependencies]
 tishlang_runtime = {{ path = {:?}{} }}
 {}{}"#,
-        out_name, profile, runtime_path, features_str, more_deps, ui_dep
+        crate_section, profile, runtime_path, features_str, more_deps, ui_dep
     );
 
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)
@@ -163,24 +208,44 @@ tishlang_runtime = {{ path = {:?}{} }}
         fs::write(build_dir.join("src/generated_native.rs"), gen)
             .map_err(|e| format!("Cannot write generated_native.rs: {}", e))?;
     }
-    fs::write(build_dir.join("src/main.rs"), rust_main)
-        .map_err(|e| format!("Cannot write main.rs: {}", e))?;
+    fs::write(build_dir.join("src").join(src_file), rust_main)
+        .map_err(|e| format!("Cannot write {}: {}", src_file, e))?;
 
     let workspace_target = Path::new(&runtime_path)
         .parent()
         .and_then(|p| p.parent())
         .map(|ws| ws.join("target"));
     let target_dir = workspace_target.filter(|p| p.exists());
+    let cross = build_config.cargo_target.as_deref();
+    let release_sub = if let Some(triple) = cross {
+        format!("{triple}/release")
+    } else {
+        "release".to_string()
+    };
     let binary_dir = target_dir
         .as_ref()
-        .map(|t| t.join("release"))
-        .unwrap_or_else(|| build_dir.join("target").join("release"));
+        .map(|t| t.join(&release_sub))
+        .unwrap_or_else(|| build_dir.join("target").join(&release_sub));
 
-    tishlang_build_utils::run_cargo_build(&build_dir, target_dir.as_deref())?;
+    tishlang_build_utils::run_cargo_build(&build_dir, target_dir.as_deref(), cross)?;
 
-    let binary = tishlang_build_utils::find_release_binary(&binary_dir, out_name)?;
-    let target = tishlang_build_utils::resolve_output_path(output_path, out_name);
-    tishlang_build_utils::copy_binary_to_output(&binary, &target)?;
+    let artifact = if build_config.artifact == NativeArtifact::StaticLib {
+        tishlang_build_utils::find_release_staticlib(&binary_dir, &cargo_name)?
+    } else {
+        tishlang_build_utils::find_release_binary(&binary_dir, &cargo_name)?
+    };
+    let target = if build_config.artifact == NativeArtifact::StaticLib {
+        if output_path.extension().is_some_and(|e| e == "a") {
+            output_path.to_path_buf()
+        } else if output_path.to_string_lossy().ends_with('/') || output_path.is_dir() {
+            output_path.join(format!("lib{out_stem}.a"))
+        } else {
+            output_path.with_extension("a")
+        }
+    } else {
+        tishlang_build_utils::resolve_output_path(output_path, out_stem)
+    };
+    tishlang_build_utils::copy_binary_to_output(&artifact, &target)?;
 
     Ok(())
 }
@@ -321,7 +386,7 @@ tishlang_runtime = {{ path = {:?}{} }}
         .map(|t| t.join("release"))
         .unwrap_or_else(|| build_dir.join("target").join("release"));
 
-    tishlang_build_utils::run_cargo_build(&build_dir, target_dir.as_deref())?;
+    tishlang_build_utils::run_cargo_build(&build_dir, target_dir.as_deref(), None)?;
 
     for i in 0..bins.len() {
         let stem = bins[i].0.as_str();

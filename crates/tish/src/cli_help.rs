@@ -530,6 +530,12 @@ pub(crate) struct BuildArgs {
         help_heading = "Options"
     )]
     pub features: Vec<String>,
+    /// Cross-compile to an Apple iOS triple (e.g. `aarch64-apple-ios-sim`). Implies `--crate-type staticlib`.
+    #[arg(long, value_name = "TRIPLE", help_heading = "Options")]
+    pub ios_triple: Option<String>,
+    /// Output artifact for `--target native` (default: `bin`; use `staticlib` for embedded iOS).
+    #[arg(long, value_name = "TYPE", default_value = "bin", help_heading = "Options")]
+    pub crate_type: String,
     #[arg(long, help_heading = "Options")]
     pub no_optimize: bool,
     /// For `--target js` project builds: emit `OUTPUT.js.map` and `//# sourceMappingURL=…` so JS/TS tools can jump to original `.tish` (implies `--no-optimize` for that build).

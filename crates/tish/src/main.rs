@@ -111,6 +111,8 @@ fn main() {
             &a.features,
             a.no_optimize || no_opt_env,
             a.source_map,
+            a.ios_triple.as_deref(),
+            &a.crate_type,
         ),
         Some(Commands::DumpAst { file }) => dump_ast(&file),
         None => {
@@ -568,6 +570,8 @@ fn build_file(
     cli_features: &[String],
     no_optimize: bool,
     source_map: bool,
+    ios_triple: Option<&str>,
+    crate_type: &str,
 ) -> Result<(), String> {
     let optimize = !no_optimize;
     let input_path = Path::new(input_path)
@@ -639,9 +643,31 @@ fn build_file(
     });
     let features: Vec<String> = native_build_features_from_cli(cli_features);
 
+    let build_config = if let Some(triple) = ios_triple {
+        tishlang_native::NativeBuildConfig::ios_staticlib(triple)
+    } else if crate_type == "staticlib" {
+        tishlang_native::NativeBuildConfig {
+            artifact: tishlang_native::NativeArtifact::StaticLib,
+            cargo_target: None,
+            emit_mode: tishlang_compile::NativeEmitMode::EmbeddedLib,
+        }
+    } else if crate_type != "bin" {
+        return Err(format!(
+            "Unknown --crate-type: {}. Use 'bin' or 'staticlib'.",
+            crate_type
+        ));
+    } else {
+        tishlang_native::NativeBuildConfig::desktop()
+    };
+
     if is_js {
         let source = fs::read_to_string(&input_path).map_err(|e| format!("{}", e))?;
         let program = tishlang_js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
+        if build_config.artifact != tishlang_native::NativeArtifact::Bin {
+            return Err(
+                "--crate-type staticlib / --ios-triple require a .tish entry file.".to_string(),
+            );
+        }
         tishlang_native::compile_program_to_native(
             &program,
             project_root,
@@ -652,13 +678,14 @@ fn build_file(
         )
         .map_err(|e| e.to_string())?;
     } else {
-        tishlang_native::compile_to_native(
+        tishlang_native::compile_to_native_with_config(
             &input_path,
             project_root,
             Path::new(output_path),
             &features,
             native_backend,
             optimize,
+            &build_config,
         )
         .map_err(|e| e.to_string())?;
     }
@@ -667,7 +694,15 @@ fn build_file(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("tish_out");
-    let built_path = if output_path.ends_with('/') || Path::new(output_path).is_dir() {
+    let built_path = if build_config.artifact == tishlang_native::NativeArtifact::StaticLib {
+        if output_path.ends_with('/') || Path::new(output_path).is_dir() {
+            Path::new(output_path).join(format!("lib{out_name}.a"))
+        } else if output_path.ends_with(".a") {
+            Path::new(output_path).to_path_buf()
+        } else {
+            Path::new(output_path).with_extension("a")
+        }
+    } else if output_path.ends_with('/') || Path::new(output_path).is_dir() {
         Path::new(output_path).join(out_name)
     } else {
         Path::new(output_path).to_path_buf()

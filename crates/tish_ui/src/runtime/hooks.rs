@@ -5,6 +5,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use std::sync::Arc;
+
 use tishlang_core::{ObjectMap, Value, VmRef};
 
 use super::Host;
@@ -18,7 +20,7 @@ pub const LEGACY_ROOT_ID: RootId = 1;
 thread_local! {
     static HOOKS: RefCell<HashMap<RootId, HookState>> = RefCell::new(HashMap::new());
     static CURRENT_ROOT: Cell<Option<RootId>> = Cell::new(None);
-    static HOSTS: RefCell<HashMap<RootId, Box<dyn Host>>> = RefCell::new(HashMap::new());
+    static HOSTS: RefCell<HashMap<RootId, Rc<RefCell<Box<dyn Host>>>>> = RefCell::new(HashMap::new());
     static NEXT_DYNAMIC_ROOT_ID: Cell<RootId> = Cell::new(2);
     static IN_FLUSH: Cell<bool> = Cell::new(false);
 }
@@ -42,7 +44,8 @@ fn ensure_hook_entry(root_id: RootId) {
 pub fn install_host_for_root(root_id: RootId, host: Box<dyn Host>) {
     ensure_hook_entry(root_id);
     HOSTS.with(|h| {
-        h.borrow_mut().insert(root_id, host);
+        h.borrow_mut()
+            .insert(root_id, Rc::new(RefCell::new(host)));
     });
 }
 
@@ -77,8 +80,10 @@ pub fn unregister_root(root_id: RootId) {
 
 pub fn with_host_for_root<R>(root_id: RootId, f: impl FnOnce(&mut dyn Host) -> R) -> Option<R> {
     HOSTS.with(|c| {
-        let mut m = c.borrow_mut();
-        m.get_mut(&root_id).map(|host| f(host.as_mut()))
+        let m = c.borrow();
+        let host = m.get(&root_id)?;
+        let mut host = host.try_borrow_mut().ok()?;
+        Some(f(host.as_mut()))
     })
 }
 
@@ -128,6 +133,11 @@ pub struct HookState {
     effect_cells: Rc<RefCell<Vec<EffectCell>>>,
     effect_cursor: usize,
     pending_effects: Rc<RefCell<Vec<PendingEffect>>>,
+    layout_effect_cells: Rc<RefCell<Vec<EffectCell>>>,
+    layout_effect_cursor: usize,
+    pending_layout_effects: Rc<RefCell<Vec<PendingEffect>>>,
+    ref_slots: Rc<RefCell<Vec<Value>>>,
+    ref_cursor: usize,
 }
 
 impl Default for HookState {
@@ -143,6 +153,11 @@ impl Default for HookState {
             effect_cells: Rc::new(RefCell::new(Vec::new())),
             effect_cursor: 0,
             pending_effects: Rc::new(RefCell::new(Vec::new())),
+            layout_effect_cells: Rc::new(RefCell::new(Vec::new())),
+            layout_effect_cursor: 0,
+            pending_layout_effects: Rc::new(RefCell::new(Vec::new())),
+            ref_slots: Rc::new(RefCell::new(Vec::new())),
+            ref_cursor: 0,
         }
     }
 }
@@ -160,11 +175,17 @@ fn run_all_effect_cleanups(cells: &RefCell<Vec<EffectCell>>) {
 impl HookState {
     pub fn reset_for_new_root(&mut self) {
         run_all_effect_cleanups(self.effect_cells.as_ref());
+        run_all_effect_cleanups(self.layout_effect_cells.as_ref());
         self.effect_cells.borrow_mut().clear();
+        self.layout_effect_cells.borrow_mut().clear();
         self.effect_cursor = 0;
+        self.layout_effect_cursor = 0;
         self.pending_effects.borrow_mut().clear();
+        self.pending_layout_effects.borrow_mut().clear();
         self.state_slots.borrow_mut().clear();
         self.cursor = 0;
+        self.ref_slots.borrow_mut().clear();
+        self.ref_cursor = 0;
         self.root_vnode = None;
         self.flush_scheduled = false;
         self.memo_cache.borrow_mut().clear();
@@ -284,9 +305,29 @@ pub fn native_use_memo(args: &[Value]) -> Value {
     })
 }
 
-/// `useEffect(effect, deps?)` — runs `effect` after the host commits the tree; compares `deps` like `useMemo`.
-/// If `effect` returns a function, it is called before the next run or on root teardown (`render` replacement / [`unregister_root`]).
-pub fn native_use_effect(args: &[Value]) -> Value {
+/// `useRef(initial)` → `{ current: initial }` (stable object identity per slot).
+pub fn native_use_ref(args: &[Value]) -> Value {
+    let initial = args.first().cloned().unwrap_or(Value::Null);
+    let root_id = root_id_for_hooks();
+    HOOKS.with(|h| {
+        let mut map = h.borrow_mut();
+        let st = map.entry(root_id).or_default();
+        let i = st.ref_cursor;
+        st.ref_cursor += 1;
+        while i >= st.ref_slots.borrow().len() {
+            let mut m = ObjectMap::default();
+            m.insert(Arc::from("current"), initial.clone());
+            st.ref_slots.borrow_mut().push(Value::object(m));
+        }
+        let out = st.ref_slots.borrow()[i].clone();
+        out
+    })
+}
+
+fn queue_effect(
+    args: &[Value],
+    layout: bool,
+) -> Value {
     let Some(Value::Function(effect_fn)) = args.first() else {
         return Value::Null;
     };
@@ -301,9 +342,22 @@ pub fn native_use_effect(args: &[Value]) -> Value {
     HOOKS.with(|h| {
         let mut map = h.borrow_mut();
         let st = map.entry(root_id).or_default();
-        let i = st.effect_cursor;
-        st.effect_cursor += 1;
-        let cells = &st.effect_cells.clone();
+        let (cursor, cells, pending) = if layout {
+            (
+                &mut st.layout_effect_cursor,
+                &st.layout_effect_cells,
+                &st.pending_layout_effects,
+            )
+        } else {
+            (
+                &mut st.effect_cursor,
+                &st.effect_cells,
+                &st.pending_effects,
+            )
+        };
+        let i = *cursor;
+        *cursor += 1;
+        let cells = cells.clone();
         let mut cells_b = cells.borrow_mut();
         while cells_b.len() <= i {
             cells_b.push(EffectCell::default());
@@ -315,7 +369,7 @@ pub fn native_use_effect(args: &[Value]) -> Value {
         drop(cells_b);
 
         if should_run {
-            st.pending_effects.borrow_mut().push(PendingEffect {
+            pending.borrow_mut().push(PendingEffect {
                 slot: i,
                 effect_fn: Value::Function(effect_fn),
                 new_deps: deps,
@@ -325,14 +379,29 @@ pub fn native_use_effect(args: &[Value]) -> Value {
     })
 }
 
-fn flush_pending_effects(root_id: RootId) {
+/// `useLayoutEffect(effect, deps?)` — runs synchronously after commit, before `useEffect`.
+pub fn native_use_layout_effect(args: &[Value]) -> Value {
+    queue_effect(args, true)
+}
+
+/// `useEffect(effect, deps?)` — runs `effect` after the host commits the tree; compares `deps` like `useMemo`.
+/// If `effect` returns a function, it is called before the next run or on root teardown (`render` replacement / [`unregister_root`]).
+pub fn native_use_effect(args: &[Value]) -> Value {
+    queue_effect(args, false)
+}
+
+fn flush_pending_effects_for(
+    root_id: RootId,
+    pending_key: impl FnOnce(&mut HookState) -> &Rc<RefCell<Vec<PendingEffect>>>,
+    cells_key: impl FnOnce(&HookState) -> Rc<RefCell<Vec<EffectCell>>>,
+) {
     let pending: Vec<PendingEffect> = HOOKS.with(|h| {
         h.borrow_mut()
             .get_mut(&root_id)
-            .map(|st| std::mem::take(&mut *st.pending_effects.borrow_mut()))
+            .map(|st| std::mem::take(&mut *pending_key(st).borrow_mut()))
             .unwrap_or_default()
     });
-    let cells_rc = HOOKS.with(|h| h.borrow().get(&root_id).map(|st| st.effect_cells.clone()));
+    let cells_rc = HOOKS.with(|h| h.borrow().get(&root_id).map(cells_key));
     let Some(cells_rc) = cells_rc else {
         return;
     };
@@ -368,6 +437,22 @@ fn flush_pending_effects(root_id: RootId) {
             cell.committed_deps = Some(p.new_deps);
         }
     }
+}
+
+fn flush_pending_layout_effects(root_id: RootId) {
+    flush_pending_effects_for(
+        root_id,
+        |st| &st.pending_layout_effects,
+        |st| st.layout_effect_cells.clone(),
+    );
+}
+
+fn flush_pending_effects(root_id: RootId) {
+    flush_pending_effects_for(
+        root_id,
+        |st| &st.pending_effects,
+        |st| st.effect_cells.clone(),
+    );
 }
 
 fn parse_root_id_arg(args: &[Value]) -> RootId {
@@ -416,6 +501,10 @@ pub fn schedule_flush() {
 }
 
 fn drain_flush_queue() {
+    drain_flush_queue_on_current_thread();
+}
+
+fn drain_flush_queue_on_current_thread() {
     loop {
         let root_id = HOOKS.with(|h| {
             h.borrow()
@@ -440,8 +529,11 @@ fn drain_flush_queue() {
             let st = map.get_mut(&root_id)?;
             st.cursor = 0;
             st.memo_cursor = 0;
+            st.ref_cursor = 0;
             st.effect_cursor = 0;
+            st.layout_effect_cursor = 0;
             st.pending_effects.borrow_mut().clear();
+            st.pending_layout_effects.borrow_mut().clear();
             let app = st.root_app.clone()?;
             let Value::Function(f) = app else {
                 return None;
@@ -452,18 +544,16 @@ fn drain_flush_queue() {
         if let Some(f) = app_fn {
             let tree = f(&[]);
             HOOKS.with(|h| {
-                let mut map = h.borrow_mut();
-                if let Some(st) = map.get_mut(&root_id) {
+                if let Some(st) = h.borrow_mut().get_mut(&root_id) {
                     st.root_vnode = Some(tree.clone());
-                    HOSTS.with(|hosts| {
-                        let mut hm = hosts.borrow_mut();
-                        if let Some(host) = hm.get_mut(&root_id) {
-                            host.commit_root(&tree);
-                        }
-                    });
                 }
             });
+            let host = HOSTS.with(|hosts| hosts.borrow().get(&root_id).cloned());
+            if let Some(host) = host {
+                host.borrow_mut().commit_root(&tree);
+            }
             IN_FLUSH.set(false);
+            flush_pending_layout_effects(root_id);
             flush_pending_effects(root_id);
         }
 
