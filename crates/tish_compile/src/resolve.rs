@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tishlang_ast::{ExportDeclaration, Expr, ImportSpecifier, Program, Statement};
+use tishlang_ast::{ExportDeclaration, Expr, ImportSpecifier, MemberProp, Program, Statement, CallArg};
 
 /// Resolved native module: crate path and init expression.
 #[derive(Debug, Clone)]
@@ -112,6 +112,188 @@ pub fn resolve_native_modules(
         }
     }
     Ok(modules)
+}
+
+/// True when merged Tish source references the browser global `document` (e.g. juke-cards).
+pub fn program_uses_document(program: &Program) -> bool {
+    use tishlang_ast::{ArrayElement, ArrowBody, JsxAttrValue, JsxChild, JsxProp, ObjectProp};
+
+    fn expr_uses_document(e: &Expr) -> bool {
+        match e {
+            Expr::Ident { name, .. } => name.as_ref() == "document",
+            Expr::Literal { .. } | Expr::NativeModuleLoad { .. } => false,
+            Expr::Binary { left, right, .. } => {
+                expr_uses_document(left) || expr_uses_document(right)
+            }
+            Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } => {
+                expr_uses_document(operand)
+            }
+            Expr::Call { callee, args, .. } => {
+                expr_uses_document(callee)
+                    || args.iter().any(|a| match a {
+                        CallArg::Expr(e) | CallArg::Spread(e) => expr_uses_document(e),
+                    })
+            }
+            Expr::New { callee, args, .. } => {
+                expr_uses_document(callee)
+                    || args.iter().any(|a| match a {
+                        CallArg::Expr(e) | CallArg::Spread(e) => expr_uses_document(e),
+                    })
+            }
+            Expr::Member { object, prop, .. } => {
+                expr_uses_document(object)
+                    || if let MemberProp::Expr(e) = prop {
+                        expr_uses_document(e)
+                    } else {
+                        false
+                    }
+            }
+            Expr::Index { object, index, .. } => {
+                expr_uses_document(object) || expr_uses_document(index)
+            }
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                expr_uses_document(cond)
+                    || expr_uses_document(then_branch)
+                    || expr_uses_document(else_branch)
+            }
+            Expr::NullishCoalesce { left, right, .. } => {
+                expr_uses_document(left) || expr_uses_document(right)
+            }
+            Expr::Array { elements, .. } => elements.iter().any(|el| match el {
+                ArrayElement::Expr(e) | ArrayElement::Spread(e) => expr_uses_document(e),
+            }),
+            Expr::Object { props, .. } => props.iter().any(|p| match p {
+                ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => expr_uses_document(e),
+            }),
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. }
+            | Expr::MemberAssign { value, .. }
+            | Expr::IndexAssign { value, .. } => expr_uses_document(value),
+            Expr::PostfixInc { .. }
+            | Expr::PostfixDec { .. }
+            | Expr::PrefixInc { .. }
+            | Expr::PrefixDec { .. } => false,
+            Expr::ArrowFunction { body, .. } => match body {
+                ArrowBody::Expr(e) => expr_uses_document(e),
+                ArrowBody::Block(s) => stmt_uses_document(s),
+            },
+            Expr::TemplateLiteral { exprs, .. } => exprs.iter().any(expr_uses_document),
+            Expr::Await { operand, .. } => expr_uses_document(operand),
+            Expr::JsxElement { props, children, .. } => {
+                props.iter().any(|p| match p {
+                    JsxProp::Attr { value, .. } => match value {
+                        JsxAttrValue::Expr(e) => expr_uses_document(e),
+                        JsxAttrValue::String(_) | JsxAttrValue::ImplicitTrue => false,
+                    },
+                    JsxProp::Spread(e) => expr_uses_document(e),
+                }) || children.iter().any(|c| match c {
+                    JsxChild::Expr(e) => expr_uses_document(e),
+                    JsxChild::Text(_) => false,
+                })
+            }
+            Expr::JsxFragment { children, .. } => children.iter().any(|c| match c {
+                JsxChild::Expr(e) => expr_uses_document(e),
+                JsxChild::Text(_) => false,
+            }),
+        }
+    }
+
+    fn stmt_uses_document(s: &Statement) -> bool {
+        match s {
+            Statement::VarDecl { init, .. } => init.as_ref().is_some_and(|e| expr_uses_document(e)),
+            Statement::VarDeclDestructure { init, .. } => expr_uses_document(init),
+            Statement::ExprStmt { expr, .. } => expr_uses_document(expr),
+            Statement::Return { value, .. } => value.as_ref().is_some_and(|e| expr_uses_document(e)),
+            Statement::Throw { value, .. } => expr_uses_document(value),
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                expr_uses_document(cond)
+                    || stmt_uses_document(then_branch)
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|b| stmt_uses_document(b.as_ref()))
+            }
+            Statement::While { cond, body, .. }
+            | Statement::DoWhile { cond, body, .. } => {
+                expr_uses_document(cond) || stmt_uses_document(body)
+            }
+            Statement::For { init, cond, update, body, .. } => {
+                init.as_ref().is_some_and(|s| stmt_uses_document(s.as_ref()))
+                    || cond.as_ref().is_some_and(|e| expr_uses_document(e))
+                    || update.as_ref().is_some_and(|e| expr_uses_document(e))
+                    || stmt_uses_document(body)
+            }
+            Statement::ForOf { iterable, body, .. } => {
+                expr_uses_document(iterable) || stmt_uses_document(body)
+            }
+            Statement::Switch {
+                expr,
+                cases,
+                default_body,
+                ..
+            } => {
+                expr_uses_document(expr)
+                    || cases.iter().any(|(e, stmts)| {
+                        e.as_ref().is_some_and(|e| expr_uses_document(e))
+                            || stmts.iter().any(stmt_uses_document)
+                    })
+                    || default_body
+                        .as_ref()
+                        .is_some_and(|stmts| stmts.iter().any(stmt_uses_document))
+            }
+            Statement::Block { statements, .. } => statements.iter().any(stmt_uses_document),
+            Statement::FunDecl { body, .. } => stmt_uses_document(body),
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
+                stmt_uses_document(body)
+                    || catch_body
+                        .as_ref()
+                        .is_some_and(|b| stmt_uses_document(b.as_ref()))
+                    || finally_body
+                        .as_ref()
+                        .is_some_and(|b| stmt_uses_document(b.as_ref()))
+            }
+            Statement::Import { .. }
+            | Statement::Export { .. }
+            | Statement::Break { .. }
+            | Statement::Continue { .. }
+            | Statement::TypeAlias { .. }
+            | Statement::DeclareVar { .. }
+            | Statement::DeclareFun { .. } => false,
+        }
+    }
+
+    program.statements.iter().any(stmt_uses_document)
+}
+
+/// When Tish uses bare `document`, link `tish-canvas` even without `import from 'tish:canvas'`.
+pub fn ensure_tish_canvas_module(
+    native_modules: &mut Vec<ResolvedNativeModule>,
+    project_root: &Path,
+) -> Result<(), String> {
+    if native_modules
+        .iter()
+        .any(|m| m.crate_name == "tish_canvas" || m.package_name == "tish-canvas")
+    {
+        return Ok(());
+    }
+    let m = resolve_native_module("tish:canvas", project_root)?;
+    native_modules.push(m);
+    Ok(())
 }
 
 /// True for `cargo:…` specs (Cargo-backed imports; Rust native backend only).
@@ -725,11 +907,11 @@ fn load_module_recursive(
 /// - fs, http, timers, process, ws (Node-compatible aliases for tish:*)
 /// - tish:egui, tish:polars, etc.
 /// - cargo:… (Cargo `rustDependencies` + generated wrapper; Rust native backend)
-/// - @scope/package (npm-style)
+///
+/// Scoped npm packages (`@scope/pkg`) are merged as Tish source unless imported via `tish:…`.
 pub fn is_native_import(spec: &str) -> bool {
     spec.starts_with("tish:")
         || spec.starts_with("cargo:")
-        || spec.starts_with('@')
         || matches!(spec, "fs" | "http" | "timers" | "process" | "ws")
 }
 

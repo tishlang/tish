@@ -80,3 +80,10 @@ pub fn hypot(args: &[Value]) -> Value {
     let y = extract_num(args.get(1)).unwrap_or(0.0);
     Value::Number(x.hypot(y))
 }
+
+/// ES6 `Math.imul`: 32-bit integer multiply (used by xmur3 PRNG in juke-cards).
+pub fn imul(args: &[Value]) -> Value {
+    let a = extract_num(args.first()).unwrap_or(0.0) as i32;
+    let b = extract_num(args.get(1)).unwrap_or(0.0) as i32;
+    Value::Number(a.wrapping_mul(b) as f64)
+}

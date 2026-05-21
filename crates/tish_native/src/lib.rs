@@ -390,7 +390,7 @@ pub fn compile_many_to_native(
             merged_extra_deps.push_str(extra);
             merged_extra_deps.push('\n');
         }
-        needs_tokio |= rust_code.contains("#[tokio::main]");
+        needs_tokio |= crate::build::rust_code_needs_tokio(&rust_code);
         needs_ui |= rust_code.contains("tishlang_ui");
         bins.push((stem, rust_code, native_build.generated_native_rs));
     }

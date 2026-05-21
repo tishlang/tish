@@ -71,6 +71,10 @@ fn inject_generated_native_mod(rust_code: &str) -> String {
     }
 }
 
+pub(crate) fn rust_code_needs_tokio(rust_code: &str) -> bool {
+    rust_code.contains("#[tokio::main]") || rust_code.contains("tokio::runtime::Runtime")
+}
+
 pub fn build_via_cargo(
     rust_code: &str,
     native_modules: Vec<ResolvedNativeModule>,
@@ -119,7 +123,7 @@ pub fn build_via_cargo_with_config(
         format!(", features = {:?}", runtime_refs)
     };
 
-    let needs_tokio = rust_code.contains("#[tokio::main]");
+    let needs_tokio = rust_code_needs_tokio(rust_code);
     let tokio_dep = if needs_tokio {
         "\ntokio = { version = \"1\", features = [\"rt-multi-thread\", \"macros\"] }\n"
     } else {
