@@ -1,5 +1,6 @@
 {
   "name": "tish",
   "version": "1.0.12",
-  "private": true
+  "private": true,
+  "license": "PIF"
 }

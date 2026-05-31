@@ -12,6 +12,10 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # For wasm32-unknown-unknown (browser): wasm-bindgen, console output
 browser = ["dep:wasm-bindgen", "tishlang_vm/wasm"]
+# Browser WebGPU / JS-interop FFI + requestAnimationFrame render loop (the
+# `start(chunk, env)` entry). Reflection-based bridge over js-sys; no web-sys
+# WebGPU bindings needed since the WebGPU command API is synchronous.
+gpu = ["browser", "dep:js-sys"]
 # Built-in modules for WASI (wasm32-wasip1): align with `tishlang_cranelift_runtime` / CLI caps
 fs = ["tishlang_vm/fs"]
 process = ["tishlang_vm/process"]
@@ -24,7 +28,9 @@ ws = ["tishlang_vm/ws"]
 [dependencies]
 tishlang_bytecode = { path = "../tish_bytecode", version = ">=0.1" }
 tishlang_vm = { path = "../tish_vm", version = ">=0.1" }
+tishlang_core = { path = "../tish_core", version = ">=0.1" }
 wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
 
 # rand_core → getrandom 0.4 needs wasm_js on wasm32-unknown-unknown (browser VM build).
 [target.'cfg(target_arch = "wasm32")'.dependencies]

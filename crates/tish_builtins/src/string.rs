@@ -189,6 +189,32 @@ pub fn substring(s: &Value, start: &Value, end: &Value) -> Value {
     }
 }
 
+/// JS `String.prototype.substr(start, length)`.
+pub fn substr(s: &Value, start: &Value, length: &Value) -> Value {
+    if let Value::String(s) = s {
+        let chars: Vec<char> = s.chars().collect();
+        let len = chars.len();
+        let mut start_idx = match start {
+            Value::Number(n) => *n as i64,
+            _ => 0,
+        };
+        if start_idx < 0 {
+            start_idx = (len as i64 + start_idx).max(0);
+        }
+        let start_idx = (start_idx as usize).min(len);
+        let count = match length {
+            Value::Null => len - start_idx,
+            Value::Number(n) => (*n as i64).max(0) as usize,
+            _ => len - start_idx,
+        };
+        let end_idx = (start_idx + count).min(len);
+        let result: String = chars[start_idx..end_idx].iter().collect();
+        Value::String(result.into())
+    } else {
+        Value::Null
+    }
+}
+
 pub fn split(s: &Value, sep: &Value) -> Value {
     if let Value::String(s) = s {
         let separator = match sep {

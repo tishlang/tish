@@ -103,7 +103,7 @@ fn main() {{
         message: format!("Cannot write build.rs: {}", e),
     })?;
 
-    tishlang_build_utils::run_cargo_build(&build_dir, None)
+    tishlang_build_utils::run_cargo_build(&build_dir, None, None)
         .map_err(|e| CraneliftError { message: e })?;
 
     let binary_dir = build_dir.join("target").join("release");

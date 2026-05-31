@@ -405,6 +405,8 @@ pub fn build_after_help() -> String {
           WebAssembly (.tish project; .js source supported on some paths)
   {t}wasi{r}
           WASI WebAssembly
+  {t}bytecode{r}
+          Raw serialized bytecode chunk (no VM binary/JS/HTML); for hosts that already ship the runtime
 
 {oh}Native backends{r} (--native-backend, only with --target native, default: rust):
   {t}rust{r}
@@ -506,7 +508,7 @@ pub(crate) struct BuildArgs {
         help_heading = "Options"
     )]
     pub output: String,
-    /// `native`, `js`, `wasm`, or `wasi` (see long help below).
+    /// `native`, `js`, `wasm`, `wasi`, or `bytecode` (see long help below).
     #[arg(
         long,
         default_value = "native",
@@ -530,6 +532,12 @@ pub(crate) struct BuildArgs {
         help_heading = "Options"
     )]
     pub features: Vec<String>,
+    /// Cross-compile to an Apple iOS triple (e.g. `aarch64-apple-ios-sim`). Implies `--crate-type staticlib`.
+    #[arg(long, value_name = "TRIPLE", help_heading = "Options")]
+    pub ios_triple: Option<String>,
+    /// Output artifact for `--target native` (default: `bin`; use `staticlib` for embedded iOS).
+    #[arg(long, value_name = "TYPE", default_value = "bin", help_heading = "Options")]
+    pub crate_type: String,
     #[arg(long, help_heading = "Options")]
     pub no_optimize: bool,
     /// For `--target js` project builds: emit `OUTPUT.js.map` and `//# sourceMappingURL=…` so JS/TS tools can jump to original `.tish` (implies `--no-optimize` for that build).

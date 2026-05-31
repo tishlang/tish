@@ -2,14 +2,16 @@
 
 mod hooks;
 
-use std::cell::RefCell;
 use std::sync::Arc;
 
 pub use hooks::{
-    alloc_root_id, current_root_id, drop_host_for_root, install_host_for_root, native_create_root,
-    native_use_effect, native_use_memo, native_use_state, run_with_current_root, schedule_flush,
-    unregister_root, unregister_root_hooks_and_effects, with_host_for_root, HookState, RootId,
-    LEGACY_ROOT_ID,
+    alloc_root_id, current_root_id, drop_host_for_root, install_host_for_root,
+    install_thread_local_host, native_create_root,
+    native_use_effect, native_use_layout_effect, native_use_memo, native_use_ref,
+    native_use_state, run_with_current_root,
+    schedule_flush,
+    unregister_root, unregister_root_hooks_and_effects, with_host_for_root,
+    with_thread_local_host, HookState, RootId, LEGACY_ROOT_ID,
 };
 
 use tishlang_core::{ObjectMap, Value, VmRef};
@@ -155,27 +157,6 @@ impl Host for HeadlessHost {
     fn commit_root(&mut self, vnode: &Value) {
         self.last = Some(vnode.clone());
     }
-}
-
-thread_local! {
-    static ACTIVE_HOST: RefCell<Option<Box<dyn Host>>> = RefCell::new(None);
-}
-
-/// Install the thread-local host used by [`schedule_flush`] / `createRoot`.
-pub fn install_thread_local_host(host: Box<dyn Host>) {
-    ACTIVE_HOST.with(|c| {
-        *c.borrow_mut() = Some(host);
-    });
-}
-
-pub fn with_thread_local_host<R>(f: impl FnOnce(&mut dyn Host) -> R) -> Option<R> {
-    ACTIVE_HOST.with(|c| {
-        let mut opt = c.borrow_mut();
-        match opt.as_deref_mut() {
-            Some(host) => Some(f(host)),
-            None => None,
-        }
-    })
 }
 
 /// Tag registry hook for future host-specific intrinsic mapping (HTML tag → component kind).

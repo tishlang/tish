@@ -231,6 +231,33 @@ pub fn compile_to_wasm(
     emit_wasm_from_chunk(&chunk, output_path)
 }
 
+/// Compile a Tish project to a raw serialized bytecode chunk.
+///
+/// Writes a single `{output}` file of the exact bytes that the wasm/WASI runtime entry points
+/// (`start` / `run`) deserialize directly — the same chunk `--target wasm` embeds as base64 in
+/// its generated HTML loader, but written raw with no VM binary, JS glue, or HTML wrapper. Lets a
+/// host that already ships the VM runtime (e.g. a bundler) consume the bytecode without the
+/// throwaway standalone build.
+pub fn compile_to_bytecode(
+    entry_path: &Path,
+    project_root: Option<&Path>,
+    output_path: &Path,
+    optimize: bool,
+) -> Result<(), WasmError> {
+    let (chunk, _) = resolve_and_compile_to_chunk(entry_path, project_root, optimize)?;
+    let bytes = serialize(&chunk);
+    if let Some(parent) = output_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| WasmError {
+            message: format!("Cannot create output directory: {}", e),
+        })?;
+    }
+    std::fs::write(output_path, &bytes).map_err(|e| WasmError {
+        message: format!("Cannot write {}: {}", output_path.display(), e),
+    })?;
+    println!("Built: {} ({} bytes)", output_path.display(), bytes.len());
+    Ok(())
+}
+
 /// Compile a Tish project for Wasmtime/WASI.
 ///
 /// Produces a single `{output}.wasm` with embedded bytecode. Run with:

@@ -541,6 +541,33 @@ pub fn compile_project_full(
     ),
     CompileError,
 > {
+    compile_project_full_emit(
+        entry_path,
+        project_root,
+        features,
+        optimize,
+        crate::NativeEmitMode::DesktopBin,
+        None,
+    )
+}
+
+/// Like [`compile_project_full`], with emit mode and optional feature cap (e.g. iOS sandbox).
+pub fn compile_project_full_emit(
+    entry_path: &Path,
+    project_root: Option<&Path>,
+    features: &[String],
+    optimize: bool,
+    emit_mode: crate::NativeEmitMode,
+    feature_cap: Option<&std::collections::HashSet<String>>,
+) -> Result<
+    (
+        String,
+        Vec<crate::resolve::ResolvedNativeModule>,
+        Vec<String>,
+        crate::resolve::NativeBuildArtifacts,
+    ),
+    CompileError,
+> {
     use crate::resolve;
     let root = project_root.unwrap_or_else(|| entry_path.parent().unwrap_or(Path::new(".")));
     let modules = resolve::resolve_project(entry_path, project_root).map_err(|e| CompileError {
@@ -555,11 +582,17 @@ pub fn compile_project_full(
         message: e,
         span: None,
     })?;
-    let native_modules =
+    let mut native_modules =
         resolve::resolve_native_modules(&merged.program, root).map_err(|e| CompileError {
             message: e,
             span: None,
         })?;
+    if resolve::program_uses_document(&merged.program) {
+        resolve::ensure_tish_canvas_module(&mut native_modules, root).map_err(|e| CompileError {
+            message: e,
+            span: None,
+        })?;
+    }
     let native_build =
         resolve::compute_native_build_artifacts(&merged.program, root, &native_modules).map_err(
             |e| CompileError {
@@ -573,13 +606,17 @@ pub fn compile_project_full(
             all_features.push(f);
         }
     }
-    let rust = compile_with_native_modules(
+    if let Some(cap) = feature_cap {
+        all_features.retain(|f| cap.contains(f));
+    }
+    let rust = compile_with_native_modules_emit(
         &merged.program,
         project_root,
         &all_features,
         &native_modules,
         &native_build.native_init,
         optimize,
+        emit_mode,
     )?;
     Ok((rust, native_modules, all_features, native_build))
 }
@@ -603,6 +640,26 @@ pub fn compile_with_native_modules(
     native_modules: &[crate::resolve::ResolvedNativeModule],
     native_init: &std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
     optimize: bool,
+) -> Result<String, CompileError> {
+    compile_with_native_modules_emit(
+        program,
+        project_root,
+        features,
+        native_modules,
+        native_init,
+        optimize,
+        crate::NativeEmitMode::DesktopBin,
+    )
+}
+
+pub fn compile_with_native_modules_emit(
+    program: &Program,
+    project_root: Option<&Path>,
+    features: &[String],
+    native_modules: &[crate::resolve::ResolvedNativeModule],
+    native_init: &std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
+    optimize: bool,
+    emit_mode: crate::NativeEmitMode,
 ) -> Result<String, CompileError> {
     let program = if optimize {
         tishlang_opt::optimize(program)
@@ -630,6 +687,13 @@ pub fn compile_with_native_modules(
             native_init.clone()
         };
     let mut g = Codegen::new_with_native_modules(project_root, features, map);
+    g.emit_mode = emit_mode;
+    g.has_native_ui_host = native_modules.iter().any(|m| {
+        m.package_name == "tish-macos"
+            || m.package_name == "tish-ios"
+            || m.crate_name == "tishlang_macos"
+            || m.crate_name == "tishlang_ios"
+    });
     g.emit_program(&program)?;
     Ok(g.output)
 }
@@ -680,6 +744,11 @@ struct Codegen {
     /// `try`/`throw` lowering uses `return Err` only at depth 0 (e.g. `run()`); inside native
     /// closures it must not return a `Result` from a `Value`-returning closure.
     value_fn_depth: u32,
+    emit_mode: crate::NativeEmitMode,
+    /// Program links `tish:macos` / `tish:ios` — skip HeadlessHost install.
+    has_native_ui_host: bool,
+    /// Program references browser global `document` — inject tish-canvas.
+    program_uses_document: bool,
 }
 
 impl Codegen {
@@ -710,6 +779,19 @@ impl Codegen {
             program_has_jsx: false,
             program_fun_decl_names: std::collections::HashSet::new(),
             value_fn_depth: 0,
+            emit_mode: crate::NativeEmitMode::DesktopBin,
+            has_native_ui_host: false,
+            program_uses_document: false,
+        }
+    }
+
+    /// In async `run()` bodies, propagate runtime op errors with `?`; in sync
+    /// `Value::native` closures use `.unwrap_or(Value::Null)`.
+    fn ops_result_suffix(&self) -> &'static str {
+        if self.is_async && self.async_context_stack.last().copied().unwrap_or(false) {
+            "?"
+        } else {
+            ".unwrap_or(Value::Null)"
         }
     }
 
@@ -1221,11 +1303,12 @@ impl Codegen {
         self.is_async = program_uses_async(program);
         self.program_has_jsx = tishlang_ui::jsx::program_contains_jsx(program);
         self.program_fun_decl_names = tishlang_ui::jsx::collect_fun_decl_names(program);
+        self.program_uses_document = crate::resolve::program_uses_document(program);
         self.write("#![allow(unused, non_snake_case)]\n\n");
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, register_static_route as tish_register_static_route, ObjectMap, TishError, Value, VmRef};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, register_static_route as tish_register_static_route, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -1251,6 +1334,9 @@ impl Codegen {
         if self.has_feature("regex") {
             self.write("use tishlang_runtime::regexp_new;\n");
         }
+        if self.program_uses_document {
+            self.write("use tish_canvas::document_value as tish_canvas_document;\n");
+        }
         self.write("\n");
 
         // Collect every `type Foo = { ... }` declaration in the program
@@ -1266,28 +1352,32 @@ impl Codegen {
         // and `x.field` becomes a direct field access.
         self.emit_named_struct_decls();
 
-        if self.is_async {
+        if self.is_async && self.emit_mode == crate::NativeEmitMode::DesktopBin {
             self.writeln("#[tokio::main]");
             self.writeln("async fn main() {");
-        } else {
+        } else if self.emit_mode == crate::NativeEmitMode::DesktopBin {
             self.writeln("fn main() {");
         }
-        self.indent += 1;
-        if self.is_async {
-            self.writeln("if let Err(e) = run().await {");
-        } else {
-            self.writeln("if let Err(e) = run() {");
+        if self.emit_mode == crate::NativeEmitMode::DesktopBin {
+            self.indent += 1;
+            if self.is_async {
+                self.writeln("if let Err(e) = run().await {");
+            } else {
+                self.writeln("if let Err(e) = run() {");
+            }
+            self.indent += 1;
+            self.writeln("eprintln!(\"Error: {}\", e);");
+            self.writeln("std::process::exit(1);");
+            self.indent -= 1;
+            self.writeln("}");
+            self.indent -= 1;
+            self.writeln("}");
+            self.writeln("");
         }
-        self.indent += 1;
-        self.writeln("eprintln!(\"Error: {}\", e);");
-        self.writeln("std::process::exit(1);");
-        self.indent -= 1;
-        self.writeln("}");
-        self.indent -= 1;
-        self.writeln("}");
-        self.writeln("");
         if self.is_async {
             self.writeln("async fn run() -> Result<(), Box<dyn std::error::Error>> {");
+        } else if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
+            self.writeln("pub fn run() -> Result<(), Box<dyn std::error::Error>> {");
         } else {
             self.writeln("fn run() -> Result<(), Box<dyn std::error::Error>> {");
         }
@@ -1350,6 +1440,9 @@ impl Codegen {
         self.writeln(
             "(Arc::from(\"trunc\"), Value::native(|args: &[Value]| tish_math_trunc(args))),",
         );
+        self.writeln(
+            "(Arc::from(\"imul\"), Value::native(|args: &[Value]| tish_math_imul(args))),",
+        );
         self.writeln("(Arc::from(\"PI\"), Value::Number(std::f64::consts::PI)),");
         self.writeln("(Arc::from(\"E\"), Value::Number(std::f64::consts::E)),");
         self.indent -= 1;
@@ -1405,6 +1498,14 @@ impl Codegen {
 
         self.writeln("let Uint8Array = tish_uint8_array_constructor();");
         self.writeln("let AudioContext = tish_audio_context_constructor();");
+        if self.program_uses_document {
+            self.writeln("let document = VmRef::new(tish_canvas_document());");
+            self.refcell_wrapped_vars.insert("document".to_string());
+            self.rc_cell_storage_define("document");
+            if let Some(scope) = self.outer_vars_stack.last_mut() {
+                scope.push("document".to_string());
+            }
+        }
 
         if self.has_feature("process") {
             self.writeln("let process = Value::object({");
@@ -1489,7 +1590,7 @@ impl Codegen {
             self.writeln("let RegExp = Value::native(|args: &[Value]| regexp_new(args));");
         }
 
-        if self.program_has_jsx {
+        if self.program_has_jsx && !self.has_native_ui_host {
             self.writeln("install_thread_local_host(Box::new(HeadlessHost::default()));");
             self.writeln("let Fragment = fragment_value();");
             self.writeln("let h = Value::native(|args: &[Value]| ui_h(args));");
@@ -1537,6 +1638,20 @@ impl Codegen {
         self.writeln("Ok(())");
         self.indent -= 1;
         self.writeln("}");
+        if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
+            self.writeln("");
+            self.writeln("#[no_mangle]");
+            self.writeln("pub extern \"C\" fn tish_ios_launch() {");
+            self.indent += 1;
+            if self.is_async {
+                self.writeln("let rt = tokio::runtime::Runtime::new().expect(\"tokio runtime\");");
+                self.writeln("let _ = rt.block_on(run());");
+            } else {
+                self.writeln("let _ = run();");
+            }
+            self.indent -= 1;
+            self.writeln("}");
+        }
         Ok(())
     }
 
@@ -2227,6 +2342,10 @@ impl Codegen {
                     for v in &mutable_outer_vars {
                         self.refcell_wrapped_vars.insert(v.clone());
                     }
+                    // Read-only captures are plain Value bindings inside the closure.
+                    for v in &read_only_outer_vars {
+                        self.refcell_wrapped_vars.remove(v);
+                    }
 
                     // Pre-scan body for nested functions (handles function body as Block)
                     if let Statement::Block { statements, .. } = body.as_ref() {
@@ -2487,7 +2606,12 @@ impl Codegen {
                         // Convert native type to Value for compatibility with existing code
                         var_type.to_value_expr(&escaped)
                     } else {
-                        escaped.into_owned()
+                        let s = escaped.into_owned();
+                        if self.value_fn_depth > 0 || !self.loop_stack.is_empty() {
+                            format!("({}).clone()", s)
+                        } else {
+                            s
+                        }
                     }
                 }
             }
@@ -2743,6 +2867,14 @@ impl Codegen {
                             return Ok(format!(
                                 "tishlang_runtime::string_substring(&{}, &{}, &{})",
                                 obj_expr, start, end
+                            ));
+                        }
+                        "substr" => {
+                            let start = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let length = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::string_substr(&{}, &{}, &{})",
+                                obj_expr, start, length
                             ));
                         }
                         "split" => {
@@ -3386,10 +3518,11 @@ impl Codegen {
                     CompoundOp::Div => "div",
                     CompoundOp::Mod => "modulo",
                 };
+                let op_suffix = self.ops_result_suffix();
                 if is_refcell {
                     format!(
-                        "{{ let _lhs_v = (*{}.borrow()).clone(); let _rhs = ({}).clone(); let _new = tishlang_runtime::ops::{}(&_lhs_v, &_rhs)?; *{}.borrow_mut() = _new; (*{}.borrow()).clone() }}",
-                        n, val, op_fn, n, n
+                        "{{ let _lhs_v = (*{}.borrow()).clone(); let _rhs = ({}).clone(); let _new = tishlang_runtime::ops::{}(&_lhs_v, &_rhs){}; *{}.borrow_mut() = _new; (*{}.borrow()).clone() }}",
+                        n, val, op_fn, op_suffix, n, n
                     )
                 } else if var_type.is_native() {
                     // Wrap native lhs as Value, run ops::, unbox result back to native
@@ -3397,13 +3530,13 @@ impl Codegen {
                     let result_native = var_type.from_value_expr("_result");
                     let n_as_value2 = var_type.to_value_expr(&n);
                     format!(
-                        "{{ let _lhs = {}; let _rhs = ({}).clone(); let _result = tishlang_runtime::ops::{}(&_lhs, &_rhs)?; {} = {}; {} }}",
-                        n_as_value, val, op_fn, n, result_native, n_as_value2
+                        "{{ let _lhs = {}; let _rhs = ({}).clone(); let _result = tishlang_runtime::ops::{}(&_lhs, &_rhs){}; {} = {}; {} }}",
+                        n_as_value, val, op_fn, op_suffix, n, result_native, n_as_value2
                     )
                 } else {
                     format!(
-                        "{{ let _rhs = ({}).clone(); {} = tishlang_runtime::ops::{}(&{}, &_rhs)?; {}.clone() }}",
-                        val, n, op_fn, n, n
+                        "{{ let _rhs = ({}).clone(); {} = tishlang_runtime::ops::{}(&{}, &_rhs){}; {}.clone() }}",
+                        val, n, op_fn, n, op_suffix, n
                     )
                 }
             }
@@ -4695,6 +4828,41 @@ impl Codegen {
             ));
         }
 
+        // Locals from an enclosing Value::native (e.g. captured helper fns) are not on
+        // outer_vars_stack but must not move into multiple sibling closures.
+        const BUILTINS: &[&str] = &[
+            "Boolean", "console", "Math", "JSON", "Date", "Object", "process",
+            "setTimeout", "clearTimeout", "setInterval", "clearInterval", "Promise",
+            "Symbol", "RegExp", "Polars", "Infinity", "NaN", "serve",
+        ];
+        let mut already_captured: HashSet<String> = outer_vars
+            .iter()
+            .chain(outer_params.iter())
+            .chain(referenced_funcs.iter())
+            .cloned()
+            .collect();
+        already_captured.extend(BUILTINS.iter().map(|s| s.to_string()));
+        let implicit_env_captures: Vec<String> = if self.value_fn_depth > 0 {
+            referenced
+                .iter()
+                .filter(|name| {
+                    !param_names.contains(name.as_str())
+                        && !local_var_names.contains(name.as_str())
+                        && !already_captured.contains(name.as_str())
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for name in &implicit_env_captures {
+            let escaped = Self::escape_ident(name);
+            code.push_str(&format!(
+                "    let {}_ref = VmRef::new({}.clone());\n",
+                escaped, escaped
+            ));
+        }
+
         code.push_str("    Value::native(move |args: &[Value]| {\n");
         self.value_fn_depth += 1;
 
@@ -4720,6 +4888,13 @@ impl Codegen {
             code.push_str(&format!(
                 "        let {} = (*{}_ref.borrow()).clone();\n",
                 var_escaped, var_escaped
+            ));
+        }
+        for name in &implicit_env_captures {
+            let escaped = Self::escape_ident(name);
+            code.push_str(&format!(
+                "        let {} = (*{}_ref.borrow()).clone();\n",
+                escaped, escaped
             ));
         }
 
@@ -4773,6 +4948,12 @@ impl Codegen {
         let saved_refcell_vars = self.refcell_wrapped_vars.clone();
         for v in &cell_capture_outer_vars {
             self.refcell_wrapped_vars.insert(v.clone());
+        }
+        for v in &read_only_outer_vars {
+            self.refcell_wrapped_vars.remove(v);
+        }
+        for v in &implicit_env_captures {
+            self.refcell_wrapped_vars.remove(v);
         }
 
         self.type_context.push_fun_param_scope(params, None);

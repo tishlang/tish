@@ -47,7 +47,8 @@ pub use tishlang_builtins::string::{
     pad_start as string_pad_start_impl, repeat as string_repeat_impl,
     replace as string_replace_impl, replace_all as string_replace_all_impl,
     slice as string_slice_impl, split as string_split_impl,
-    starts_with as string_starts_with_impl, substring as string_substring_impl,
+    starts_with as string_starts_with_impl, substr as string_substr_impl,
+    substring as string_substring_impl,
     to_lower_case as string_to_lower_case, to_upper_case as string_to_upper_case,
     trim as string_trim,
 };
@@ -104,6 +105,9 @@ pub fn string_slice(s: &Value, start: &Value, end: &Value) -> Value {
 }
 pub fn string_substring(s: &Value, start: &Value, end: &Value) -> Value {
     string_substring_impl(s, start, end)
+}
+pub fn string_substr(s: &Value, start: &Value, length: &Value) -> Value {
+    string_substr_impl(s, start, length)
 }
 pub fn string_split(s: &Value, sep: &Value) -> Value {
     string_split_impl(s, sep)
@@ -420,6 +424,7 @@ pub use tishlang_builtins::math::{
     exp as tish_math_exp_impl, floor as tish_math_floor_impl, max as tish_math_max_impl,
     min as tish_math_min_impl, pow as tish_math_pow_impl, random as tish_math_random_impl,
     round as tish_math_round_impl, sign as tish_math_sign_impl, sin as tish_math_sin_impl,
+    imul as tish_math_imul_impl,
     sqrt as tish_math_sqrt_impl, tan as tish_math_tan_impl, trunc as tish_math_trunc_impl,
 };
 
@@ -459,6 +464,9 @@ pub fn math_exp(args: &[Value]) -> Value {
 }
 pub fn math_trunc(args: &[Value]) -> Value {
     tish_math_trunc_impl(args)
+}
+pub fn math_imul(args: &[Value]) -> Value {
+    tish_math_imul_impl(args)
 }
 pub fn math_pow(args: &[Value]) -> Value {
     tish_math_pow_impl(args)

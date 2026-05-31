@@ -7,19 +7,29 @@ mod infer;
 mod resolve;
 mod types;
 
+/// How generated Rust is linked (desktop binary vs embedded iOS staticlib).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NativeEmitMode {
+    #[default]
+    DesktopBin,
+    /// `[lib] crate-type = ["staticlib"]` — no `fn main()`, host calls `tish_ios_launch`.
+    EmbeddedLib,
+}
+
 pub use codegen::CompileError;
 pub use codegen::{
-    compile, compile_project, compile_project_full, compile_with_features,
-    compile_with_native_modules, compile_with_project_root,
+    compile, compile_project, compile_project_full, compile_project_full_emit,
+    compile_with_features, compile_with_native_modules, compile_with_native_modules_emit,
+    compile_with_project_root,
 };
 pub use resolve::{
-    cargo_export_fn_name, compute_native_build_artifacts, detect_cycles, export_name_to_rust_ident,
-    extract_native_import_features, format_rust_dependencies_toml, generate_native_wrapper_rs,
-    has_external_native_imports, has_native_imports, infer_native_module_exports,
-    is_builtin_native_spec, is_cargo_native_spec, is_native_import, merge_modules,
-    normalize_builtin_spec, read_project_tish_config, resolve_bare_spec, resolve_native_modules,
-    resolve_project, resolve_project_from_stdin, MergedProgram, NativeBuildArtifacts,
-    NativeModuleInit, ResolvedNativeModule,
+    cargo_export_fn_name, compute_native_build_artifacts, detect_cycles, ensure_tish_canvas_module,
+    export_name_to_rust_ident, extract_native_import_features, format_rust_dependencies_toml,
+    generate_native_wrapper_rs, has_external_native_imports, has_native_imports,
+    infer_native_module_exports, is_builtin_native_spec, is_cargo_native_spec, is_native_import,
+    merge_modules, normalize_builtin_spec, program_uses_document, read_project_tish_config,
+    resolve_bare_spec, resolve_native_modules, resolve_project, resolve_project_from_stdin,
+    MergedProgram, NativeBuildArtifacts, NativeModuleInit, ResolvedNativeModule,
 };
 pub use types::{RustType, TypeContext};
 

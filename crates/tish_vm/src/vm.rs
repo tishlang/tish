@@ -455,6 +455,46 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         "trunc".into(),
         Value::native(|args: &[Value]| math_builtins::trunc(args)),
     );
+    // Trig/hypot not covered by `math_builtins`; needed by the 3D engine's
+    // camera + character-controller math (atan2/hypot) on the wasm VM, where
+    // (unlike `--target js`) there is no host `Math` to fall through to.
+    math.insert(
+        "atan2".into(),
+        Value::native(|args: &[Value]| {
+            let y = args.first().and_then(|v| v.as_number()).unwrap_or(f64::NAN);
+            let x = args.get(1).and_then(|v| v.as_number()).unwrap_or(f64::NAN);
+            Value::Number(y.atan2(x))
+        }),
+    );
+    math.insert(
+        "atan".into(),
+        Value::native(|args: &[Value]| {
+            let n = args.first().and_then(|v| v.as_number()).unwrap_or(f64::NAN);
+            Value::Number(n.atan())
+        }),
+    );
+    math.insert(
+        "asin".into(),
+        Value::native(|args: &[Value]| {
+            let n = args.first().and_then(|v| v.as_number()).unwrap_or(f64::NAN);
+            Value::Number(n.asin())
+        }),
+    );
+    math.insert(
+        "acos".into(),
+        Value::native(|args: &[Value]| {
+            let n = args.first().and_then(|v| v.as_number()).unwrap_or(f64::NAN);
+            Value::Number(n.acos())
+        }),
+    );
+    math.insert(
+        "hypot".into(),
+        Value::native(|args: &[Value]| {
+            let nums: Vec<f64> = args.iter().filter_map(|v| v.as_number()).collect();
+            let sum_sq: f64 = nums.iter().map(|n| n * n).sum();
+            Value::Number(sum_sq.sqrt())
+        }),
+    );
     math.insert("PI".into(), Value::Number(std::f64::consts::PI));
     math.insert("E".into(), Value::Number(std::f64::consts::E));
     g.insert("Math".into(), value_object_from_map(math));
