@@ -6,7 +6,7 @@ tish_hello
 *.swo
 .DS_Store
 target/*
-
+target-gpu/*
 
 dist/
 debug_out.txt
