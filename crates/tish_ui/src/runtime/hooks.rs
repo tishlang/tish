@@ -23,6 +23,7 @@ thread_local! {
     static HOSTS: RefCell<HashMap<RootId, Rc<RefCell<Box<dyn Host>>>>> = RefCell::new(HashMap::new());
     static NEXT_DYNAMIC_ROOT_ID: Cell<RootId> = Cell::new(2);
     static IN_FLUSH: Cell<bool> = Cell::new(false);
+    static IN_EFFECT_FLUSH: Cell<bool> = Cell::new(false);
 }
 
 /// Allocate an id for an additional in-process window (starts at 2; 1 is legacy primary).
@@ -212,6 +213,7 @@ fn memo_dep_eq(a: &Value, b: &Value) -> bool {
             }
             ab.iter().zip(bb.iter()).all(|(x, y)| memo_dep_eq(x, y))
         }
+        (Value::Object(a), Value::Object(b)) => tishlang_core::VmRef::ptr_eq(a, b),
         _ => false,
     }
 }
@@ -260,7 +262,7 @@ pub fn native_use_state(args: &[Value]) -> Value {
                     st.flush_scheduled = true;
                 }
             });
-            if !IN_FLUSH.get() {
+            if !IN_FLUSH.get() && !IN_EFFECT_FLUSH.get() {
                 drain_flush_queue();
             }
             Value::Null
@@ -440,19 +442,23 @@ fn flush_pending_effects_for(
 }
 
 fn flush_pending_layout_effects(root_id: RootId) {
+    IN_EFFECT_FLUSH.set(true);
     flush_pending_effects_for(
         root_id,
         |st| &st.pending_layout_effects,
         |st| st.layout_effect_cells.clone(),
     );
+    IN_EFFECT_FLUSH.set(false);
 }
 
 fn flush_pending_effects(root_id: RootId) {
+    IN_EFFECT_FLUSH.set(true);
     flush_pending_effects_for(
         root_id,
         |st| &st.pending_effects,
         |st| st.effect_cells.clone(),
     );
+    IN_EFFECT_FLUSH.set(false);
 }
 
 fn parse_root_id_arg(args: &[Value]) -> RootId {

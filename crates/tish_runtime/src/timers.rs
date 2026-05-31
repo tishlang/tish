@@ -47,15 +47,20 @@ pub fn drain_timers() {
     run_due_timers();
 }
 
-/// Run all due timer callbacks.
+/// Run all due timer callbacks (including timers scheduled by other timers).
 fn run_due_timers() {
-    let due = take_due_timers();
-    for (id, callback, args, interval_ms) in due {
-        if let Value::Function(f) = &callback {
-            let _ = f(&args);
+    for _ in 0..64 {
+        let due = take_due_timers();
+        if due.is_empty() {
+            break;
         }
-        if interval_ms > 0 {
-            re_register_interval(id, callback, args, interval_ms);
+        for (id, callback, args, interval_ms) in due {
+            if let Value::Function(f) = &callback {
+                let _ = f(&args);
+            }
+            if interval_ms > 0 {
+                re_register_interval(id, callback, args, interval_ms);
+            }
         }
     }
 }

@@ -39,7 +39,7 @@ impl NativeBuildConfig {
 
 /// Filter runtime features for iOS sandbox builds.
 pub fn ios_runtime_features(features: &[String]) -> Vec<String> {
-    const ALLOW: &[&str] = &["http", "http-hyper", "regex"];
+    const ALLOW: &[&str] = &["http", "http-hyper", "regex", "timers"];
     features
         .iter()
         .filter(|f| ALLOW.contains(&f.as_str()))

@@ -405,6 +405,8 @@ pub fn build_after_help() -> String {
           WebAssembly (.tish project; .js source supported on some paths)
   {t}wasi{r}
           WASI WebAssembly
+  {t}bytecode{r}
+          Raw serialized bytecode chunk (no VM binary/JS/HTML); for hosts that already ship the runtime
 
 {oh}Native backends{r} (--native-backend, only with --target native, default: rust):
   {t}rust{r}
@@ -506,7 +508,7 @@ pub(crate) struct BuildArgs {
         help_heading = "Options"
     )]
     pub output: String,
-    /// `native`, `js`, `wasm`, or `wasi` (see long help below).
+    /// `native`, `js`, `wasm`, `wasi`, or `bytecode` (see long help below).
     #[arg(
         long,
         default_value = "native",

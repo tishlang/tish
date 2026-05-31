@@ -627,9 +627,26 @@ fn build_file(
         .map_err(|e| e.to_string());
     }
 
+    if target == "bytecode" {
+        let project_root = input_path.parent().and_then(|p| {
+            if p.file_name().and_then(|n| n.to_str()) == Some("src") {
+                p.parent()
+            } else {
+                Some(p)
+            }
+        });
+        return tishlang_wasm::compile_to_bytecode(
+            &input_path,
+            project_root,
+            Path::new(output_path),
+            optimize,
+        )
+        .map_err(|e| e.to_string());
+    }
+
     if target != "native" {
         return Err(format!(
-            "Unknown target: {}. Use 'native', 'js', 'wasm', or 'wasi'.",
+            "Unknown target: {}. Use 'native', 'js', 'wasm', 'wasi', or 'bytecode'.",
             target
         ));
     }

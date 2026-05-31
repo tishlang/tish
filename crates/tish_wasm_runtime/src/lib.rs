@@ -8,6 +8,11 @@
 use tishlang_bytecode::deserialize;
 use tishlang_vm::Vm;
 
+/// Browser WebGPU / JS-interop FFI + requestAnimationFrame render loop.
+/// Adds the `start(chunk, env)` wasm-bindgen entry used by the engine.
+#[cfg(feature = "gpu")]
+pub mod gpu;
+
 /// Run serialized Tish bytecode (WASI/Wasmtime or native).
 ///
 /// `chunk` is the output of `tishlang_bytecode::serialize(chunk)`.

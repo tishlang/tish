@@ -70,7 +70,28 @@ pub type NativeFn = std::rc::Rc<dyn Fn(&[Value]) -> Value>;
 
 /// Trait for opaque Rust types exposed to Tish (e.g. Polars DataFrame).
 /// Implementors provide method dispatch so Tish can call methods on the value.
+///
+/// The `Send + Sync` supertrait bound is conditional on the `send-values`
+/// feature. When `send-values` is off (single-threaded VMs: wasm browser /
+/// wasi / interpreter / cranelift), `NativeFn` is already `Rc<dyn Fn>`, so
+/// `Value` is `!Send` anyway — dropping the bound here loses nothing and lets
+/// `!Send` opaques like `JsHandle(wasm_bindgen::JsValue)` be stored in a
+/// `Value::Opaque` on the browser runtime.
+#[cfg(feature = "send-values")]
 pub trait TishOpaque: Send + Sync {
+    /// Display name for the type (e.g. "DataFrame").
+    fn type_name(&self) -> &'static str;
+
+    /// Get a method by name. Returns a native function if the method exists.
+    fn get_method(&self, name: &str) -> Option<NativeFn>;
+
+    /// For downcasting `Arc<dyn TishOpaque>` in native crates (e.g. Polars → `DataFrame`).
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// Single-threaded variant (no `Send + Sync` bound); see the `send-values` doc above.
+#[cfg(not(feature = "send-values"))]
+pub trait TishOpaque {
     /// Display name for the type (e.g. "DataFrame").
     fn type_name(&self) -> &'static str;
 
