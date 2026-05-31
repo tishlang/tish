@@ -1,5 +1,18 @@
 # Publish to npm when a GitHub release is promoted from prerelease to full release.
 # Downloads the npm package tarball from the release (no rebuild).
+#
+# AUTH: npm OIDC trusted publishing (no long-lived NPM_TOKEN — npm revoked classic
+# tokens on 2026-12-09 and forces granular tokens to expire, so OIDC is the only
+# durable option). This requires a ONE-TIME setup on npmjs.com for EACH package
+# below; until that is done a publish fails with E404/E422. For every package
+# (@tishlang/tish, @tishlang/cargo-bindgen, @tishlang/pg, @tishlang/create-tish-app,
+# and unscoped create-tish-app) open npmjs.com > the package > Settings >
+# "Trusted Publisher" > GitHub Actions and set:
+#   Organization or user: tishlang
+#   Repository:           tish
+#   Workflow filename:    npm-release.yml
+#   Environment:          (leave blank)
+# Requires npm >= 11.5.1 (upgraded below) and the id-token: write permission.
 
 name: NPM release
 
@@ -14,9 +27,15 @@ jobs:
     if: github.event.release.prerelease == false
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
-      contents: write  # required to update release body via API
+      contents: write   # required to update release body via API
+      id-token: write   # required for npm OIDC trusted publishing
     env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # No NODE_AUTH_TOKEN — auth is via OIDC (see trusted-publishing note at top).
+      # Provenance is disabled because @tishlang/tish and @tishlang/cargo-bindgen
+      # publish from pre-built tarballs (built in build-npm-binaries.yml, not this
+      # run), which is the fragile case for provenance. To enable it later, remove
+      # this line and confirm the two tarball publishes still succeed.
+      NPM_CONFIG_PROVENANCE: "false"
     steps:
       - name: Checkout (for create-tish-app)
         uses: actions/checkout@v4
@@ -47,6 +66,11 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Upgrade npm for OIDC trusted publishing (needs >= 11.5.1)
+        run: |
+          npm install -g npm@latest
+          npm --version
+
       - name: Publish @tishlang/tish from tarball
         run: npm publish tish-npm-package.tgz --access public
 
@@ -62,7 +86,7 @@ jobs:
           npm version $VERSION --no-git-tag-version --allow-same-version
           npm publish --access public
 
-      # Scoped package: token must have publish on @tishlang (granular tokens usually include this).
+      # Scoped package: needs its own trusted-publisher entry on npmjs.com (see note at top).
       - name: Publish @tishlang/create-tish-app
         run: |
           TAG="${{ github.event.release.tag_name }}"
@@ -72,9 +96,10 @@ jobs:
           npm version $VERSION --no-git-tag-version --allow-same-version
           npm publish --access public
 
-      # Unscoped name requires the same npm user/org to own https://www.npmjs.com/package/create-tish-app
-      # and a token with permission to that package. Granular tokens scoped only to @tishlang get E403 here.
-      # This step always exits 0 so the release job stays green; use ::warning:: for visibility in the log.
+      # Unscoped name is a separate package and needs its own trusted-publisher entry on
+      # npmjs.com (org tishlang / repo tish / workflow npm-release.yml). Without it OIDC auth
+      # fails for this package only. This step always exits 0 so the release job stays green;
+      # use ::warning:: for visibility in the log.
       - name: Publish unscoped create-tish-app (optional)
         run: |
           cd /tmp/create-tish-app-publish
@@ -87,7 +112,7 @@ jobs:
           if npm publish --access public; then
             echo "Published unscoped create-tish-app (npx create-tish-app)."
           else
-            echo "::warning::Unscoped create-tish-app publish failed (usually E403: NPM_TOKEN cannot publish that package). Scoped package @tishlang/create-tish-app is already published — use npx @tishlang/create-tish-app. To fix: grant the token publish access to https://www.npmjs.com/package/create-tish-app"
+            echo "::warning::Unscoped create-tish-app publish failed (usually no trusted-publisher configured for it on npmjs.com). Scoped package @tishlang/create-tish-app is already published — use npx @tishlang/create-tish-app. To fix: add a Trusted Publisher (org tishlang / repo tish / workflow npm-release.yml) at https://www.npmjs.com/package/create-tish-app/access"
           fi
 
       - name: Update release description with npm URL

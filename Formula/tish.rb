@@ -5,7 +5,7 @@ class Tish < Formula
   desc "Tish - minimal TS/JS-compatible language. Run, REPL, compile to native."
   homepage "https://github.com/tishlang/tish"
   version "1.11.0"
-  license "MIT"
+  license "PIF"
 
   depends_on "tish-bindgen"
 

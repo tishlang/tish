@@ -2,7 +2,7 @@
   "name": "@tishlang/cargo-bindgen",
   "version": "0.0.0",
   "description": "CLI to generate Rust glue for Tish cargo: imports (tishlang-cargo-bindgen)",
-  "license": "MIT",
+  "license": "PIF",
   "repository": {
     "type": "git",
     "url": "https://github.com/tishlang/tish.git"
