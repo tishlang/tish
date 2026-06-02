@@ -1,44 +1,177 @@
 //! Pretty-print Tish AST to source. Style: 2-space indent, braces for blocks, trailing newline.
 
+use std::collections::HashMap;
+
 use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
     ExportDeclaration, Expr, FunParam, ImportSpecifier, JsxAttrValue, JsxChild, JsxProp, Literal,
-    LogicalAssignOp, MemberProp, ObjectProp, Program, Statement, TypeAnnotation, TypedParam,
+    LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement, TypeAnnotation, TypedParam,
     UnaryOp,
 };
+
+/// A comment recovered from source by [`scan_comments`]. The lexer discards
+/// comments, so the parsed AST has none; the formatter re-inserts these by source
+/// position so they survive a format pass.
+#[derive(Clone)]
+struct CommentTok {
+    /// 1-based (line, col) of the opening `/`, matching `ast::Span`.
+    start: (usize, usize),
+    /// Verbatim comment text, including the `//` or `/* */` delimiters.
+    text: String,
+    /// True when only whitespace precedes the comment on its line (a leading,
+    /// own-line comment); false for a trailing `code // note` comment.
+    own_line: bool,
+}
+
+/// Maps a `{`'s 1-based (line, col) to its matching `}`'s (line, col). Used to
+/// bound a block's dangling-comment flush to the real closing brace, since the
+/// parser's `Block` `span.end` overshoots to the next token.
+type BraceMap = HashMap<(usize, usize), (usize, usize)>;
 
 /// Format Tish source. On parse error, returns the parser message.
 pub fn format_source(source: &str) -> Result<String, String> {
     let program = tishlang_parser::parse(source)?;
-    Ok(format_program(&program))
+    let (comments, braces, bracket_spans) = scan_comments(source);
+    Ok(format_with_comments(
+        &program,
+        comments,
+        blank_line_map(source),
+        braces,
+        bracket_spans,
+        source,
+    ))
 }
 
+/// Format an already-parsed program. Comments and blank lines are unavailable
+/// here (the AST carries neither), so the output is comment-free and dense and
+/// `// tish-fmt-ignore` has no effect; use [`format_source`] when the original
+/// text is available.
 pub fn format_program(program: &Program) -> String {
-    let mut p = Printer::new();
-    for (i, s) in program.statements.iter().enumerate() {
-        if i > 0 {
-            p.buf.push('\n');
-        }
-        p.stmt(s, 0);
-        if !matches!(s, Statement::Import { .. } | Statement::Export { .. }) {
-            p.buf.push('\n');
-        }
+    format_with_comments(
+        program,
+        Vec::new(),
+        Vec::new(),
+        BraceMap::new(),
+        Vec::new(),
+        "",
+    )
+}
+
+fn format_with_comments(
+    program: &Program,
+    comments: Vec<CommentTok>,
+    blank_lines: Vec<bool>,
+    braces: BraceMap,
+    bracket_spans: Vec<(usize, usize)>,
+    source: &str,
+) -> String {
+    let mut p = Printer::new(comments, blank_lines, braces, bracket_spans, source);
+    p.print_seq(&program.statements, 0);
+    // Comments after the last statement (trailing file comments).
+    p.emit_leading_comments((usize::MAX, usize::MAX), 0);
+    // Exactly one trailing newline.
+    while p.buf.ends_with('\n') {
+        p.buf.pop();
     }
-    if !p.buf.ends_with('\n') {
-        p.buf.push('\n');
-    }
+    p.buf.push('\n');
     p.buf
+}
+
+/// `out[line]` is true when 1-based source `line` is blank (empty or whitespace
+/// only). Index 0 is unused so callers can index by 1-based line number.
+fn blank_line_map(source: &str) -> Vec<bool> {
+    let mut v = vec![false];
+    v.extend(source.lines().map(|l| l.trim().is_empty()));
+    v
 }
 
 struct Printer {
     buf: String,
+    /// Comments in source order; `ci` is the next one not yet emitted.
+    comments: Vec<CommentTok>,
+    ci: usize,
+    /// 1-indexed: `blank_lines[n]` is true when source line `n` is blank. Empty
+    /// when no source is available (`format_program`).
+    blank_lines: Vec<bool>,
+    /// `{`→`}` position map for bounding block dangling-comment flushes.
+    braces: BraceMap,
+    /// Nonzero once anything has been emitted in the current sequence; used only
+    /// to suppress a leading blank line at the very start of a file or block.
+    emitted: usize,
+    /// Current structural indentation level for expression layout — set to the
+    /// enclosing statement's level and bumped as broken containers nest. Continuation
+    /// lines of a broken object/array/argument-list indent to `depth + 1`.
+    depth: usize,
+    /// When set, containers render on one line regardless of width. Used to measure
+    /// a container's flat width before deciding whether to break it.
+    force_flat: bool,
+    /// Source as chars, plus 1-based line → starting char-index, for slicing the
+    /// original text of a `// tish-fmt-ignore`-d statement verbatim. Empty when no
+    /// source is available (`format_program`).
+    src: Vec<char>,
+    line_start: Vec<usize>,
+    /// Set by [`Printer::emit_leading_comments`] when the comment directly above the
+    /// next statement is `// tish-fmt-ignore`; consumed by [`Printer::print_seq`].
+    ignore_next: bool,
+    /// `(open_line, close_line)` for every bracket pair, used to bound an ignored
+    /// statement's verbatim slice to its own full extent.
+    bracket_spans: Vec<(usize, usize)>,
 }
 
+/// Target line width: objects/arrays/argument lists that fit within this stay on
+/// one line; longer ones break one item per line.
+const WIDTH: usize = 100;
+
+/// The escape-hatch marker (à la Prettier's `// prettier-ignore`): a comment with
+/// exactly this content leaves the next statement's original source untouched.
+const IGNORE_MARKER: &str = "tish-fmt-ignore";
+
 impl Printer {
-    fn new() -> Self {
+    fn new(
+        comments: Vec<CommentTok>,
+        blank_lines: Vec<bool>,
+        braces: BraceMap,
+        bracket_spans: Vec<(usize, usize)>,
+        source: &str,
+    ) -> Self {
+        let src: Vec<char> = source.chars().collect();
+        // line_start[L] = char index where 1-based line L begins (index 0 unused).
+        let mut line_start = vec![0usize, 0usize];
+        for (i, &c) in src.iter().enumerate() {
+            if c == '\n' {
+                line_start.push(i + 1);
+            }
+        }
         Self {
             buf: String::with_capacity(4096),
+            comments,
+            ci: 0,
+            blank_lines,
+            braces,
+            emitted: 0,
+            depth: 0,
+            force_flat: false,
+            src,
+            line_start,
+            ignore_next: false,
+            bracket_spans,
         }
+    }
+
+    /// Char index of a 1-based (line, col) position, clamped to the source length.
+    fn char_pos(&self, (line, col): (usize, usize)) -> usize {
+        if line >= self.line_start.len() {
+            return self.src.len();
+        }
+        (self.line_start[line] + col - 1).min(self.src.len())
+    }
+
+    /// The original source spanning `[from, to)`, with trailing whitespace trimmed.
+    fn verbatim(&self, from: (usize, usize), to: (usize, usize)) -> String {
+        let a = self.char_pos(from);
+        let b = self.char_pos(to).max(a);
+        let s: String = self.src[a..b].iter().collect();
+        s.trim_end().to_string()
     }
 
     fn indent(&mut self, level: usize) {
@@ -47,18 +180,334 @@ impl Printer {
         }
     }
 
-    fn stmt(&mut self, s: &Statement, level: usize) {
-        match s {
-            Statement::Block { statements, .. } => {
-                self.indent(level);
-                self.buf.push_str("{\n");
-                for st in statements {
-                    self.stmt(st, level + 1);
-                    self.buf.push('\n');
-                }
-                self.indent(level);
-                self.buf.push('}');
+    /// Current column (chars since the last newline) — the start position for the
+    /// next thing to be printed.
+    fn col(&self) -> usize {
+        let line_start = self.buf.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        self.buf[line_start..].chars().count()
+    }
+
+    /// Render a container flat into `buf`; if it fits in the remaining width keep it,
+    /// otherwise roll back and render the broken form. While measuring (and inside an
+    /// already-flat context) nested containers stay inline too, so the measured width
+    /// is the true single-line length. This is the layout decision in miniature — the
+    /// `fits` check of a Wadler/Prettier-style pretty-printer, done by rendering.
+    fn fit(&mut self, inline: impl Fn(&mut Self), broken: impl Fn(&mut Self)) {
+        if self.force_flat {
+            inline(self);
+            return;
+        }
+        let mark = self.buf.len();
+        let col = self.col();
+        self.force_flat = true;
+        inline(self);
+        self.force_flat = false;
+        if col + (self.buf.len() - mark) <= WIDTH {
+            return;
+        }
+        self.buf.truncate(mark);
+        broken(self);
+    }
+
+    // ---- Width-aware containers: inline when they fit, else one item per line. ----
+
+    fn emit_object(&mut self, props: &[ObjectProp]) {
+        if props.is_empty() {
+            self.buf.push_str("{}");
+            return;
+        }
+        self.fit(|s| s.object_inline(props), |s| s.object_broken(props));
+    }
+
+    fn object_inline(&mut self, props: &[ObjectProp]) {
+        self.buf.push_str("{ ");
+        for (i, pr) in props.iter().enumerate() {
+            if i > 0 {
+                self.buf.push_str(", ");
             }
+            self.object_prop(pr);
+        }
+        self.buf.push_str(" }");
+    }
+
+    fn object_broken(&mut self, props: &[ObjectProp]) {
+        self.buf.push_str("{\n");
+        self.depth += 1;
+        for (i, pr) in props.iter().enumerate() {
+            if i > 0 {
+                self.buf.push_str(",\n");
+            }
+            self.indent(self.depth);
+            self.object_prop(pr);
+        }
+        self.depth -= 1;
+        self.buf.push('\n');
+        self.indent(self.depth);
+        self.buf.push('}');
+    }
+
+    fn object_prop(&mut self, pr: &ObjectProp) {
+        match pr {
+            ObjectProp::KeyValue(k, v) => {
+                self.buf.push_str(k.as_ref());
+                self.buf.push_str(": ");
+                self.expr(v);
+            }
+            ObjectProp::Spread(ex) => {
+                self.buf.push_str("...");
+                self.expr(ex);
+            }
+        }
+    }
+
+    fn emit_array(&mut self, elems: &[ArrayElement]) {
+        if elems.is_empty() {
+            self.buf.push_str("[]");
+            return;
+        }
+        self.fit(|s| s.array_inline(elems), |s| s.array_broken(elems));
+    }
+
+    fn array_inline(&mut self, elems: &[ArrayElement]) {
+        self.buf.push('[');
+        for (i, el) in elems.iter().enumerate() {
+            if i > 0 {
+                self.buf.push_str(", ");
+            }
+            self.array_elem(el);
+        }
+        self.buf.push(']');
+    }
+
+    fn array_broken(&mut self, elems: &[ArrayElement]) {
+        self.buf.push_str("[\n");
+        self.depth += 1;
+        for (i, el) in elems.iter().enumerate() {
+            if i > 0 {
+                self.buf.push_str(",\n");
+            }
+            self.indent(self.depth);
+            self.array_elem(el);
+        }
+        self.depth -= 1;
+        self.buf.push('\n');
+        self.indent(self.depth);
+        self.buf.push(']');
+    }
+
+    fn array_elem(&mut self, el: &ArrayElement) {
+        match el {
+            ArrayElement::Expr(ex) => self.expr(ex),
+            ArrayElement::Spread(ex) => {
+                self.buf.push_str("...");
+                self.expr(ex);
+            }
+        }
+    }
+
+    /// Argument list `(...)`. A sole/last object|array|arrow argument "hugs" the
+    /// parens — it breaks itself rather than forcing the whole list to break, e.g.
+    /// `f(layout, [\n  …\n])`. Otherwise the list breaks as a unit when too wide.
+    fn emit_args(&mut self, args: &[CallArg]) {
+        if args.is_empty() {
+            self.buf.push_str("()");
+            return;
+        }
+        if !self.force_flat && self.last_arg_huggable(args) {
+            self.buf.push('(');
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    self.buf.push_str(", ");
+                }
+                self.call_arg(a);
+            }
+            self.buf.push(')');
+            return;
+        }
+        self.fit(|s| s.args_inline(args), |s| s.args_broken(args));
+    }
+
+    fn last_arg_huggable(&self, args: &[CallArg]) -> bool {
+        let huggable = |a: &CallArg| {
+            matches!(
+                a,
+                CallArg::Expr(Expr::Object { .. })
+                    | CallArg::Expr(Expr::Array { .. })
+                    | CallArg::Expr(Expr::ArrowFunction { .. })
+            )
+        };
+        let collection =
+            |a: &CallArg| matches!(a, CallArg::Expr(Expr::Object { .. } | Expr::Array { .. }));
+        match args.split_last() {
+            Some((last, rest)) => huggable(last) && !rest.iter().any(collection),
+            None => false,
+        }
+    }
+
+    fn args_inline(&mut self, args: &[CallArg]) {
+        self.buf.push('(');
+        for (i, a) in args.iter().enumerate() {
+            if i > 0 {
+                self.buf.push_str(", ");
+            }
+            self.call_arg(a);
+        }
+        self.buf.push(')');
+    }
+
+    fn args_broken(&mut self, args: &[CallArg]) {
+        self.buf.push_str("(\n");
+        self.depth += 1;
+        for (i, a) in args.iter().enumerate() {
+            if i > 0 {
+                self.buf.push_str(",\n");
+            }
+            self.indent(self.depth);
+            self.call_arg(a);
+        }
+        self.depth -= 1;
+        self.buf.push('\n');
+        self.indent(self.depth);
+        self.buf.push(')');
+    }
+
+    fn call_arg(&mut self, a: &CallArg) {
+        match a {
+            CallArg::Expr(ex) => self.expr(ex),
+            CallArg::Spread(ex) => {
+                self.buf.push_str("...");
+                self.expr(ex);
+            }
+        }
+    }
+
+    fn is_blank(&self, line: usize) -> bool {
+        self.blank_lines.get(line).copied().unwrap_or(false)
+    }
+
+    /// Preserve a single blank line before the item starting at `next_line` when
+    /// the source line directly above it was blank. Statement `span.end` is
+    /// unreliable (it points at the next token), so spacing keys off the reliable
+    /// start line and the source blank-line map rather than on span ranges.
+    fn vspace(&mut self, next_line: usize) {
+        if self.emitted != 0
+            && self.is_blank(next_line.saturating_sub(1))
+            && !self.buf.ends_with("\n\n")
+        {
+            self.buf.push('\n');
+        }
+    }
+
+    /// Emit every pending comment positioned before `before`, each on its own line
+    /// at `level` indentation, preserving source blank-line separation. Used at
+    /// statement-sequence boundaries and before a block's closing brace.
+    fn emit_leading_comments(&mut self, before: (usize, usize), level: usize) {
+        while self.ci < self.comments.len() && self.comments[self.ci].start < before {
+            let c = self.comments[self.ci].clone();
+            self.ci += 1;
+            self.vspace(c.start.0);
+            self.indent(level);
+            self.buf.push_str(&c.text);
+            self.buf.push('\n');
+            self.emitted = c.start.0;
+            // A marker anywhere in the statement's leading comment group ignores it.
+            if is_ignore_marker(&c.text) {
+                self.ignore_next = true;
+            }
+        }
+    }
+
+    /// Emit trailing (same-line) comments sitting on source line `line`, inline
+    /// after the just-printed statement text.
+    fn emit_trailing_comments(&mut self, line: usize) {
+        while self.ci < self.comments.len() {
+            let c = &self.comments[self.ci];
+            if c.own_line || c.start.0 != line {
+                break;
+            }
+            let text = c.text.clone();
+            self.ci += 1;
+            self.buf.push(' ');
+            self.buf.push_str(&text);
+        }
+    }
+
+    /// Print a run of statements (top level, block body, or switch case body),
+    /// interleaving recovered comments and preserving blank-line grouping. Trailing
+    /// comments attach by the statement's reliable start line (single-line case);
+    /// a trailing comment on a multi-line statement's last line simply migrates to
+    /// a leading comment of the next item — preserved, never dropped.
+    fn print_seq(&mut self, stmts: &[Statement], level: usize) {
+        for (i, s) in stmts.iter().enumerate() {
+            let sp = s.span();
+            self.ignore_next = false;
+            self.emit_leading_comments(sp.start, level);
+            self.vspace(sp.start.0);
+            if self.ignore_next {
+                self.emit_ignored(s, i, stmts, level);
+            } else {
+                self.stmt(s, level);
+            }
+            self.emitted = sp.start.0;
+            self.emit_trailing_comments(sp.start.0);
+            self.buf.push('\n');
+        }
+    }
+
+    /// Last source line covered by the statement at `start` — its start line, grown
+    /// over the full lines of any bracket (`{}`/`[]`/`()`) it transitively opens. This
+    /// bounds an ignored statement to its own extent regardless of what follows (next
+    /// sibling, a `switch` case label, the enclosing `}`), so verbatim never overruns.
+    fn ignored_last_line(&self, start: (usize, usize)) -> usize {
+        let mut last = start.0;
+        loop {
+            let mut grew = false;
+            for &(open_line, close_line) in &self.bracket_spans {
+                if open_line >= start.0 && open_line <= last && close_line > last {
+                    last = close_line;
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        last
+    }
+
+    /// Emit a `// tish-fmt-ignore`-d statement as its original source, verbatim. The
+    /// slice ends at the smallest of: the statement's own bracket extent, the next
+    /// sibling, and the next own-line comment — so a same-line trailing comment is
+    /// kept but neither the next statement's leading comments nor anything past this
+    /// statement leaks in. Captured comments are skipped so they aren't re-emitted.
+    fn emit_ignored(&mut self, s: &Statement, i: usize, stmts: &[Statement], level: usize) {
+        let start = s.span().start;
+        let mut boundary = (self.ignored_last_line(start) + 1, 1);
+        if let Some(next) = stmts.get(i + 1) {
+            boundary = boundary.min(next.span().start);
+        }
+        let mut j = self.ci;
+        while j < self.comments.len() && self.comments[j].start < boundary {
+            let c = &self.comments[j];
+            if c.start > start && c.own_line {
+                boundary = c.start;
+                break;
+            }
+            j += 1;
+        }
+        self.indent(level);
+        let text = self.verbatim(start, boundary);
+        self.buf.push_str(&text);
+        while self.ci < self.comments.len() && self.comments[self.ci].start < boundary {
+            self.ci += 1;
+        }
+    }
+
+    fn stmt(&mut self, s: &Statement, level: usize) {
+        // Expression layout indents relative to this statement's level.
+        self.depth = level;
+        match s {
+            Statement::Block { statements, span } => self.block(statements, *span, level, true),
             Statement::VarDecl {
                 name,
                 mutable,
@@ -197,7 +646,7 @@ impl Printer {
                     self.expr(expr);
                 } else {
                     self.buf.push(' ');
-                    self.stmt(body, level);
+                    self.stmt_inline_or_block(body, level);
                 }
             }
             Statement::Switch {
@@ -220,18 +669,14 @@ impl Printer {
                         }
                         None => self.buf.push_str("default:\n"),
                     }
-                    for st in stmts {
-                        self.stmt(st, level + 2);
-                        self.buf.push('\n');
-                    }
+                    self.emitted = 0;
+                    self.print_seq(stmts, level + 2);
                 }
                 if let Some(def) = default_body {
                     self.indent(level + 1);
                     self.buf.push_str("default:\n");
-                    for st in def {
-                        self.stmt(st, level + 2);
-                        self.buf.push('\n');
-                    }
+                    self.emitted = 0;
+                    self.print_seq(def, level + 2);
                 }
                 self.indent(level);
                 self.buf.push('}');
@@ -240,6 +685,7 @@ impl Printer {
                 self.indent(level);
                 self.buf.push_str("do ");
                 self.stmt_inline_or_block(body, level);
+                self.depth = level; // body recursion moved depth; restore for cond
                 self.buf.push_str(" while (");
                 self.expr(cond);
                 self.buf.push(')');
@@ -352,7 +798,7 @@ impl Printer {
                                 self.type_ann(rt);
                             }
                             self.buf.push(' ');
-                            self.stmt(body, level);
+                            self.stmt_inline_or_block(body, level);
                         } else {
                             self.stmt(inner, level);
                         }
@@ -391,15 +837,43 @@ impl Printer {
         }
     }
 
+    /// Print a `{ … }` block. `lead_indent` controls whether the opening brace is
+    /// indented (true for a standalone block statement) or written at the current
+    /// position (false when it follows `if (…) `, `fn f() `, `else `, etc.).
+    fn block(&mut self, statements: &[Statement], span: Span, level: usize, lead_indent: bool) {
+        if lead_indent {
+            self.indent(level);
+        }
+        self.buf.push_str("{\n");
+        // Fresh sequence: suppress any blank line immediately after `{`.
+        self.emitted = 0;
+        self.print_seq(statements, level + 1);
+        // Dangling comments between the last statement and `}` (e.g. a note inside an
+        // otherwise-empty block). Bound by the real closing brace — `span.end`
+        // overshoots to the next token. Brace-less (indent) blocks have no map entry,
+        // so `span.start` flushes nothing and the comment migrates to the next sibling.
+        let bound = self.braces.get(&span.start).copied().unwrap_or(span.start);
+        self.emit_leading_comments(bound, level + 1);
+        self.indent(level);
+        self.buf.push('}');
+        self.emitted = span.start.0;
+    }
+
     fn stmt_inline_or_block(&mut self, s: &Statement, level: usize) {
-        if let Statement::Block { .. } = s {
-            self.stmt(s, level);
+        if let Statement::Block { statements, span } = s {
+            self.block(statements, *span, level, false);
         } else {
+            let sp = s.span();
             self.buf.push_str("{\n");
+            self.emitted = 0;
+            self.emit_leading_comments(sp.start, level + 1);
             self.stmt(s, level + 1);
+            self.emitted = sp.start.0;
+            self.emit_trailing_comments(sp.start.0);
             self.buf.push('\n');
             self.indent(level);
             self.buf.push('}');
+            self.emitted = sp.start.0;
         }
     }
 
@@ -413,33 +887,56 @@ impl Printer {
                 }
                 ImportSpecifier::Named { name, alias, .. } => {
                     self.buf.push_str("{ ");
-                    self.buf.push_str(name.as_ref());
-                    if let Some(a) = alias {
-                        self.buf.push_str(" as ");
-                        self.buf.push_str(a.as_ref());
-                    }
+                    self.import_named(name.as_ref(), alias.as_deref());
                     self.buf.push_str(" }");
                 }
             }
             return;
         }
+        // A long named-import list wraps one name per line.
+        self.fit(
+            |s| s.import_list_inline(specs),
+            |s| s.import_list_broken(specs),
+        );
+    }
+
+    fn import_named(&mut self, name: &str, alias: Option<&str>) {
+        self.buf.push_str(name);
+        if let Some(a) = alias {
+            self.buf.push_str(" as ");
+            self.buf.push_str(a);
+        }
+    }
+
+    fn import_list_inline(&mut self, specs: &[ImportSpecifier]) {
         self.buf.push_str("{ ");
         for (i, sp) in specs.iter().enumerate() {
             if i > 0 {
                 self.buf.push_str(", ");
             }
-            match sp {
-                ImportSpecifier::Named { name, alias, .. } => {
-                    self.buf.push_str(name.as_ref());
-                    if let Some(a) = alias {
-                        self.buf.push_str(" as ");
-                        self.buf.push_str(a.as_ref());
-                    }
-                }
-                _ => {}
+            if let ImportSpecifier::Named { name, alias, .. } = sp {
+                self.import_named(name.as_ref(), alias.as_deref());
             }
         }
         self.buf.push_str(" }");
+    }
+
+    fn import_list_broken(&mut self, specs: &[ImportSpecifier]) {
+        self.buf.push_str("{\n");
+        self.depth += 1;
+        for (i, sp) in specs.iter().enumerate() {
+            if i > 0 {
+                self.buf.push_str(",\n");
+            }
+            self.indent(self.depth);
+            if let ImportSpecifier::Named { name, alias, .. } = sp {
+                self.import_named(name.as_ref(), alias.as_deref());
+            }
+        }
+        self.depth -= 1;
+        self.buf.push('\n');
+        self.indent(self.depth);
+        self.buf.push('}');
     }
 
     fn param_list(&mut self, params: &[FunParam], rest: &Option<TypedParam>) {
@@ -578,6 +1075,18 @@ impl Printer {
         }
     }
 
+    /// Print `e` as a sub-expression, wrapping it in parentheses when its operator
+    /// binds looser than `min_prec` (so the printed form re-parses to the same AST).
+    fn child(&mut self, e: &Expr, min_prec: u8) {
+        if expr_prec(e) < min_prec {
+            self.buf.push('(');
+            self.expr(e);
+            self.buf.push(')');
+        } else {
+            self.expr(e);
+        }
+    }
+
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Literal { value, .. } => match value {
@@ -596,11 +1105,16 @@ impl Printer {
             Expr::Binary {
                 left, op, right, ..
             } => {
-                self.expr(left);
+                // Parenthesize operands by precedence/associativity so the printed
+                // grouping re-parses to the same tree (the AST has no paren nodes).
+                let p = binop_prec(*op);
+                let right_assoc = matches!(op, BinOp::Pow);
+                let (lmin, rmin) = if right_assoc { (p + 1, p) } else { (p, p + 1) };
+                self.child(left, lmin);
                 self.buf.push(' ');
                 self.buf.push_str(binop(*op));
                 self.buf.push(' ');
-                self.expr(right);
+                self.child(right, rmin);
             }
             Expr::Unary { op, operand, .. } => {
                 match op {
@@ -610,43 +1124,17 @@ impl Printer {
                     UnaryOp::BitNot => self.buf.push_str("~"),
                     UnaryOp::Void => self.buf.push_str("void "),
                 }
-                self.expr(operand);
+                self.child(operand, PREC_POSTFIX);
             }
             Expr::Call { callee, args, .. } => {
-                self.expr(callee);
-                self.buf.push('(');
-                for (i, a) in args.iter().enumerate() {
-                    if i > 0 {
-                        self.buf.push_str(", ");
-                    }
-                    match a {
-                        CallArg::Expr(ex) => self.expr(ex),
-                        CallArg::Spread(ex) => {
-                            self.buf.push_str("...");
-                            self.expr(ex);
-                        }
-                    }
-                }
-                self.buf.push(')');
+                self.child(callee, PREC_POSTFIX);
+                self.emit_args(args);
             }
             Expr::New { callee, args, .. } => {
                 self.buf.push_str("new ");
-                self.expr(callee);
+                self.child(callee, PREC_POSTFIX);
                 if !args.is_empty() {
-                    self.buf.push('(');
-                    for (i, a) in args.iter().enumerate() {
-                        if i > 0 {
-                            self.buf.push_str(", ");
-                        }
-                        match a {
-                            CallArg::Expr(ex) => self.expr(ex),
-                            CallArg::Spread(ex) => {
-                                self.buf.push_str("...");
-                                self.expr(ex);
-                            }
-                        }
-                    }
-                    self.buf.push(')');
+                    self.emit_args(args);
                 }
             }
             Expr::Member {
@@ -655,7 +1143,7 @@ impl Printer {
                 optional,
                 ..
             } => {
-                self.expr(object);
+                self.child(object, PREC_POSTFIX);
                 if *optional {
                     self.buf.push_str("?.");
                 } else {
@@ -676,7 +1164,7 @@ impl Printer {
                 optional,
                 ..
             } => {
-                self.expr(object);
+                self.child(object, PREC_POSTFIX);
                 if *optional {
                     self.buf.push_str("?.[");
                 } else {
@@ -691,53 +1179,20 @@ impl Printer {
                 else_branch,
                 ..
             } => {
-                self.expr(cond);
+                // cond binds tighter than `?:`; the else chains (right-assoc).
+                self.child(cond, PREC_NULLISH);
                 self.buf.push_str(" ? ");
                 self.expr(then_branch);
                 self.buf.push_str(" : ");
-                self.expr(else_branch);
+                self.child(else_branch, PREC_CONDITIONAL);
             }
             Expr::NullishCoalesce { left, right, .. } => {
-                self.expr(left);
+                self.child(left, PREC_NULLISH);
                 self.buf.push_str(" ?? ");
-                self.expr(right);
+                self.child(right, PREC_NULLISH + 1);
             }
-            Expr::Array { elements, .. } => {
-                self.buf.push('[');
-                for (i, el) in elements.iter().enumerate() {
-                    if i > 0 {
-                        self.buf.push_str(", ");
-                    }
-                    match el {
-                        ArrayElement::Expr(ex) => self.expr(ex),
-                        ArrayElement::Spread(ex) => {
-                            self.buf.push_str("...");
-                            self.expr(ex);
-                        }
-                    }
-                }
-                self.buf.push(']');
-            }
-            Expr::Object { props, .. } => {
-                self.buf.push_str("{ ");
-                for (i, pr) in props.iter().enumerate() {
-                    if i > 0 {
-                        self.buf.push_str(", ");
-                    }
-                    match pr {
-                        ObjectProp::KeyValue(k, v) => {
-                            self.buf.push_str(k.as_ref());
-                            self.buf.push_str(": ");
-                            self.expr(v);
-                        }
-                        ObjectProp::Spread(ex) => {
-                            self.buf.push_str("...");
-                            self.expr(ex);
-                        }
-                    }
-                }
-                self.buf.push_str(" }");
-            }
+            Expr::Array { elements, .. } => self.emit_array(elements),
+            Expr::Object { props, .. } => self.emit_object(props),
             Expr::Assign { name, value, .. } => {
                 self.buf.push_str(name.as_ref());
                 self.buf.push_str(" = ");
@@ -745,7 +1200,7 @@ impl Printer {
             }
             Expr::TypeOf { operand, .. } => {
                 self.buf.push_str("typeof ");
-                self.expr(operand);
+                self.child(operand, PREC_POSTFIX);
             }
             Expr::PostfixInc { name, .. } => {
                 self.buf.push_str(name.as_ref());
@@ -783,7 +1238,7 @@ impl Printer {
                 value,
                 ..
             } => {
-                self.expr(object);
+                self.child(object, PREC_POSTFIX);
                 self.buf.push('.');
                 self.buf.push_str(prop.as_ref());
                 self.buf.push_str(" = ");
@@ -795,7 +1250,7 @@ impl Printer {
                 value,
                 ..
             } => {
-                self.expr(object);
+                self.child(object, PREC_POSTFIX);
                 self.buf.push('[');
                 self.expr(index);
                 self.buf.push_str("] = ");
@@ -806,8 +1261,20 @@ impl Printer {
                 self.param_list(params, &None);
                 self.buf.push_str(") => ");
                 match body {
-                    ArrowBody::Expr(e) => self.expr(e),
-                    ArrowBody::Block(b) => self.stmt(b, 0),
+                    // A bare object-literal body must be parenthesized, else `=> {`
+                    // re-parses as a block.
+                    ArrowBody::Expr(e) => {
+                        if matches!(e.as_ref(), Expr::Object { .. }) {
+                            self.buf.push('(');
+                            self.expr(e);
+                            self.buf.push(')');
+                        } else {
+                            self.expr(e);
+                        }
+                    }
+                    // Indent the block body relative to the arrow's own line
+                    // (`self.depth`), printed inline after `=> ` (no leading indent).
+                    ArrowBody::Block(b) => self.stmt_inline_or_block(b, self.depth),
                 }
             }
             Expr::TemplateLiteral { quasis, exprs, .. } => {
@@ -824,7 +1291,7 @@ impl Printer {
             }
             Expr::Await { operand, .. } => {
                 self.buf.push_str("await ");
-                self.expr(operand);
+                self.child(operand, PREC_POSTFIX);
             }
             Expr::JsxElement {
                 tag,
@@ -963,6 +1430,72 @@ fn escape_template(s: &str) -> String {
         .replace('$', "\\$")
 }
 
+// Expression precedence levels (higher binds tighter), mirroring the parser's
+// descent chain (parse_conditional → … → parse_unary → primary). Used to decide
+// when a sub-expression needs parentheses.
+const PREC_CONDITIONAL: u8 = 1;
+const PREC_NULLISH: u8 = 2;
+const PREC_POSTFIX: u8 = 15; // call / member / index — tighter than any operator
+const PREC_ATOM: u8 = 16; // literals, identifiers, array/object/template/jsx
+
+/// True when a comment is exactly the ignore marker — `// tish-fmt-ignore` or the
+/// `/* tish-fmt-ignore */` block form.
+fn is_ignore_marker(text: &str) -> bool {
+    let t = text.trim();
+    let inner = if let Some(r) = t.strip_prefix("//") {
+        r
+    } else if let Some(r) = t.strip_prefix("/*").and_then(|x| x.strip_suffix("*/")) {
+        r
+    } else {
+        return false;
+    };
+    inner.trim() == IGNORE_MARKER
+}
+
+/// Precedence of a binary operator, matching the parser (parser.rs `parse_*`).
+fn binop_prec(op: BinOp) -> u8 {
+    match op {
+        BinOp::Or => 3,
+        BinOp::And => 4,
+        BinOp::BitOr => 5,
+        BinOp::BitXor => 6,
+        BinOp::BitAnd => 7,
+        BinOp::Shl | BinOp::Shr => 8,
+        BinOp::Eq | BinOp::Ne | BinOp::StrictEq | BinOp::StrictNe => 9,
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::In => 10,
+        BinOp::Add | BinOp::Sub => 11,
+        BinOp::Mul | BinOp::Div | BinOp::Mod => 12,
+        BinOp::Pow => 13,
+    }
+}
+
+/// Precedence of an expression's outermost operator (atoms bind tightest).
+fn expr_prec(e: &Expr) -> u8 {
+    match e {
+        Expr::Assign { .. }
+        | Expr::MemberAssign { .. }
+        | Expr::IndexAssign { .. }
+        | Expr::CompoundAssign { .. }
+        | Expr::LogicalAssign { .. } => 0,
+        Expr::Conditional { .. } => PREC_CONDITIONAL,
+        Expr::NullishCoalesce { .. } => PREC_NULLISH,
+        Expr::Binary { op, .. } => binop_prec(*op),
+        Expr::Unary { .. }
+        | Expr::TypeOf { .. }
+        | Expr::Await { .. }
+        | Expr::PrefixInc { .. }
+        | Expr::PrefixDec { .. } => 14,
+        Expr::Call { .. }
+        | Expr::New { .. }
+        | Expr::Member { .. }
+        | Expr::Index { .. }
+        | Expr::PostfixInc { .. }
+        | Expr::PostfixDec { .. } => PREC_POSTFIX,
+        Expr::ArrowFunction { .. } => PREC_ATOM,
+        _ => PREC_ATOM,
+    }
+}
+
 fn binop(op: BinOp) -> &'static str {
     match op {
         BinOp::Add => "+",
@@ -1008,6 +1541,224 @@ fn logical_assign(op: LogicalAssignOp) -> &'static str {
     }
 }
 
+/// Recover `//` and `/* */` comments from source, in order, with their 1-based
+/// (line, col) positions — matching `ast::Span`'s convention so the printer can
+/// re-insert them by position. The lexer discards comments, so this is a separate
+/// pass; it skips string and template literals so a `//` inside `"…"` or `` `…` ``
+/// is never mistaken for a comment. (Tish has no regex literals, so a bare `/` is
+/// only division or a comment opener — no further disambiguation is needed.)
+fn scan_comments(source: &str) -> (Vec<CommentTok>, BraceMap, Vec<(usize, usize)>) {
+    let mut s = Scanner {
+        chars: source.chars().collect(),
+        i: 0,
+        line: 1,
+        col: 1,
+        seen_nonws: false,
+        out: Vec::new(),
+        brace_stack: Vec::new(),
+        braces: BraceMap::new(),
+        bracket_open: Vec::new(),
+        bracket_spans: Vec::new(),
+    };
+    s.scan_code(false);
+    (s.out, s.braces, s.bracket_spans)
+}
+
+struct Scanner {
+    chars: Vec<char>,
+    i: usize,
+    line: usize,
+    col: usize,
+    /// Whether any non-whitespace has appeared on the current line yet.
+    seen_nonws: bool,
+    out: Vec<CommentTok>,
+    /// Open `{` positions awaiting their match, for building `braces`.
+    brace_stack: Vec<(usize, usize)>,
+    /// `{`→`}` position pairs (see [`BraceMap`]).
+    braces: BraceMap,
+    /// Open lines of every bracket (`{ [ (`) awaiting its match.
+    bracket_open: Vec<usize>,
+    /// `(open_line, close_line)` for every bracket pair — lets an ignored statement's
+    /// verbatim slice extend over the full lines of any `{}`/`[]`/`()` it opens.
+    bracket_spans: Vec<(usize, usize)>,
+}
+
+impl Scanner {
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.i).copied()
+    }
+
+    fn peek2(&self) -> Option<char> {
+        self.chars.get(self.i + 1).copied()
+    }
+
+    /// Consume one char, tracking line/col like the lexer (col resets after `\n`).
+    fn bump(&mut self) -> Option<char> {
+        let c = *self.chars.get(self.i)?;
+        self.i += 1;
+        if c == '\n' {
+            self.line += 1;
+            self.col = 1;
+            self.seen_nonws = false;
+        } else {
+            self.col += 1;
+        }
+        Some(c)
+    }
+
+    /// Scan ordinary code, collecting comments. When `stop_at_close_brace` is set
+    /// (inside a `${ … }` template interpolation), returns at the matching `}`
+    /// without consuming it.
+    fn scan_code(&mut self, stop_at_close_brace: bool) {
+        let mut depth = 0usize;
+        while let Some(c) = self.peek() {
+            match c {
+                '}' if stop_at_close_brace && depth == 0 => return,
+                '{' => {
+                    self.brace_stack.push((self.line, self.col));
+                    self.bracket_open.push(self.line);
+                    depth += 1;
+                    self.bump();
+                    self.seen_nonws = true;
+                }
+                '}' => {
+                    let close = (self.line, self.col);
+                    if let Some(open) = self.brace_stack.pop() {
+                        self.braces.insert(open, close);
+                    }
+                    if let Some(open_line) = self.bracket_open.pop() {
+                        self.bracket_spans.push((open_line, self.line));
+                    }
+                    depth = depth.saturating_sub(1);
+                    self.bump();
+                    self.seen_nonws = true;
+                }
+                '(' | '[' => {
+                    self.bracket_open.push(self.line);
+                    self.bump();
+                    self.seen_nonws = true;
+                }
+                ')' | ']' => {
+                    if let Some(open_line) = self.bracket_open.pop() {
+                        self.bracket_spans.push((open_line, self.line));
+                    }
+                    self.bump();
+                    self.seen_nonws = true;
+                }
+                '"' | '\'' => self.scan_string(c),
+                '`' => {
+                    self.bump();
+                    self.seen_nonws = true;
+                    self.scan_template();
+                }
+                '/' if self.peek2() == Some('/') => self.scan_line_comment(),
+                '/' if self.peek2() == Some('*') => self.scan_block_comment(),
+                ' ' | '\t' | '\r' | '\n' => {
+                    self.bump();
+                }
+                _ => {
+                    self.bump();
+                    self.seen_nonws = true;
+                }
+            }
+        }
+    }
+
+    fn scan_string(&mut self, quote: char) {
+        self.bump(); // opening quote
+        self.seen_nonws = true;
+        while let Some(c) = self.bump() {
+            if c == '\\' {
+                self.bump(); // escaped char
+            } else if c == quote {
+                break;
+            }
+        }
+    }
+
+    /// Scan a template literal body (opening backtick already consumed), recursing
+    /// into `${ … }` interpolations so their strings/comments are handled too.
+    fn scan_template(&mut self) {
+        while let Some(c) = self.peek() {
+            match c {
+                '`' => {
+                    self.bump();
+                    return;
+                }
+                '\\' => {
+                    self.bump();
+                    self.bump();
+                }
+                '$' if self.peek2() == Some('{') => {
+                    self.bump();
+                    self.bump();
+                    self.scan_code(true);
+                    if self.peek() == Some('}') {
+                        self.bump();
+                    }
+                }
+                _ => {
+                    self.bump();
+                }
+            }
+        }
+    }
+
+    fn scan_line_comment(&mut self) {
+        let start = (self.line, self.col);
+        let own_line = !self.seen_nonws;
+        let mut text = String::new();
+        while let Some(c) = self.peek() {
+            if c == '\n' {
+                break;
+            }
+            text.push(c);
+            self.bump();
+        }
+        self.out.push(CommentTok {
+            start,
+            text: text.trim_end().to_string(),
+            own_line,
+        });
+    }
+
+    fn scan_block_comment(&mut self) {
+        let start = (self.line, self.col);
+        let own_line = !self.seen_nonws;
+        let mut text = String::new();
+        let mut depth = 0usize;
+        loop {
+            if self.peek() == Some('/') && self.peek2() == Some('*') {
+                text.push('/');
+                text.push('*');
+                self.bump();
+                self.bump();
+                depth += 1;
+            } else if self.peek() == Some('*') && self.peek2() == Some('/') {
+                text.push('*');
+                text.push('/');
+                self.bump();
+                self.bump();
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            } else {
+                match self.bump() {
+                    Some(c) => text.push(c),
+                    None => break,
+                }
+            }
+        }
+        self.out.push(CommentTok {
+            start,
+            text,
+            own_line,
+        });
+        self.seen_nonws = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,5 +1779,323 @@ mod tests {
             "expected line breaks in formatted JSX: {out:?}"
         );
         let _ = tishlang_parser::parse(&out).unwrap();
+    }
+
+    #[test]
+    fn preserves_leading_and_section_comments() {
+        let src = "\
+// file header
+// second line
+let a = 1
+
+// a section
+let b = 2
+";
+        let out = format_source(src).unwrap();
+        assert!(out.contains("// file header"), "{out:?}");
+        assert!(out.contains("// second line"), "{out:?}");
+        assert!(out.contains("// a section"), "{out:?}");
+        // header hugs the statement it documents; blank line before the section.
+        assert!(out.contains("// a section\nlet b = 2"), "{out:?}");
+        let _ = tishlang_parser::parse(&out).unwrap();
+    }
+
+    #[test]
+    fn preserves_trailing_comment() {
+        let src = "let a = 1 // inline note\n";
+        let out = format_source(src).unwrap();
+        assert!(out.contains("let a = 1 // inline note"), "{out:?}");
+        let _ = tishlang_parser::parse(&out).unwrap();
+    }
+
+    #[test]
+    fn preserves_comments_inside_block() {
+        let src = "\
+fn f() {
+  // step one
+  let a = 1
+  // step two
+  return a
+}
+";
+        let out = format_source(src).unwrap();
+        assert!(out.contains("  // step one"), "{out:?}");
+        assert!(out.contains("  // step two"), "{out:?}");
+        let _ = tishlang_parser::parse(&out).unwrap();
+    }
+
+    #[test]
+    fn preserves_dangling_comment_in_empty_block() {
+        let src = "fn f() {\n  // nothing yet\n}\n";
+        let out = format_source(src).unwrap();
+        assert!(out.contains("// nothing yet"), "{out:?}");
+        let _ = tishlang_parser::parse(&out).unwrap();
+    }
+
+    #[test]
+    fn preserves_block_comment() {
+        let src = "/* a block comment */\nlet a = 1\n";
+        let out = format_source(src).unwrap();
+        assert!(out.contains("/* a block comment */"), "{out:?}");
+        let _ = tishlang_parser::parse(&out).unwrap();
+    }
+
+    #[test]
+    fn double_slash_in_string_is_not_a_comment() {
+        let src = "let url = \"http://example.com\"\n";
+        let out = format_source(src).unwrap();
+        assert_eq!(out, "let url = \"http://example.com\"\n", "{out:?}");
+    }
+
+    #[test]
+    fn idempotent_with_comments() {
+        let src = "\
+// header
+let a = 1
+
+fn f() {
+  // body note
+  let b = 2 // trailing
+  return b
+}
+";
+        let once = format_source(src).unwrap();
+        let twice = format_source(&once).unwrap();
+        assert_eq!(
+            once, twice,
+            "formatting is not idempotent:\n{once}\n---\n{twice}"
+        );
+    }
+
+    #[test]
+    fn collapses_multiple_blank_lines_to_one() {
+        let src = "let a = 1\n\n\n\nlet b = 2\n";
+        let out = format_source(src).unwrap();
+        assert_eq!(out, "let a = 1\n\nlet b = 2\n", "{out:?}");
+    }
+
+    #[test]
+    fn comment_after_inner_block_stays_at_outer_level() {
+        // Regression: a comment after an inner block's `}` belongs to the outer
+        // scope, not inside the inner block (the parser's block span.end overshoots
+        // past `}`, which previously pulled this comment in and broke idempotency).
+        let src = "\
+fn f() {
+  if (x) {
+    a()
+  }
+  // after the if
+  b()
+}
+";
+        let out = format_source(src).unwrap();
+        assert!(out.contains("  // after the if\n  b()"), "{out:?}");
+        let twice = format_source(&out).unwrap();
+        assert_eq!(out, twice, "not idempotent:\n{out}\n---\n{twice}");
+    }
+
+    #[test]
+    fn trailing_comment_inside_block_stays_inside() {
+        let src = "\
+fn f() {
+  a()
+  // last note
+}
+";
+        let out = format_source(src).unwrap();
+        assert!(out.contains("  // last note\n}"), "{out:?}");
+        let twice = format_source(&out).unwrap();
+        assert_eq!(out, twice, "{out:?}");
+    }
+
+    #[test]
+    fn preserves_operator_grouping() {
+        // The AST has no parenthesis nodes, so the printer must re-derive parens
+        // from precedence. Each `want` must re-parse to the same tree.
+        let cases = [
+            ("let a = 1 / (b - c)\n", "1 / (b - c)"),
+            ("let a = 0 - (x + y + z)\n", "0 - (x + y + z)"),
+            ("let a = (1 - (p + q)) * s\n", "(1 - (p + q)) * s"),
+            ("let a = b * c + d\n", "b * c + d"),
+            ("let a = b + c * d\n", "b + c * d"),
+            ("let a = (b + c) * d\n", "(b + c) * d"),
+            ("let a = 1 - 2 - 3\n", "1 - 2 - 3"),
+            ("let a = 1 - (2 - 3)\n", "1 - (2 - 3)"),
+            ("let a = -(b + c)\n", "-(b + c)"),
+            ("let a = !(b && c)\n", "!(b && c)"),
+            ("let a = (a | b) & c\n", "(a | b) & c"),
+        ];
+        for (src, want) in cases {
+            let out = format_source(src).unwrap();
+            assert!(
+                out.contains(want),
+                "for {src:?} expected to contain {want:?}, got {out:?}"
+            );
+            let twice = format_source(&out).unwrap();
+            assert_eq!(out, twice, "not idempotent for {src:?}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn nested_control_flow_brace_spacing() {
+        let src = "fn f() {\n  if (a) {\n    b()\n  }\n}\n";
+        let out = format_source(src).unwrap();
+        assert!(!out.contains(")   {"), "double-space before brace: {out:?}");
+        assert!(out.contains("  if (a) {\n"), "{out:?}");
+        let twice = format_source(&out).unwrap();
+        assert_eq!(out, twice, "{out:?}");
+    }
+
+    #[test]
+    fn short_object_stays_inline() {
+        let src = "let a = { x: 1, y: 2 }\n";
+        assert_eq!(format_source(src).unwrap(), src);
+    }
+
+    #[test]
+    fn long_object_breaks_one_per_line() {
+        let props: Vec<String> = (0..12).map(|i| format!("key{i}: {i}")).collect();
+        let src = format!("let a = {{ {} }}\n", props.join(", "));
+        let out = format_source(&src).unwrap();
+        assert!(
+            out.contains("let a = {\n  key0: 0,\n"),
+            "expected broken object:\n{out}"
+        );
+        assert!(out.ends_with("\n}\n"), "{out:?}");
+        // idempotent and re-parses
+        assert_eq!(format_source(&out).unwrap(), out, "not idempotent:\n{out}");
+        tishlang_parser::parse(&out).unwrap();
+    }
+
+    #[test]
+    fn long_array_breaks_one_per_line() {
+        let elems: Vec<String> = (0..40).map(|i| i.to_string()).collect();
+        let src = format!("let a = [{}]\n", elems.join(", "));
+        let out = format_source(&src).unwrap();
+        assert!(
+            out.contains("[\n  0,\n  1,\n"),
+            "expected broken array:\n{out}"
+        );
+        assert_eq!(format_source(&out).unwrap(), out);
+    }
+
+    #[test]
+    fn last_arg_object_hugs_parens() {
+        let props: Vec<String> = (0..20).map(|i| format!("k{i}: {i}")).collect();
+        let src = format!("f(a, {{ {} }})\n", props.join(", "));
+        let out = format_source(&src).unwrap();
+        assert!(
+            out.starts_with("f(a, {\n"),
+            "expected hugged object:\n{out}"
+        );
+        assert!(out.contains("\n})\n"), "expected hugged close:\n{out}");
+        assert_eq!(format_source(&out).unwrap(), out);
+        tishlang_parser::parse(&out).unwrap();
+    }
+
+    #[test]
+    fn nested_containers_indent_progressively() {
+        let inner: Vec<String> = (0..16).map(|i| format!("p{i}: {i}")).collect();
+        let src = format!("let a = {{ outer: {{ {} }} }}\n", inner.join(", "));
+        let out = format_source(&src).unwrap();
+        // outer object at 2 spaces, inner props at 4 spaces
+        assert!(
+            out.contains("\n  outer: {\n    p0: 0,"),
+            "expected nested indent:\n{out}"
+        );
+        assert_eq!(format_source(&out).unwrap(), out);
+    }
+
+    #[test]
+    fn arrow_block_body_indents_to_context() {
+        let src =
+            "export fn make() {\n  let s = {}\n  s.go = (x) => {\n    foo(x)\n  }\n  return s\n}\n";
+        let out = format_source(src).unwrap();
+        // Arrow body one level past its `s.go` line (4 spaces); closing `}` at 2.
+        assert!(
+            out.contains("  s.go = (x) => {\n    foo(x)\n  }\n"),
+            "arrow body mis-indented:\n{out}"
+        );
+        assert_eq!(format_source(&out).unwrap(), out);
+    }
+
+    #[test]
+    fn ignore_marker_preserves_statement_verbatim() {
+        let src = "// tish-fmt-ignore\nexport fn m(out) {\n  out[0]=1;  out[1]=0\n  out[2]=0; out[3]=1\n}\n\nlet x = {a:1,b:2}\n";
+        let out = format_source(src).unwrap();
+        // The ignored function keeps its exact source (aligned, no spaces around `=`).
+        assert!(
+            out.contains("export fn m(out) {\n  out[0]=1;  out[1]=0\n  out[2]=0; out[3]=1\n}"),
+            "ignored block not verbatim:\n{out}"
+        );
+        // Surrounding code is still formatted normally.
+        assert!(
+            out.contains("let x = { a: 1, b: 2 }"),
+            "neighbour not formatted:\n{out}"
+        );
+        // The marker itself is kept.
+        assert!(out.contains("// tish-fmt-ignore\n"), "{out}");
+        assert_eq!(format_source(&out).unwrap(), out, "not idempotent:\n{out}");
+        tishlang_parser::parse(&out).unwrap();
+    }
+
+    #[test]
+    fn ignore_marker_block_comment_form() {
+        let src = "/* tish-fmt-ignore */\nlet a = [1,2,   3]\n";
+        let out = format_source(src).unwrap();
+        assert!(
+            out.contains("let a = [1,2,   3]"),
+            "expected verbatim array:\n{out}"
+        );
+    }
+
+    #[test]
+    fn ignore_in_switch_case_does_not_overrun() {
+        // Regression: an ignored last statement of a non-final case must not swallow
+        // the following cases / closing brace / trailing code.
+        let src = "switch (x) {\n  case 1:\n    // tish-fmt-ignore\n    foo( a,b )\n  case 2:\n    bar()\n}\nlet after = 1\n";
+        let out = format_source(src).unwrap();
+        assert!(out.contains("foo( a,b )"), "ignored not verbatim:\n{out}");
+        assert!(out.contains("case 2:"), "case 2 was swallowed:\n{out}");
+        assert!(out.contains("bar()"), "case 2 body swallowed:\n{out}");
+        assert!(
+            out.contains("let after = 1"),
+            "trailing code swallowed:\n{out}"
+        );
+        tishlang_parser::parse(&out).unwrap();
+        assert_eq!(format_source(&out).unwrap(), out, "not idempotent:\n{out}");
+    }
+
+    #[test]
+    fn ignore_preserves_multiline_bracket_statement() {
+        // The verbatim extent must follow `[]`/`()`, not just `{}`.
+        let src = "// tish-fmt-ignore\nlet m = [\n  1,2,\n  3,4\n]\nlet n = 5\n";
+        let out = format_source(src).unwrap();
+        assert!(
+            out.contains("let m = [\n  1,2,\n  3,4\n]"),
+            "multiline array truncated:\n{out}"
+        );
+        assert!(out.contains("let n = 5"), "{out}");
+        assert_eq!(format_source(&out).unwrap(), out);
+    }
+
+    #[test]
+    fn without_marker_is_formatted_normally() {
+        let src = "let a = [1,2,   3]\n";
+        let out = format_source(src).unwrap();
+        assert_eq!(out, "let a = [1, 2, 3]\n", "{out:?}");
+    }
+
+    #[test]
+    fn no_comments_round_trips_without_loss() {
+        let src = "\
+fn add(a, b) {
+  return a + b
+}
+
+let x = add(1, 2)
+";
+        let out = format_source(src).unwrap();
+        assert_eq!(out, src, "{out:?}");
     }
 }
