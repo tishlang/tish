@@ -1,0 +1,42 @@
+import { fileExists, isDir } from "fs"
+import { serve } from "http"
+import { process } from "process"
+
+fn contentType(path) {
+  if (path.endsWith(".html")) { return "text/html; charset=utf-8" }
+  if (path.endsWith(".css")) { return "text/css; charset=utf-8" }
+  if (path.endsWith(".js") || path.endsWith(".mjs")) { return "application/javascript; charset=utf-8" }
+  return "application/octet-stream"
+}
+
+fn serveFile(path) {
+  let ct = contentType(path)
+  return { status: 200, headers: { "Content-Type": ct, "Cache-Control": "no-store" }, file: path }
+}
+
+fn handleRequest(req) {
+  let p = req.path
+  if (p === "/" || p === "") { p = "/index.html" }
+  if (p.charAt(0) === "/") { p = p.substring(1) }
+
+  let candidates = ["public/" + p, p]
+  let i = 0
+  while (i < candidates.length) {
+    let path = candidates[i]
+    if (fileExists(path) && !isDir(path)) { return serveFile(path) }
+    i = i + 1
+  }
+  
+  if (fileExists("public/index.html") && req.path.indexOf(".") < 0) {
+    return serveFile("public/index.html")
+  }
+  
+  return { status: 404, body: "Not found: " + req.path }
+}
+
+let port = 8080
+if (process !== null && "env" in process && process.env !== null && "PORT" in process.env) {
+  port = parseInt(process.env["PORT"])
+}
+console.log("Dev server running at http://127.0.0.1:" + port)
+serve(port, handleRequest)

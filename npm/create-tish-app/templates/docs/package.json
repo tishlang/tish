@@ -1,0 +1,10 @@
+{
+  "name": "{{PROJECT_NAME}}",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tish run --feature fs build.tish && tish run --feature http,fs,process dev-server.tish",
+    "build": "tish run --feature fs build.tish",
+    "start": "tish run --feature http,fs,process dev-server.tish"
+  }
+}
