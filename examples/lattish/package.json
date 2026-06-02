@@ -8,6 +8,6 @@
     "source": "./src/App.tish"
   },
   "dependencies": {
-    "lattish": "file:../../../lattish"
+    "@tishlang/lattish": "file:../../../lattish"
   }
 }
