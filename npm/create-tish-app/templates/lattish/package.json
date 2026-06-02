@@ -1,0 +1,13 @@
+{
+  "name": "{{PROJECT_NAME}}",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tish run --feature http,fs,process dev-server.tish",
+    "build": "tish build --target js src/App.tish -o public/dist/App",
+    "start": "tish run --feature http,fs,process dev-server.tish"
+  },
+  "dependencies": {
+    "@tishlang/lattish": "latest"
+  }
+}

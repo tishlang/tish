@@ -1,0 +1,10 @@
+{
+  "name": "{{PROJECT_NAME}}",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tish run --feature http src/main.tish",
+    "build": "tish build src/main.tish -o app",
+    "start": "./app"
+  }
+}

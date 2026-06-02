@@ -1,0 +1,27 @@
+import { fileExists, readFile, writeFile, mkdir } from "fs"
+
+fn buildDocs() {
+  let content = ""
+  if (fileExists("content/index.md")) {
+    content = readFile("content/index.md")
+  }
+  
+  let html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Docs</title>
+  <style>body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem; }</style>
+</head>
+<body>
+  <div class="content">${content}</div>
+  <p><em>(In a full implementation, you would convert Markdown to HTML here)</em></p>
+</body>
+</html>`
+
+  mkdir("public")
+  writeFile("public/index.html", html)
+  console.log("Built docs to public/index.html")
+}
+
+buildDocs()

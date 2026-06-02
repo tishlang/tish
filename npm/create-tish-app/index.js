@@ -3,9 +3,9 @@
 
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline');
 
 function prompt(question) {
-  const readline = require('readline');
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise(resolve => {
     rl.question(question, answer => {
@@ -15,14 +15,63 @@ function prompt(question) {
   });
 }
 
+function copyDirSync(src, dest, safeName) {
+  fs.mkdirSync(dest, { recursive: true });
+  let entries = fs.readdirSync(src, { withFileTypes: true });
+
+  for (let entry of entries) {
+    let srcPath = path.join(src, entry.name);
+    let destPath = path.join(dest, entry.name);
+
+    if (entry.isDirectory()) {
+      copyDirSync(srcPath, destPath, safeName);
+    } else {
+      let content = fs.readFileSync(srcPath, 'utf8');
+      content = content.replace(/\{\{PROJECT_NAME\}\}/g, safeName);
+      fs.writeFileSync(destPath, content, 'utf8');
+    }
+  }
+}
+
 async function main() {
-  let name = (process.argv[2] && String(process.argv[2]).trim()) || '';
+  const templatesDir = path.join(__dirname, 'templates');
+  const TEMPLATES = fs.existsSync(templatesDir) ? fs.readdirSync(templatesDir).filter(f => fs.statSync(path.join(templatesDir, f)).isDirectory()) : [];
+
+  let template = (process.argv[2] && String(process.argv[2]).trim()) || '';
+  let name = (process.argv[3] && String(process.argv[3]).trim()) || '';
+
+  // Shift arguments if the first arg is not a template (allow `create-tish-app my-app` but prompt for template)
+  if (template && !TEMPLATES.includes(template)) {
+    if (!name) {
+      name = template;
+      template = '';
+    }
+  }
+
+  if (!template) {
+    console.log('Available templates:');
+    TEMPLATES.forEach((t, i) => console.log(`  ${i + 1}) ${t}`));
+    let selection = await prompt('Select a template (1-' + TEMPLATES.length + '): ');
+    const index = parseInt(selection, 10) - 1;
+    if (index >= 0 && index < TEMPLATES.length) {
+      template = TEMPLATES[index];
+    } else if (TEMPLATES.includes(selection)) {
+      template = selection;
+    }
+    
+    if (!TEMPLATES.includes(template)) {
+      console.error('Invalid template selection.');
+      process.exit(1);
+    }
+  }
+
   if (!name) {
     name = await prompt('Project name: ');
     name = name.trim();
   }
+  
   if (!name) {
-    console.error('Please provide a project name (argument or when prompted). Example: npx @tishlang/create-tish-app my-app');
+    console.error('Please provide a project name.');
     process.exit(1);
   }
 
@@ -30,6 +79,7 @@ async function main() {
     console.error('Project name must be a single folder name, not a path.');
     process.exit(1);
   }
+  
   if (name === '.' || name === '..') {
     console.error('Invalid project name.');
     process.exit(1);
@@ -41,57 +91,28 @@ async function main() {
     process.exit(1);
   }
 
-  fs.mkdirSync(dir, { recursive: true });
-  fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
-
   const safeName = name.replace(/[^a-z0-9-]/gi, '-').replace(/-+/g, '-').toLowerCase() || 'tish-app';
-  const files = {
-    'src/main.tish': `// ${name} - Tish app
-let message = "Hello, Tish!"
-console.log(message)
-`,
-    'zectre.yaml': `name: ${safeName}
-`,
-    'package.json': JSON.stringify({
-      name: safeName,
-      version: '0.1.0',
-      private: true,
-      tish: { source: './src/main.tish' },
-    }, null, 2),
-    '.gitignore': `# Build output
-/tish_out
-*.exe
-`,
-    'README.md': `# ${name}
 
-A [Tish](https://github.com/tishlang/tish) project.
-
-## Run (interpret)
-
-\`\`\`bash
-npx @tishlang/tish run src/main.tish
-# or after installing: tish run src/main.tish
-\`\`\`
-
-## Build to native
-
-\`\`\`bash
-npx @tishlang/tish build src/main.tish -o app
-./app
-\`\`\`
-`,
-  };
-
-  for (const [file, content] of Object.entries(files)) {
-    fs.writeFileSync(path.join(dir, file), content, 'utf8');
+  const tplDir = path.join(templatesDir, template);
+  if (!fs.existsSync(tplDir)) {
+    console.error('Template not found: ' + template);
+    process.exit(1);
   }
 
-  console.log(`Created ${name} at ${dir}`);
-  console.log('');
-  console.log('Next steps:');
-  console.log(`  cd ${name}`);
-  console.log('  npx @tishlang/tish run src/main.tish');
-  console.log('  # or: npx @tishlang/tish build src/main.tish -o app && ./app');
+  console.log(`Copying files from ${template} template...`);
+  copyDirSync(tplDir, dir, safeName);
+
+  console.log(`\nSuccess! Created ${name} at ${dir}`);
+  console.log('Inside that directory, you can run several commands:');
+  console.log('\n  npm run dev');
+  console.log('    Starts the development server.');
+  console.log('\n  npm run build');
+  console.log('    Builds the app for production.');
+  console.log('\n  npm run start');
+  console.log('    Runs the built app in production mode.\n');
+  console.log('We suggest that you begin by typing:');
+  console.log(`\n  cd ${name}`);
+  console.log('  npm run dev\n');
 }
 
 main().catch(err => {
