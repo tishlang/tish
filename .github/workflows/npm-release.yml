@@ -5,8 +5,9 @@
 # tokens on 2026-12-09 and forces granular tokens to expire, so OIDC is the only
 # durable option). This requires a ONE-TIME setup on npmjs.com for EACH package
 # below; until that is done a publish fails with E404/E422. For every package
-# (@tishlang/tish, @tishlang/cargo-bindgen, @tishlang/pg, @tishlang/create-tish-app,
-# and unscoped create-tish-app) open npmjs.com > the package > Settings >
+# (@tishlang/tish, @tishlang/cargo-bindgen, @tishlang/tish-format, @tishlang/tish-lint,
+# @tishlang/pg, @tishlang/create-tish-app, and unscoped create-tish-app) open
+# npmjs.com > the package > Settings >
 # "Trusted Publisher" > GitHub Actions and set:
 #   Organization or user: tishlang
 #   Repository:           tish
@@ -59,6 +60,18 @@ jobs:
             exit 1
           fi
           curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_BINDGEN" -o cargo-bindgen-npm-package.tgz
+          ASSET_URL_FORMAT=$(echo '${{ toJSON(github.event.release.assets) }}' | jq -r '.[] | select(.name == "tish-format-npm-package.tgz") | .url')
+          if [ -z "$ASSET_URL_FORMAT" ] || [ "$ASSET_URL_FORMAT" = "null" ]; then
+            echo "Release has no asset tish-format-npm-package.tgz"
+            exit 1
+          fi
+          curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_FORMAT" -o tish-format-npm-package.tgz
+          ASSET_URL_LINT=$(echo '${{ toJSON(github.event.release.assets) }}' | jq -r '.[] | select(.name == "tish-lint-npm-package.tgz") | .url')
+          if [ -z "$ASSET_URL_LINT" ] || [ "$ASSET_URL_LINT" = "null" ]; then
+            echo "Release has no asset tish-lint-npm-package.tgz"
+            exit 1
+          fi
+          curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_LINT" -o tish-lint-npm-package.tgz
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -76,6 +89,12 @@ jobs:
 
       - name: Publish @tishlang/cargo-bindgen from tarball
         run: npm publish cargo-bindgen-npm-package.tgz --access public
+
+      - name: Publish @tishlang/tish-format from tarball
+        run: npm publish tish-format-npm-package.tgz --access public
+
+      - name: Publish @tishlang/tish-lint from tarball
+        run: npm publish tish-lint-npm-package.tgz --access public
 
       - name: Publish @tishlang/pg
         run: |
@@ -123,6 +142,8 @@ jobs:
           VERSION="${TAG#v}"
           NPM_URL="https://www.npmjs.com/package/@tishlang/tish/v/${VERSION}"
           NPM_BINDGEN_URL="https://www.npmjs.com/package/@tishlang/cargo-bindgen/v/${VERSION}"
+          NPM_FORMAT_URL="https://www.npmjs.com/package/@tishlang/tish-format/v/${VERSION}"
+          NPM_LINT_URL="https://www.npmjs.com/package/@tishlang/tish-lint/v/${VERSION}"
           CTA_SCOPED="https://www.npmjs.com/package/@tishlang/create-tish-app/v/${VERSION}"
           CTA_UNSCOPED="https://www.npmjs.com/package/create-tish-app/v/${VERSION}"
           CRATES_URL="https://crates.io/crates/tishlang/${VERSION}"
@@ -133,7 +154,7 @@ jobs:
           NEW_BODY="${CURRENT_BODY}
 
           ---
-          Published to npm: ${NPM_URL} | cargo-bindgen: ${NPM_BINDGEN_URL} | create-tish-app: ${CTA_SCOPED} · ${CTA_UNSCOPED} | crates.io: ${CRATES_URL}"
+          Published to npm: ${NPM_URL} | cargo-bindgen: ${NPM_BINDGEN_URL} | tish-format: ${NPM_FORMAT_URL} | tish-lint: ${NPM_LINT_URL} | create-tish-app: ${CTA_SCOPED} · ${CTA_UNSCOPED} | crates.io: ${CRATES_URL}"
           curl -s -X PATCH \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \
