@@ -333,6 +333,8 @@ jobs:
         run: |
           cargo build --release -p tishlang --target ${{ matrix.target }} --features full
           cargo build --release -p tishlang_cargo_bindgen --target ${{ matrix.target }}
+          cargo build --release -p tishlang_fmt --target ${{ matrix.target }}
+          cargo build --release -p tishlang_lint --target ${{ matrix.target }}
 
       - name: Install cross and build (Linux ARM64)
         if: ${{ matrix.use_cross }}
@@ -340,6 +342,8 @@ jobs:
           cargo install cross
           cross build --target ${{ matrix.target }} -p tishlang --release --features full
           cross build --target ${{ matrix.target }} -p tishlang_cargo_bindgen --release
+          cross build --target ${{ matrix.target }} -p tishlang_fmt --release
+          cross build --target ${{ matrix.target }} -p tishlang_lint --release
 
       - name: Stage binary for upload
         shell: bash
@@ -357,6 +361,18 @@ jobs:
             cp "target/${{ matrix.target }}/release/tishlang-cargo-bindgen" "staging/tish-bindgen"
           fi
 
+      - name: Stage tish-format and tish-lint binaries for upload
+        shell: bash
+        run: |
+          mkdir -p staging
+          if [ "${{ matrix.platform }}" = "win32-x64" ]; then
+            cp "target/${{ matrix.target }}/release/tish-fmt.exe" "staging/tish-fmt.exe"
+            cp "target/${{ matrix.target }}/release/tish-lint.exe" "staging/tish-lint.exe"
+          else
+            cp "target/${{ matrix.target }}/release/tish-fmt" "staging/tish-fmt"
+            cp "target/${{ matrix.target }}/release/tish-lint" "staging/tish-lint"
+          fi
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
@@ -368,6 +384,18 @@ jobs:
         with:
           name: bindgen-${{ matrix.platform }}
           path: staging/tish-bindgen*
+
+      - name: Upload tish-format binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: tish-format-${{ matrix.platform }}
+          path: staging/tish-fmt*
+
+      - name: Upload tish-lint binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: tish-lint-${{ matrix.platform }}
+          path: staging/tish-lint*
 
   release:
     name: Release (prerelease branch + GitHub API)
@@ -425,6 +453,40 @@ jobs:
           chmod +x npm/cargo-bindgen/platform/darwin-arm64/tish-bindgen
           chmod +x npm/cargo-bindgen/platform/darwin-x64/tish-bindgen
 
+          mkdir -p npm/tish-format/platform/darwin-arm64
+          mkdir -p npm/tish-format/platform/darwin-x64
+          mkdir -p npm/tish-format/platform/linux-x64
+          mkdir -p npm/tish-format/platform/linux-arm64
+          mkdir -p npm/tish-format/platform/win32-x64
+
+          cp artifacts/tish-format-linux-x64/tish-fmt npm/tish-format/platform/linux-x64/tish-fmt
+          cp artifacts/tish-format-linux-arm64/tish-fmt npm/tish-format/platform/linux-arm64/tish-fmt
+          cp artifacts/tish-format-darwin-arm64/tish-fmt npm/tish-format/platform/darwin-arm64/tish-fmt
+          cp artifacts/tish-format-darwin-x64/tish-fmt npm/tish-format/platform/darwin-x64/tish-fmt
+          cp artifacts/tish-format-win32-x64/tish-fmt.exe npm/tish-format/platform/win32-x64/tish-fmt.exe
+
+          chmod +x npm/tish-format/platform/linux-x64/tish-fmt
+          chmod +x npm/tish-format/platform/linux-arm64/tish-fmt
+          chmod +x npm/tish-format/platform/darwin-arm64/tish-fmt
+          chmod +x npm/tish-format/platform/darwin-x64/tish-fmt
+
+          mkdir -p npm/tish-lint/platform/darwin-arm64
+          mkdir -p npm/tish-lint/platform/darwin-x64
+          mkdir -p npm/tish-lint/platform/linux-x64
+          mkdir -p npm/tish-lint/platform/linux-arm64
+          mkdir -p npm/tish-lint/platform/win32-x64
+
+          cp artifacts/tish-lint-linux-x64/tish-lint npm/tish-lint/platform/linux-x64/tish-lint
+          cp artifacts/tish-lint-linux-arm64/tish-lint npm/tish-lint/platform/linux-arm64/tish-lint
+          cp artifacts/tish-lint-darwin-arm64/tish-lint npm/tish-lint/platform/darwin-arm64/tish-lint
+          cp artifacts/tish-lint-darwin-x64/tish-lint npm/tish-lint/platform/darwin-x64/tish-lint
+          cp artifacts/tish-lint-win32-x64/tish-lint.exe npm/tish-lint/platform/win32-x64/tish-lint.exe
+
+          chmod +x npm/tish-lint/platform/linux-x64/tish-lint
+          chmod +x npm/tish-lint/platform/linux-arm64/tish-lint
+          chmod +x npm/tish-lint/platform/darwin-arm64/tish-lint
+          chmod +x npm/tish-lint/platform/darwin-x64/tish-lint
+
       - name: Create platform binaries zip
         run: |
           cd npm/tish && zip -r tish-platform-binaries.zip platform/ && cd ../..
@@ -481,6 +543,28 @@ jobs:
         env:
           VERSION: ${{ steps.next_version.outputs.version }}
 
+      - name: Set @tishlang/tish-format package version for npm pack
+        run: |
+          node -e "
+          const fs = require('fs');
+          const p = require('./npm/tish-format/package.json');
+          p.version = process.env.VERSION;
+          fs.writeFileSync('./npm/tish-format/package.json', JSON.stringify(p, null, 2));
+          "
+        env:
+          VERSION: ${{ steps.next_version.outputs.version }}
+
+      - name: Set @tishlang/tish-lint package version for npm pack
+        run: |
+          node -e "
+          const fs = require('fs');
+          const p = require('./npm/tish-lint/package.json');
+          p.version = process.env.VERSION;
+          fs.writeFileSync('./npm/tish-lint/package.json', JSON.stringify(p, null, 2));
+          "
+        env:
+          VERSION: ${{ steps.next_version.outputs.version }}
+
       - name: Copy workspace source for native compile (rust backend)
         run: |
           cp Cargo.toml npm/tish/
@@ -505,6 +589,22 @@ jobs:
           node npm/cargo-bindgen/scripts/install-bin.js
           cd npm/cargo-bindgen && npm pack && cd ../..
           mv npm/cargo-bindgen/tishlang-cargo-bindgen-*.tgz cargo-bindgen-npm-package.tgz
+
+      - name: Create @tishlang/tish-format npm package tarball
+        env:
+          TISH_NPM_PACK_REQUIRE: "1"
+        run: |
+          node npm/tish-format/scripts/install-bin.js
+          cd npm/tish-format && npm pack && cd ../..
+          mv npm/tish-format/tishlang-tish-format-*.tgz tish-format-npm-package.tgz
+
+      - name: Create @tishlang/tish-lint npm package tarball
+        env:
+          TISH_NPM_PACK_REQUIRE: "1"
+        run: |
+          node npm/tish-lint/scripts/install-bin.js
+          cd npm/tish-lint && npm pack && cd ../..
+          mv npm/tish-lint/tishlang-tish-lint-*.tgz tish-lint-npm-package.tgz
 
       - name: Create or update release branch and push
         env:
@@ -613,3 +713,5 @@ jobs:
           upload_asset npm/tish/tish-platform-binaries.zip "tish-platform-binaries.zip" "Platform binaries (all OS)" "application/zip"
           upload_asset tish-npm-package.tgz "tish-npm-package.tgz" "npm package (publish with: npm publish)" "application/octet-stream"
           upload_asset cargo-bindgen-npm-package.tgz "cargo-bindgen-npm-package.tgz" "npm @tishlang/cargo-bindgen (publish with: npm publish)" "application/octet-stream"
+          upload_asset tish-format-npm-package.tgz "tish-format-npm-package.tgz" "npm @tishlang/tish-format (publish with: npm publish)" "application/octet-stream"
+          upload_asset tish-lint-npm-package.tgz "tish-lint-npm-package.tgz" "npm @tishlang/tish-lint (publish with: npm publish)" "application/octet-stream"
