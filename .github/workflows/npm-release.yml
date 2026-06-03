@@ -1,5 +1,10 @@
 # Publish to npm when a GitHub release is promoted from prerelease to full release.
-# Downloads the npm package tarball from the release (no rebuild).
+#
+# Each package publishes as its OWN matrix job (fail-fast: false), so one package
+# failing — e.g. a re-run where a version is already on npm — never skips the others.
+# Each job also skips if its exact version is already published, so re-runs stay green.
+# Tarball packages publish the pre-built asset from the release (built in
+# build-npm-binaries.yml, no rebuild); source packages publish from npm/<dir>.
 #
 # AUTH: npm OIDC trusted publishing (no long-lived NPM_TOKEN — npm revoked classic
 # tokens on 2026-12-09 and forces granular tokens to expire, so OIDC is the only
@@ -7,8 +12,7 @@
 # below; until that is done a publish fails with E404/E422. For every package
 # (@tishlang/tish, @tishlang/cargo-bindgen, @tishlang/tish-format, @tishlang/tish-lint,
 # @tishlang/pg, @tishlang/create-tish-app, and unscoped create-tish-app) open
-# npmjs.com > the package > Settings >
-# "Trusted Publisher" > GitHub Actions and set:
+# npmjs.com > the package > Settings > "Trusted Publisher" > GitHub Actions and set:
 #   Organization or user: tishlang
 #   Repository:           tish
 #   Workflow filename:    npm-release.yml
@@ -23,55 +27,62 @@ on:
 
 jobs:
   publish:
-    name: Publish to npm
+    name: Publish ${{ matrix.label }}
     # Only run when this is a full release (not a prerelease)
     if: github.event.release.prerelease == false
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
-      contents: write   # required to update release body via API
-      id-token: write   # required for npm OIDC trusted publishing
+      contents: read   # the release body is updated in the separate update-release job
+      id-token: write  # required for npm OIDC trusted publishing
+    strategy:
+      # Publish every package independently — one failing package does not skip the rest.
+      fail-fast: false
+      matrix:
+        include:
+          # Tarball packages: download the pre-built asset from the release, publish it.
+          - label: "@tishlang/tish"
+            npm: "@tishlang/tish"
+            type: tarball
+            asset: tish-npm-package.tgz
+          - label: "@tishlang/cargo-bindgen"
+            npm: "@tishlang/cargo-bindgen"
+            type: tarball
+            asset: cargo-bindgen-npm-package.tgz
+          - label: "@tishlang/tish-format"
+            npm: "@tishlang/tish-format"
+            type: tarball
+            asset: tish-format-npm-package.tgz
+          - label: "@tishlang/tish-lint"
+            npm: "@tishlang/tish-lint"
+            type: tarball
+            asset: tish-lint-npm-package.tgz
+          # Source packages: publish straight from the npm/<dir> source tree.
+          - label: "@tishlang/pg"
+            npm: "@tishlang/pg"
+            type: source
+            dir: pg
+          - label: "@tishlang/create-tish-app"
+            npm: "@tishlang/create-tish-app"
+            type: source
+            dir: create-tish-app
+          # Unscoped alias of create-tish-app — published as its own package, non-fatal.
+          - label: "create-tish-app (unscoped)"
+            npm: "create-tish-app"
+            type: unscoped
+            dir: create-tish-app
     env:
       # No NODE_AUTH_TOKEN — auth is via OIDC (see trusted-publishing note at top).
-      # Provenance is disabled because @tishlang/tish and @tishlang/cargo-bindgen
-      # publish from pre-built tarballs (built in build-npm-binaries.yml, not this
-      # run), which is the fragile case for provenance. To enable it later, remove
-      # this line and confirm the two tarball publishes still succeed.
+      # Provenance is disabled because the tarball packages publish from pre-built
+      # tarballs (built in build-npm-binaries.yml, not this run), the fragile case for
+      # provenance. To enable it later, remove this line and confirm publishes succeed.
       NPM_CONFIG_PROVENANCE: "false"
     steps:
-      - name: Checkout (for create-tish-app)
+      - name: Checkout
+        if: matrix.type != 'tarball'
         uses: actions/checkout@v4
         with:
           ref: refs/tags/${{ github.event.release.tag_name }}
           fetch-depth: 0
-
-      - name: Download npm package tarball from release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          ASSET_URL=$(echo '${{ toJSON(github.event.release.assets) }}' | jq -r '.[] | select(.name == "tish-npm-package.tgz") | .url')
-          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
-            echo "Release has no asset tish-npm-package.tgz"
-            exit 1
-          fi
-          curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL" -o tish-npm-package.tgz
-          ASSET_URL_BINDGEN=$(echo '${{ toJSON(github.event.release.assets) }}' | jq -r '.[] | select(.name == "cargo-bindgen-npm-package.tgz") | .url')
-          if [ -z "$ASSET_URL_BINDGEN" ] || [ "$ASSET_URL_BINDGEN" = "null" ]; then
-            echo "Release has no asset cargo-bindgen-npm-package.tgz"
-            exit 1
-          fi
-          curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_BINDGEN" -o cargo-bindgen-npm-package.tgz
-          ASSET_URL_FORMAT=$(echo '${{ toJSON(github.event.release.assets) }}' | jq -r '.[] | select(.name == "tish-format-npm-package.tgz") | .url')
-          if [ -z "$ASSET_URL_FORMAT" ] || [ "$ASSET_URL_FORMAT" = "null" ]; then
-            echo "Release has no asset tish-format-npm-package.tgz"
-            exit 1
-          fi
-          curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_FORMAT" -o tish-format-npm-package.tgz
-          ASSET_URL_LINT=$(echo '${{ toJSON(github.event.release.assets) }}' | jq -r '.[] | select(.name == "tish-lint-npm-package.tgz") | .url')
-          if [ -z "$ASSET_URL_LINT" ] || [ "$ASSET_URL_LINT" = "null" ]; then
-            echo "Release has no asset tish-lint-npm-package.tgz"
-            exit 1
-          fi
-          curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_LINT" -o tish-lint-npm-package.tgz
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -84,44 +95,52 @@ jobs:
           npm install -g npm@latest
           npm --version
 
-      - name: Publish @tishlang/tish from tarball
-        run: npm publish tish-npm-package.tgz --access public
-
-      - name: Publish @tishlang/cargo-bindgen from tarball
-        run: npm publish cargo-bindgen-npm-package.tgz --access public
-
-      - name: Publish @tishlang/tish-format from tarball
-        run: npm publish tish-format-npm-package.tgz --access public
-
-      - name: Publish @tishlang/tish-lint from tarball
-        run: npm publish tish-lint-npm-package.tgz --access public
-
-      - name: Publish @tishlang/pg
+      - name: Determine version and whether it is already published
+        id: check
         run: |
           TAG="${{ github.event.release.tag_name }}"
           VERSION="${TAG#v}"
-          cp -r npm/pg /tmp/pg-publish
-          cd /tmp/pg-publish
-          npm version $VERSION --no-git-tag-version --allow-same-version
-          npm publish --access public
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if npm view "${{ matrix.npm }}@${VERSION}" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ matrix.npm }}@${VERSION} is already published — skipping."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      # Scoped package: needs its own trusted-publisher entry on npmjs.com (see note at top).
-      - name: Publish @tishlang/create-tish-app
+      - name: Download tarball from release
+        if: matrix.type == 'tarball' && steps.check.outputs.already == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
-          VERSION="${TAG#v}"
-          cp -r npm/create-tish-app /tmp/create-tish-app-publish
-          cd /tmp/create-tish-app-publish
-          npm version $VERSION --no-git-tag-version --allow-same-version
+          ASSET_URL=$(echo '${{ toJSON(github.event.release.assets) }}' | jq -r --arg n "${{ matrix.asset }}" '.[] | select(.name == $n) | .url')
+          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+            echo "Release has no asset ${{ matrix.asset }}"
+            exit 1
+          fi
+          curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL" -o "${{ matrix.asset }}"
+
+      - name: Publish (tarball)
+        if: matrix.type == 'tarball' && steps.check.outputs.already == 'false'
+        run: npm publish "${{ matrix.asset }}" --access public
+
+      - name: Publish (source dir)
+        if: matrix.type == 'source' && steps.check.outputs.already == 'false'
+        run: |
+          cp -r "npm/${{ matrix.dir }}" /tmp/publish-pkg
+          cd /tmp/publish-pkg
+          npm version "${{ steps.check.outputs.version }}" --no-git-tag-version --allow-same-version
           npm publish --access public
 
       # Unscoped name is a separate package and needs its own trusted-publisher entry on
-      # npmjs.com (org tishlang / repo tish / workflow npm-release.yml). Without it OIDC auth
-      # fails for this package only. This step always exits 0 so the release job stays green;
-      # use ::warning:: for visibility in the log.
-      - name: Publish unscoped create-tish-app (optional)
+      # npmjs.com (org tishlang / repo tish / workflow npm-release.yml). Without it OIDC
+      # auth fails for this package only — kept non-fatal so the matrix entry stays green.
+      - name: Publish (unscoped, optional)
+        if: matrix.type == 'unscoped' && steps.check.outputs.already == 'false'
         run: |
-          cd /tmp/create-tish-app-publish
+          cp -r "npm/${{ matrix.dir }}" /tmp/publish-unscoped
+          cd /tmp/publish-unscoped
+          npm version "${{ steps.check.outputs.version }}" --no-git-tag-version --allow-same-version
           node -e "
             const fs = require('fs');
             const p = require('./package.json');
@@ -131,10 +150,19 @@ jobs:
           if npm publish --access public; then
             echo "Published unscoped create-tish-app (npx create-tish-app)."
           else
-            echo "::warning::Unscoped create-tish-app publish failed (usually no trusted-publisher configured for it on npmjs.com). Scoped package @tishlang/create-tish-app is already published — use npx @tishlang/create-tish-app. To fix: add a Trusted Publisher (org tishlang / repo tish / workflow npm-release.yml) at https://www.npmjs.com/package/create-tish-app/access"
+            echo "::warning::Unscoped create-tish-app publish failed (usually no trusted-publisher configured for it on npmjs.com). Scoped @tishlang/create-tish-app is the canonical package — use npx @tishlang/create-tish-app. To fix: add a Trusted Publisher (org tishlang / repo tish / workflow npm-release.yml) at https://www.npmjs.com/package/create-tish-app/access"
           fi
 
-      - name: Update release description with npm URL
+  update-release:
+    name: Update release description
+    needs: publish
+    # Run after all publishes complete (success or not), but never for a prerelease.
+    if: ${{ always() && github.event.release.prerelease == false }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: write   # required to update the release body via API
+    steps:
+      - name: Update release description with npm URLs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -151,6 +179,12 @@ jobs:
           REPO="${{ github.repository }}"
           CURRENT_BODY=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
             "https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}" | jq -r '.body // ""')
+          # Idempotent: the PATCH below fires another `edited` event, which re-runs this
+          # workflow — don't append the npm-URL line a second time.
+          if printf '%s' "$CURRENT_BODY" | grep -q "Published to npm:"; then
+            echo "Release body already lists npm URLs — nothing to do."
+            exit 0
+          fi
           NEW_BODY="${CURRENT_BODY}
 
           ---
