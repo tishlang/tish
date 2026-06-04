@@ -10,7 +10,7 @@
 //!   command API is synchronous, so this covers it)
 //! - `js_new(ctorNameOrHandle, argsArray)`
 //! - `js_typeof(handle)` — debugging
-//! - `f32a(arr)` / `u16a(arr)` / `u8a(arr)` — tish `number[]` → real typed array
+//! - `f32a(arr)` / `u16a(arr)` / `u8a(arr)` / `u32a(arr)` — tish `number[]` → real typed array
 //! - `request_animation_frame(cb)` — drive a render loop
 //!
 //! GPU/JS objects (device, queue, context, buffers, pipelines, textures,
@@ -284,6 +284,21 @@ fn ffi_u8a() -> Value {
     })
 }
 
+fn ffi_u32a() -> Value {
+    Value::native(|args: &[Value]| {
+        let arr = match args.first() {
+            Some(Value::Array(a)) => a.clone(),
+            _ => return Value::Null,
+        };
+        let b = arr.borrow();
+        let ta = js_sys::Uint32Array::new_with_length(b.len() as u32);
+        for (i, v) in b.iter().enumerate() {
+            ta.set_index(i as u32, v.as_number().unwrap_or(0.0) as u32);
+        }
+        wrap(ta.into())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // requestAnimationFrame render loop
 // ---------------------------------------------------------------------------
@@ -362,6 +377,7 @@ fn install_ffi(vm: &mut Vm) {
     vm.set_global("f32a".into(), ffi_f32a());
     vm.set_global("u16a".into(), ffi_u16a());
     vm.set_global("u8a".into(), ffi_u8a());
+    vm.set_global("u32a".into(), ffi_u32a());
     vm.set_global("request_animation_frame".into(), ffi_request_animation_frame());
 }
 
