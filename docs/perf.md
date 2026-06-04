@@ -1,3 +1,37 @@
+================================================================================
+  OPTIMIZATION PASS (2026-06) — slots + numeric JIT + object layout
+================================================================================
+Three shared changes to the VM / compiler / core (no per-test hacks; every backend
+that embeds the VM benefits). darwin-arm64, release, `tish run --backend vm`,
+5-run avg via `./scripts/run_performance_suite.sh --release`.
+
+  test                   before  after   Node   change
+  core/array_stress        227     58     41    463% -> 141%  (numeric JIT: find/some/every
+                                                              ran 96ms of callbacks, now 7ms
+                                                              of native f64)
+  core/benchmark_granular  113     97     36    slot-based call frames
+  core/object_stress       111    105     36    insertion-order PropMap (small objs inline)
+  core/new_features_perf    76     73     36
+  bundle (whole program)   471    313     75    vm; cranelift 511->333, llvm 502->337
+  46 startup-bound tests   ~unchanged — all beat Node (tish ~12ms cold start vs Node ~35ms)
+
+Changes:
+  RC2  tish_bytecode/compiler.rs + tish_vm/vm.rs : self-contained leaf functions compile to
+       slot-indexed locals (LoadLocal/StoreLocal) on a bare Vec<Value> call frame — no per-call
+       scope hashmap, no name lookups.
+  JIT  tish_vm/jit.rs (cranelift, non-wasm) : straight-line numeric slot fns compile to native
+       f64 code, called from `Call` when args are numbers (VM fallback otherwise). Decisive for
+       array_stress's find/some/every. Carries to the cranelift/llvm native backends.
+  RC3  tish_core/value.rs : object props use PropMap (inline <=8 keys, no separate hashmap alloc;
+       IndexMap for large so JSON.parse stays O(1)); insertion order now matches JS/Node.
+
+Ceiling: object/dynamic-heavy tests (object_stress, benchmark_granular, new_features_perf) stay
+~2x Node — V8's JIT compiles property access to ~free. Beating Node there needs object/dynamic
+native codegen (hidden classes); the numeric JIT is slice 1 of that. Dropping `send-values`
+(Arc<Mutex>) adds ~15-19% on those but does not cross the ceiling.
+================================================================================
+
+
 ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
                                            PERFORMANCE SUMMARY
                                     (sorted by Tish(run)/Node ratio, slowest first)

@@ -20,6 +20,8 @@ send-values = []
 
 [dependencies]
 ahash = "0.8.11"
+smallvec = "1"
+indexmap = "2"
 fancy-regex = { version = "0.17.0", optional = true }
 
 [target.wasm32-unknown-unknown.dependencies]

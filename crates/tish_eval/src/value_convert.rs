@@ -7,7 +7,7 @@ use std::sync::Arc;
 #[cfg(feature = "regex")]
 use tishlang_core::TishRegExp;
 use ahash::AHashMap;
-use tishlang_core::{ObjectData, ObjectMap, Value as CoreValue, VmRef};
+use tishlang_core::{ObjectData, Value as CoreValue, VmRef};
 
 use crate::value::{EvalObjectData, PropMap, Value};
 
@@ -27,7 +27,7 @@ pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
         }
         Value::Object(map) => {
             let b = map.borrow();
-            let mut strings = ObjectMap::default();
+            let mut strings = tishlang_core::PropMap::default();
             for (k, v) in b.strings.iter() {
                 strings.insert(Arc::clone(k), eval_to_core(v)?);
             }

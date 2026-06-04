@@ -15,7 +15,8 @@ use tishlang_builtins::math as math_builtins;
 use tishlang_builtins::string as str_builtins;
 use tishlang_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
 use tishlang_core::{
-    merge_object_data, object_get, object_has, object_set, NativeFn, ObjectData, ObjectMap, Value,
+    merge_object_data, object_get, object_has, object_set, NativeFn, ObjectData, ObjectMap,
+    PropMap, Value,
 };
 
 /// Wrap a closure in the right shared pointer for the current build.
@@ -1000,12 +1001,42 @@ impl Vm {
                             let inner = nested
                                 .get(*nested_idx)
                                 .ok_or_else(|| "Nested chunk index out of bounds".to_string())?;
+                            // Numeric JIT fast path (native codegen, non-wasm): if this is a
+                            // straight-line numeric function, compile it once (cached per chunk)
+                            // and call native code when all args are numbers; else fall back to
+                            // the interpreter below. Purely additive — can't change behaviour.
+                            #[cfg(not(target_arch = "wasm32"))]
+                            let jit_fn = crate::jit::try_compile_numeric(inner);
                             let inner_clone = inner.clone();
                             let globals = self.globals.clone();
                             let enclosing = Some(local_scope.clone());
                             let capabilities = Arc::clone(&self.capabilities);
                             let native_modules = self.native_modules.clone();
                             Value::native(move |args: &[Value]| {
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    if let Some(nf) = jit_fn {
+                                        // JS array methods call back with (element, index, array);
+                                        // a callback that declares `arity` params uses only the
+                                        // first `arity` args, so accept >= arity and check just those.
+                                        let arity = nf.arity();
+                                        if args.len() >= arity {
+                                            let mut nums = [0f64; 4];
+                                            let mut all_numbers = true;
+                                            for i in 0..arity {
+                                                if let Value::Number(n) = &args[i] {
+                                                    nums[i] = *n;
+                                                } else {
+                                                    all_numbers = false;
+                                                    break;
+                                                }
+                                            }
+                                            if all_numbers {
+                                                return Value::Number(nf.call(&nums[..arity]));
+                                            }
+                                        }
+                                    }
+                                }
                                 let mut vm = Vm {
                                     stack: Vec::new(),
                                     scope: ObjectMap::default(),
@@ -1425,7 +1456,11 @@ impl Vm {
                 }
                 Opcode::NewObject => {
                     let n = Self::read_u16(code, &mut ip) as usize;
-                    let mut map = ObjectMap::with_capacity(n.max(1));
+                    // Pairs are on the stack in reverse source order (valN,keyN,…,val1,key1).
+                    // Collect, then insert in source order so the object keeps insertion
+                    // order (matches JS/Node). Builds the PropMap directly — small objects
+                    // stay inline with no separate hashmap allocation.
+                    let mut pairs: Vec<(Arc<str>, Value)> = Vec::with_capacity(n);
                     for _ in 0..n {
                         let val = self
                             .stack
@@ -1435,10 +1470,17 @@ impl Vm {
                             .stack
                             .pop()
                             .ok_or_else(|| "Stack underflow".to_string())?;
-                        let key = key_val.to_display_string().into();
+                        let key: Arc<str> = key_val.to_display_string().into();
+                        pairs.push((key, val));
+                    }
+                    let mut map = PropMap::with_capacity(n);
+                    for (key, val) in pairs.into_iter().rev() {
                         map.insert(key, val);
                     }
-                    self.stack.push(value_object_from_map(map));
+                    self.stack.push(Value::Object(VmRef::new(ObjectData {
+                        strings: map,
+                        symbols: None,
+                    })));
                 }
                 Opcode::EnterTry => {
                     let offset = Self::read_u16(code, &mut ip) as usize;

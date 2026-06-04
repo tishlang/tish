@@ -4,7 +4,7 @@
 //! Functions will be migrated here from tishlang_runtime and tishlang_eval.
 
 use std::sync::Arc;
-use tishlang_core::{ObjectData, ObjectMap, Value, VmRef};
+use tishlang_core::{ObjectData, PropMap, Value, VmRef};
 
 /// Create a new empty object Value.
 pub fn new() -> Value {
@@ -14,7 +14,7 @@ pub fn new() -> Value {
 /// Create a new object Value with a given capacity.
 pub fn with_capacity(capacity: usize) -> Value {
     Value::Object(VmRef::new(ObjectData {
-        strings: ObjectMap::with_capacity(capacity),
+        strings: PropMap::with_capacity(capacity),
         symbols: None,
     }))
 }

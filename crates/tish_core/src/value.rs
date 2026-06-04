@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use ahash::AHashMap;
+use indexmap::IndexMap;
+use smallvec::SmallVec;
 
 use crate::vmref::VmRef;
 
@@ -297,18 +299,191 @@ pub enum Value {
     Opaque(Arc<dyn TishOpaque>),
 }
 
+/// Number of properties kept inline (no heap hashmap) before promoting to a map.
+const PROPMAP_INLINE: usize = 8;
+
+/// String-keyed property storage for objects.
+///
+/// Small objects (the overwhelming common case — `{ id, name, active }`) keep
+/// their entries inline with linear-scan lookup: no separate hashmap allocation
+/// and good cache locality, which beats hashing for a handful of keys. Objects
+/// that grow past [`PROPMAP_INLINE`] keys promote to an insertion-ordered
+/// `IndexMap` so large objects (e.g. `JSON.parse` output) keep O(1) lookup and
+/// never hit O(n²). Iteration is always **insertion order**, matching JS/Node.
+///
+/// Exposes the `AHashMap`-compatible surface (`get`/`insert`/`iter`/…) the rest
+/// of the runtime already uses, so it is a drop-in for the old `ObjectMap` field.
+#[derive(Clone, Debug, Default)]
+pub struct PropMap {
+    inline: SmallVec<[(Arc<str>, Value); PROPMAP_INLINE]>,
+    map: Option<Box<IndexMap<Arc<str>, Value, ahash::RandomState>>>,
+}
+
+impl PropMap {
+    #[inline]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_capacity(n: usize) -> Self {
+        if n > PROPMAP_INLINE {
+            Self {
+                inline: SmallVec::new(),
+                map: Some(Box::new(IndexMap::with_capacity_and_hasher(
+                    n,
+                    ahash::RandomState::default(),
+                ))),
+            }
+        } else {
+            Self::default()
+        }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        match &self.map {
+            Some(m) => m.len(),
+            None => self.inline.len(),
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        match &self.map {
+            Some(m) => m.get(key),
+            None => self
+                .inline
+                .iter()
+                .find(|(k, _)| k.as_ref() == key)
+                .map(|(_, v)| v),
+        }
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+        match &mut self.map {
+            Some(m) => m.get_mut(key),
+            None => self
+                .inline
+                .iter_mut()
+                .find(|(k, _)| k.as_ref() == key)
+                .map(|(_, v)| v),
+        }
+    }
+
+    #[inline]
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
+    pub fn insert(&mut self, key: Arc<str>, val: Value) -> Option<Value> {
+        if let Some(m) = &mut self.map {
+            return m.insert(key, val);
+        }
+        if let Some(slot) = self.inline.iter_mut().find(|(k, _)| k.as_ref() == key.as_ref()) {
+            return Some(std::mem::replace(&mut slot.1, val));
+        }
+        if self.inline.len() >= PROPMAP_INLINE {
+            // Promote inline storage to an insertion-ordered map.
+            let mut m: IndexMap<Arc<str>, Value, ahash::RandomState> =
+                IndexMap::with_capacity_and_hasher(self.inline.len() + 1, ahash::RandomState::default());
+            for (k, v) in self.inline.drain(..) {
+                m.insert(k, v);
+            }
+            m.insert(key, val);
+            self.map = Some(Box::new(m));
+            return None;
+        }
+        self.inline.push((key, val));
+        None
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        match &mut self.map {
+            // shift_remove preserves insertion order (vs swap_remove).
+            Some(m) => m.shift_remove(key),
+            None => self
+                .inline
+                .iter()
+                .position(|(k, _)| k.as_ref() == key)
+                .map(|pos| self.inline.remove(pos).1),
+        }
+    }
+
+    pub fn iter(&self) -> Box<dyn Iterator<Item = (&Arc<str>, &Value)> + '_> {
+        match &self.map {
+            Some(m) => Box::new(m.iter()),
+            None => Box::new(self.inline.iter().map(|(k, v)| (k, v))),
+        }
+    }
+
+    pub fn keys(&self) -> Box<dyn Iterator<Item = &Arc<str>> + '_> {
+        match &self.map {
+            Some(m) => Box::new(m.keys()),
+            None => Box::new(self.inline.iter().map(|(k, _)| k)),
+        }
+    }
+
+    pub fn values(&self) -> Box<dyn Iterator<Item = &Value> + '_> {
+        match &self.map {
+            Some(m) => Box::new(m.values()),
+            None => Box::new(self.inline.iter().map(|(_, v)| v)),
+        }
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        if let Some(m) = &mut self.map {
+            m.reserve(additional);
+        }
+    }
+}
+
+impl FromIterator<(Arc<str>, Value)> for PropMap {
+    fn from_iter<I: IntoIterator<Item = (Arc<str>, Value)>>(iter: I) -> Self {
+        let mut pm = PropMap::default();
+        for (k, v) in iter {
+            pm.insert(k, v);
+        }
+        pm
+    }
+}
+
+impl Extend<(Arc<str>, Value)> for PropMap {
+    fn extend<I: IntoIterator<Item = (Arc<str>, Value)>>(&mut self, iter: I) {
+        for (k, v) in iter {
+            self.insert(k, v);
+        }
+    }
+}
+
+impl IntoIterator for PropMap {
+    type Item = (Arc<str>, Value);
+    type IntoIter = Box<dyn Iterator<Item = (Arc<str>, Value)>>;
+    fn into_iter(self) -> Self::IntoIter {
+        match self.map {
+            Some(m) => Box::new(m.into_iter()),
+            None => Box::new(self.inline.into_iter()),
+        }
+    }
+}
+
 /// Ordinary object: string-keyed properties plus optional symbol-keyed side map.
 #[derive(Clone, Debug, Default)]
 pub struct ObjectData {
-    pub strings: ObjectMap,
+    pub strings: PropMap,
     pub symbols: Option<AHashMap<u64, Value>>,
 }
 
 impl ObjectData {
     #[inline]
-    pub fn from_strings(strings: ObjectMap) -> Self {
+    pub fn from_strings<I: IntoIterator<Item = (Arc<str>, Value)>>(strings: I) -> Self {
         Self {
-            strings,
+            strings: strings.into_iter().collect(),
             symbols: None,
         }
     }
@@ -407,7 +582,7 @@ pub fn value_call(callee: &Value, args: &[Value]) -> Value {
 pub fn merge_object_data(left: &VmRef<ObjectData>, right: &VmRef<ObjectData>) -> ObjectData {
     let l = left.borrow();
     let r = right.borrow();
-    let mut strings = ObjectMap::with_capacity(l.strings.len() + r.strings.len());
+    let mut strings = PropMap::with_capacity(l.strings.len() + r.strings.len());
     strings.extend(l.strings.iter().map(|(k, v)| (Arc::clone(k), v.clone())));
     strings.extend(r.strings.iter().map(|(k, v)| (Arc::clone(k), v.clone())));
     let mut symbols: Option<AHashMap<u64, Value>> = None;
