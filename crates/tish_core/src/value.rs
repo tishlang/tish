@@ -815,6 +815,21 @@ impl Value {
         Value::Object(VmRef::new(ObjectData::from_strings(map)))
     }
 
+    /// Create an object directly from key/value pairs, building the `PropMap`
+    /// in one pass with **no intermediate `AHashMap`**. Used by the Rust
+    /// backend's object-literal codegen and any hot path that knows its pairs,
+    /// so small objects (the common case) cost a single inline allocation.
+    pub fn object_from_pairs<const N: usize>(pairs: [(Arc<str>, Value); N]) -> Self {
+        let mut strings = PropMap::with_capacity(N);
+        for (k, v) in pairs {
+            strings.insert(k, v);
+        }
+        Value::Object(VmRef::new(ObjectData {
+            strings,
+            symbols: None,
+        }))
+    }
+
     /// Create an empty array Value.
     pub fn empty_array() -> Self {
         Value::Array(VmRef::new(Vec::new()))

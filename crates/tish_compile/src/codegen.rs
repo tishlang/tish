@@ -3294,10 +3294,9 @@ impl Codegen {
                             }
                         }
                     }
-                    format!(
-                        "Value::object(ObjectMap::from([{}]))",
-                        parts.join(", ")
-                    )
+                    // Build the PropMap directly (no intermediate AHashMap) — one
+                    // inline allocation for small objects (the common case).
+                    format!("Value::object_from_pairs([{}])", parts.join(", "))
                 }
             }
             Expr::Assign { name, value, .. } => {

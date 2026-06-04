@@ -68,20 +68,18 @@ pub fn json_stringify_into(buf: &mut String, value: &Value) {
         }
         Value::Object(obj) => {
             let borrowed = obj.borrow();
-            // Sort keys for deterministic output. Pre-allocate to avoid
-            // a fresh `Vec` realloc inside `keys().collect()`.
-            let mut keys: Vec<&Arc<str>> = Vec::with_capacity(borrowed.strings.len());
-            keys.extend(borrowed.strings.keys());
-            keys.sort_unstable_by(|a, b| a.as_ref().cmp(b.as_ref()));
+            // Iterate in insertion order (PropMap preserves it) — matches JS/Node
+            // and `Object.keys`. No intermediate key Vec, no sort: one fewer
+            // allocation per object on the JSON hot path (e.g. TFB /json, /db).
             buf.push('{');
-            for (i, key) in keys.into_iter().enumerate() {
+            for (i, (key, val)) in borrowed.strings.iter().enumerate() {
                 if i > 0 {
                     buf.push(',');
                 }
                 buf.push('"');
                 escape_json_string_into(buf, key);
                 buf.push_str("\":");
-                json_stringify_into(buf, borrowed.strings.get(key).unwrap());
+                json_stringify_into(buf, val);
             }
             buf.push('}');
         }
