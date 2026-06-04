@@ -1,0 +1,47 @@
+// Test for hex and binary numeric literal lexing
+// This test FAILS until the lexer bug is fixed
+
+// Test hex literals
+let hex1 = 0xFF
+assert(hex1 == 255, "0xFF should equal 255")
+
+let hex2 = 0xff
+assert(hex2 == 255, "0xff should equal 255")
+
+let hex3 = 0xFFFFFF
+assert(hex3 == 16777215, "0xFFFFFF should equal 16777215")
+
+let hex4 = 0x00
+assert(hex4 == 0, "0x00 should equal 0")
+
+let hex5 = 0xABCD
+assert(hex5 == 43981, "0xABCD should equal 43981")
+
+// Test binary literals
+let bin1 = 0b1010
+assert(bin1 == 10, "0b1010 should equal 10")
+
+let bin2 = 0b0
+assert(bin2 == 0, "0b0 should equal 0")
+
+let bin3 = 0b11111111
+assert(bin3 == 255, "0b11111111 should equal 255")
+
+let bin4 = 0b1
+assert(bin4 == 1, "0b1 should equal 1")
+
+// Test in various contexts
+let result1 = 0xFF + 0b1010
+assert(result1 == 265, "0xFF + 0b1010 should equal 265")
+
+let result2 = (0xFF)
+assert(result2 == 255, "(0xFF) should equal 255")
+
+let result3 = 0xFF * 2
+assert(result3 == 510, "0xFF * 2 should equal 510")
+
+// Test that decimal still works
+let dec = 255
+assert(dec == 255, "255 should equal 255")
+
+print("All numeric literal tests passed!")

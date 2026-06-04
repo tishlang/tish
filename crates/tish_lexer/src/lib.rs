@@ -174,6 +174,39 @@ impl<'a> Lexer<'a> {
     fn read_number(&mut self, first: char) -> String {
         let mut s = String::with_capacity(16);
         s.push(first);
+        
+        // Check for hex (0x/0X) or binary (0b/0B) prefix
+        if first == '0' {
+            if let Some(prefix) = self.peek() {
+                if prefix == 'x' || prefix == 'X' {
+                    // Hex literal
+                    s.push(self.advance().unwrap());
+                    while let Some(c) = self.peek() {
+                        if c.is_ascii_hexdigit() {
+                            s.push(c);
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    return s;
+                } else if prefix == 'b' || prefix == 'B' {
+                    // Binary literal
+                    s.push(self.advance().unwrap());
+                    while let Some(c) = self.peek() {
+                        if c == '0' || c == '1' {
+                            s.push(c);
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    return s;
+                }
+            }
+        }
+        
+        // Regular decimal number (with optional decimal point)
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() || c == '.' {
                 s.push(c);
@@ -712,5 +745,99 @@ mod tests {
                 .map(|t| format!("{:?}", t.kind))
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// Issue #1: Hex and binary numeric literals fail to lex.
+    /// 
+    /// The lexer currently splits `0xFF` into `0` (Number) and `xFF` (Ident),
+    /// causing "Undefined variable" errors. This test validates the bug exists
+    /// by asserting the CURRENT broken behavior. Once fixed, the lexer should
+    /// produce a single Number token with literal "0xFF" (or the numeric value).
+    #[test]
+    fn test_issue_1_hex_and_binary_literals_fail_to_lex() {
+        // Test case 1: Uppercase hex literal 0xFF
+        let tokens: Vec<_> = Lexer::new("let v = 0xFF")
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        
+        // BUG: Currently lexes as [Let, Ident("v"), Assign, Number("0"), Ident("xFF")]
+        // EXPECTED after fix: [Let, Ident("v"), Assign, Number("0xFF")]
+        let number_tokens: Vec<_> = tokens.iter()
+            .filter(|t| t.kind == TokenKind::Number)
+            .collect();
+        let ident_tokens: Vec<_> = tokens.iter()
+            .filter(|t| t.kind == TokenKind::Ident)
+            .collect();
+        
+        // Assert current broken behavior: "0" is parsed as Number, "xFF" as Ident
+        assert_eq!(number_tokens.len(), 1, "Should have exactly one Number token (the '0')");
+        assert_eq!(number_tokens[0].literal.as_deref(), Some("0"), "Number token should be '0'");
+        assert_eq!(ident_tokens.len(), 2, "Should have two Ident tokens: 'v' and 'xFF'");
+        assert!(ident_tokens.iter().any(|t| t.literal.as_deref() == Some("xFF")),
+                "Should have 'xFF' parsed as an identifier (BUG)");
+
+        // Test case 2: Lowercase hex literal 0xff
+        let tokens: Vec<_> = Lexer::new("let v = 0xff")
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        
+        let number_tokens: Vec<_> = tokens.iter()
+            .filter(|t| t.kind == TokenKind::Number)
+            .collect();
+        let ident_tokens: Vec<_> = tokens.iter()
+            .filter(|t| t.kind == TokenKind::Ident)
+            .collect();
+        
+        assert_eq!(number_tokens.len(), 1);
+        assert_eq!(number_tokens[0].literal.as_deref(), Some("0"));
+        assert!(ident_tokens.iter().any(|t| t.literal.as_deref() == Some("xff")),
+                "Should have 'xff' parsed as an identifier (BUG)");
+
+        // Test case 3: Longer hex literal 0xFFFFFF
+        let tokens: Vec<_> = Lexer::new("let v = 0xFFFFFF")
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        
+        let number_tokens: Vec<_> = tokens.iter()
+            .filter(|t| t.kind == TokenKind::Number)
+            .collect();
+        let ident_tokens: Vec<_> = tokens.iter()
+            .filter(|t| t.kind == TokenKind::Ident)
+            .collect();
+        
+        assert_eq!(number_tokens.len(), 1);
+        assert_eq!(number_tokens[0].literal.as_deref(), Some("0"));
+        assert!(ident_tokens.iter().any(|t| t.literal.as_deref() == Some("xFFFFFF")),
+                "Should have 'xFFFFFF' parsed as an identifier (BUG)");
+
+        // Test case 4: Binary literal 0b1010
+        let tokens: Vec<_> = Lexer::new("let v = 0b1010")
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        
+        let number_tokens: Vec<_> = tokens.iter()
+            .filter(|t| t.kind == TokenKind::Number)
+            .collect();
+        let ident_tokens: Vec<_> = tokens.iter()
+            .filter(|t| t.kind == TokenKind::Ident)
+            .collect();
+        
+        assert_eq!(number_tokens.len(), 1);
+        assert_eq!(number_tokens[0].literal.as_deref(), Some("0"));
+        assert!(ident_tokens.iter().any(|t| t.literal.as_deref() == Some("b1010")),
+                "Should have 'b1010' parsed as an identifier (BUG)");
+
+        // Test case 5: Regular decimal literal (control - should work)
+        let tokens: Vec<_> = Lexer::new("let v = 255")
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        
+        let number_tokens: Vec<_> = tokens.iter()
+            .filter(|t| t.kind == TokenKind::Number)
+            .collect();
+        
+        assert_eq!(number_tokens.len(), 1);
+        assert_eq!(number_tokens[0].literal.as_deref(), Some("255"),
+                          "Decimal literals should work correctly");
     }
 }
