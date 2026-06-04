@@ -911,7 +911,21 @@ impl Vm {
 
         let mut ip = 0;
         let local_scope: ScopeMap = VmRef::new(ObjectMap::default());
-        {
+        // Slot-based chunks (self-contained functions) use a bare `Vec<Value>`
+        // frame indexed by slot — no per-call hashmap, no name lookups. Args bind
+        // to slots 0..param_count. Empty for name-based chunks.
+        let mut slot_locals: Vec<Value> = Vec::new();
+        if chunk.slot_based {
+            slot_locals = vec![Value::Null; chunk.num_slots as usize];
+            let param_count = chunk.param_count as usize;
+            for i in 0..param_count {
+                if let Some(v) = args.get(i) {
+                    if let Some(dst) = slot_locals.get_mut(i) {
+                        *dst = v.clone();
+                    }
+                }
+            }
+        } else {
             let mut ls = local_scope.borrow_mut();
             let param_count = chunk.param_count as usize;
             if chunk.rest_param_index != NO_REST_PARAM {
@@ -949,6 +963,29 @@ impl Vm {
 
             match opcode {
                 Opcode::Nop => {}
+                Opcode::LoadLocal => {
+                    let slot = Self::read_u16(code, &mut ip) as usize;
+                    let v = slot_locals
+                        .get(slot)
+                        .cloned()
+                        .ok_or_else(|| format!("Local slot out of bounds: {}", slot))?;
+                    self.stack.push(v);
+                }
+                Opcode::StoreLocal => {
+                    let slot = Self::read_u16(code, &mut ip) as usize;
+                    let v = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow in StoreLocal".to_string())?;
+                    match slot_locals.get_mut(slot) {
+                        Some(dst) => *dst = v,
+                        None => return Err(format!("Local slot out of bounds: {}", slot)),
+                    }
+                }
+                Opcode::LoadUpvalue | Opcode::StoreUpvalue => {
+                    // Reserved for the linked-frame upvalue model (not emitted yet).
+                    return Err("Upvalue opcodes not supported in this VM build".to_string());
+                }
                 Opcode::LoadConst => {
                     let idx = Self::read_u16(code, &mut ip);
                     let c = constants

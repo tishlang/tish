@@ -96,13 +96,23 @@ pub enum Opcode {
     /// Pop the `await` operand value; if it is a `Promise`, block until settled, push the result,
     /// or unwind to `catch` like `Throw` on rejection.
     AwaitPromise = 43,
+    /// Load a local variable by frame slot (operand: u16 slot). Fast path: direct
+    /// index into the current call frame's locals, no name lookup.
+    LoadLocal = 44,
+    /// Store top of stack into a local frame slot (operand: u16 slot). Leaves nothing.
+    StoreLocal = 45,
+    /// Load a captured variable from an enclosing frame (operands: u16 hops, u16 slot).
+    /// Walks `hops` parent frames, then indexes `slot`.
+    LoadUpvalue = 46,
+    /// Store top of stack into an enclosing frame slot (operands: u16 hops, u16 slot).
+    StoreUpvalue = 47,
 }
 
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=43 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=47 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 43 {
+        if b <= 47 {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None
@@ -131,7 +141,10 @@ impl Opcode {
             Opcode::ArraySortByProperty
             | Opcode::ArrayMapBinOp
             | Opcode::ArrayFilterBinOp
-            | Opcode::LoadNativeExport => 5,
+            | Opcode::LoadNativeExport
+            | Opcode::LoadUpvalue
+            | Opcode::StoreUpvalue => 5,
+            // LoadLocal / StoreLocal take a single u16 operand → 3 bytes (default).
             _ => 3,
         };
         if ip + size > code.len() {

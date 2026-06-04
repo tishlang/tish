@@ -1,6 +1,6 @@
 //! AST to bytecode compiler.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tishlang_ast::{
@@ -83,6 +83,126 @@ struct Compiler<'a> {
     block_depth: usize,
     /// When true (REPL mode), last ExprStmt leaves its value on the stack and we skip trailing LoadConst Null.
     retain_last_expr: bool,
+    /// When `Some`, this chunk is being compiled in slot mode: identifier references
+    /// resolve to frame slots (`LoadLocal`) via this param→slot map instead of
+    /// name-keyed `LoadVar`. Set only for self-contained functions (see
+    /// [`simple_fn_slots`]); `None` for top-level and name-based closures.
+    slot_ctx: Option<HashMap<Arc<str>, u16>>,
+}
+
+/// Does `e` reference only the given params (no free/global vars, no nested
+/// functions, no mutation)? Such a function can run on a bare slot frame.
+fn expr_is_param_only(e: &Expr, params: &HashSet<&str>) -> bool {
+    match e {
+        Expr::Literal { .. } => true,
+        Expr::Ident { name, .. } => params.contains(name.as_ref()),
+        Expr::Binary { left, right, .. } => {
+            expr_is_param_only(left, params) && expr_is_param_only(right, params)
+        }
+        Expr::Unary { operand, .. } => expr_is_param_only(operand, params),
+        Expr::Call { callee, args, .. } => {
+            expr_is_param_only(callee, params)
+                && args.iter().all(|a| match a {
+                    CallArg::Expr(x) => expr_is_param_only(x, params),
+                    CallArg::Spread(_) => false,
+                })
+        }
+        Expr::Member { object, prop, .. } => {
+            expr_is_param_only(object, params)
+                && match prop {
+                    MemberProp::Name { .. } => true,
+                    MemberProp::Expr(x) => expr_is_param_only(x, params),
+                }
+        }
+        Expr::Index { object, index, .. } => {
+            expr_is_param_only(object, params) && expr_is_param_only(index, params)
+        }
+        Expr::Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_is_param_only(cond, params)
+                && expr_is_param_only(then_branch, params)
+                && expr_is_param_only(else_branch, params)
+        }
+        Expr::NullishCoalesce { left, right, .. } => {
+            expr_is_param_only(left, params) && expr_is_param_only(right, params)
+        }
+        Expr::Array { elements, .. } => elements.iter().all(|el| match el {
+            ArrayElement::Expr(x) => expr_is_param_only(x, params),
+            ArrayElement::Spread(_) => false,
+        }),
+        Expr::Object { props, .. } => props.iter().all(|p| match p {
+            ObjectProp::KeyValue(_, x) => expr_is_param_only(x, params),
+            ObjectProp::Spread(_) => false,
+        }),
+        Expr::TemplateLiteral { exprs, .. } => {
+            exprs.iter().all(|x| expr_is_param_only(x, params))
+        }
+        Expr::TypeOf { operand, .. } => expr_is_param_only(operand, params),
+        // Mutation, nested fns, async, jsx, native, `new` — not eligible.
+        _ => false,
+    }
+}
+
+/// Statement form of [`expr_is_param_only`]. Only the small set of statements a
+/// pure leaf function body uses is allowed; anything that declares a binding or
+/// loops bails (those keep the name-based path).
+fn stmt_is_param_only(s: &Statement, params: &HashSet<&str>) -> bool {
+    match s {
+        Statement::Block { statements, .. } => {
+            statements.iter().all(|st| stmt_is_param_only(st, params))
+        }
+        Statement::ExprStmt { expr, .. } => expr_is_param_only(expr, params),
+        Statement::Return { value, .. } => {
+            value.as_ref().map_or(true, |e| expr_is_param_only(e, params))
+        }
+        Statement::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_is_param_only(cond, params)
+                && stmt_is_param_only(then_branch, params)
+                && else_branch
+                    .as_ref()
+                    .map_or(true, |b| stmt_is_param_only(b, params))
+        }
+        _ => false,
+    }
+}
+
+/// If a function with these `params` (all simple, no rest) has a body that
+/// references only its params, returns the param→slot map for slot-based
+/// compilation. Slots are the parameter positions (0-based). Returns `None`
+/// when the function must use the name-based path (captures outer scope,
+/// declares locals, mutates, or defines nested functions).
+fn simple_fn_slots(
+    params: &[FunParam],
+    has_rest: bool,
+    body_ok: impl FnOnce(&HashSet<&str>) -> bool,
+) -> Option<HashMap<Arc<str>, u16>> {
+    if has_rest {
+        return None;
+    }
+    let mut map: HashMap<Arc<str>, u16> = HashMap::with_capacity(params.len());
+    for (i, p) in params.iter().enumerate() {
+        match p {
+            FunParam::Simple(tp) => {
+                map.insert(Arc::clone(&tp.name), i as u16);
+            }
+            FunParam::Destructure { .. } => return None,
+        }
+    }
+    let pset: HashSet<&str> = map.keys().map(|k| k.as_ref()).collect();
+    if body_ok(&pset) {
+        Some(map)
+    } else {
+        None
+    }
 }
 
 impl<'a> Compiler<'a> {
@@ -95,6 +215,7 @@ impl<'a> Compiler<'a> {
             breakable_stack: Vec::new(),
             block_depth: 0,
             retain_last_expr,
+            slot_ctx: None,
         }
     }
 
@@ -794,6 +915,9 @@ impl<'a> Compiler<'a> {
             } => {
                 let formal_len = params.len();
                 let (mut param_names, slots) = Self::plan_function_params(params)?;
+                let simple_slots = simple_fn_slots(params, rest_param.is_some(), |pset| {
+                    stmt_is_param_only(body, pset)
+                });
                 let mut inner = Chunk::new();
                 if let Some(rp) = rest_param {
                     param_names.push(Arc::clone(&rp.name));
@@ -803,13 +927,22 @@ impl<'a> Compiler<'a> {
                     inner.add_name(Arc::clone(p));
                 }
                 inner.param_count = param_names.len() as u16;
+                if simple_slots.is_some() {
+                    inner.slot_based = true;
+                    inner.num_slots = param_names.len() as u16;
+                }
                 let mut inner_comp = Compiler::new(&mut inner, false);
-                inner_comp.scope = vec![param_names
-                    .iter()
-                    .map(|n| (Arc::clone(n), false))
-                    .collect::<HashMap<_, _>>()];
-                inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
-                inner_comp.compile_statement(body)?;
+                if let Some(map) = simple_slots {
+                    inner_comp.slot_ctx = Some(map);
+                    inner_comp.compile_statement(body)?;
+                } else {
+                    inner_comp.scope = vec![param_names
+                        .iter()
+                        .map(|n| (Arc::clone(n), false))
+                        .collect::<HashMap<_, _>>()];
+                    inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
+                    inner_comp.compile_statement(body)?;
+                }
                 inner_comp.emit(Opcode::LoadConst);
                 let idx = inner_comp.constant_idx(Constant::Null);
                 inner_comp.chunk.write_u16(idx);
@@ -1072,8 +1205,12 @@ impl<'a> Compiler<'a> {
                 self.chunk.write_u16(idx);
             }
             Expr::Ident { name, .. } => {
-                let idx = self.name_idx(name);
-                self.emit_u16(Opcode::LoadVar, idx);
+                if let Some(&slot) = self.slot_ctx.as_ref().and_then(|m| m.get(name)) {
+                    self.emit_u16(Opcode::LoadLocal, slot);
+                } else {
+                    let idx = self.name_idx(name);
+                    self.emit_u16(Opcode::LoadVar, idx);
+                }
             }
             Expr::Binary {
                 left, op, right, ..
@@ -1368,17 +1505,29 @@ impl<'a> Compiler<'a> {
             Expr::ArrowFunction { params, body, .. } => {
                 let formal_len = params.len();
                 let (param_names, slots) = Self::plan_function_params(params)?;
+                let simple_slots = simple_fn_slots(params, false, |pset| match body {
+                    ArrowBody::Expr(e) => expr_is_param_only(e, pset),
+                    ArrowBody::Block(s) => stmt_is_param_only(s, pset),
+                });
                 let mut inner = Chunk::new();
                 for p in &param_names {
                     inner.add_name(Arc::clone(p));
                 }
                 inner.param_count = param_names.len() as u16;
+                if simple_slots.is_some() {
+                    inner.slot_based = true;
+                    inner.num_slots = param_names.len() as u16;
+                }
                 let mut inner_comp = Compiler::new(&mut inner, false);
-                inner_comp.scope = vec![param_names
-                    .iter()
-                    .map(|n| (Arc::clone(n), false))
-                    .collect::<HashMap<_, _>>()];
-                inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
+                if let Some(map) = simple_slots {
+                    inner_comp.slot_ctx = Some(map);
+                } else {
+                    inner_comp.scope = vec![param_names
+                        .iter()
+                        .map(|n| (Arc::clone(n), false))
+                        .collect::<HashMap<_, _>>()];
+                    inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
+                }
                 match body {
                     ArrowBody::Expr(e) => {
                         inner_comp.compile_expr(e)?;

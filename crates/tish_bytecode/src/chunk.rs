@@ -45,6 +45,16 @@ pub struct Chunk {
     pub rest_param_index: u16,
     /// Number of leading names that are parameters (for proper closure arg binding).
     pub param_count: u16,
+    /// Number of local variable slots this chunk's call frame needs (params + body locals).
+    /// Frame `locals` Vec is sized to this. Only meaningful when `slot_based`.
+    pub num_slots: u16,
+    /// When true, this chunk resolves its locals via integer frame slots
+    /// (`LoadLocal`/`StoreLocal`) instead of name-keyed scope maps. Set for
+    /// self-contained functions (no free-variable / global references), whose
+    /// call frame is a bare `Vec<Value>` of length `num_slots` — no per-call
+    /// hashmap, no name lookups. Name-based chunks (top level, closures that
+    /// capture outer scope) leave this `false` and use the legacy path.
+    pub slot_based: bool,
 }
 
 impl Chunk {
@@ -56,6 +66,8 @@ impl Chunk {
             nested: Vec::new(),
             rest_param_index: super::NO_REST_PARAM,
             param_count: 0,
+            num_slots: 0,
+            slot_based: false,
         }
     }
 
