@@ -28,7 +28,15 @@ Changes:
 Ceiling: object/dynamic-heavy tests (object_stress, benchmark_granular, new_features_perf) stay
 ~2x Node — V8's JIT compiles property access to ~free. Beating Node there needs object/dynamic
 native codegen (hidden classes); the numeric JIT is slice 1 of that. Dropping `send-values`
-(Arc<Mutex>) adds ~15-19% on those but does not cross the ceiling.
+(Arc<Mutex>) would add ~15-19% on those but is RULED OUT: the tish-techempower TFB benchmark
+(`tish build --native-backend rust` + tiny_http + Postgres) depends on it for multi-threaded
+handler dispatch + tish-pg pipelining, so removing it would regress HTTP/DB throughput — and it
+would not cross the ceiling anyway.
+
+Note: object props now use `PropMap` (tish_core/value.rs) with ZERO-ALLOC concrete iterators
+(`PropMapIter`/`Keys`/`Values`) — `json.rs` iterates `strings.keys()` per response object, so a
+`Box<dyn Iterator>` there would heap-allocate per request on the TFB JSON/db hot path. Keep them
+concrete.
 ================================================================================
 
 

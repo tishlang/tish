@@ -415,24 +415,30 @@ impl PropMap {
         }
     }
 
-    pub fn iter(&self) -> Box<dyn Iterator<Item = (&Arc<str>, &Value)> + '_> {
+    // Iterators return concrete enum types (not `Box<dyn>`) so iteration never
+    // heap-allocates — critical for the per-request JSON stringify hot path
+    // (`json.rs` iterates `strings.keys()` on every response object).
+    #[inline]
+    pub fn iter(&self) -> PropMapIter<'_> {
         match &self.map {
-            Some(m) => Box::new(m.iter()),
-            None => Box::new(self.inline.iter().map(|(k, v)| (k, v))),
+            Some(m) => PropMapIter::Map(m.iter()),
+            None => PropMapIter::Inline(self.inline.iter()),
         }
     }
 
-    pub fn keys(&self) -> Box<dyn Iterator<Item = &Arc<str>> + '_> {
+    #[inline]
+    pub fn keys(&self) -> PropMapKeys<'_> {
         match &self.map {
-            Some(m) => Box::new(m.keys()),
-            None => Box::new(self.inline.iter().map(|(k, _)| k)),
+            Some(m) => PropMapKeys::Map(m.keys()),
+            None => PropMapKeys::Inline(self.inline.iter()),
         }
     }
 
-    pub fn values(&self) -> Box<dyn Iterator<Item = &Value> + '_> {
+    #[inline]
+    pub fn values(&self) -> PropMapValues<'_> {
         match &self.map {
-            Some(m) => Box::new(m.values()),
-            None => Box::new(self.inline.iter().map(|(_, v)| v)),
+            Some(m) => PropMapValues::Map(m.values()),
+            None => PropMapValues::Inline(self.inline.iter()),
         }
     }
 
@@ -463,11 +469,75 @@ impl Extend<(Arc<str>, Value)> for PropMap {
 
 impl IntoIterator for PropMap {
     type Item = (Arc<str>, Value);
-    type IntoIter = Box<dyn Iterator<Item = (Arc<str>, Value)>>;
+    type IntoIter = PropMapIntoIter;
     fn into_iter(self) -> Self::IntoIter {
         match self.map {
-            Some(m) => Box::new(m.into_iter()),
-            None => Box::new(self.inline.into_iter()),
+            Some(m) => PropMapIntoIter::Map(m.into_iter()),
+            None => PropMapIntoIter::Inline(self.inline.into_iter()),
+        }
+    }
+}
+
+/// Zero-allocation borrowing iterator over [`PropMap`] entries (insertion order).
+pub enum PropMapIter<'a> {
+    Inline(std::slice::Iter<'a, (Arc<str>, Value)>),
+    Map(indexmap::map::Iter<'a, Arc<str>, Value>),
+}
+impl<'a> Iterator for PropMapIter<'a> {
+    type Item = (&'a Arc<str>, &'a Value);
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            PropMapIter::Inline(it) => it.next().map(|(k, v)| (k, v)),
+            PropMapIter::Map(it) => it.next(),
+        }
+    }
+}
+
+/// Zero-allocation key iterator over [`PropMap`] (insertion order).
+pub enum PropMapKeys<'a> {
+    Inline(std::slice::Iter<'a, (Arc<str>, Value)>),
+    Map(indexmap::map::Keys<'a, Arc<str>, Value>),
+}
+impl<'a> Iterator for PropMapKeys<'a> {
+    type Item = &'a Arc<str>;
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            PropMapKeys::Inline(it) => it.next().map(|(k, _)| k),
+            PropMapKeys::Map(it) => it.next(),
+        }
+    }
+}
+
+/// Zero-allocation value iterator over [`PropMap`] (insertion order).
+pub enum PropMapValues<'a> {
+    Inline(std::slice::Iter<'a, (Arc<str>, Value)>),
+    Map(indexmap::map::Values<'a, Arc<str>, Value>),
+}
+impl<'a> Iterator for PropMapValues<'a> {
+    type Item = &'a Value;
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            PropMapValues::Inline(it) => it.next().map(|(_, v)| v),
+            PropMapValues::Map(it) => it.next(),
+        }
+    }
+}
+
+/// Owning iterator over [`PropMap`] entries (insertion order).
+pub enum PropMapIntoIter {
+    Inline(smallvec::IntoIter<[(Arc<str>, Value); PROPMAP_INLINE]>),
+    Map(indexmap::map::IntoIter<Arc<str>, Value>),
+}
+impl Iterator for PropMapIntoIter {
+    type Item = (Arc<str>, Value);
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            PropMapIntoIter::Inline(it) => it.next(),
+            PropMapIntoIter::Map(it) => it.next(),
         }
     }
 }
