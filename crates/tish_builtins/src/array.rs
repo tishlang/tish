@@ -406,11 +406,49 @@ fn num_cmp(a: &Value, b: &Value, asc: bool) -> std::cmp::Ordering {
 }
 
 pub fn sort_numeric_asc(arr: &Value) -> Value {
-    sort_by_impl(arr, |a, b| num_cmp(a, b, true))
+    sort_numeric_impl(arr, true)
 }
 
 pub fn sort_numeric_desc(arr: &Value) -> Value {
-    sort_by_impl(arr, |a, b| num_cmp(a, b, false))
+    sort_numeric_impl(arr, false)
+}
+
+/// Numeric sort. When every element is a number, extract to unboxed `f64`,
+/// `sort_unstable` (faster than the stable comparator sort, and stability is
+/// irrelevant for equal numbers), then write back — no per-comparison `Value`
+/// match. Mixed arrays fall back to the comparator path.
+fn sort_numeric_impl(arr: &Value, asc: bool) -> Value {
+    if let Value::Array(a) = arr {
+        {
+            let mut g = a.borrow_mut();
+            if g.iter().all(|v| matches!(v, Value::Number(_))) {
+                let mut nums: Vec<f64> = g
+                    .iter()
+                    .map(|v| match v {
+                        Value::Number(n) => *n,
+                        _ => f64::NAN,
+                    })
+                    .collect();
+                if asc {
+                    nums.sort_unstable_by(|x, y| {
+                        x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                } else {
+                    nums.sort_unstable_by(|x, y| {
+                        y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
+                for (slot, n) in g.iter_mut().zip(nums) {
+                    *slot = Value::Number(n);
+                }
+                return Value::Array(a.clone());
+            }
+            g.sort_by(|x, y| num_cmp(x, y, asc));
+        }
+        Value::Array(a.clone())
+    } else {
+        Value::Null
+    }
 }
 
 /// Sort array of objects by numeric property: arr.sort((a,b)=>a.prop-b.prop)
