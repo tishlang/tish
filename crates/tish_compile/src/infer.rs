@@ -197,12 +197,44 @@ fn pi_stmt(s: Statement) -> Statement {
     }
 }
 
-fn pi_is_num_binop(op: &tishlang_ast::BinOp) -> bool {
-    use tishlang_ast::BinOp::*;
-    matches!(
-        op,
-        Add | Sub | Mul | Div | Mod | Pow | Lt | Le | Gt | Ge | StrictEq | StrictNe
-    )
+/// One side of an OVERLOADED binop (`+`, comparisons). If `operand` is bare `name`, the `other`
+/// side must be PROVABLY numeric (else `name + x` / `name < x` could be string ops, and `name`
+/// a string). If `operand` is a sub-expr, recurse (its own context decides).
+fn nus_overloaded(operand: &Expr, other: &Expr, name: &str) -> bool {
+    if matches!(operand, Expr::Ident { name: n, .. } if n.as_ref() == name) {
+        return numeric_provable(other);
+    }
+    nus_expr(operand, name)
+}
+
+/// `e` is PROVABLY a number: a number literal, arithmetic (`-`/`*`/`/`/`%`/`**`), numeric unary,
+/// or a Math intrinsic. Bare variables and `+`/comparisons are NOT provable (could be strings).
+fn numeric_provable(e: &Expr) -> bool {
+    use Expr::*;
+    match e {
+        Literal {
+            value: tishlang_ast::Literal::Number(_),
+            ..
+        } => true,
+        Binary {
+            left, op, right, ..
+        } => {
+            use tishlang_ast::BinOp::*;
+            matches!(op, Sub | Mul | Div | Mod | Pow)
+                && numeric_provable(left)
+                && numeric_provable(right)
+        }
+        Unary { op, operand, .. } => {
+            matches!(op, tishlang_ast::UnaryOp::Neg | tishlang_ast::UnaryOp::Pos)
+                && numeric_provable(operand)
+        }
+        Call { callee, .. } => matches!(callee.as_ref(),
+            Expr::Member { object, prop: tishlang_ast::MemberProp::Name { name: m, .. }, .. }
+                if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                    && matches!(m.as_ref(),
+                        "sqrt" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil" | "exp" | "trunc" | "log")),
+        _ => false,
+    }
 }
 
 /// Every use of `name` within `s` is a numeric-operand use (so `name` can lower to `f64`).
@@ -254,10 +286,20 @@ fn nus_expr(e: &Expr, name: &str) -> bool {
         Binary {
             left, op, right, ..
         } => {
-            if pi_is_num_binop(op) {
-                nus_num_operand(left, name) && nus_num_operand(right, name)
-            } else {
-                !pi_mentions(left, name) && !pi_mentions(right, name)
+            use tishlang_ast::BinOp::*;
+            match op {
+                // Unambiguously numeric — `name` as either operand is definitely a number.
+                Sub | Mul | Div | Mod | Pow => {
+                    nus_num_operand(left, name) && nus_num_operand(right, name)
+                }
+                // OVERLOADED: `+` is also string concat, `<`/`===` also compare strings. If
+                // `name` is a DIRECT operand here, the OTHER side must be PROVABLY numeric to
+                // conclude `name` is a number — this is what stops `first + ":"` typing `first`.
+                Add | Lt | Le | Gt | Ge | StrictEq | StrictNe => {
+                    nus_overloaded(left, right, name) && nus_overloaded(right, left, name)
+                }
+                // Logical (&&, ||, ??) etc.: `name` must be absent.
+                _ => !pi_mentions(left, name) && !pi_mentions(right, name),
             }
         }
         Unary { op, operand, .. } => {

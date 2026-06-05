@@ -155,14 +155,23 @@ flag OFF the corpus is byte-identical, flag ON the whole native corpus still pas
 work: closures passed to builtins (array_hof's reduce callback) still box — extend to native closures
 / fused reduce.
 
-M4 param inference LANDED (dark-shipped behind `TISH_PARAM_INFER`, `infer.rs` `param_infer_program` +
-the conservative `nus_*` numeric-use checker): a top-level fn param used PURELY numerically gets a
-synthetic `: number`, so M1/M5 pick it up — `sumto(n)` (unannotated) 100ms->67ms (param `n` now
-native), corpus sound (flag-on passes), flag-off byte-identical. HONEST limit: M4-params alone does
-NOT fully flip unannotated *kernels* — unannotated matmul still 483ms because `let a = []` stays a
-boxed array (needs array-ELEMENT inference), and unannotated recursion needs RETURN inference (a
-fixpoint, for M5 eligibility). "Make unannotated code native" is a compounding inference effort
-(params done; arrays + returns next), not one feature.
+M4 param inference + M5 return inference LANDED (dark-shipped behind `TISH_PARAM_INFER`):
+`infer.rs::param_infer_program` gives a top-level fn param used PURELY numerically a synthetic
+`: number`, and M5's `collect_native_fns` now INFERS a numeric return (`returns_numeric`/
+`numeric_shaped`, folded into its existing fixpoint). Together they make IDIOMATIC UNANNOTATED
+`function fib(n) {...}` compile to a native `fib_native` — gauntlet `recursion_untyped` 31ms, BEATS
+node (51ms). Corpus sound (flag-on passes), flag-off byte-identical.
+
+SOUNDNESS LESSON (a real bug caught + fixed): the numeric-use checker must NOT treat `+` and
+comparisons as numeric — `+` is also string concat, `<`/`===` also compare strings — so `first + ":"`
+wrongly typed `first` as a number (`rest_params` miscompiled, "expected number" panic). Fix: only
+`-`/`*`/`/`/`%`/`**` imply numeric directly; `+`/comparisons require the OTHER operand to be PROVABLY
+numeric (`numeric_provable`). Also fixed a stale-cache bug: the native batch cache hashed codegen.rs
++ value.rs but NOT infer.rs, so inference changes served stale binaries.
+
+STILL boxed (the remaining inference pieces): unannotated matmul (483ms) — `let a = []` is a boxed
+array, needs array-ELEMENT inference; array_hof (native closures); object_sum (hidden classes, #13).
+"Native unannotated code" is a compounding inference effort — params + numeric-returns now done.
 ================================================================================
 
 
@@ -180,13 +189,15 @@ both tish and node). Baseline (darwin-arm64, rust backend + `TISH_PARAM_NATIVE=1
   numeric_loop    44ms   47ms   0.94x   PASS  (statement-position de-boxing)
   math_trig       12ms   82ms   0.15x   PASS  native Math intrinsics LANDED (sqrt/sin/...->f64 method)
   string_concat    3ms    3ms   1.00x   PASS  self-append `s=s+x` -> push_str (O(1)); was O(n^2)
-  recursion_fib   31ms   48ms   0.65x   PASS  M5 native monomorphic calls LANDED (TISH_NATIVE_FN)
-  array_hof      257ms   29ms   8.9x    FAIL  native closure calls / fused reduce over native arrays
+  recursion_fib     31ms   48ms   0.65x  PASS  M5 native monomorphic calls (TISH_NATIVE_FN)
+  recursion_untyped 31ms   51ms   0.61x  PASS  M4 param + M5 return inference -> native, NO annotations
+  array_hof        257ms   29ms   8.9x   FAIL  native closure calls / fused reduce over native arrays
   object_sum     145ms    3ms   48x     FAIL  hidden classes / unboxed objects (task #13)
 
-5/7 beating V8. Three flipped FAIL->PASS across recent passes: math_trig (native Math intrinsics ->
-direct `f64` methods), string_concat (String self-append -> in-place `push_str`), and recursion_fib
-(M5, below). The 2 remaining FAILs are the representation rearchitectures: `array_hof` -> native
+6/8 beating V8. Four flipped FAIL->PASS across recent passes: math_trig (native Math intrinsics ->
+direct `f64` methods), string_concat (String self-append -> `push_str`), recursion_fib (M5 native
+calls), and recursion_untyped (M4 param + M5 return inference — IDIOMATIC untyped recursion compiles
+native, no annotations). The 2 remaining FAILs are the representation rearchitectures: `array_hof` -> native
 CLOSURE calls (the reduce callback still boxes; M5 only covers named top-level fns) or a fused
 native reduce; `object_sum` -> hidden classes / unboxed objects (task #13).
 ================================================================================

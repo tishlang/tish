@@ -5312,7 +5312,7 @@ impl Codegen {
                 name,
                 params,
                 rest_param: None,
-                return_type: Some(rt),
+                return_type,
                 body,
                 ..
             } = s
@@ -5322,7 +5322,13 @@ impl Codegen {
                         if tp.default.is_none()
                             && tp.type_ann.as_ref().map(Self::ann_is_number).unwrap_or(false))
                 });
-                if Self::ann_is_number(rt) && params_ok && !params.is_empty() {
+                // Return: an annotated `: number`, OR unannotated with all-numeric returns
+                // (verified in the fixpoint via `returns_numeric`), so the native `-> f64` holds.
+                let ret_ok = match return_type {
+                    Some(rt) => Self::ann_is_number(rt),
+                    None => true,
+                };
+                if ret_ok && params_ok && !params.is_empty() {
                     cand.insert(name.to_string());
                     decls.push((name.as_ref(), params, body));
                 }
@@ -5336,7 +5342,9 @@ impl Codegen {
                 }
                 let pnames: HashSet<String> =
                     params.iter().flat_map(|p| p.bound_names()).map(|n| n.to_string()).collect();
-                if !Self::native_safe_stmt(body, &pnames, &cand) {
+                if !Self::native_safe_stmt(body, &pnames, &cand)
+                    || !Self::returns_numeric(body, &pnames, &cand)
+                {
                     remove.push(name.to_string());
                 }
             }
@@ -5414,6 +5422,74 @@ impl Codegen {
                     _ => false,
                 }
             }
+            _ => false,
+        }
+    }
+
+    /// Every `return` in `s` yields a numeric-shaped value, so a native `-> f64` body is sound.
+    /// Lets an unannotated-but-numeric-returning fn (e.g. `function fib(n) {...}` after M4 typed
+    /// the param) become M5-eligible.
+    fn returns_numeric(
+        s: &Statement,
+        params: &std::collections::HashSet<String>,
+        cand: &std::collections::HashSet<String>,
+    ) -> bool {
+        match s {
+            Statement::Block { statements, .. } => {
+                statements.iter().all(|x| Self::returns_numeric(x, params, cand))
+            }
+            Statement::Return { value, .. } => {
+                value.as_ref().map_or(false, |e| Self::numeric_shaped(e, params, cand))
+            }
+            Statement::If { then_branch, else_branch, .. } => {
+                Self::returns_numeric(then_branch, params, cand)
+                    && else_branch.as_ref().map_or(true, |e| Self::returns_numeric(e, params, cand))
+            }
+            Statement::While { body, .. } | Statement::For { body, .. } => {
+                Self::returns_numeric(body, params, cand)
+            }
+            _ => true, // no return in this statement form
+        }
+    }
+
+    /// `e` evaluates to a number: built from numeric params, number literals, ARITHMETIC binops
+    /// (comparisons/logical yield bool → excluded), numeric unary, conditionals, and calls to
+    /// eligible native fns / 1-arg Math.
+    fn numeric_shaped(
+        e: &Expr,
+        params: &std::collections::HashSet<String>,
+        cand: &std::collections::HashSet<String>,
+    ) -> bool {
+        match e {
+            Expr::Literal { value: Literal::Number(_), .. } => true,
+            Expr::Ident { name, .. } => params.contains(name.as_ref()),
+            Expr::Binary { left, op, right, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
+                ) && Self::numeric_shaped(left, params, cand)
+                    && Self::numeric_shaped(right, params, cand)
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnaryOp::Neg | UnaryOp::Pos)
+                    && Self::numeric_shaped(operand, params, cand)
+            }
+            Expr::Conditional { then_branch, else_branch, .. } => {
+                Self::numeric_shaped(then_branch, params, cand)
+                    && Self::numeric_shaped(else_branch, params, cand)
+            }
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Ident { name, .. } => cand.contains(name.as_ref()),
+                Expr::Member { object, prop: MemberProp::Name { name: m, .. }, .. } => {
+                    matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                        && matches!(
+                            m.as_ref(),
+                            "sqrt" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil" | "exp"
+                                | "trunc" | "log"
+                        )
+                }
+                _ => false,
+            },
             _ => false,
         }
     }

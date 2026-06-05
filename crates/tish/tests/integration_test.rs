@@ -86,6 +86,12 @@ fn combined_mvp_native_inputs_hash(paths: &[PathBuf]) -> u64 {
     if value_rs.is_file() {
         file_content_hash(&value_rs).hash(&mut h);
     }
+    // Inference (struct/param/return typing — M1/M4/M5) also drives native emission, so the
+    // native batch cache must invalidate when it changes too.
+    let infer_rs = workspace_root().join("crates/tish_compile/src/infer.rs");
+    if infer_rs.is_file() {
+        file_content_hash(&infer_rs).hash(&mut h);
+    }
     h.finish()
 }
 
