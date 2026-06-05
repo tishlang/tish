@@ -101,6 +101,34 @@ darwin-arm64, `oha -c128`, 14 cores, req/s (higher better) / p50 ms:
 ================================================================================
 
 
+================================================================================
+  AOT DE-BOXING (2026-06) — rust backend now BEATS V8 on numeric kernels
+================================================================================
+The rust backend (`tish build --native-backend rust`) already emits native f64 for typed/inferred
+numeric locals — but every assignment / `i++` STATEMENT also emitted the expression's *value*
+(`Value::Number(s)`), because JS "assignment yields its value". That boxed value is dead in
+statement position, but `Value` has a non-trivial `Drop` (other variants hold `Rc`/`Arc`), so LLVM
+could not prove it dead and therefore could NOT vectorize/fold the loop. The native f64 math was
+free; the per-iteration construct+drop of a dead `Value` was the entire tax.
+
+Fix: `emit_expr_discard` (`tish_compile/src/codegen.rs`) emits only the native side-effect for
+assignments + inc/dec in statement position (routed from `ExprStmt` and the for-loop update).
+
+darwin-arm64, `--native-backend rust` vs node (V8), lower = better:
+  workload                        before    after    node    result
+  40M-iter numeric loop           111 ms    48 ms    52 ms   BEATS V8 (was 2.2x slower)
+  matmul 256x256 (typed-local N)  boxed     13 ms    45 ms   3.5x FASTER than V8
+
+Whole corpus byte-identical (full integration suite green) — pure de-boxing, zero semantic change.
+
+KEYSTONE still open (M1): a function PARAMETER arrives boxed (`let N = args.get(0).cloned()`;
+`types.rs:388` `push_fun_param_scope` -> `RustType::Value`). ONE boxed param poisons every index in
+a hot loop — matmul with `fn bench(N)` stays ~10-40x node because `i*N+k` boxes. Typing params
+(Strategy A native shadow, `docs/type-system-roadmap.md` M1) is the next unlock — and the
+typed-local matmul above proves it flips the kernel from 10x-slower to 3.5x-faster.
+================================================================================
+
+
 ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
                                            PERFORMANCE SUMMARY
                                     (sorted by Tish(run)/Node ratio, slowest first)

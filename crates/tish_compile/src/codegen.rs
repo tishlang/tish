@@ -1655,6 +1655,60 @@ impl Codegen {
         Ok(())
     }
 
+    /// Emit an expression in **statement position** (its value is discarded). For a native
+    /// assignment this emits only the side-effect — NOT the boxed `Value::Number(..)` that the
+    /// expression form returns (JS "assignment yields its value"). In a hot loop that boxed
+    /// value was constructed + dropped every iteration, and because `Value` has a non-trivial
+    /// `Drop` (other variants hold `Rc`/`Arc`) LLVM couldn't prove it dead — so it could not
+    /// vectorize/fold the loop. Falls back to `emit_expr` for everything else (whose trailing
+    /// value is simply dropped by the `;`).
+    fn emit_expr_discard(&mut self, expr: &Expr) -> Result<String, CompileError> {
+        match expr {
+            Expr::Assign { name, value, .. } => {
+                let rust_type = self.type_context.get_type(name.as_ref());
+                if matches!(rust_type, RustType::F64 | RustType::Bool | RustType::String) {
+                    let escaped = Self::escape_ident(name.as_ref());
+                    let is_ref = self.refcell_wrapped_vars.contains(name.as_ref());
+                    let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                    let native_val = if val_ty == RustType::Value {
+                        rust_type.from_value_expr(&val_code)
+                    } else {
+                        val_code
+                    };
+                    if is_ref {
+                        return Ok(format!(
+                            "{{ let _assign_tmp = {}; *{}.borrow_mut() = _assign_tmp; }}",
+                            native_val, escaped
+                        ));
+                    }
+                    return Ok(format!("{} = {}", escaped, native_val));
+                }
+            }
+            // `i++` / `++i` / `i--` / `--i` in statement position (incl. for-loop update):
+            // emit just the native increment, no boxed `Value::Number(_prev)`.
+            Expr::PostfixInc { name, .. } | Expr::PrefixInc { name, .. } => {
+                if self.type_context.get_type(name.as_ref()) == RustType::F64 {
+                    let n = Self::escape_ident(name.as_ref());
+                    if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                        return Ok(format!("*{}.borrow_mut() += 1.0_f64", n));
+                    }
+                    return Ok(format!("{} += 1.0_f64", n));
+                }
+            }
+            Expr::PostfixDec { name, .. } | Expr::PrefixDec { name, .. } => {
+                if self.type_context.get_type(name.as_ref()) == RustType::F64 {
+                    let n = Self::escape_ident(name.as_ref());
+                    if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                        return Ok(format!("*{}.borrow_mut() -= 1.0_f64", n));
+                    }
+                    return Ok(format!("{} -= 1.0_f64", n));
+                }
+            }
+            _ => {}
+        }
+        self.emit_expr(expr)
+    }
+
     fn emit_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
         match stmt {
             Statement::Block { statements, .. } => {
@@ -1789,7 +1843,7 @@ impl Codegen {
                 self.register_destruct_pattern_outer_vars(pattern);
             }
             Statement::ExprStmt { expr, .. } => {
-                let e = self.emit_expr(expr)?;
+                let e = self.emit_expr_discard(expr)?;
                 self.writeln(&format!("{};", e));
             }
             Statement::If {
@@ -1885,7 +1939,7 @@ impl Codegen {
                     .map(|c| self.emit_cond_expr(c).unwrap())
                     .unwrap_or_else(|| "true".to_string());
                 let update_code = update.as_ref().map(|u| {
-                    let ue = self.emit_expr(u).unwrap();
+                    let ue = self.emit_expr_discard(u).unwrap();
                     format!("{};", ue)
                 });
                 self.loop_stack.push((label.clone(), update_code));
@@ -1894,7 +1948,7 @@ impl Codegen {
                 self.writeln(&format!("if !{} {{ break; }}", cond_expr));
                 self.emit_statement(body)?;
                 if let Some(u) = update {
-                    let ue = self.emit_expr(u)?;
+                    let ue = self.emit_expr_discard(u)?;
                     self.writeln(&format!("{};", ue));
                 }
                 self.loop_stack.pop();
