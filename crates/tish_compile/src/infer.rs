@@ -594,6 +594,25 @@ fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx)
                 }
             }
         }
+        // Record a typed plain local (e.g. `let i = 0`) so a LATER object literal can type its
+        // fields from it (`{ x: i }` → struct). The first inference pass may already have annotated
+        // it (`let i: number`), so read the annotation OR infer from the init. Object-literal lets
+        // defined their struct alias above and `continue`d; this runs for the rest. Without it,
+        // `{ x: i }` can't resolve `i`'s type and the object stays a boxed `PropMap` (object_sum gap).
+        if let Statement::VarDecl {
+            name,
+            type_ann,
+            init,
+            ..
+        } = stmt
+        {
+            let t = type_ann
+                .clone()
+                .or_else(|| init.as_ref().and_then(|e| infer_expr_type(e, ctx)));
+            if let Some(t) = t {
+                ctx.define(name.as_ref(), t);
+            }
+        }
         out.push(si_recurse(stmt, reg, ctx));
     }
     ctx.pop_scope();

@@ -13,4 +13,5 @@ Internal and contributor-facing docs. User-facing docs live in the **[tishlang.c
 | `builtins-gap-analysis.md` | Builtins across Rust vs bytecode VM (Cranelift/WASI) |
 | `code-audit-2026-06.md` | Cleanup/optimize/secure audit: what's fixed + prioritized remaining roadmap (DoS limits, interp/core convergence, hot-path allocs) |
 | `control-flow-audit.md` | Cross-backend control-flow/scope correctness matrix: 7 pre-existing divergences (let-binding, try-in-fn, switch-break, finally, event-loop) + fix priority. Perf work verified clean |
+| `concurrency-model.md` | EXACT task-execution flow (single-thread micro/macrotask + multi-thread HTTP) per backend vs JS/V8: no microtask queue, blocking `await`, prefork+threads+tokio. Why tish deliberately isn't a JS event loop |
 | `perf.md` | Perf optimization log: slots/JIT/object layout, HTTP throughput, run-vs-build |

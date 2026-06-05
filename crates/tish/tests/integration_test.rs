@@ -656,6 +656,10 @@ const MVP_TEST_FILES: &[&str] = &[
     // Regression guard for the 2026-06 vm `LoopVarsBegin`/`enclosing2` overlay fix; identical across
     // interp/vm/rust/cranelift. See docs/control-flow-audit.md.
     "loop_let_capture.tish",
+    // Closure capture-by-reference: a closure that only READS an outer var must see mutations made
+    // after it was created (incl. sibling closures sharing one cell). Regression guard for the rust
+    // codegen capture-by-value bug; identical across interp/vm/rust/cranelift. See docs/control-flow-audit.md.
+    "closure_capture_cell.tish",
     "nested_loops.tish",
     "scopes.tish",
     "optional_braces.tish",

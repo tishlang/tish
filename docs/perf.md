@@ -191,15 +191,32 @@ both tish and node). Baseline (darwin-arm64, rust backend + `TISH_PARAM_NATIVE=1
   string_concat    3ms    3ms   1.00x   PASS  self-append `s=s+x` -> push_str (O(1)); was O(n^2)
   recursion_fib     31ms   48ms   0.65x  PASS  M5 native monomorphic calls (TISH_NATIVE_FN)
   recursion_untyped 31ms   51ms   0.61x  PASS  M4 param + M5 return inference -> native, NO annotations
-  array_hof        257ms   29ms   8.9x   FAIL  native closure calls / fused reduce over native arrays
-  object_sum     145ms    3ms   48x     FAIL  hidden classes / unboxed objects (task #13)
+  array_hof        108ms   29ms   3.7x   FAIL  fused reduce LANDED (8.9x->3.7x); rest = packed f64 arrays
+  object_sum        11ms    3ms   3.7x   FAIL  struct inference LANDED (48x->3.7x); rest = native struct arithmetic
 
-6/8 beating V8. Four flipped FAIL->PASS across recent passes: math_trig (native Math intrinsics ->
-direct `f64` methods), string_concat (String self-append -> `push_str`), recursion_fib (M5 native
-calls), and recursion_untyped (M4 param + M5 return inference — IDIOMATIC untyped recursion compiles
-native, no annotations). The 2 remaining FAILs are the representation rearchitectures: `array_hof` -> native
-CLOSURE calls (the reduce callback still boxes; M5 only covers named top-level fns) or a fused
-native reduce; `object_sum` -> hidden classes / unboxed objects (task #13).
+6/8 beating V8. TWO big representation wins this pass:
+
+FUSED REDUCE (TISH_FUSED_HOF): `arr.reduce((acc,x)=>acc OP x, init)` with a plain binop of the two
+params lowers to a native fold using the SAME runtime Value op the closure body would
+(`try_fused_reduce` in codegen.rs) — eliminating the per-element `value_call`. SOUND: identical Value
+semantics, so string `reduce((a,x)=>a+x,"")` still concatenates; no-init + any non-`param OP param`
+body fall back. array_hof 264ms->108ms (8.9x->3.7x). Rest = **packed f64 arrays** (boxed `Vec<Value>`
+still pays a clone + `ops::add` match per element).
+
+STRUCT INFERENCE now FIRES for object_sum (TISH_STRUCT_INFER): #12's struct lowering existed but
+`infer_object_shape` couldn't type `{ x: i }` because the struct-infer ctx didn't record local var
+types. Two-line fix in `infer.rs::si_block`: record each plain `let`'s type (from its annotation —
+the first inference pass adds `: number` — OR inferred from its init) so a later object literal can
+type its fields. `{ x: i, y: i+1 }` now infers a `#[derive] struct { x: f64, y: f64 }` (stack, native
+field access) instead of a boxed `Rc<RefCell<PropMap>>`. object_sum 145ms->11ms (48x->3.7x); result
+identical, `objects`/`object_methods` byte-identical struct-infer vs not. Soundness gate
+(`uses_are_struct_safe`) UNCHANGED — only eligibility widened. Rest = the field arithmetic
+`sum + o.x + o.y` still routes through boxed `ops::add` even though `o.x`/`o.y` are native f64 struct
+fields → needs typed-member arithmetic de-boxing in `emit_typed_expr`.
+
+So BOTH gauntlet reds are now ~3.7x (was 48x / 8.9x) and BOTH are one codegen step from green: native
+struct-field arithmetic (object_sum) and packed f64 arrays (array_hof). Earlier flips: math_trig
+(Math intrinsics), string_concat (`push_str`), recursion_fib (M5), recursion_untyped (M4+M5).
 ================================================================================
 
 

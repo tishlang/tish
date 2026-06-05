@@ -49,7 +49,7 @@ for tish_src in tests/perf/*.tish; do
   if [[ ${#ONLY[@]} -gt 0 ]] && ! printf '%s\n' "${ONLY[@]}" | grep -qx "$name"; then continue; fi
   bin="/tmp/gauntlet_${name}"
   if [[ "$NO_BUILD" -eq 0 ]]; then
-    if ! TISH_PARAM_NATIVE=1 TISH_NATIVE_FN=1 TISH_PARAM_INFER=1 "$TISH" build "$tish_src" -o "$bin" \
+    if ! TISH_PARAM_NATIVE=1 TISH_NATIVE_FN=1 TISH_PARAM_INFER=1 TISH_FUSED_HOF=1 TISH_STRUCT_INFER=1 "$TISH" build "$tish_src" -o "$bin" \
         --target native --native-backend rust >/dev/null 2>&1; then
       rows+=("${name}|BUILD-FAIL|-|-|-"); total=$((total + 1)); continue
     fi

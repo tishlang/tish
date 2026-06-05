@@ -1324,7 +1324,7 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, register_static_route as tish_register_static_route, ObjectMap, TishError, Value, VmRef};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -1335,6 +1335,9 @@ impl Codegen {
             self.write("use tishlang_runtime::{timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, timer_set_interval as tish_timer_set_interval, timer_clear_interval as tish_timer_clear_interval};\n");
         }
         if self.has_feature("http") {
+            // `register_static_route` is http-gated in the runtime; emit its import only when http is
+            // linked, else a non-http `tish build --feature …` fails with an unresolved import.
+            self.write("use tishlang_runtime::register_static_route as tish_register_static_route;\n");
             if self.is_async {
                 self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, promise_object as tish_promise_object, await_promise as tish_await_promise};\n");
             } else {
@@ -1423,9 +1426,13 @@ impl Codegen {
         self.writeln("let parseFloat = Value::native(|args: &[Value]| tish_parse_float(args));");
         self.writeln("let decodeURI = Value::native(|args: &[Value]| tish_decode_uri(args));");
         self.writeln("let encodeURI = Value::native(|args: &[Value]| tish_encode_uri(args));");
-        self.writeln(
-            r#"let registerStaticRoute = Value::native(|args: &[Value]| { let path = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => return Value::Null }; let body = match args.get(1) { Some(Value::String(s)) => s.as_bytes().to_vec(), _ => return Value::Null }; let ct = match args.get(2) { Some(Value::String(s)) => s.to_string(), _ => "application/octet-stream".to_string() }; tish_register_static_route(&path, &body, &ct); Value::Null });"#,
-        );
+        // `registerStaticRoute` calls the http-gated runtime fn, so only bind it when http is linked
+        // (matches the conditional `use` above; otherwise non-http builds fail to resolve it).
+        if self.has_feature("http") {
+            self.writeln(
+                r#"let registerStaticRoute = Value::native(|args: &[Value]| { let path = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => return Value::Null }; let body = match args.get(1) { Some(Value::String(s)) => s.as_bytes().to_vec(), _ => return Value::Null }; let ct = match args.get(2) { Some(Value::String(s)) => s.to_string(), _ => "application/octet-stream".to_string() }; tish_register_static_route(&path, &body, &ct); Value::Null });"#,
+            );
+        }
         self.writeln(
             "let htmlEscape = Value::native(|args: &[Value]| tish_escape_html(args.first().unwrap_or(&Value::Null)));",
         );
@@ -1645,7 +1652,7 @@ impl Codegen {
         self.usage_analyzer = Some(analyzer);
 
         // Prepass: vars mutated by nested closures must be RefCell from the start (top-level)
-        let top_level_mutated = Self::collect_vars_mutated_by_nested_closures(&program.statements);
+        let top_level_mutated = Self::collect_vars_needing_capture_cell(&program.statements);
         for v in &top_level_mutated {
             self.refcell_wrapped_vars.insert(v.clone());
         }
@@ -1807,7 +1814,7 @@ impl Codegen {
                     .push(std::collections::HashSet::new());
                 // Prepass: vars that must be RefCell because nested closures capture and mutate them
                 let vars_mutated_by_nested =
-                    Self::collect_vars_mutated_by_nested_closures(statements);
+                    Self::collect_vars_needing_capture_cell(statements);
                 for v in &vars_mutated_by_nested {
                     self.refcell_wrapped_vars.insert(v.clone());
                 }
@@ -2334,18 +2341,22 @@ impl Codegen {
                     })
                     .collect();
 
-                // Outer vars that are assigned in the body need RefCell (capture cell, add to refcell_wrapped_vars).
-                // Read-only outer vars get a Value binding to avoid nested_complex param-shadow issues.
+                // Live cell capture: assigned in this body, or already a shared
+                // `VmRef` cell in a parent scope (so a closure that only READS the
+                // var still sees later mutations through the shared cell, instead
+                // of snapshotting it by value at creation time). Truly read-only,
+                // non-cell vars get a Value snapshot (avoids param-shadow issues).
+                // Mirrors `emit_arrow_function`.
                 let mut assigned_in_body = HashSet::new();
                 Self::collect_assigned_idents_in_stmt(body, &mut assigned_in_body);
                 let mutable_outer_vars: Vec<String> = outer_vars
                     .iter()
-                    .filter(|v| assigned_in_body.contains(*v))
+                    .filter(|v| assigned_in_body.contains(*v) || self.rc_cell_storage_contains(*v))
                     .cloned()
                     .collect();
                 let read_only_outer_vars: Vec<String> = outer_vars
                     .iter()
-                    .filter(|v| !assigned_in_body.contains(*v))
+                    .filter(|v| !assigned_in_body.contains(*v) && !self.rc_cell_storage_contains(*v))
                     .cloned()
                     .collect();
 
@@ -2593,8 +2604,21 @@ impl Codegen {
                                 escaped
                             ));
                         }
+                        // Vars declared in this body that a nested closure captures
+                        // and that are assigned somewhere in the body must be shared
+                        // `VmRef` cells (e.g. `let t=0; let f=()=>t; t=100`). Block
+                        // scopes get this via emit_statement(Block); a function body
+                        // is iterated directly, so run the same prepass here.
+                        let body_cell_vars =
+                            Self::collect_vars_needing_capture_cell(statements);
+                        for v in &body_cell_vars {
+                            self.refcell_wrapped_vars.insert(v.clone());
+                        }
                         for s in statements {
                             self.emit_statement(s)?;
+                        }
+                        for v in &body_cell_vars {
+                            self.refcell_wrapped_vars.remove(v);
                         }
                         self.function_scope_stack.pop();
                         self.outer_vars_stack.pop();
@@ -3222,8 +3246,20 @@ impl Codegen {
                             ));
                         }
                         "reduce" => {
-                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let initial = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            // Fused reduce (TISH_FUSED_HOF): `arr.reduce((acc, x) => acc OP x, init)`
+                            // with a plain binop of the two params → a native fold using the SAME
+                            // runtime Value op the closure body would, eliminating the per-element
+                            // `value_call`. Sound (identical Value semantics, incl. string `+`).
+                            // Requires an explicit init; anything else falls back to array_reduce.
+                            if std::env::var("TISH_FUSED_HOF").is_ok() && args.len() == 2 {
+                                if let Some(fold) =
+                                    self.try_fused_reduce(args, &obj_expr, &initial)?
+                                {
+                                    return Ok(fold);
+                                }
+                            }
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tishlang_runtime::array_reduce(&{}, &{}, &{})",
                                 obj_expr, callback, initial
@@ -4161,7 +4197,18 @@ impl Codegen {
     fn collect_assigned_idents_in_stmt(stmt: &Statement, names: &mut HashSet<String>) {
         match stmt {
             Statement::ExprStmt { expr, .. } => Self::collect_assigned_idents_in_expr(expr, names),
-            Statement::VarDecl { .. } | Statement::VarDeclDestructure { .. } => {}
+            // Descend into initializers: an assignment may live inside a closure
+            // stored in a `let`/`const` (e.g. `let inc = () => { count = count + 1 }`).
+            // The declared name itself is a binding, not an assignment, so it is
+            // not added here. Closing this gap also closes it for arrow-block
+            // bodies, which are scanned via collect_assigned_idents_in_expr.
+            Statement::VarDecl { init: Some(e), .. } => {
+                Self::collect_assigned_idents_in_expr(e, names)
+            }
+            Statement::VarDecl { init: None, .. } => {}
+            Statement::VarDeclDestructure { init, .. } => {
+                Self::collect_assigned_idents_in_expr(init, names)
+            }
             Statement::Block { statements, .. } => {
                 for s in statements {
                     Self::collect_assigned_idents_in_stmt(s, names);
@@ -4427,9 +4474,11 @@ impl Codegen {
         }
     }
 
-    /// Collect variable names that are both captured and mutated by a closure body.
-    /// block_vars: vars declared in the enclosing block (candidates for mutation).
-    fn collect_mutated_captures_from_closure(
+    /// Collect block vars captured (referenced) by this closure and any nested
+    /// closures. block_vars: vars declared in the enclosing block. The caller
+    /// (`collect_vars_needing_capture_cell`) further restricts to vars that are
+    /// also assigned somewhere in the defining scope.
+    fn collect_captured_block_vars_from_closure(
         params: &[FunParam],
         body: &Statement,
         block_vars: &HashSet<String>,
@@ -4444,8 +4493,6 @@ impl Codegen {
         Self::collect_local_var_names(body, &mut local_var_names);
         let mut referenced = HashSet::new();
         Self::collect_stmt_idents(body, &mut referenced);
-        let mut assigned = HashSet::new();
-        Self::collect_assigned_idents_in_stmt(body, &mut assigned);
         let outer_captured: HashSet<String> = referenced
             .difference(&param_names)
             .cloned()
@@ -4453,16 +4500,18 @@ impl Codegen {
             .difference(&local_var_names)
             .cloned()
             .collect();
-        for v in outer_captured.intersection(&assigned) {
+        // Every block var this closure captures is a candidate; the caller keeps
+        // only those also assigned somewhere in the defining scope.
+        for v in &outer_captured {
             if block_vars.contains(v) {
                 result.insert(v.clone());
             }
         }
         // Recurse into nested fns
-        Self::collect_mutated_captures_from_statements(body, block_vars, result);
+        Self::collect_captured_block_vars_from_statements(body, block_vars, result);
     }
 
-    fn collect_mutated_captures_from_arrow(
+    fn collect_captured_block_vars_from_arrow(
         params: &[FunParam],
         body: &ArrowBody,
         block_vars: &HashSet<String>,
@@ -4483,11 +4532,6 @@ impl Codegen {
             ArrowBody::Expr(e) => Self::collect_expr_idents(e, &mut referenced),
             ArrowBody::Block(s) => Self::collect_stmt_idents(s, &mut referenced),
         }
-        let mut assigned = HashSet::new();
-        match body {
-            ArrowBody::Expr(e) => Self::collect_assigned_idents_in_expr(e, &mut assigned),
-            ArrowBody::Block(s) => Self::collect_assigned_idents_in_stmt(s, &mut assigned),
-        }
         let outer_captured: HashSet<String> = referenced
             .difference(&param_names)
             .cloned()
@@ -4495,52 +4539,52 @@ impl Codegen {
             .difference(&local_var_names)
             .cloned()
             .collect();
-        for v in outer_captured.intersection(&assigned) {
+        for v in &outer_captured {
             if block_vars.contains(v) {
                 result.insert(v.clone());
             }
         }
         match body {
-            ArrowBody::Expr(e) => Self::collect_mutated_captures_from_expr(e, block_vars, result),
+            ArrowBody::Expr(e) => Self::collect_captured_block_vars_from_expr(e, block_vars, result),
             ArrowBody::Block(s) => {
-                Self::collect_mutated_captures_from_statements(s, block_vars, result)
+                Self::collect_captured_block_vars_from_statements(s, block_vars, result)
             }
         }
     }
 
-    fn collect_mutated_captures_from_expr(
+    fn collect_captured_block_vars_from_expr(
         expr: &Expr,
         block_vars: &HashSet<String>,
         result: &mut HashSet<String>,
     ) {
         match expr {
             Expr::ArrowFunction { params, body, .. } => {
-                Self::collect_mutated_captures_from_arrow(params, body, block_vars, result);
+                Self::collect_captured_block_vars_from_arrow(params, body, block_vars, result);
             }
             Expr::Call { callee, args, .. } => {
-                Self::collect_mutated_captures_from_expr(callee, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(callee, block_vars, result);
                 for arg in args {
                     match arg {
                         CallArg::Expr(e) | CallArg::Spread(e) => {
-                            Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                            Self::collect_captured_block_vars_from_expr(e, block_vars, result);
                         }
                     }
                 }
             }
             Expr::New { callee, args, .. } => {
-                Self::collect_mutated_captures_from_expr(callee, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(callee, block_vars, result);
                 for arg in args {
                     match arg {
                         CallArg::Expr(e) | CallArg::Spread(e) => {
-                            Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                            Self::collect_captured_block_vars_from_expr(e, block_vars, result);
                         }
                     }
                 }
             }
             Expr::Member { object, prop, .. } => {
-                Self::collect_mutated_captures_from_expr(object, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(object, block_vars, result);
                 if let MemberProp::Expr(e) = prop {
-                    Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                    Self::collect_captured_block_vars_from_expr(e, block_vars, result);
                 }
             }
             Expr::Conditional {
@@ -4549,19 +4593,19 @@ impl Codegen {
                 else_branch,
                 ..
             } => {
-                Self::collect_mutated_captures_from_expr(cond, block_vars, result);
-                Self::collect_mutated_captures_from_expr(then_branch, block_vars, result);
-                Self::collect_mutated_captures_from_expr(else_branch, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(cond, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(then_branch, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(else_branch, block_vars, result);
             }
             Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
-                Self::collect_mutated_captures_from_expr(left, block_vars, result);
-                Self::collect_mutated_captures_from_expr(right, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(left, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(right, block_vars, result);
             }
             Expr::Array { elements, .. } => {
                 for el in elements {
                     match el {
                         ArrayElement::Expr(e) | ArrayElement::Spread(e) => {
-                            Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                            Self::collect_captured_block_vars_from_expr(e, block_vars, result);
                         }
                     }
                 }
@@ -4570,7 +4614,7 @@ impl Codegen {
                 for prop in props {
                     match prop {
                         ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => {
-                            Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                            Self::collect_captured_block_vars_from_expr(e, block_vars, result);
                         }
                     }
                 }
@@ -4579,21 +4623,21 @@ impl Codegen {
         }
     }
 
-    fn collect_mutated_captures_from_statements(
+    fn collect_captured_block_vars_from_statements(
         stmt: &Statement,
         block_vars: &HashSet<String>,
         result: &mut HashSet<String>,
     ) {
         match stmt {
             Statement::FunDecl { params, body, .. } => {
-                Self::collect_mutated_captures_from_closure(params, body, block_vars, result);
+                Self::collect_captured_block_vars_from_closure(params, body, block_vars, result);
             }
             Statement::ExprStmt { expr, .. } => {
-                Self::collect_mutated_captures_from_expr(expr, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(expr, block_vars, result);
             }
             Statement::Block { statements, .. } => {
                 for s in statements {
-                    Self::collect_mutated_captures_from_statements(s, block_vars, result);
+                    Self::collect_captured_block_vars_from_statements(s, block_vars, result);
                 }
             }
             Statement::If {
@@ -4602,10 +4646,10 @@ impl Codegen {
                 else_branch,
                 ..
             } => {
-                Self::collect_mutated_captures_from_expr(cond, block_vars, result);
-                Self::collect_mutated_captures_from_statements(then_branch, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(cond, block_vars, result);
+                Self::collect_captured_block_vars_from_statements(then_branch, block_vars, result);
                 if let Some(eb) = else_branch {
-                    Self::collect_mutated_captures_from_statements(eb, block_vars, result);
+                    Self::collect_captured_block_vars_from_statements(eb, block_vars, result);
                 }
             }
             Statement::For {
@@ -4616,23 +4660,23 @@ impl Codegen {
                 ..
             } => {
                 if let Some(i) = init {
-                    Self::collect_mutated_captures_from_statements(i, block_vars, result);
+                    Self::collect_captured_block_vars_from_statements(i, block_vars, result);
                 }
                 if let Some(c) = cond {
-                    Self::collect_mutated_captures_from_expr(c, block_vars, result);
+                    Self::collect_captured_block_vars_from_expr(c, block_vars, result);
                 }
                 if let Some(u) = update {
-                    Self::collect_mutated_captures_from_expr(u, block_vars, result);
+                    Self::collect_captured_block_vars_from_expr(u, block_vars, result);
                 }
-                Self::collect_mutated_captures_from_statements(body, block_vars, result);
+                Self::collect_captured_block_vars_from_statements(body, block_vars, result);
             }
             Statement::ForOf { iterable, body, .. } => {
-                Self::collect_mutated_captures_from_expr(iterable, block_vars, result);
-                Self::collect_mutated_captures_from_statements(body, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(iterable, block_vars, result);
+                Self::collect_captured_block_vars_from_statements(body, block_vars, result);
             }
             Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
-                Self::collect_mutated_captures_from_expr(cond, block_vars, result);
-                Self::collect_mutated_captures_from_statements(body, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(cond, block_vars, result);
+                Self::collect_captured_block_vars_from_statements(body, block_vars, result);
             }
             Statement::Switch {
                 expr,
@@ -4640,18 +4684,18 @@ impl Codegen {
                 default_body,
                 ..
             } => {
-                Self::collect_mutated_captures_from_expr(expr, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(expr, block_vars, result);
                 for (ce, stmts) in cases {
                     if let Some(e) = ce {
-                        Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                        Self::collect_captured_block_vars_from_expr(e, block_vars, result);
                     }
                     for s in stmts {
-                        Self::collect_mutated_captures_from_statements(s, block_vars, result);
+                        Self::collect_captured_block_vars_from_statements(s, block_vars, result);
                     }
                 }
                 if let Some(stmts) = default_body {
                     for s in stmts {
-                        Self::collect_mutated_captures_from_statements(s, block_vars, result);
+                        Self::collect_captured_block_vars_from_statements(s, block_vars, result);
                     }
                 }
             }
@@ -4661,39 +4705,77 @@ impl Codegen {
                 finally_body,
                 ..
             } => {
-                Self::collect_mutated_captures_from_statements(body, block_vars, result);
+                Self::collect_captured_block_vars_from_statements(body, block_vars, result);
                 if let Some(c) = catch_body {
-                    Self::collect_mutated_captures_from_statements(c, block_vars, result);
+                    Self::collect_captured_block_vars_from_statements(c, block_vars, result);
                 }
                 if let Some(f) = finally_body {
-                    Self::collect_mutated_captures_from_statements(f, block_vars, result);
+                    Self::collect_captured_block_vars_from_statements(f, block_vars, result);
                 }
             }
             Statement::VarDecl { init: Some(e), .. } => {
-                Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(e, block_vars, result);
             }
             Statement::VarDeclDestructure { init, .. } => {
-                Self::collect_mutated_captures_from_expr(init, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(init, block_vars, result);
             }
             Statement::Return { value: Some(e), .. } => {
-                Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(e, block_vars, result);
             }
             Statement::Throw { value, .. } => {
-                Self::collect_mutated_captures_from_expr(value, block_vars, result)
+                Self::collect_captured_block_vars_from_expr(value, block_vars, result)
             }
             _ => {}
         }
     }
 
-    /// For a block, return var names that must be RefCell (captured and mutated by nested closures).
-    fn collect_vars_mutated_by_nested_closures(statements: &[Statement]) -> HashSet<String> {
+    /// For a block, return the names of block-scoped vars that must live in a
+    /// shared `VmRef` cell because a nested closure captures them by reference.
+    ///
+    /// A var needs a cell when it is BOTH (a) captured (referenced) by some nested
+    /// closure AND (b) assigned somewhere in the defining scope. The assignment may
+    /// be inside a closure (`counter()`, sibling `inc`/`get`) or in the enclosing
+    /// scope — including AFTER the closure is created (`let t = 0; let f = () => t;
+    /// t = 100`). Capture alone is not enough: a never-mutated var can be snapshot
+    /// by value. The previous rule (captured AND mutated *inside* a closure) was too
+    /// narrow — it snapshotted capture-then-mutate vars by value, so the rust backend
+    /// returned the stale value and diverged from node/vm/interp/cranelift.
+    fn collect_vars_needing_capture_cell(statements: &[Statement]) -> HashSet<String> {
         let mut block_vars = HashSet::new();
         Self::collect_block_var_names(statements, &mut block_vars);
-        let mut result = HashSet::new();
+        // (a) Block vars captured by any nested closure.
+        let mut captured = HashSet::new();
         for s in statements {
-            Self::collect_mutated_captures_from_statements(s, &block_vars, &mut result);
+            Self::collect_captured_block_vars_from_statements(s, &block_vars, &mut captured);
         }
-        result
+        // (b) Idents assigned anywhere in this scope (incl. inside closures).
+        let mut assigned_in_scope = HashSet::new();
+        for s in statements {
+            Self::collect_assigned_idents_in_stmt(s, &mut assigned_in_scope);
+        }
+        captured.retain(|v| assigned_in_scope.contains(v));
+        // A `for (let i = 0; …; i++)` counter is declared ONCE in the header but is a
+        // per-iteration `let` in JS: a closure in the body must snapshot THIS iteration's
+        // value, not share one cell across all iterations. The loop's own `i++` would
+        // otherwise pull it in here. (for-of vars are not block vars, and body-`let`s are
+        // re-declared each iteration so they get a fresh cell regardless — only header
+        // counters, declared once, must be excluded.) See loop_let_capture.tish.
+        let mut for_counters = HashSet::new();
+        for s in statements {
+            if let Statement::For { init: Some(i), .. } = s {
+                match i.as_ref() {
+                    Statement::VarDecl { name, .. } => {
+                        for_counters.insert(name.to_string());
+                    }
+                    Statement::VarDeclDestructure { pattern, .. } => {
+                        Self::collect_destruct_names(pattern, &mut for_counters);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        captured.retain(|v| !for_counters.contains(v));
+        captured
     }
 
     /// Collect variable names declared in a statement (VarDecl, Destructure, For init).
@@ -5191,7 +5273,14 @@ impl Codegen {
         let arrow_body_res: Result<(), CompileError> = match body {
             tishlang_ast::ArrowBody::Expr(expr) => {
                 let expr_code = self.emit_expr(expr)?;
-                code.push_str(&format!("        {}\n", expr_code));
+                // Bind to a temp before the closure returns: if `expr_code` reads a
+                // cell-captured var its `RefCell` borrow guard is a temporary, and a
+                // borrow left in tail position outlives the local cell binding —
+                // which fails to compile (E0597). The `let` releases it at the `;`.
+                code.push_str(&format!(
+                    "        let __arrow_ret = {};\n        __arrow_ret\n",
+                    expr_code
+                ));
                 Ok(())
             }
             tishlang_ast::ArrowBody::Block(block_stmt) => {
@@ -5867,6 +5956,68 @@ impl Codegen {
         } else {
             Ok(format!("{}.is_truthy()", code))
         }
+    }
+
+    /// Fused `reduce`: if the callback is exactly `(acc, x) => acc OP x` (or `x OP acc`) with a
+    /// plain binop of the two params, emit a native fold over the array using the SAME runtime
+    /// Value op the closure body would — eliminating the per-element `value_call`. Sound (identical
+    /// Value semantics, including string `+`). Returns `None` to fall back to `array_reduce`.
+    fn try_fused_reduce(
+        &self,
+        args: &[CallArg],
+        obj_expr: &str,
+        initial: &str,
+    ) -> Result<Option<String>, CompileError> {
+        let Some(CallArg::Expr(Expr::ArrowFunction { params, body, .. })) = args.first() else {
+            return Ok(None);
+        };
+        let tishlang_ast::ArrowBody::Expr(be) = body else {
+            return Ok(None);
+        };
+        if params.len() != 2 {
+            return Ok(None);
+        }
+        let pname = |p: &FunParam| -> Option<std::sync::Arc<str>> {
+            match p {
+                FunParam::Simple(tp) if tp.default.is_none() => Some(std::sync::Arc::clone(&tp.name)),
+                _ => None,
+            }
+        };
+        let (Some(acc), Some(cur)) = (pname(&params[0]), pname(&params[1])) else {
+            return Ok(None);
+        };
+        let Expr::Binary {
+            left, op, right, span,
+        } = be.as_ref()
+        else {
+            return Ok(None);
+        };
+        let ident = |e: &Expr| -> Option<std::sync::Arc<str>> {
+            match e {
+                Expr::Ident { name, .. } => Some(std::sync::Arc::clone(name)),
+                _ => None,
+            }
+        };
+        let (Some(ln), Some(rn)) = (ident(left), ident(right)) else {
+            return Ok(None);
+        };
+        // Map each operand to `_acc` / `_x` in the body's actual order.
+        let (ls, rs) = if ln.as_ref() == acc.as_ref() && rn.as_ref() == cur.as_ref() {
+            ("_acc", "_x")
+        } else if ln.as_ref() == cur.as_ref() && rn.as_ref() == acc.as_ref() {
+            ("_x", "_acc")
+        } else {
+            return Ok(None);
+        };
+        let body_code = self.emit_binop(ls, *op, rs, *span)?;
+        Ok(Some(format!(
+            "{{ let mut _acc = {init}; let _arr = ({obj}).clone(); \
+             if let Value::Array(ref _a) = _arr {{ for _el in _a.borrow().iter() {{ \
+             let _x = _el.clone(); _acc = {body}; }} }} _acc }}",
+            init = initial,
+            obj = obj_expr,
+            body = body_code
+        )))
     }
 
     fn emit_binop(&self, l: &str, op: BinOp, r: &str, span: Span) -> Result<String, CompileError> {

@@ -53,10 +53,17 @@ pub fn ui_h(args: &[Value]) -> Value {
     let children_vec = normalize_children_list(children_arg);
 
     if let Value::Function(f) = &tag {
-        let mut merged = if matches!(props, Value::Null) {
+        let mut merged: ObjectMap = if matches!(props, Value::Null) {
             ObjectMap::default()
         } else if let Value::Object(obj) = props {
-            obj.borrow().strings.clone()
+            // `ObjectData.strings` is an insertion-ordered `PropMap`; `Value::object` takes an
+            // `ObjectMap` (`AHashMap`). Copy the entries across (object property order is not
+            // observable for a merged props map here).
+            obj.borrow()
+                .strings
+                .iter()
+                .map(|(k, v)| (Arc::clone(k), v.clone()))
+                .collect()
         } else {
             ObjectMap::default()
         };

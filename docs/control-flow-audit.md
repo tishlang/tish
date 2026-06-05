@@ -34,22 +34,40 @@ per-iteration binding for `for`/`for-of`/`while`/`do` (#1, #2).** **All of #1–
 every backend (interp/vm/rust/cranelift/wasi).** #7's microtask/macrotask interleave is **WON'T-DO by
 design** (it would conflict with tish's multi-threaded concurrency model); the timer-FIFO part of #7
 is fixed. `switch` having no fall-through is also intentional (locked in `switch.tish.expected`).
-The only known out-of-scope straggler is a SEPARATE rust capture-by-value bug (a read-only outer var
-captured in a closure is snapshotted, so a later mutation isn't seen — tracked separately).
-Regression fixtures `tests/core/control_flow_nested.tish` (loops/switch/try) and
-`loop_let_capture.tish` (per-iteration `let`) are asserted across interp/vm/rust/cranelift.
+The SEPARATE rust capture-by-value bug (a read-only outer var captured in a closure was snapshotted,
+so a later mutation wasn't seen) is **now also FIXED** (later same day — see "Capture-by-value fix"
+below). Regression fixtures `tests/core/control_flow_nested.tish` (loops/switch/try),
+`loop_let_capture.tish` (per-iteration `let`), and `closure_capture_cell.tish` (capture-by-reference)
+are asserted across interp/vm/rust/cranelift.
 
 This is NOT Node-parity chasing: per-iteration `let` is what **Rust itself** does (the native
 backend compiles to Rust closures and gets `0 1 2` for free) and what tish's own block scoping
 implies (`let` is block-scoped; a loop iteration is a block). The vm at `3 3 3` was the lone
 var-like outlier; it now matches the other three paths.
 
+### Capture-by-value fix (2026-06-05, later same day) — FIXED across all backends
+`let x = 0; let f = () => x; x = 100; f()` returned `0` on the rust backend (snapshot at
+closure-creation) vs `100` on node/vm/interp/cranelift. Root cause + fix in `crates/tish_compile/src/codegen.rs`:
+- **Prepass** (`collect_vars_needing_capture_cell`, was `collect_vars_mutated_by_nested_closures`): the
+  rule was "captured AND assigned *inside* a closure" → now "captured by a closure AND assigned
+  *anywhere* in the defining scope" (incl. the enclosing scope, even after the closure is created). So
+  such a var is stored in one shared `VmRef` cell instead of a per-closure value snapshot.
+- **FunDecl capture split**: a read-only outer capture that is already a shared cell now binds the live
+  cell (read-through) instead of snapshotting it — mirrors what `emit_arrow_function` already did.
+- **FunDecl body prepass**: function bodies are emitted by manual statement iteration (not
+  `emit_statement(Block)`), so the prepass is now run there too — covers capture-then-mutate of a
+  function-body local.
+- **Assignment scan completeness**: `collect_assigned_idents_in_stmt` now descends into VarDecl
+  initializers, so an assignment inside a closure stored in a `let` (e.g. `let inc = () => { c = c+1 }`)
+  is counted — needed so sibling closures still share one cell.
+- **Borrow-lifetime**: an arrow expr-body now binds its result to a temp before returning, so a
+  `RefCell` borrow guard from reading a cell var isn't left in tail position (would fail E0597).
+
+Verified (node oracle): capture-then-mutate (arrow + FunDecl), sibling read/write closures, `counter()`,
+capture-then-mutate inside a function body, object rebind, native string — all identical across
+interp/vm/rust/cranelift. Regression fixture: `tests/core/closure_capture_cell.tish`.
+
 ### Remaining work
-- **(separate, out of scope) rust capture-by-value of read-only outer vars** — `let x=0; let f=()=>x;
-  x=100; f()` returns `0` on the rust backend (snapshot) vs `100` on node/vm/interp/cranelift. The
-  codegen cell-wraps a captured var only if it's assigned *inside* a closure; it should also cell-wrap
-  one that's captured AND assigned anywhere in the defining scope. Tracked as its own task; unrelated
-  to per-iteration `let`.
 - **microtask/macrotask ordering (#7) — WON'T DO (by design).** A JS-style single-threaded event
   loop with a microtask queue drained between macrotasks would conflict with tish's multi-threaded
   concurrency model (the `send-values` `Arc<Mutex>` design exists precisely so HTTP/handlers run
