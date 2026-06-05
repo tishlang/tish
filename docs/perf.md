@@ -121,11 +121,18 @@ darwin-arm64, `--native-backend rust` vs node (V8), lower = better:
 
 Whole corpus byte-identical (full integration suite green) — pure de-boxing, zero semantic change.
 
-KEYSTONE still open (M1): a function PARAMETER arrives boxed (`let N = args.get(0).cloned()`;
-`types.rs:388` `push_fun_param_scope` -> `RustType::Value`). ONE boxed param poisons every index in
-a hot loop — matmul with `fn bench(N)` stays ~10-40x node because `i*N+k` boxes. Typing params
-(Strategy A native shadow, `docs/type-system-roadmap.md` M1) is the next unlock — and the
-typed-local matmul above proves it flips the kernel from 10x-slower to 3.5x-faster.
+KEYSTONE LANDED (M1, dark-shipped behind `TISH_PARAM_NATIVE`): a typed scalar param used to arrive
+boxed (`let N = args.get(0).cloned()`; `types.rs:388` `push_fun_param_scope` -> `RustType::Value`),
+and ONE boxed param poisoned every index in the hot loop. Now codegen binds a native SHADOW at the
+closure top — coerce `args.get(i)` once to f64/bool/String (`from_value_expr`), then register the
+native type so the body lowers the param exactly like a native local. Real param-based matmul
+(`fn bench(N: number)`), 256x256:
+  boxed param (default):   301 ms
+  native param (flag on):   15 ms     <- 20x faster, and 3x FASTER than node (45ms)
+Identical check value (correct). Flag OFF: whole corpus byte-identical (zero risk). Flag ON: the
+entire native corpus still passes (correct output, no panics). Conservative gate: simple params,
+native-scalar annotation, no default value. Next: M4 (infer param types from use, so unannotated
+`fn bench(N)` benefits too) + harden capture/escape cases, then default-on.
 ================================================================================
 
 

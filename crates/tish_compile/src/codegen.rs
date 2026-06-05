@@ -2354,14 +2354,48 @@ impl Codegen {
                     .map(|n| n.to_string())
                     .collect();
                 let formal_span = *span;
+                // M1 (keystone, dark-shipped behind TISH_PARAM_NATIVE): a typed scalar param
+                // normally arrives boxed (`args.get(i).cloned()`), which poisons native math in
+                // the body (e.g. `i*N+k` boxes). Bind a *native shadow* — coerce once to f64/
+                // bool/String — so the body lowers it like a native local. Conservative: only
+                // simple params, native-scalar annotation, no default value.
+                let param_native =
+                    std::env::var("TISH_PARAM_NATIVE").map(|v| v != "0").unwrap_or(false);
+                let mut native_params: Vec<(String, RustType)> = Vec::new();
                 for (i, p) in params.iter().enumerate() {
                     match p {
                         FunParam::Simple(tp) => {
-                            self.writeln(&format!(
-                                "let mut {} = args.get({}).cloned().unwrap_or(Value::Null);",
-                                Self::escape_ident(tp.name.as_ref()),
-                                i
-                            ));
+                            let native_ty = if param_native && tp.default.is_none() {
+                                tp.type_ann
+                                    .as_ref()
+                                    .map(RustType::from_annotation)
+                                    .filter(|t| {
+                                        matches!(
+                                            t,
+                                            RustType::F64 | RustType::Bool | RustType::String
+                                        )
+                                    })
+                            } else {
+                                None
+                            };
+                            if let Some(nt) = native_ty {
+                                let coercion = nt.from_value_expr(&format!(
+                                    "args.get({}).cloned().unwrap_or(Value::Null)",
+                                    i
+                                ));
+                                self.writeln(&format!(
+                                    "let mut {} = {};",
+                                    Self::escape_ident(tp.name.as_ref()),
+                                    coercion
+                                ));
+                                native_params.push((tp.name.to_string(), nt));
+                            } else {
+                                self.writeln(&format!(
+                                    "let mut {} = args.get({}).cloned().unwrap_or(Value::Null);",
+                                    Self::escape_ident(tp.name.as_ref()),
+                                    i
+                                ));
+                            }
                         }
                         FunParam::Destructure { pattern, .. } => {
                             let tmp = format!("_formal_{}", i);
@@ -2383,6 +2417,11 @@ impl Codegen {
 
                 self.type_context
                     .push_fun_param_scope(params, rest_param.as_ref());
+                // Register native-shadowed params (bound above) with their native type so the
+                // body lowers them exactly like native locals (binops, indices, etc.).
+                for (pname, pty) in &native_params {
+                    self.type_context.define(pname, pty.clone());
+                }
 
                 let fun_body_res: Result<(), CompileError> = (|| -> Result<(), CompileError> {
                     // Push current params to stack for nested functions
