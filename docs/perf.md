@@ -170,16 +170,17 @@ both tish and node). Baseline (darwin-arm64, rust backend + `TISH_PARAM_NATIVE=1
   matmul          14ms   16ms   0.87x   PASS  (M1 native params)
   numeric_loop    44ms   47ms   0.94x   PASS  (statement-position de-boxing)
   math_trig       12ms   82ms   0.15x   PASS  native Math intrinsics LANDED (sqrt/sin/...->f64 method)
-  array_hof      259ms   29ms   8.9x    FAIL  native closure calls / fused reduce over native arrays
-  recursion_fib  512ms   58ms   8.8x    FAIL  M5 (native monomorphic calls — bypass value_call)
-  object_sum     143ms    3ms   48x     FAIL  hidden classes / unboxed objects (task #13)
-  string_concat  449ms    3ms   150x    FAIL  rope / native string builder (today `s+"x"` is O(n^2))
+  string_concat    2ms    3ms   0.67x   PASS  self-append `s=s+x` -> push_str (O(1)); was O(n^2)
+  array_hof      269ms   30ms   8.9x    FAIL  native closure calls / fused reduce over native arrays
+  recursion_fib  536ms   52ms   10x     FAIL  M5 (native monomorphic calls — bypass value_call)
+  object_sum     146ms    3ms   49x     FAIL  hidden classes / unboxed objects (task #13)
 
-3/7 beating V8 (math_trig flipped FAIL->PASS this pass via native Math intrinsics — `Math.sqrt(x)`
-etc. with a native-f64 arg now lowers to a direct `f64` method in `emit_typed_expr`, skipping the
-boxed value_call; only the methods whose Rust op matches JS — round/sign stay boxed). Remaining
-FAILs ordered by leverage: `recursion_fib`/`array_hof` want M5 (native calls); `object_sum`/
-`string_concat` are representation rearchitectures (hidden classes; rope strings).
+4/7 beating V8. Two flipped FAIL->PASS this pass: (1) math_trig via native Math intrinsics
+(`Math.sqrt(x)` etc. with a native-f64 arg -> direct `f64` method in `emit_typed_expr`, skipping the
+boxed value_call; round/sign stay boxed — JS semantics differ); (2) string_concat via a String
+self-append fast path (`s = s + x` -> in-place `push_str` in `emit_expr_discard`, O(1) amortized
+instead of cloning the whole string per concat). Remaining FAILs are the structural levers:
+`recursion_fib`/`array_hof` -> M5 (native calls); `object_sum` -> hidden classes (task #13).
 ================================================================================
 
 

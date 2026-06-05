@@ -1666,6 +1666,36 @@ impl Codegen {
         match expr {
             Expr::Assign { name, value, .. } => {
                 let rust_type = self.type_context.get_type(name.as_ref());
+                // String self-append `s = s + rhs` -> in-place push_str (amortized O(1)). The
+                // general path boxes via `ops::add(Value::String(s.clone()), ...)` which clones
+                // the whole string per concat -> O(n^2) string building. rhs must be String-typed.
+                if rust_type == RustType::String {
+                    if let Expr::Binary {
+                        left,
+                        op: BinOp::Add,
+                        right,
+                        ..
+                    } = value.as_ref()
+                    {
+                        if matches!(left.as_ref(), Expr::Ident { name: ln, .. } if ln.as_ref() == name.as_ref())
+                        {
+                            let (rhs_code, rhs_ty) = self.emit_typed_expr(right.as_ref())?;
+                            if rhs_ty == RustType::String {
+                                let escaped = Self::escape_ident(name.as_ref());
+                                if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                                    return Ok(format!(
+                                        "{{ let _r = {}; {}.borrow_mut().push_str(&_r); }}",
+                                        rhs_code, escaped
+                                    ));
+                                }
+                                return Ok(format!(
+                                    "{{ let _r = {}; {}.push_str(&_r); }}",
+                                    rhs_code, escaped
+                                ));
+                            }
+                        }
+                    }
+                }
                 if matches!(rust_type, RustType::F64 | RustType::Bool | RustType::String) {
                     let escaped = Self::escape_ident(name.as_ref());
                     let is_ref = self.refcell_wrapped_vars.contains(name.as_ref());
