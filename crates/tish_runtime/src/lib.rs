@@ -110,6 +110,12 @@ pub fn string_substr(s: &Value, start: &Value, length: &Value) -> Value {
     string_substr_impl(s, start, length)
 }
 pub fn string_split(s: &Value, sep: &Value) -> Value {
+    // A RegExp separator routes to the regex splitter (matches string_replace's regex handling
+    // and the interpreter/VM), so `"a1b2c".split(RegExp("\\d",""))` works on the rust backend.
+    #[cfg(feature = "regex")]
+    if matches!(sep, Value::RegExp(_)) {
+        return string_split_regex(s, sep, None);
+    }
     string_split_impl(s, sep)
 }
 pub fn string_starts_with(s: &Value, search: &Value) -> Value {
@@ -148,16 +154,12 @@ pub fn string_last_index_of(s: &Value, search: &Value, position: &Value) -> Valu
 }
 
 /// Number.prototype.toFixed(digits) - format number with fixed decimal places (0-20)
+///
+/// Delegates to the single source of truth in `tishlang_builtins::number` so the rust
+/// backend, the bytecode VM, and the interpreter stay byte-identical. See
+/// `tish/docs/full-backend-parity-plan.md` (Workstream A).
 pub fn number_to_fixed(n: &Value, digits: &Value) -> Value {
-    let num = match n {
-        Value::Number(x) => *x,
-        _ => f64::NAN,
-    };
-    let d = match digits {
-        Value::Number(x) => (*x as i32).clamp(0, 20),
-        _ => 0,
-    };
-    Value::String(format!("{:.*}", d as usize, num).into())
+    tishlang_builtins::number::to_fixed(n, digits)
 }
 
 /// Operators module for compound assignment operations
@@ -675,22 +677,33 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
             }
         }
         #[cfg(feature = "regex")]
-        Value::RegExp(re) => {
-            let re = re.clone();
-            if key == "exec" {
+        Value::RegExp(re) => match key {
+            "exec" => {
+                let rc = re.clone();
                 Value::native(move |args: &[Value]| {
                     let input = args.first().unwrap_or(&Value::Null);
-                    regexp_exec(&Value::RegExp(re.clone()), input)
+                    regexp_exec(&Value::RegExp(rc.clone()), input)
                 })
-            } else if key == "test" {
-                Value::native(move |args: &[Value]| {
-                    let input = args.first().unwrap_or(&Value::Null);
-                    regexp_test(&Value::RegExp(re.clone()), input)
-                })
-            } else {
-                Value::Null
             }
-        }
+            "test" => {
+                let rc = re.clone();
+                Value::native(move |args: &[Value]| {
+                    let input = args.first().unwrap_or(&Value::Null);
+                    regexp_test(&Value::RegExp(rc.clone()), input)
+                })
+            }
+            // Properties — mirror the interpreter + bytecode VM so all backends agree.
+            "source" => Value::String(re.borrow().source.clone().into()),
+            "flags" => Value::String(re.borrow().flags_string().into()),
+            "lastIndex" => Value::Number(re.borrow().last_index as f64),
+            "global" => Value::Bool(re.borrow().flags.global),
+            "ignoreCase" => Value::Bool(re.borrow().flags.ignore_case),
+            "multiline" => Value::Bool(re.borrow().flags.multiline),
+            "dotAll" => Value::Bool(re.borrow().flags.dot_all),
+            "unicode" => Value::Bool(re.borrow().flags.unicode),
+            "sticky" => Value::Bool(re.borrow().flags.sticky),
+            _ => Value::Null,
+        },
         Value::Opaque(o) => o
             .get_method(key)
             .map(Value::Function)

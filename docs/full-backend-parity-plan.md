@@ -37,6 +37,35 @@ So the plan is three workstreams, in ROI order:
 The interpreter proves the language semantics; the work is bringing `tish_bytecode` (compiler) +
 `tish_vm` (runtime) up to it. Every fix here auto-applies to vm, cranelift, llvm, and wasi.
 
+> **STATUS — A1 + A2 LANDED (2026-06-05).** Full **interp↔vm parity across all 66 discovered core
+> tests, zero skips** (`VM_PARITY_SKIP` is now empty). Each fix was verified to inherit to **cranelift**
+> by building+running the actual backend (all 7 former reds pass). The 6 gaps closed:
+> - **number_tofixed** — added `Value::Number` arm to `get_member`; canonical `tishlang_builtins::number::to_fixed`
+>   (runtime `number_to_fixed` + the interp route through it — single source of truth).
+> - **array_sort_splice** — the fused `ArraySortByProperty` getter (`tish_builtins::array::get_prop_number`)
+>   returned `NaN` for string/array `.length` (computed, not a stored key) → every compare collapsed to
+>   `Equal` → unsorted. Now computes `.length` for `String`/`Array`, mirroring `get_member`.
+> - **default_params** — defaults were silently dropped. Added opcode `ArgMissing(u16)` (#50) + a
+>   `emit_param_defaults_prologue` (FunDecl + Arrow, slot + name paths). **Count-based** (default applies
+>   only when the positional arg is *missing*, matching the interp; an explicit `null` keeps the `null`).
+>   The **native/rust backend** needed the same fix in both codegen param-binding sites.
+> - **destructuring** — `compile_destructure` now handles array holes, rest (`...r` via `source.slice(i)`
+>   using `GetMember`), and nested array/object patterns (recurse; stack-balanced). Object rest still TODO
+>   (no test depends on it).
+> - **regex + js_compat_gaps** — RegExp across **VM and native**: `regex` feature now pulls in the runtime;
+>   `RegExp` global (`regexp_new`); `Value::RegExp` `get_member` (props + `test`/`exec`); String
+>   `match`/`search`/`split`/`replace` route to the runtime's regex-aware fns (same code the rust backend
+>   uses). Runtime `get_member` gained the RegExp *properties* (was `test`/`exec` only); `string_split`
+>   is now regex-aware; codegen `match`/`search` gated on `has_feature` not `cfg!`. The two `.expected`
+>   files were empty placeholders (exposed by file-discovery) — regenerated from the interp.
+> - **nested_complex (deep closures)** — `Vm.enclosing` went from a fixed `Option` + `Option` (`enclosing` +
+>   `enclosing2`) to a **`Vec<ScopeMap>` full lexical chain** (innermost first). A closure captures its
+>   defining frame's scope *plus that frame's own chain*, so functions nested arbitrarily deep resolve every
+>   ancestor's locals. Per-iteration `let` (frozen overlay = innermost entry) and captured-var mutation are
+>   preserved. `LoadVar`/`StoreVar` walk the chain.
+>
+> Remaining: **A3** (extend cranelift/wasi from the curated allowlist to `discover_core_tests()`).
+
 **A1 — bytecode compiler gaps (`tish_bytecode/src/compiler.rs`)**
 - **Destructuring beyond a bare ident** (`compiler.rs:1227-1281`): array holes, rest `...`, nested
   patterns, renamed object keys all error `"Complex/Nested destructuring not yet supported"`. Implement
@@ -60,10 +89,20 @@ The interpreter proves the language semantics; the work is bringing `tish_byteco
 - Minor: confirm `console.debug`, `Object.keys/values`, `Array.isArray`, `Math.pow/sin/...` are all on
   the VM (the agent found most already are; the gap-analysis doc is partly stale — verify, don't assume).
 
-**A3 — test harness (build on the file-discovery just landed)**
-- File-discovery already covers interp/vm/native. Extend cranelift/wasi from the curated allowlist to
-  **`discover_core_tests()` minus a documented `VM_FAMILY_SKIP`** (the constructs still failing). As each
-  A1/A2 fix lands, un-skip the corresponding file — the skip list shrinks to empty as parity completes.
+**A3 — test harness (build on the file-discovery just landed)** — *blocked on a build-cost fix, see below.*
+- File-discovery already covers interp/vm/native. The intent was to extend cranelift/wasi from the curated
+  allowlist to `discover_core_tests()` too. **Correctness is no longer the blocker** — the VM passes every
+  discovered test (parity is complete) and cranelift/wasi inherit it (the 7 former reds were each verified
+  to build+pass on cranelift).
+- **The real blocker is disk/build cost.** Unlike interp/vm/native (which run one shared `tish` binary),
+  each cranelift/wasi case emits a *full per-program Rust crate* under `tishlang_{cranelift,wasi}_build/<name>`
+  (`tish_cranelift/src/link.rs:21` `create_build_dir`), ~2-5 GB apiece with `cranelift_codegen` + the embedded
+  VM, and **they accumulate**. A full 66-file sweep consumed **134 GB** and hit `ENOSPC`. So the curated list
+  is a deliberate build-cost bound; full discovery here would fill the disk on every CI run.
+- **Enabler (do first):** bound that build dir — a shared `CARGO_TARGET_DIR` across cranelift/wasi builds so
+  the heavy deps compile once (best: fixes disk *and* speed), or clean `tishlang_*_build/<name>` after
+  `compile_cached` caches the output artifact (the small binary/wasm persists for re-runs; the giant crate
+  doesn't). Then cranelift/wasi can move to `discover_core_tests()` minus a small documented skip set.
 - Timing/perf/probe files (`*_stress`, `*_perf`, `jit_probe`, `benchmark_granular`) stay excluded
   always (nondeterministic ms output), independent of VM correctness.
 

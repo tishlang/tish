@@ -12,6 +12,7 @@ use tishlang_builtins::array as arr_builtins;
 use tishlang_builtins::construct as construct_builtin;
 use tishlang_builtins::globals as globals_builtins;
 use tishlang_builtins::math as math_builtins;
+use tishlang_builtins::number as num_builtins;
 use tishlang_builtins::string as str_builtins;
 use tishlang_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
 use tishlang_core::{
@@ -781,6 +782,15 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         g.insert("Promise".into(), tishlang_runtime::promise_object());
     }
 
+    // `RegExp(pattern, flags)` constructor. A language feature (not a sandboxed capability),
+    // so it's available whenever the `regex` feature is compiled — matching the interpreter.
+    // Routes to the same `regexp_new` the rust backend uses (full-backend-parity-plan.md).
+    #[cfg(feature = "regex")]
+    g.insert(
+        "RegExp".into(),
+        Value::native(|args: &[Value]| tishlang_runtime::regexp_new(args)),
+    );
+
     g
 }
 
@@ -800,13 +810,15 @@ pub struct VmRunOptions {
 pub struct Vm {
     stack: Vec<Value>,
     scope: ObjectMap,
-    /// Enclosing scope for closures (captured parent frame locals).
-    enclosing: Option<ScopeMap>,
-    /// Second enclosing level, checked after `enclosing`. Used for per-iteration `let`: a closure
-    /// created in a loop body captures a small overlay of the loop var(s) (`enclosing`) layered
-    /// over the still-shared frame scope (`enclosing2`), so the loop var is frozen per-iteration
-    /// while everything else stays live. `None` for ordinary closures.
-    enclosing2: Option<ScopeMap>,
+    /// Captured enclosing scopes for closures, **innermost first**. A free variable resolves by
+    /// walking `local_scope` → each entry here in order → `scope` → `globals`. This is the full
+    /// lexical chain: a closure captures its defining frame's scope *plus that frame's own
+    /// enclosing chain*, so a function nested N levels deep still sees every ancestor's locals
+    /// (was a fixed `enclosing` + `enclosing2`, which silently lost captures >2 levels deep — see
+    /// `nested_complex`). Per-iteration `let`: a fresh frozen overlay of the loop var(s) is
+    /// prepended as the innermost entry, shadowing the still-shared frame scope that follows it,
+    /// so the loop var is frozen per-iteration while everything else stays live. Empty at top level.
+    enclosing: Vec<ScopeMap>,
     globals: VmRef<ObjectMap>,
     /// Capabilities for `LoadNativeExport` and globals such as `process` / `serve`.
     capabilities: Arc<HashSet<String>>,
@@ -832,8 +844,7 @@ impl Vm {
         Self {
             stack: Vec::new(),
             scope: ObjectMap::default(),
-            enclosing: None,
-            enclosing2: None,
+            enclosing: Vec::new(),
             globals: VmRef::new(init_globals(capabilities.as_ref())),
             capabilities,
             native_modules: VmRef::new(HashMap::new()),
@@ -1019,13 +1030,17 @@ impl Vm {
                             let jit_fn = crate::jit::try_compile_numeric(inner);
                             let inner_clone = inner.clone();
                             let globals = self.globals.clone();
-                            // Per-iteration `let`: inside a loop's binding region, freeze the loop
-                            // var(s) into a fresh overlay (`enclosing`) layered over the still-shared
-                            // frame scope (`enclosing2`) — the loop var is this iteration's value,
-                            // everything else stays live. Otherwise capture the frame scope directly.
-                            let (enclosing, enclosing2) = if active_loop_vars.is_empty() {
-                                (Some(local_scope.clone()), None)
+                            // The closure captures its defining frame's scope PLUS that frame's own
+                            // enclosing chain, so functions nested arbitrarily deep still resolve
+                            // every ancestor's locals (innermost first).
+                            let enclosing_chain: Vec<ScopeMap> = if active_loop_vars.is_empty() {
+                                let mut chain = Vec::with_capacity(self.enclosing.len() + 1);
+                                chain.push(local_scope.clone());
+                                chain.extend(self.enclosing.iter().cloned());
+                                chain
                             } else {
+                                // Per-iteration `let`: freeze the loop var(s) into an overlay that
+                                // shadows the still-shared frame scope, then the inherited chain.
                                 let mut overlay = ObjectMap::default();
                                 {
                                     let ls = local_scope.borrow();
@@ -1035,7 +1050,11 @@ impl Vm {
                                         }
                                     }
                                 }
-                                (Some(VmRef::new(overlay)), Some(local_scope.clone()))
+                                let mut chain = Vec::with_capacity(self.enclosing.len() + 2);
+                                chain.push(VmRef::new(overlay));
+                                chain.push(local_scope.clone());
+                                chain.extend(self.enclosing.iter().cloned());
+                                chain
                             };
                             let capabilities = Arc::clone(&self.capabilities);
                             let native_modules = self.native_modules.clone();
@@ -1072,8 +1091,7 @@ impl Vm {
                                 let mut vm = Vm {
                                     stack: Vec::new(),
                                     scope: ObjectMap::default(),
-                                    enclosing: enclosing.clone(),
-                                    enclosing2: enclosing2.clone(),
+                                    enclosing: enclosing_chain.clone(),
                                     globals: globals.clone(),
                                     capabilities: Arc::clone(&capabilities),
                                     native_modules: native_modules.clone(),
@@ -1095,14 +1113,10 @@ impl Vm {
                         .get(name.as_ref())
                         .cloned()
                         .or_else(|| {
+                            // Walk the captured lexical chain, innermost first.
                             self.enclosing
-                                .as_ref()
-                                .and_then(|e| e.borrow().get(name.as_ref()).cloned())
-                        })
-                        .or_else(|| {
-                            self.enclosing2
-                                .as_ref()
-                                .and_then(|e| e.borrow().get(name.as_ref()).cloned())
+                                .iter()
+                                .find_map(|e| e.borrow().get(name.as_ref()).cloned())
                         })
                         .or_else(|| self.scope.get(name.as_ref()).cloned())
                         .or_else(|| self.globals.borrow().get(name.as_ref()).cloned())
@@ -1121,29 +1135,21 @@ impl Vm {
                     // Update innermost scope that has the variable (matches interpreter Scope.assign)
                     if local_scope.borrow().contains_key(name.as_ref()) {
                         local_scope.borrow_mut().insert(Arc::clone(name), v);
-                    } else if self
+                    } else if let Some(e) = self
                         .enclosing
-                        .as_ref()
-                        .map(|e| e.borrow().contains_key(name.as_ref()))
-                        .unwrap_or(false)
+                        .iter()
+                        .find(|e| e.borrow().contains_key(name.as_ref()))
                     {
-                        let en = self.enclosing.as_ref().unwrap();
-                        en.borrow_mut().insert(Arc::clone(name), v);
-                    } else if self
-                        .enclosing2
-                        .as_ref()
-                        .map(|e| e.borrow().contains_key(name.as_ref()))
-                        .unwrap_or(false)
-                    {
-                        let en = self.enclosing2.as_ref().unwrap();
-                        en.borrow_mut().insert(Arc::clone(name), v);
+                        // Innermost captured scope that already binds the name (matches the
+                        // interpreter's Scope.assign walking the lexical chain).
+                        e.borrow_mut().insert(Arc::clone(name), v);
                     } else if self.scope.contains_key(name.as_ref()) {
                         self.scope.insert(Arc::clone(name), v);
                     } else if self.globals.borrow().contains_key(name.as_ref()) {
                         self.globals.borrow_mut().insert(Arc::clone(name), v);
                     } else {
                         // New variable: at top level (no enclosing) store in globals so REPL persists across lines
-                        if self.enclosing.is_none() {
+                        if self.enclosing.is_empty() {
                             self.globals.borrow_mut().insert(Arc::clone(name), v);
                         } else {
                             local_scope.borrow_mut().insert(Arc::clone(name), v);
@@ -1164,7 +1170,7 @@ impl Vm {
                         frame.push((Arc::clone(name), old));
                     }
                     // REPL: persist top-level bindings only (not block-locals shadowing globals).
-                    if repl_mode && self.enclosing.is_none() && block_undo_stack.is_empty() {
+                    if repl_mode && self.enclosing.is_empty() && block_undo_stack.is_empty() {
                         self.globals
                             .borrow_mut()
                             .insert(Arc::clone(name), v.clone());
@@ -1180,7 +1186,7 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    if repl_mode && self.enclosing.is_none() && block_undo_stack.is_empty() {
+                    if repl_mode && self.enclosing.is_empty() && block_undo_stack.is_empty() {
                         self.globals
                             .borrow_mut()
                             .insert(Arc::clone(name), v.clone());
@@ -1215,6 +1221,13 @@ impl Vm {
                 }
                 Opcode::LoopVarsEnd => {
                     active_loop_vars.pop();
+                }
+                Opcode::ArgMissing => {
+                    // True iff the positional arg at `idx` was not supplied → the function
+                    // prologue applies the param's default. Matches the interpreter: an
+                    // explicit `null` arg is "supplied" and keeps the `null`.
+                    let idx = Self::read_u16(code, &mut ip) as usize;
+                    self.stack.push(Value::Bool(idx >= args.len()));
                 }
                 Opcode::LoadGlobal => {
                     let idx = Self::read_u16(code, &mut ip);
@@ -2109,6 +2122,14 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 }),
                 "split" => make_native_fn(move |args: &[Value]| {
                     let sep = args.first().unwrap_or(&Value::Null);
+                    #[cfg(feature = "regex")]
+                    if matches!(sep, Value::RegExp(_)) {
+                        return tishlang_runtime::string_split_regex(
+                            &Value::String(Arc::clone(&s_clone)),
+                            sep,
+                            None,
+                        );
+                    }
                     str_builtins::split(&Value::String(Arc::clone(&s_clone)), sep)
                 }),
                 "trim" => make_native_fn(move |_args: &[Value]| {
@@ -2131,6 +2152,16 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "replace" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let replacement = args.get(1).unwrap_or(&Value::Null);
+                    // RegExp search (incl. global flag + function replacer) routes to the runtime's
+                    // regex-aware string_replace, identical to the rust backend.
+                    #[cfg(feature = "regex")]
+                    if matches!(search, Value::RegExp(_)) {
+                        return tishlang_runtime::string_replace(
+                            &Value::String(Arc::clone(&s_clone)),
+                            search,
+                            replacement,
+                        );
+                    }
                     str_builtins::replace(&Value::String(Arc::clone(&s_clone)), search, replacement)
                 }),
                 "replaceAll" => make_native_fn(move |args: &[Value]| {
@@ -2141,6 +2172,16 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                         search,
                         replacement,
                     )
+                }),
+                #[cfg(feature = "regex")]
+                "match" => make_native_fn(move |args: &[Value]| {
+                    let re = args.first().unwrap_or(&Value::Null);
+                    tishlang_runtime::string_match_regex(&Value::String(Arc::clone(&s_clone)), re)
+                }),
+                #[cfg(feature = "regex")]
+                "search" => make_native_fn(move |args: &[Value]| {
+                    let re = args.first().unwrap_or(&Value::Null);
+                    tishlang_runtime::string_search_regex(&Value::String(Arc::clone(&s_clone)), re)
                 }),
                 "charAt" => make_native_fn(move |args: &[Value]| {
                     let idx = args.first().unwrap_or(&Value::Null);
@@ -2168,6 +2209,49 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             };
             Ok(Value::Function(method))
         }
+        Value::Number(n) => {
+            // Number.prototype methods. Shared impls live in tishlang_builtins::number so
+            // the VM, rust runtime, and interpreter stay byte-identical (full-backend-parity-plan.md).
+            let n_val = *n;
+            let method: ArrayMethodFn = match key.as_ref() {
+                "toFixed" => make_native_fn(move |args: &[Value]| {
+                    let digits = args.first().unwrap_or(&Value::Null);
+                    num_builtins::to_fixed(&Value::Number(n_val), digits)
+                }),
+                _ => return Err(format!("Property '{}' not found", key)),
+            };
+            Ok(Value::Function(method))
+        }
+        #[cfg(feature = "regex")]
+        Value::RegExp(re) => match key.as_ref() {
+            // `test`/`exec` route to the same runtime impls the rust backend uses, so the match
+            // object shape (keys "0".."n" + "index") and lastIndex advancement are identical.
+            "test" => {
+                let rc = re.clone();
+                Ok(Value::native(move |args: &[Value]| {
+                    let input = args.first().unwrap_or(&Value::Null);
+                    tishlang_runtime::regexp_test(&Value::RegExp(rc.clone()), input)
+                }))
+            }
+            "exec" => {
+                let rc = re.clone();
+                Ok(Value::native(move |args: &[Value]| {
+                    let input = args.first().unwrap_or(&Value::Null);
+                    tishlang_runtime::regexp_exec(&Value::RegExp(rc.clone()), input)
+                }))
+            }
+            // Properties mirror the interpreter (eval.rs get_prop RegExp arm) exactly.
+            "source" => Ok(Value::String(re.borrow().source.clone().into())),
+            "flags" => Ok(Value::String(re.borrow().flags_string().into())),
+            "lastIndex" => Ok(Value::Number(re.borrow().last_index as f64)),
+            "global" => Ok(Value::Bool(re.borrow().flags.global)),
+            "ignoreCase" => Ok(Value::Bool(re.borrow().flags.ignore_case)),
+            "multiline" => Ok(Value::Bool(re.borrow().flags.multiline)),
+            "dotAll" => Ok(Value::Bool(re.borrow().flags.dot_all)),
+            "unicode" => Ok(Value::Bool(re.borrow().flags.unicode)),
+            "sticky" => Ok(Value::Bool(re.borrow().flags.sticky)),
+            _ => Err(format!("Property '{}' not found", key)),
+        },
         #[cfg(any(feature = "http", feature = "promise"))]
         Value::Promise(p) => match key.as_ref() {
             "then" => {

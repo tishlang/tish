@@ -113,13 +113,18 @@ pub enum Opcode {
     LoopVarsBegin = 48,
     /// End the innermost per-iteration binding region (no operand).
     LoopVarsEnd = 49,
+    /// Push `Bool(param_index >= argc)` — true when the positional argument at `param_index`
+    /// was not supplied by the caller (operand: u16 param index). Emitted by the function
+    /// prologue so default parameter values apply only for *missing* args, matching the
+    /// interpreter: an explicit `null` argument does NOT trigger the default.
+    ArgMissing = 50,
 }
 
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=49 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=50 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 49 {
+        if b <= 50 {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None

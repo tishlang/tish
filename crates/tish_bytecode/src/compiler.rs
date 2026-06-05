@@ -295,6 +295,41 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// Emit the default-parameter prologue: for each simple param `p_i` with a default,
+    /// `if (arg i was not supplied) p_i = <default>`. Runs at the top of the function body so
+    /// later defaults can reference earlier (already-bound) params, e.g. `(a, b = a + 1)`.
+    ///
+    /// Uses `ArgMissing(i)` (true iff `i >= argc`) + `JumpIfFalse` so the default applies only
+    /// to *missing* positional args — matching the interpreter, where an explicit `null` keeps
+    /// the `null` (tish has no `undefined`). The store mirrors variable resolution: a slot-based
+    /// chunk writes the slot directly (`StoreLocal`); a name-based chunk binds the name
+    /// (`DeclareVarPlain`, since a missing param is absent from the frame scope).
+    fn emit_param_defaults_prologue(&mut self, params: &[FunParam]) -> Result<(), CompileError> {
+        for (i, p) in params.iter().enumerate() {
+            let FunParam::Simple(tp) = p else { continue };
+            let Some(default_expr) = &tp.default else {
+                continue;
+            };
+            self.emit_u16(Opcode::ArgMissing, i as u16);
+            let skip = self.emit_jump(Opcode::JumpIfFalse);
+            self.compile_expr(default_expr)?;
+            let slot = self
+                .slot_ctx
+                .as_ref()
+                .and_then(|m| m.get(tp.name.as_ref()))
+                .copied();
+            match slot {
+                Some(slot) => self.emit_u16(Opcode::StoreLocal, slot),
+                None => {
+                    let idx = self.name_idx(&tp.name);
+                    self.emit_u16(Opcode::DeclareVarPlain, idx);
+                }
+            }
+            self.patch_jump(skip, self.chunk.code.len());
+        }
+        Ok(())
+    }
+
     /// Names `let`/`const`-declared DIRECTLY in a loop body block (not nested blocks). Each is a
     /// fresh per-iteration binding (ES `let`), so closures created in the body must capture this
     /// iteration's value — registered via `LoopVarsBegin`.
@@ -1004,6 +1039,7 @@ impl<'a> Compiler<'a> {
                 let mut inner_comp = Compiler::new(&mut inner, false);
                 if let Some(map) = simple_slots {
                     inner_comp.slot_ctx = Some(map);
+                    inner_comp.emit_param_defaults_prologue(params)?;
                     inner_comp.compile_statement(body)?;
                 } else {
                     inner_comp.scope = vec![param_names
@@ -1011,6 +1047,7 @@ impl<'a> Compiler<'a> {
                         .map(|n| (Arc::clone(n), false))
                         .collect::<HashMap<_, _>>()];
                     inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
+                    inner_comp.emit_param_defaults_prologue(params)?;
                     inner_comp.compile_statement(body)?;
                 }
                 inner_comp.emit(Opcode::LoadConst);
@@ -1241,10 +1278,36 @@ impl<'a> Compiler<'a> {
                                 .unwrap()
                                 .insert(Arc::clone(name), false);
                         }
-                        _ => {
-                            return Err(CompileError {
-                                message: "Complex destructuring not yet supported".to_string(),
-                            });
+                        // Array hole `[a, , c]`: position is skipped, no binding emitted.
+                        None => {}
+                        // Nested pattern `[[a, b], c]` or `[{x}, y]`: push source[i] and recurse.
+                        // compile_destructure is stack-balanced (consumes exactly the value it
+                        // destructures), so the source array beneath stays intact.
+                        Some(DestructElement::Pattern(sub)) => {
+                            self.emit(Opcode::Dup);
+                            let idx = self.constant_idx(Constant::Number(i as f64));
+                            self.emit(Opcode::LoadConst);
+                            self.chunk.write_u16(idx);
+                            self.emit(Opcode::GetIndex);
+                            self.compile_destructure(sub, mutable, for_header_binding)?;
+                        }
+                        // Rest `[a, ...rest]`: rest = source.slice(i). Use GetMember (not GetIndex)
+                        // so the array's `slice` method resolves via get_member; GetIndex rejects
+                        // string keys on arrays.
+                        Some(DestructElement::Rest(name, _)) => {
+                            self.emit(Opcode::Dup);
+                            let slice_idx = self.name_idx(&Arc::from("slice"));
+                            self.emit_u16(Opcode::GetMember, slice_idx);
+                            let idx = self.constant_idx(Constant::Number(i as f64));
+                            self.emit(Opcode::LoadConst);
+                            self.chunk.write_u16(idx);
+                            self.emit_u16(Opcode::Call, 1);
+                            let nidx = self.name_idx(name);
+                            self.emit_u16(decl_op, nidx);
+                            self.scope
+                                .last_mut()
+                                .unwrap()
+                                .insert(Arc::clone(name), false);
                         }
                     }
                 }
@@ -1268,10 +1331,15 @@ impl<'a> Compiler<'a> {
                                     .insert(Arc::clone(name), false);
                             }
                         }
-                        _ => {
+                        // Nested value `{ outer: { inner } }` or `{ arr: [a, b] }`: obj[key] is
+                        // already on the stack (GetIndex above); recurse to destructure it.
+                        DestructElement::Pattern(sub) => {
+                            self.compile_destructure(sub, mutable, for_header_binding)?;
+                        }
+                        // `{ ...rest }` needs the set of *remaining* keys; not yet supported.
+                        DestructElement::Rest(_, _) => {
                             return Err(CompileError {
-                                message: "Nested object destructuring not yet supported"
-                                    .to_string(),
+                                message: "Object rest destructuring not yet supported".to_string(),
                             });
                         }
                     }
@@ -1619,6 +1687,7 @@ impl<'a> Compiler<'a> {
                         .collect::<HashMap<_, _>>()];
                     inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
                 }
+                inner_comp.emit_param_defaults_prologue(params)?;
                 match body {
                     ArrowBody::Expr(e) => {
                         inner_comp.compile_expr(e)?;

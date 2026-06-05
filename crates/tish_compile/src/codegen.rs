@@ -2538,6 +2538,19 @@ impl Codegen {
                                     coercion
                                 ));
                                 native_params.push((tp.name.to_string(), nt));
+                            } else if let Some(default_expr) = &tp.default {
+                                // Default applies only when the positional arg is MISSING
+                                // (`args.get(i) == None`), matching the interpreter + bytecode VM.
+                                // An explicit `null` argument is "supplied" and keeps the null.
+                                // Earlier params are already bound above, so a default may
+                                // reference them, e.g. `(a, b = a + 1)`.
+                                let default_str = self.emit_expr(default_expr)?;
+                                self.writeln(&format!(
+                                    "let mut {} = match args.get({}) {{ Some(v) => v.clone(), None => {} }};",
+                                    Self::escape_ident(tp.name.as_ref()),
+                                    i,
+                                    default_str
+                                ));
                             } else {
                                 self.writeln(&format!(
                                     "let mut {} = args.get({}).cloned().unwrap_or(Value::Null);",
@@ -3178,10 +3191,21 @@ impl Codegen {
                                 obj_expr, search, replacement
                             ));
                         }
-                        "match" if cfg!(feature = "regex") => {
+                        // Gate on the *requested* feature (has_feature), not tish_compile's own
+                        // cfg!(feature="regex") — the generated binary links the runtime's regex
+                        // impls when the build requests regex, regardless of how tish_compile was
+                        // compiled. Falls through to a generic call (no-regex builds) otherwise.
+                        "match" if self.has_feature("regex") => {
                             let regexp = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tishlang_runtime::string_match_regex(&{}, &{})",
+                                obj_expr, regexp
+                            ));
+                        }
+                        "search" if self.has_feature("regex") => {
+                            let regexp = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::string_search_regex(&{}, &{})",
                                 obj_expr, regexp
                             ));
                         }
@@ -5228,11 +5252,27 @@ impl Codegen {
         for (i, p) in params.iter().enumerate() {
             match p {
                 FunParam::Simple(tp) => {
-                    code.push_str(&format!(
-                        "        let mut {} = args.get({}).cloned().unwrap_or(Value::Null);\n",
-                        Self::escape_ident(tp.name.as_ref()),
-                        i
-                    ));
+                    if let Some(default_expr) = &tp.default {
+                        // Default applies only for a MISSING positional arg (matches interp + VM);
+                        // an explicit `null` keeps the null. emit_expr captured like the destructure
+                        // path below so any prelude lands in `code`, not the outer output buffer.
+                        let saved = std::mem::take(&mut self.output);
+                        let default_str = self.emit_expr(default_expr)?;
+                        let prelude = std::mem::replace(&mut self.output, saved);
+                        code.push_str(&prelude);
+                        code.push_str(&format!(
+                            "        let mut {} = match args.get({}) {{ Some(v) => v.clone(), None => {} }};\n",
+                            Self::escape_ident(tp.name.as_ref()),
+                            i,
+                            default_str
+                        ));
+                    } else {
+                        code.push_str(&format!(
+                            "        let mut {} = args.get({}).cloned().unwrap_or(Value::Null);\n",
+                            Self::escape_ident(tp.name.as_ref()),
+                            i
+                        ));
+                    }
                 }
                 FunParam::Destructure { pattern, .. } => {
                     let tmp = format!("_formal_{}", i);

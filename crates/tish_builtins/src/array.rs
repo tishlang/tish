@@ -474,6 +474,12 @@ fn get_prop_number(v: &Value, prop: &std::sync::Arc<str>) -> f64 {
             .get(prop.as_ref())
             .map(|v| v.as_number().unwrap_or(f64::NAN))
             .unwrap_or(f64::NAN),
+        // `.length` is a *computed* property (not a stored map entry) for strings and arrays.
+        // The fused `(a,b)=>a.length-b.length` sort path must compute it the same way
+        // `get_member` does, otherwise it returns NaN, every comparison collapses to Equal,
+        // and the array is left unsorted. Mirror get_member's length semantics here.
+        Value::String(s) if prop.as_ref() == "length" => s.chars().count() as f64,
+        Value::Array(a) if prop.as_ref() == "length" => a.borrow().len() as f64,
         _ => f64::NAN,
     }
 }

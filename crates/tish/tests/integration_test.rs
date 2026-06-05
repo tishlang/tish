@@ -672,10 +672,12 @@ const TIMING_NONDETERMINISTIC: &[&str] = &[
 
 /// Known cross-backend gaps skipped on the interp↔vm parity check, with reason + a tracking note.
 /// Each is a real divergence to fix, not a permanent exclusion.
-/// - `nested_complex.tish`: the VM's `enclosing` is a single level, so a closure nested >2 deep
-///   loses grand-parent captures (`level4` can't see `level1`'s `a`); interp/rust are correct.
-///   Needs the VM scope-chain fix (see docs/control-flow-audit.md).
-const VM_PARITY_SKIP: &[&str] = &["nested_complex.tish"];
+///
+/// Empty: the former `nested_complex.tish` gap (the VM's fixed 2-level `enclosing` lost captures
+/// >2 levels deep — `level4` couldn't see `level1`'s `a`) is fixed. The VM now captures the full
+/// lexical chain (`Vm.enclosing: Vec<ScopeMap>`), so closures nested arbitrarily deep resolve
+/// every ancestor's locals. interp↔vm parity holds for all discovered tests.
+const VM_PARITY_SKIP: &[&str] = &[];
 
 /// Discover every `tests/core/*.tish` that has a `.expected` sibling, minus timing-nondeterministic
 /// ones. Replaces the hand-maintained `MVP_TEST_FILES` allowlist so a new `*.tish` + `*.expected`
@@ -925,7 +927,16 @@ fn test_mvp_programs_native() {
     assert!(errors.is_empty(), "native failures:\n{}", errors.join("\n"));
 }
 
-/// Curated list: files that pass with Cranelift (some constructs cause stack-underflow; see docs/builtins-gap-analysis.md).
+/// Curated subset for the cranelift + wasi backends. **This is a build-COST bound, not a
+/// correctness bound:** cranelift/llvm/wasi embed the bytecode VM, which now passes every discovered
+/// test (full interp↔vm parity, `VM_PARITY_SKIP` empty), so correctness is inherited. The reason this
+/// stays curated instead of using `discover_core_tests()` like interp/vm/native: each cranelift/wasi
+/// build emits a *full per-program Rust crate* (`tishlang_{cranelift,wasi}_build/<name>`, ~2-5 GB with
+/// `cranelift_codegen` + the embedded VM) and they accumulate — building all ~66 fills ~130 GB and
+/// exhausts the disk. Full file-discovery here needs the per-program build dir bounded first (shared
+/// `CARGO_TARGET_DIR` so deps compile once, or clean the build dir after caching the output). Until
+/// then this list is a representative cross-section; the former-red features (toFixed, RegExp, default
+/// params, destructuring, deep closures) were each verified to build+pass on cranelift individually.
 const CRANELIFT_TEST_FILES: &[&str] = &[
     "jit_regression.tish",
     "control_flow_nested.tish",
