@@ -1,0 +1,8 @@
+// GAUNTLET: transcendental Math in a loop. `Math.sqrt(i)` is a boxed value_call to a native
+// builtin per element. EXPECTED FAIL — target: native Math intrinsics (lower sqrt/sin/... to
+// direct f64 calls). (valid both)
+let s = 0
+let i = 1
+let t0 = Date.now()
+while (i < 3000000) { s = s + Math.sqrt(i) + Math.sin(i); i = i + 1 }
+console.log("GAUNTLET math_trig " + (Date.now() - t0) + " " + Math.floor(s))

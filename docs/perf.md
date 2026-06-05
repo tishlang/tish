@@ -112,7 +112,9 @@ could not prove it dead and therefore could NOT vectorize/fold the loop. The nat
 free; the per-iteration construct+drop of a dead `Value` was the entire tax.
 
 Fix: `emit_expr_discard` (`tish_compile/src/codegen.rs`) emits only the native side-effect for
-assignments + inc/dec in statement position (routed from `ExprStmt` and the for-loop update).
+assignments, inc/dec, AND compound-assign (`s += x`) in statement position (routed from `ExprStmt`
+and the for-loop update). Each covered form was independently ~2.2x node before / now beats it:
+40M-iter `s = ...` 48ms, `s += i` 23ms (node ~50ms); 2M-element `a[i] = i*2` 6ms (node ~8ms).
 
 darwin-arm64, `--native-backend rust` vs node (V8), lower = better:
   workload                        before    after    node    result
@@ -133,6 +135,51 @@ Identical check value (correct). Flag OFF: whole corpus byte-identical (zero ris
 entire native corpus still passes (correct output, no panics). Conservative gate: simple params,
 native-scalar annotation, no default value. Next: M4 (infer param types from use, so unannotated
 `fn bench(N)` benefits too) + harden capture/escape cases, then default-on.
+================================================================================
+
+
+================================================================================
+  NEXT LEVER (audit, 2026-06): the function-call ABI — recursion is the last big gap
+================================================================================
+With native params + de-boxing, straight-line numeric kernels beat node. Recursion does NOT yet:
+fib(35) with `fn fib(n: number)` is 518ms vs node 55ms (9x), because every call still goes through
+the boxed-closure ABI — `value_call(&fib, &[Value::Number(n-1)])` clones the closure Value, boxes
+the arg, dynamic-dispatches, and the native shadow unboxes it again, ~30M times. The arithmetic is
+native; the CALL is the whole tax.
+
+Fix = M5 (native monomorphic fn, `docs/type-system-roadmap.md`): for a native-eligible function (all
+params native-typed, native return, non-escaping) emit a parallel free `fn f_native(a:f64,…)->R` and
+route DIRECT calls to it, bypassing `value_call` + boxing; keep the closure wrapper as the dynamic
+fallback. This is the highest-value remaining rust-backend lever (recursion + hot direct calls).
+Audit status: de-boxing complete for Assign/inc-dec/compound; IndexAssign on native arrays already
+lowers (a[i]=x: 6ms/2M); MemberAssign on dynamic objects stays boxed (the object-representation
+ceiling, task #13 — orthogonal to numerics).
+================================================================================
+
+
+================================================================================
+  PERF GAUNTLET (2026-06) — tracked targets we currently LOSE, to evolve past
+================================================================================
+`scripts/run_perf_gauntlet.sh` (`just perf-gauntlet`): compute-only benchmarks (self-timed, process
+startup excluded) for the rust backend vs node V8, with per-benchmark correctness checks.
+DELIBERATELY includes tests we lose, so each backend change is measured and red turns green over
+time. Fixtures: `tests/perf/<name>.tish` (+ `.js` for the native-param ones; the rest are valid in
+both tish and node). Baseline (darwin-arm64, rust backend + `TISH_PARAM_NATIVE=1`, min of 2):
+
+  benchmark      tish    node   ratio   verdict / lever to flip it green
+  matmul          14ms   16ms   0.87x   PASS  (M1 native params)
+  numeric_loop    44ms   47ms   0.94x   PASS  (statement-position de-boxing)
+  math_trig       12ms   82ms   0.15x   PASS  native Math intrinsics LANDED (sqrt/sin/...->f64 method)
+  array_hof      259ms   29ms   8.9x    FAIL  native closure calls / fused reduce over native arrays
+  recursion_fib  512ms   58ms   8.8x    FAIL  M5 (native monomorphic calls — bypass value_call)
+  object_sum     143ms    3ms   48x     FAIL  hidden classes / unboxed objects (task #13)
+  string_concat  449ms    3ms   150x    FAIL  rope / native string builder (today `s+"x"` is O(n^2))
+
+3/7 beating V8 (math_trig flipped FAIL->PASS this pass via native Math intrinsics — `Math.sqrt(x)`
+etc. with a native-f64 arg now lowers to a direct `f64` method in `emit_typed_expr`, skipping the
+boxed value_call; only the methods whose Rust op matches JS — round/sign stay boxed). Remaining
+FAILs ordered by leverage: `recursion_fib`/`array_hof` want M5 (native calls); `object_sum`/
+`string_concat` are representation rearchitectures (hidden classes; rope strings).
 ================================================================================
 
 

@@ -1704,6 +1704,38 @@ impl Codegen {
                     return Ok(format!("{} -= 1.0_f64", n));
                 }
             }
+            // `s += x` etc. in statement position: native f64 compound op, no boxed return.
+            Expr::CompoundAssign { name, op, value, .. } => {
+                if self.type_context.get_type(name.as_ref()) == RustType::F64 {
+                    let n = Self::escape_ident(name.as_ref());
+                    let is_refcell = self.refcell_wrapped_vars.contains(name.as_ref());
+                    let (rhs_code, rhs_ty) = self.emit_typed_expr(value)?;
+                    let rhs_f64 = if rhs_ty == RustType::F64 {
+                        rhs_code
+                    } else {
+                        let rhs_val = if rhs_ty.is_native() {
+                            rhs_ty.to_value_expr(&rhs_code)
+                        } else {
+                            rhs_code
+                        };
+                        format!("(match &({}) {{ Value::Number(n) => *n, v => panic!(\"compound assign: expected number, got {{:?}}\", v) }})", rhs_val)
+                    };
+                    let op_str = match op {
+                        CompoundOp::Add => "+=",
+                        CompoundOp::Sub => "-=",
+                        CompoundOp::Mul => "*=",
+                        CompoundOp::Div => "/=",
+                        CompoundOp::Mod => "%=",
+                    };
+                    if is_refcell {
+                        return Ok(format!(
+                            "{{ let _op_rhs = {}; *{}.borrow_mut() {} _op_rhs; }}",
+                            rhs_f64, n, op_str
+                        ));
+                    }
+                    return Ok(format!("{} {} {}", n, op_str, rhs_f64));
+                }
+            }
             _ => {}
         }
         self.emit_expr(expr)
@@ -5344,6 +5376,51 @@ impl Codegen {
                 } else {
                     format!("tishlang_runtime::get_index(&{}, &{})", obj, idx)
                 };
+                Ok((result, RustType::Value))
+            }
+
+            // ── native Math intrinsics ───────────────────────────────────────────
+            // `Math.sqrt(x)` etc. with a native-f64 arg lowers to a direct f64 method,
+            // skipping the boxed value_call per element. Only methods whose Rust f64 op
+            // matches JS semantics (round half-up & sign(0) differ → left to the runtime).
+            Expr::Call { callee, args, .. } => {
+                if let [CallArg::Expr(arg_expr)] = args.as_slice() {
+                    if let Expr::Member {
+                        object,
+                        prop: MemberProp::Name { name: method, .. },
+                        ..
+                    } = callee.as_ref()
+                    {
+                        if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                        {
+                            let rust_m = match method.as_ref() {
+                                "sqrt" => Some("sqrt"),
+                                "sin" => Some("sin"),
+                                "cos" => Some("cos"),
+                                "tan" => Some("tan"),
+                                "abs" => Some("abs"),
+                                "floor" => Some("floor"),
+                                "ceil" => Some("ceil"),
+                                "exp" => Some("exp"),
+                                "trunc" => Some("trunc"),
+                                "log" => Some("ln"),
+                                _ => None,
+                            };
+                            if let Some(m) = rust_m {
+                                let (arg_code, arg_ty) = self.emit_typed_expr(arg_expr)?;
+                                let arg_f64 = if arg_ty == RustType::F64 {
+                                    arg_code
+                                } else if arg_ty == RustType::Value {
+                                    RustType::F64.from_value_expr(&arg_code)
+                                } else {
+                                    arg_code
+                                };
+                                return Ok((format!("({}).{}()", arg_f64, m), RustType::F64));
+                            }
+                        }
+                    }
+                }
+                let result = self.emit_expr(expr)?;
                 Ok((result, RustType::Value))
             }
 
