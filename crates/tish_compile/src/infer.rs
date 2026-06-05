@@ -130,10 +130,273 @@ pub fn infer_program(program: &Program) -> Program {
     // backend emits unboxed structs with direct field access. Conservative —
     // only applies when every use of the binding is a literal-key field read,
     // so it can never miscompile (any uncertainty falls back to boxed Value).
-    if std::env::var("TISH_STRUCT_INFER").map(|v| v != "0").unwrap_or(false) {
+    let p = if std::env::var("TISH_STRUCT_INFER").map(|v| v != "0").unwrap_or(false) {
         struct_infer_program(p)
     } else {
         p
+    };
+    // M4 (opt-in via TISH_PARAM_INFER): give unannotated params used PURELY numerically a
+    // synthetic `: number` so M1 (native shadow) + M5 (native fn) lower them. Conservative —
+    // any non-numeric / write / escape use bails (param stays boxed Value), so it can't miscompile.
+    if std::env::var("TISH_PARAM_INFER").map(|v| v != "0").unwrap_or(false) {
+        param_infer_program(p)
+    } else {
+        p
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M4: parameter type inference (conservative, sound, opt-in)
+// ---------------------------------------------------------------------------
+
+fn param_infer_program(program: Program) -> Program {
+    Program {
+        statements: program.statements.into_iter().map(pi_stmt).collect(),
+    }
+}
+
+fn pi_stmt(s: Statement) -> Statement {
+    if let Statement::FunDecl {
+        async_,
+        name,
+        name_span,
+        params,
+        rest_param,
+        return_type,
+        body,
+        span,
+    } = s
+    {
+        let new_params = params
+            .into_iter()
+            .map(|p| match p {
+                FunParam::Simple(mut tp) => {
+                    if tp.type_ann.is_none()
+                        && tp.default.is_none()
+                        && nus_stmt(&body, tp.name.as_ref())
+                    {
+                        tp.type_ann = Some(TypeAnnotation::Simple(std::sync::Arc::from("number")));
+                    }
+                    FunParam::Simple(tp)
+                }
+                other => other,
+            })
+            .collect();
+        Statement::FunDecl {
+            async_,
+            name,
+            name_span,
+            params: new_params,
+            rest_param,
+            return_type,
+            body,
+            span,
+        }
+    } else {
+        s
+    }
+}
+
+fn pi_is_num_binop(op: &tishlang_ast::BinOp) -> bool {
+    use tishlang_ast::BinOp::*;
+    matches!(
+        op,
+        Add | Sub | Mul | Div | Mod | Pow | Lt | Le | Gt | Ge | StrictEq | StrictNe
+    )
+}
+
+/// Every use of `name` within `s` is a numeric-operand use (so `name` can lower to `f64`).
+fn nus_stmt(s: &Statement, name: &str) -> bool {
+    use Statement::*;
+    match s {
+        Block { statements, .. } => statements.iter().all(|x| nus_stmt(x, name)),
+        Return { value, .. } => value.as_ref().map_or(true, |e| nus_num_operand(e, name)),
+        If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            nus_expr(cond, name)
+                && nus_stmt(then_branch, name)
+                && else_branch.as_ref().map_or(true, |e| nus_stmt(e, name))
+        }
+        ExprStmt { expr, .. } => nus_expr(expr, name),
+        While { cond, body, .. } => nus_expr(cond, name) && nus_stmt(body, name),
+        For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
+            init.as_ref().map_or(true, |x| nus_stmt(x, name))
+                && cond.as_ref().map_or(true, |e| nus_expr(e, name))
+                && update.as_ref().map_or(true, |e| nus_expr(e, name))
+                && nus_stmt(body, name)
+        }
+        VarDecl {
+            name: vn, init, ..
+        } => vn.as_ref() != name && init.as_ref().map_or(true, |e| nus_expr(e, name)),
+        Break { .. } | Continue { .. } => true,
+        // Any other statement (switch/throw/try/nested fn/...) -> bail (don't infer this param).
+        _ => false,
+    }
+}
+
+/// `e` with `name` used only as a numeric operand. A bare `Ident(name)` at THIS level is not a
+/// numeric operand (only valid inside a numeric parent), so it returns false here.
+fn nus_expr(e: &Expr, name: &str) -> bool {
+    use Expr::*;
+    match e {
+        Literal { .. } => true,
+        Ident { name: n, .. } => n.as_ref() != name,
+        Binary {
+            left, op, right, ..
+        } => {
+            if pi_is_num_binop(op) {
+                nus_num_operand(left, name) && nus_num_operand(right, name)
+            } else {
+                !pi_mentions(left, name) && !pi_mentions(right, name)
+            }
+        }
+        Unary { op, operand, .. } => {
+            if matches!(
+                op,
+                tishlang_ast::UnaryOp::Neg | tishlang_ast::UnaryOp::Pos | tishlang_ast::UnaryOp::BitNot
+            ) {
+                nus_num_operand(operand, name)
+            } else {
+                !pi_mentions(operand, name)
+            }
+        }
+        Index { object, index, .. } => !pi_mentions(object, name) && nus_num_operand(index, name),
+        Call { callee, args, .. } => {
+            !pi_mentions(callee, name)
+                && args.iter().all(|a| match a {
+                    tishlang_ast::CallArg::Expr(x) => nus_arg(x, name),
+                    tishlang_ast::CallArg::Spread(_) => false,
+                })
+        }
+        Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            nus_expr(cond, name)
+                && nus_num_operand(then_branch, name)
+                && nus_num_operand(else_branch, name)
+        }
+        // Assignment to a DIFFERENT var, where the RHS may use `name` numerically (e.g.
+        // `sum = sum + a[i*N+k]`). Writing to `name` itself bails (its type could change).
+        Assign { name: an, value, .. }
+        | CompoundAssign { name: an, value, .. }
+        | LogicalAssign { name: an, value, .. } => {
+            an.as_ref() != name && nus_expr(value, name)
+        }
+        PostfixInc { name: n, .. }
+        | PostfixDec { name: n, .. }
+        | PrefixInc { name: n, .. }
+        | PrefixDec { name: n, .. } => n.as_ref() != name,
+        // `c[i*N+j] = sum`: index is a numeric operand, RHS may use `name` numerically.
+        IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => {
+            !pi_mentions(object, name)
+                && nus_num_operand(index, name)
+                && nus_expr(value, name)
+        }
+        MemberAssign { object, value, .. } => {
+            !pi_mentions(object, name) && nus_expr(value, name)
+        }
+        // any other context where `name` could appear non-numerically -> require it absent.
+        _ => !pi_mentions(e, name),
+    }
+}
+
+/// A numeric-operand position: `name` may appear directly, or as a numeric sub-expr.
+fn nus_num_operand(e: &Expr, name: &str) -> bool {
+    if matches!(e, Expr::Ident { name: n, .. } if n.as_ref() == name) {
+        return true;
+    }
+    nus_expr(e, name)
+}
+
+/// A call argument: passing `name` BARE bails (callee param type unknown); a numeric sub-expr ok.
+fn nus_arg(e: &Expr, name: &str) -> bool {
+    if matches!(e, Expr::Ident { name: n, .. } if n.as_ref() == name) {
+        return false;
+    }
+    nus_expr(e, name)
+}
+
+/// Does `name` appear anywhere in `e`? Conservative: unhandled forms -> true (assume present).
+fn pi_mentions(e: &Expr, name: &str) -> bool {
+    use Expr::*;
+    match e {
+        Literal { .. } => false,
+        Ident { name: n, .. } => n.as_ref() == name,
+        Binary { left, right, .. } | NullishCoalesce { left, right, .. } => {
+            pi_mentions(left, name) || pi_mentions(right, name)
+        }
+        Unary { operand, .. } | TypeOf { operand, .. } | Await { operand, .. } => {
+            pi_mentions(operand, name)
+        }
+        Member { object, prop, .. } => {
+            pi_mentions(object, name)
+                || matches!(prop, tishlang_ast::MemberProp::Expr(p) if pi_mentions(p, name))
+        }
+        Index { object, index, .. } => pi_mentions(object, name) || pi_mentions(index, name),
+        Call { callee, args, .. } | New { callee, args, .. } => {
+            pi_mentions(callee, name)
+                || args.iter().any(|a| match a {
+                    tishlang_ast::CallArg::Expr(x) | tishlang_ast::CallArg::Spread(x) => {
+                        pi_mentions(x, name)
+                    }
+                })
+        }
+        Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            pi_mentions(cond, name)
+                || pi_mentions(then_branch, name)
+                || pi_mentions(else_branch, name)
+        }
+        Assign { name: n, value, .. }
+        | CompoundAssign { name: n, value, .. }
+        | LogicalAssign { name: n, value, .. } => n.as_ref() == name || pi_mentions(value, name),
+        PostfixInc { name: n, .. }
+        | PostfixDec { name: n, .. }
+        | PrefixInc { name: n, .. }
+        | PrefixDec { name: n, .. } => n.as_ref() == name,
+        Array { elements, .. } => elements.iter().any(|el| match el {
+            tishlang_ast::ArrayElement::Expr(x) | tishlang_ast::ArrayElement::Spread(x) => {
+                pi_mentions(x, name)
+            }
+        }),
+        Object { props, .. } => props.iter().any(|p| match p {
+            tishlang_ast::ObjectProp::KeyValue(_, v) => pi_mentions(v, name),
+            tishlang_ast::ObjectProp::Spread(x) => pi_mentions(x, name),
+        }),
+        TemplateLiteral { exprs, .. } => exprs.iter().any(|x| pi_mentions(x, name)),
+        MemberAssign { object, value, .. } => {
+            pi_mentions(object, name) || pi_mentions(value, name)
+        }
+        IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => pi_mentions(object, name) || pi_mentions(index, name) || pi_mentions(value, name),
+        // ArrowFunction (could capture), Jsx, native loads, etc. -> assume present (bail).
+        _ => true,
     }
 }
 

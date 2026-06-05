@@ -153,7 +153,16 @@ parallel free `fn f_native(f64,..)->f64` at top level, and route DIRECT calls to
 wrapper stays for dynamic use. Result: fib(35) 512ms -> 31ms — BEATS node (48ms), identical result;
 flag OFF the corpus is byte-identical, flag ON the whole native corpus still passes. Remaining call
 work: closures passed to builtins (array_hof's reduce callback) still box — extend to native closures
-/ fused reduce; and M4 (infer `: number` so unannotated fns qualify) widens M1+M5 coverage.
+/ fused reduce.
+
+M4 param inference LANDED (dark-shipped behind `TISH_PARAM_INFER`, `infer.rs` `param_infer_program` +
+the conservative `nus_*` numeric-use checker): a top-level fn param used PURELY numerically gets a
+synthetic `: number`, so M1/M5 pick it up — `sumto(n)` (unannotated) 100ms->67ms (param `n` now
+native), corpus sound (flag-on passes), flag-off byte-identical. HONEST limit: M4-params alone does
+NOT fully flip unannotated *kernels* — unannotated matmul still 483ms because `let a = []` stays a
+boxed array (needs array-ELEMENT inference), and unannotated recursion needs RETURN inference (a
+fixpoint, for M5 eligibility). "Make unannotated code native" is a compounding inference effort
+(params done; arrays + returns next), not one feature.
 ================================================================================
 
 
