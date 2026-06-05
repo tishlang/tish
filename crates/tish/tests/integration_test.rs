@@ -643,65 +643,67 @@ fn test_full_stack_parse() {
     }
 }
 
-/// Shared list of MVP test files used for static comparison (interpreter and native).
-const MVP_TEST_FILES: &[&str] = &[
-    // Regression guard for JIT bool-boxing / mod, and object/JSON insertion order
-    // (found via tests/core/jit_probe). Asserted identical across all backends.
-    "jit_regression.tish",
-    // Deeply-nested control flow (loops × switch × try/catch/finally × let/const). Regression
-    // guard for the 2026-06 fixes: rust switch-break scoping, rust/vm try-in-fn + finally on
-    // return/propagation. Asserted identical across all backends. See docs/control-flow-audit.md.
-    "control_flow_nested.tish",
-    // ES per-iteration `let` binding (for / for-of / while closures capture this iteration's value).
-    // Regression guard for the 2026-06 vm `LoopVarsBegin`/`enclosing2` overlay fix; identical across
-    // interp/vm/rust/cranelift. See docs/control-flow-audit.md.
-    "loop_let_capture.tish",
-    // Closure capture-by-reference: a closure that only READS an outer var must see mutations made
-    // after it was created (incl. sibling closures sharing one cell). Regression guard for the rust
-    // codegen capture-by-value bug; identical across interp/vm/rust/cranelift. See docs/control-flow-audit.md.
-    "closure_capture_cell.tish",
-    "nested_loops.tish",
-    "scopes.tish",
-    "optional_braces.tish",
-    "optional_braces_braced.tish",
-    "tab_indent.tish",
-    "space_indent.tish",
-    "fn_any.tish",
-    "strict_equality.tish",
-    "arrays.tish",
-    "break_continue.tish",
-    "length.tish",
-    "objects.tish",
-    "symbol.tish",
-    "conditional.tish",
-    "switch.tish",
-    "do_while.tish",
-    "typeof.tish",
-    "inc_dec.tish",
-    "try_catch.tish",
-    "builtins.tish",
-    "exponentiation.tish",
-    "for_of.tish",
-    "bitwise.tish",
-    "math.tish",
-    "optional_chaining.tish",
-    "void.tish",
-    "rest_params.tish",
-    "json.tish",
-    "uri.tish",
-    "in_op.tish",
-    "arrow_functions.tish",
-    "template_literals.tish",
-    "compound_assign.tish",
-    "mutation.tish",
-    "string_methods.tish",
-    "array_methods.tish",
-    "object_methods.tish",
-    "types.tish",
-    "logical_assign.tish",
-    "spread.tish",
-    "fn_param_destructuring.tish",
+// (The hand-maintained `MVP_TEST_FILES` allowlist was removed in favor of `discover_core_tests()`
+// below — every `tests/core/*.tish` with a `.expected` now gets cross-backend coverage automatically.)
+
+/// Tests whose `.expected` embeds elapsed-ms timings (perf/stress/probe) — nondeterministic, so
+/// excluded from exact-output comparison. Run them via `just perf-*` instead.
+const TIMING_NONDETERMINISTIC: &[&str] = &[
+    "array_stress.tish",
+    "array_stress_01_large_array_creation.tish",
+    "array_stress_02_iteration.tish",
+    "array_stress_03_map_filter_reduce.tish",
+    "array_stress_04_chained.tish",
+    "array_stress_05_sorting.tish",
+    "array_stress_06_search.tish",
+    "array_stress_07_splice_slice.tish",
+    "array_stress_08_concat_spread.tish",
+    "array_stress_09_flat.tish",
+    "array_stress_10_objects.tish",
+    "basic_types.tish",
+    "benchmark_granular.tish",
+    "new_features_perf.tish",
+    "object_stress.tish",
+    "objects_perf.tish",
+    "string_methods_perf.tish",
+    "recursion_stress.tish",
+    "jit_probe.tish",
 ];
+
+/// Known cross-backend gaps skipped on the interp↔vm parity check, with reason + a tracking note.
+/// Each is a real divergence to fix, not a permanent exclusion.
+/// - `nested_complex.tish`: the VM's `enclosing` is a single level, so a closure nested >2 deep
+///   loses grand-parent captures (`level4` can't see `level1`'s `a`); interp/rust are correct.
+///   Needs the VM scope-chain fix (see docs/control-flow-audit.md).
+const VM_PARITY_SKIP: &[&str] = &["nested_complex.tish"];
+
+/// Discover every `tests/core/*.tish` that has a `.expected` sibling, minus timing-nondeterministic
+/// ones. Replaces the hand-maintained `MVP_TEST_FILES` allowlist so a new `*.tish` + `*.expected`
+/// gets cross-backend coverage automatically (the allowlist silently left ~38 tests running nowhere).
+fn discover_core_tests() -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(core_dir())
+        .expect("read tests/core")
+        .filter_map(|e| {
+            let p = e.ok()?.path();
+            if p.extension().map(|x| x == "tish").unwrap_or(false) && expected_path(&p).exists() {
+                Some(p.file_name()?.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        })
+        .filter(|n| !TIMING_NONDETERMINISTIC.contains(&n.as_str()))
+        .collect();
+    v.sort();
+    v
+}
+
+/// True if `name` has a sibling `.js` (so it can run through the Node oracle).
+fn has_js_sibling(name: &str) -> bool {
+    core_dir()
+        .join(name)
+        .with_extension("js")
+        .exists()
+}
 
 /// Run each .tish file with interpreter and compare stdout to static expected.
 /// Set REGENERATE_EXPECTED=1 to write .expected files from interpreter output (run once, then commit).
@@ -715,7 +717,7 @@ fn test_mvp_programs_interpreter() {
         bin.display()
     );
     let regenerate = std::env::var("REGENERATE_EXPECTED").as_deref() == Ok("1");
-    for name in MVP_TEST_FILES {
+    for name in &discover_core_tests() {
         let path = core_dir.join(name);
         if !path.exists() {
             continue;
@@ -762,7 +764,10 @@ fn test_mvp_programs_interp_vm_stdout_parity() {
         "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
-    for name in MVP_TEST_FILES {
+    for name in &discover_core_tests() {
+        if VM_PARITY_SKIP.contains(&name.as_str()) {
+            continue;
+        }
         let path = core_dir.join(name);
         if !path.exists() {
             continue;
@@ -813,7 +818,7 @@ fn test_mvp_programs_native() {
         bin.display()
     );
 
-    let mut paths: Vec<PathBuf> = MVP_TEST_FILES
+    let mut paths: Vec<PathBuf> = discover_core_tests()
         .iter()
         .filter_map(|name| {
             let p = core_dir.join(name);
@@ -1081,8 +1086,9 @@ fn test_mvp_programs_js() {
         "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
-    for name in MVP_TEST_FILES {
-        if JS_SKIP_FILES.contains(name) {
+    for name in &discover_core_tests() {
+        // intentional JS divergences + tests without a `.js` sibling can't use the Node oracle
+        if JS_SKIP_FILES.contains(&name.as_str()) || !has_js_sibling(name) {
             continue;
         }
         let path = core_dir.join(name);

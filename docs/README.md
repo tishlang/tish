@@ -15,3 +15,5 @@ Internal and contributor-facing docs. User-facing docs live in the **[tishlang.c
 | `control-flow-audit.md` | Cross-backend control-flow/scope correctness matrix: 7 pre-existing divergences (let-binding, try-in-fn, switch-break, finally, event-loop) + fix priority. Perf work verified clean |
 | `concurrency-model.md` | EXACT task-execution flow (single-thread micro/macrotask + multi-thread HTTP) per backend vs JS/V8: no microtask queue, blocking `await`, prefork+threads+tokio. Why tish deliberately isn't a JS event loop |
 | `perf.md` | Perf optimization log: slots/JIT/object layout, HTTP throughput, run-vs-build |
+| `full-backend-parity-plan.md` | Plan to make cranelift/llvm/wasi full-capability (they all package the bytecode VM → fix the VM once); C-ABI `ffi:` native extensions paired across backends (`cargo:` stays rust-only); wasmtime embedder + preview2 for the WASI ecosystem |
+| `performance-roi.md` | Tech + ROI synthesis: runtime speedups (startup, compute, HTTP), artifact/runtime size vs Node/V8, and where precompile-then-execute pays off (serverless, containers, CLIs, compute). Marketing-facing; `perf.md`/`concurrency-model.md` are the deep dives |
