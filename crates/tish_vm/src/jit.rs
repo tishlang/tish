@@ -32,6 +32,10 @@ use tishlang_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_
 pub struct NumericFn {
     ptr: usize,
     arity: u8,
+    /// True when the function's result is a comparison (boolean), so the caller
+    /// boxes the returned f64 as `Value::Bool` (1.0→true) instead of
+    /// `Value::Number`. Needed for callbacks like `x => x === c` used by `map`.
+    result_bool: bool,
 }
 
 // SAFETY: `ptr` references immutable executable code in a module that is never
@@ -44,6 +48,12 @@ impl NumericFn {
     #[inline]
     pub fn arity(&self) -> usize {
         self.arity as usize
+    }
+
+    /// Whether the result should be boxed as `Value::Bool` rather than `Number`.
+    #[inline]
+    pub fn result_is_bool(&self) -> bool {
+        self.result_bool
     }
 
     /// Call the native function. `args.len()` must equal `arity`.
@@ -163,11 +173,13 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     ctx.func.signature = sig.clone();
 
     let mut fbctx = FunctionBuilderContext::new();
-    let built = build_body(&mut ctx.func, &mut fbctx, chunk, arity);
-    if !built {
-        g.module.clear_context(&mut ctx);
-        return None;
-    }
+    let result_bool = match build_body(&mut ctx.func, &mut fbctx, chunk, arity) {
+        Some(b) => b,
+        None => {
+            g.module.clear_context(&mut ctx);
+            return None;
+        }
+    };
 
     let name = format!("tish_num_{}", g.counter);
     g.counter += 1;
@@ -190,17 +202,20 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     Some(NumericFn {
         ptr: ptr as usize,
         arity: arity as u8,
+        result_bool,
     })
 }
 
 /// Translate the chunk's straight-line numeric bytecode into the function body.
-/// Returns `false` (caller discards) on any unsupported opcode/operand.
+/// Returns `None` on any unsupported opcode/operand, or `Some(result_is_bool)`
+/// where `result_is_bool` flags a comparison result so the caller boxes it as
+/// `Value::Bool` instead of `Value::Number`.
 fn build_body(
     func: &mut cranelift::codegen::ir::Function,
     fbctx: &mut FunctionBuilderContext,
     chunk: &Chunk,
     arity: usize,
-) -> bool {
+) -> Option<bool> {
     let mut bcx = FunctionBuilder::new(func, fbctx);
     let entry = bcx.create_block();
     bcx.append_block_params_for_function_params(entry);
@@ -209,60 +224,52 @@ fn build_body(
     let params: Vec<ClifValue> = bcx.block_params(entry).to_vec();
 
     let code = &chunk.code;
-    let mut stack: Vec<ClifValue> = Vec::new();
+    // Each entry is (clif f64 value, is_bool). `is_bool` marks comparison/`!`
+    // results (logical 0.0/1.0) so the final value boxes as Bool, not Number.
+    let mut stack: Vec<(ClifValue, bool)> = Vec::new();
     let mut ip = 0usize;
-    let mut returned = false;
+    let mut result: Option<bool> = None;
 
     while ip < code.len() {
-        let op = match Opcode::from_u8(code[ip]) {
-            Some(o) => o,
-            None => return false,
-        };
+        let op = Opcode::from_u8(code[ip])?;
         ip += 1;
         match op {
             Opcode::Nop => {}
             Opcode::LoadLocal => {
-                let slot = match read_u16(code, &mut ip) {
-                    Some(s) => s as usize,
-                    None => return false,
-                };
-                // Straight-line simple fns declare no locals, so only param slots exist.
+                let slot = read_u16(code, &mut ip)? as usize;
+                // Straight-line simple fns declare no locals; only params (numbers).
                 if slot >= arity {
-                    return false;
+                    return None;
                 }
-                stack.push(params[slot]);
+                stack.push((params[slot], false));
             }
             Opcode::LoadConst => {
-                let idx = match read_u16(code, &mut ip) {
-                    Some(i) => i as usize,
-                    None => return false,
-                };
+                let idx = read_u16(code, &mut ip)? as usize;
                 match chunk.constants.get(idx) {
                     Some(Constant::Number(n)) => {
                         let v = bcx.ins().f64const(*n);
-                        stack.push(v);
+                        stack.push((v, false));
                     }
                     Some(Constant::Bool(b)) => {
                         let v = bcx.ins().f64const(if *b { 1.0 } else { 0.0 });
-                        stack.push(v);
+                        stack.push((v, true));
                     }
-                    _ => return false,
+                    _ => return None,
                 }
             }
             Opcode::BinOp => {
-                let raw = match read_u16(code, &mut ip) {
-                    Some(v) => v as u8,
-                    None => return false,
-                };
-                let bop = match u8_to_binop(raw) {
-                    Some(b) => b,
-                    None => return false,
-                };
+                let raw = read_u16(code, &mut ip)? as u8;
+                let bop = u8_to_binop(raw)?;
                 if stack.len() < 2 {
-                    return false;
+                    return None;
                 }
-                let r = stack.pop().unwrap();
-                let l = stack.pop().unwrap();
+                let (r, _) = stack.pop().unwrap();
+                let (l, _) = stack.pop().unwrap();
+                let is_cmp = matches!(
+                    bop,
+                    BinOp::Eq | BinOp::Ne | BinOp::StrictEq | BinOp::StrictNe
+                        | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                );
                 let v = match bop {
                     BinOp::Add => bcx.ins().fadd(l, r),
                     BinOp::Sub => bcx.ins().fsub(l, r),
@@ -274,54 +281,47 @@ fn build_body(
                     BinOp::Le => fcmp_f64(&mut bcx, FloatCC::LessThanOrEqual, l, r),
                     BinOp::Gt => fcmp_f64(&mut bcx, FloatCC::GreaterThan, l, r),
                     BinOp::Ge => fcmp_f64(&mut bcx, FloatCC::GreaterThanOrEqual, l, r),
-                    // Mod/Pow/bitwise/shifts/In/And/Or: not handled in slice 1.
-                    _ => return false,
+                    BinOp::Mod => {
+                        // f64 remainder a - trunc(a/b)*b — exactly Rust's `%`,
+                        // which is what the VM's eval_binop uses, so JIT and
+                        // VM-fallback agree bit-for-bit.
+                        let q = bcx.ins().fdiv(l, r);
+                        let t = bcx.ins().trunc(q);
+                        let p = bcx.ins().fmul(t, r);
+                        bcx.ins().fsub(l, p)
+                    }
+                    // Pow/bitwise/shifts/In/And/Or: fall back to the VM.
+                    _ => return None,
                 };
-                stack.push(v);
+                stack.push((v, is_cmp));
             }
             Opcode::UnaryOp => {
-                let raw = match read_u16(code, &mut ip) {
-                    Some(v) => v as u8,
-                    None => return false,
-                };
-                let uop = match u8_to_unaryop(raw) {
-                    Some(u) => u,
-                    None => return false,
-                };
-                let o = match stack.pop() {
-                    Some(v) => v,
-                    None => return false,
-                };
-                let v = match uop {
-                    UnaryOp::Neg => bcx.ins().fneg(o),
-                    UnaryOp::Pos => o,
+                let raw = read_u16(code, &mut ip)? as u8;
+                let uop = u8_to_unaryop(raw)?;
+                let (o, _) = stack.pop()?;
+                let (v, is_bool) = match uop {
+                    UnaryOp::Neg => (bcx.ins().fneg(o), false),
+                    UnaryOp::Pos => (o, false),
                     UnaryOp::Not => {
                         let zero = bcx.ins().f64const(0.0);
-                        fcmp_f64(&mut bcx, FloatCC::Equal, o, zero)
+                        (fcmp_f64(&mut bcx, FloatCC::Equal, o, zero), true)
                     }
-                    _ => return false,
+                    _ => return None,
                 };
-                stack.push(v);
+                stack.push((v, is_bool));
             }
             Opcode::Return => {
-                let v = match stack.pop() {
-                    Some(v) => v,
-                    None => return false,
-                };
+                let (v, is_bool) = stack.pop()?;
                 bcx.ins().return_(&[v]);
-                returned = true;
-                break; // straight-line: first Return ends the function
+                result = Some(is_bool); // straight-line: first Return ends it
+                break;
             }
             // Any control flow / member / index / call / array / object opcode
             // disqualifies the chunk from the numeric fast path.
-            _ => return false,
+            _ => return None,
         }
     }
 
-    if !returned {
-        bcx.finalize();
-        return false;
-    }
     bcx.finalize();
-    true
+    result
 }

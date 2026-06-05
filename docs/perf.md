@@ -40,6 +40,67 @@ concrete.
 ================================================================================
 
 
+================================================================================
+  FOLLOW-UP (2026-06) — JIT correctness, interp parity, run-vs-build, regression test
+================================================================================
+Diagnostic: tests/core/jit_probe.{tish,js} — 10 isolated op categories (reduce, map ternary,
+filter mod, bitwise, Math, inline loop, fib(30), string concat, array index, find) with
+per-section timings. On-demand ONLY — excluded from the perf suite/bundle (its 4M-iteration loop
+would dominate). Run: `target/release/tish run --backend vm tests/core/jit_probe.tish`.
+
+`tish run` (vm) vs `tish build` (vm-embed) are CONSISTENT — both run the VM, so the numeric JIT
+(incl. the new `mod`) fires identically. `tish build --native-backend cranelift` of jit_probe
+matches `tish run --backend vm` section-for-section (reduce 25 vs 32, filter-mod 23 vs 20, find
+11 vs 11; non-JIT loop/recursion/array-index ~750-900 on both), the cranelift build only slightly
+slower on bytecode-deserialize startup. So the JIT roadmap lifts run AND the cranelift/llvm/wasi
+builds. (Remaining gaps vs Node: non-JIT inline loops/recursion/array-index ~120x — these point at
+a baseline/loop JIT, the next roadmap slice.)
+
+Fixes (correctness; regression test tests/core/jit_regression.tish asserted on ALL 6 backends):
+  - JIT bool-boxing: `map(x => x === c)` was returning Number [1,0,..] not Bool [true,false,..].
+    jit.rs now tracks result kind (NumericFn.result_bool); vm.rs boxes Bool vs Number accordingly.
+    Silent miscompilation — caught by jit_probe, not the prior corpus.
+  - JIT `mod`: added `%` to the numeric JIT (`a - trunc(a/b)*b`, matches Rust f64 % and Node).
+  - Interp object order: tish_eval used AHashMap (hash-order Object.keys) + alphabetically-sorted
+    JSON, diverging from Node and the VM. EvalObjectData.strings is now an insertion-ordered
+    IndexMap and the JSON key-sort is removed — interp == vm == node. (RC3 fixed tish_core only;
+    the interpreter lagged, and the old corpus never exercised multi-key object order.)
+================================================================================
+
+
+================================================================================
+  HTTP THROUGHPUT (2026-06) — tish vs Node, single- vs multi-worker
+================================================================================
+The single-shot core/* tests never exercise the multi-worker HTTP server — the whole reason
+`send-values` / prefork exist. `scripts/run_http_perf.sh` (`just perf-http`) fills that gap: it
+builds `tests/http/server.tish` (rust backend), drives `oha` load at tish AND an equivalent
+`node:http` server, across {1 worker, N workers} x {/plaintext, /json}, DB-free (isolates the
+HTTP server + per-request VM handler dispatch). Server and load run as SEPARATE PROCESSES (never
+self-fetch — you can't measure a port-holder from inside its own event loop): `--serve tish|node`
+is the server process (blocks), `--url URL` is the external load process; the no-arg form
+orchestrates both for a quick local comparison. HTTP/WS tests are EXCLUDED from the single-shot
+suite (run_performance_manual.sh + the bundle) — opening a port / doing an outbound fetch can't be
+timed in a one-process harness.
+
+darwin-arm64, `oha -c128`, 14 cores, req/s (higher better) / p50 ms:
+  engine       /plaintext       /json
+  tish  w=1    125k / 1.02ms    121k / 1.05ms
+  tish  w=14   124k / 1.02ms    119k / 1.07ms    <- no scaling on macOS (see below)
+  node  w=1     95k / 1.35ms     93k / 1.38ms
+  node  w=14   154k / 0.82ms    153k / 0.83ms
+
+- SINGLE worker: tish beats Node by ~33% (faster per request, 1.02 vs 1.35 ms p50). This is the
+  apples-to-apples local number — native rust server + cached Date header + Arc<str> bodies pay off.
+- macOS MULTI-worker is a NO-OP: BSD SO_REUSEPORT does not kernel-load-balance, so all connections
+  funnel to ONE worker (measured: 1 process at 252% CPU, the other 13 at 0%). So tish w=14 ~ w=1.
+  The prefork scaling is real on LINUX (the TFB deployment target — the kernel distributes accept()
+  across the per-worker sockets); verify multi-worker there, not on macOS. Node's `cluster`
+  distributes FDs from the master, which works on macOS, so its multi-worker row scales locally and
+  overtakes tish (154k vs 124k) — a platform artifact, not a runtime loss. Rationale:
+  `crates/tish_runtime/src/http.rs` concurrency-model doc comment.
+================================================================================
+
+
 ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
                                            PERFORMANCE SUMMARY
                                     (sorted by Tish(run)/Node ratio, slowest first)

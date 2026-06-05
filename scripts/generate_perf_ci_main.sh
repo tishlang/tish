@@ -18,7 +18,12 @@ list_pairs_to_stdout() {
     for tish in "$d"/*.tish; do
       [[ -f "$tish" ]] || continue
       base=$(basename "$tish" .tish)
-      [[ "$base" == "recursion_stress" ]] && continue
+      # recursion_stress: pathological depth. jit_probe: on-demand JIT diagnostic with a
+      # multi-million-iteration loop (would dominate the suite). jit_regression: correctness
+      # guard, not a benchmark. None belong in the bundled perf run.
+      case "$base" in
+        recursion_stress | jit_probe | jit_regression) continue ;;
+      esac
       js=""
       if [[ -f "$d/${base}.mjs" ]]; then
         js="$d/${base}.mjs"

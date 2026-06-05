@@ -1032,7 +1032,12 @@ impl Vm {
                                                 }
                                             }
                                             if all_numbers {
-                                                return Value::Number(nf.call(&nums[..arity]));
+                                                let res = nf.call(&nums[..arity]);
+                                                return if nf.result_is_bool() {
+                                                    Value::Bool(res != 0.0)
+                                                } else {
+                                                    Value::Number(res)
+                                                };
                                             }
                                         }
                                     }

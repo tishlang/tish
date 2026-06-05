@@ -3255,6 +3255,7 @@ dependencies = [
  "ahash",
  "fancy-regex",
  "futures",
+ "indexmap",
  "rand 0.10.1",
  "reqwest",
  "tiny_http",

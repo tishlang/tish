@@ -639,6 +639,9 @@ fn test_full_stack_parse() {
 
 /// Shared list of MVP test files used for static comparison (interpreter and native).
 const MVP_TEST_FILES: &[&str] = &[
+    // Regression guard for JIT bool-boxing / mod, and object/JSON insertion order
+    // (found via tests/core/jit_probe). Asserted identical across all backends.
+    "jit_regression.tish",
     "nested_loops.tish",
     "scopes.tish",
     "optional_braces.tish",
@@ -901,6 +904,7 @@ fn test_mvp_programs_native() {
 
 /// Curated list: files that pass with Cranelift (some constructs cause stack-underflow; see docs/builtins-gap-analysis.md).
 const CRANELIFT_TEST_FILES: &[&str] = &[
+    "jit_regression.tish",
     "fn_any.tish",
     "strict_equality.tish",
     "switch.tish",

@@ -15,7 +15,9 @@ use tishlang_core::NativeFn as CoreNativeFn;
 use tishlang_core::TishSymbol;
 
 /// Property map for interpreter object string keys (uses `eval::Value`, not `tishlang_core::Value`).
-pub type PropMap = AHashMap<Arc<str>, Value>;
+/// `IndexMap` preserves insertion order so `Object.keys` / `JSON.stringify` match JS/Node
+/// (and the VM/rust backends, which use `tishlang_core`'s insertion-ordered `PropMap`).
+pub type PropMap = indexmap::IndexMap<Arc<str>, Value>;
 
 /// Interpreter object: string keys plus optional symbol-keyed properties.
 #[derive(Clone, Debug, Default)]

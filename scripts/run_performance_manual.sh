@@ -221,7 +221,12 @@ else
         continue
       fi
       test_id="${perf_dir#tests/}/$base"
-      [[ "$base" == "recursion_stress" ]] && continue
+      [[ "$base" == "recursion_stress" || "$base" == "jit_probe" || "$base" == "jit_regression" ]] && continue
+      # HTTP/WS server + outbound-fetch tests open a port or hit the network — they cannot be
+      # measured in a single-shot timing harness (you can't open a port and fetch it in the same
+      # process). They belong in the dedicated separate-process harness: scripts/run_http_perf.sh
+      # (`just perf-http`). Skip anything importing the http/ws modules.
+      grep -qE "from ['\"](http|ws)['\"]" "$tish_file" 2>/dev/null && continue
       [[ -n "$filter_name" && "$test_id" != *"$filter_name"* ]] && continue
       [[ $limit -gt 0 && $count -ge $limit ]] && break
       count=$((count + 1))
@@ -301,7 +306,7 @@ for perf_dir in "${perf_dirs[@]}"; do
       continue
     fi
     test_id="${perf_dir#tests/}/$base"
-    [[ "$base" == "recursion_stress" ]] && continue
+    [[ "$base" == "recursion_stress" || "$base" == "jit_probe" || "$base" == "jit_regression" ]] && continue
     [[ -n "$filter_name" && "$test_id" != *"$filter_name"* ]] && continue
     [[ $limit -gt 0 && $count -ge $limit ]] && break
     count=$((count + 1))

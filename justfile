@@ -258,6 +258,10 @@ perf-suite *ARGS:
 perf-suite-gen:
     ./scripts/generate_perf_ci_main.sh
 
+# HTTP throughput: tish vs Node, single vs multi-worker, plaintext + json (needs oha + jq)
+perf-http *ARGS:
+    ./scripts/run_http_perf.sh {{ARGS}}
+
 # Show binary sizes for different builds
 sizes:
     @echo "Building secure binary..."

@@ -3316,30 +3316,21 @@ impl Evaluator {
                 format!("[{}]", inner.join(","))
             }
             Value::Object(map) => {
-                let mut entries: Vec<_> = map
+                // Insertion order (PropMap is an IndexMap) — matches JS/Node and the
+                // VM/rust backends. No key sort.
+                let entries: Vec<String> = map
                     .borrow()
                     .strings
                     .iter()
                     .map(|(k, v)| {
-                        (
-                            k.as_ref().to_string(),
-                            format!(
-                                "\"{}\":{}",
-                                k.replace('\\', "\\\\").replace('"', "\\\""),
-                                Self::json_stringify_value(v)
-                            ),
+                        format!(
+                            "\"{}\":{}",
+                            k.replace('\\', "\\\\").replace('"', "\\\""),
+                            Self::json_stringify_value(v)
                         )
                     })
                     .collect();
-                entries.sort_by(|a, b| a.0.cmp(&b.0));
-                format!(
-                    "{{{}}}",
-                    entries
-                        .into_iter()
-                        .map(|(_, s)| s)
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
+                format!("{{{}}}", entries.join(","))
             }
             Value::Symbol(_) => "null".to_string(),
             Value::Function { .. } | Value::Native(_) => "null".to_string(),
