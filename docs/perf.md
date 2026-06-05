@@ -139,21 +139,21 @@ native-scalar annotation, no default value. Next: M4 (infer param types from use
 
 
 ================================================================================
-  NEXT LEVER (audit, 2026-06): the function-call ABI — recursion is the last big gap
+  M5 LANDED (2026-06): native monomorphic calls — recursion now BEATS V8
 ================================================================================
-With native params + de-boxing, straight-line numeric kernels beat node. Recursion does NOT yet:
-fib(35) with `fn fib(n: number)` is 518ms vs node 55ms (9x), because every call still goes through
-the boxed-closure ABI — `value_call(&fib, &[Value::Number(n-1)])` clones the closure Value, boxes
-the arg, dynamic-dispatches, and the native shadow unboxes it again, ~30M times. The arithmetic is
-native; the CALL is the whole tax.
+The call ABI was recursion's whole tax: every `fib(n-1)` went through `value_call(&fib,
+&[Value::Number(n-1)])` — clone the closure Value, box the arg, dynamic-dispatch, unbox in the
+native shadow — ~30M times for fib(35) (512ms vs node 52ms; the arithmetic was already native).
 
-Fix = M5 (native monomorphic fn, `docs/type-system-roadmap.md`): for a native-eligible function (all
-params native-typed, native return, non-escaping) emit a parallel free `fn f_native(a:f64,…)->R` and
-route DIRECT calls to it, bypassing `value_call` + boxing; keep the closure wrapper as the dynamic
-fallback. This is the highest-value remaining rust-backend lever (recursion + hot direct calls).
-Audit status: de-boxing complete for Assign/inc-dec/compound; IndexAssign on native arrays already
-lowers (a[i]=x: 6ms/2M); MemberAssign on dynamic objects stays boxed (the object-representation
-ceiling, task #13 — orthogonal to numerics).
+M5 (dark-shipped behind `TISH_NATIVE_FN`, in `codegen.rs`): for a native-eligible top-level fn (all
+params `: number`, `: number` return, native-safe body — a conservative fixpoint `collect_native_fns`
+over block/if/return/expr-stmt with native exprs + calls to other eligible fns or 1-arg Math) emit a
+parallel free `fn f_native(f64,..)->f64` at top level, and route DIRECT calls to it in
+`emit_typed_expr` (`fib(x)` -> `fib_native(x)`), bypassing `value_call` + boxing. The boxed closure
+wrapper stays for dynamic use. Result: fib(35) 512ms -> 31ms — BEATS node (48ms), identical result;
+flag OFF the corpus is byte-identical, flag ON the whole native corpus still passes. Remaining call
+work: closures passed to builtins (array_hof's reduce callback) still box — extend to native closures
+/ fused reduce; and M4 (infer `: number` so unannotated fns qualify) widens M1+M5 coverage.
 ================================================================================
 
 
@@ -170,17 +170,16 @@ both tish and node). Baseline (darwin-arm64, rust backend + `TISH_PARAM_NATIVE=1
   matmul          14ms   16ms   0.87x   PASS  (M1 native params)
   numeric_loop    44ms   47ms   0.94x   PASS  (statement-position de-boxing)
   math_trig       12ms   82ms   0.15x   PASS  native Math intrinsics LANDED (sqrt/sin/...->f64 method)
-  string_concat    2ms    3ms   0.67x   PASS  self-append `s=s+x` -> push_str (O(1)); was O(n^2)
-  array_hof      269ms   30ms   8.9x    FAIL  native closure calls / fused reduce over native arrays
-  recursion_fib  536ms   52ms   10x     FAIL  M5 (native monomorphic calls — bypass value_call)
-  object_sum     146ms    3ms   49x     FAIL  hidden classes / unboxed objects (task #13)
+  string_concat    3ms    3ms   1.00x   PASS  self-append `s=s+x` -> push_str (O(1)); was O(n^2)
+  recursion_fib   31ms   48ms   0.65x   PASS  M5 native monomorphic calls LANDED (TISH_NATIVE_FN)
+  array_hof      257ms   29ms   8.9x    FAIL  native closure calls / fused reduce over native arrays
+  object_sum     145ms    3ms   48x     FAIL  hidden classes / unboxed objects (task #13)
 
-4/7 beating V8. Two flipped FAIL->PASS this pass: (1) math_trig via native Math intrinsics
-(`Math.sqrt(x)` etc. with a native-f64 arg -> direct `f64` method in `emit_typed_expr`, skipping the
-boxed value_call; round/sign stay boxed — JS semantics differ); (2) string_concat via a String
-self-append fast path (`s = s + x` -> in-place `push_str` in `emit_expr_discard`, O(1) amortized
-instead of cloning the whole string per concat). Remaining FAILs are the structural levers:
-`recursion_fib`/`array_hof` -> M5 (native calls); `object_sum` -> hidden classes (task #13).
+5/7 beating V8. Three flipped FAIL->PASS across recent passes: math_trig (native Math intrinsics ->
+direct `f64` methods), string_concat (String self-append -> in-place `push_str`), and recursion_fib
+(M5, below). The 2 remaining FAILs are the representation rearchitectures: `array_hof` -> native
+CLOSURE calls (the reduce callback still boxes; M5 only covers named top-level fns) or a fused
+native reduce; `object_sum` -> hidden classes / unboxed objects (task #13).
 ================================================================================
 
 

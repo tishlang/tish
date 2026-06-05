@@ -723,6 +723,10 @@ struct Codegen {
     /// Variables currently wrapped in Rc<RefCell<Value>> for mutable capture in closures
     /// These need special handling: reads via .borrow().clone(), writes via *var.borrow_mut()
     refcell_wrapped_vars: std::collections::HashSet<String>,
+    /// M5 (dark-shipped behind `TISH_NATIVE_FN`): top-level functions eligible for a parallel
+    /// free `fn f_native(f64,..)->f64` (all params `: number`, returns `number`, native-safe
+    /// body). Direct calls to these route to the native fn, bypassing the boxed `value_call`.
+    native_fns: std::collections::HashSet<String>,
     /// Scopes of names whose Rust binding is actually `Rc<RefCell<_>>` (emitted at VarDecl).
     /// `refcell_wrapped_vars` alone is insufficient: it is set by prepasses before decl may run.
     rc_cell_storage_scopes: Vec<std::collections::HashSet<String>>,
@@ -772,6 +776,7 @@ impl Codegen {
             outer_params_stack: Vec::new(),
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
+            native_fns: std::collections::HashSet::new(),
             rc_cell_storage_scopes: vec![std::collections::HashSet::new()],
             usage_analyzer: None,
             type_context: TypeContext::new(),
@@ -1373,6 +1378,15 @@ impl Codegen {
             self.indent -= 1;
             self.writeln("}");
             self.writeln("");
+        }
+        // M5 (dark-shipped behind TISH_NATIVE_FN): emit a parallel native `fn f_native` for each
+        // eligible top-level numeric fn at top level; direct calls route to it in emit_typed_expr.
+        if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+            self.native_fns = Self::collect_native_fns(&program.statements);
+            if !self.native_fns.is_empty() {
+                self.emit_native_fns(&program.statements)?;
+                self.writeln("");
+            }
         }
         if self.is_async {
             self.writeln("async fn run() -> Result<(), Box<dyn std::error::Error>> {");
@@ -5279,6 +5293,214 @@ impl Codegen {
     /// through arithmetic, indexing, and assignments.  For any expression this
     /// function cannot handle natively, it falls back to `emit_expr` and returns
     /// `RustType::Value`.
+    // ───────────────────────── M5: native monomorphic functions ─────────────────────────
+    fn ann_is_number(ann: &TypeAnnotation) -> bool {
+        RustType::from_annotation(ann) == RustType::F64
+    }
+
+    /// Names of top-level fns eligible for a parallel native `fn f_native(f64,..)->f64`:
+    /// non-async, every param `: number` (no default), `: number` return, and a native-safe
+    /// body (only block/if/return/expr-stmt over native exprs + calls to other eligible fns or
+    /// 1-arg Math intrinsics). Conservative fixpoint — bails on anything else.
+    fn collect_native_fns(statements: &[Statement]) -> std::collections::HashSet<String> {
+        use std::collections::HashSet;
+        let mut cand: HashSet<String> = HashSet::new();
+        let mut decls: Vec<(&str, &Vec<FunParam>, &Statement)> = Vec::new();
+        for s in statements {
+            if let Statement::FunDecl {
+                async_: false,
+                name,
+                params,
+                rest_param: None,
+                return_type: Some(rt),
+                body,
+                ..
+            } = s
+            {
+                let params_ok = params.iter().all(|p| {
+                    matches!(p, FunParam::Simple(tp)
+                        if tp.default.is_none()
+                            && tp.type_ann.as_ref().map(Self::ann_is_number).unwrap_or(false))
+                });
+                if Self::ann_is_number(rt) && params_ok && !params.is_empty() {
+                    cand.insert(name.to_string());
+                    decls.push((name.as_ref(), params, body));
+                }
+            }
+        }
+        loop {
+            let mut remove: Vec<String> = Vec::new();
+            for &(name, params, body) in &decls {
+                if !cand.contains(name) {
+                    continue;
+                }
+                let pnames: HashSet<String> =
+                    params.iter().flat_map(|p| p.bound_names()).map(|n| n.to_string()).collect();
+                if !Self::native_safe_stmt(body, &pnames, &cand) {
+                    remove.push(name.to_string());
+                }
+            }
+            if remove.is_empty() {
+                break;
+            }
+            for n in remove {
+                cand.remove(&n);
+            }
+        }
+        cand
+    }
+
+    fn native_safe_stmt(
+        stmt: &Statement,
+        params: &std::collections::HashSet<String>,
+        cand: &std::collections::HashSet<String>,
+    ) -> bool {
+        match stmt {
+            Statement::Block { statements, .. } => {
+                statements.iter().all(|s| Self::native_safe_stmt(s, params, cand))
+            }
+            Statement::Return { value, .. } => {
+                value.as_ref().map_or(false, |e| Self::native_safe_expr(e, params, cand))
+            }
+            Statement::If { cond, then_branch, else_branch, .. } => {
+                Self::native_safe_expr(cond, params, cand)
+                    && Self::native_safe_stmt(then_branch, params, cand)
+                    && else_branch.as_ref().map_or(true, |e| Self::native_safe_stmt(e, params, cand))
+            }
+            Statement::ExprStmt { expr, .. } => Self::native_safe_expr(expr, params, cand),
+            _ => false,
+        }
+    }
+
+    fn native_safe_expr(
+        expr: &Expr,
+        params: &std::collections::HashSet<String>,
+        cand: &std::collections::HashSet<String>,
+    ) -> bool {
+        match expr {
+            Expr::Literal { value, .. } => matches!(value, Literal::Number(_) | Literal::Bool(_)),
+            Expr::Ident { name, .. } => params.contains(name.as_ref()),
+            Expr::Binary { left, op, right, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
+                        | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                        | BinOp::StrictEq | BinOp::StrictNe | BinOp::And | BinOp::Or
+                ) && Self::native_safe_expr(left, params, cand)
+                    && Self::native_safe_expr(right, params, cand)
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::Not)
+                    && Self::native_safe_expr(operand, params, cand)
+            }
+            Expr::Call { callee, args, .. } => {
+                let args_ok = args
+                    .iter()
+                    .all(|a| matches!(a, CallArg::Expr(e) if Self::native_safe_expr(e, params, cand)));
+                if !args_ok {
+                    return false;
+                }
+                match callee.as_ref() {
+                    Expr::Ident { name, .. } => cand.contains(name.as_ref()),
+                    Expr::Member { object, prop: MemberProp::Name { name: m, .. }, .. } => {
+                        matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                            && args.len() == 1
+                            && matches!(
+                                m.as_ref(),
+                                "sqrt" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil" | "exp"
+                                    | "trunc" | "log"
+                            )
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Emit `fn name_native(p: f64, ...) -> f64 { ... }` (top level) for each eligible fn.
+    fn emit_native_fns(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
+        for s in statements {
+            if let Statement::FunDecl { name, params, body, .. } = s {
+                if !self.native_fns.contains(name.as_ref()) {
+                    continue;
+                }
+                let plist: Vec<String> = params
+                    .iter()
+                    .filter_map(|p| match p {
+                        FunParam::Simple(tp) => {
+                            Some(format!("mut {}: f64", Self::escape_ident(tp.name.as_ref())))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                self.type_context.push_scope();
+                for p in params {
+                    if let FunParam::Simple(tp) = p {
+                        self.type_context.define(tp.name.as_ref(), RustType::F64);
+                    }
+                }
+                self.writeln(&format!("fn {}_native({}) -> f64 {{", Self::escape_ident(name.as_ref()), plist.join(", ")));
+                self.indent += 1;
+                self.emit_native_fn_body(body)?;
+                // Functions that fall off the end without returning: JS yields undefined; an
+                // eligible numeric fn shouldn't, but emit a default to keep `-> f64` total.
+                self.writeln("0.0");
+                self.indent -= 1;
+                self.writeln("}");
+                self.type_context.pop_scope();
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_native_fn_body(&mut self, stmt: &Statement) -> Result<(), CompileError> {
+        match stmt {
+            Statement::Block { statements, .. } => {
+                for s in statements {
+                    self.emit_native_fn_body(s)?;
+                }
+            }
+            Statement::Return { value, .. } => {
+                let e = value.as_ref().expect("eligible return has a value");
+                let (code, ty) = self.emit_typed_expr(e)?;
+                let f = if ty == RustType::F64 {
+                    code
+                } else if ty == RustType::Value {
+                    RustType::F64.from_value_expr(&code)
+                } else {
+                    code
+                };
+                self.writeln(&format!("return {};", f));
+            }
+            Statement::If { cond, then_branch, else_branch, .. } => {
+                let (c, ct) = self.emit_typed_expr(cond)?;
+                let c_bool = match ct {
+                    RustType::Bool => c,
+                    RustType::F64 => format!("({} != 0.0)", c),
+                    _ => format!("{}.is_truthy()", c),
+                };
+                self.writeln(&format!("if {} {{", c_bool));
+                self.indent += 1;
+                self.emit_native_fn_body(then_branch)?;
+                self.indent -= 1;
+                if let Some(eb) = else_branch {
+                    self.writeln("} else {");
+                    self.indent += 1;
+                    self.emit_native_fn_body(eb)?;
+                    self.indent -= 1;
+                }
+                self.writeln("}");
+            }
+            Statement::ExprStmt { expr, .. } => {
+                let (code, _) = self.emit_typed_expr(expr)?;
+                self.writeln(&format!("{};", code));
+            }
+            _ => unreachable!("emit_native_fn_body: eligibility guarantees only handled statements"),
+        }
+        Ok(())
+    }
+
     fn emit_typed_expr(&mut self, expr: &Expr) -> Result<(String, RustType), CompileError> {
         match expr {
             // ── literals ─────────────────────────────────────────────────────────
@@ -5414,6 +5636,36 @@ impl Codegen {
             // skipping the boxed value_call per element. Only methods whose Rust f64 op
             // matches JS semantics (round half-up & sign(0) differ → left to the runtime).
             Expr::Call { callee, args, .. } => {
+                // M5: direct call to an eligible native fn -> `name_native(<native args>)`.
+                if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                    if self.native_fns.contains(fname.as_ref()) {
+                        let mut argc: Vec<String> = Vec::with_capacity(args.len());
+                        let mut ok = true;
+                        for a in args {
+                            if let CallArg::Expr(e) = a {
+                                let (ac, at) = self.emit_typed_expr(e)?;
+                                argc.push(if at == RustType::Value {
+                                    RustType::F64.from_value_expr(&ac)
+                                } else {
+                                    ac
+                                });
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if ok {
+                            return Ok((
+                                format!(
+                                    "{}_native({})",
+                                    Self::escape_ident(fname.as_ref()),
+                                    argc.join(", ")
+                                ),
+                                RustType::F64,
+                            ));
+                        }
+                    }
+                }
                 if let [CallArg::Expr(arg_expr)] = args.as_slice() {
                     if let Expr::Member {
                         object,

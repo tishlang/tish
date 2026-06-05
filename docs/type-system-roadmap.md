@@ -27,7 +27,7 @@ machine-AOT), targeting a **full TS-like** surface (generics, unions, interfaces
 | Type **inference** | ⚠️ ~15% — forward, literal + numeric-arithmetic only | `tish_compile/src/infer.rs` |
 | Type **checking / soundness** | ❌ 0% — nothing validates annotations | (no checker crate exists) |
 | **Type-driven native codegen** (Rust backend) | ✅ Real but trapped *inside* one function body | `tish_compile/src/codegen.rs:1721,5009,5127` |
-| **Cross-function** native typing | ⚠️ params: native SCALAR params (`number`/`boolean`/`string`) now get a native shadow, dark-shipped behind `TISH_PARAM_NATIVE` (matmul `fn bench(N: number)` 301→15ms, 3x node, corpus correct); returns still boxed | `codegen.rs` param-bind + `push_fun_param_scope` |
+| **Cross-function** native typing | ⚠️ M1 params: native scalar params get a native shadow (`TISH_PARAM_NATIVE`; matmul 301→15ms, 3x node). M5 calls: native monomorphic top-level fns + direct-call routing (`TISH_NATIVE_FN`; fib(35) 512→31ms, beats node). Both dark-shipped, corpus-correct. TODO: native returns to other contexts, closures, M4 inference | `codegen.rs` param-bind, `collect_native_fns`/`emit_native_fns` |
 | **Machine-code AOT** (Cranelift/LLVM) | ❌ ~5% — stubs that embed bytecode + run the VM | `tish_cranelift/src/lower.rs:3` |
 | Optimizations exploiting types | ⚠️ const-fold/DCE/algebraic only (not type-driven) | `tish_opt/src/lib.rs` |
 
