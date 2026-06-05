@@ -69,15 +69,21 @@ fn take_due_timers() -> Vec<(u64, Value, Vec<Value>, u64)> {
     let now = Instant::now();
     REGISTRY.with(|r| {
         let mut reg = r.borrow_mut();
-        let due: Vec<_> = reg
+        let mut due: Vec<_> = reg
             .iter()
             .filter(|(_, e)| e.due <= now)
-            .map(|(id, e)| (*id, e.callback.clone(), e.args.clone(), e.interval_ms))
+            .map(|(id, e)| (e.due, *id, e.callback.clone(), e.args.clone(), e.interval_ms))
             .collect();
-        for (id, _, _, _) in &due {
+        // Deterministic JS timer order: earliest `due` first, ties broken by registration order
+        // (the monotonic id). REGISTRY is a HashMap whose iteration order is otherwise arbitrary,
+        // which scrambled same-delay timers (e.g. three `setTimeout(_, 0)` firing out of order).
+        due.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        for (_, id, _, _, _) in &due {
             reg.remove(id);
         }
-        due
+        due.into_iter()
+            .map(|(_, id, cb, args, iv)| (id, cb, args, iv))
+            .collect()
     })
 }
 

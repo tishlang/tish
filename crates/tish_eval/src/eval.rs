@@ -21,7 +21,7 @@ use crate::value::{
     eval_object_get, eval_object_has, eval_object_set, EvalObjectData, PropMap, Value,
 };
 
-struct Scope {
+pub struct Scope {
     // Scope vars: order is never observed (no Object.keys over a scope), so use a fast
     // unordered aHash map — NOT the object-strings PropMap (an insertion-ordered IndexMap),
     // which would pay SipHash + ordered-bucket overhead on every variable lookup.
@@ -29,6 +29,10 @@ struct Scope {
     consts: ahash::AHashSet<Arc<str>>,
     parent: Option<Rc<std::cell::RefCell<Scope>>>,
 }
+
+/// A reference-counted lexical scope. A `Value::Function` captures one of these at creation
+/// (the *defining* scope) so calls resolve free variables lexically — real closures.
+pub type ScopeRef = Rc<std::cell::RefCell<Scope>>;
 
 impl Scope {
     fn new() -> Rc<std::cell::RefCell<Self>> {
@@ -406,16 +410,26 @@ impl Evaluator {
                         )));
                     }
                 };
+                // Each element gets a FRESH per-iteration binding (ES6 `for (let v of …)`), so a
+                // closure created in the body captures that element, not the last one.
+                let outer = Rc::clone(&self.scope);
+                let mut ret = Ok(Value::Null);
                 for elem in elements {
-                    self.scope.borrow_mut().set(Arc::clone(name), elem, true);
+                    let iter_env = Scope::child(Rc::clone(&outer));
+                    iter_env.borrow_mut().set(Arc::clone(name), elem, true);
+                    self.scope = Rc::clone(&iter_env);
                     match self.eval_statement(body) {
                         Ok(_) => {}
                         Err(EvalError::Break) => break,
                         Err(EvalError::Continue) => continue,
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            ret = Err(e);
+                            break;
+                        }
                     }
                 }
-                Ok(Value::Null)
+                self.scope = outer;
+                ret
             }
             Statement::For {
                 init,
@@ -424,34 +438,76 @@ impl Evaluator {
                 body,
                 ..
             } => {
+                // `let`/`const` declared in `init` get a FRESH per-iteration binding (ES6), so a
+                // closure created in the body captures THAT iteration's value, not the final one.
+                // The canonical values live in `loop_env`; each iteration's body runs in a fresh
+                // `iter_env` copy, and mutations are copied back for the next test/update.
+                let outer = Rc::clone(&self.scope);
+                let loop_env = Scope::child(Rc::clone(&outer));
+                self.scope = Rc::clone(&loop_env);
                 if let Some(i) = init {
-                    self.eval_statement(i)?;
+                    if let Err(e) = self.eval_statement(i) {
+                        self.scope = outer;
+                        return Err(e);
+                    }
                 }
+                let per_iter: Vec<Arc<str>> = loop_env.borrow().vars.keys().cloned().collect();
+                let copy_vars = |from: &ScopeRef, to: &ScopeRef, names: &[Arc<str>]| {
+                    let src = from.borrow();
+                    let mut dst = to.borrow_mut();
+                    for n in names {
+                        if let Some(v) = src.vars.get(n.as_ref()) {
+                            dst.set(Arc::clone(n), v.clone(), true);
+                        }
+                    }
+                };
+                let mut ret = Ok(Value::Null);
                 loop {
-                    let cond_ok = cond
-                        .as_ref()
-                        .map(|c| self.eval_expr(c).map(|v| v.is_truthy()))
-                        .transpose()?
-                        .unwrap_or(true);
+                    self.scope = Rc::clone(&loop_env);
+                    let cond_ok = match cond.as_ref() {
+                        Some(c) => match self.eval_expr(c) {
+                            Ok(v) => v.is_truthy(),
+                            Err(e) => {
+                                ret = Err(e);
+                                break;
+                            }
+                        },
+                        None => true,
+                    };
                     if !cond_ok {
                         break;
                     }
-                    match self.eval_statement(body) {
+                    let iter_env = if per_iter.is_empty() {
+                        Rc::clone(&loop_env)
+                    } else {
+                        let e = Scope::child(Rc::clone(&outer));
+                        copy_vars(&loop_env, &e, &per_iter);
+                        e
+                    };
+                    self.scope = Rc::clone(&iter_env);
+                    let flow = self.eval_statement(body);
+                    if !per_iter.is_empty() {
+                        copy_vars(&iter_env, &loop_env, &per_iter);
+                    }
+                    match flow {
                         Ok(_) => {}
                         Err(EvalError::Break) => break,
-                        Err(EvalError::Continue) => {
-                            if let Some(u) = update {
-                                self.eval_expr(u)?;
-                            }
-                            continue;
+                        Err(EvalError::Continue) => {}
+                        Err(e) => {
+                            ret = Err(e);
+                            break;
                         }
-                        Err(e) => return Err(e),
                     }
+                    self.scope = Rc::clone(&loop_env);
                     if let Some(u) = update {
-                        self.eval_expr(u)?;
+                        if let Err(e) = self.eval_expr(u) {
+                            ret = Err(e);
+                            break;
+                        }
                     }
                 }
-                Ok(Value::Null)
+                self.scope = outer;
+                ret
             }
             Statement::Return { value, .. } => {
                 let v = value
@@ -477,6 +533,9 @@ impl Evaluator {
                     formals,
                     rest_param: rest_param_name,
                     body,
+                    // Capture the defining scope. It's the SAME Rc we insert into below, so the
+                    // function sees itself → recursion works.
+                    env: Rc::clone(&self.scope),
                 };
                 self.scope.borrow_mut().set(Arc::clone(name), func, true);
                 Ok(Value::Null)
@@ -2027,6 +2086,7 @@ impl Evaluator {
                     formals,
                     rest_param: None,
                     body: Arc::new(body_stmt),
+                    env: Rc::clone(&self.scope),
                 })
             }
             Expr::TemplateLiteral { quasis, exprs, .. } => {
@@ -2546,8 +2606,11 @@ impl Evaluator {
                 formals,
                 rest_param,
                 body,
+                env,
             } => {
-                let scope = Scope::child(Rc::clone(&self.scope));
+                // A real closure: the call frame's parent is the function's DEFINING scope (env),
+                // not the call site — so free variables resolve lexically.
+                let scope = Scope::child(Rc::clone(env));
                 {
                     let mut s = scope.borrow_mut();
                     for (i, formal) in formals.iter().enumerate() {

@@ -711,6 +711,15 @@ struct Codegen {
     /// Stack: true = async Rust context (run body), false = sync closure (Tish fn body)
     async_context_stack: Vec<bool>,
     loop_stack: Vec<(String, Option<String>)>, // (break_label, continue_update) for innermost loop
+    /// Break targets for innermost breakable construct — loops AND switches (JS `break` exits the
+    /// nearest loop OR switch; `continue` uses loop_stack). Loops push to both; switches push here only.
+    break_stack: Vec<String>,
+    /// How many enclosing `try`-body closures we're currently emitting inside (within the current
+    /// function). A try body compiles to `(|| -> Result<Option<Value>, _> { … })()` — a *completion*
+    /// closure: `Ok(None)`=normal, `Ok(Some(v))`=pending `return v`, `Err(Throw)`=pending throw. When
+    /// depth>0, `return`/`throw` emit the closure-escaping completion form so they unwind through
+    /// `finally`; at depth 0 they're a plain `return`/panic (the fast path is untouched).
+    try_closure_depth: u32,
     /// Stack of scopes, each containing function names declared in that scope
     /// Used to capture sibling functions for mutual recursion
     function_scope_stack: Vec<Vec<String>>,
@@ -772,6 +781,8 @@ impl Codegen {
             native_module_init,
             async_context_stack: Vec::new(),
             loop_stack: Vec::new(),
+            break_stack: Vec::new(),
+            try_closure_depth: 0,
             function_scope_stack: vec![Vec::new()], // Start with global scope
             outer_params_stack: Vec::new(),
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
@@ -1946,9 +1957,11 @@ impl Codegen {
                 let label = format!("'while_loop_{}", self.loop_label_index);
                 self.loop_label_index += 1;
                 self.loop_stack.push((label.clone(), None));
+                self.break_stack.push(label.clone());
                 self.write(&format!("{}: while {} {{\n", label, c));
                 self.indent += 1;
                 self.emit_statement(body)?;
+                self.break_stack.pop();
                 self.loop_stack.pop();
                 self.indent -= 1;
                 self.writeln("}");
@@ -2019,6 +2032,7 @@ impl Codegen {
                     format!("{};", ue)
                 });
                 self.loop_stack.push((label.clone(), update_code));
+                self.break_stack.push(label.clone());
                 self.write(&format!("{}: loop {{\n", label));
                 self.indent += 1;
                 self.writeln(&format!("if !{} {{ break; }}", cond_expr));
@@ -2027,6 +2041,7 @@ impl Codegen {
                     let ue = self.emit_expr_discard(u)?;
                     self.writeln(&format!("{};", ue));
                 }
+                self.break_stack.pop();
                 self.loop_stack.pop();
                 self.indent -= 1;
                 self.writeln("}");
@@ -2039,10 +2054,18 @@ impl Codegen {
                     .map(|e| self.emit_expr(e))
                     .transpose()?
                     .unwrap_or_else(|| "Value::Null".to_string());
-                self.writeln(&format!("return {};", v));
+                if self.try_closure_depth > 0 {
+                    // Inside a try-body closure: escape it as a pending-return completion so any
+                    // enclosing `finally` runs on the way out to the function boundary.
+                    self.writeln(&format!("return Ok(Some({}));", v));
+                } else {
+                    self.writeln(&format!("return {};", v));
+                }
             }
             Statement::Break { .. } => {
-                if let Some((label, _)) = self.loop_stack.last() {
+                // `break` exits the innermost loop OR switch (break_stack), not necessarily the
+                // innermost loop. A switch pushes a label here so its `break` stays switch-local.
+                if let Some(label) = self.break_stack.last() {
                     self.writeln(&format!("break {};", label));
                 } else {
                     self.writeln("break;");
@@ -2079,6 +2102,13 @@ impl Codegen {
             } => {
                 let e = self.emit_expr(expr)?;
                 self.writeln(&format!("let _sv = {};", e));
+                // Wrap in a labeled block so `break` inside a case exits the SWITCH, not an
+                // enclosing loop. tish switch has no fall-through (match's first-arm semantics).
+                let sw_label = format!("'switch_{}", self.loop_label_index);
+                self.loop_label_index += 1;
+                self.break_stack.push(sw_label.clone());
+                self.write(&format!("{}: {{\n", sw_label));
+                self.indent += 1;
                 self.writeln("match () {");
                 self.indent += 1;
                 for (case_expr, body) in cases {
@@ -2108,30 +2138,39 @@ impl Codegen {
                 }
                 self.indent -= 1;
                 self.writeln("}");
+                self.indent -= 1;
+                self.writeln("}");
+                self.break_stack.pop();
             }
             Statement::DoWhile { body, cond, .. } => {
                 let c = self.emit_cond_expr(cond)?;
                 let label = format!("'dowhile_loop_{}", self.loop_label_index);
                 self.loop_label_index += 1;
                 self.loop_stack.push((label.clone(), None));
+                self.break_stack.push(label.clone());
                 self.write(&format!("{}: loop {{\n", label));
                 self.indent += 1;
                 self.emit_statement(body)?;
                 self.write(&format!("if !{} {{ break; }}\n", c));
+                self.break_stack.pop();
                 self.loop_stack.pop();
                 self.indent -= 1;
                 self.writeln("}");
             }
             Statement::Throw { value, .. } => {
                 let v = self.emit_expr(value)?;
-                if self.value_fn_depth > 0 {
+                if self.try_closure_depth > 0 || self.value_fn_depth == 0 {
+                    // Inside a try-body closure (so `catch`/`finally` can see it) or at top level
+                    // (run() returns a Result): a catchable error completion.
                     self.writeln(&format!(
-                        "{{ let _th = {}; panic!(\"uncaught throw: {{}}\", _th.to_display_string()); }}",
+                        "return Err(Box::new(tishlang_runtime::TishError::Throw({})) as Box<dyn std::error::Error>);",
                         v
                     ));
                 } else {
+                    // Top of a value-fn body with no enclosing try: there is no error channel
+                    // across the native-fn ABI, so an uncaught throw aborts (matches prior behavior).
                     self.writeln(&format!(
-                        "return Err(Box::new(tishlang_runtime::TishError::Throw({})) as Box<dyn std::error::Error>);",
+                        "{{ let _th = {}; panic!(\"uncaught throw: {{}}\", _th.to_display_string()); }}",
                         v
                     ));
                 }
@@ -2143,58 +2182,81 @@ impl Codegen {
                 finally_body,
                 ..
             } => {
-                self.writeln("let _try_result: Result<Value, Box<dyn std::error::Error>> = (|| {");
+                // The try body runs in a completion closure:
+                //   Ok(None)     = ran to the end normally
+                //   Ok(Some(v))  = a `return v` is pending (must run finally, then return)
+                //   Err(Throw)   = a `throw` is pending (catchable; else runs finally then re-raises)
+                // `return`/`throw` inside the body emit the closure-escaping form (try_closure_depth).
+                self.writeln(
+                    "let mut _flow: Result<Option<Value>, Box<dyn std::error::Error>> = (|| {",
+                );
                 self.indent += 1;
+                self.try_closure_depth += 1;
                 self.emit_statement(body)?;
-                self.writeln("Ok(Value::Null)");
+                self.try_closure_depth -= 1;
+                self.writeln("Ok(None)");
                 self.indent -= 1;
                 self.writeln("})();");
 
                 if let Some(catch_stmt) = catch_body {
+                    // Only a `throw` is catchable; a pending `return` (Ok(Some)) bypasses catch.
+                    self.writeln("_flow = match _flow {");
+                    self.indent += 1;
+                    self.writeln("Err(_e) => match _e.downcast::<tishlang_runtime::TishError>() {");
+                    self.indent += 1;
+                    self.writeln("Ok(_te) => match *_te {");
+                    self.indent += 1;
+                    self.writeln("tishlang_runtime::TishError::Throw(_tv) => {");
+                    self.indent += 1;
                     if let Some(param) = catch_param {
-                        self.writeln("if let Err(e) = _try_result {");
-                        self.indent += 1;
-                        self.writeln("match e.downcast::<tishlang_runtime::TishError>() {");
-                        self.indent += 1;
-                        self.writeln("Ok(tish_err) => {");
-                        self.indent += 1;
-                        self.writeln("if let tishlang_runtime::TishError::Throw(v) = *tish_err {");
-                        self.writeln(&format!(
-                            "let {} = v.clone();",
-                            Self::escape_ident(param.as_ref())
-                        ));
-                        self.emit_statement(catch_stmt)?;
-                        if self.value_fn_depth > 0 {
-                            self.writeln(
-                                "} else { panic!(\"unhandled error in native Tish: {:?}\", *tish_err); }",
-                            );
-                        } else {
-                            self.writeln("} else { return Err(Box::new(tish_err)); }");
-                        }
-                        self.indent -= 1;
-                        self.writeln("}");
-                        if self.value_fn_depth > 0 {
-                            self.writeln(
-                                "Err(orig) => panic!(\"non-Tish error in native Tish: {:?}\", orig),",
-                            );
-                        } else {
-                            self.writeln("Err(orig) => return Err(orig),");
-                        }
-                        self.indent -= 1;
-                        self.writeln("}");
-                        self.indent -= 1;
-                    } else {
-                        self.writeln("if let Err(_e) = _try_result {");
-                        self.indent += 1;
-                        self.emit_statement(catch_stmt)?;
-                        self.indent -= 1;
+                        self.writeln(&format!("let {} = _tv;", Self::escape_ident(param.as_ref())));
                     }
+                    self.writeln(
+                        "(|| -> Result<Option<Value>, Box<dyn std::error::Error>> {",
+                    );
+                    self.indent += 1;
+                    self.try_closure_depth += 1;
+                    self.emit_statement(catch_stmt)?;
+                    self.try_closure_depth -= 1;
+                    self.writeln("Ok(None)");
+                    self.indent -= 1;
+                    self.writeln("})()");
+                    self.indent -= 1;
                     self.writeln("}");
+                    self.writeln("_other => Err(Box::new(_other)),");
+                    self.indent -= 1;
+                    self.writeln("},");
+                    self.writeln("Err(_orig) => Err(_orig),");
+                    self.indent -= 1;
+                    self.writeln("},");
+                    self.writeln("_ok => _ok,");
+                    self.indent -= 1;
+                    self.writeln("};");
                 }
 
                 if let Some(finally_stmt) = finally_body {
                     self.emit_statement(finally_stmt)?;
                 }
+
+                // After finally, propagate any pending completion in the form the enclosing context
+                // expects (an outer try-closure / a value-fn body / top-level run()).
+                self.writeln("match _flow {");
+                self.indent += 1;
+                if self.try_closure_depth > 0 {
+                    self.writeln("Ok(Some(_rv)) => return Ok(Some(_rv)),");
+                    self.writeln("Err(_e) => return Err(_e),");
+                } else if self.value_fn_depth > 0 {
+                    self.writeln("Ok(Some(_rv)) => return _rv,");
+                    self.writeln("Err(_e) => return tishlang_runtime::fn_unwind(_e),");
+                } else {
+                    // Top level (run() -> Result<(), _>): a top-level `return value` just ends the
+                    // script (the value is unobservable); an uncaught throw propagates out of run().
+                    self.writeln("Ok(Some(_)) => return Ok(()),");
+                    self.writeln("Err(_e) => return Err(_e),");
+                }
+                self.writeln("Ok(None) => {}");
+                self.indent -= 1;
+                self.writeln("}");
             }
             Statement::FunDecl {
                 name,

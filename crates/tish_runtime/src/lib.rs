@@ -321,21 +321,40 @@ pub mod json {
     }
 }
 
-/// Error type for Tish throw/catch.
+/// Error type for Tish throw/catch + non-local control flow (used to model `return`/`throw`
+/// escaping `try`/`finally` in the Rust backend, which has no native exceptions).
 #[derive(Debug, Clone)]
 pub enum TishError {
+    /// A JS `throw` — catchable by `catch`.
     Throw(Value),
+    /// A JS `return value` that must escape an enclosing `try`/`finally` and unwind to the
+    /// function boundary (running each `finally` on the way out). Never caught by `catch`.
+    Return(Value),
 }
 
 impl fmt::Display for TishError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TishError::Throw(v) => write!(f, "{}", v.to_display_string()),
+            TishError::Return(v) => write!(f, "return {}", v.to_display_string()),
         }
     }
 }
 
 impl std::error::Error for TishError {}
+
+/// Function-boundary unwind: convert a completion that escaped a function body's `Result`-closure
+/// back into the function's `Value`. A `return v` yields `v`; an uncaught `throw` panics (matching
+/// the behavior of a throw with no enclosing `try`); any other error panics.
+pub fn fn_unwind(e: Box<dyn std::error::Error>) -> Value {
+    match e.downcast::<TishError>() {
+        Ok(te) => match *te {
+            TishError::Return(v) => v,
+            TishError::Throw(v) => panic!("uncaught throw: {}", v.to_display_string()),
+        },
+        Err(orig) => panic!("error in native Tish: {:?}", orig),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum LogLevel {

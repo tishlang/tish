@@ -106,13 +106,20 @@ pub enum Opcode {
     LoadUpvalue = 46,
     /// Store top of stack into an enclosing frame slot (operands: u16 hops, u16 slot).
     StoreUpvalue = 47,
+    /// Begin a per-iteration binding region for a loop variable (operand: u16 name index).
+    /// Registers the name so closures created in the loop body snapshot it into a fresh overlay
+    /// (ES `let` per-iteration semantics); the rest of the frame stays shared. Emitted only when
+    /// the loop body creates a closure, so closure-free (hot) loops are untouched.
+    LoopVarsBegin = 48,
+    /// End the innermost per-iteration binding region (no operand).
+    LoopVarsEnd = 49,
 }
 
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=47 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=49 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 47 {
+        if b <= 49 {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None
@@ -137,6 +144,7 @@ impl Opcode {
             | Opcode::ConstructSpread
             | Opcode::EnterBlock
             | Opcode::ExitBlock
+            | Opcode::LoopVarsEnd
             | Opcode::AwaitPromise => 1,
             Opcode::ArraySortByProperty
             | Opcode::ArrayMapBinOp

@@ -648,6 +648,14 @@ const MVP_TEST_FILES: &[&str] = &[
     // Regression guard for JIT bool-boxing / mod, and object/JSON insertion order
     // (found via tests/core/jit_probe). Asserted identical across all backends.
     "jit_regression.tish",
+    // Deeply-nested control flow (loops × switch × try/catch/finally × let/const). Regression
+    // guard for the 2026-06 fixes: rust switch-break scoping, rust/vm try-in-fn + finally on
+    // return/propagation. Asserted identical across all backends. See docs/control-flow-audit.md.
+    "control_flow_nested.tish",
+    // ES per-iteration `let` binding (for / for-of / while closures capture this iteration's value).
+    // Regression guard for the 2026-06 vm `LoopVarsBegin`/`enclosing2` overlay fix; identical across
+    // interp/vm/rust/cranelift. See docs/control-flow-audit.md.
+    "loop_let_capture.tish",
     "nested_loops.tish",
     "scopes.tish",
     "optional_braces.tish",
@@ -911,6 +919,8 @@ fn test_mvp_programs_native() {
 /// Curated list: files that pass with Cranelift (some constructs cause stack-underflow; see docs/builtins-gap-analysis.md).
 const CRANELIFT_TEST_FILES: &[&str] = &[
     "jit_regression.tish",
+    "control_flow_nested.tish",
+    "loop_let_capture.tish",
     "fn_any.tish",
     "strict_equality.tish",
     "switch.tish",

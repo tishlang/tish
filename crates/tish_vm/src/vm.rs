@@ -802,6 +802,11 @@ pub struct Vm {
     scope: ObjectMap,
     /// Enclosing scope for closures (captured parent frame locals).
     enclosing: Option<ScopeMap>,
+    /// Second enclosing level, checked after `enclosing`. Used for per-iteration `let`: a closure
+    /// created in a loop body captures a small overlay of the loop var(s) (`enclosing`) layered
+    /// over the still-shared frame scope (`enclosing2`), so the loop var is frozen per-iteration
+    /// while everything else stays live. `None` for ordinary closures.
+    enclosing2: Option<ScopeMap>,
     globals: VmRef<ObjectMap>,
     /// Capabilities for `LoadNativeExport` and globals such as `process` / `serve`.
     capabilities: Arc<HashSet<String>>,
@@ -828,6 +833,7 @@ impl Vm {
             stack: Vec::new(),
             scope: ObjectMap::default(),
             enclosing: None,
+            enclosing2: None,
             globals: VmRef::new(init_globals(capabilities.as_ref())),
             capabilities,
             native_modules: VmRef::new(HashMap::new()),
@@ -950,6 +956,10 @@ impl Vm {
         }
         let mut try_handlers: Vec<(usize, usize)> = vec![];
         let mut block_undo_stack: Vec<Vec<(Arc<str>, Option<Value>)>> = vec![];
+        // Names of loop variables currently in a per-iteration binding region (ES `let` semantics).
+        // A closure created while this is non-empty snapshots these into a fresh overlay so it
+        // captures the loop variable's value for THIS iteration. Pushed/popped by LoopVarsBegin/End.
+        let mut active_loop_vars: Vec<Arc<str>> = Vec::new();
 
         loop {
             if ip >= code.len() {
@@ -1009,7 +1019,24 @@ impl Vm {
                             let jit_fn = crate::jit::try_compile_numeric(inner);
                             let inner_clone = inner.clone();
                             let globals = self.globals.clone();
-                            let enclosing = Some(local_scope.clone());
+                            // Per-iteration `let`: inside a loop's binding region, freeze the loop
+                            // var(s) into a fresh overlay (`enclosing`) layered over the still-shared
+                            // frame scope (`enclosing2`) — the loop var is this iteration's value,
+                            // everything else stays live. Otherwise capture the frame scope directly.
+                            let (enclosing, enclosing2) = if active_loop_vars.is_empty() {
+                                (Some(local_scope.clone()), None)
+                            } else {
+                                let mut overlay = ObjectMap::default();
+                                {
+                                    let ls = local_scope.borrow();
+                                    for n in &active_loop_vars {
+                                        if let Some(v) = ls.get(n.as_ref()) {
+                                            overlay.insert(Arc::clone(n), v.clone());
+                                        }
+                                    }
+                                }
+                                (Some(VmRef::new(overlay)), Some(local_scope.clone()))
+                            };
                             let capabilities = Arc::clone(&self.capabilities);
                             let native_modules = self.native_modules.clone();
                             Value::native(move |args: &[Value]| {
@@ -1046,6 +1073,7 @@ impl Vm {
                                     stack: Vec::new(),
                                     scope: ObjectMap::default(),
                                     enclosing: enclosing.clone(),
+                                    enclosing2: enclosing2.clone(),
                                     globals: globals.clone(),
                                     capabilities: Arc::clone(&capabilities),
                                     native_modules: native_modules.clone(),
@@ -1068,6 +1096,11 @@ impl Vm {
                         .cloned()
                         .or_else(|| {
                             self.enclosing
+                                .as_ref()
+                                .and_then(|e| e.borrow().get(name.as_ref()).cloned())
+                        })
+                        .or_else(|| {
+                            self.enclosing2
                                 .as_ref()
                                 .and_then(|e| e.borrow().get(name.as_ref()).cloned())
                         })
@@ -1095,6 +1128,14 @@ impl Vm {
                         .unwrap_or(false)
                     {
                         let en = self.enclosing.as_ref().unwrap();
+                        en.borrow_mut().insert(Arc::clone(name), v);
+                    } else if self
+                        .enclosing2
+                        .as_ref()
+                        .map(|e| e.borrow().contains_key(name.as_ref()))
+                        .unwrap_or(false)
+                    {
+                        let en = self.enclosing2.as_ref().unwrap();
                         en.borrow_mut().insert(Arc::clone(name), v);
                     } else if self.scope.contains_key(name.as_ref()) {
                         self.scope.insert(Arc::clone(name), v);
@@ -1164,6 +1205,16 @@ impl Vm {
                             }
                         }
                     }
+                }
+                Opcode::LoopVarsBegin => {
+                    let idx = Self::read_u16(code, &mut ip);
+                    let name = names
+                        .get(idx as usize)
+                        .ok_or_else(|| format!("Name index out of bounds: {}", idx))?;
+                    active_loop_vars.push(Arc::clone(name));
+                }
+                Opcode::LoopVarsEnd => {
+                    active_loop_vars.pop();
                 }
                 Opcode::LoadGlobal => {
                     let idx = Self::read_u16(code, &mut ip);

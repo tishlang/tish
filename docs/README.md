@@ -12,4 +12,5 @@ Internal and contributor-facing docs. User-facing docs live in the **[tishlang.c
 | `architecture-next-steps.md` | tish_core refactor, crate layout, design decisions |
 | `builtins-gap-analysis.md` | Builtins across Rust vs bytecode VM (Cranelift/WASI) |
 | `code-audit-2026-06.md` | Cleanup/optimize/secure audit: what's fixed + prioritized remaining roadmap (DoS limits, interp/core convergence, hot-path allocs) |
+| `control-flow-audit.md` | Cross-backend control-flow/scope correctness matrix: 7 pre-existing divergences (let-binding, try-in-fn, switch-break, finally, event-loop) + fix priority. Perf work verified clean |
 | `perf.md` | Perf optimization log: slots/JIT/object layout, HTTP throughput, run-vs-build |

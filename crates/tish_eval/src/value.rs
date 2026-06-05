@@ -112,11 +112,14 @@ pub enum Value {
     Array(Rc<RefCell<Vec<Value>>>),
     Object(Rc<RefCell<EvalObjectData>>),
     Symbol(Arc<TishSymbol>),
-    /// User-defined function with AST body
+    /// User-defined function with AST body. `env` is the lexical scope captured at definition
+    /// time, so the body resolves free variables against where it was DEFINED (a real closure),
+    /// not where it is called.
     Function {
         formals: Arc<[FunParam]>,
         rest_param: Option<Arc<str>>,
         body: Arc<Statement>,
+        env: crate::eval::ScopeRef,
     },
     /// Native/builtin function
     Native(NativeFn),

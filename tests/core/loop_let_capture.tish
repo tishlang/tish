@@ -1,0 +1,30 @@
+// ES per-iteration `let` binding: a closure created in a loop captures THAT iteration's value,
+// not the final one. node + rust + interp + vm (after the 2026-06 fix) all agree here. A `let`
+// declared OUTSIDE the loop stays a single shared binding (closures see its final value).
+// See docs/control-flow-audit.md.
+let out = []
+
+// for-let: each iteration's `i` is a fresh binding
+let f = []
+for (let i = 0; i < 3; i++) { f.push(() => i) }
+out.push("for:" + f[0]() + f[1]() + f[2]())
+
+// for-of: each element is a fresh binding
+let g = []
+for (let v of [10, 20, 30]) { g.push(() => v) }
+out.push("of:" + g[0]() + g[1]() + g[2]())
+
+// nested loops: both levels are per-iteration
+let h = []
+for (let a = 0; a < 2; a++) {
+  for (let b = 0; b < 2; b++) { h.push(() => "" + a + b) }
+}
+out.push("nest:" + h.map((cb) => cb()).join(","))
+
+// `let` declared directly in a while body is also per-iteration
+let w = []
+let n = 0
+while (n < 3) { let m = n * 2; w.push(() => m); n = n + 1 }
+out.push("while:" + w[0]() + "," + w[1]() + "," + w[2]())
+
+console.log(out.join(" "))

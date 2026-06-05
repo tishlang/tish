@@ -88,6 +88,11 @@ struct Compiler<'a> {
     /// name-keyed `LoadVar`. Set only for self-contained functions (see
     /// [`simple_fn_slots`]); `None` for top-level and name-based closures.
     slot_ctx: Option<HashMap<Arc<str>, u16>>,
+    /// Active `finally` bodies of enclosing `try`s in the CURRENT function (innermost last). A
+    /// `return` that escapes these trys must run each one on the way out (the bytecode VM jumps
+    /// straight to the function return otherwise). Reset per function — nested fns get a fresh
+    /// `Compiler`. The exception-unwind path is handled separately in the `Try` emitter.
+    finally_stack: Vec<Box<Statement>>,
 }
 
 /// Does `e` reference only the given params (no free/global vars, no nested
@@ -216,7 +221,22 @@ impl<'a> Compiler<'a> {
             block_depth: 0,
             retain_last_expr,
             slot_ctx: None,
+            finally_stack: Vec::new(),
         }
+    }
+
+    /// Emit the pending `finally` bodies (innermost first) before a `return` escapes them. While
+    /// emitting, the stack is cleared so a `return` *inside* one of these finallys doesn't recurse.
+    fn emit_pending_finallys(&mut self) -> Result<(), CompileError> {
+        if self.finally_stack.is_empty() {
+            return Ok(());
+        }
+        let saved = std::mem::take(&mut self.finally_stack);
+        for finally in saved.iter().rev() {
+            self.compile_statement(finally)?;
+        }
+        self.finally_stack = saved;
+        Ok(())
     }
 
     fn emit_exit_blocks_until_depth(&mut self, target_depth: usize) {
@@ -273,6 +293,21 @@ impl<'a> Compiler<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Names `let`/`const`-declared DIRECTLY in a loop body block (not nested blocks). Each is a
+    /// fresh per-iteration binding (ES `let`), so closures created in the body must capture this
+    /// iteration's value — registered via `LoopVarsBegin`.
+    fn loop_body_block_lets(body: &Statement) -> Vec<Arc<str>> {
+        let mut out = Vec::new();
+        if let Statement::Block { statements, .. } = body {
+            for s in statements {
+                if let Statement::VarDecl { name, .. } = s {
+                    out.push(Arc::clone(name));
+                }
+            }
+        }
+        out
     }
 
     fn compile_for_init_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
@@ -691,6 +726,14 @@ impl<'a> Compiler<'a> {
                 self.patch_jump(jump_end, self.chunk.code.len());
             }
             Statement::While { cond, body, .. } => {
+                // Per-iteration `let`: a `let` declared directly in the loop body is a fresh binding
+                // each iteration, so a closure created in the body captures THIS iteration's value.
+                // Register those names (same overlay mechanism as for/for-of loop vars).
+                let body_lets = Self::loop_body_block_lets(body);
+                for n in &body_lets {
+                    let idx = self.name_idx(n);
+                    self.emit_u16(Opcode::LoopVarsBegin, idx);
+                }
                 let start = self.chunk.code.len();
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
@@ -716,6 +759,9 @@ impl<'a> Compiler<'a> {
                 for p in info.break_patches {
                     self.patch_jump(p, end);
                 }
+                for _ in &body_lets {
+                    self.emit(Opcode::LoopVarsEnd);
+                }
             }
             Statement::For {
                 init,
@@ -727,6 +773,18 @@ impl<'a> Compiler<'a> {
                 self.scope.push(HashMap::new());
                 if let Some(i) = init {
                     self.compile_for_init_statement(i.as_ref())?;
+                }
+                // ES per-iteration `let`: register the loop var so a closure created in the body
+                // captures THIS iteration's value (not the final one). One push per loop entry; the
+                // per-iteration snapshot only happens when a closure is actually created, so
+                // closure-free loops are unaffected.
+                let loop_var: Option<Arc<str>> = match init.as_deref() {
+                    Some(Statement::VarDecl { name, .. }) => Some(Arc::clone(name)),
+                    _ => None,
+                };
+                if let Some(ref n) = loop_var {
+                    let idx = self.name_idx(n);
+                    self.emit_u16(Opcode::LoopVarsBegin, idx);
                 }
                 let cond_start = self.chunk.code.len();
                 if let Some(c) = cond {
@@ -761,6 +819,11 @@ impl<'a> Compiler<'a> {
                 self.patch_jump(jump_out, end);
                 for p in info.break_patches {
                     self.patch_jump(p, end);
+                }
+                // After the loop fully exits (normal or break, both land at `end`): close the
+                // per-iteration region.
+                if loop_var.is_some() {
+                    self.emit(Opcode::LoopVarsEnd);
                 }
                 self.breakable_stack.pop();
                 self.scope.pop();
@@ -798,6 +861,9 @@ impl<'a> Compiler<'a> {
                 self.chunk.write_u16(zero_idx);
                 self.emit_u16(Opcode::DeclareVar, i_idx);
                 self.scope.last_mut().unwrap().insert(i_name.clone(), false);
+                // ES per-iteration `let` for `for (let v of …)`: register the loop var so a closure
+                // in the body captures this iteration's element (emitted once, before loop_start).
+                self.emit_u16(Opcode::LoopVarsBegin, name_idx);
                 let loop_start = self.chunk.code.len();
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
@@ -838,9 +904,12 @@ impl<'a> Compiler<'a> {
                 for p in info.break_patches {
                     self.patch_jump(p, end);
                 }
+                self.emit(Opcode::LoopVarsEnd);
                 self.scope.pop();
             }
             Statement::Return { value, .. } => {
+                // Evaluate the return value first (JS order), then run any enclosing `finally`
+                // blocks (they're stack-neutral, so the value stays on top), then return.
                 if let Some(v) = value {
                     self.compile_expr(v)?;
                 } else {
@@ -848,6 +917,7 @@ impl<'a> Compiler<'a> {
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(idx);
                 }
+                self.emit_pending_finallys()?;
                 self.emit(Opcode::Return);
             }
             Statement::Break { .. } => {
@@ -959,6 +1029,11 @@ impl<'a> Compiler<'a> {
                     .insert(Arc::clone(name), false);
             }
             Statement::DoWhile { body, cond, .. } => {
+                let body_lets = Self::loop_body_block_lets(body);
+                for n in &body_lets {
+                    let idx = self.name_idx(n);
+                    self.emit_u16(Opcode::LoopVarsBegin, idx);
+                }
                 let start = self.chunk.code.len();
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
@@ -983,6 +1058,9 @@ impl<'a> Compiler<'a> {
                 }
                 for p in info.break_patches {
                     self.patch_jump(p, end);
+                }
+                for _ in &body_lets {
+                    self.emit(Opcode::LoopVarsEnd);
                 }
             }
             Statement::Switch {
@@ -1064,6 +1142,10 @@ impl<'a> Compiler<'a> {
                 let catch_offset_pos = self.chunk.code.len();
                 self.emit(Opcode::EnterTry);
                 self.chunk.write_u16(0);
+                // A `return` inside the body/catch must run this finally on the way out.
+                if let Some(f) = finally_body {
+                    self.finally_stack.push(f.clone());
+                }
                 self.compile_statement(body)?;
                 self.emit(Opcode::ExitTry);
                 let jump_over_catch = self.emit_jump(Opcode::Jump);
@@ -1088,10 +1170,19 @@ impl<'a> Compiler<'a> {
                         self.compile_statement(catch_stmt)?;
                     }
                 } else {
+                    // No catch: run `finally` on the exception path, then re-raise (propagate).
+                    if let Some(f) = finally_body {
+                        self.compile_statement(f)?;
+                    }
                     self.emit(Opcode::Throw);
                 }
                 let after_catch = self.chunk.code.len();
                 self.patch_jump(jump_over_catch, after_catch);
+                // The finally is no longer pending for enclosing returns once we emit its inline
+                // (normal-path) copy below.
+                if finally_body.is_some() {
+                    self.finally_stack.pop();
+                }
                 if let Some(finally) = finally_body {
                     self.compile_statement(finally)?;
                 }
