@@ -215,10 +215,9 @@ pub fn math_round(args: &[Value]) -> Result<Value, String> {
 }
 
 pub fn math_random(_args: &[Value]) -> Result<Value, String> {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let random = RandomState::new().build_hasher().finish() as f64 / u64::MAX as f64;
-    Ok(Value::Number(random))
+    // Match the VM / builtins (`rand::random::<f64>()`) — uniform [0,1). The old
+    // RandomState-hash was non-uniform and diverged from every other backend.
+    Ok(Value::Number(rand::random::<f64>()))
 }
 
 pub fn math_pow(args: &[Value]) -> Result<Value, String> {

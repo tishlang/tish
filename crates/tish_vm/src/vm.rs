@@ -1461,27 +1461,24 @@ impl Vm {
                 }
                 Opcode::NewObject => {
                     let n = Self::read_u16(code, &mut ip) as usize;
-                    // Pairs are on the stack in reverse source order (valN,keyN,…,val1,key1).
-                    // Collect, then insert in source order so the object keeps insertion
-                    // order (matches JS/Node). Builds the PropMap directly — small objects
-                    // stay inline with no separate hashmap allocation.
-                    let mut pairs: Vec<(Arc<str>, Value)> = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        let val = self
-                            .stack
-                            .pop()
-                            .ok_or_else(|| "Stack underflow".to_string())?;
-                        let key_val = self
-                            .stack
-                            .pop()
-                            .ok_or_else(|| "Stack underflow".to_string())?;
-                        let key: Arc<str> = key_val.to_display_string().into();
-                        pairs.push((key, val));
+                    if self.stack.len() < 2 * n {
+                        return Err("Stack underflow".to_string());
                     }
+                    // Pairs sit on the stack in source order: key1,val1,…,keyN,valN. Read them
+                    // in place into the PropMap (insertion order = JS order) and drop them in
+                    // one truncate — no intermediate Vec per object literal (a hot path: every
+                    // `{...}` and every HTTP JSON response).
+                    let base = self.stack.len() - 2 * n;
                     let mut map = PropMap::with_capacity(n);
-                    for (key, val) in pairs.into_iter().rev() {
+                    for i in 0..n {
+                        let key_val =
+                            std::mem::replace(&mut self.stack[base + 2 * i], Value::Null);
+                        let val =
+                            std::mem::replace(&mut self.stack[base + 2 * i + 1], Value::Null);
+                        let key: Arc<str> = key_val.to_display_string().into();
                         map.insert(key, val);
                     }
+                    self.stack.truncate(base);
                     self.stack.push(Value::Object(VmRef::new(ObjectData {
                         strings: map,
                         symbols: None,

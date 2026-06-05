@@ -587,6 +587,12 @@ impl Evaluator {
                 };
 
                 if let Some(finally_stmt) = finally_body {
+                    // KNOWN BUG (shared with the VM/compiled backends): a throw/return/
+                    // break/continue inside `finally` should supersede the try/catch
+                    // outcome (JS completion semantics) but is swallowed here. Fixing it
+                    // in the interp alone (`?`) breaks interp==vm parity because the VM has
+                    // the same bug, and the VM fix is a bytecode-compiler-level
+                    // finally-completion change. Deferred as a coordinated cross-backend fix.
                     let _ = self.eval_statement(finally_stmt);
                 }
 
@@ -2107,7 +2113,10 @@ impl Evaluator {
                 };
                 Ok(Value::Bool(ok))
             }
-            BinOp::Eq | BinOp::Ne => Err("Loose equality not supported".to_string()),
+            // Loose ==/!= : match the VM (vm.rs maps Eq/Ne to strict_eq) so interp == vm ==
+            // compiled. Previously the interpreter alone errored on `==`.
+            BinOp::Eq => Ok(Value::Bool(l.strict_eq(r))),
+            BinOp::Ne => Ok(Value::Bool(!l.strict_eq(r))),
         }
     }
 

@@ -82,6 +82,20 @@ fn unregister(id: u32) {
     CONNS.lock().unwrap().remove(&id);
 }
 
+/// Max simultaneous WebSocket connections. Each accepted conn registers in `CONNS` and
+/// spawns tasks + channels, freed only on close — unbounded accepts exhaust tasks/memory.
+/// Override with `TISH_WS_MAX_CONNS`; default 10000.
+fn max_ws_connections() -> usize {
+    use std::sync::OnceLock;
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("TISH_WS_MAX_CONNS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000)
+    })
+}
+
 fn conn_send(id: u32, data: String) -> bool {
     let guard = match CONNS.lock() {
         Ok(g) => g,
@@ -366,6 +380,11 @@ pub fn web_socket_server_listen(args: &[Value]) -> Value {
                     Ok(s) => s,
                     Err(_) => break,
                 };
+                // Cap total connections — unbounded accepts would exhaust tasks/memory.
+                if CONNS.lock().map(|c| c.len()).unwrap_or(0) >= max_ws_connections() {
+                    drop(stream);
+                    continue;
+                }
                 let ws_stream = match tokio_tungstenite::accept_async(stream).await {
                     Ok(ws) => {
                         eprintln!(

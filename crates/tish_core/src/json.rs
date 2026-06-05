@@ -132,13 +132,6 @@ fn escape_json_string_into(buf: &mut String, s: &str) {
     }
 }
 
-#[allow(dead_code)]
-fn escape_json_string(s: &str) -> String {
-    let mut buf = String::with_capacity(s.len());
-    escape_json_string_into(&mut buf, s);
-    buf
-}
-
 /// Max nesting depth for `JSON.parse`. Bounds recursion so deeply-nested untrusted
 /// input errors instead of overflowing the stack — a Rust stack overflow aborts the
 /// whole process (uncatchable, SIGABRT). 128 matches serde_json's default limit.

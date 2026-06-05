@@ -226,7 +226,27 @@ impl RequestPrimitive {
             && req.body_length().map(|n| n > 0).unwrap_or(true);
         let mut body = String::new();
         if has_body {
-            let _ = req.as_reader().read_to_string(&mut body);
+            // Bounded read: cap at max_request_body so a huge advertised/chunked body can't
+            // exhaust memory. (`take` is unavailable on `&mut dyn Read`; read in chunks via
+            // the object-safe `read`, then decode once to keep UTF-8 boundaries intact.)
+            let max = max_request_body();
+            let reader = req.as_reader();
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 8192];
+            while buf.len() < max {
+                match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let take = n.min(max - buf.len());
+                        buf.extend_from_slice(&chunk[..take]);
+                        if take < n {
+                            break; // hit the cap mid-chunk
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            body = String::from_utf8_lossy(&buf).into_owned();
         }
         let headers = req
             .headers()
@@ -525,11 +545,37 @@ pub fn send_response_arc(
         None,
     );
     for (key, value) in headers {
-        if let Ok(header) = tiny_http::Header::from_bytes(key.as_bytes(), value.as_bytes()) {
+        if let Some(header) = safe_response_header(key.as_bytes(), value.as_bytes()) {
             response = response.with_header(header);
         }
     }
     let _ = request.respond(response);
+}
+
+/// Max request body bytes read before truncating — bounds per-request memory so a huge
+/// `Content-Length` / chunked stream can't OOM the worker. Override with `TISH_HTTP_MAX_BODY`
+/// (bytes); default 16 MiB. (A future refinement: reply 413 instead of truncating.)
+fn max_request_body() -> usize {
+    use std::sync::OnceLock;
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("TISH_HTTP_MAX_BODY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(16 * 1024 * 1024)
+    })
+}
+
+/// Build a response header, rejecting any key/value with control bytes (CR/LF/NUL).
+/// Prevents response-splitting / header injection when a handler reflects untrusted input
+/// into a header — `tiny_http::Header::from_bytes` only checks ASCII, and CR/LF are ASCII,
+/// so it would otherwise accept them.
+fn safe_response_header(key: &[u8], value: &[u8]) -> Option<tiny_http::Header> {
+    let bad = |b: &u8| matches!(*b, b'\r' | b'\n' | 0);
+    if key.iter().any(bad) || value.iter().any(bad) {
+        return None;
+    }
+    tiny_http::Header::from_bytes(key, value).ok()
 }
 
 struct ArcBytesReader {
@@ -573,7 +619,7 @@ pub fn send_response_bytes(
         None,
     );
     for (key, value) in headers {
-        if let Ok(header) = tiny_http::Header::from_bytes(key.as_bytes(), value.as_bytes()) {
+        if let Some(header) = safe_response_header(key.as_bytes(), value.as_bytes()) {
             response = response.with_header(header);
         }
     }
@@ -601,7 +647,7 @@ fn send_file_response(
     let status_code = tiny_http::StatusCode(status);
     let mut response = tiny_http::Response::from_file(file).with_status_code(status_code);
     for (key, value) in headers {
-        if let Ok(header) = tiny_http::Header::from_bytes(key.as_bytes(), value.as_bytes()) {
+        if let Some(header) = safe_response_header(key.as_bytes(), value.as_bytes()) {
             response = response.with_header(header);
         }
     }

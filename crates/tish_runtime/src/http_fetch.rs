@@ -353,13 +353,31 @@ pub fn response_value_from_reqwest(response: reqwest::Response) -> Value {
     Value::object(obj)
 }
 
+/// Shared, hardened outbound HTTP client: request + connect timeouts (a no-timeout fetch is
+/// an outbound resource-pinning / slowloris vector) and a bounded redirect chain. Cached so
+/// the connection pool is reused across requests.
+/// NOTE: this does NOT yet block internal/metadata IPs — full SSRF defense (deny loopback /
+/// link-local / RFC1918 after DNS resolution) is a follow-up that needs a policy decision.
+fn fetch_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 async fn send_request_parts(
     url: String,
     method: String,
     headers: Vec<(String, String)>,
     body: Option<String>,
 ) -> Result<reqwest::Response, String> {
-    let client = reqwest::Client::new();
+    let client = fetch_client();
     let mut req = match method.as_str() {
         "GET" => client.get(&url),
         "POST" => client.post(&url),
