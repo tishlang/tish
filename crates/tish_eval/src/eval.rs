@@ -22,24 +22,27 @@ use crate::value::{
 };
 
 struct Scope {
-    vars: PropMap,
-    consts: std::collections::HashSet<Arc<str>>,
+    // Scope vars: order is never observed (no Object.keys over a scope), so use a fast
+    // unordered aHash map — NOT the object-strings PropMap (an insertion-ordered IndexMap),
+    // which would pay SipHash + ordered-bucket overhead on every variable lookup.
+    vars: AHashMap<Arc<str>, Value>,
+    consts: ahash::AHashSet<Arc<str>>,
     parent: Option<Rc<std::cell::RefCell<Scope>>>,
 }
 
 impl Scope {
     fn new() -> Rc<std::cell::RefCell<Self>> {
         Rc::new(std::cell::RefCell::new(Self {
-            vars: PropMap::default(),
-            consts: std::collections::HashSet::new(),
+            vars: AHashMap::default(),
+            consts: ahash::AHashSet::default(),
             parent: None,
         }))
     }
 
     fn child(parent: Rc<std::cell::RefCell<Scope>>) -> Rc<std::cell::RefCell<Self>> {
         Rc::new(std::cell::RefCell::new(Self {
-            vars: PropMap::default(),
-            consts: std::collections::HashSet::new(),
+            vars: AHashMap::default(),
+            consts: ahash::AHashSet::default(),
             parent: Some(parent),
         }))
     }
