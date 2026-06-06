@@ -1,4 +1,32 @@
 ================================================================================
+  VM CONTROL-FLOW JIT — numeric LOOP functions now run at native speed (2026-06-05)
+================================================================================
+Extended the Cranelift numeric JIT (`tish_vm/src/jit.rs`) from straight-line/ternary leaf functions
+to **functions with loops + branches** (`build_body_cfg`). A cranelift `Variable` per frame slot
+(loop-carried locals; cranelift inserts the SSA phis at `seal_all_blocks`) + one block per bytecode
+jump target. Handles for/while/do-while/nested loops, if/else, early-return, break, continue.
+**Unblocked by slot-based locals** — those made such functions `slot_based` (JIT-eligible) and gave
+the JIT slot indices to consume. Default-on, additive (a bail runs the VM; only a logic bug here is
+wrong → differential-validated).
+
+  THE WIN (default `tish run`; lifts cranelift/wasi — they embed the JIT):
+    fn sumTo(n){let s=0;for(let i=0;i<n;i++){s=s+i*2-1}return s}, 500×100k iters:
+        5530ms (interpreted, ~89× Node)  →  71ms (native, ≈1.1× Node 63ms)  =  78× FASTER.
+    collatz kernel (longer per-call loop): tish 146ms ≈ Node 134ms — MATCHING V8.
+  Numeric loop functions now run at ~native speed. (Tiny-loop-called-Nx — e.g. fib(20)×3M — is
+  CALL-boundary-bound, not loop-bound: 532ms vs 18ms; the per-call box/dispatch dominates → next
+  lever is the call boundary, a separate win.)
+
+  CORRECTNESS (a JIT miscompile = silent wrong result, so validated hard): vm(JIT) ≡ interp(no JIT)
+  ≡ node on a differential fuzz over arithmetic/mod/div(float)/negatives/if-else/nested-loops/while/
+  early-return/break/continue/2-param/bitwise; full cross-backend suite 14/0; `jit_regression` +
+  new `tests/core/jit_loops.tish`. Conservative: bails (→VM) on member/call/array/object, booleans
+  in slots, a ternary-merge inside a loop (non-empty operand stack at a block boundary), unknown
+  opcodes. KEY BUG fixed in bring-up: the compiler appends an unreachable trailing `LoadConst Null;
+  Return` after an explicit `return` — must NOT be a block leader (only real jump targets are), else
+  the JIT bails translating the unreachable Null. Skipped as dead tail instead.
+
+================================================================================
   VM SLOT-BASED LOCALS — NOW DEFAULT-ON + SCOPE-AWARE + TOP-LEVEL (2026-06-05)
 ================================================================================
 Extended the slot work to a proper SCOPE-AWARE allocator (block-scoped `slot_scopes` stack

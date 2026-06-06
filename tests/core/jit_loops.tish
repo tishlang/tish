@@ -1,0 +1,14 @@
+// Numeric-loop functions exercise the VM control-flow JIT (build_body_cfg). Guards JIT≡interp
+// correctness on all backends (vm/cranelift/wasi embed the JIT; native/interp don't but must match).
+fn sumTo(n) { let s = 0; for (let i = 0; i < n; i++) { s = s + i * 2 - 1 } return s }
+fn powMod(n) { let s = 1; for (let i = 1; i < n; i++) { s = s * 2 % 1000000007 } return s }
+fn alt(n) { let s = 0; for (let i = 0; i < n; i++) { if (i % 2 === 0) { s = s + i } else { s = s - i } } return s }
+fn nested(n) { let s = 0; for (let i = 0; i < n; i++) { for (let k = 0; k < 4; k++) { s = s + k } } return s }
+fn whileSum(n) { let s = 0; let i = 0; while (i < n) { s = s + i; i = i + 1 } return s }
+fn earlyRet(n) { let s = 0; for (let i = 0; i < n; i++) { if (i > 30) { return s } s = s + i } return s }
+console.log("sumTo:", sumTo(1000))
+console.log("powMod:", powMod(50))
+console.log("alt:", alt(101))
+console.log("nested:", nested(100))
+console.log("whileSum:", whileSum(100))
+console.log("earlyRet:", earlyRet(100))

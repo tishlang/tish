@@ -1,13 +1,19 @@
-//! Numeric JIT — slice 1 of native codegen.
+//! Numeric JIT — native codegen for `slot_based` numeric functions.
 //!
-//! Compiles *straight-line numeric* `slot_based` functions (the self-contained
-//! leaf callbacks RC2 already detects: `x => x * 2`, `(a, b) => a - b`,
-//! `x => x === 500`, …) to native `f64`-in/`f64`-out machine code via Cranelift,
-//! and the VM calls them directly from the `Call` path when every argument is a
-//! number. Anything unsupported (control flow, member/index, calls, non-number
-//! constants, mod/pow/bitwise, >3 params) makes compilation return `None`, and
-//! any non-number argument at call time falls back to the interpreter — so this
-//! is purely additive and can never change behaviour.
+//! Compiles numeric `f64`-in/`f64`-out functions to native machine code via Cranelift; the VM calls
+//! them directly from the `Call` path when every argument is a number. Two builders:
+//!   * [`build_body`] — straight-line + the ternary-`select` shape (leaf callbacks `x => x * 2`,
+//!     `(a, b) => a - b`, `x => x === 500`, …).
+//!   * [`build_body_cfg`] — **functions with LOOPS and branches** (the big win: a numeric loop
+//!     function went from ~89× Node interpreted to ≈1× Node native). Uses a cranelift `Variable` per
+//!     frame slot and a block per bytecode jump target; handles for/while/nested loops, if/else,
+//!     early return, break, continue. Enabled by slot-based locals making such functions `slot_based`.
+//!
+//! Anything unsupported (member/index, calls, arrays/objects, non-number constants, pow/shift,
+//! booleans in slots, a ternary inside a loop) makes compilation return `None`, and any non-number
+//! argument at call time falls back to the interpreter — so this is purely ADDITIVE and can never
+//! change behaviour (a miss runs the VM). Only a logic bug here could, hence the differential
+//! validation (vm-JIT ≡ interp ≡ node) + `tests/core/jit_loops.tish`.
 //!
 //! Not compiled for wasm targets (cranelift-jit emits host code).
 
@@ -17,7 +23,8 @@ use std::sync::{Mutex, OnceLock};
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::types;
 use cranelift::prelude::{
-    AbiParam, FloatCC, FunctionBuilder, FunctionBuilderContext, InstBuilder, Value as ClifValue,
+    AbiParam, Block, FloatCC, FunctionBuilder, FunctionBuilderContext, InstBuilder,
+    Value as ClifValue, Variable,
 };
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
@@ -164,20 +171,31 @@ fn fcmp_f64(bcx: &mut FunctionBuilder, cc: FloatCC, a: ClifValue, b: ClifValue) 
 fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     let arity = chunk.param_count as usize;
 
-    let mut ctx = g.module.make_context();
     let mut sig = g.module.make_signature();
     for _ in 0..arity {
         sig.params.push(AbiParam::new(types::F64));
     }
     sig.returns.push(AbiParam::new(types::F64));
-    ctx.func.signature = sig.clone();
 
+    // Try the loop-capable CFG builder first; if it bails, retry the straight-line/ternary builder.
+    // Each attempt needs a fresh function (a partial build leaves the context dirty).
+    let mut ctx = g.module.make_context();
+    ctx.func.signature = sig.clone();
     let mut fbctx = FunctionBuilderContext::new();
-    let result_bool = match build_body(&mut ctx.func, &mut fbctx, chunk, arity) {
+    let result_bool = match build_body_cfg(&mut ctx.func, &mut fbctx, chunk, arity) {
         Some(b) => b,
         None => {
             g.module.clear_context(&mut ctx);
-            return None;
+            ctx = g.module.make_context();
+            ctx.func.signature = sig.clone();
+            fbctx = FunctionBuilderContext::new();
+            match build_body(&mut ctx.func, &mut fbctx, chunk, arity) {
+                Some(b) => b,
+                None => {
+                    g.module.clear_context(&mut ctx);
+                    return None;
+                }
+            }
         }
     };
 
@@ -367,6 +385,217 @@ fn falsy_flag(bcx: &mut FunctionBuilder, cond: ClifValue) -> ClifValue {
 /// agreeing-`is_bool` arms) → a Cranelift `select`. Loops (`JumpBack`), early returns inside a
 /// branch, nested branches, calls, member/index, or mismatched `is_bool` all return `None` so the
 /// VM runs the chunk instead — purely additive. Returns `Some(result_is_bool)`.
+/// Byte size of an opcode the loop-JIT understands; `None` ⇒ unsupported (bail → VM).
+fn op_size(op: Opcode) -> Option<usize> {
+    use Opcode::*;
+    Some(match op {
+        Nop | Pop | Dup | Return | LoopVarsEnd | EnterBlock | ExitBlock => 1,
+        LoadLocal | StoreLocal | LoadConst | BinOp | UnaryOp | Jump | JumpIfFalse | JumpBack
+        | LoopVarsBegin => 3,
+        _ => return None,
+    })
+}
+
+/// Read a big-endian u16 operand at `off` without advancing (matches [`read_u16`]).
+#[inline]
+fn peek_u16(code: &[u8], off: usize) -> Option<u16> {
+    let a = *code.get(off)? as u16;
+    let b = *code.get(off + 1)? as u16;
+    Some((a << 8) | b)
+}
+
+/// Control-flow JIT: lower a slot-based numeric function WITH loops/branches to native code. Uses a
+/// cranelift `Variable` per slot (loop-carried locals are mutable across blocks; cranelift inserts the
+/// SSA phis at `seal_all_blocks`), and one block per bytecode jump target. Handles LoadLocal/StoreLocal,
+/// LoadConst, numeric BinOp/UnaryOp, Pop/Dup/Nop, LoopVarsBegin/End (skipped — a slotted loop var needs
+/// no per-iteration overlay), and Jump/JumpIfFalse/JumpBack/Return. CONSERVATIVE: bails (→ caller → VM)
+/// on any other opcode, a non-empty operand stack at a block boundary (a ternary's merge — left to the
+/// straight-line [`build_body`]), or storing/returning a boolean (keeps result boxing = Number).
+/// ADDITIVE: a bail just runs the VM, so a miss is never wrong — only a logic bug here is, hence the
+/// `jit_regression` + differential validation. Returns `Some(false)` (Number result) on success.
+fn build_body_cfg(
+    func: &mut cranelift::codegen::ir::Function,
+    fbctx: &mut FunctionBuilderContext,
+    chunk: &Chunk,
+    arity: usize,
+) -> Option<bool> {
+    let code = &chunk.code;
+    let num_slots = chunk.num_slots as usize;
+    if num_slots == 0 || num_slots > 256 {
+        return None;
+    }
+
+    // 1. Validate every opcode is supported + collect block leaders (jump targets, the fall-through
+    //    after each branch, entry). Bail on any unsupported opcode (so we never mis-size the scan).
+    let mut leaders: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    leaders.insert(0);
+    let mut has_loop = false;
+    let mut ip = 0;
+    while ip < code.len() {
+        let op = Opcode::from_u8(code[ip])?;
+        let size = op_size(op)?;
+        match op {
+            // A conditional branch: BOTH the target and the fall-through are reachable.
+            Opcode::JumpIfFalse => {
+                let off = peek_u16(code, ip + 1)? as i16 as isize;
+                leaders.insert(((ip + 3) as isize + off).max(0) as usize);
+                leaders.insert(ip + 3);
+            }
+            // Unconditional jumps: only the TARGET is a leader. The byte after the jump is reachable
+            // iff something else jumps to it — in which case that jump adds it. Code after an
+            // unconditional terminator (Jump/JumpBack/Return) that nothing targets is UNREACHABLE
+            // (e.g. the compiler's trailing implicit `LoadConst Null; Return`) and must be skipped,
+            // not translated — else we'd bail on `LoadConst Null`.
+            Opcode::Jump => {
+                let off = peek_u16(code, ip + 1)? as i16 as isize;
+                leaders.insert(((ip + 3) as isize + off).max(0) as usize);
+            }
+            Opcode::JumpBack => {
+                let dist = peek_u16(code, ip + 1)? as usize;
+                leaders.insert((ip + 3).checked_sub(dist)?);
+                has_loop = true;
+            }
+            _ => {}
+        }
+        ip += size;
+    }
+    // Only the loop case is worth the CFG path; pure straight-line/ternary stays on `build_body`
+    // (which also handles the ternary-`select` shape this path deliberately bails on).
+    if !has_loop {
+        return None;
+    }
+
+    let mut bcx = FunctionBuilder::new(func, fbctx);
+    let blocks: std::collections::BTreeMap<usize, Block> =
+        leaders.iter().map(|&o| (o, bcx.create_block())).collect();
+    let entry = *blocks.get(&0)?;
+    bcx.append_block_params_for_function_params(entry);
+    bcx.switch_to_block(entry);
+    let params: Vec<ClifValue> = bcx.block_params(entry).to_vec();
+
+    // 2. A Variable per slot, all defined at entry (params, else 0.0) so every path defines them.
+    let vars: Vec<Variable> = (0..num_slots).map(|_| bcx.declare_var(types::F64)).collect();
+    for (i, &v) in vars.iter().enumerate() {
+        let init = if i < arity {
+            params[i]
+        } else {
+            bcx.ins().f64const(0.0)
+        };
+        bcx.def_var(v, init);
+    }
+
+    // 3. Translate. The operand stack is empty at every block boundary (statement-level control flow).
+    let mut stack: Vec<(ClifValue, bool)> = Vec::new();
+    let mut cur = entry;
+    let mut terminated = false;
+    let mut ip = 0usize;
+    while ip < code.len() {
+        if let Some(&blk) = blocks.get(&ip) {
+            if blk != cur {
+                if !terminated {
+                    if !stack.is_empty() {
+                        return None;
+                    }
+                    bcx.ins().jump(blk, &[]);
+                }
+                bcx.switch_to_block(blk);
+                cur = blk;
+                terminated = false;
+                stack.clear();
+            }
+        }
+        if terminated {
+            ip += op_size(Opcode::from_u8(code[ip])?)?; // skip unreachable tail before next leader
+            continue;
+        }
+        let op = Opcode::from_u8(code[ip])?;
+        match op {
+            Opcode::LoadLocal => {
+                let slot = peek_u16(code, ip + 1)? as usize;
+                let v = *vars.get(slot)?;
+                stack.push((bcx.use_var(v), false));
+                ip += 3;
+            }
+            Opcode::StoreLocal => {
+                let slot = peek_u16(code, ip + 1)? as usize;
+                let (val, is_bool) = stack.pop()?;
+                if is_bool {
+                    return None; // no boolean slots — keeps result boxing simple
+                }
+                let v = *vars.get(slot)?;
+                bcx.def_var(v, val);
+                ip += 3;
+            }
+            Opcode::Pop => {
+                stack.pop()?;
+                ip += 1;
+            }
+            Opcode::Dup => {
+                let top = *stack.last()?;
+                stack.push(top);
+                ip += 1;
+            }
+            // Scope markers (EnterBlock/ExitBlock) + loop-var registration only affect the VM's
+            // name-based block scope / per-iteration overlay — irrelevant to flat frame slots.
+            Opcode::Nop | Opcode::EnterBlock | Opcode::ExitBlock | Opcode::LoopVarsEnd => ip += 1,
+            Opcode::LoopVarsBegin => ip += 3,
+            Opcode::Return => {
+                let (v, is_bool) = stack.pop()?;
+                if is_bool {
+                    return None;
+                }
+                bcx.ins().return_(&[v]);
+                terminated = true;
+                ip += 1;
+            }
+            Opcode::Jump => {
+                let off = peek_u16(code, ip + 1)? as i16 as isize;
+                let blk = *blocks.get(&(((ip + 3) as isize + off).max(0) as usize))?;
+                if !stack.is_empty() {
+                    return None;
+                }
+                bcx.ins().jump(blk, &[]);
+                terminated = true;
+                ip += 3;
+            }
+            Opcode::JumpBack => {
+                let dist = peek_u16(code, ip + 1)? as usize;
+                let blk = *blocks.get(&((ip + 3).checked_sub(dist)?))?;
+                if !stack.is_empty() {
+                    return None;
+                }
+                bcx.ins().jump(blk, &[]);
+                terminated = true;
+                ip += 3;
+            }
+            Opcode::JumpIfFalse => {
+                let off = peek_u16(code, ip + 1)? as i16 as isize;
+                let (cond, _) = stack.pop()?;
+                if !stack.is_empty() {
+                    return None; // non-empty stack ⇒ ternary shape ⇒ leave to build_body / VM
+                }
+                let falsy = falsy_flag(&mut bcx, cond);
+                let target = *blocks.get(&(((ip + 3) as isize + off).max(0) as usize))?;
+                let fallthrough = *blocks.get(&(ip + 3))?;
+                bcx.ins().brif(falsy, target, &[], fallthrough, &[]);
+                terminated = true;
+                ip += 3;
+            }
+            _ => match emit_simple_op(&mut bcx, chunk, code, &mut ip, &mut stack, &params, arity) {
+                SimpleOp::Handled(_) => {}
+                _ => return None, // LoadConst/BinOp/UnaryOp handled; anything else → VM
+            },
+        }
+    }
+
+    if !terminated {
+        return None;
+    }
+    bcx.seal_all_blocks();
+    bcx.finalize();
+    Some(false)
+}
+
 fn build_body(
     func: &mut cranelift::codegen::ir::Function,
     fbctx: &mut FunctionBuilderContext,
