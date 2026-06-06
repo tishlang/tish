@@ -9,9 +9,15 @@ Pure arithmetic is dispatch-bound (→ the JIT, already landed); object/array/st
 **malloc-bound**. tish was using the system allocator; **JSC ships its own (bmalloc)** for exactly
 this reason.
 
-Fix: `mimalloc` as the process `#[global_allocator]` (crates/tish, `fast-alloc` feature, in `default`;
-`--no-default-features` → system allocator). Semantically transparent — only changes which malloc
-backs every allocation. Differential vm≡interp clean on object_stress/array_stress/new_features.
+Fix: `mimalloc` as the process `#[global_allocator]` — on BOTH paths:
+  • `tish run` (the VM): crates/tish, `fast-alloc` feature in `default`; `--no-default-features` → system.
+  • `tish build --native-backend rust` (rust-AOT output): crates/tish_native/src/build.rs injects the
+    dep + a `#[global_allocator]` into the generated crate root (binary output only, native only;
+    `TISH_NATIVE_FAST_ALLOC=0` opts out). Even bigger there — the AOT path has no interpreter overhead,
+    so allocation is a larger fraction: an object/Object.entries workload went 944→564ms (**−40%**),
+    result byte-identical to interp.
+Semantically transparent — only changes which malloc backs every allocation. Differential vm≡interp
+clean on object_stress/array_stress/new_features; rust-AOT acc ≡ interp.
 
   RESULT vs FROZEN baseline (target/release/tish run, best-of-3 Σms; bundle = best-of-5 wall):
     micro                BEFORE   AFTER   Δ
@@ -31,8 +37,9 @@ backs every allocation. Differential vm≡interp clean on object_stress/array_st
   representation changes that REDUCE allocation count (packed f64 arrays = one buffer not per-element
   boxing; shape objects = no per-key storage). Property-lookup ICs (Phase 1a) and NaN-boxing address
   neither dominant cost directly (lookups aren't hot; NaN-box shrinks Values but not alloc COUNT), so
-  they rank below the allocator + packed arrays. NEXT highest-confidence: extend `fast-alloc` to the
-  rust-AOT generated output, then Phase 2 packed arrays (now clearly motivated: cuts alloc count).
+  they rank below the allocator + packed arrays. The allocator is now on BOTH the VM and rust-AOT
+  paths (above). NEXT highest-confidence: Phase 2 packed f64 arrays (now clearly motivated: cuts alloc
+  count) and the rust-AOT struct/array inference that already exists behind flags.
 
 ================================================================================
   PHASE 1a — shapes + inline caches LANDED, but NOT the object_stress lever (2026-06-05)
