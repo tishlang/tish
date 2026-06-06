@@ -87,6 +87,12 @@ pub fn core_to_eval(v: CoreValue) -> Value {
         CoreValue::Promise(p) => Value::CorePromise(Arc::clone(&p)),
         #[cfg(not(feature = "http"))]
         CoreValue::Promise(_) => Value::Null,
+        // NumberArray: materialize to boxed Array for the interpreter (it has no packed path).
+        CoreValue::NumberArray(arr) => {
+            let nums = arr.borrow();
+            let out: Vec<Value> = nums.iter().map(|&n| Value::Number(n)).collect();
+            Value::Array(Rc::new(RefCell::new(out)))
+        }
         // `CoreNativeFn` is feature-gated (Rc vs Arc), so use Clone::clone
         // which works for either.
         CoreValue::Function(f) => Value::CoreFn(f.clone()),

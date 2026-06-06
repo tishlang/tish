@@ -48,7 +48,7 @@ pub fn is_nan(args: &[Value]) -> Value {
 
 /// Array.isArray(value)
 pub fn array_is_array(args: &[Value]) -> Value {
-    Value::Bool(matches!(args.first(), Some(Value::Array(_))))
+    Value::Bool(matches!(args.first(), Some(Value::Array(_)) | Some(Value::NumberArray(_))))
 }
 
 /// String(value) — convert value to string (JS String constructor as function).

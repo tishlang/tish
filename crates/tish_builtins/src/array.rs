@@ -13,11 +13,24 @@ pub fn from_vec(v: Vec<Value>) -> Value {
 pub fn len(arr: &Value) -> Option<usize> {
     match arr {
         Value::Array(a) => Some(a.borrow().len()),
+        Value::NumberArray(a) => Some(a.borrow().len()),
         _ => None,
     }
 }
 
+/// Normalise `NumberArray → Array` so callers that don't have a packed fast path
+/// can use this deopt helper rather than changing every `if let Value::Array` branch.
+/// Returns the original value unchanged for anything that isn't a `NumberArray`.
+#[inline]
+fn as_boxed_array(arr: &Value) -> std::borrow::Cow<'_, Value> {
+    match arr {
+        Value::NumberArray(na) => std::borrow::Cow::Owned(Value::materialize_number_array(na)),
+        other => std::borrow::Cow::Borrowed(other),
+    }
+}
+
 pub fn push(arr: &Value, args: &[Value]) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         let mut arr_mut = arr.borrow_mut();
         for v in args {
@@ -30,6 +43,7 @@ pub fn push(arr: &Value, args: &[Value]) -> Value {
 }
 
 pub fn pop(arr: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         arr.borrow_mut().pop().unwrap_or(Value::Null)
     } else {
@@ -38,6 +52,7 @@ pub fn pop(arr: &Value) -> Value {
 }
 
 pub fn shift(arr: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         let mut arr_mut = arr.borrow_mut();
         if arr_mut.is_empty() {
@@ -51,6 +66,7 @@ pub fn shift(arr: &Value) -> Value {
 }
 
 pub fn unshift(arr: &Value, args: &[Value]) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         let mut arr_mut = arr.borrow_mut();
         for (i, v) in args.iter().enumerate() {
@@ -63,6 +79,7 @@ pub fn unshift(arr: &Value, args: &[Value]) -> Value {
 }
 
 pub fn index_of(arr: &Value, search: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
@@ -75,6 +92,7 @@ pub fn index_of(arr: &Value, search: &Value) -> Value {
 }
 
 pub fn includes(arr: &Value, search: &Value, from: Option<&Value>) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         let arr_borrow = arr.borrow();
         let len = arr_borrow.len() as i64;
@@ -93,6 +111,7 @@ pub fn includes(arr: &Value, search: &Value, from: Option<&Value>) -> Value {
 }
 
 pub fn join(arr: &Value, sep: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         let separator = match sep {
             Value::String(s) => s.to_string(),
@@ -115,6 +134,7 @@ pub fn join(arr: &Value, sep: &Value) -> Value {
 }
 
 pub fn reverse(arr: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         arr.borrow_mut().reverse();
         Value::Array(arr.clone())
@@ -125,6 +145,7 @@ pub fn reverse(arr: &Value) -> Value {
 
 /// Fisher-Yates shuffle. Returns a new shuffled array (does not mutate).
 pub fn shuffle(arr: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         let mut v = arr.borrow().clone();
         use rand::seq::SliceRandom;
@@ -136,6 +157,7 @@ pub fn shuffle(arr: &Value) -> Value {
 }
 
 pub fn splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &[Value]) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         let mut arr_mut = arr.borrow_mut();
         let len = arr_mut.len() as i64;
@@ -155,6 +177,7 @@ pub fn splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &
 }
 
 pub fn slice(arr: &Value, start: &Value, end: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         let arr_borrow = arr.borrow();
         let len = arr_borrow.len() as i64;
@@ -172,6 +195,7 @@ pub fn slice(arr: &Value, start: &Value, end: &Value) -> Value {
 }
 
 pub fn concat(arr: &Value, args: &[Value]) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         let mut result = arr.borrow().clone();
         for v in args {
@@ -188,6 +212,7 @@ pub fn concat(arr: &Value, args: &[Value]) -> Value {
 }
 
 pub fn flat(arr: &Value, depth: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     fn flatten(arr: &[Value], depth: i32, result: &mut Vec<Value>) {
         for v in arr {
             if depth > 0 {
@@ -217,6 +242,7 @@ pub fn flat(arr: &Value, depth: &Value) -> Value {
 // These take NativeFn from tishlang_core::Value::Function
 
 pub fn map(arr: &Value, callback: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         let result: Vec<Value> = arr_borrow
@@ -231,6 +257,7 @@ pub fn map(arr: &Value, callback: &Value) -> Value {
 }
 
 pub fn filter(arr: &Value, callback: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         let result: Vec<Value> = arr_borrow
@@ -252,6 +279,7 @@ pub fn filter(arr: &Value, callback: &Value) -> Value {
 }
 
 pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         let len = arr_borrow.len();
@@ -272,6 +300,7 @@ pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
 }
 
 pub fn for_each(arr: &Value, callback: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
@@ -282,6 +311,7 @@ pub fn for_each(arr: &Value, callback: &Value) -> Value {
 }
 
 pub fn find(arr: &Value, callback: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
@@ -295,6 +325,7 @@ pub fn find(arr: &Value, callback: &Value) -> Value {
 }
 
 pub fn find_index(arr: &Value, callback: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
@@ -308,6 +339,7 @@ pub fn find_index(arr: &Value, callback: &Value) -> Value {
 }
 
 pub fn some(arr: &Value, callback: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
@@ -321,6 +353,7 @@ pub fn some(arr: &Value, callback: &Value) -> Value {
 }
 
 pub fn every(arr: &Value, callback: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
@@ -336,6 +369,7 @@ pub fn every(arr: &Value, callback: &Value) -> Value {
 }
 
 pub fn flat_map(arr: &Value, callback: &Value) -> Value {
+    let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         let mut result: Vec<Value> = Vec::new();
@@ -426,6 +460,16 @@ pub fn sort_numeric_desc(arr: &Value) -> Value {
 /// irrelevant for equal numbers), then write back — no per-comparison `Value`
 /// match. Mixed arrays fall back to the comparator path.
 fn sort_numeric_impl(arr: &Value, asc: bool) -> Value {
+    // NumberArray fast path: sort the Vec<f64> directly — no unbox pass, no rebox.
+    if let Value::NumberArray(a) = arr {
+        let mut g = a.borrow_mut();
+        if asc {
+            g.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            g.sort_unstable_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        return Value::NumberArray(a.clone());
+    }
     if let Value::Array(a) = arr {
         {
             let mut g = a.borrow_mut();

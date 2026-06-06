@@ -408,11 +408,12 @@ fn peek_u16(code: &[u8], off: usize) -> Option<u16> {
 /// cranelift `Variable` per slot (loop-carried locals are mutable across blocks; cranelift inserts the
 /// SSA phis at `seal_all_blocks`), and one block per bytecode jump target. Handles LoadLocal/StoreLocal,
 /// LoadConst, numeric BinOp/UnaryOp, Pop/Dup/Nop, LoopVarsBegin/End (skipped — a slotted loop var needs
-/// no per-iteration overlay), and Jump/JumpIfFalse/JumpBack/Return. CONSERVATIVE: bails (→ caller → VM)
-/// on any other opcode, a non-empty operand stack at a block boundary (a ternary's merge — left to the
-/// straight-line [`build_body`]), or storing/returning a boolean (keeps result boxing = Number).
-/// ADDITIVE: a bail just runs the VM, so a miss is never wrong — only a logic bug here is, hence the
-/// `jit_regression` + differential validation. Returns `Some(false)` (Number result) on success.
+/// no per-iteration overlay), Jump/JumpIfFalse/JumpBack/Return, AND direct calls to JIT-compiled callees
+/// (a `LoadVar name_idx` + `Call arity` where the callee has a `NumericFn` in `callees` → emit a
+/// direct cranelift `call` to the native code pointer, skipping all Value boxing). CONSERVATIVE: bails
+/// (→ caller → VM) on any other opcode, a non-empty operand stack at a block boundary, boolean slots,
+/// or a `Call` whose callee is not in `callees`. ADDITIVE: a bail just runs the VM.
+/// Returns `Some(false)` (Number result) on success.
 fn build_body_cfg(
     func: &mut cranelift::codegen::ir::Function,
     fbctx: &mut FunctionBuilderContext,

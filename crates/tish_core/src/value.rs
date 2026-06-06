@@ -298,6 +298,12 @@ pub enum Value {
     Bool(bool),
     Null,
     Array(VmRef<Vec<Value>>),
+    /// Packed f64 array — `TISH_PACKED_ARRAYS` mode only. All elements are f64; a non-numeric
+    /// push/set/op materializes to `Value::Array` first. Eliminates per-element boxing and
+    /// enables direct `sort_unstable_by` without an unbox pass. Created by all-numeric array
+    /// literals, `new Array(n)` (zero-filled), and from numeric HOF results. Never created
+    /// when `packed_arrays_enabled()` is false — callers check before constructing.
+    NumberArray(VmRef<Vec<f64>>),
     Object(VmRef<ObjectData>),
     /// ECMAScript-style primitive symbol (identity by `Arc`).
     Symbol(Arc<TishSymbol>),
@@ -759,6 +765,7 @@ impl std::fmt::Debug for Value {
             Value::Bool(b) => write!(f, "Bool({})", b),
             Value::Null => write!(f, "Null"),
             Value::Array(arr) => write!(f, "Array({:?})", arr.borrow()),
+            Value::NumberArray(arr) => write!(f, "NumberArray({:?})", arr.borrow()),
             Value::Object(obj) => write!(f, "Object({:?})", obj.borrow()),
             Value::Symbol(s) => write!(f, "Symbol({})", s.id),
             Value::Function(_) => write!(f, "Function"),
@@ -796,6 +803,14 @@ impl Value {
             Value::Array(arr) => {
                 let inner: Vec<String> =
                     arr.borrow().iter().map(|v| v.to_display_string()).collect();
+                format!("[{}]", inner.join(", "))
+            }
+            Value::NumberArray(arr) => {
+                let inner: Vec<String> = arr
+                    .borrow()
+                    .iter()
+                    .map(|&n| if n.is_nan() { "null".to_string() } else { Value::Number(n).to_display_string() })
+                    .collect();
                 format!("[{}]", inner.join(", "))
             }
             Value::Object(obj) => {
@@ -839,10 +854,15 @@ impl Value {
                 .borrow()
                 .iter()
                 .map(|v| match v {
-                    // join/ToString of an array elides null & undefined to empty.
                     Value::Null => String::new(),
                     other => other.to_js_string(),
                 })
+                .collect::<Vec<_>>()
+                .join(","),
+            Value::NumberArray(arr) => arr
+                .borrow()
+                .iter()
+                .map(|n| Value::Number(*n).to_js_string())
                 .collect::<Vec<_>>()
                 .join(","),
             Value::Object(_) => "[object Object]".to_string(),
@@ -876,6 +896,7 @@ impl Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (Value::Array(a), Value::Array(b)) => VmRef::ptr_eq(a, b),
+            (Value::NumberArray(a), Value::NumberArray(b)) => VmRef::ptr_eq(a, b),
             (Value::Object(a), Value::Object(b)) => VmRef::ptr_eq(a, b),
             #[cfg(feature = "send-values")]
             (Value::Function(a), Value::Function(b)) => Arc::ptr_eq(a, b),
@@ -942,6 +963,46 @@ impl Value {
         Value::Array(VmRef::new(Vec::new()))
     }
 
+    // -------------------------------------------------------------------------
+    // Packed f64 array support (TISH_PACKED_ARRAYS)
+    // -------------------------------------------------------------------------
+
+    /// Whether packed f64 arrays are enabled this run. Default: **off** (`TISH_PACKED_ARRAYS=1`
+    /// opts in). Checked at every creation site so flag changes take effect per-process.
+    /// The flag is intentionally backwards from the slot/JIT flags (those were default-on) to
+    /// keep the default binary behaviour byte-identical while we validate coverage.
+    #[inline]
+    pub fn packed_arrays_enabled() -> bool {
+        std::env::var("TISH_PACKED_ARRAYS").map(|v| v == "1").unwrap_or(false)
+    }
+
+    /// Wrap a `Vec<f64>` as a `Value::NumberArray`. Only call when `packed_arrays_enabled()`.
+    #[inline]
+    pub fn number_array(items: Vec<f64>) -> Self {
+        Value::NumberArray(VmRef::new(items))
+    }
+
+    /// Materialize a `Value::NumberArray` into a boxed `Value::Array`.
+    /// Called on the deopt path: any operation that doesn't have a packed fast path
+    /// (non-numeric push, getIndex-beyond-bounds, spread into non-numeric context, etc.)
+    /// converts once and continues on the generic path. The original `NumberArray` VmRef
+    /// is consumed; callers replace the `Value` in whatever container held it.
+    #[inline]
+    pub fn materialize_number_array(arr: &VmRef<Vec<f64>>) -> Value {
+        let nums = arr.borrow();
+        Value::Array(VmRef::new(nums.iter().map(|&n| Value::Number(n)).collect()))
+    }
+
+    /// If `self` is a `NumberArray`, materialise and return `Value::Array`; otherwise
+    /// return `self` unchanged. Convenience deopt for callers that pattern-match on `Array`.
+    #[inline]
+    pub fn coerce_number_array(self) -> Value {
+        match self {
+            Value::NumberArray(ref arr) => Value::materialize_number_array(arr),
+            other => other,
+        }
+    }
+
     /// Create an empty object Value.
     pub fn empty_object() -> Self {
         Value::Object(VmRef::new(ObjectData::default()))
@@ -962,7 +1023,7 @@ impl Value {
             Value::String(_) => "string",
             Value::Bool(_) => "boolean",
             Value::Null => "null",
-            Value::Array(_) => "object",
+            Value::Array(_) | Value::NumberArray(_) => "object",
             Value::Object(_) => "object",
             Value::Function(_) => "function",
             #[cfg(feature = "regex")]

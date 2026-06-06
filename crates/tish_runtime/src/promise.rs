@@ -305,7 +305,7 @@ pub fn promise_any(args: &[Value]) -> Value {
         let mut received = 0usize;
         while received < sent {
             match rx.recv() {
-                Ok((i, Ok(v))) => return fulfilled(v), // first fulfillment wins
+                Ok((_, Ok(v))) => return fulfilled(v), // first fulfillment wins
                 Ok((i, Err(e))) => {
                     errors[i] = e;
                     reject_count += 1;

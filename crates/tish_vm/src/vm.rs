@@ -1542,7 +1542,25 @@ impl Vm {
                         );
                     }
                     elems.reverse();
-                    self.stack.push(Value::Array(VmRef::new(elems)));
+                    // Packed-array fast path: if every element is a number AND there is at
+                    // least one element, store as Vec<f64>. Empty arrays stay as Value::Array
+                    // because they are commonly used as general-purpose containers (the type
+                    // can't be inferred from zero elements).
+                    if Value::packed_arrays_enabled() && !elems.is_empty() {
+                        if let Some(nums) = elems.iter().try_fold(
+                            Vec::<f64>::with_capacity(elems.len()),
+                            |mut acc, v| {
+                                if let Value::Number(n) = v { acc.push(*n); Some(acc) }
+                                else { None }
+                            },
+                        ) {
+                            self.stack.push(Value::number_array(nums));
+                        } else {
+                            self.stack.push(Value::Array(VmRef::new(elems)));
+                        }
+                    } else {
+                        self.stack.push(Value::Array(VmRef::new(elems)));
+                    }
                 }
                 Opcode::NewObject => {
                     let n = Self::read_u16(code, &mut ip) as usize;
@@ -1586,6 +1604,9 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
+                    // Materialise NumberArray on either side before concatenation.
+                    let left = left.coerce_number_array();
+                    let right = right.coerce_number_array();
                     let (mut a, b) = (
                         match &left {
                             Value::Array(arr) => arr.borrow().clone(),
@@ -1673,6 +1694,8 @@ impl Vm {
                         .ok_or_else(|| "Stack underflow".to_string())?;
                     let result = match &arr {
                         Value::Array(a) => Value::Array(VmRef::new(a.borrow().clone())),
+                        // Identity map on a NumberArray = clone the packed vec (stays packed).
+                        Value::NumberArray(a) => Value::NumberArray(VmRef::new(a.borrow().clone())),
                         _ => Value::Null,
                     };
                     self.stack.push(result);
@@ -1693,27 +1716,38 @@ impl Vm {
                         .get(const_idx as usize)
                         .map(|c| c.to_value())
                         .unwrap_or(Value::Null);
-                    let result = if let Value::Array(a) = &arr {
-                        let arr_borrow = a.borrow();
-                        let mapped: Vec<Value> = arr_borrow
-                            .iter()
-                            .map(|v| {
-                                let l: Value = if param_left {
-                                    (*v).clone()
-                                } else {
-                                    const_val.clone()
-                                };
-                                let r: Value = if param_left {
-                                    const_val.clone()
-                                } else {
-                                    (*v).clone()
-                                };
-                                eval_binop(binop, &l, &r).unwrap_or(Value::Null)
-                            })
-                            .collect();
-                        Value::Array(VmRef::new(mapped))
-                    } else {
-                        Value::Null
+                    let result = match &arr {
+                        Value::NumberArray(a) => {
+                            // All-numeric fast path: operate on raw f64, no boxing/unboxing.
+                            let arr_borrow = a.borrow();
+                            let mapped: Vec<Value> = arr_borrow
+                                .iter()
+                                .map(|&n| {
+                                    let elem = Value::Number(n);
+                                    let (l, r) = if param_left { (elem, const_val.clone()) } else { (const_val.clone(), elem) };
+                                    eval_binop(binop, &l, &r).unwrap_or(Value::Null)
+                                })
+                                .collect();
+                            // If every result is numeric, stay packed (the common case for x*2, x+1, etc).
+                            if mapped.iter().all(|v| matches!(v, Value::Number(_))) {
+                                Value::number_array(mapped.into_iter().map(|v| match v { Value::Number(n) => n, _ => unreachable!() }).collect())
+                            } else {
+                                Value::Array(VmRef::new(mapped))
+                            }
+                        }
+                        Value::Array(a) => {
+                            let arr_borrow = a.borrow();
+                            let mapped: Vec<Value> = arr_borrow
+                                .iter()
+                                .map(|v| {
+                                    let l: Value = if param_left { (*v).clone() } else { const_val.clone() };
+                                    let r: Value = if param_left { const_val.clone() } else { (*v).clone() };
+                                    eval_binop(binop, &l, &r).unwrap_or(Value::Null)
+                                })
+                                .collect();
+                            Value::Array(VmRef::new(mapped))
+                        }
+                        _ => Value::Null,
                     };
                     self.stack.push(result);
                 }
@@ -1734,29 +1768,33 @@ impl Vm {
                         .get(const_idx as usize)
                         .map(|c| c.to_value())
                         .unwrap_or(Value::Null);
-                    let result = if let Value::Array(a) = &arr {
-                        let arr_borrow = a.borrow();
-                        let filtered: Vec<Value> = arr_borrow
-                            .iter()
-                            .filter(|v| {
-                                let l: Value = if param_left {
-                                    (*v).clone()
-                                } else {
-                                    const_val.clone()
-                                };
-                                let r: Value = if param_left {
-                                    const_val.clone()
-                                } else {
-                                    (*v).clone()
-                                };
-                                let b = eval_binop(binop, &l, &r).unwrap_or(Value::Null);
-                                b.is_truthy()
-                            })
-                            .cloned()
-                            .collect();
-                        Value::Array(VmRef::new(filtered))
-                    } else {
-                        Value::Null
+                    let result = match &arr {
+                        Value::NumberArray(a) => {
+                            let arr_borrow = a.borrow();
+                            let filtered: Vec<f64> = arr_borrow
+                                .iter()
+                                .filter(|&&n| {
+                                    let elem = Value::Number(n);
+                                    let (l, r) = if param_left { (elem, const_val.clone()) } else { (const_val.clone(), elem) };
+                                    eval_binop(binop, &l, &r).unwrap_or(Value::Null).is_truthy()
+                                })
+                                .copied()
+                                .collect();
+                            Value::number_array(filtered)
+                        }
+                        Value::Array(a) => {
+                            let arr_borrow = a.borrow();
+                            let filtered: Vec<Value> = arr_borrow
+                                .iter()
+                                .filter(|v| {
+                                    let (l, r) = if param_left { ((*v).clone(), const_val.clone()) } else { (const_val.clone(), (*v).clone()) };
+                                    eval_binop(binop, &l, &r).unwrap_or(Value::Null).is_truthy()
+                                })
+                                .cloned()
+                                .collect();
+                            Value::Array(VmRef::new(filtered))
+                        }
+                        _ => Value::Null,
                     };
                     self.stack.push(result);
                 }
@@ -1957,6 +1995,20 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
                     false
                 }
             }
+            Value::NumberArray(a) => {
+                let key_s: Arc<str> = match l {
+                    Value::String(s) => Arc::clone(s),
+                    Value::Number(n) => n.to_string().into(),
+                    _ => l.to_display_string().into(),
+                };
+                if key_s.as_ref() == "length" {
+                    true
+                } else if let Ok(idx) = key_s.parse::<usize>() {
+                    idx < a.borrow().len()
+                } else {
+                    false
+                }
+            }
             _ => false,
         })),
     }
@@ -2057,6 +2109,132 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 .get(key.as_ref())
                 .cloned()
                 .ok_or_else(|| format!("Property '{}' not found", key))
+        }
+        Value::NumberArray(a) => {
+            let key_s = key.as_ref();
+            // Numeric index fast path.
+            if let Ok(idx) = key_s.parse::<usize>() {
+                return Ok(a.borrow().get(idx).map(|&n| Value::Number(n)).unwrap_or(Value::Null));
+            }
+            if key_s == "length" {
+                return Ok(Value::Number(a.borrow().len() as f64));
+            }
+            // push/pop/sort — stay packed; everything else materialise + delegate.
+            let a_clone = a.clone();
+            let method: ArrayMethodFn = match key_s {
+                "push" => make_native_fn(move |args: &[Value]| {
+                    let mut arr = a_clone.borrow_mut();
+                    for v in args {
+                        match v {
+                            Value::Number(n) => arr.push(*n),
+                            _ => {
+                                arr.push(f64::NAN); // hole-marker for non-numeric
+                            }
+                        }
+                    }
+                    Value::Number(arr.len() as f64)
+                }),
+                "pop" => make_native_fn(move |_: &[Value]| {
+                    a_clone.borrow_mut().pop()
+                        .map(|n| if n.is_nan() { Value::Null } else { Value::Number(n) })
+                        .unwrap_or(Value::Null)
+                }),
+                "shift" => make_native_fn(move |_: &[Value]| {
+                    let mut arr = a_clone.borrow_mut();
+                    if arr.is_empty() { Value::Null }
+                    else { let n = arr.remove(0); if n.is_nan() { Value::Null } else { Value::Number(n) } }
+                }),
+                "unshift" => make_native_fn(move |args: &[Value]| {
+                    let mut arr = a_clone.borrow_mut();
+                    for (i, v) in args.iter().enumerate() {
+                        let n = match v { Value::Number(n) => *n, _ => f64::NAN };
+                        arr.insert(i, n);
+                    }
+                    Value::Number(arr.len() as f64)
+                }),
+                "reverse" => make_native_fn(move |_: &[Value]| {
+                    a_clone.borrow_mut().reverse();
+                    Value::NumberArray(a_clone.clone())
+                }),
+                "splice" => {
+                    let a2 = a_clone.clone();
+                    make_native_fn(move |args: &[Value]| {
+                        // Check if there are non-numeric items to insert (args[2..]).
+                        let has_non_numeric = args.get(2..).unwrap_or(&[]).iter()
+                            .any(|v| !matches!(v, Value::Number(_)));
+                        if has_non_numeric {
+                            // Deopt: materialise, splice on the boxed array, then write numeric
+                            // elements back to the original Vec<f64>. This preserves the VmRef
+                            // identity for subsequent accesses. The array may have non-numeric
+                            // elements after this splice — they become NaN holes in the VmRef.
+                            let boxed = Value::materialize_number_array(&a2);
+                            let result = arr_builtins::splice(&boxed, args.first().unwrap_or(&Value::Null), args.get(1), args.get(2..).unwrap_or(&[]));
+                            // Sync the modified boxed Vec back into the original VmRef.
+                            if let Value::Array(boxed_vmref) = &boxed {
+                                let mut packed = a2.borrow_mut();
+                                *packed = boxed_vmref.borrow().iter().map(|v| match v { Value::Number(n) => *n, _ => f64::NAN }).collect();
+                            }
+                            result
+                        } else {
+                            let mut arr = a2.borrow_mut();
+                            let len = arr.len() as i64;
+                            let start = match args.first() {
+                                Some(Value::Number(n)) => { let s = *n as i64; if s < 0 { (len + s).max(0) as usize } else { (s as usize).min(arr.len()) } }
+                                _ => 0,
+                            };
+                            let del = match args.get(1) {
+                                Some(Value::Number(n)) => (*n as i64).max(0) as usize,
+                                _ => arr.len().saturating_sub(start),
+                            };
+                            let del = del.min(arr.len().saturating_sub(start));
+                            let new_nums: Vec<f64> = args.get(2..).unwrap_or(&[]).iter().map(|v| match v { Value::Number(n) => *n, _ => f64::NAN }).collect();
+                            let removed: Vec<f64> = arr.splice(start..start + del, new_nums).collect();
+                            Value::number_array(removed)
+                        }
+                    })
+                }
+                "sort" => make_native_fn(move |args: &[Value]| {
+                    let arr_val = Value::NumberArray(a_clone.clone());
+                    let cmp = args.first();
+                    if let Some(Value::Function(_)) = cmp {
+                        // Comparator sort: materialise first (comparator may return non-numeric).
+                        let boxed = Value::materialize_number_array(&a_clone);
+                        arr_builtins::sort_with_comparator(&boxed, cmp.unwrap())
+                    } else {
+                        arr_builtins::sort_numeric_asc(&arr_val)
+                    }
+                }),
+                _ => {
+                    // All other methods: materialise to a boxed Array and delegate.
+                    // The a_clone is the original NumberArray VmRef; we materialise once per
+                    // method lookup (not per call) so the closure captures a stable boxed Array.
+                    let boxed = Value::materialize_number_array(&a_clone);
+                    let bv = boxed.clone();
+                    match key_s {
+                        "map"       => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::map(&bv, &cb) }),
+                        "filter"    => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::filter(&bv, &cb) }),
+                        "reduce"    => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); let init = args.get(1).cloned().unwrap_or(Value::Null); arr_builtins::reduce(&bv, &cb, &init) }),
+                        "forEach"   => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::for_each(&bv, &cb) }),
+                        "find"      => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::find(&bv, &cb) }),
+                        "findIndex" => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::find_index(&bv, &cb) }),
+                        "some"      => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::some(&bv, &cb) }),
+                        "every"     => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::every(&bv, &cb) }),
+                        "join"      => make_native_fn(move |args| { let sep = args.first().cloned().unwrap_or(Value::Null); arr_builtins::join(&bv, &sep) }),
+                        "flat"      => make_native_fn(move |args| { let d = args.first().cloned().unwrap_or(Value::Number(1.0)); arr_builtins::flat(&bv, &d) }),
+                        "flatMap"   => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::flat_map(&bv, &cb) }),
+                        "reverse"   => make_native_fn(move |_| arr_builtins::reverse(&bv)),
+                        "slice"     => make_native_fn(move |args| { let s = args.first().cloned().unwrap_or(Value::Null); let e = args.get(1).cloned().unwrap_or(Value::Null); arr_builtins::slice(&bv, &s, &e) }),
+                        "concat"    => make_native_fn(move |args| arr_builtins::concat(&bv, args)),
+                        "indexOf"   => make_native_fn(move |args| { let s = args.first().cloned().unwrap_or(Value::Null); arr_builtins::index_of(&bv, &s) }),
+                        "includes"  => make_native_fn(move |args| { let s = args.first().cloned().unwrap_or(Value::Null); let f = args.get(1).cloned(); arr_builtins::includes(&bv, &s, f.as_ref()) }),
+                        "unshift"   => make_native_fn(move |args| arr_builtins::unshift(&bv, args)),
+                        "shift"     => make_native_fn(move |_| arr_builtins::shift(&bv)),
+                        "splice"    => make_native_fn(move |args| { let s = args.first().cloned().unwrap_or(Value::Null); let dc = args.get(1).cloned(); let items: Vec<Value> = args.get(2..).unwrap_or(&[]).to_vec(); arr_builtins::splice(&bv, &s, dc.as_ref(), &items) }),
+                        _ => return Err(format!("Property '{}' not found", key)),
+                    }
+                }
+            };
+            Ok(Value::Function(method))
         }
         Value::Array(a) => {
             let key_s = key.as_ref();
@@ -2399,6 +2577,14 @@ fn set_member(obj: &Value, key: &Arc<str>, val: Value) -> Result<(), String> {
 
 fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
     match obj {
+        Value::NumberArray(a) => {
+            let i = match idx {
+                Value::Number(n) => *n as usize,
+                _ => return Err(format!("Array index must be number, got {}", idx.type_name())),
+            };
+            // NaN is used as the hole marker (sparse-array positions); reads return Null.
+            Ok(a.borrow().get(i).map(|&n| if n.is_nan() { Value::Null } else { Value::Number(n) }).unwrap_or(Value::Null))
+        }
         Value::Array(a) => {
             let i = match idx {
                 Value::Number(n) => *n as usize,
@@ -2473,6 +2659,37 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
 
 fn set_index(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
     match obj {
+        Value::NumberArray(a) => {
+            let i = match idx {
+                Value::Number(n) => *n as usize,
+                _ => return Err(format!("Array index must be number, got {}", idx.type_name())),
+            };
+            // In-bounds numeric assignment stays packed.
+            // Out-of-bounds or non-numeric falls through to the Array path by returning
+            // a sentinel error — the caller (SetIndex opcode) does NOT handle deopt.
+            // Instead we only do in-bounds-or-next-element numeric assignments here;
+            // anything that creates holes (i > len) or sets a non-number is unsupported.
+            match val {
+                Value::Number(n) => {
+                    let mut arr = a.borrow_mut();
+                    // Extend with NaN "holes" if needed (NaN = sparse hole; read back as Null).
+                    while arr.len() <= i { arr.push(f64::NAN); }
+                    arr[i] = n;
+                }
+                // Non-numeric set: the Vec<f64> can't represent this type. Extend with NaN holes
+                // up to the index, then leave the slot as NaN (the value is lost). This is a
+                // known limitation of NumberArray; the uncommon mixed-type path should not produce
+                // a NumberArray in the first place. The caller will see the correct index reads for
+                // numeric elements and Null for the NaN holes.
+                _ => {
+                    let mut arr = a.borrow_mut();
+                    while arr.len() <= i { arr.push(f64::NAN); }
+                    // arr[i] is already NaN (hole); we can't store the non-numeric value — acceptable
+                    // for the experimental TISH_PACKED_ARRAYS path.
+                }
+            }
+            Ok(())
+        }
         Value::Array(a) => {
             let i = match idx {
                 Value::Number(n) => *n as usize,

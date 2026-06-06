@@ -81,6 +81,15 @@ fn format_value_styled_inner(value: &Value, colors: bool, quote_strings: bool) -
             let sep = format!("{PUNCT}, {RESET}");
             format!("{PUNCT}[{RESET}{}{PUNCT}]{RESET}", inner.join(&sep))
         }
+        Value::NumberArray(arr) => {
+            let sep = format!("{PUNCT}, {RESET}");
+            let inner: Vec<String> = arr
+                .borrow()
+                .iter()
+                .map(|n| format_value_styled_inner(&Value::Number(*n), colors, true))
+                .collect();
+            format!("{PUNCT}[{RESET}{}{PUNCT}]{RESET}", inner.join(&sep))
+        }
         Value::Object(obj) => {
             let inner: Vec<String> = obj
                 .borrow()

@@ -1,3 +1,51 @@
+================================================================================
+  FINDING — function-call overhead is architectural (call-frame model), 2026-06-06
+================================================================================
+Investigated the call boundary (benchmark_granular's nested-fn lines, ~6ms; the broader concern that
+"every function call is slow"). Measured per-call cost ≈ 150-165 ns (5M calls): a 0-ARG call is 764ms,
+a 1-arg call 826ms — so the cost is NOT the args `Vec` allocation (only ~60ms of the 800ms). It is the
+closure-invocation model itself:
+  1. The function NAME is a global → resolved via a hashmap lookup on every call (LoadVar).
+  2. Every tish function is a `Value::native(Arc<dyn Fn>)` → dynamic dispatch per call.
+  3. NON-JIT functions create a fresh `Vm` struct per call, with `enclosing_chain.clone()` (a Vec
+     clone), `globals.clone()`, capabilities/native_modules clones (vm.rs ~1091).
+None of these is individually dominant; together they are the call tax.
+
+Attempted a JIT call-inlining (JIT'd fn → direct cranelift `call` to a JIT'd callee). REVERTED: it is
+correct but NARROW (both fns must be numeric + JIT-eligible; does not cover self-recursion, since a
+function isn't cached while being compiled) and needs a `Chunk` name→nested-closure map to fire
+reliably (bytecode can't be walked without a full instruction-size table). Not worth the structural
+cost for the rare pattern.
+
+The real lever for call overhead is a CALL-FRAME REDESIGN: an explicit heap call stack instead of a
+per-call `Vm` struct + Arc-dyn-dispatch. This is the SAME work the recursion-overflow bug needs (the VM
+overflows the native stack at depth ~500 because each tish call = a Rust recursion). Do both together:
+a real frame stack fixes the crash AND removes the per-call clone/dispatch tax. Multi-session.
+
+================================================================================
+  PHASE 2 — packed f64 arrays LANDED (TISH_PACKED_ARRAYS=1, default=off) (2026-06-06)
+================================================================================
+`Value::NumberArray(VmRef<Vec<f64>>)` added. Deopt wrapper in all array builtins (as_boxed_array).
+VM fast paths: GetIndex, SetIndex, In, push/pop/shift/unshift/reverse/splice/sort, fused opcodes
+(ArrayMapBinOp/ArrayFilterBinOp/ArrayMapIdentity), ConcatArray deopt, Array.isArray. Sparse-assign
+handled via NaN-as-hole marker. Suite 17/0 at flag=0 (byte-identical to interp). Correctness:
+  - flag-off (default) identical to .expected for all core fixtures ✅
+  - flag-on: all core fixtures output-identical to flag-off EXCEPT 2 edge cases:
+    `splice(1,3,"a","b")` on a NumberArray (non-numeric values into packed Vec = stored as NaN holes;
+    semantic loss is expected and documented — mixed-type splice requires scope-binding update to
+    fully deopt, which `&Value` can't do without architectural changes).
+
+FINDING — does NOT move array_stress (32ms → 32ms with flag=1). Root cause:
+  - array_stress builds arrays via `push()` into empty `[]` literals
+  - Empty `[]` stays regular Array (can't infer numeric from zero elements)
+  - `sort_numeric_impl` on all-numeric regular Arrays already does unbox→sort→rebox, near-equivalent
+  - NumberArray only created for NON-EMPTY ALL-NUMERIC array literals `[1,2,3]`
+
+The infrastructure is CORRECT and benefits code with explicit numeric literals (e.g. benchmark suites
+that use `[1,2,...,N]` syntax) and sort/HOF chains starting from those. For the `array_stress`
+benchmarks to benefit: need to upgrade push-accumulated arrays to NumberArray (not done — requires
+a different mechanism than &Value mutation, e.g. a "tagging" approach on the VmRef).
+
 ################################################################################
 ##  WIN — parking_lot::Mutex on the send-values path (2026-06-06). 2nd profile lever.
 ################################################################################

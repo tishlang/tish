@@ -66,6 +66,22 @@ pub fn json_stringify_into(buf: &mut String, value: &Value) {
             }
             buf.push(']');
         }
+        Value::NumberArray(arr) => {
+            let borrowed = arr.borrow();
+            buf.push('[');
+            use std::fmt::Write;
+            for (i, n) in borrowed.iter().enumerate() {
+                if i > 0 {
+                    buf.push(',');
+                }
+                if n.is_nan() || n.is_infinite() {
+                    buf.push_str("null");
+                } else {
+                    let _ = write!(buf, "{}", n);
+                }
+            }
+            buf.push(']');
+        }
         Value::Object(obj) => {
             let borrowed = obj.borrow();
             // Iterate in insertion order (PropMap preserves it) — matches JS/Node
