@@ -1361,6 +1361,39 @@ impl Vm {
                     };
                     self.stack.push(result);
                 }
+                Opcode::SelfCall => {
+                    // Direct recursive call to the CURRENT function (`chunk`). The compiler emits
+                    // this only when the function's own name is provably stable, so the callee is
+                    // implicitly `chunk` — no callee on the stack, no name lookup, no closure
+                    // dispatch. Behaviour matches `LoadVar name; Call argc` (a closure call that
+                    // swallows errors to Null), and uses the SAME captured `enclosing`.
+                    let argc = Self::read_u16(code, &mut ip) as usize;
+                    let mut args = Vec::with_capacity(argc);
+                    for _ in 0..argc {
+                        args.push(
+                            self.stack
+                                .pop()
+                                .ok_or_else(|| "Stack underflow in self-call".to_string())?,
+                        );
+                    }
+                    args.reverse();
+                    let mut vm = Vm {
+                        stack: Vec::new(),
+                        scope: ObjectMap::default(),
+                        enclosing: self.enclosing.clone(),
+                        globals: self.globals.clone(),
+                        capabilities: Arc::clone(&self.capabilities),
+                        native_modules: self.native_modules.clone(),
+                    };
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let result = stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
+                        vm.run_chunk(chunk, nested, &args, false)
+                            .unwrap_or(Value::Null)
+                    });
+                    #[cfg(target_arch = "wasm32")]
+                    let result = vm.run_chunk(chunk, nested, &args, false).unwrap_or(Value::Null);
+                    self.stack.push(result);
+                }
                 Opcode::CallSpread => {
                     let callee = self
                         .stack

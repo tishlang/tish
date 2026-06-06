@@ -1,3 +1,25 @@
+################################################################################
+##  ★ FLAGSHIP WIN — recursion-JIT via SelfCall (2026-06-06). fib(35) BEATS Node.
+################################################################################
+The numeric JIT now compiles SELF-RECURSIVE calls to native cranelift recursion. A new `SelfCall`
+opcode is emitted by the compiler for `fn NAME(...)` bodies that call `NAME(args)` directly, ONLY when
+NAME's binding is provably stable (not shadowed by a param, not reassigned/redeclared anywhere in the
+body — conservative `stmt_rebinds` scan; a wrong SelfCall would be a miscompile). The VM runs SelfCall
+as a direct recursive `run_chunk`; the JIT lowers it to `bcx.ins().call(self_ref, …)` (the function's
+own FuncId, forward-referenced, resolved at finalize). `build_body_cfg`'s `!has_loop` bail was relaxed
+to also accept `has_self_call`, so branch+recursion functions like `fib` (no loop) now JIT.
+
+  RESULT:
+    fib(30):  329ms → 5ms        (66×)
+    fib(35):  tish 43ms  vs  Node 54ms   ← tish BEATS V8 on recursive fib
+    recursion_stress depth-500 tail recursion: CRASHED (stack overflow) → 0ms (native frames are
+      tiny, so the JIT also FIXES the overflow for JIT-eligible numeric recursion)
+  CORRECTNESS (the JIT-recursion path is critical — a miscompile is silent): vm ≡ interp on fib, fact,
+  pow2, collatz, gcd, ackermann, sumDigits, sumTo(1000); the reassignment case `tricky` (name rebound
+  mid-body) correctly does NOT self-call; mutual recursion (isEven/isOdd) correctly stays normal calls;
+  full suite 17/0; cranelift inherits it (embeds the VM). Additive: a non-eligible SelfCall bails to the
+  VM. Carries to cranelift/llvm; wasi runs the (correct, non-JIT) VM SelfCall.
+
 ================================================================================
   WIN (small) — per-call allocation cuts: shared `enclosing` + lazy `local_scope` (2026-06-06)
 ================================================================================

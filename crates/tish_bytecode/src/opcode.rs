@@ -118,13 +118,20 @@ pub enum Opcode {
     /// prologue so default parameter values apply only for *missing* args, matching the
     /// interpreter: an explicit `null` argument does NOT trigger the default.
     ArgMissing = 50,
+    /// Direct self-recursive call (operand: u16 arg count). Emitted by the compiler ONLY when a
+    /// `fn NAME` body calls `NAME(args)` and `NAME` is provably the function itself (not shadowed
+    /// by a param/local, not reassigned anywhere in the body). Args are on the stack as for `Call`,
+    /// but the callee is implicitly the currently-executing chunk — no name lookup, no closure
+    /// dispatch. The numeric JIT lowers this to a native recursive call (the big recursion win);
+    /// the VM runs the current chunk directly. Behaviour is identical to `LoadVar NAME; Call argc`.
+    SelfCall = 51,
 }
 
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=50 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=51 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 50 {
+        if b <= 51 {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None

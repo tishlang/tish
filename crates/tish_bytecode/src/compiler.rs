@@ -104,6 +104,12 @@ struct Compiler<'a> {
     /// straight to the function return otherwise). Reset per function — nested fns get a fresh
     /// `Compiler`. The exception-unwind path is handled separately in the `Try` emitter.
     finally_stack: Vec<Box<Statement>>,
+    /// When `Some(name)`, this chunk is the body of `fn name(...)` and `name`'s binding is provably
+    /// stable (no param shadows it, no reassignment/redeclaration in the body — see [`stmt_rebinds`]).
+    /// A direct call `name(args)` then compiles to `SelfCall` (no name lookup / closure dispatch; the
+    /// JIT lowers it to a native recursive call). `None` for anonymous fns, top-level, or anywhere the
+    /// self-binding can't be proven stable.
+    self_fn_name: Option<Arc<str>>,
 }
 
 /// Does `e` reference only the given params (no free/global vars, no nested
@@ -226,6 +232,118 @@ fn simple_fn_slots(
 /// the `main.tish` bundle (−22%). Set `TISH_VM_SLOTS=0` to disable (name-based, the old path).
 fn slots_enabled() -> bool {
     std::env::var("TISH_VM_SLOTS").map(|v| v != "0").unwrap_or(true)
+}
+
+/// Is `name` bound by one of `params` (so it would shadow a function's own name)? Conservative:
+/// any destructuring param returns `true` (it could bind `name` via a nested pattern we don't analyze).
+fn params_bind_name(params: &[FunParam], name: &str) -> bool {
+    params.iter().any(|p| match p {
+        FunParam::Simple(tp) => tp.name.as_ref() == name,
+        FunParam::Destructure { .. } => true,
+    })
+}
+
+/// Conservative scan: does `name` get REBOUND (assigned `=`, `+=`, `??=`, `++`/`--`, or re-declared
+/// via `let`/`for-of`) anywhere in `s`? Returns `true` on a rebind OR on any node it can't fully
+/// analyze. Used to decide whether `fn NAME`'s body may emit `SelfCall` for `NAME(...)`: only when
+/// NAME's binding is PROVABLY stable throughout the body, because a wrong `SelfCall` would call the
+/// original chunk after a reassignment — a silent miscompile. Erring toward `true` only costs the
+/// optimization, never correctness.
+fn stmt_rebinds(s: &Statement, name: &str) -> bool {
+    match s {
+        Statement::Block { statements, .. } => statements.iter().any(|s| stmt_rebinds(s, name)),
+        Statement::VarDecl { name: n, init, .. } => {
+            n.as_ref() == name || init.as_ref().is_some_and(|e| expr_rebinds(e, name))
+        }
+        Statement::ExprStmt { expr, .. } => expr_rebinds(expr, name),
+        Statement::Return { value, .. } => value.as_ref().is_some_and(|e| expr_rebinds(e, name)),
+        Statement::Throw { value, .. } => expr_rebinds(value, name),
+        Statement::If { cond, then_branch, else_branch, .. } => {
+            expr_rebinds(cond, name)
+                || stmt_rebinds(then_branch, name)
+                || else_branch.as_ref().is_some_and(|s| stmt_rebinds(s, name))
+        }
+        Statement::While { cond, body, .. } => expr_rebinds(cond, name) || stmt_rebinds(body, name),
+        Statement::DoWhile { body, cond, .. } => stmt_rebinds(body, name) || expr_rebinds(cond, name),
+        Statement::For { init, cond, update, body, .. } => {
+            init.as_ref().is_some_and(|s| stmt_rebinds(s, name))
+                || cond.as_ref().is_some_and(|e| expr_rebinds(e, name))
+                || update.as_ref().is_some_and(|e| expr_rebinds(e, name))
+                || stmt_rebinds(body, name)
+        }
+        Statement::ForOf { name: n, iterable, body, .. } => {
+            n.as_ref() == name || expr_rebinds(iterable, name) || stmt_rebinds(body, name)
+        }
+        Statement::Switch { expr, cases, default_body, .. } => {
+            expr_rebinds(expr, name)
+                || cases.iter().any(|(t, body)| {
+                    t.as_ref().is_some_and(|e| expr_rebinds(e, name))
+                        || body.iter().any(|s| stmt_rebinds(s, name))
+                })
+                || default_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(|s| stmt_rebinds(s, name)))
+        }
+        Statement::Try { body, catch_body, finally_body, .. } => {
+            stmt_rebinds(body, name)
+                || catch_body.as_ref().is_some_and(|s| stmt_rebinds(s, name))
+                || finally_body.as_ref().is_some_and(|s| stmt_rebinds(s, name))
+        }
+        Statement::Break { .. } | Statement::Continue { .. } => false,
+        // VarDeclDestructure (could bind `name`), FunDecl (could shadow), and any unknown construct
+        // → conservative: assume it may rebind `name`.
+        _ => true,
+    }
+}
+
+/// Expression half of [`stmt_rebinds`]. `true` if `name` is an assignment/update target, or unknown.
+fn expr_rebinds(e: &Expr, name: &str) -> bool {
+    match e {
+        Expr::Assign { name: n, value, .. }
+        | Expr::CompoundAssign { name: n, value, .. }
+        | Expr::LogicalAssign { name: n, value, .. } => n.as_ref() == name || expr_rebinds(value, name),
+        Expr::PostfixInc { name: n, .. }
+        | Expr::PostfixDec { name: n, .. }
+        | Expr::PrefixInc { name: n, .. }
+        | Expr::PrefixDec { name: n, .. } => n.as_ref() == name,
+        Expr::Literal { .. } | Expr::Ident { .. } => false,
+        Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+            expr_rebinds(left, name) || expr_rebinds(right, name)
+        }
+        Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } | Expr::Await { operand, .. } => {
+            expr_rebinds(operand, name)
+        }
+        Expr::Conditional { cond, then_branch, else_branch, .. } => {
+            expr_rebinds(cond, name) || expr_rebinds(then_branch, name) || expr_rebinds(else_branch, name)
+        }
+        Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+            expr_rebinds(callee, name)
+                || args.iter().any(|a| match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => expr_rebinds(e, name),
+                })
+        }
+        Expr::Member { object, .. } => expr_rebinds(object, name),
+        Expr::Index { object, index, .. } => expr_rebinds(object, name) || expr_rebinds(index, name),
+        Expr::Array { elements, .. } => elements.iter().any(|el| match el {
+            ArrayElement::Expr(e) | ArrayElement::Spread(e) => expr_rebinds(e, name),
+        }),
+        Expr::Object { props, .. } => props.iter().any(|p| match p {
+            ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => expr_rebinds(e, name),
+        }),
+        Expr::MemberAssign { object, value, .. } => expr_rebinds(object, name) || expr_rebinds(value, name),
+        Expr::IndexAssign { object, index, value, .. } => {
+            expr_rebinds(object, name) || expr_rebinds(index, name) || expr_rebinds(value, name)
+        }
+        Expr::TemplateLiteral { exprs, .. } => exprs.iter().any(|e| expr_rebinds(e, name)),
+        // A nested closure could reassign the outer `name`; recurse (over-conservative if it shadows,
+        // which only costs the optimization).
+        Expr::ArrowFunction { body, .. } => match body {
+            ArrowBody::Expr(e) => expr_rebinds(e, name),
+            ArrowBody::Block(s) => stmt_rebinds(s, name),
+        },
+        // Jsx, NativeModuleLoad, and anything unknown → conservative.
+        _ => true,
+    }
 }
 
 /// One conservative pass computing the over-approximated CAPTURED set: every identifier that appears
@@ -474,6 +592,7 @@ impl<'a> Compiler<'a> {
             next_slot: 0,
             general_slots: false,
             finally_stack: Vec::new(),
+            self_fn_name: None,
         }
     }
 
@@ -1349,6 +1468,13 @@ impl<'a> Compiler<'a> {
                     inner.num_slots = param_names.len() as u16;
                 }
                 let mut inner_comp = Compiler::new(&mut inner, false);
+                // Recursion-JIT enabler: if `name`'s binding is provably stable in the body (no
+                // param shadows it, no reassignment/redeclaration), direct `name(args)` calls inside
+                // compile to `SelfCall` — no name lookup, and the numeric JIT lowers it to a native
+                // recursive call. Conservative `stmt_rebinds` errs toward NOT enabling (safe).
+                if !params_bind_name(params, name.as_ref()) && !stmt_rebinds(body, name.as_ref()) {
+                    inner_comp.self_fn_name = Some(Arc::clone(name));
+                }
                 let mut general_frame_slots: Option<u16> = None;
                 if let Some(map) = simple_slots {
                     inner_comp.slot_ctx = Some(map);
@@ -1824,13 +1950,30 @@ impl<'a> Compiler<'a> {
                     self.compile_expr(callee)?;
                     self.emit(Opcode::CallSpread);
                 } else {
-                    self.compile_expr(callee)?;
-                    for arg in args {
-                        if let CallArg::Expr(e) = arg {
-                            self.compile_expr(e)?;
+                    // Self-recursion fast path: `name(args)` where `name` is this function's own
+                    // provably-stable binding → `SelfCall` (no callee LoadVar, no closure dispatch;
+                    // the JIT lowers it to a native recursive call). `self_fn_name` is only `Some`
+                    // when the compiler proved `name` isn't shadowed or rebound (see FunDecl).
+                    let is_self_call = matches!(
+                        callee.as_ref(),
+                        Expr::Ident { name, .. } if self.self_fn_name.as_deref() == Some(name.as_ref())
+                    );
+                    if is_self_call {
+                        for arg in args {
+                            if let CallArg::Expr(e) = arg {
+                                self.compile_expr(e)?;
+                            }
                         }
+                        self.emit_u16(Opcode::SelfCall, args.len() as u16);
+                    } else {
+                        self.compile_expr(callee)?;
+                        for arg in args {
+                            if let CallArg::Expr(e) = arg {
+                                self.compile_expr(e)?;
+                            }
+                        }
+                        self.emit_u16(Opcode::Call, args.len() as u16);
                     }
-                    self.emit_u16(Opcode::Call, args.len() as u16);
                 }
             }
             Expr::Member {

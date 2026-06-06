@@ -177,18 +177,30 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     }
     sig.returns.push(AbiParam::new(types::F64));
 
+    // Declare the function FIRST so its own `FuncRef` is available while building the body — that is
+    // what lets `SelfCall` lower to a native recursive call (the recursion-JIT win). Cranelift
+    // resolves the forward self-reference at `finalize_definitions`.
+    let name = format!("tish_num_{}", g.counter);
+    g.counter += 1;
+    let id = match g.module.declare_function(&name, Linkage::Export, &sig) {
+        Ok(id) => id,
+        Err(_) => return None,
+    };
+
     // Try the loop-capable CFG builder first; if it bails, retry the straight-line/ternary builder.
     // Each attempt needs a fresh function (a partial build leaves the context dirty).
     let mut ctx = g.module.make_context();
     ctx.func.signature = sig.clone();
+    let self_ref = g.module.declare_func_in_func(id, &mut ctx.func);
     let mut fbctx = FunctionBuilderContext::new();
-    let result_bool = match build_body_cfg(&mut ctx.func, &mut fbctx, chunk, arity) {
+    let result_bool = match build_body_cfg(&mut ctx.func, &mut fbctx, chunk, arity, Some(self_ref)) {
         Some(b) => b,
         None => {
             g.module.clear_context(&mut ctx);
             ctx = g.module.make_context();
             ctx.func.signature = sig.clone();
             fbctx = FunctionBuilderContext::new();
+            // build_body (straight-line/ternary) has no self-call path; it bails on SelfCall → VM.
             match build_body(&mut ctx.func, &mut fbctx, chunk, arity) {
                 Some(b) => b,
                 None => {
@@ -199,15 +211,6 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         }
     };
 
-    let name = format!("tish_num_{}", g.counter);
-    g.counter += 1;
-    let id = match g.module.declare_function(&name, Linkage::Export, &sig) {
-        Ok(id) => id,
-        Err(_) => {
-            g.module.clear_context(&mut ctx);
-            return None;
-        }
-    };
     if g.module.define_function(id, &mut ctx).is_err() {
         g.module.clear_context(&mut ctx);
         return None;
@@ -391,7 +394,7 @@ fn op_size(op: Opcode) -> Option<usize> {
     Some(match op {
         Nop | Pop | Dup | Return | LoopVarsEnd | EnterBlock | ExitBlock => 1,
         LoadLocal | StoreLocal | LoadConst | BinOp | UnaryOp | Jump | JumpIfFalse | JumpBack
-        | LoopVarsBegin => 3,
+        | LoopVarsBegin | SelfCall => 3,
         _ => return None,
     })
 }
@@ -419,6 +422,7 @@ fn build_body_cfg(
     fbctx: &mut FunctionBuilderContext,
     chunk: &Chunk,
     arity: usize,
+    self_ref: Option<cranelift::codegen::ir::FuncRef>,
 ) -> Option<bool> {
     let code = &chunk.code;
     let num_slots = chunk.num_slots as usize;
@@ -431,10 +435,18 @@ fn build_body_cfg(
     let mut leaders: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     leaders.insert(0);
     let mut has_loop = false;
+    let mut has_self_call = false;
     let mut ip = 0;
     while ip < code.len() {
         let op = Opcode::from_u8(code[ip])?;
         let size = op_size(op)?;
+        // A SelfCall whose arity != this function's arity can't be a plain f64-ABI native call → bail.
+        if op == Opcode::SelfCall {
+            if self_ref.is_none() || peek_u16(code, ip + 1)? as usize != arity {
+                return None;
+            }
+            has_self_call = true;
+        }
         match op {
             // A conditional branch: BOTH the target and the fall-through are reachable.
             Opcode::JumpIfFalse => {
@@ -460,9 +472,9 @@ fn build_body_cfg(
         }
         ip += size;
     }
-    // Only the loop case is worth the CFG path; pure straight-line/ternary stays on `build_body`
-    // (which also handles the ternary-`select` shape this path deliberately bails on).
-    if !has_loop {
+    // Worth the CFG path when there's a loop OR a self-recursive call (e.g. `fib`: branches + early
+    // return + recursion, no loop). Pure straight-line/ternary stays on `build_body`.
+    if !has_loop && !has_self_call {
         return None;
     }
 
@@ -580,6 +592,27 @@ fn build_body_cfg(
                 let fallthrough = *blocks.get(&(ip + 3))?;
                 bcx.ins().brif(falsy, target, &[], fallthrough, &[]);
                 terminated = true;
+                ip += 3;
+            }
+            Opcode::SelfCall => {
+                // Recursive self-call → a native cranelift call to this very function. Args are the
+                // top `arity` f64 stack values; result is pushed. Validated above (self_ref present,
+                // arity matches). This is what makes `fib` etc. run at native speed.
+                let sref = self_ref?; // guaranteed Some by the validation scan
+                if stack.len() < arity {
+                    return None;
+                }
+                let arg_start = stack.len() - arity;
+                let mut call_args = Vec::with_capacity(arity);
+                for (v, is_bool) in stack.drain(arg_start..) {
+                    if is_bool {
+                        return None; // boolean args don't match the f64 ABI
+                    }
+                    call_args.push(v);
+                }
+                let call = bcx.ins().call(sref, &call_args);
+                let result = bcx.inst_results(call)[0];
+                stack.push((result, false));
                 ip += 3;
             }
             _ => match emit_simple_op(&mut bcx, chunk, code, &mut ip, &mut stack, &params, arity) {
