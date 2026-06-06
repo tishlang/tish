@@ -110,16 +110,17 @@ mod imp {
 // --------------------------------------------------------------------------
 #[cfg(feature = "send-values")]
 mod imp {
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
 
     #[derive(Default)]
     pub struct VmRef<T: ?Sized>(pub(super) Arc<Mutex<T>>);
 
     /// Read guard alias. On the multi-threaded path both readers and
     /// writers share a single `MutexGuard` (exclusive access).
-    pub type ReadGuard<'a, T> = std::sync::MutexGuard<'a, T>;
+    pub type ReadGuard<'a, T> = parking_lot::MutexGuard<'a, T>;
     /// Write guard alias.
-    pub type WriteGuard<'a, T> = std::sync::MutexGuard<'a, T>;
+    pub type WriteGuard<'a, T> = parking_lot::MutexGuard<'a, T>;
 
     impl<T> VmRef<T> {
         #[inline]
@@ -129,17 +130,21 @@ mod imp {
     }
 
     impl<T: ?Sized> VmRef<T> {
-        /// Acquire the inner mutex. Poisoning is swallowed — a Tish
-        /// handler panic already aborts the enclosing thread; there is
-        /// no invariant worth preserving past that point.
+        /// Acquire the inner mutex. `parking_lot::Mutex` is used (not
+        /// `std::sync::Mutex`): its uncontended lock is a single atomic with
+        /// no pthread syscall — a profile of object/array-heavy code showed
+        /// `pthread_mutex_lock/unlock` as a top cost under send-values, since
+        /// every property/element access locks. It also has no poisoning, so
+        /// there is no `Result` to swallow (a handler panic aborts the thread
+        /// regardless).
         #[inline]
         pub fn borrow(&self) -> ReadGuard<'_, T> {
-            self.0.lock().unwrap_or_else(|p| p.into_inner())
+            self.0.lock()
         }
 
         #[inline]
         pub fn borrow_mut(&self) -> WriteGuard<'_, T> {
-            self.0.lock().unwrap_or_else(|p| p.into_inner())
+            self.0.lock()
         }
 
         #[inline]

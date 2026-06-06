@@ -1,4 +1,28 @@
 ################################################################################
+##  WIN — parking_lot::Mutex on the send-values path (2026-06-06). 2nd profile lever.
+################################################################################
+The post-mimalloc profile (same heavy object/array workload) exposed `pthread_mutex_lock`/`unlock`
+(~47 samples incl. stubs) as the #2 cost: under `send-values` (the shipped `full`/http build), every
+object/array access goes through `Arc<Mutex<T>>`, and `std::sync::Mutex` on macOS makes a pthread
+syscall even uncontended. Swapped to `parking_lot::Mutex` (crates/tish_core/src/vmref.rs, gated by the
+existing `send-values` feature; parking_lot was already in the tree): uncontended lock = one atomic,
+no syscall, no poisoning. Drop-in — still `Send + Sync`, behaviour identical (the std path already
+swallowed poison). Full suite 14/0, vm≡interp clean.
+
+  RESULT vs the post-mimalloc numbers (same harness):
+    micro                mimalloc   +parking_lot
+    object_stress          59          57
+    array_stress           31          30
+    new_features_perf      33          28     (−15%; access/mutex-heavy)
+    benchmark_granular     51          48
+    main.tish bundle      180         170
+  CUMULATIVE this session vs the FROZEN baseline (two transparent, zero-risk runtime wins):
+    object_stress 69→57 (−17%), array_stress 40→30 (−25%), new_features 47→28 (−40%),
+    benchmark_granular 67→48 (−28%), main.tish BUNDLE 230→170 (−26%).
+  The two transparent allocator/lock wins (mimalloc + parking_lot) are now harvested — the profile's
+  top-2 costs. What remains (allocation COUNT, refcount) needs the bigger representation/arena work.
+
+################################################################################
 ##  WIN — mimalloc global allocator (2026-06-06). The profile-driven lever.
 ################################################################################
 A sampling profile (macOS `sample`, symboled release) of an object/array-heavy workload showed it is
