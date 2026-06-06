@@ -2674,7 +2674,33 @@ impl Evaluator {
                         );
                     }
                 }
-                match eval.eval_statement(body) {
+                // Grow the native stack on demand so deep (non-tail) recursion doesn't overflow
+                // the OS thread stack — same idea as the bytecode VM's `stacker::maybe_grow` around
+                // recursive `run_chunk` (vm.rs:1138). Without it the tree-walker aborts (SIGABRT,
+                // "stack overflow") on deep recursion, which the cross-backend parity run surfaced
+                // on `recursion_stress`. This is the recursion ACCUMULATOR (every user-function call
+                // lands here); the per-element HOF path (`call_with_scope`) is deliberately NOT
+                // guarded — it never nests deeply, so it avoids the per-call check on hot map/filter.
+                //
+                // Red zone = 1 MiB, NOT the VM's 128 KiB: one tree-walker recursion level spans a
+                // long eval chain (eval_statement → eval_expr(if) → eval_expr(binary) → eval_expr(call)
+                // → eval_call_args → call_func → …), each frame large — far more per level than the
+                // VM's single `run_chunk` re-entry. 128 KiB is smaller than one level's chain, so the
+                // stack overflows BETWEEN checks; 1 MiB comfortably covers a level (verified to depth
+                // 20000 in both debug and release). 16 MiB segments keep grow frequency low.
+                let body_result = {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        stacker::maybe_grow(1024 * 1024, 16 * 1024 * 1024, || {
+                            eval.eval_statement(body)
+                        })
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        eval.eval_statement(body)
+                    }
+                };
+                match body_result {
                     Ok(v) => Ok(v),
                     Err(EvalError::Return(v)) => Ok(v),
                     Err(EvalError::Throw(v)) => Err(EvalError::Throw(v)),

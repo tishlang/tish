@@ -3337,6 +3337,7 @@ dependencies = [
  "indexmap",
  "rand 0.10.1",
  "reqwest",
+ "stacker",
  "tiny_http",
  "tishlang_ast",
  "tishlang_builtins",

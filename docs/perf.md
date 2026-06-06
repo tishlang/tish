@@ -55,6 +55,25 @@ A high-level "what are we missing" pass, grounded in two fresh profiles:
   levers — both multi-session reps. The 275ns/call number is the concrete frame-VM justification.
 
 ================================================================================
+  CORRECTNESS FIX — interp deep-recursion stack-overflow guard (2026-06-06)
+================================================================================
+The tree-walk interpreter had NO native-stack guard, so deeply recursive code (`fn deep(n){…deep(n-1)}`)
+aborted the process with SIGABRT ("stack overflow") — debug at <100 levels, release at higher depths —
+where the VM completes (its JIT lowers recursion to tiny native frames). Surfaced by the cross-backend
+parity run on `recursion_stress`. FIX: `stacker::maybe_grow` around the body eval in `call_func` (the
+recursion ACCUMULATOR; deliberately NOT in `call_with_scope`, the per-element HOF callback path, to keep
+map/filter hot loops check-free). TUNING: the VM's 128 KiB red-zone is too small for the interp — one
+tree-walker level spans a long eval chain (eval_statement→eval_expr×N→call_func), so the stack overflows
+BETWEEN checks; **1 MiB red-zone + 16 MiB segments** (verified to depth 20000, debug + release). Suite
+17/0, interp call throughput unchanged (~345ns/call; the per-call stack check is negligible).
+
+KNOWN LIMITATION (defer to frame-VM #39): the **wasi** backend still traps ("call stack exhausted") on
+deep recursion — its `run_chunk` re-entry maps each tish level to a wasm CALL frame (wasmtime exhausts
+~313), stacker is a no-op on wasm32, and there is no JIT. A depth-limit band-aid would wrongly throw on
+depth-500 recursion that node/vm/interp complete, so the proper fix is the frame-VM (iterative heap
+frame-stack, no wasm call frames) — a SECOND concrete justification for #39 alongside the 275ns/call wall.
+
+================================================================================
   WIN (small) — per-call allocation cuts: shared `enclosing` + lazy `local_scope` (2026-06-06)
 ================================================================================
 Two safe, compiler-/suite-verified cuts to the per-call cost in `run_chunk`:
