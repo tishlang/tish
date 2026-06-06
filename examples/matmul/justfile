@@ -17,6 +17,34 @@ run-main:
     ./matmul-main
 
 run-all:
-    just build-mlx && ./matmul-mlx
-    just build-gpu && ./matmul-gpu
+    just build-mlx  && ./matmul-mlx
+    just build-gpu  && ./matmul-gpu
     just build-main && ./matmul-main
+
+# ── concurrent racing (Promise.spawn + Promise.any / allSettled) ─────────────
+
+# Race MLX vs Metal — first GPU to finish wins. Prints: winner backend, latency.
+build-race:
+    cargo run --release -p tishlang --manifest-path ../../Cargo.toml -- build src/matmul_race.tish -o matmul-race --native-backend rust
+
+race: build-race
+    ./matmul-race
+
+# Both GPUs run concurrently; collect both results in order. Prints timing + checksum match.
+build-race-settled:
+    cargo run --release -p tishlang --manifest-path ../../Cargo.toml -- build src/matmul_race_settled.tish -o matmul-race-settled --native-backend rust
+
+race-settled: build-race-settled
+    ./matmul-race-settled
+
+# Race all three — MLX, Metal, CPU. First to finish wins; CPU is the fallback if GPUs fail.
+build-fastest:
+    cargo run --release -p tishlang --manifest-path ../../Cargo.toml -- build src/matmul_fastest.tish -o matmul-fastest --native-backend rust
+
+fastest: build-fastest
+    ./matmul-fastest
+
+race-all:
+    just race
+    just race-settled
+    just fastest

@@ -1,0 +1,80 @@
+// MLX vs Metal race — collect BOTH results with timing, then compare.
+//
+// Promise.allSettled waits for all backends to finish regardless of order,
+// returning an array of {status, value} in the same order as the input.
+// Use this when you want to compare backends or verify they agree, rather
+// than just taking the fastest result.
+//
+// This is also the right pattern for: profiling both backends per size,
+// result validation (both should produce the same checksum), or building
+// a benchmark table.
+//
+// Compile:
+//   tish build src/matmul_race_settled.tish -o matmul-race-settled --native-backend rust
+// Run:
+//   ./matmul-race-settled
+
+import { matmul as mlx_matmul, device_name as mlx_device, version as mlx_version } from 'tish:mlx'
+import { matmul as metal_matmul, device_name as metal_device } from 'tish:metal'
+
+console.log("=== MLX + Metal — parallel benchmark (both results) ===")
+console.log(`MLX:   ${mlx_version()}  ${mlx_device()}`)
+console.log(`Metal: ${metal_device()}`)
+console.log("")
+console.log("N       mlx_ms  metal_ms  wall_ms  match")
+
+fn makeMatrix(N: number) {
+  let len: number = N * N
+  let a: number[] = []
+  let b: number[] = []
+  for (let i: number = 0; i < len; i++) {
+    a.push((i % 997) / 997)
+    b.push((i % 991) / 991)
+  }
+  return { a: a, b: b, len: len }
+}
+
+fn checksum(c, N: number) {
+  let len: number = N * N
+  return c[0] + c[N - 1] + c[(N - 1) * N] + c[len - 1]
+}
+
+fn bench(N: number) {
+  let m = makeMatrix(N)
+  let a = m.a
+  let b = m.b
+
+  // Warm-up both backends at this shape.
+  mlx_matmul(a, b, N, N, N)
+  metal_matmul(a, b, N, N, N)
+
+  // Both run concurrently; allSettled collects both in input order.
+  let t = Date.now()
+  let results = await Promise.allSettled([
+    Promise.spawn(() => {
+      let t0 = Date.now()
+      let c = mlx_matmul(a, b, N, N, N)
+      return { ms: Date.now() - t0, c: c }
+    }),
+    Promise.spawn(() => {
+      let t0 = Date.now()
+      let c = metal_matmul(a, b, N, N, N)
+      return { ms: Date.now() - t0, c: c }
+    }),
+  ])
+  let wall = Date.now() - t
+
+  // results[0] = MLX, results[1] = Metal (input order, always)
+  let mlx = results[0].value
+  let metal = results[1].value
+  let mlx_check = checksum(mlx.c, N)
+  let metal_check = checksum(metal.c, N)
+  let match = Math.abs(mlx_check - metal_check) < 0.001 ? "yes" : "NO"
+  console.log(`${N}  ${mlx.ms}ms  ${metal.ms}ms  ${wall}ms  ${match}`)
+}
+
+bench(256)
+bench(512)
+bench(1024)
+bench(2048)
+bench(4096)

@@ -494,27 +494,57 @@ fn test_async_await_run() {
     }
 }
 
-/// Run Promise and setTimeout module tests (`promise` needs `http`; `settimeout` needs `timers`, which `http` enables).
-/// Ignored: tishlang_eval::run() does not run the event loop.
+/// `promise.tish` — full Promise API including `new Promise(executor)`, `.then`, `.catch`,
+/// `all`, `race`, `any`, `allSettled`. Runs via the binary (vm + interp), asserts exact output.
+/// This was previously `#[ignore]`'d and only checked "doesn't error" — the old fixture also
+/// avoided `new Promise` entirely, hiding a bug where the executor never ran on the VM. Now
+/// CI-gated and output-asserting. vm ≡ interp.
 #[test]
-#[cfg(feature = "http")]
-#[ignore = "requires async runtime"]
-fn test_promise_and_settimeout() {
-    for name in ["promise", "settimeout"] {
-        let path = workspace_root()
-            .join("tests")
-            .join("modules")
-            .join(format!("{}.tish", name));
-        if path.exists() {
-            let source = std::fs::read_to_string(&path).unwrap();
-            let result = tishlang_eval::run(&source);
-            assert!(
-                result.is_ok(),
-                "Failed to run {}: {:?}",
-                path.display(),
-                result.err()
-            );
-        }
+fn test_promise_core() {
+    let bin = tish_bin();
+    if !bin.exists() {
+        return;
+    }
+    let path = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("promise.tish");
+    if !path.exists() {
+        return;
+    }
+    let expected = "\
+new Promise: new-ctor
+Promise sync resolve: 42
+Promise.resolve: 100
+Promise.reject caught: true
+.then chain: 4
+.catch: handled: fail
+Promise.all: 1 2 3
+Promise.race: fast
+Promise.any: any-win
+Promise.allSettled: fulfilled rejected reason
+Promise tests completed
+";
+    for backend_args in [vec!["run"], vec!["run", "--backend", "interp"]] {
+        let mut args = backend_args.clone();
+        args.push(path.to_string_lossy().to_string().leak());
+        let out = Command::new(&bin)
+            .args(&args)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish binary");
+        assert!(
+            out.status.success(),
+            "promise.tish ({:?}) failed: stderr={}",
+            backend_args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected,
+            "Promise output mismatch on backend {:?} — check new Promise/any/allSettled regressions",
+            backend_args
+        );
     }
 }
 

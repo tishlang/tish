@@ -1096,8 +1096,28 @@ impl Vm {
                                     capabilities: Arc::clone(&capabilities),
                                     native_modules: native_modules.clone(),
                                 };
-                                vm.run_chunk(&inner_clone, &inner_clone.nested, args, false)
-                                    .unwrap_or(Value::Null)
+                                // Grow the OS thread stack on demand so deep tish recursion
+                                // doesn't abort the process. Each tish call adds a real Rust
+                                // frame; without this, ~500 levels overflows the default ~8 MB
+                                // thread stack. stacker mmap-allocates new segments (no fixed
+                                // ceiling) using the same mechanism rustc itself uses.
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
+                                        vm.run_chunk(
+                                            &inner_clone,
+                                            &inner_clone.nested,
+                                            args,
+                                            false,
+                                        )
+                                        .unwrap_or(Value::Null)
+                                    })
+                                }
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    vm.run_chunk(&inner_clone, &inner_clone.nested, args, false)
+                                        .unwrap_or(Value::Null)
+                                }
                             })
                         }
                     };
