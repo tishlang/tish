@@ -317,6 +317,12 @@ const PROPMAP_INLINE: usize = 8;
 pub struct PropMap {
     inline: SmallVec<[(Arc<str>, Value); PROPMAP_INLINE]>,
     map: Option<Box<IndexMap<Arc<str>, Value, ahash::RandomState>>>,
+    /// Hidden-class identity for this object's ordered key-set (JSC Structure). `EMPTY_SHAPE` (0)
+    /// for `{}`. Maintained by `insert` (new key → `shape::transition`) and reset to `DICT_SHAPE` by
+    /// `remove`. Lets the VM's inline caches compare a `u32` instead of hashing a key. INVARIANT: a
+    /// non-empty PropMap never has `EMPTY_SHAPE` (every key-add transitions away from it) — the IC
+    /// relies on this, so all key-adds must go through `insert` (the only mutation path; fields private).
+    shape: crate::shape::ShapeId,
 }
 
 impl PropMap {
@@ -333,9 +339,48 @@ impl PropMap {
                     n,
                     ahash::RandomState::default(),
                 ))),
+                shape: crate::shape::EMPTY_SHAPE,
             }
         } else {
             Self::default()
+        }
+    }
+
+    /// The hidden-class id for this object's current key-set (for the VM's inline caches).
+    #[inline]
+    pub fn shape(&self) -> crate::shape::ShapeId {
+        self.shape
+    }
+
+    /// Value at slot `i` (insertion order). For the inline-cache hit path: once a `(shape, index)`
+    /// is cached, a shape match means the property is at this stable index.
+    #[inline]
+    pub fn value_at_index(&self, i: usize) -> Option<&Value> {
+        match &self.map {
+            Some(m) => m.get_index(i).map(|(_, v)| v),
+            None => self.inline.get(i).map(|(_, v)| v),
+        }
+    }
+
+    /// Mutable value at slot `i` (insertion order) — for the SetMember inline-cache update path.
+    #[inline]
+    pub fn value_at_index_mut(&mut self, i: usize) -> Option<&mut Value> {
+        match &mut self.map {
+            Some(m) => m.get_index_mut(i).map(|(_, v)| v),
+            None => self.inline.get_mut(i).map(|(_, v)| v),
+        }
+    }
+
+    /// Like `get`, but also returns the property's slot index — used to *fill* an inline cache on a miss.
+    #[inline]
+    pub fn get_with_index(&self, key: &str) -> Option<(&Value, usize)> {
+        match &self.map {
+            Some(m) => m.get_full(key).map(|(i, _, v)| (v, i)),
+            None => self
+                .inline
+                .iter()
+                .position(|(k, _)| k.as_ref() == key)
+                .map(|i| (&self.inline[i].1, i)),
         }
     }
 
@@ -383,13 +428,23 @@ impl PropMap {
 
     pub fn insert(&mut self, key: Arc<str>, val: Value) -> Option<Value> {
         if let Some(m) = &mut self.map {
-            return m.insert(key, val);
+            // Map path (>PROPMAP_INLINE keys). A new key transitions the shape; an update doesn't.
+            let kc = Arc::clone(&key);
+            let prev = m.insert(key, val);
+            if prev.is_none() {
+                self.shape = crate::shape::transition(self.shape, &kc);
+            }
+            return prev;
         }
         if let Some(slot) = self.inline.iter_mut().find(|(k, _)| k.as_ref() == key.as_ref()) {
+            // Update existing key → value changes, layout (shape) does not.
             return Some(std::mem::replace(&mut slot.1, val));
         }
+        // New key (inline storage) → transition the shape away from the current one.
+        self.shape = crate::shape::transition(self.shape, &key);
         if self.inline.len() >= PROPMAP_INLINE {
-            // Promote inline storage to an insertion-ordered map.
+            // Promote inline storage to an insertion-ordered map (keys + their order are preserved,
+            // so the shape stays valid).
             let mut m: IndexMap<Arc<str>, Value, ahash::RandomState> =
                 IndexMap::with_capacity_and_hasher(self.inline.len() + 1, ahash::RandomState::default());
             for (k, v) in self.inline.drain(..) {
@@ -404,7 +459,7 @@ impl PropMap {
     }
 
     pub fn remove(&mut self, key: &str) -> Option<Value> {
-        match &mut self.map {
+        let removed = match &mut self.map {
             // shift_remove preserves insertion order (vs swap_remove).
             Some(m) => m.shift_remove(key),
             None => self
@@ -412,7 +467,12 @@ impl PropMap {
                 .iter()
                 .position(|(k, _)| k.as_ref() == key)
                 .map(|pos| self.inline.remove(pos).1),
+        };
+        if removed.is_some() {
+            // Deleting shifts slot indices → this object opts out of shape-based inline caches.
+            self.shape = crate::shape::DICT_SHAPE;
         }
+        removed
     }
 
     // Iterators return concrete enum types (not `Box<dyn>`) so iteration never

@@ -1,5 +1,14 @@
 //! Tish CLI - run, REPL, build to native or other targets.
 
+// Fast allocator for the whole process. tish's object/array/string workloads are allocation-bound
+// (sampling profiles spend a large fraction in system malloc/free + Arc drops); mimalloc is much
+// faster for the many-small-allocations pattern — the technique JSC uses with bmalloc. Transparent:
+// it only changes WHICH malloc backs every allocation, never program behaviour. `fast-alloc` is in
+// `default`; `--no-default-features` falls back to the system allocator.
+#[cfg(feature = "fast-alloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod cargo_native_registry;
 mod cli_help;
 mod repl_completion;

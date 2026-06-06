@@ -170,6 +170,12 @@ pub fn deserialize(mut data: &[u8]) -> Result<Chunk, String> {
     };
     let _ = data;
 
+    // Inline caches are a runtime-only cache, not serialized — start empty, sized to `names`.
+    let inline_caches = crate::chunk::InlineCaches(
+        (0..names.len())
+            .map(|_| std::sync::atomic::AtomicU64::new(0))
+            .collect(),
+    );
     Ok(Chunk {
         code,
         constants,
@@ -179,5 +185,6 @@ pub fn deserialize(mut data: &[u8]) -> Result<Chunk, String> {
         param_count,
         num_slots,
         slot_based,
+        inline_caches,
     })
 }

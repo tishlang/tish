@@ -1,7 +1,22 @@
 //! Bytecode chunk: instructions and constants.
 
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tishlang_core::Value;
+
+/// Per-property-name inline cache for object access (the JavaScriptCore inline-cache idea), indexed by
+/// the name index that `GetMember`/`SetMember` already carry. Each cell packs
+/// `(shape_id:u32 << 32) | slot_index:u32`; `0` = uncached. A racy `Relaxed` load/store is sound: a
+/// stale read just falls to the slow path, which re-checks the object's shape and refills. This is a
+/// runtime cache, NOT program data — a cloned `Chunk` (e.g. each closure instance) starts empty.
+#[derive(Debug, Default)]
+pub struct InlineCaches(pub Vec<AtomicU64>);
+
+impl Clone for InlineCaches {
+    fn clone(&self) -> Self {
+        InlineCaches(self.0.iter().map(|_| AtomicU64::new(0)).collect())
+    }
+}
 
 /// A constant in the constants table.
 #[derive(Debug, Clone)]
@@ -55,6 +70,9 @@ pub struct Chunk {
     /// hashmap, no name lookups. Name-based chunks (top level, closures that
     /// capture outer scope) leave this `false` and use the legacy path.
     pub slot_based: bool,
+    /// Inline caches for object property access, one cell per entry in `names` (so indexed by the
+    /// same name index `GetMember`/`SetMember` carry). Runtime-only; not part of the serialized program.
+    pub inline_caches: InlineCaches,
 }
 
 impl Chunk {
@@ -68,6 +86,7 @@ impl Chunk {
             param_count: 0,
             num_slots: 0,
             slot_based: false,
+            inline_caches: InlineCaches::default(),
         }
     }
 
@@ -91,6 +110,7 @@ impl Chunk {
         }
         let idx = self.names.len();
         self.names.push(name);
+        self.inline_caches.0.push(AtomicU64::new(0)); // keep the IC table sized to `names`
         idx as u16
     }
 

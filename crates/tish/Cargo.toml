@@ -16,10 +16,15 @@ path = "src/main.rs"
 # (see workspace `justfile`). `tish run --feature …` / `tish build --feature …` gate what runs
 # or what gets linked into a *native output* binary — they are not the primary way to ship a
 # “full” vs “empty” CLI.
-default = ["full"]
+default = ["full", "fast-alloc"]
 # Alias: same dependency edges as `default` (kept for `--features full` in CI and docs).
 # Includes `pg` so `tish run` can resolve `import … from '@tishlang/pg'` (`cargo:tish_pg`) on the bytecode VM.
 full = ["http", "fs", "process", "regex", "ws", "timers", "pg"]
+# Fast allocator (mimalloc) as the process `#[global_allocator]`. tish's object/array/string workloads
+# are allocation-bound (a sampling profile of object-heavy code spends ~14%+ in system malloc/free);
+# mimalloc is markedly faster for the many-small-allocations pattern — the same reason JSC ships bmalloc.
+# Semantically transparent (just a faster malloc); `--no-default-features` drops it for the system allocator.
+fast-alloc = ["dep:mimalloc"]
 # Opt-out: build without Postgres (`cargo build -p tishlang --no-default-features --features http,...`).
 pg = ["dep:tishlang_pg"]
 # Individual capability flags
@@ -50,6 +55,7 @@ tishlang_core = { path = "../tish_core", version = ">=0.1" }
 tishlang_js_to_tish = { path = "../js_to_tish", version = ">=0.1" }
 clap = { version = "4.6.0", features = ["derive", "color"] }
 tishlang_pg = { path = "../tish_pg", version = ">=0.1", optional = true }
+mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
 rayon = "1.11"

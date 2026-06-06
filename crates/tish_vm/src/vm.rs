@@ -1446,7 +1446,7 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    let v = get_member(&obj, key)?;
+                    let v = ic_get_member(chunk, idx, &obj, key)?;
                     self.stack.push(v);
                 }
                 Opcode::GetMemberOptional => {
@@ -1458,7 +1458,7 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    let v = get_member(&obj, key).unwrap_or(Value::Null);
+                    let v = ic_get_member(chunk, idx, &obj, key).unwrap_or(Value::Null);
                     self.stack.push(v);
                 }
                 Opcode::SetMember => {
@@ -1474,7 +1474,7 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    set_member(&obj, key, val.clone())?;
+                    ic_set_member(chunk, idx, &obj, key, val.clone())?;
                     self.stack.push(val); // assignment yields value
                 }
                 Opcode::GetIndex => {
@@ -1952,6 +1952,81 @@ fn eval_unary(op: UnaryOp, o: &Value) -> Result<Value, String> {
         BitNot => Ok(Number(!(o.as_number().unwrap_or(0.0) as i32) as f64)),
         Void => Ok(Null),
     }
+}
+
+/// `GetMember` with the per-name inline cache (JSC-style, Phase 1a). On a shape hit the property is at
+/// a cached slot index → a direct load, no key hash/compare. A miss (or a non-plain-object, or a
+/// `DICT_SHAPE` object) falls to [`get_member`] (arrays/strings/`length`/methods/missing-property
+/// error), refilling the cache when the object *does* have the property. Result-equivalent to
+/// `get_member` — the cache only skips the lookup; the shape uniquely fixes the slot for a property.
+#[inline]
+fn ic_get_member(chunk: &Chunk, name_idx: u16, obj: &Value, key: &Arc<str>) -> Result<Value, String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    if let Value::Object(od) = obj {
+        let b = od.borrow();
+        let shape = b.strings.shape();
+        if shape != tishlang_core::DICT_SHAPE {
+            if let Some(cell) = chunk.inline_caches.0.get(name_idx as usize) {
+                let ic = cell.load(Relaxed);
+                let cached_shape = (ic >> 32) as u32; // 0 == uncached
+                if cached_shape != 0 && cached_shape == shape {
+                    if let Some(v) = b.strings.value_at_index((ic & 0xffff_ffff) as usize) {
+                        return Ok(v.clone());
+                    }
+                }
+                // Miss: do the real lookup once, and if the property exists, cache its slot.
+                if let Some((v, i)) = b.strings.get_with_index(key.as_ref()) {
+                    cell.store(((shape as u64) << 32) | i as u64, Relaxed);
+                    return Ok(v.clone());
+                }
+            }
+        }
+        // `b` drops at the end of this block → safe to re-borrow `obj` in `get_member` below.
+    }
+    get_member(obj, key)
+}
+
+/// `SetMember` with the per-name inline cache. On a shape hit for an existing property → an in-place
+/// store at the cached slot (no key lookup, no shape change). Otherwise the slow path inserts (a new
+/// key transitions the shape) and refills the cache. Non-objects fall to [`set_member`].
+#[inline]
+fn ic_set_member(
+    chunk: &Chunk,
+    name_idx: u16,
+    obj: &Value,
+    key: &Arc<str>,
+    val: Value,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    if let Value::Object(od) = obj {
+        let mut b = od.borrow_mut();
+        let shape = b.strings.shape();
+        let cell = chunk.inline_caches.0.get(name_idx as usize);
+        if shape != tishlang_core::DICT_SHAPE {
+            if let Some(c) = cell {
+                let ic = c.load(Relaxed);
+                let cached_shape = (ic >> 32) as u32;
+                if cached_shape != 0 && cached_shape == shape {
+                    if let Some(slot) = b.strings.value_at_index_mut((ic & 0xffff_ffff) as usize) {
+                        *slot = val; // existing property, same shape → in-place update
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        // Slow path: insert (a new key transitions the shape) + refill the cache for next time.
+        b.strings.insert(Arc::clone(key), val);
+        if let Some(c) = cell {
+            let ns = b.strings.shape();
+            if ns != tishlang_core::DICT_SHAPE {
+                if let Some((_, i)) = b.strings.get_with_index(key.as_ref()) {
+                    c.store(((ns as u64) << 32) | i as u64, Relaxed);
+                }
+            }
+        }
+        return Ok(());
+    }
+    set_member(obj, key, val)
 }
 
 fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {

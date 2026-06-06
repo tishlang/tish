@@ -1,3 +1,115 @@
+################################################################################
+##  WIN — mimalloc global allocator (2026-06-06). The profile-driven lever.
+################################################################################
+A sampling profile (macOS `sample`, symboled release) of an object/array-heavy workload showed it is
+**allocation-bound**: ~220 of the hot samples are in the system allocator (`_xzm_xzone_malloc_tiny`
+51, `_xzm_free` 45, `_xzm_xzone_malloc` 20, `_malloc_zone_malloc` 20, `__bzero` 29, `_free` 19, …)
+plus refcount drops (`drop_in_place<Value>` 32, `Arc::drop_slow` 11) — and ~0 in opcode dispatch.
+Pure arithmetic is dispatch-bound (→ the JIT, already landed); object/array/string churn is
+**malloc-bound**. tish was using the system allocator; **JSC ships its own (bmalloc)** for exactly
+this reason.
+
+Fix: `mimalloc` as the process `#[global_allocator]` (crates/tish, `fast-alloc` feature, in `default`;
+`--no-default-features` → system allocator). Semantically transparent — only changes which malloc
+backs every allocation. Differential vm≡interp clean on object_stress/array_stress/new_features.
+
+  RESULT vs FROZEN baseline (target/release/tish run, best-of-3 Σms; bundle = best-of-5 wall):
+    micro                BEFORE   AFTER   Δ
+    object_stress          69      59    −14%
+    array_stress           40      31    −22%
+    new_features_perf      47      33    −30%
+    benchmark_granular     67      51    −24%
+    main.tish bundle      230     180    −22%   <- the real-world workload
+  (All rows: shipping release config, system-malloc BEFORE vs mimalloc AFTER, no debug symbols on
+  either — apples-to-apples.) Every tracked micro AND the bundle beat the frozen baseline. This is
+  the single highest
+  win/effort change of the JSC work: one transparent dependency, no representation change, no risk.
+
+  SYNTHESIS (the corrected strategy, from 5 measurements): tish's perf gap is TWO distinct levers,
+  by workload — (1) PURE COMPUTE is dispatch-bound → the numeric/control-flow JIT (landed, 89×→1× on
+  numeric loops); (2) OBJECT/ARRAY/STRING churn is ALLOCATION-bound → a fast allocator (this) +
+  representation changes that REDUCE allocation count (packed f64 arrays = one buffer not per-element
+  boxing; shape objects = no per-key storage). Property-lookup ICs (Phase 1a) and NaN-boxing address
+  neither dominant cost directly (lookups aren't hot; NaN-box shrinks Values but not alloc COUNT), so
+  they rank below the allocator + packed arrays. NEXT highest-confidence: extend `fast-alloc` to the
+  rust-AOT generated output, then Phase 2 packed arrays (now clearly motivated: cuts alloc count).
+
+================================================================================
+  PHASE 1a — shapes + inline caches LANDED, but NOT the object_stress lever (2026-06-05)
+================================================================================
+Implemented JSC-style object shapes (`tish_core/src/shape.rs`: interned ShapeId + structure
+transitions) + a per-name inline cache on `GetMember`/`SetMember` (`Chunk.inline_caches`, atomic,
+serde-skip). CORRECT: full cross-backend suite 14/0; vm ≡ interp on an IC stress (mono/poly shapes,
+update, delete→DICT, missing, nested, array-of-objects). Additive — `DICT_SHAPE`/non-object/miss fall
+to the existing path.
+
+  RESULT vs BEFORE baseline: object_stress 69→72ms (≈flat), bundle 230→240ms (≈flat). **The IC did
+  NOT move the tracked numbers.** Measured why: object_stress's hot sections are `Object.entries`/
+  `Object.keys` for-of (build arrays), spread+extend, `Object.assign`, destructure — BULK ops that
+  allocate, NOT `o.x` access in a loop. And an access-heavy micro (3M × 4 reads) is 501ms vs Node 5 —
+  the interpreter loop + boxing dominate, not the property lookup.
+
+  STRATEGIC FINDING (reshapes the ENTIRE JSC plan — backed by 4 measurements): tish's micro gap to
+  Node/Bun is dominated by **interpreter dispatch overhead** (per-opcode match + stack push/pop +
+  ip-advance) and allocation — NOT value representation (boxing / shapes / NaN-box). Proof:
+    1. The access IC (faster lookup) did not move object_stress (72 vs 69) or the bundle (240 vs 230).
+    2. object_stress hot sections are Object.entries/keys (build arrays), spread, assign, destructure —
+       allocation + iteration, not `o.x` lookups.
+    3. THE CLINCHER — same arithmetic, two ways: `arr.map(x=>x*2)` ×5000 (the FUSED `ArrayMapBinOp`
+       opcode, one dispatch per call) = 40ms ≈ 8ns/op, near-native; the IDENTICAL work as an inline
+       interpreted index loop (one dispatch *per element op*) = 646ms ≈ 130ns/iter. **16× — and the
+       only difference is dispatch count.** Element boxing is identical in both; representation is not
+       the variable.
+    4. This session's control-flow JIT crushed numeric loops 89×→1× by ELIMINATING dispatch — the same
+       lever, proven.
+
+  Therefore the high-leverage direction is **dispatch elimination**, not representation:
+    • Extend the proven JIT beyond numeric-only function bodies → top-level hot loops, more callback
+      shapes, object/array ops (with the IC from 1a as the in-JIT property fast path). The 89× lever.
+    • More fused super-opcodes for common non-fused HOF shapes (map-returning-array for `.flat()`,
+      map-to-property) — each amortizes dispatch over N elements like ArrayMapBinOp already does.
+  The JSC representation plan addresses a smaller fraction: Phase 1b (butterfly) helps construction/
+  spread ~30% but objects stay Arc<Mutex>; Phase 2 (packed arrays) removes element boxing — real but
+  secondary to dispatch; Phase 3 (NaN-box) halves per-op memory traffic but not dispatch *count*.
+  Phase 1a (the IC) is kept as correct infrastructure (it is the in-JIT property fast path the
+  extended JIT will use, and it speeds property-access-heavy REAL code) — it is simply not, by itself,
+  the lever these benchmarks needed.
+
+################################################################################
+##  FROZEN BASELINE (2026-06-05) — BEFORE shapes/inline-caches, packed arrays,
+##  NaN-boxing. This is the line the JSC/Bun-guided work (docs/jsc-bun-perf-
+##  guidance.md, plan: shapes+ICs → packed arrays → NaN-box) MUST beat. Captured
+##  AFTER this session's slot-based locals + control-flow JIT already landed.
+################################################################################
+
+darwin-arm64, release. THIS IS "BEFORE". Each phase appends an "AFTER" block above
+and must show its target micro faster than these numbers, suite still 14/0.
+
+BUNDLED PERF SUITE (tests/main.tish, sustained, 5-run avg, ms) — run_performance_suite.sh --release:
+  backend       ms     vs Node
+  rust (AOT)   114     1.5x
+  vm (default) 252     3.3x   <- the JSC work targets this via objects+arrays+Value
+  interp       326     4.3x
+  cranelift    263     3.5x   (embeds the VM → inherits the wins)
+  llvm         260     3.4x   (embeds the VM)
+  wasi        1308    17.2x
+  Node          76     1.0
+  Bun           58     0.76x  <- the real target
+  Deno          69     0.91x
+  QuickJS      263     3.5x
+
+COMPUTE MICROS (vm, internal Date.now Σms, startup excluded, 3-run best):
+  micro                vm     Node   Bun    vm/Node   vm/Bun
+  object_stress        69ms   6      6      11.5x     11.5x   <- Phase 1 target (≤35ms)
+  array_stress         40ms   12     10      3.3x      4.0x   <- Phase 2 target (≤22ms)
+  new_features_perf    47ms   6      6       7.8x      7.8x
+  benchmark_granular   67ms   6      8      11.2x      8.4x
+  main.tish bundle (vm wall-clock, 3-run best): 230ms
+
+Reproduce a micro: target/release/tish run tests/core/object_stress.tish (self-times
+each section via Date.now); sum the `…ms` lines. Numeric loop fns already match Node
+(sumTo 62ms) via the control-flow JIT below — the remaining gap is objects/arrays/Value.
+
 ================================================================================
   VM CONTROL-FLOW JIT — numeric LOOP functions now run at native speed (2026-06-05)
 ================================================================================
