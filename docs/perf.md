@@ -1,4 +1,36 @@
 ================================================================================
+  FULL SUITE RUN (2026-06-05) — all backends, after rust-AOT async parity fix
+================================================================================
+Fresh `scripts/run_performance_suite.sh --release`. The headline change: the rust
+backend no longer CRASHES on the bundle (was exit 134 on `.then()` chains), so its
+sustained-compute number is now real — and much better than the prior unreliable
+175ms. Suite failures are down to 2/52, **both QuickJS** (a reference runtime), not
+any tish backend; every tish backend passes.
+
+BUNDLED PERF SUITE — tests/main.tish, sustained compute, 5-run avg (ms):
+  backend       ms     vs Node   note
+  rust (AOT)   106     1.6x      best tish; beats QuickJS (255)
+  vm (default) 300     4.5x      <- the real gap (#13/#14 lever territory)
+  interp       311     4.6x
+  cranelift    327     4.9x      mirrors vm (embeds it)
+  llvm         326     4.9x      mirrors vm
+  wasi        1268    18.9x      still broken for compute; needs own triage
+  Node          67     1.0
+  Bun           49     0.7x
+  Deno          61     0.9x
+  QuickJS      255     3.8x
+
+PER-TEST compute (micro, vm vs Node%): object_stress 321% · benchmark_granular 294%
+  · new_features_perf 208% · array_stress 142%.  Startup-bound micros (~46 of them):
+  ~30% (tish ~9ms vs Node ~30ms) — tish WINS ~3x on small scripts (durable startup edge).
+
+Reconciliation vs the prior log: array_stress micro is startup-amortized at the file
+level; the BUNDLE (all tests in one process) is the honest sustained-compute figure.
+rust 1.6x (not the earlier 2.3x) — the old number was measured while the bundle was
+aborting mid-run. Default `tish run` (vm) at 4.5x and cranelift/llvm (which embed the
+VM) are the remaining compute reds; wasi at 19x is a separate problem.
+
+================================================================================
   GAUNTLET PASS (2026-06-05) — native struct fields + native numeric reduce
 ================================================================================
 Two shared rust-backend codegen changes (no per-test hacks). The compute gauntlet
