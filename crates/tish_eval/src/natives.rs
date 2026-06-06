@@ -289,6 +289,13 @@ pub fn array_is_array(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Bool(matches!(args.first(), Some(Value::Array(_)))))
 }
 
+/// `String(value)` as a function: JS `ToString` coercion (arrays comma-join recursively,
+/// objects → "[object Object]", null → "null"), matching the VM/native `string_convert`.
+pub fn string_convert(args: &[Value]) -> Result<Value, String> {
+    let v = args.first().unwrap_or(&Value::Null);
+    Ok(Value::String(v.to_js_string().into()))
+}
+
 pub fn string_from_char_code(args: &[Value]) -> Result<Value, String> {
     let s: String = args
         .iter()

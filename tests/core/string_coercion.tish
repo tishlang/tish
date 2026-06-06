@@ -1,0 +1,40 @@
+// JS ToString coercion conformance for `+`, template literals, and String().
+// Every line's output must match Node. Bare `console.log(array/object)` is
+// intentionally excluded: that uses the inspect/display form, which differs
+// from Node by design (e.g. `[1, 2]` vs `[ 1, 2 ]`).
+
+// ── String concatenation (+) coerces operands via ToString ──────────────
+console.log("" + [1, 2, 3])
+console.log("" + [1, [2, 3]])
+console.log("arr=" + [1, [2, [3, 4]]])
+console.log("" + { a: 1 })
+console.log("" + null)
+console.log("" + true)
+console.log("" + 42)
+console.log([1, 2] + "x")
+
+// ── Template literal interpolation coerces via ToString ─────────────────
+console.log(`${[1, 2, 3]}`)
+console.log(`nested ${[1, [2, 3]]} end`)
+let o = { a: 1, b: 2 }
+console.log(`obj=${o}`)
+console.log(`null=${null}`)
+console.log(`bool=${true} num=${42}`)
+
+// ── String() function: ToString coercion ───────────────────────────────
+console.log(String([1, 2, 3]))
+console.log(String([1, [2, 3]]))
+console.log(String({ a: 1 }))
+console.log(String(null))
+console.log(String(42))
+console.log(String(true))
+console.log(String("hi"))
+
+// ── Array.prototype.join with nested arrays / null elements ─────────────
+console.log([1, [2, 3], 4].join("|"))
+console.log([1, null, 3].join(","))
+
+// ── Compound += onto a string coerces the rhs via ToString ──────────────
+let s = "acc:"
+s += [1, 2]
+console.log(s)

@@ -194,11 +194,13 @@ impl Evaluator {
                 true,
             );
 
-            let mut string_obj = PropMap::with_capacity(1);
+            let mut string_obj = PropMap::with_capacity(2);
             string_obj.insert(
                 "fromCharCode".into(),
                 Value::Native(natives::string_from_char_code),
             );
+            // `String(value)` callable: dispatched via `__call` in `call_func`, like `Symbol`.
+            string_obj.insert("__call".into(), Value::Native(natives::string_convert));
             s.set(
                 "String".into(),
                 Value::object(string_obj),
@@ -2104,7 +2106,7 @@ impl Evaluator {
                     result.push_str(quasi);
                     if i < exprs.len() {
                         let val = self.eval_expr(&exprs[i])?;
-                        result.push_str(&val.to_string());
+                        result.push_str(&val.to_js_string());
                     }
                 }
                 Ok(Value::String(result.into()))
@@ -2123,14 +2125,14 @@ impl Evaluator {
                     Ok(Value::String(s.into()))
                 }
                 (Value::String(a), b) => {
-                    let b_str = b.to_string();
+                    let b_str = b.to_js_string();
                     let mut s = String::with_capacity(a.len() + b_str.len());
                     s.push_str(a);
                     s.push_str(&b_str);
                     Ok(Value::String(s.into()))
                 }
                 (a, Value::String(b)) => {
-                    let a_str = a.to_string();
+                    let a_str = a.to_js_string();
                     let mut s = String::with_capacity(a_str.len() + b.len());
                     s.push_str(&a_str);
                     s.push_str(b);

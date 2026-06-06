@@ -246,3 +246,22 @@ pub fn await_promise(v: Value) -> Value {
         v
     }
 }
+
+/// Like [`await_promise`], but a REJECTED promise surfaces as a catchable throw rather than
+/// silently yielding the rejection value. `await Promise.reject(x)` must throw `x` (so a
+/// surrounding `try/catch` fires) — matching interp/vm/cranelift/wasi. The codegen emits this
+/// variant (with `?`) wherever an error channel exists (inside a `try` body, or top-level `run()`),
+/// and falls back to [`await_promise`] only where there is no channel (a nested value-fn with no
+/// enclosing try), mirroring how `throw` is lowered.
+pub fn await_promise_throw(v: Value) -> Result<Value, Box<dyn std::error::Error>> {
+    if let Value::Promise(p) = v {
+        match p.block_until_settled() {
+            Ok(val) => Ok(val),
+            Err(rejection) => {
+                Err(Box::new(crate::TishError::Throw(rejection)) as Box<dyn std::error::Error>)
+            }
+        }
+    } else {
+        Ok(v)
+    }
+}

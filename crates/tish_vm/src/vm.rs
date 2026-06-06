@@ -1877,7 +1877,9 @@ fn append_value_for_string_concat(out: &mut String, v: &Value) {
         Value::String(s) => out.push_str(s.as_ref()),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Null => out.push_str("null"),
-        _ => out.push_str(&v.to_display_string()),
+        // Arrays/objects use JS `ToString` (recursive comma-join / "[object Object]"),
+        // not the inspect form, so `"" + [1,[2,3]]` and templates match Node.
+        _ => out.push_str(&v.to_js_string()),
     }
 }
 

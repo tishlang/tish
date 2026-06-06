@@ -177,14 +177,14 @@ pub mod ops {
                 Ok(Value::String(s.into()))
             }
             (Value::String(a), b) => {
-                let b_str = b.to_display_string();
+                let b_str = b.to_js_string();
                 let mut s = String::with_capacity(a.len() + b_str.len());
                 s.push_str(a);
                 s.push_str(&b_str);
                 Ok(Value::String(s.into()))
             }
             (a, Value::String(b)) => {
-                let a_str = a.to_display_string();
+                let a_str = a.to_js_string();
                 let mut s = String::with_capacity(a_str.len() + b.len());
                 s.push_str(&a_str);
                 s.push_str(b);
@@ -275,6 +275,7 @@ use tishlang_builtins::globals::{
     object_assign as builtins_object_assign, object_entries as builtins_object_entries,
     object_from_entries as builtins_object_from_entries, object_keys as builtins_object_keys,
     object_values as builtins_object_values,
+    string_convert as builtins_string_convert,
     string_from_char_code as builtins_string_from_char_code,
 };
 use tishlang_core::{json_parse as core_json_parse, json_stringify as core_json_stringify};
@@ -534,6 +535,12 @@ pub fn string_from_char_code(args: &[Value]) -> Value {
     builtins_string_from_char_code(args)
 }
 
+/// `String(value)` as a function (JS `ToString`). Wired into the codegen `String`
+/// global as `__call` so compiled `String(x)` matches the VM/interp.
+pub fn string_convert(args: &[Value]) -> Value {
+    builtins_string_convert(args)
+}
+
 #[cfg(feature = "process")]
 pub fn process_exit(args: &[Value]) -> Value {
     let code = args
@@ -708,6 +715,22 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
             .get_method(key)
             .map(Value::Function)
             .unwrap_or(Value::Null),
+        // Promise instance methods (`.then`/`.catch`), bound to this promise. Returning a
+        // callable here makes the rust backend match the VM family (interp/vm/cranelift/wasi),
+        // which expose these via `GetMember`. Both `p.then(cb)` (member) and `p["catch"](cb)`
+        // (index, used because `catch` is reserved) route through here / `get_index`.
+        #[cfg(any(feature = "http", feature = "promise"))]
+        Value::Promise(p) => match key {
+            "then" => {
+                let pc = p.clone();
+                Value::native(move |args: &[Value]| promise_instance_then(&pc, args))
+            }
+            "catch" => {
+                let pc = p.clone();
+                Value::native(move |args: &[Value]| promise_instance_catch(&pc, args))
+            }
+            _ => Value::Null,
+        },
         _ => Value::Null,
     }
 }
@@ -723,6 +746,13 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
             arr.borrow().get(idx).cloned().unwrap_or(Value::Null)
         }
         Value::Object(_) => tishlang_core::object_get(obj, index).unwrap_or(Value::Null),
+        // `promise["then"|"catch"]` — string-keyed access mirrors `get_prop` (bracket form
+        // is required for `catch`, a reserved word). Keeps the rust backend on par with the VM.
+        #[cfg(any(feature = "http", feature = "promise"))]
+        Value::Promise(_) => match index {
+            Value::String(k) => get_prop(obj, k.as_ref()),
+            _ => Value::Null,
+        },
         _ => Value::Null,
     }
 }
@@ -917,7 +947,10 @@ pub use timers::{
 };
 
 #[cfg(any(feature = "http", feature = "promise"))]
-pub use promise::{await_promise, promise_instance_catch, promise_instance_then, promise_object};
+pub use promise::{
+    await_promise, await_promise_throw, promise_instance_catch, promise_instance_then,
+    promise_object,
+};
 
 #[cfg(feature = "http")]
 pub use native_promise::{fetch_all_promise, fetch_async_promise, fetch_promise};

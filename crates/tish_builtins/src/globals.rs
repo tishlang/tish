@@ -52,9 +52,11 @@ pub fn array_is_array(args: &[Value]) -> Value {
 }
 
 /// String(value) — convert value to string (JS String constructor as function).
+/// Uses JS `ToString` (arrays comma-join recursively, objects → "[object Object]"),
+/// not the inspect/display form.
 pub fn string_convert(args: &[Value]) -> Value {
     let v = args.first().unwrap_or(&Value::Null);
-    Value::String(v.to_display_string().into())
+    Value::String(v.to_js_string().into())
 }
 
 /// String.fromCharCode(...codes)

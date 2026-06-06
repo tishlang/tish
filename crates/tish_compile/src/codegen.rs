@@ -1324,7 +1324,7 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -1339,7 +1339,7 @@ impl Codegen {
             // linked, else a non-http `tish build --feature …` fails with an unresolved import.
             self.write("use tishlang_runtime::register_static_route as tish_register_static_route;\n");
             if self.is_async {
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, promise_object as tish_promise_object, await_promise as tish_await_promise};\n");
+                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, promise_object as tish_promise_object, await_promise as tish_await_promise, await_promise_throw as tish_await_promise_throw};\n");
             } else {
                 self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve};\n");
             }
@@ -1499,6 +1499,8 @@ impl Codegen {
         self.writeln("let String = Value::object(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"fromCharCode\"), Value::native(|args: &[Value]| tish_string_from_char_code(args))),");
+        // `String(value)` callable: `value_call` dispatches objects via `__call`, like `Symbol`.
+        self.writeln("(Arc::from(\"__call\"), Value::native(|args: &[Value]| tish_string_convert(args))),");
         self.indent -= 1;
         self.writeln("]));");
 
@@ -1665,6 +1667,14 @@ impl Codegen {
         }
         if self.is_async {
             self.async_context_stack.pop();
+        }
+
+        // Run pending timers to completion before exiting — the JS event loop drains the
+        // timer queue after top-level code finishes. Without this the rust backend drops
+        // `setTimeout(cb, 0)` callbacks that never coincided with a blocking-op drain,
+        // diverging from interp/vm/cranelift/wasi (which drain at end-of-program).
+        if self.has_feature("timers") {
+            self.writeln("tishlang_runtime::drain_timers();");
         }
 
         self.writeln("Ok(())");
@@ -3649,26 +3659,36 @@ impl Codegen {
                 #[cfg(feature = "http")]
                 if self.is_async {
                     let _in_async = self.async_context_stack.last().copied().unwrap_or(false);
+                    // A rejected awaited promise must THROW (so a surrounding try/catch fires).
+                    // Use the throwing `?`-variant wherever an error channel exists — the SAME
+                    // condition `throw` uses to emit `return Err(..)` (inside a try body, or the
+                    // top-level run()). Elsewhere there is no channel, so fall back to the
+                    // value-returning variant (matches the existing uncaught-throw limitation).
+                    let (awaiter, q) = if self.try_closure_depth > 0 || self.value_fn_depth == 0 {
+                        ("tish_await_promise_throw", "?")
+                    } else {
+                        ("tish_await_promise", "")
+                    };
                     if let Expr::Call { callee, args, .. } = operand.as_ref() {
                         if let Expr::Ident { name, .. } = callee.as_ref() {
                             let args_code = self.emit_call_args(args)?;
                             return Ok(match name.as_ref() {
                                 "fetch" => {
-                                    format!("tish_await_promise(tish_fetch_promise({}))", args_code)
+                                    format!("{}(tish_fetch_promise({})){}", awaiter, args_code, q)
                                 }
                                 "fetchAll" => {
-                                    format!("tish_await_promise(tish_fetch_all_promise({}))", args_code)
+                                    format!("{}(tish_fetch_all_promise({})){}", awaiter, args_code, q)
                                 }
                                 _ => {
                                     let o = self.emit_expr(operand)?;
-                                    return Ok(format!("tish_await_promise({})", o));
+                                    return Ok(format!("{}({}){}", awaiter, o, q));
                                 }
                             });
                         }
                     }
                     // await Call with non-Ident callee, or await Promise value: wrap in await_promise
                     let o = self.emit_expr(operand)?;
-                    return Ok(format!("tish_await_promise({})", o));
+                    return Ok(format!("{}({}){}", awaiter, o, q));
                 }
                 // Fallback: emit operand as sync call (no real .await in our model)
                 let o = self.emit_expr(operand)?;
@@ -3763,7 +3783,7 @@ impl Codegen {
                              Value::Number(n) => {{ let i = *n as i64; if (*n - i as f64).abs() < f64::EPSILON {{ i.to_string() }} else {{ n.to_string() }} }}, \
                              Value::Bool(b) => b.to_string(), \
                              Value::Null => \"null\".to_string(), \
-                             other => format!(\"{{:?}}\", other) }}",
+                             other => other.to_js_string() }}",
                             rhs_val
                         )
                     };
@@ -3790,7 +3810,7 @@ impl Codegen {
                              Value::Number(n) => {{ let i = *n as i64; if (*n - i as f64).abs() < f64::EPSILON {{ i.to_string() }} else {{ n.to_string() }} }}, \
                              Value::Bool(b) => b.to_string(), \
                              Value::Null => \"null\".to_string(), \
-                             other => format!(\"{{:?}}\", other) }}",
+                             other => other.to_js_string() }}",
                             rhs_val
                         )
                     };
@@ -4002,7 +4022,7 @@ impl Codegen {
                     parts.push(format!("\"{}\"", escaped));
                     if i < exprs.len() {
                         let expr_code = self.emit_expr(&exprs[i])?;
-                        parts.push(format!("&({}).to_display_string()", expr_code));
+                        parts.push(format!("&({}).to_js_string()", expr_code));
                     }
                 }
                 format!("Value::String([{}].concat().into())", parts.join(", "))
