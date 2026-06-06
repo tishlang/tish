@@ -21,6 +21,40 @@ to also accept `has_self_call`, so branch+recursion functions like `fib` (no loo
   VM. Carries to cranelift/llvm; wasi runs the (correct, non-JIT) VM SelfCall.
 
 ================================================================================
+  WIN — JIT arity ceiling 3 → 8 (multi-arg numeric kernels) (2026-06-06)
+================================================================================
+`try_compile_numeric` bailed on `param_count > 3`; `NumericFn::call` only dispatched arities 1–3.
+Both x86-64 SysV and AArch64 pass up to 8 `f64` in registers (XMM0-7 / V0-7), so extending to 8 is
+ZERO correctness tax — the `extern "C"` transmute stays sound (all args register-passed). Now
+multi-arg numeric functions (geometry/physics/matmul kernels: `dist3(x1,y1,z1,x2,y2,z2)`, `clamp5`,
+`lerp4`, `poly8`) are JIT-eligible.
+  - Latent panic fixed: the caller-side arg buffer was `[0f64; 4]`; the `for i in 0..arity` write would
+    index out of bounds for arity 5–8. Now `[0f64; 8]` (sized to the ceiling).
+  RESULT: multi-arg RECURSION shines (SelfCall → native): `sum6(20,…)` (6 args) interp 2055ms → vm
+    **34ms (60×)**; values match interp exactly. Suite 17/0.
+
+================================================================================
+  PASS FINDING — the call-overhead wall (~275ns/call) is the frame-VM's justification (2026-06-06)
+================================================================================
+A high-level "what are we missing" pass, grounded in two fresh profiles:
+  1. MIXED real-world code (objects + strings + calls): the leaf profile is FLAT — ~97% inside
+     `run_chunk` with tiny spread leaves (malloc 3, hashmap.get 2, drop<Value> 2, memmove). Real
+     object/string code is INTERPRETER-DISPATCH-bound (death by a thousand opcodes, no hot spot).
+     → broad lever = SMALLER Value (NaN-box / thin variants 24→16→8): every clone/push/pop/dispatch
+       moves less memory. All-or-nothing ~600-site change.
+  2. COMPUTE with function calls: `add2(a,b)` (trivially JIT-eligible) loop-called 20M times = 5501ms
+     (~275ns/call) — IDENTICAL wall whether the body is arity-2 or arity-8. The JIT'd body is fast; the
+     CALL path (LoadVar lookup + `Arc<dyn Fn>` closure-wrapper dispatch + per-call arg marshalling +
+     result wrap) dominates. Only RECURSIVE (SelfCall→native) or INLINED (no-call JIT loop) calls escape
+     it. → broad lever = FRAME-VM (one VM + a CallFrame stack; kill per-call Vm + closure-wrapper
+     dispatch; also fixes non-numeric recursion overflow). ~900-line core-loop rewrite.
+  Achievable-now JIT extensions are NARROW + carry disproportionate correctness tax: Math.* intrinsics
+  need a precise program-wide "is `Math` reassigned" AST walker (~80-100 lines) to avoid a silent
+  miscompile, for code the benchmarks don't even exercise; known/mutual-fn calls need cross-fn FuncId
+  ordering (batch declaration). Verdict: the two BIG broad wins (NaN-box Value, frame-VM) are the real
+  levers — both multi-session reps. The 275ns/call number is the concrete frame-VM justification.
+
+================================================================================
   WIN (small) — per-call allocation cuts: shared `enclosing` + lazy `local_scope` (2026-06-06)
 ================================================================================
 Two safe, compiler-/suite-verified cuts to the per-call cost in `run_chunk`:

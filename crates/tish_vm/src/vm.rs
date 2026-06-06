@@ -1096,7 +1096,10 @@ impl Vm {
                                         // first `arity` args, so accept >= arity and check just those.
                                         let arity = nf.arity();
                                         if args.len() >= arity {
-                                            let mut nums = [0f64; 4];
+                                            // Sized to the JIT arity ceiling (try_compile_numeric
+                                            // bails above 8); arities 5..=8 would otherwise index
+                                            // past a fixed [0f64; 4] and panic.
+                                            let mut nums = [0f64; 8];
                                             let mut all_numbers = true;
                                             for i in 0..arity {
                                                 if let Value::Number(n) = &args[i] {

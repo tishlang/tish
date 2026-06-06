@@ -82,6 +82,32 @@ impl NumericFn {
                     let f: extern "C" fn(f64, f64, f64) -> f64 = std::mem::transmute(self.ptr);
                     f(args[0], args[1], args[2])
                 }
+                // Arities 4..=8: still fully register-passed (x86-64 SysV → XMM0-7,
+                // AArch64 AAPCS → V0-7), so the `extern "C"` transmute stays sound.
+                4 => {
+                    let f: extern "C" fn(f64, f64, f64, f64) -> f64 = std::mem::transmute(self.ptr);
+                    f(args[0], args[1], args[2], args[3])
+                }
+                5 => {
+                    let f: extern "C" fn(f64, f64, f64, f64, f64) -> f64 =
+                        std::mem::transmute(self.ptr);
+                    f(args[0], args[1], args[2], args[3], args[4])
+                }
+                6 => {
+                    let f: extern "C" fn(f64, f64, f64, f64, f64, f64) -> f64 =
+                        std::mem::transmute(self.ptr);
+                    f(args[0], args[1], args[2], args[3], args[4], args[5])
+                }
+                7 => {
+                    let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64) -> f64 =
+                        std::mem::transmute(self.ptr);
+                    f(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+                }
+                8 => {
+                    let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64, f64) -> f64 =
+                        std::mem::transmute(self.ptr);
+                    f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+                }
                 _ => f64::NAN,
             }
         }
@@ -145,7 +171,7 @@ pub fn try_compile_numeric(chunk: &Chunk) -> Option<NumericFn> {
     if !chunk.slot_based
         || chunk.rest_param_index != NO_REST_PARAM
         || chunk.param_count == 0
-        || chunk.param_count > 3
+        || chunk.param_count > 8
     {
         return None;
     }
