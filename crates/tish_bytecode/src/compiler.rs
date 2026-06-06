@@ -210,7 +210,246 @@ fn simple_fn_slots(
     }
 }
 
+/// `TISH_VM_SLOTS` — dark-ship gate for general (params + body `let`) slot-based locals. When unset,
+/// [`general_slot_map`] always returns `None`, so compilation is byte-identical to the name-based path.
+fn slots_enabled() -> bool {
+    std::env::var("TISH_VM_SLOTS").map(|v| v != "0").unwrap_or(false)
+}
+
+/// One conservative pass over a function body. Collects (a) the names declared as **function-level**
+/// `let`/`const` + `for`-init `let` (the slottable locals — NOT those inside nested closures), and
+/// (b) the over-approximated **captured** set: every identifier that appears textually inside any
+/// nested closure (`ArrowFunction`/`FunDecl`). Returns `false` from the walkers on any AST shape it
+/// does not explicitly handle, so the caller leaves the whole function name-based (safe default-bail:
+/// a missed variant can never hide a closure and cause a captured local to be wrongly slotted).
+#[derive(Default)]
+struct SlotScan {
+    lets: Vec<Arc<str>>,
+    captured: HashSet<Arc<str>>,
+}
+
+impl SlotScan {
+    fn stmt(&mut self, s: &Statement, in_closure: bool) -> bool {
+        match s {
+            Statement::Block { statements, .. } => statements.iter().all(|s| self.stmt(s, in_closure)),
+            Statement::VarDecl { name, init, .. } => {
+                if !in_closure {
+                    self.lets.push(Arc::clone(name));
+                }
+                init.as_ref().map_or(true, |e| self.expr(e, in_closure))
+            }
+            Statement::ExprStmt { expr, .. } => self.expr(expr, in_closure),
+            Statement::If { cond, then_branch, else_branch, .. } => {
+                self.expr(cond, in_closure)
+                    && self.stmt(then_branch, in_closure)
+                    && else_branch.as_ref().map_or(true, |s| self.stmt(s, in_closure))
+            }
+            Statement::While { cond, body, .. } => self.expr(cond, in_closure) && self.stmt(body, in_closure),
+            Statement::DoWhile { body, cond, .. } => self.stmt(body, in_closure) && self.expr(cond, in_closure),
+            Statement::For { init, cond, update, body, .. } => {
+                if let Some(i) = init {
+                    match i.as_ref() {
+                        Statement::VarDecl { name, init, .. } => {
+                            if !in_closure {
+                                self.lets.push(Arc::clone(name));
+                            }
+                            if let Some(e) = init {
+                                if !self.expr(e, in_closure) {
+                                    return false;
+                                }
+                            }
+                        }
+                        Statement::ExprStmt { expr, .. } => {
+                            if !self.expr(expr, in_closure) {
+                                return false;
+                            }
+                        }
+                        _ => return false,
+                    }
+                }
+                cond.as_ref().map_or(true, |e| self.expr(e, in_closure))
+                    && update.as_ref().map_or(true, |e| self.expr(e, in_closure))
+                    && self.stmt(body, in_closure)
+            }
+            Statement::Return { value, .. } => value.as_ref().map_or(true, |e| self.expr(e, in_closure)),
+            Statement::Break { .. } | Statement::Continue { .. } => true,
+            // A nested named function: its param defaults (enclosing-scope) + whole body capture.
+            Statement::FunDecl { params, body, .. } => {
+                self.scan_closure_param_defaults(params) && self.stmt(body, true)
+            }
+            // ForOf, destructuring decls, Switch, Try, Throw, etc. → bail (whole fn name-based).
+            _ => false,
+        }
+    }
+
+    fn expr(&mut self, e: &Expr, in_closure: bool) -> bool {
+        match e {
+            Expr::Literal { .. } => true,
+            Expr::Ident { name, .. } => {
+                if in_closure {
+                    self.captured.insert(Arc::clone(name));
+                }
+                true
+            }
+            Expr::Binary { left, right, .. } => self.expr(left, in_closure) && self.expr(right, in_closure),
+            Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } | Expr::Await { operand, .. } => {
+                self.expr(operand, in_closure)
+            }
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                self.expr(cond, in_closure) && self.expr(then_branch, in_closure) && self.expr(else_branch, in_closure)
+            }
+            Expr::NullishCoalesce { left, right, .. } => self.expr(left, in_closure) && self.expr(right, in_closure),
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                self.expr(callee, in_closure)
+                    && args.iter().all(|a| match a {
+                        CallArg::Expr(e) | CallArg::Spread(e) => self.expr(e, in_closure),
+                    })
+            }
+            Expr::Member { object, .. } => self.expr(object, in_closure),
+            Expr::Index { object, index, .. } => self.expr(object, in_closure) && self.expr(index, in_closure),
+            Expr::Array { elements, .. } => elements.iter().all(|el| match el {
+                ArrayElement::Expr(e) | ArrayElement::Spread(e) => self.expr(e, in_closure),
+            }),
+            Expr::Object { props, .. } => props.iter().all(|p| match p {
+                ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => self.expr(e, in_closure),
+            }),
+            Expr::Assign { name, value, .. } | Expr::CompoundAssign { name, value, .. } => {
+                if in_closure {
+                    self.captured.insert(Arc::clone(name));
+                }
+                self.expr(value, in_closure)
+            }
+            Expr::MemberAssign { object, value, .. } => self.expr(object, in_closure) && self.expr(value, in_closure),
+            Expr::IndexAssign { object, index, value, .. } => {
+                self.expr(object, in_closure) && self.expr(index, in_closure) && self.expr(value, in_closure)
+            }
+            Expr::PostfixInc { name, .. }
+            | Expr::PostfixDec { name, .. }
+            | Expr::PrefixInc { name, .. }
+            | Expr::PrefixDec { name, .. } => {
+                if in_closure {
+                    self.captured.insert(Arc::clone(name));
+                }
+                true
+            }
+            Expr::TemplateLiteral { exprs, .. } => exprs.iter().all(|e| self.expr(e, in_closure)),
+            Expr::ArrowFunction { params, body, .. } => {
+                // A closure's param DEFAULTS evaluate in the ENCLOSING scope, so they capture outer
+                // locals (e.g. `(a = secret) => a` captures `secret`). Scan them as captured.
+                if !self.scan_closure_param_defaults(params) {
+                    return false;
+                }
+                match body {
+                    ArrowBody::Expr(e) => self.expr(e, true),
+                    ArrowBody::Block(s) => self.stmt(s, true),
+                }
+            }
+            // LogicalAssign (rare), Jsx, NativeModuleLoad, anything else → bail.
+            _ => false,
+        }
+    }
+
+    /// Scan a nested closure's parameter default expressions as captured context (they evaluate in
+    /// the enclosing scope). Returns false on an unanalysable default (→ caller bails).
+    fn scan_closure_param_defaults(&mut self, params: &[FunParam]) -> bool {
+        for p in params {
+            let default = match p {
+                FunParam::Simple(tp) => &tp.default,
+                FunParam::Destructure { default, .. } => default,
+            };
+            if let Some(d) = default {
+                if !self.expr(d, true) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+/// Build the `name → slot` map for a function eligible for general slot-based locals, or `None` to
+/// fall back to name-based compilation. Eligible iff: the flag is on; no rest param; all params are
+/// simple; the body is fully analysable; no name is declared twice (no shadowing — keeps the flat map
+/// unambiguous); and no **param** is captured by a nested closure (the VM binds params into slots
+/// 0..n, but a closure reads captures by name from `local_scope`, so a captured param can't be a slot).
+/// Captured **locals** are left out of the map → they stay name-based in `local_scope` (which closures
+/// capture); uncaptured params + locals get slots. `*num_slots` receives the frame size.
+fn general_slot_map(
+    params: &[FunParam],
+    has_rest: bool,
+    body: &Statement,
+    num_slots: &mut u16,
+) -> Option<HashMap<Arc<str>, u16>> {
+    if !slots_enabled() || has_rest {
+        return None;
+    }
+    let mut param_names: Vec<Arc<str>> = Vec::with_capacity(params.len());
+    for p in params {
+        match p {
+            FunParam::Simple(tp) => param_names.push(Arc::clone(&tp.name)),
+            FunParam::Destructure { .. } => return None,
+        }
+    }
+    let mut scan = SlotScan::default();
+    if !scan.stmt(body, false) {
+        return None;
+    }
+    // No shadowing: every declared name (params + slottable lets) must be unique.
+    let mut seen: HashSet<Arc<str>> = HashSet::new();
+    for n in param_names.iter().chain(scan.lets.iter()) {
+        if !seen.insert(Arc::clone(n)) {
+            return None;
+        }
+    }
+    // A captured param is unslottable (see doc).
+    if param_names.iter().any(|p| scan.captured.contains(p)) {
+        return None;
+    }
+    let mut map: HashMap<Arc<str>, u16> = HashMap::new();
+    let mut slot: u16 = 0;
+    for p in &param_names {
+        map.insert(Arc::clone(p), slot);
+        slot += 1;
+    }
+    for l in &scan.lets {
+        if scan.captured.contains(l) {
+            continue; // captured local → stays name-based in local_scope
+        }
+        map.insert(Arc::clone(l), slot);
+        slot += 1;
+    }
+    *num_slots = slot;
+    Some(map)
+}
+
 impl<'a> Compiler<'a> {
+    /// Resolve a name to its frame slot (general or simple slot-based chunk). `None` ⇒ name-based
+    /// (a captured local, a global, or a builtin) — the single source of truth for slot-vs-name.
+    #[inline]
+    fn resolve_slot(&self, name: &str) -> Option<u16> {
+        self.slot_ctx.as_ref().and_then(|m| m.get(name).copied())
+    }
+
+    /// Emit a variable READ: `LoadLocal` if slotted, else name-based `LoadVar`.
+    fn emit_var_load(&mut self, name: &Arc<str>) {
+        if let Some(slot) = self.resolve_slot(name) {
+            self.emit_u16(Opcode::LoadLocal, slot);
+        } else {
+            let idx = self.name_idx(name);
+            self.emit_u16(Opcode::LoadVar, idx);
+        }
+    }
+
+    /// Emit a variable WRITE (value already on stack): `StoreLocal` if slotted, else `StoreVar`.
+    fn emit_var_store(&mut self, name: &Arc<str>) {
+        if let Some(slot) = self.resolve_slot(name) {
+            self.emit_u16(Opcode::StoreLocal, slot);
+        } else {
+            let idx = self.name_idx(name);
+            self.emit_u16(Opcode::StoreVar, idx);
+        }
+    }
+
     fn new(chunk: &'a mut Chunk, retain_last_expr: bool) -> Self {
         Self {
             chunk,
@@ -360,12 +599,16 @@ impl<'a> Compiler<'a> {
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(idx);
                 }
-                let idx = self.name_idx(name);
-                self.emit_u16(Opcode::DeclareVarPlain, idx);
-                self.scope
-                    .last_mut()
-                    .unwrap()
-                    .insert(Arc::clone(name), false);
+                if let Some(slot) = self.resolve_slot(name) {
+                    self.emit_u16(Opcode::StoreLocal, slot);
+                } else {
+                    let idx = self.name_idx(name);
+                    self.emit_u16(Opcode::DeclareVarPlain, idx);
+                    self.scope
+                        .last_mut()
+                        .unwrap()
+                        .insert(Arc::clone(name), false);
+                }
             }
             Statement::VarDeclDestructure { pattern, init, .. } => {
                 self.compile_expr(init)?;
@@ -729,12 +972,17 @@ impl<'a> Compiler<'a> {
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(idx);
                 }
-                let idx = self.name_idx(name);
-                self.emit_u16(Opcode::DeclareVar, idx);
-                self.scope
-                    .last_mut()
-                    .unwrap()
-                    .insert(Arc::clone(name), false);
+                if let Some(slot) = self.resolve_slot(name) {
+                    // Uncaptured local → write its frame slot directly (no name, no hashmap).
+                    self.emit_u16(Opcode::StoreLocal, slot);
+                } else {
+                    let idx = self.name_idx(name);
+                    self.emit_u16(Opcode::DeclareVar, idx);
+                    self.scope
+                        .last_mut()
+                        .unwrap()
+                        .insert(Arc::clone(name), false);
+                }
             }
             Statement::VarDeclDestructure { pattern, init, .. } => {
                 self.compile_expr(init)?;
@@ -1023,6 +1271,15 @@ impl<'a> Compiler<'a> {
                 let simple_slots = simple_fn_slots(params, rest_param.is_some(), |pset| {
                     stmt_is_param_only(body, pset)
                 });
+                // General slot-based locals (params + uncaptured body `let`s) when the simple
+                // param-only fast path doesn't apply. Gated by `TISH_VM_SLOTS` (off ⇒ None ⇒
+                // byte-identical name-based compilation).
+                let mut general_num_slots: u16 = 0;
+                let general_slots = if simple_slots.is_none() {
+                    general_slot_map(params, rest_param.is_some(), body, &mut general_num_slots)
+                } else {
+                    None
+                };
                 let mut inner = Chunk::new();
                 if let Some(rp) = rest_param {
                     param_names.push(Arc::clone(&rp.name));
@@ -1035,9 +1292,18 @@ impl<'a> Compiler<'a> {
                 if simple_slots.is_some() {
                     inner.slot_based = true;
                     inner.num_slots = param_names.len() as u16;
+                } else if general_slots.is_some() {
+                    inner.slot_based = true;
+                    inner.num_slots = general_num_slots;
                 }
                 let mut inner_comp = Compiler::new(&mut inner, false);
                 if let Some(map) = simple_slots {
+                    inner_comp.slot_ctx = Some(map);
+                    inner_comp.emit_param_defaults_prologue(params)?;
+                    inner_comp.compile_statement(body)?;
+                } else if let Some(map) = general_slots {
+                    // Params are simple (gated) → bound into slots 0..n by the VM; uncaptured body
+                    // `let`s get the remaining slots; captured locals stay name-based in local_scope.
                     inner_comp.slot_ctx = Some(map);
                     inner_comp.emit_param_defaults_prologue(params)?;
                     inner_comp.compile_statement(body)?;
@@ -1651,9 +1917,8 @@ impl<'a> Compiler<'a> {
             }
             Expr::Assign { name, value, .. } => {
                 self.compile_expr(value)?;
-                let idx = self.name_idx(name);
-                self.emit_u16(Opcode::StoreVar, idx);
-                self.emit_u16(Opcode::LoadVar, idx); // assign yields value
+                self.emit_var_store(name);
+                self.emit_var_load(name); // assign yields value
             }
             Expr::TypeOf { operand, .. } => {
                 let typeof_idx = self.name_idx(&Arc::from("typeof"));
@@ -1730,54 +1995,49 @@ impl<'a> Compiler<'a> {
                 }
             }
             Expr::PostfixInc { name, .. } => {
-                let idx = self.name_idx(name);
                 let one = self.constant_idx(Constant::Number(1.0));
-                self.emit_u16(Opcode::LoadVar, idx);
+                self.emit_var_load(name);
                 self.emit(Opcode::Dup);
                 self.emit(Opcode::LoadConst);
                 self.chunk.write_u16(one);
                 self.emit_u8(Opcode::BinOp, 0);
-                self.emit_u16(Opcode::StoreVar, idx);
+                self.emit_var_store(name);
             }
             Expr::PostfixDec { name, .. } => {
-                let idx = self.name_idx(name);
                 let one = self.constant_idx(Constant::Number(1.0));
-                self.emit_u16(Opcode::LoadVar, idx);
+                self.emit_var_load(name);
                 self.emit(Opcode::Dup);
                 self.emit(Opcode::LoadConst);
                 self.chunk.write_u16(one);
                 self.emit_u8(Opcode::BinOp, 1);
-                self.emit_u16(Opcode::StoreVar, idx);
+                self.emit_var_store(name);
             }
             Expr::PrefixInc { name, .. } => {
-                let idx = self.name_idx(name);
                 let one = self.constant_idx(Constant::Number(1.0));
-                self.emit_u16(Opcode::LoadVar, idx);
+                self.emit_var_load(name);
                 self.emit(Opcode::LoadConst);
                 self.chunk.write_u16(one);
                 self.emit_u8(Opcode::BinOp, 0);
                 self.emit(Opcode::Dup);
-                self.emit_u16(Opcode::StoreVar, idx);
+                self.emit_var_store(name);
             }
             Expr::PrefixDec { name, .. } => {
-                let idx = self.name_idx(name);
                 let one = self.constant_idx(Constant::Number(1.0));
-                self.emit_u16(Opcode::LoadVar, idx);
+                self.emit_var_load(name);
                 self.emit(Opcode::LoadConst);
                 self.chunk.write_u16(one);
                 self.emit_u8(Opcode::BinOp, 1);
                 self.emit(Opcode::Dup);
-                self.emit_u16(Opcode::StoreVar, idx);
+                self.emit_var_store(name);
             }
             Expr::CompoundAssign {
                 name, op, value, ..
             } => {
-                let idx = self.name_idx(name);
-                self.emit_u16(Opcode::LoadVar, idx);
+                self.emit_var_load(name);
                 self.compile_expr(value)?;
                 self.emit_u8(Opcode::BinOp, compound_op_to_u8(*op));
                 self.emit(Opcode::Dup);
-                self.emit_u16(Opcode::StoreVar, idx);
+                self.emit_var_store(name);
             }
             Expr::MemberAssign {
                 object,

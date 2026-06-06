@@ -1,4 +1,32 @@
 ================================================================================
+  VM SLOT-BASED LOCALS LANDED (2026-06-05) — TISH_VM_SLOTS, the RC2 lever
+================================================================================
+Capture-aware general slot-based locals in the bytecode VM (`tish_bytecode/compiler.rs`),
+the long-missing half of RC2. A function's params + **uncaptured** body `let`/`const` now
+resolve to frame slots (`LoadLocal`/`StoreLocal` — a direct `Vec` index) instead of
+name-keyed `LoadVar`/`StoreVar` (hashmap lookup + `borrow()` mutex-lock-under-send-values +
+Value clone + scope-chain walk). Locals **captured** by a nested closure (via its body OR its
+param defaults) stay name-based in `local_scope` (which closures capture) — so closures still
+work. Lifts the whole VM family (vm/cranelift/wasi embed the VM); the rust-AOT backend has its
+own compiler and is unaffected.
+
+  RESULT: a function-local hot loop (`fn work(n){let s=0;for(let i=0;i<n;i++){…};return s}`,
+  200×100k iters) went **~8000ms → ~2900ms (2.7×)** on `tish run`. Pure numeric loops are still
+  ~76× Node (V8 JITs them; slots remove name-resolution overhead but the boxed-`Value` arithmetic
+  + interpreter dispatch remain → that's #14, the JIT — slots are necessary-not-sufficient).
+
+  ELIGIBILITY (conservative, default-bails): flag on; simple params, no rest; no shadowing; no
+  captured param; body uses only analysable constructs (bails on for-of, try, switch, destructuring
+  decls, `||=`/`&&=`/`??=`, unknown variants). So the `main.tish` BUNDLE does NOT yet benefit (its
+  `__perf_run_modules_*` use for-of/try/etc. → bail; the standalone micros are top-level, not
+  function-scoped). Broadening eligibility + top-level slotting = increment 2.
+
+  VALIDATED: flag-OFF byte-identical (suite 14/0); flag-ON full cross-backend suite 14/0 + bundle
+  ≡ interp + `tests/core/slot_capture.tish` (closure/FunDecl param-default capture, forEach capture,
+  shadow-across-closure, uncaptured hot loop). Flag-gated (no runtime fallback, unlike the JIT) until
+  broader soak. Bug caught in validation: nested-closure PARAM DEFAULTS capture (`(a=secret)=>a`).
+
+================================================================================
   FULL SUITE RUN (2026-06-05) — all backends, after rust-AOT async parity fix
 ================================================================================
 Fresh `scripts/run_performance_suite.sh --release`. The headline change: the rust

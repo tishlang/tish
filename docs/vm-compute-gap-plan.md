@@ -76,3 +76,47 @@ last.
 Fully closing 4.5× is a multi-step compiler project (Steps A–D compound; none alone wins). Step A is
 the highest-leverage, most-broadly-beneficial start and unblocks §06. The micro "wins" elsewhere in
 the suite are **startup-bound** (tish ~9ms vs Node ~30ms) and must not regress — keep cold start ≤ ~28ms.
+
+## Step A — implementation map + the critical finding (recon done 2026-06-05)
+
+**Touch points (all in `crates/tish_bytecode/src/compiler.rs` unless noted):**
+- `slot_ctx: Option<HashMap<Arc<str>,u16>>` (field 90) — drives reference resolution at the ident-load
+  site (1367). It is the SINGLE SOURCE OF TRUTH: a name in the map → `LoadLocal`/`StoreLocal`; absent →
+  `LoadVar`/`StoreVar`. **Partial conversion is automatically consistent** (slot-based VM frames also
+  carry a `local_scope` hashmap — [vm.rs:931](crates/tish_vm/src/vm.rs) — so slotted + name-based locals
+  coexist), PROVIDED every write site agrees with the map.
+- Write sites that must become slot-aware (route through one `emit_var_store(name)` helper): Assign
+  (1655), CompoundAssign/LogicalAssign (1772+), Postfix/Prefix Inc/Dec (1732–1780), VarDecl init (733),
+  for-init `let` (`compile_for_init_statement` 348), and skip `LoopVarsBegin/End` (770/798/822/861/901/
+  942/1072/1100) when the loop var is slotted (no closures → no per-iteration capture needed).
+- VM side needs NO change: `slot_locals = vec![Null; num_slots]` ([vm.rs:936](crates/tish_vm/src/vm.rs))
+  already sizes + zero-inits the frame; set `inner.slot_based=true; inner.num_slots=<count>` at the two
+  function-compile sites (1023, 1667).
+- **Dark-ship behind `TISH_VM_SLOTS`** (the project's standard pattern): eligibility returns `None` when
+  the flag is off ⇒ byte-identical corpus. Eligibility walker must **default-bail** on any unrecognized
+  `Statement`/`Expr` variant (a missed variant could otherwise hide a closure ⇒ capture miscompile).
+  Closures = `Expr::ArrowFunction`, `Statement::FunDecl`/`DeclareFun`.
+
+**CRITICAL FINDING — the safe first increment doesn't pay off; go straight to capture-aware:**
+- The standalone micros (object_stress, array_stress) are **top-level scripts**, not functions — so
+  *function*-level slotting doesn't touch them (top-level is its own name-based sink; slotting it is
+  capture-sensitive too because later `function`s capture top-level vars as globals).
+- The bundle's hot functions (`__perf_run_modules_*`) **use `.map`/`.filter`/`.reduce` callbacks** =
+  nested closures, so the conservative "no nested closure → slot everything" gate **excludes them →
+  ~0 bundle benefit.**
+- ∴ Real benefit needs the **capture-aware** split: a local is slotted iff it is NOT in the
+  over-approximated captured set (= every identifier appearing inside any nested `ArrowFunction`/
+  `FunDecl` in the body); captured locals stay name-based. **VM path VERIFIED OK (no VM change needed):** `Constant::Closure`
+  ([vm.rs:1036](crates/tish_vm/src/vm.rs)) pushes `local_scope.clone()` into the new closure's
+  `enclosing` chain **unconditionally — regardless of `slot_based`**. So captured locals (name-based,
+  living in `local_scope`) are seen by closures; uncaptured locals (in `slot_locals`, NOT in
+  `local_scope`) are invisible to closures — exactly correct, since by definition nothing captures
+  them. The per-iteration-`let` overlay path (1041–1057) likewise reads `local_scope`, so a captured
+  loop var (name-based) still works; an uncaptured one is slotted and unreferenced. No new VM code.
+
+**Sequencing (fresh focused session — recon makes it mechanical):** (1) capture-aware slot map behind
+`TISH_VM_SLOTS` (eligibility walker default-bails on unknown variants; captured-set = idents inside any
+nested `ArrowFunction`/`FunDecl`; slot the uncaptured params+lets, route every write through one
+`emit_var_store` helper, skip `LoopVarsBegin` for slotted loop vars); (2) flag-off byte-identical check;
+(3) flag-on validation (full suite + `tests/main.tish` bundle diff across ALL backends + closure/
+recursion fixtures); (4) measure bundle, flip default-on only if parity holds; (5) extend to top-level.

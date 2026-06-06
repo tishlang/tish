@@ -1,0 +1,32 @@
+// Slot-locals capture edge cases: a local captured by a nested closure (incl. via the closure's
+// PARAM DEFAULT) must stay name-based, not be wrongly slotted. Exercises TISH_VM_SLOTS.
+fn arrowDefaultCapture() {
+    let secret = 42;
+    let f = (a = secret) => a;     // default captures `secret`
+    return f();
+}
+fn fnDeclDefaultCapture() {
+    let base = 100;
+    fn inner(a = base) { return a; }   // nested FunDecl default captures `base`
+    return inner();
+}
+fn forEachCapture(arr) {
+    let total = 0;                 // captured + mutated by the callback
+    arr.forEach(v => { total = total + v; });
+    return total;
+}
+fn hotLoopUncaptured(n) {
+    let s = 0;                     // uncaptured → slotted
+    for (let i = 0; i < n; i++) { let t = i * 2; s = s + t; }
+    return s;
+}
+fn shadowAcrossClosure() {
+    let x = 1;                     // outer x
+    let g = () => { let x = 2; return x; };  // inner x shadows (own local)
+    return x + g();                // 1 + 2 = 3
+}
+console.log(arrowDefaultCapture());      // 42
+console.log(fnDeclDefaultCapture());     // 100
+console.log(forEachCapture([1,2,3,4,5]));// 15
+console.log(hotLoopUncaptured(100));     // 9900
+console.log(shadowAcrossClosure());      // 3
