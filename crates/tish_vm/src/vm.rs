@@ -797,6 +797,17 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
 /// Shared scope for closure capture (parent frame's locals).
 type ScopeMap = VmRef<ObjectMap>;
 
+/// The captured lexical chain for closures. Shared immutably (never mutated after a closure is
+/// built — `run_chunk` only reads it: `.len()`/`.iter()`/`.is_empty()`), so it lives behind an
+/// `Rc`/`Arc` instead of a `Vec` that would be deep-cloned on every call. This makes the per-call
+/// `enclosing` propagation a single refcount bump rather than a `Vec` allocation + N element clones
+/// — a direct cut to function-call overhead. `Arc` under `send-values` (closures must be `Send`),
+/// `Rc` otherwise.
+#[cfg(feature = "send-values")]
+type SharedChain = std::sync::Arc<Vec<ScopeMap>>;
+#[cfg(not(feature = "send-values"))]
+type SharedChain = std::rc::Rc<Vec<ScopeMap>>;
+
 /// Options for the convenience [`run_with_options`] helper (one-shot VM run from the CLI).
 #[derive(Clone, Debug, Default)]
 pub struct VmRunOptions {
@@ -818,7 +829,8 @@ pub struct Vm {
     /// `nested_complex`). Per-iteration `let`: a fresh frozen overlay of the loop var(s) is
     /// prepended as the innermost entry, shadowing the still-shared frame scope that follows it,
     /// so the loop var is frozen per-iteration while everything else stays live. Empty at top level.
-    enclosing: Vec<ScopeMap>,
+    /// Shared via `SharedChain` (Rc/Arc) so per-call propagation is a refcount bump, not a Vec clone.
+    enclosing: SharedChain,
     globals: VmRef<ObjectMap>,
     /// Capabilities for `LoadNativeExport` and globals such as `process` / `serve`.
     capabilities: Arc<HashSet<String>>,
@@ -844,7 +856,7 @@ impl Vm {
         Self {
             stack: Vec::new(),
             scope: ObjectMap::default(),
-            enclosing: Vec::new(),
+            enclosing: SharedChain::new(Vec::new()),
             globals: VmRef::new(init_globals(capabilities.as_ref())),
             capabilities,
             native_modules: VmRef::new(HashMap::new()),
@@ -928,7 +940,21 @@ impl Vm {
         let names = &chunk.names;
 
         let mut ip = 0;
-        let local_scope: ScopeMap = VmRef::new(ObjectMap::default());
+        // Lazily allocated name-keyed scope. Slot-based chunks never WRITE it (params + body locals
+        // live in `slot_locals`; `StoreVar` checks-then-falls-through to globals; a slot-based chunk
+        // has no captured locals by construction), so on the hot slot-based call path we skip the
+        // `VmRef::new(Arc<Mutex<HashMap>>)` box entirely. Non-slot chunks need it eagerly for params.
+        // `ls_get_or_init!()` lazily creates it on the first write/capture; reads treat `None` as empty.
+        let mut local_scope: Option<ScopeMap> = if chunk.slot_based {
+            None
+        } else {
+            Some(VmRef::new(ObjectMap::default()))
+        };
+        macro_rules! ls_get_or_init {
+            () => {{
+                local_scope.get_or_insert_with(|| VmRef::new(ObjectMap::default()))
+            }};
+        }
         // Slot-based chunks (self-contained functions) use a bare `Vec<Value>`
         // frame indexed by slot — no per-call hashmap, no name lookups. Args bind
         // to slots 0..param_count. Empty for name-based chunks.
@@ -944,7 +970,7 @@ impl Vm {
                 }
             }
         } else {
-            let mut ls = local_scope.borrow_mut();
+            let mut ls = ls_get_or_init!().borrow_mut();
             let param_count = chunk.param_count as usize;
             if chunk.rest_param_index != NO_REST_PARAM {
                 let ri = chunk.rest_param_index as usize;
@@ -1033,9 +1059,12 @@ impl Vm {
                             // The closure captures its defining frame's scope PLUS that frame's own
                             // enclosing chain, so functions nested arbitrarily deep still resolve
                             // every ancestor's locals (innermost first).
-                            let enclosing_chain: Vec<ScopeMap> = if active_loop_vars.is_empty() {
+                            // A closure must capture a real scope (even if empty) so that, post-creation,
+                            // the parent's name-based locals are visible. Materialise local_scope here.
+                            let captured_scope: ScopeMap = ls_get_or_init!().clone();
+                            let enclosing_chain: SharedChain = SharedChain::new(if active_loop_vars.is_empty() {
                                 let mut chain = Vec::with_capacity(self.enclosing.len() + 1);
-                                chain.push(local_scope.clone());
+                                chain.push(captured_scope.clone());
                                 chain.extend(self.enclosing.iter().cloned());
                                 chain
                             } else {
@@ -1043,7 +1072,7 @@ impl Vm {
                                 // shadows the still-shared frame scope, then the inherited chain.
                                 let mut overlay = ObjectMap::default();
                                 {
-                                    let ls = local_scope.borrow();
+                                    let ls = captured_scope.borrow();
                                     for n in &active_loop_vars {
                                         if let Some(v) = ls.get(n.as_ref()) {
                                             overlay.insert(Arc::clone(n), v.clone());
@@ -1052,10 +1081,10 @@ impl Vm {
                                 }
                                 let mut chain = Vec::with_capacity(self.enclosing.len() + 2);
                                 chain.push(VmRef::new(overlay));
-                                chain.push(local_scope.clone());
+                                chain.push(captured_scope.clone());
                                 chain.extend(self.enclosing.iter().cloned());
                                 chain
-                            };
+                            });
                             let capabilities = Arc::clone(&self.capabilities);
                             let native_modules = self.native_modules.clone();
                             Value::native(move |args: &[Value]| {
@@ -1129,9 +1158,8 @@ impl Vm {
                         .get(idx as usize)
                         .ok_or_else(|| format!("Name index out of bounds: {}", idx))?;
                     let v = local_scope
-                        .borrow()
-                        .get(name.as_ref())
-                        .cloned()
+                        .as_ref()
+                        .and_then(|ls| ls.borrow().get(name.as_ref()).cloned())
                         .or_else(|| {
                             // Walk the captured lexical chain, innermost first.
                             self.enclosing
@@ -1153,8 +1181,8 @@ impl Vm {
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
                     // Update innermost scope that has the variable (matches interpreter Scope.assign)
-                    if local_scope.borrow().contains_key(name.as_ref()) {
-                        local_scope.borrow_mut().insert(Arc::clone(name), v);
+                    if local_scope.as_ref().is_some_and(|ls| ls.borrow().contains_key(name.as_ref())) {
+                        ls_get_or_init!().borrow_mut().insert(Arc::clone(name), v);
                     } else if let Some(e) = self
                         .enclosing
                         .iter()
@@ -1172,7 +1200,7 @@ impl Vm {
                         if self.enclosing.is_empty() {
                             self.globals.borrow_mut().insert(Arc::clone(name), v);
                         } else {
-                            local_scope.borrow_mut().insert(Arc::clone(name), v);
+                            ls_get_or_init!().borrow_mut().insert(Arc::clone(name), v);
                         }
                     }
                 }
@@ -1186,7 +1214,9 @@ impl Vm {
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
                     if let Some(frame) = block_undo_stack.last_mut() {
-                        let old = local_scope.borrow().get(name.as_ref()).cloned();
+                        let old = local_scope
+                            .as_ref()
+                            .and_then(|ls| ls.borrow().get(name.as_ref()).cloned());
                         frame.push((Arc::clone(name), old));
                     }
                     // REPL: persist top-level bindings only (not block-locals shadowing globals).
@@ -1195,7 +1225,7 @@ impl Vm {
                             .borrow_mut()
                             .insert(Arc::clone(name), v.clone());
                     }
-                    local_scope.borrow_mut().insert(Arc::clone(name), v);
+                    ls_get_or_init!().borrow_mut().insert(Arc::clone(name), v);
                 }
                 Opcode::DeclareVarPlain => {
                     let idx = Self::read_u16(code, &mut ip);
@@ -1211,7 +1241,7 @@ impl Vm {
                             .borrow_mut()
                             .insert(Arc::clone(name), v.clone());
                     }
-                    local_scope.borrow_mut().insert(Arc::clone(name), v);
+                    ls_get_or_init!().borrow_mut().insert(Arc::clone(name), v);
                 }
                 Opcode::EnterBlock => {
                     block_undo_stack.push(Vec::new());
@@ -1221,7 +1251,7 @@ impl Vm {
                         .pop()
                         .ok_or_else(|| "ExitBlock without matching EnterBlock".to_string())?;
                     for (name, old) in frame.into_iter().rev() {
-                        let mut ls = local_scope.borrow_mut();
+                        let mut ls = ls_get_or_init!().borrow_mut();
                         match old {
                             Some(prev) => {
                                 ls.insert(name, prev);

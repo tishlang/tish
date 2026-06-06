@@ -1,4 +1,18 @@
 ================================================================================
+  WIN (small) — per-call allocation cuts: shared `enclosing` + lazy `local_scope` (2026-06-06)
+================================================================================
+Two safe, compiler-/suite-verified cuts to the per-call cost in `run_chunk`:
+  1. `Vm.enclosing`: `Vec<ScopeMap>` → `SharedChain` (Rc/Arc<Vec>). It is never mutated after a
+     closure is built, so the per-call propagation is now a refcount bump, not a Vec deep-clone.
+  2. `local_scope`: eager `VmRef::new(Arc<Mutex<HashMap>>)` → lazy `Option`, created on first
+     write/capture. Slot-based chunks (the hot path + all JIT-eligible fns) never write it, so they
+     skip the box entirely. Safe because slot-based ⟹ no captured locals + StoreVar falls through.
+  RESULT: 0-arg call 5M: 764→708ms; 1-arg: 826→776ms (~7%). Closure-capture correctness verified
+  (vm≡interp on closure_capture_cell/loop_let_capture/arrow_functions/mutation); suite 17/0.
+  The tracked object/array micros do NOT move (they aren't call-bound). `fib(30)` stays ~329ms vs
+  Node ~5ms — confirming the per-call micro-opts only nibble; the closure-invocation MODEL is the wall.
+
+================================================================================
   FINDING — function-call overhead is architectural (call-frame model), 2026-06-06
 ================================================================================
 Investigated the call boundary (benchmark_granular's nested-fn lines, ~6ms; the broader concern that
