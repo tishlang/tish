@@ -1664,6 +1664,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mathext"
+version = "0.1.0"
+dependencies = [
+ "tishlang_ffi",
+]
+
+[[package]]
 name = "md-5"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3126,6 +3133,7 @@ dependencies = [
  "tishlang_compile_js",
  "tishlang_core",
  "tishlang_eval",
+ "tishlang_ffi",
  "tishlang_js_to_tish",
  "tishlang_lexer",
  "tishlang_llvm",

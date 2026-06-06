@@ -169,7 +169,7 @@ fn run_stdin_source(
     } else {
         tishlang_opt::optimize(&prog)
     };
-    run_program(&program, backend, no_optimize, features)
+    run_program(&program, &cwd, backend, no_optimize, features)
 }
 
 fn run_file(
@@ -214,16 +214,54 @@ fn run_file(
         }
     };
 
-    run_program(&program, backend, no_optimize, features)
+    let ffi_base = Path::new(path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    run_program(&program, &ffi_base, backend, no_optimize, features)
+}
+
+/// Load every `ffi:<path>` cdylib the program imports, resolving each path relative to `base_dir`
+/// (the importing file's directory). Returns `(spec, exports)` pairs the backends register as
+/// native modules so `import { f } from "ffi:./lib.dylib"` resolves to the extension's exports.
+fn load_ffi_modules(
+    program: &tishlang_ast::Program,
+    base_dir: &Path,
+) -> Result<Vec<(String, tishlang_core::ObjectMap)>, String> {
+    let mut out = Vec::new();
+    for spec in tishlang_compile::ffi_native_specs(program) {
+        let rel = spec.strip_prefix("ffi:").unwrap_or(spec.as_str());
+        let lib_path = base_dir.join(rel);
+        let path_str = lib_path
+            .to_str()
+            .ok_or_else(|| format!("ffi: non-UTF-8 path: {}", lib_path.display()))?;
+        let exports = tishlang_ffi::load_module(path_str)?;
+        out.push((spec, exports));
+    }
+    Ok(out)
 }
 
 fn run_program(
     program: &tishlang_ast::Program,
+    base_dir: &Path,
     backend: &str,
     no_optimize: bool,
     features: &[String],
 ) -> Result<(), String> {
+    // FFI: load each `ffi:<path>` cdylib (resolved relative to the importing file) into a
+    // name→export map the backends register as a native module. Built once, shared across backends.
+    let ffi_modules = load_ffi_modules(program, base_dir)?;
+
     if backend == "interp" {
+        if !ffi_modules.is_empty() {
+            // The interpreter runs on `EvalValue`, but the FFI shim is built over core `Value`;
+            // bridging the two is a follow-up. `ffi:` works on the default VM backend today.
+            return Err(
+                "ffi: native extensions currently require the default (VM) backend; \
+                 run without `--backend interp`"
+                    .to_string(),
+            );
+        }
         let mut eval = tishlang_eval::Evaluator::new();
         let value = eval.eval_program(program)?;
         #[cfg(feature = "timers")]
@@ -250,6 +288,9 @@ fn run_program(
     let caps = vm_capabilities_for_cli_run(features);
     let mut vm = tishlang_vm::Vm::with_capabilities(caps);
     cargo_native_registry::register_bytecode_native_modules(&mut vm);
+    for (spec, exports) in ffi_modules {
+        vm.register_native_module(spec, exports);
+    }
     let value = vm.run_with_options(&chunk, false)?;
     if !matches!(value, tishlang_core::Value::Null) {
         println!(

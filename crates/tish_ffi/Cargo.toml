@@ -9,8 +9,13 @@ repository = { workspace = true }
 
 [features]
 default = []
-# Match the embedding backend's value representation when the host enables it.
+# An extension that LINKS tishlang_core must match the host's value representation/layout exactly.
+# `send-values` flips arrays/objects to Arc<Mutex<…>>; `regex` adds the `Value::RegExp` variant
+# (which changes the enum's niche/discriminant layout). The shipped `tish` (default="full") enables
+# both, so a linked extension targeting it must too. (The decoupled, host-exported-accessor model
+# avoids all of this — there is then a single tish_core.)
 send-values = ["tishlang_core/send-values"]
+regex = ["tishlang_core/regex"]
 
 [dependencies]
 tishlang_core = { path = "../tish_core", version = ">=0.1" }

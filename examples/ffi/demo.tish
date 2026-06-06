@@ -1,0 +1,24 @@
+// tish FFI demo — calls a native Rust extension (mathext) compiled as a C-ABI cdylib.
+//
+//   1. build the extension:  ./examples/ffi/build.sh
+//   2. run this:             tish run examples/ffi/demo.tish
+//
+// `ffi:./mathext.lib` resolves relative to THIS file, so it works from any CWD. The host loads the
+// cdylib with tish_ffi::load_module and registers its exports — `hypot`, `factorial`, … below are
+// real native functions, marshaled over the stable C ABI (no shared Rust types).
+
+import { hypot, factorial, greet, summary } from "ffi:./mathext.lib"
+
+console.log("=== tish FFI demo — native Rust extension over the C ABI ===")
+
+// numbers in, number out
+console.log("hypot(3, 4)    =", hypot(3, 4))         // 5
+console.log("factorial(6)   =", factorial(6))        // 720
+
+// string in, string out
+console.log("greet('tish')  =", greet("tish"))       // Hello, tish! (from native Rust)
+
+// array in, string out — the extension reads the array and computes stats natively
+console.log("summary([..])  =", summary([10, 20, 30, 40, 100]))  // sum=200 mean=40 max=100 count=5
+
+console.log("=== all native calls returned through the FFI ===")

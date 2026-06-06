@@ -747,12 +747,28 @@ pub fn has_native_imports(program: &Program) -> bool {
 pub fn has_external_native_imports(program: &Program) -> bool {
     for stmt in &program.statements {
         for spec in stmt_native_specs(stmt) {
-            if !is_builtin_native_spec(spec.as_ref()) {
+            // `ffi:` is portable (loadable on every backend via the C ABI), so it is NOT an
+            // "external native import" that non-rust backends must reject — only `cargo:` is.
+            if !is_builtin_native_spec(spec.as_ref()) && !is_ffi_native_spec(&spec) {
                 return true;
             }
         }
     }
     false
+}
+
+/// Every `ffi:…` spec imported anywhere in `program` (deduplicated, in first-seen order). The CLI
+/// loads each cdylib with `tish_ffi::load_module` and registers it before running.
+pub fn ffi_native_specs(program: &Program) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for stmt in &program.statements {
+        for spec in stmt_native_specs(stmt) {
+            if is_ffi_native_spec(&spec) && !out.contains(&spec) {
+                out.push(spec);
+            }
+        }
+    }
+    out
 }
 
 /// A resolved module: path and its parsed program.
@@ -907,12 +923,21 @@ fn load_module_recursive(
 /// - fs, http, timers, process, ws (Node-compatible aliases for tish:*)
 /// - tish:egui, tish:polars, etc.
 /// - cargo:… (Cargo `rustDependencies` + generated wrapper; Rust native backend)
+/// - ffi:… (a C-ABI cdylib loaded via `tish_ffi::load_module` — portable across backends)
 ///
 /// Scoped npm packages (`@scope/pkg`) are merged as Tish source unless imported via `tish:…`.
 pub fn is_native_import(spec: &str) -> bool {
     spec.starts_with("tish:")
         || spec.starts_with("cargo:")
+        || spec.starts_with("ffi:")
         || matches!(spec, "fs" | "http" | "timers" | "process" | "ws")
+}
+
+/// True for `ffi:…` specs (portable C-ABI cdylib extensions, loadable on every backend). The
+/// path after `ffi:` is resolved relative to the importing program and loaded with
+/// `tish_ffi::load_module`. Unlike `cargo:` (rust-AOT only), `ffi:` is allowed everywhere.
+pub fn is_ffi_native_spec(spec: &str) -> bool {
+    spec.starts_with("ffi:")
 }
 
 /// Map native spec to Cargo feature name for built-in tish:* modules.

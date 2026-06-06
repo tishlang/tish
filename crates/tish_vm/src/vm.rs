@@ -1798,7 +1798,9 @@ impl Vm {
                     // on the cranelift / llvm backends that want to expose
                     // `cargo:…` Rust crates should register the module's
                     // exports map before calling `vm.run(chunk)`.
-                    let from_registry: Option<Value> = if spec.starts_with("cargo:") {
+                    let from_registry: Option<Value> = if spec.starts_with("cargo:")
+                        || spec.starts_with("ffi:")
+                    {
                         let regs = self.native_modules.borrow();
                         regs.get(spec)
                             .and_then(|m| m.borrow().get(&Arc::from(export_name)).cloned())

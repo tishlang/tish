@@ -41,6 +41,7 @@ tishlang_compile_js = { path = "../tish_compile_js", version = ">=0.1" }
 tishlang_bytecode = { path = "../tish_bytecode", version = ">=0.1" }
 tishlang_opt = { path = "../tish_opt", version = ">=0.1" }
 tishlang_vm = { path = "../tish_vm", version = ">=0.1" }
+tishlang_ffi = { path = "../tish_ffi", version = ">=0.1" }
 tishlang_native = { path = "../tish_native", version = ">=0.1" }
 tishlang_llvm = { path = "../tish_llvm", version = ">=0.1" }
 tishlang_wasm = { path = "../tish_wasm", version = ">=0.1" }

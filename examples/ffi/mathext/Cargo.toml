@@ -1,0 +1,27 @@
+# Example native extension for tish, built as a C-ABI cdylib and loaded via `ffi:`.
+# Standalone workspace so the main tish workspace doesn't treat it as a member.
+[package]
+name = "mathext"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A workspace MEMBER (not a standalone workspace), so it resolves the exact same transitive
+# dependency versions (indexmap/ahash inside PropMap, …) as the host `tish` — a linked extension's
+# Value/ObjectData layout must match the host's byte-for-byte, which requires identical deps, not
+# just identical features. (The decoupled host-exported-accessor model removes this requirement.)
+
+[lib]
+name = "mathext"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Links tishlang_ffi for the ABI types + accessors. (A fully decoupled extension would instead
+# declare the `tish_value_*` accessors `extern "C"` and rely on the host exporting them; linking
+# here keeps the value layout identical and needs no host -rdynamic.)
+#
+# IMPORTANT: when linking tishlang_ffi, the extension must match the HOST's value representation.
+# The shipped `tish` (default = "full") enables `send-values` (arrays/objects = Arc<Mutex<…>>); a
+# mismatch makes container handles (Value::Array/Object) UB across the boundary. So enable it here.
+# (The decoupled, host-exported-accessors model sidesteps this — there is then one tish_core.)
+tishlang_ffi = { path = "../../../crates/tish_ffi", features = ["send-values", "regex"] }
