@@ -1,0 +1,18 @@
+# A fixture native extension built as a cdylib + loaded by the `load_module` integration test.
+# Standalone workspace ([workspace] below) so the main workspace doesn't treat it as a member.
+# It links `tishlang_ffi` for the ABI types + accessors; a real third-party extension would instead
+# only declare the `tish_value_*` accessors `extern "C"` and rely on the host exporting them
+# (-rdynamic), but linking here keeps the value layout identical so the mechanics are exercised.
+[package]
+name = "tish_ffi_testmod"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tishlang_ffi = { path = "../../.." }

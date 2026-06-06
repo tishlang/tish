@@ -145,12 +145,13 @@ received handles; push/set clone). 5 unit tests incl. a simulated `add_fn` exten
 - Module entry: one `#[no_mangle] extern "C" fn tish_module_register() -> *const TishExportTable`
   returning a name→fn-pointer table.
 
-**B2 — the loader + dispatch shim** — *core LANDED 2026-06-05.* `tish_ffi::wrap_native_fn(TishNativeFn)
--> Value::native` (the marshaling shim — `&[Value]`→handles, call, unwrap, drop) is implemented +
-unit-tested (scalar + array extensions). `tish_ffi::load_module(path) -> ObjectMap` via `libloading`
-(native-only; leaks the `Library` for process-lifetime symbols). **Remaining:** the host must export the
-`tish_value_*` accessors (`-rdynamic`) so a real cdylib's imports resolve at dlopen — then an end-to-end
-cdylib test; that + B3 wiring are next.
+**B2 — the loader + dispatch shim** — *LANDED + E2E-VALIDATED 2026-06-05.* `tish_ffi::wrap_native_fn`
+(the marshaling shim) + `load_module(path) -> ObjectMap` via `libloading`. **`tests/loader.rs` builds a
+real fixture cdylib, `dlopen`s it via `load_module`, and calls its exports** (`triple(7)=21`,
+`make_pair(1,2)=[len 2]`) through the wrapped shims — scalars + arrays cross the C ABI for real. (The
+fixture links `tishlang_ffi` for an identical `Value` layout; a production third-party extension instead
+declares the accessors `extern` and relies on the host exporting them via `-rdynamic` — the next step
+toward B3.) **Remaining:** B3 wiring of the `ffi:` import + host `-rdynamic` export.
 - Native: `libloading::Library` (new dep) loads a cdylib; for each export, store a `Value::native`
   Rust *shim* that marshals `&[Value]`→handles, calls the `extern "C"` fn, unwraps the result handle.
 - Reuse the existing registration chokepoints unchanged: interp `Evaluator::with_modules` /
