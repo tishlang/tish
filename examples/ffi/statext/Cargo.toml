@@ -1,0 +1,16 @@
+# A DECOUPLED tish native extension: it declares the `tish_value_*` accessors `extern "C"` and links
+# NOTHING tish-related (no tish_core, no tishlang_ffi). The host resolves the accessors at dlopen
+# (the `tish` binary exports them via its build.rs). One tish_core, so no dep/feature/layout matching
+# — this extension returns an OBJECT, which the linked model couldn't do robustly. Standalone
+# workspace: it shares nothing with the main workspace, by design.
+[package]
+name = "statext"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+name = "statext"
+crate-type = ["cdylib"]

@@ -1066,7 +1066,15 @@ impl Evaluator {
                                     _ => ",".to_string(),
                                 };
                                 let arr_borrow = arr.borrow();
-                                let parts: Vec<String> = arr_borrow.iter().map(|v| v.to_string()).collect();
+                                // JS join: null/undefined → "", else JS ToString (nested arrays
+                                // recurse to a comma-join, objects → "[object Object]").
+                                let parts: Vec<String> = arr_borrow
+                                    .iter()
+                                    .map(|v| match v {
+                                        Value::Null => String::new(),
+                                        other => other.to_js_string(),
+                                    })
+                                    .collect();
                                 return Ok(Value::String(parts.join(&sep).into()));
                             }
                             "reverse" => {
@@ -2611,6 +2619,18 @@ impl Evaluator {
                 // A real closure: the call frame's parent is the function's DEFINING scope (env),
                 // not the call site — so free variables resolve lexically.
                 let scope = Scope::child(Rc::clone(env));
+                // The call-frame evaluator, built up front so default-parameter expressions
+                // evaluate in this *call* scope — where earlier params are already bound (so a
+                // default like `b = a + 1` can see `a`) and free vars still resolve lexically
+                // through the closure's `env`. Evaluating against `self.scope` (the call *site*)
+                // would see neither, matching the bytecode VM's ArgMissing prologue, which runs
+                // defaults in the frame after the supplied args are bound.
+                let mut eval = Evaluator {
+                    scope: Rc::clone(&scope),
+                    module_cache: Rc::clone(&self.module_cache),
+                    current_dir: RefCell::new(self.current_dir.borrow().clone()),
+                    virtual_builtins: Rc::clone(&self.virtual_builtins),
+                };
                 {
                     let mut s = scope.borrow_mut();
                     for (i, formal) in formals.iter().enumerate() {
@@ -2623,7 +2643,7 @@ impl Evaluator {
                                 };
                                 if let Some(default_expr) = def {
                                     drop(s);
-                                    let default_val = self.eval_expr(default_expr)?;
+                                    let default_val = eval.eval_expr(default_expr)?;
                                     s = scope.borrow_mut();
                                     default_val
                                 } else {
@@ -2652,12 +2672,6 @@ impl Evaluator {
                         );
                     }
                 }
-                let mut eval = Evaluator {
-                    scope,
-                    module_cache: Rc::clone(&self.module_cache),
-                    current_dir: RefCell::new(self.current_dir.borrow().clone()),
-                    virtual_builtins: Rc::clone(&self.virtual_builtins),
-                };
                 match eval.eval_statement(body) {
                     Ok(v) => Ok(v),
                     Err(EvalError::Return(v)) => Ok(v),

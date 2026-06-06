@@ -1,15 +1,20 @@
-// tish FFI demo — calls a native Rust extension (mathext) compiled as a C-ABI cdylib.
+// tish FFI demo — calls native Rust extensions compiled as C-ABI cdylibs.
 //
-//   1. build the extension:  ./examples/ffi/build.sh
-//   2. run this:             tish run examples/ffi/demo.tish
+//   1. build the extensions:  ./examples/ffi/build.sh
+//   2. run this:              tish run examples/ffi/demo.tish
 //
-// `ffi:./mathext.lib` resolves relative to THIS file, so it works from any CWD. The host loads the
-// cdylib with tish_ffi::load_module and registers its exports — `hypot`, `factorial`, … below are
-// real native functions, marshaled over the stable C ABI (no shared Rust types).
+// `ffi:./*.lib` resolves relative to THIS file, so it works from any CWD. The host loads each cdylib
+// with tish_ffi::load_module and registers its exports — `hypot`, `stats`, … below are real native
+// functions, marshaled over the stable C ABI (no shared Rust types). mathext is the LINKED model
+// (links tishlang_ffi, byte-matches the host); statext is the DECOUPLED model (links nothing, resolves
+// the host's accessors at load) — the latter is what lets a native extension return an object safely.
 
+// mathext: the LINKED model (links tishlang_ffi).
 import { hypot, factorial, greet, summary } from "ffi:./mathext.lib"
+// statext: the DECOUPLED model (links nothing tish-related; resolves the host's accessors at load).
+import { stats } from "ffi:./statext.lib"
 
-console.log("=== tish FFI demo — native Rust extension over the C ABI ===")
+console.log("=== tish FFI demo — native Rust extensions over the C ABI ===")
 
 // numbers in, number out
 console.log("hypot(3, 4)    =", hypot(3, 4))         // 5
@@ -20,5 +25,9 @@ console.log("greet('tish')  =", greet("tish"))       // Hello, tish! (from nativ
 
 // array in, string out — the extension reads the array and computes stats natively
 console.log("summary([..])  =", summary([10, 20, 30, 40, 100]))  // sum=200 mean=40 max=100 count=5
+
+// array in, OBJECT out — the decoupled extension builds + returns an object (no layout matching)
+let st = stats([10, 20, 30, 40, 100])
+console.log("stats([..])    -> sum =", st.sum, " mean =", st.mean, " max =", st.max, " count =", st.count)
 
 console.log("=== all native calls returned through the FFI ===")

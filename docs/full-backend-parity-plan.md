@@ -159,16 +159,24 @@ toward B3.) **Remaining:** B3 wiring of the `ffi:` import + host `-rdynamic` exp
   `LoadNativeExport` (`tish_vm/src/vm.rs:849-853,1788-1811`). Only the *backing* of the fn changes from
   a direct Rust call to an FFI trampoline.
 
-**B3 — wire across the VM-family backends** — *VM path LANDED + EXAMPLE 2026-06-05.* `ffi:` imports work
-on `tish run`: the resolver recognizes `ffi:` (`is_native_import`/`ffi_native_specs`, allowed on all
-backends, not flagged by `has_external_native_imports`); the CLI's `load_ffi_modules` loads each cdylib
-(relative to the importing file) and `register_native_module`s it; the VM's `LoadNativeExport` consults
-the registry for `ffi:` (was `cargo:`-only). Working example in `examples/ffi/` (a `mathext` cdylib +
-`demo.tish` + `build.sh` + README) — `tish run examples/ffi/demo.tish` marshals numbers/strings/arrays
-natively. **Caveat:** a *linked* extension must byte-match the host's tish_core (workspace member for dep
-versions + `send-values`/`regex` features); returning objects (IndexMap-backed) is layout-sensitive even
-when matched — the **decoupled** host-exported-accessor model (next) removes this. **Remaining:**
-cranelift/llvm runtime registration; interp needs a core-Value↔EvalValue bridge.
+**B3 — wire across the VM-family backends** — *VM path LANDED + BOTH MODELS PROVEN 2026-06-05.* `ffi:`
+imports work on `tish run`: the resolver recognizes `ffi:` (`is_native_import`/`ffi_native_specs`,
+allowed on all backends, not flagged by `has_external_native_imports`); the CLI's `load_ffi_modules`
+loads each cdylib (relative to the importing file) and `register_native_module`s it; the VM's
+`LoadNativeExport` consults the registry for `ffi:` (was `cargo:`-only). `examples/ffi/` demonstrates
+**both** extension models end-to-end (`tish run examples/ffi/demo.tish`):
+- **Linked** (`mathext`): links `tishlang_ffi`; must byte-match the host's tish_core (workspace member
+  for dep versions + `send-values`/`regex` features). Marshals numbers/strings/arrays; object return is
+  layout-sensitive (IndexMap-backed) so it returns a string instead.
+- **Decoupled** (`statext`) — the production model, now LANDED: a standalone cdylib that links **nothing**
+  tish-related, *declares* the `tish_value_*` accessors `extern "C"`, and resolves them against the host
+  at `dlopen`. The host exports them via `crates/tish/build.rs` (`-Wl,-export_dynamic` on macOS/iOS,
+  `-rdynamic` on linux; verified with `nm -gU`); the plugin opts into late binding with
+  `-undefined dynamic_lookup` (macOS) via its own `build.rs`. One `tish_core`, no layout matching → it
+  returns an **object** `{sum,mean,max,count}`, the case the linked model couldn't. This is what real
+  extensions should use.
+
+**Remaining:** cranelift/llvm runtime registration; interp needs a core-Value↔EvalValue bridge.
 - `tish_cranelift_runtime`'s entry today is just `Vm::new(); vm.run(chunk)` — teach it (and the llvm
   reuse) to discover + `register_native_module` the FFI modules a program imports.
 - Introduce an `ffi:` (or `extern:`) import specifier for C-ABI modules — allowed on **all** backends.

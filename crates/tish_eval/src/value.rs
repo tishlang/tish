@@ -270,6 +270,27 @@ impl Value {
         }
     }
 
+    /// JavaScript `ToString` coercion (as used by `Array.prototype.join`), distinct from the
+    /// `Display`/inspect form: a nested **array** stringifies to its own comma-joined `toString`
+    /// (recursively, always `,`), an **object** becomes `"[object Object]"`, and `null`/`undefined`
+    /// elements elide to `""`. Mirrors `tishlang_core::Value::to_js_string` so interp output matches
+    /// the VM/rust/cranelift/wasi backends (and Node) for join/coercion.
+    pub fn to_js_string(&self) -> String {
+        match self {
+            Value::Array(arr) => arr
+                .borrow()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => String::new(),
+                    other => other.to_js_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+            Value::Object(_) => "[object Object]".to_string(),
+            _ => self.to_string(),
+        }
+    }
+
     pub fn strict_eq(&self, other: &Value) -> bool {
         match (self, other) {
             (Value::Number(a), Value::Number(b)) => {

@@ -99,7 +99,15 @@ pub fn join(arr: &Value, sep: &Value) -> Value {
             _ => ",".to_string(),
         };
         let arr_borrow = arr.borrow();
-        let parts: Vec<String> = arr_borrow.iter().map(|v| v.to_display_string()).collect();
+        // JS `Array.prototype.join`: null/undefined → "", everything else via JS ToString
+        // (nested arrays recurse to a comma-join, objects → "[object Object]").
+        let parts: Vec<String> = arr_borrow
+            .iter()
+            .map(|v| match v {
+                Value::Null => String::new(),
+                other => other.to_js_string(),
+            })
+            .collect();
         Value::String(parts.join(&separator).into())
     } else {
         Value::Null

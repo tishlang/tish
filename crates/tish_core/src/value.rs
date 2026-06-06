@@ -744,6 +744,32 @@ impl Value {
         }
     }
 
+    /// JavaScript `ToString` coercion (the value's `.toString()`), as used by `Array.prototype.join`,
+    /// string concatenation, and template literals — distinct from [`Self::to_display_string`], which
+    /// is the *inspect/console* form (arrays bracketed, strings quoted in some contexts). The key
+    /// JS-conformance differences from display: a nested **array** stringifies to its own
+    /// comma-joined `toString` (recursively, always `,` regardless of the outer separator), an
+    /// **object** becomes `"[object Object]"`, and primitives render as their plain value. `null`
+    /// renders as `"null"` here (matching `String(null)`); `join` itself maps `null`/`undefined`
+    /// elements to `""` *before* calling this, per the spec.
+    pub fn to_js_string(&self) -> String {
+        match self {
+            Value::Array(arr) => arr
+                .borrow()
+                .iter()
+                .map(|v| match v {
+                    // join/ToString of an array elides null & undefined to empty.
+                    Value::Null => String::new(),
+                    other => other.to_js_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+            Value::Object(_) => "[object Object]".to_string(),
+            // Primitives (and the remaining cases) coincide with the display form.
+            _ => self.to_display_string(),
+        }
+    }
+
     /// Check if value is truthy (for conditionals).
     pub fn is_truthy(&self) -> bool {
         match self {

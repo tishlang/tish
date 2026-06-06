@@ -1,2 +1,2 @@
-# Staged cdylib (produced by build.sh from the workspace target/).
 mathext.lib
+statext.lib
