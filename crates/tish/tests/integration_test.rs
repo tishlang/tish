@@ -579,6 +579,62 @@ fn test_vm_date_now() {
     }
 }
 
+/// Pins tish's DOCUMENTED async/Promise ordering (docs/concurrency-model.md) — network-free, so it
+/// runs in CI (unlike the `#[ignore]`'d network async tests). Asserts Promise.all order + non-promise
+/// passthrough, `.then` chaining, await-reject catch, Promise.all reject short-circuit, AND the
+/// deliberate blocking signature: a 0ms `setTimeout` queued before an `await` fires LAST (a JS event
+/// loop would interleave it earlier — tish's `await` blocks instead of yielding). NOT compared to node
+/// on purpose; this is tish's own contract. vm ≡ interp guards cross-backend agreement.
+#[test]
+fn test_async_ordering_documented() {
+    let bin = tish_bin();
+    if !bin.exists() {
+        return;
+    }
+    let path = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("async_ordering.tish");
+    if !path.exists() {
+        return;
+    }
+    // tish's documented, deliberately-non-JS ordering (timer drains last because await blocks).
+    let expected = "\
+1: sync-start
+2: await = 42
+2b: new Promise = ctor-ran
+3: all = a b c
+4: chain = 13
+5: caught = boom
+6: all-reject = rej
+7: post-await = after-timer-was-queued
+9: sync-end
+8: timer-fires-LAST (await did not yield)
+";
+    // Both the bytecode VM and the tree-walking interpreter must agree on this contract.
+    for backend_args in [vec!["run"], vec!["run", "--backend", "interp"]] {
+        let mut args = backend_args.clone();
+        args.push(path.to_string_lossy().to_string().leak());
+        let out = Command::new(&bin)
+            .args(&args)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish binary");
+        assert!(
+            out.status.success(),
+            "async_ordering ({:?}) failed: stderr={}",
+            backend_args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected,
+            "async ordering divergence on backend {:?} — the documented blocking-await/timer contract changed",
+            backend_args
+        );
+    }
+}
+
 /// VM run with parse+compile only (no resolve/merge) - isolates bytecode IndexAssign.
 #[test]
 fn test_vm_index_assign_direct() {

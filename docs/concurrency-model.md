@@ -255,6 +255,44 @@ Node's event-loop semantics.
 - **Parallel HTTP is a strength.** `fetchAll` + the prefork/thread model give real multi-core scaling
   that a single-threaded event loop cannot — this is the deliberate trade.
 
+## `fetch` is eager → `Promise.all` IS concurrent (despite blocking `await`)
+
+A subtlety the "blocking await" headline hides: `fetch(url)` (`http_fetch.rs:399`) calls `rt.spawn(...)`
+**immediately** — the request goes in flight on the tokio runtime the moment `fetch` is called, before
+any `await`. So:
+- `await fetch(a); await fetch(b)` (sequential awaits) → **sequential**, ~sum of latencies (same as JS).
+- `Promise.all([fetch(a), fetch(b), fetch(c), fetch(d)])` → all four `fetch` calls run first (four tokio
+  tasks already in flight), THEN `promise_all` blocks on each in turn → **concurrent**, ~max latency.
+  **Same result as JS** — the blocking `await` does not serialize the I/O because the I/O started
+  eagerly. `fetchAll(...)` (`http_fetch.rs:426`) does the same in one task via `join_all`.
+- The timer "drain at exit" rule is `setTimeout`-only; it does NOT apply to `fetch` (tokio I/O).
+
+### Promise combinator status (measured 2026-06-06)
+| combinator | status |
+|---|---|
+| `Promise.all` | ✅ order preserved; non-promises pass through; rejects short-circuit; concurrent with eager `fetch` |
+| `Promise.resolve`/`reject`/`.then`/`.catch` | ✅ ordering matches node (`tests/modules/promise.tish` ≡ node) |
+| `Promise.race` | ⚠️ **buggy** — only settles the FIRST-LISTED element (`promise.rs:141` blocks on index 0), not the first to settle. Masked when inputs are already-resolved; wrong for `race([slow, fast])`. |
+| `Promise.any` | ❌ **not implemented** — throws `Property 'any' not found` |
+| `Promise.allSettled` | ❌ **not implemented** |
+
+True `race`/`any` need a concurrent select across all promises' channels — the one-at-a-time
+`block_until_settled` cannot express "first to settle wins".
+
+## Test coverage & known gaps
+- **Async/Promise ordering** is now gated network-free + cross-backend by
+  `tests/modules/async_ordering.tish` + `test_async_ordering_documented`: asserts Promise.all order,
+  `.then` chains, await-reject catch, all-reject short-circuit, AND the blocking signature (a 0ms timer
+  queued before an `await` fires LAST). vm ≡ interp. Pins tish's deliberate non-JS ordering vs its own
+  expected output (NOT node).
+- **HTTP handler parallelism**: `scripts/test_http_concurrency.sh` + `tests/http/concurrency_server.tish`
+  fire N concurrent slow requests and read concurrency off the wall clock. **Measured: macOS serializes**
+  (6×150ms ≈ 934ms) — BSD `SO_REUSEPORT` does not kernel-distribute (matches §3). The test asserts
+  parallelism on **Linux** (the deployment target) and is informational (exit 0) on macOS.
+- **Known bug (spun off)**: an HTTP handler that mutates a shared module-level `let` **hangs** under
+  concurrent requests (fine without the shared write) — a lock/deadlock in the VM global-write path
+  under multi-threaded dispatch. Matters on Linux where handlers actually parallelize.
+
 ## Key source references
 
 - Promises (VM/native): `crates/tish_runtime/src/promise.rs` (`ThenPromise:78`, `promise_object:162`,

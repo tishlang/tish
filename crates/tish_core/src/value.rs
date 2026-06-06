@@ -299,6 +299,16 @@ pub enum Value {
     Opaque(Arc<dyn TishOpaque>),
 }
 
+// Size-regression guard for the NaN-box workstream (docs/nan-box-value-plan.md). On 64-bit targets
+// `Value` is 24 bytes today: `String(Arc<str>)` and `Promise`/`Opaque`/`Function(Arc<dyn …>)` are fat
+// (16B) pointers, so a 16B payload + discriminant ⇒ 24. The staged plan drives this DOWN: Stage B
+// (thin those variants to 8B handles) flips this to 16; Stage C (NaN-box to `struct Value(u64)`) to 8.
+// The assert makes each stage's target a compile-time check and catches accidental growth meanwhile.
+// Gated to 64-bit: wasm32 (wasi) has 32-bit pointers, so the size differs there and the guard
+// would not hold — the perf-relevant targets are all 64-bit anyway.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<Value>() == 24);
+
 /// Number of properties kept inline (no heap hashmap) before promoting to a map.
 const PROPMAP_INLINE: usize = 8;
 
@@ -1040,3 +1050,4 @@ impl Value {
         }
     }
 }
+

@@ -1,0 +1,51 @@
+// Async / Promise semantics + the DOCUMENTED blocking-await ordering (docs/concurrency-model.md).
+// No `http` import on purpose (Promise + setTimeout are globals) so this runs in the cross-backend
+// suite. It pins tish's deliberate, non-JS ordering — `await` BLOCKS the thread and timers drain at
+// the end — so any regression in that behavior is caught. (It is intentionally NOT compared to node;
+// node would interleave the timers earlier. The matching .expected is tish's own documented output.)
+
+console.log("1: sync-start")
+
+// --- await a resolved promise ---
+let v = await Promise.resolve(42)
+console.log("2: await =", v)
+
+// --- new Promise(executor): the executor runs synchronously at construction and resolve() flows to
+//     await (regression: the VM `new` path used to skip the executor and yield null) ---
+let np = await new Promise((resolve) => { resolve("ctor-ran") })
+console.log("2b: new Promise =", np)
+
+// --- Promise.all: order preserved, non-promises pass through ---
+let all = await Promise.all([Promise.resolve("a"), Promise.resolve("b"), "c"])
+console.log("3: all =", all[0], all[1], all[2])
+
+// --- .then / .catch chaining ---
+let chained = await Promise.resolve(5).then(x => x * 2).then(x => x + 3)
+console.log("4: chain =", chained)
+
+// --- rejection is catchable (await of a rejected promise throws) ---
+let caught = "no"
+try {
+    await Promise.reject("boom")
+} catch (e) {
+    caught = e
+}
+console.log("5: caught =", caught)
+
+// --- Promise.all short-circuits on the first rejection ---
+let allErr = "no"
+try {
+    await Promise.all([Promise.resolve(1), Promise.reject("rej"), Promise.resolve(3)])
+} catch (e) {
+    allErr = e
+}
+console.log("6: all-reject =", allErr)
+
+// --- THE BLOCKING SIGNATURE: a 0ms timer queued BEFORE more awaits still fires LAST, because
+//     `await` blocks the thread instead of yielding to the timer queue (a JS event loop would run
+//     the 0ms callback between the awaits). This is the documented tish behavior. ---
+setTimeout(() => { console.log("8: timer-fires-LAST (await did not yield)") }, 0)
+let after = await Promise.resolve("after-timer-was-queued")
+console.log("7: post-await =", after)
+
+console.log("9: sync-end")

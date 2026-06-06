@@ -1,0 +1,21 @@
+// HTTP concurrency correctness fixture — driven by scripts/test_http_concurrency.sh.
+//
+// Each /slow request busy-holds the handler ~150ms (a CPU spin, not a timer — timers drain at program
+// exit, but a server never exits). Firing N concurrent /slow requests then distinguishes:
+//   * handlers run in PARALLEL  -> wall ≈ one hold (≈150ms)
+//   * handlers run SERIALIZED   -> wall ≈ N * hold
+// No shared mutable global on purpose: concurrent handlers mutating a module-level `let` currently
+// DEADLOCK (see scripts/test_http_concurrency.sh notes) — that's a separate runtime bug, not what this
+// fixture measures. Concurrency here is read off wall-clock instead.
+import { serve } from 'http'
+
+fn handleRequest(req) {
+    if (req.path === "/slow") {
+        let start = Date.now()
+        while (Date.now() - start < 150) { }
+        return { status: 200, headers: { "content-type": "text/plain" }, body: "ok" }
+    }
+    return { status: 200, body: "ok" } // /health and everything else: immediate
+}
+
+serve("PORT" in process.env ? parseInt(process.env.PORT) : 8090, handleRequest)
