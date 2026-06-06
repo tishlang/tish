@@ -1,4 +1,31 @@
 ================================================================================
+  VM SLOT-BASED LOCALS — NOW DEFAULT-ON + SCOPE-AWARE + TOP-LEVEL (2026-06-05)
+================================================================================
+Extended the slot work to a proper SCOPE-AWARE allocator (block-scoped `slot_scopes` stack
+→ correct shadowing/sibling-`let i`) + TOP-LEVEL slotting (non-REPL) + broadened eligibility
+(SlotScan now recurses for-of/try/switch/throw/destructure/`||=` for a complete capture set,
+bailing only on ambient/module constructs). Flipped **DEFAULT ON** (`TISH_VM_SLOTS=0` disables).
+
+  MEASURED WINS (default `tish run`, vm; lifts cranelift/wasi too — they embed the VM):
+    object_stress       95→71ms  (-25%)     new_features_perf   59→45ms  (-24%)
+    array_stress        50→39ms  (-22%)     benchmark_granular  89→65ms  (-27%)
+    main.tish BUNDLE    0.32→0.25s (-22%)   ← the headline sustained-compute number
+
+  WHY IT NOW MOVES THE BUNDLE/MICROS (the earlier flag-gated version didn't): the micros are
+  TOP-LEVEL scripts (now slotted) and the bundle's `__perf_run_modules_*` use for-of/try (now
+  handled, not bailed). Pure numeric loops are still ~Node×N (boxed-Value arithmetic remains →
+  that's #14 JIT; slots remove name-resolution overhead, the necessary first layer).
+
+  CORRECTNESS: full cross-backend suite 14/0 BOTH default-on AND `TISH_VM_SLOTS=0`; `main.tish`
+  bundle ≡ interp; `tests/core/slot_capture.tish` (closure/FunDecl param-default capture, forEach
+  capture, shadow-across-closure). Two bugs caught+fixed in validation: (1) `Expr::Ident` read used
+  the simple flat map not `resolve_slot` (general-slot reads → LoadVar → undefined); (2) `||=`/`&&=`/
+  `??=` compile site wasn't slot-aware. The single source of truth is `resolve_slot` (checks the
+  simple param map THEN the general scope stack); every var read/write routes through
+  `emit_var_load`/`emit_var_store`. Captured locals (referenced by a nested closure's body or param
+  defaults) stay name-based in `local_scope` (which closures capture) — VM needed ZERO changes.
+
+================================================================================
   VM SLOT-BASED LOCALS LANDED (2026-06-05) — TISH_VM_SLOTS, the RC2 lever
 ================================================================================
 Capture-aware general slot-based locals in the bytecode VM (`tish_bytecode/compiler.rs`),
