@@ -1,4 +1,48 @@
 ================================================================================
+  GAUNTLET PASS (2026-06-05) — native struct fields + native numeric reduce
+================================================================================
+Two shared rust-backend codegen changes (no per-test hacks). The compute gauntlet
+(`scripts/run_perf_gauntlet.sh`, compute-only / startup excluded, rust-AOT vs node V8)
+went from **6/8 → 8/8 beating V8**. Both closed reds:
+
+  benchmark    before        after        change
+  object_sum   11ms (3.67x)  1ms (0.33x)   native struct-field arithmetic
+  array_hof    109ms (3.86x) 11ms (0.38x)  native numeric reduce fold
+
+  object_sum: `let o = {x,y}` is already struct-inferred, but `sum + o.x + o.y` boxed every
+    operand through `tishlang_runtime::ops::add(&Value::Number(..))`. Added an `Expr::Member`
+    arm to `emit_typed_expr` (codegen.rs) so a native struct field reads as raw f64 with its
+    field type — the binop then stays native `((sum + o.x) + o.y)`. Helps ALL struct-field
+    arithmetic, not just this micro.
+  array_hof: `a.reduce((acc,x)=>acc+x, 0)` fused-folds, but each step was a boxed `ops::add`.
+    `try_fused_reduce` now emits a native-f64 fold guarded by a runtime all-numeric check
+    (init + every element is `Value::Number` → fold in raw f64; else fall back to the boxed
+    fold from the original init). Correct: `+`'s string-concat path is preserved — verified
+    `["a","b"].reduce(+,"")`="ab", `[1,"x"].reduce(+,0)`="1x", mul/sub/empty all match interp.
+
+Still the lever for the *full* array_stress/object_stress (multi-section) + the VM family:
+unboxed packed `Vec<f64>` arrays (#13) and more VM JIT coverage (#14).
+
+VM JIT — bitwise + ternary slices (same day): `tish_vm/src/jit.rs`.
+  • **bitwise** `BitAnd/BitOr/BitXor` + `~BitNot` via `fcvt_to_sint_sat` (= VM's saturating `f64 as i32`,
+    bit-for-bit; verified incl. `3e9 & 1 = 1`, negatives, `2.9|0=2`). jit_probe §04 → ~15 ms.
+  • **ternary** `cond ? A : B` → a Cranelift `select` (build_body refactored: `emit_simple_op` helper +
+    a peephole over forward `JumpIfFalse`/`Jump` with branch-free, net-+1, agreeing-is_bool arms;
+    `falsy_flag` reproduces JS truthiness incl. NaN/-0). Bails (→VM) on loops, early-return-in-branch,
+    nested/general if-else, mismatched is_bool. jit_probe §02 map-ternary **269 ms → 17 ms** (~16×).
+  Verified bit-for-bit vs interp + zero interp-vs-vm divergences across the suite. Benefits the whole
+  VM family (vm/cranelift/llvm/wasi embed the JIT). Next: §05 Math 703 ms (cranelift `sqrt` + libcalls),
+  §06 inline hot loop 752 ms (whole-loop JIT, the hardest), general if/else (blocks/SSA rewrite).
+
+Note on **packed `Vec<f64>` arrays (#13)** — de-risked but *lower value than expected*: the rust-backend
+codegen is already complete (an explicit `let a: number[]` lowers push/index/reduce/map/filter/spread/…
+natively or auto-converts at boundaries), so only the inference is missing. BUT the rust backend already
+*beats* Node on array-heavy tests (array_stress 26 ms vs 42), and gauntlet array_hof is already green — so
+packing would only widen an already-winning margin. It does NOT help the VM-family array_stress (166 ms),
+which runs the bytecode VM (boxed `Value` arrays) and needs the JIT instead. So the JIT is the real lever
+for the remaining compute reds; packed-array inference is a rust-backend polish for later.
+
+================================================================================
   OPTIMIZATION PASS (2026-06) — slots + numeric JIT + object layout
 ================================================================================
 Three shared changes to the VM / compiler / core (no per-test hacks; every backend

@@ -206,10 +206,167 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     })
 }
 
-/// Translate the chunk's straight-line numeric bytecode into the function body.
-/// Returns `None` on any unsupported opcode/operand, or `Some(result_is_bool)`
-/// where `result_is_bool` flags a comparison result so the caller boxes it as
-/// `Value::Bool` instead of `Value::Number`.
+/// Outcome of trying to emit one *straight-line* numeric opcode.
+enum SimpleOp {
+    /// Handled: bytecode consumed, IR emitted, `bool` flags a comparison/`!` result.
+    Handled(bool),
+    /// The opcode is control flow / `Return` / non-numeric — NOT consumed; caller decides.
+    NotSimple,
+    /// A simple-op *type* but an unsupported variant (Pow / shift / non-number const) —
+    /// the whole function is ineligible. State may be partially consumed; caller bails.
+    Unsupported,
+}
+
+/// Emit one straight-line numeric opcode at `*ip` (no control flow, no `Return`). On
+/// `NotSimple` neither `ip` nor `stack` is touched, so the caller can re-dispatch.
+fn emit_simple_op(
+    bcx: &mut FunctionBuilder,
+    chunk: &Chunk,
+    code: &[u8],
+    ip: &mut usize,
+    stack: &mut Vec<(ClifValue, bool)>,
+    params: &[ClifValue],
+    arity: usize,
+) -> SimpleOp {
+    let op = match code.get(*ip).copied().and_then(Opcode::from_u8) {
+        Some(o) => o,
+        None => return SimpleOp::NotSimple,
+    };
+    match op {
+        Opcode::Nop | Opcode::LoadLocal | Opcode::LoadConst | Opcode::BinOp | Opcode::UnaryOp => {}
+        // Control flow / member / index / call / array / object / Return → caller handles.
+        _ => return SimpleOp::NotSimple,
+    }
+    *ip += 1;
+    match op {
+        Opcode::Nop => {}
+        Opcode::LoadLocal => {
+            let slot = match read_u16(code, ip) {
+                Some(s) => s as usize,
+                None => return SimpleOp::Unsupported,
+            };
+            // Straight-line simple fns declare no locals; only params (numbers).
+            if slot >= arity {
+                return SimpleOp::Unsupported;
+            }
+            stack.push((params[slot], false));
+        }
+        Opcode::LoadConst => {
+            let idx = match read_u16(code, ip) {
+                Some(i) => i as usize,
+                None => return SimpleOp::Unsupported,
+            };
+            match chunk.constants.get(idx) {
+                Some(Constant::Number(n)) => {
+                    let v = bcx.ins().f64const(*n);
+                    stack.push((v, false));
+                }
+                Some(Constant::Bool(b)) => {
+                    let v = bcx.ins().f64const(if *b { 1.0 } else { 0.0 });
+                    stack.push((v, true));
+                }
+                _ => return SimpleOp::Unsupported,
+            }
+        }
+        Opcode::BinOp => {
+            let bop = match read_u16(code, ip).map(|r| r as u8).and_then(u8_to_binop) {
+                Some(b) => b,
+                None => return SimpleOp::Unsupported,
+            };
+            if stack.len() < 2 {
+                return SimpleOp::Unsupported;
+            }
+            let (r, _) = stack.pop().unwrap();
+            let (l, _) = stack.pop().unwrap();
+            let is_cmp = matches!(
+                bop,
+                BinOp::Eq | BinOp::Ne | BinOp::StrictEq | BinOp::StrictNe
+                    | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+            );
+            let v = match bop {
+                BinOp::Add => bcx.ins().fadd(l, r),
+                BinOp::Sub => bcx.ins().fsub(l, r),
+                BinOp::Mul => bcx.ins().fmul(l, r),
+                BinOp::Div => bcx.ins().fdiv(l, r),
+                BinOp::Eq | BinOp::StrictEq => fcmp_f64(bcx, FloatCC::Equal, l, r),
+                BinOp::Ne | BinOp::StrictNe => fcmp_f64(bcx, FloatCC::NotEqual, l, r),
+                BinOp::Lt => fcmp_f64(bcx, FloatCC::LessThan, l, r),
+                BinOp::Le => fcmp_f64(bcx, FloatCC::LessThanOrEqual, l, r),
+                BinOp::Gt => fcmp_f64(bcx, FloatCC::GreaterThan, l, r),
+                BinOp::Ge => fcmp_f64(bcx, FloatCC::GreaterThanOrEqual, l, r),
+                BinOp::Mod => {
+                    // f64 remainder a - trunc(a/b)*b — exactly Rust's `%`, which the
+                    // VM's eval_binop uses, so JIT and VM-fallback agree bit-for-bit.
+                    let q = bcx.ins().fdiv(l, r);
+                    let t = bcx.ins().trunc(q);
+                    let p = bcx.ins().fmul(t, r);
+                    bcx.ins().fsub(l, p)
+                }
+                // Bitwise AND/OR/XOR. The VM does `((a as i32) OP (b as i32)) as f64`;
+                // Rust's `f64 as i32` is *saturating*, which `fcvt_to_sint_sat` matches
+                // exactly. Shifts / `>>>` stay on the VM (shift-amount edge cases).
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                    let li = bcx.ins().fcvt_to_sint_sat(types::I32, l);
+                    let ri = bcx.ins().fcvt_to_sint_sat(types::I32, r);
+                    let res = match bop {
+                        BinOp::BitAnd => bcx.ins().band(li, ri),
+                        BinOp::BitOr => bcx.ins().bor(li, ri),
+                        BinOp::BitXor => bcx.ins().bxor(li, ri),
+                        _ => unreachable!(),
+                    };
+                    bcx.ins().fcvt_from_sint(types::F64, res)
+                }
+                // Pow/shifts/`>>>`/In/And/Or: fall back to the VM.
+                _ => return SimpleOp::Unsupported,
+            };
+            stack.push((v, is_cmp));
+        }
+        Opcode::UnaryOp => {
+            let uop = match read_u16(code, ip).map(|r| r as u8).and_then(u8_to_unaryop) {
+                Some(u) => u,
+                None => return SimpleOp::Unsupported,
+            };
+            let (o, _) = match stack.pop() {
+                Some(x) => x,
+                None => return SimpleOp::Unsupported,
+            };
+            let (v, is_bool) = match uop {
+                UnaryOp::Neg => (bcx.ins().fneg(o), false),
+                UnaryOp::Pos => (o, false),
+                UnaryOp::Not => {
+                    let zero = bcx.ins().f64const(0.0);
+                    (fcmp_f64(bcx, FloatCC::Equal, o, zero), true)
+                }
+                // `~x` = `!(x as i32) as f64` (matches the VM; saturating cast).
+                UnaryOp::BitNot => {
+                    let oi = bcx.ins().fcvt_to_sint_sat(types::I32, o);
+                    let res = bcx.ins().bnot(oi);
+                    (bcx.ins().fcvt_from_sint(types::F64, res), false)
+                }
+                _ => return SimpleOp::Unsupported,
+            };
+            stack.push((v, is_bool));
+        }
+        _ => unreachable!("guarded above"),
+    }
+    SimpleOp::Handled(false)
+}
+
+/// `is_truthy(cond)` as a Cranelift bool, matching the VM: a number is truthy iff it is
+/// nonzero AND not NaN. Returns the **falsy** flag (so callers can `select(falsy, else, then)`
+/// without a logical-not, which `bnot` can't express on a 0/1 value).
+fn falsy_flag(bcx: &mut FunctionBuilder, cond: ClifValue) -> ClifValue {
+    let zero = bcx.ins().f64const(0.0);
+    let eq_zero = bcx.ins().fcmp(FloatCC::Equal, cond, zero); // ordered: false for NaN
+    let is_nan = bcx.ins().fcmp(FloatCC::NotEqual, cond, cond); // UNE self-compare: true iff NaN
+    bcx.ins().bor(eq_zero, is_nan)
+}
+
+/// Translate the chunk's numeric bytecode into the function body. Straight-line ops plus the
+/// **ternary `cond ? A : B`** pattern (forward `JumpIfFalse`/`Jump` with branch-free, net-+1,
+/// agreeing-`is_bool` arms) → a Cranelift `select`. Loops (`JumpBack`), early returns inside a
+/// branch, nested branches, calls, member/index, or mismatched `is_bool` all return `None` so the
+/// VM runs the chunk instead — purely additive. Returns `Some(result_is_bool)`.
 fn build_body(
     func: &mut cranelift::codegen::ir::Function,
     fbctx: &mut FunctionBuilderContext,
@@ -231,93 +388,74 @@ fn build_body(
     let mut result: Option<bool> = None;
 
     while ip < code.len() {
+        match emit_simple_op(&mut bcx, chunk, code, &mut ip, &mut stack, &params, arity) {
+            SimpleOp::Handled(_) => continue,
+            SimpleOp::Unsupported => return None,
+            SimpleOp::NotSimple => {}
+        }
         let op = Opcode::from_u8(code[ip])?;
-        ip += 1;
         match op {
-            Opcode::Nop => {}
-            Opcode::LoadLocal => {
-                let slot = read_u16(code, &mut ip)? as usize;
-                // Straight-line simple fns declare no locals; only params (numbers).
-                if slot >= arity {
-                    return None;
-                }
-                stack.push((params[slot], false));
-            }
-            Opcode::LoadConst => {
-                let idx = read_u16(code, &mut ip)? as usize;
-                match chunk.constants.get(idx) {
-                    Some(Constant::Number(n)) => {
-                        let v = bcx.ins().f64const(*n);
-                        stack.push((v, false));
-                    }
-                    Some(Constant::Bool(b)) => {
-                        let v = bcx.ins().f64const(if *b { 1.0 } else { 0.0 });
-                        stack.push((v, true));
-                    }
-                    _ => return None,
-                }
-            }
-            Opcode::BinOp => {
-                let raw = read_u16(code, &mut ip)? as u8;
-                let bop = u8_to_binop(raw)?;
-                if stack.len() < 2 {
-                    return None;
-                }
-                let (r, _) = stack.pop().unwrap();
-                let (l, _) = stack.pop().unwrap();
-                let is_cmp = matches!(
-                    bop,
-                    BinOp::Eq | BinOp::Ne | BinOp::StrictEq | BinOp::StrictNe
-                        | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
-                );
-                let v = match bop {
-                    BinOp::Add => bcx.ins().fadd(l, r),
-                    BinOp::Sub => bcx.ins().fsub(l, r),
-                    BinOp::Mul => bcx.ins().fmul(l, r),
-                    BinOp::Div => bcx.ins().fdiv(l, r),
-                    BinOp::Eq | BinOp::StrictEq => fcmp_f64(&mut bcx, FloatCC::Equal, l, r),
-                    BinOp::Ne | BinOp::StrictNe => fcmp_f64(&mut bcx, FloatCC::NotEqual, l, r),
-                    BinOp::Lt => fcmp_f64(&mut bcx, FloatCC::LessThan, l, r),
-                    BinOp::Le => fcmp_f64(&mut bcx, FloatCC::LessThanOrEqual, l, r),
-                    BinOp::Gt => fcmp_f64(&mut bcx, FloatCC::GreaterThan, l, r),
-                    BinOp::Ge => fcmp_f64(&mut bcx, FloatCC::GreaterThanOrEqual, l, r),
-                    BinOp::Mod => {
-                        // f64 remainder a - trunc(a/b)*b — exactly Rust's `%`,
-                        // which is what the VM's eval_binop uses, so JIT and
-                        // VM-fallback agree bit-for-bit.
-                        let q = bcx.ins().fdiv(l, r);
-                        let t = bcx.ins().trunc(q);
-                        let p = bcx.ins().fmul(t, r);
-                        bcx.ins().fsub(l, p)
-                    }
-                    // Pow/bitwise/shifts/In/And/Or: fall back to the VM.
-                    _ => return None,
-                };
-                stack.push((v, is_cmp));
-            }
-            Opcode::UnaryOp => {
-                let raw = read_u16(code, &mut ip)? as u8;
-                let uop = u8_to_unaryop(raw)?;
-                let (o, _) = stack.pop()?;
-                let (v, is_bool) = match uop {
-                    UnaryOp::Neg => (bcx.ins().fneg(o), false),
-                    UnaryOp::Pos => (o, false),
-                    UnaryOp::Not => {
-                        let zero = bcx.ins().f64const(0.0);
-                        (fcmp_f64(&mut bcx, FloatCC::Equal, o, zero), true)
-                    }
-                    _ => return None,
-                };
-                stack.push((v, is_bool));
-            }
             Opcode::Return => {
                 let (v, is_bool) = stack.pop()?;
                 bcx.ins().return_(&[v]);
-                result = Some(is_bool); // straight-line: first Return ends it
+                result = Some(is_bool); // first Return ends a (sub)path
                 break;
             }
-            // Any control flow / member / index / call / array / object opcode
-            // disqualifies the chunk from the numeric fast path.
+            // Ternary `cond ? A : B` → `select`. Both arms must be branch-free numeric
+            // sub-sequences, each pushing exactly one value, with matching is_bool.
+            Opcode::JumpIfFalse => {
+                let (cond, _) = stack.pop()?;
+                let mut p = ip + 1;
+                let off = read_u16(code, &mut p)? as i16 as isize; // p now past the operand
+                let else_target = (p as isize + off).max(0) as usize;
+                let base = stack.len();
+
+                // THEN arm: straight-line ops until the trailing `Jump`.
+                let mut tip = p;
+                loop {
+                    match emit_simple_op(&mut bcx, chunk, code, &mut tip, &mut stack, &params, arity)
+                    {
+                        SimpleOp::Handled(_) => continue,
+                        SimpleOp::Unsupported => return None,
+                        SimpleOp::NotSimple => break,
+                    }
+                }
+                if Opcode::from_u8(*code.get(tip)?)? != Opcode::Jump {
+                    return None; // not the ternary shape (e.g. early return) → VM
+                }
+                let mut jp = tip + 1;
+                let joff = read_u16(code, &mut jp)? as i16 as isize;
+                let merge_target = (jp as isize + joff).max(0) as usize;
+                // The else arm must begin exactly where the then-arm's `Jump` left off.
+                if else_target != jp || stack.len() != base + 1 {
+                    return None;
+                }
+                let (then_v, then_b) = stack.pop()?;
+
+                // ELSE arm: straight-line ops from `jp` up to the merge point.
+                let mut eip = jp;
+                while eip < merge_target {
+                    match emit_simple_op(&mut bcx, chunk, code, &mut eip, &mut stack, &params, arity)
+                    {
+                        SimpleOp::Handled(_) => continue,
+                        _ => return None, // nested control flow / unsupported → VM
+                    }
+                }
+                if eip != merge_target || stack.len() != base + 1 {
+                    return None;
+                }
+                let (else_v, else_b) = stack.pop()?;
+                // One result_bool per function: arms must agree on Bool-vs-Number.
+                if then_b != else_b {
+                    return None;
+                }
+
+                let falsy = falsy_flag(&mut bcx, cond);
+                let sel = bcx.ins().select(falsy, else_v, then_v);
+                stack.push((sel, then_b));
+                ip = merge_target;
+            }
+            // Loops / member / index / call / array / object → VM.
             _ => return None,
         }
     }

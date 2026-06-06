@@ -5973,6 +5973,42 @@ impl Codegen {
                 Ok((result, RustType::Value))
             }
 
+            // ── native struct field access ───────────────────────────────────────
+            // `o.x` where `o` is a `RustType::Named` struct local and `x` is a native
+            // (f64/bool/string) field → a direct Rust field read with that native type,
+            // instead of boxing it through `Value::Number(o.x)`. This keeps `sum + o.x + o.y`
+            // entirely native (the object_sum hot loop) — see emit_expr's struct fast path,
+            // which returns the SAME access but wrapped in `Value::*` for the dynamic callers.
+            Expr::Member {
+                object,
+                prop: MemberProp::Name { name: prop_name, .. },
+                optional: false,
+                ..
+            } => {
+                if let Expr::Ident { name: var_name, .. } = object.as_ref() {
+                    let var_type = self.type_context.get_type(var_name.as_ref());
+                    if let RustType::Named { fields, .. } = &var_type {
+                        if let Some((_, field_ty)) =
+                            fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                        {
+                            if field_ty.is_native() {
+                                let var_esc = Self::escape_ident(var_name.as_ref()).into_owned();
+                                let field = crate::types::field_ident(prop_name.as_ref());
+                                let access = if self.refcell_wrapped_vars.contains(var_name.as_ref())
+                                {
+                                    format!("(*{}.borrow()).{}.clone()", var_esc, field)
+                                } else {
+                                    format!("{}.{}", var_esc, field)
+                                };
+                                return Ok((access, field_ty.clone()));
+                            }
+                        }
+                    }
+                }
+                let result = self.emit_expr(expr)?;
+                Ok((result, RustType::Value))
+            }
+
             // ── everything else: delegate to emit_expr ───────────────────────────
             _ => {
                 let result = self.emit_expr(expr)?;
@@ -6050,6 +6086,42 @@ impl Codegen {
             return Ok(None);
         };
         let body_code = self.emit_binop(ls, *op, rs, *span)?;
+
+        // Native-f64 fast path for arithmetic reducers in the standard `acc OP x` order. We can't
+        // assume the array is numeric at compile time (`+` concatenates strings in JS), so emit a
+        // runtime all-numeric guard: if the init and every element are `Value::Number`, fold in raw
+        // f64 (no per-element `ops::add` call, no Result, no re-boxing); otherwise fall back to the
+        // boxed fold from the original init — identical semantics either way. This is the array_hof
+        // hot loop; a fully-unboxed `Vec<f64>` (packed arrays / task #13) would go further.
+        let nat_op = if (ls, rs) == ("_acc", "_x") {
+            match op {
+                BinOp::Add => Some("+="),
+                BinOp::Sub => Some("-="),
+                BinOp::Mul => Some("*="),
+                BinOp::Div => Some("/="),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(nat_op) = nat_op {
+            return Ok(Some(format!(
+                "{{ let _init0 = {init}; let _arr = ({obj}).clone(); \
+                 if let Value::Array(ref _a) = _arr {{ let _b = _a.borrow(); \
+                 let mut _accn: f64 = 0.0; let mut _ok = false; \
+                 if let Value::Number(_i0) = &_init0 {{ _accn = *_i0; _ok = true; }} \
+                 if _ok {{ for _el in _b.iter() {{ \
+                 if let Value::Number(_n) = _el {{ _accn {nat_op} *_n; }} else {{ _ok = false; break; }} }} }} \
+                 if _ok {{ Value::Number(_accn) }} \
+                 else {{ let mut _acc = _init0; for _el in _b.iter() {{ let _x = _el.clone(); _acc = {body}; }} _acc }} \
+                 }} else {{ _init0 }} }}",
+                init = initial,
+                obj = obj_expr,
+                nat_op = nat_op,
+                body = body_code
+            )));
+        }
+
         Ok(Some(format!(
             "{{ let mut _acc = {init}; let _arr = ({obj}).clone(); \
              if let Value::Array(ref _a) = _arr {{ for _el in _a.borrow().iter() {{ \
