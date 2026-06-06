@@ -148,7 +148,22 @@ fn file_content_hash(path: &Path) -> u64 {
 /// executing a binary still being written).
 fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
     let stem = path.file_stem().unwrap().to_string_lossy();
-    let hash = file_content_hash(path);
+    // The cache must invalidate when the COMPILER changes, not only the `.tish` source: cranelift/wasi
+    // (and native) bake the VM/codegen/runtime into the artifact, so a stale cached binary built before
+    // a VM fix would silently use old behaviour. The `tish` binary's mtime is the precise signal — any
+    // VM/compiler/runtime/codegen source edit rebuilds it. Mix it into the key alongside the file hash.
+    let bin_stamp = std::fs::metadata(bin)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let hash = {
+        let mut h = DefaultHasher::new();
+        file_content_hash(path).hash(&mut h);
+        bin_stamp.hash(&mut h);
+        h.finish()
+    };
     let hash8 = &format!("{:016x}", hash)[..8];
     let cache_base = integration_compile_cache_dir().join(backend);
     let _ = std::fs::create_dir_all(&cache_base);
@@ -927,38 +942,14 @@ fn test_mvp_programs_native() {
     assert!(errors.is_empty(), "native failures:\n{}", errors.join("\n"));
 }
 
-/// Curated subset for the cranelift + wasi backends. **This is a build-COST bound, not a
-/// correctness bound:** cranelift/llvm/wasi embed the bytecode VM, which now passes every discovered
-/// test (full interp↔vm parity, `VM_PARITY_SKIP` empty), so correctness is inherited. The reason this
-/// stays curated instead of using `discover_core_tests()` like interp/vm/native: each cranelift/wasi
-/// build emits a *full per-program Rust crate* (`tishlang_{cranelift,wasi}_build/<name>`, ~2-5 GB with
-/// `cranelift_codegen` + the embedded VM) and they accumulate — building all ~66 fills ~130 GB and
-/// exhausts the disk. Full file-discovery here needs the per-program build dir bounded first (shared
-/// `CARGO_TARGET_DIR` so deps compile once, or clean the build dir after caching the output). Until
-/// then this list is a representative cross-section; the former-red features (toFixed, RegExp, default
-/// params, destructuring, deep closures) were each verified to build+pass on cranelift individually.
-const CRANELIFT_TEST_FILES: &[&str] = &[
-    "jit_regression.tish",
-    "control_flow_nested.tish",
-    "loop_let_capture.tish",
-    "fn_any.tish",
-    "strict_equality.tish",
-    "switch.tish",
-    "do_while.tish",
-    "typeof.tish",
-    "try_catch.tish",
-    "json.tish",
-    "math.tish",
-    "builtins.tish",
-    "uri.tish",
-    "inc_dec.tish",
-    "exponentiation.tish",
-    "void.tish",
-    "rest_params.tish",
-    "arrow_functions.tish",
-    "array_methods.tish",
-    "types.tish",
-];
+// cranelift + wasi now use `discover_core_tests()` (full file discovery), like interp/vm/native —
+// the former curated `CRANELIFT_TEST_FILES` allowlist is gone. They embed the bytecode VM, which
+// has full interp↔vm parity (`VM_PARITY_SKIP` empty), so they inherit it: a disk-safe sweep confirmed
+// cranelift 66/66 and wasi 66/66. The old blocker was build COST — each backend build used to emit a
+// per-program `target/` (~2-5 GB) that accumulated to ~130 GB; now `tish_cranelift`/`tish_wasm` build
+// into a SHARED target dir so the deps compile once (610 MB / 85 MB total for the whole sweep, and a
+// repeat build is ~1 s). If a construct ever regresses on a backend, add it to a documented skip set
+// rather than re-introducing an allowlist.
 
 /// Compile each .tish file with Cranelift backend, run, and compare stdout to static expected (parallelized).
 #[test]
@@ -970,7 +961,7 @@ fn test_mvp_programs_cranelift() {
         "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
-    let errors: Vec<String> = CRANELIFT_TEST_FILES
+    let errors: Vec<String> = discover_core_tests()
         .par_iter()
         .filter_map(|name| {
             let path = core_dir.join(name);
@@ -1034,7 +1025,7 @@ fn test_mvp_programs_wasi() {
         "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
-    let errors: Vec<String> = CRANELIFT_TEST_FILES
+    let errors: Vec<String> = discover_core_tests()
         .par_iter()
         .filter_map(|name| {
             let path = core_dir.join(name);

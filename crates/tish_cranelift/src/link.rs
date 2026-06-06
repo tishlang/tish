@@ -54,9 +54,15 @@ pub fn link_to_binary(
                 .join(", ")
         )
     };
+    // UNIQUE package name per program. With the shared target dir, a fixed package name
+    // (`tishlang_cranelift_out`) made cargo cross-contaminate builds — each program links its own
+    // per-program object via build.rs, so program B would reuse program A's cached build script and
+    // link A's (now-deleted) `.o`. A distinct package name keeps them separate while the heavy
+    // dependency (`tishlang_cranelift_runtime`, same path + features for all) still compiles once.
+    let pkg_name = format!("clout_{}", out_name);
     let cargo_toml_fixed = format!(
         r#"[package]
-name = "tishlang_cranelift_out"
+name = "{}"
 version = "0.1.0"
 edition = "2021"
 
@@ -67,7 +73,7 @@ path = "src/main.rs"
 [dependencies]
 tishlang_cranelift_runtime = {{ path = {:?}{} }}
 "#,
-        out_name, runtime_path, features_str
+        pkg_name, out_name, runtime_path, features_str
     );
 
     let main_rs = r#"
@@ -103,10 +109,17 @@ fn main() {{
         message: format!("Cannot write build.rs: {}", e),
     })?;
 
-    tishlang_build_utils::run_cargo_build(&build_dir, None, None)
+    // Build into a SHARED target dir (one per host), not the per-program `build_dir/target`.
+    // The heavy deps (cranelift_codegen + the embedded VM, ~several GB) then compile ONCE and
+    // are reused by every cranelift build; only each program's tiny main + object is rebuilt.
+    // Without this, every program left its own multi-GB `target/` behind and a full-suite sweep
+    // filled the disk (see docs/full-backend-parity-plan.md A3). Concurrent builds are serialized
+    // by `run_cargo_build`'s nested-cargo mutex and cargo's own target lock, so sharing is safe.
+    let shared_target = std::env::temp_dir().join("tishlang_cranelift_target");
+    tishlang_build_utils::run_cargo_build(&build_dir, Some(&shared_target), None)
         .map_err(|e| CraneliftError { message: e })?;
 
-    let binary_dir = build_dir.join("target").join("release");
+    let binary_dir = shared_target.join("release");
     let binary = tishlang_build_utils::find_release_binary(&binary_dir, out_name)
         .map_err(|e| CraneliftError { message: e })?;
     let target = tishlang_build_utils::resolve_output_path(output_path, out_name);

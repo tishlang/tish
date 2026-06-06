@@ -379,10 +379,14 @@ fn main() {
         message: format!("Cannot write main.rs: {}", e),
     })?;
 
-    // Build - use explicit target-dir so we know where the artifact is
+    // Build into a SHARED target dir (one per host), not per-program. The wasi runtime + embedded
+    // VM then compile ONCE and are reused by every wasi build; only each program's tiny main is
+    // rebuilt. Without this each program left its own multi-GB `target/` and a full-suite sweep
+    // would fill the disk (same issue fixed for cranelift; see full-backend-parity-plan.md A3).
+    // cargo's target lock serializes concurrent builds safely.
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let bin_name = format!("tish_wasi_{}", stem);
-    let target_dir = build_dir.join("target");
+    let target_dir = std::env::temp_dir().join("tishlang_wasi_target");
     let build_status = Command::new(&cargo)
         .current_dir(&build_dir)
         .env("CARGO_TARGET_DIR", &target_dir)

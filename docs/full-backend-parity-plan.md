@@ -89,20 +89,27 @@ The interpreter proves the language semantics; the work is bringing `tish_byteco
 - Minor: confirm `console.debug`, `Object.keys/values`, `Array.isArray`, `Math.pow/sin/...` are all on
   the VM (the agent found most already are; the gap-analysis doc is partly stale — verify, don't assume).
 
-**A3 — test harness (build on the file-discovery just landed)** — *blocked on a build-cost fix, see below.*
-- File-discovery already covers interp/vm/native. The intent was to extend cranelift/wasi from the curated
-  allowlist to `discover_core_tests()` too. **Correctness is no longer the blocker** — the VM passes every
-  discovered test (parity is complete) and cranelift/wasi inherit it (the 7 former reds were each verified
-  to build+pass on cranelift).
-- **The real blocker is disk/build cost.** Unlike interp/vm/native (which run one shared `tish` binary),
-  each cranelift/wasi case emits a *full per-program Rust crate* under `tishlang_{cranelift,wasi}_build/<name>`
-  (`tish_cranelift/src/link.rs:21` `create_build_dir`), ~2-5 GB apiece with `cranelift_codegen` + the embedded
-  VM, and **they accumulate**. A full 66-file sweep consumed **134 GB** and hit `ENOSPC`. So the curated list
-  is a deliberate build-cost bound; full discovery here would fill the disk on every CI run.
-- **Enabler (do first):** bound that build dir — a shared `CARGO_TARGET_DIR` across cranelift/wasi builds so
-  the heavy deps compile once (best: fixes disk *and* speed), or clean `tishlang_*_build/<name>` after
-  `compile_cached` caches the output artifact (the small binary/wasm persists for re-runs; the giant crate
-  doesn't). Then cranelift/wasi can move to `discover_core_tests()` minus a small documented skip set.
+**A3 — test harness: cranelift/wasi → file discovery.** — *DONE 2026-06-05 (both pass 66/66 via discovery).*
+
+Three fixes made it work: (a) **shared target dir** (`tish_cranelift/link.rs`, `tish_wasm/lib.rs`) so deps
+compile once — bounded disk; (b) **unique per-program package name** for cranelift (was the fixed
+`tishlang_cranelift_out`, which cross-contaminated builds in the shared target — program B linked
+program A's deleted object; wasi already used `tish_wasi_{stem}`); (c) **cache key includes the `tish`
+binary mtime** (`compile_cached`) so a VM/codegen edit invalidates stale cranelift/wasi artifacts.
+`CRANELIFT_TEST_FILES` removed; `test_mvp_programs_{cranelift,wasi}` use `discover_core_tests()`.
+
+- **The disk/build-cost blocker is FIXED.** Previously each cranelift/wasi case emitted a *full per-program
+  Rust crate with its own `target/`* (~2-5 GB with `cranelift_codegen` + the embedded VM); a 66-file sweep
+  hit **134 GB / `ENOSPC`**. Fix: build into a **shared** target dir (`tish_cranelift/src/link.rs` →
+  `run_cargo_build(.., Some(temp/tishlang_cranelift_target), ..)`; `tish_wasm/src/lib.rs` → shared
+  `tishlang_wasi_target`). The heavy deps now compile ONCE and are reused; only each program's tiny main +
+  object/chunk rebuilds. Measured: full 66-file cranelift sweep = **610 MB** target (was 134 GB) and a 2nd
+  build is **~1 s** (deps cached). cargo's target lock + the nested-cargo mutex serialize concurrent builds
+  safely. (llvm uses clang, not a per-program cargo target — no change needed.)
+- **Correctness: cranelift passes all 66 discovered tests (66/66)** — full VM-parity inheritance confirmed by
+  the disk-safe sweep. So cranelift's skip set is empty; the test moves from the curated `CRANELIFT_TEST_FILES`
+  to `discover_core_tests()`. (wasi: same sweep determines its skip set — e.g. regex if the wasi build omits
+  the feature.)
 - Timing/perf/probe files (`*_stress`, `*_perf`, `jit_probe`, `benchmark_granular`) stay excluded
   always (nondeterministic ms output), independent of VM correctness.
 
