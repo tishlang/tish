@@ -1289,25 +1289,26 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow: no callee".to_string())?;
-                    let f = match &callee {
-                        Value::Function(f) => f.clone(),
+                    // Call the function in place — no `Arc` clone on the hot direct-call path. The
+                    // immutable borrow of `callee` is held only across the call, which never touches it.
+                    let result = match &callee {
+                        Value::Function(f) => f(&args),
                         Value::Object(o) => {
-                            if let Some(Value::Function(call_fn)) =
-                                o.borrow().strings.get("__call")
-                            {
-                                call_fn.clone()
-                            } else {
-                                return Err(format!(
-                                    "Call of non-function: {}",
-                                    callee.type_name()
-                                ));
-                            }
+                            let call_fn = match o.borrow().strings.get("__call") {
+                                Some(Value::Function(cf)) => cf.clone(),
+                                _ => {
+                                    return Err(format!(
+                                        "Call of non-function: {}",
+                                        callee.type_name()
+                                    ))
+                                }
+                            };
+                            call_fn(&args)
                         }
                         _ => {
                             return Err(format!("Call of non-function: {}", callee.type_name()));
                         }
                     };
-                    let result = f(&args);
                     self.stack.push(result);
                 }
                 Opcode::CallSpread => {
