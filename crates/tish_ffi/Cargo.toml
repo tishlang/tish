@@ -1,0 +1,16 @@
+[package]
+name = "tishlang_ffi"
+version = "0.1.0"
+edition = "2021"
+description = "Stable C ABI for tish native extensions — opaque value handles + extern \"C\" accessors so a cdylib (native) or wasm host-import module can interoperate with any tish backend without sharing tish_core's Rust types. Workstream B (full-backend-parity-plan.md)."
+
+license-file = { workspace = true }
+repository = { workspace = true }
+
+[features]
+default = []
+# Match the embedding backend's value representation when the host enables it.
+send-values = ["tishlang_core/send-values"]
+
+[dependencies]
+tishlang_core = { path = "../tish_core", version = ">=0.1" }

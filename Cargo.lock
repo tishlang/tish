@@ -3268,6 +3268,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tishlang_ffi"
+version = "0.1.0"
+dependencies = [
+ "tishlang_core",
+]
+
+[[package]]
 name = "tishlang_fmt"
 version = "0.1.0"
 dependencies = [

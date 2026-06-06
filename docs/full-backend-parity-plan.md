@@ -131,7 +131,11 @@ rust-AOT-only.
 loadable by every backend — the "pairing." `cargo:` (Rust-crate compile-time linking) remains the one
 rust-only path.
 
-**B1 — define the C ABI (a new `tish_ffi` crate + header)**
+**B1 — define the C ABI (a new `tish_ffi` crate + header)** — *LANDED 2026-06-05.* `crates/tish_ffi`
+(`tishlang_ffi`): opaque `TishValueRef` (= boxed `Value` behind `*mut c_void`); host `extern "C"`
+accessors `tish_value_*` (new/tag/as_*/array/object/clone/drop + `tish_string_free`); `TishNativeFn`
+signature; `TishExport`/`TishExportTable` for `tish_module_register`. C-style ownership (caller drops
+received handles; push/set clone). 5 unit tests incl. a simulated `add_fn` extension. **Next: B2–B4.**
 - Opaque value handle: `typedef struct TishValue* TishValueRef;` (a boxed index into a VM-side value
   table or a `*mut c_void`) — never the Rust enum by value (it can't cross `extern "C"`).
 - Host-provided accessor API (all `extern "C"`): `tish_value_new_number/string/bool/null`,
