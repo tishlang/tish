@@ -949,7 +949,7 @@ pub use timers::{
 #[cfg(any(feature = "http", feature = "promise"))]
 pub use promise::{
     await_promise, await_promise_throw, promise_instance_catch, promise_instance_then,
-    promise_object,
+    promise_object, promise_spawn as promise_spawn_value,
 };
 
 #[cfg(feature = "http")]

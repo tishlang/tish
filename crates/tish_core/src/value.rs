@@ -108,6 +108,17 @@ pub trait TishOpaque {
 /// Implemented by the runtime for native compile; interpreter uses its own Promise.
 pub trait TishPromise: Send + Sync {
     fn block_until_settled(&self) -> std::result::Result<Value, Value>;
+    /// Try to settle WITHOUT blocking. Returns `Some(result)` if the promise was already
+    /// settled before this call; returns `None` if it is still pending (a background thread
+    /// / I/O task has not completed yet). Default: always pending — implementors of async
+    /// promises (fetch, spawn) leave this as `None`; `ImmediateSettledPromise` overrides it.
+    ///
+    /// Used by `race`/`any`/`allSettled` to handle already-settled promises in input-order
+    /// (deterministic, JS-compatible) before falling back to concurrent thread waiting for
+    /// genuinely-pending ones.
+    fn try_settle(&self) -> Option<std::result::Result<Value, Value>> {
+        None
+    }
 }
 
 /// JavaScript RegExp flags

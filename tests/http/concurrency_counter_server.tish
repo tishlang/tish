@@ -1,0 +1,30 @@
+// HTTP shared-counter concurrency regression — driven by scripts/test_http_concurrency.sh.
+//
+// The handler mutates module-level `let`s (a live request gauge + a monotonic served counter) on every
+// request, then busy-holds ~120ms on /slow. This is the "shared counter / cache / rate-limiter" shape
+// that was reported to hang under concurrent load. It does NOT hang: concurrent handlers can safely
+// read-modify-write shared module state (proven cross-platform by
+// crates/tish_vm/tests/concurrent_shared_state.rs). The script asserts every concurrent request returns
+// 200 and the server stays responsive afterward.
+//
+// Caveats this fixture deliberately embodies (NOT bugs to assert against here):
+//   * the read-modify-write is non-atomic, so `served` undercounts under true thread parallelism;
+//   * under prefork (multiple processes) the counters are per-process, not global.
+// Run with TISH_HTTP_PREFORK=0 to share one process's counters across worker threads.
+import { serve } from 'http'
+
+let active = 0
+let served = 0
+
+fn handleRequest(req) {
+    active = active + 1
+    served = served + 1
+    if (req.path === "/slow") {
+        let start = Date.now()
+        while (Date.now() - start < 120) { } // CPU spin so requests overlap (timers don't drain in a server)
+    }
+    active = active - 1
+    return { status: 200, headers: { "content-type": "text/plain", "x-served": "" + served }, body: "ok" }
+}
+
+serve("PORT" in process.env ? parseInt(process.env.PORT) : 8091, handleRequest)

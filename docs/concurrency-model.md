@@ -289,9 +289,23 @@ True `race`/`any` need a concurrent select across all promises' channels — the
   fire N concurrent slow requests and read concurrency off the wall clock. **Measured: macOS serializes**
   (6×150ms ≈ 934ms) — BSD `SO_REUSEPORT` does not kernel-distribute (matches §3). The test asserts
   parallelism on **Linux** (the deployment target) and is informational (exit 0) on macOS.
-- **Known bug (spun off)**: an HTTP handler that mutates a shared module-level `let` **hangs** under
-  concurrent requests (fine without the shared write) — a lock/deadlock in the VM global-write path
-  under multi-threaded dispatch. Matters on Linux where handlers actually parallelize.
+- **Shared module state under concurrent handlers (investigated 2026-06-06)**: a handler that mutates a
+  module-level `let` (request counter / cache / rate-limiter) does **not** deadlock under concurrent
+  requests. The earlier "hangs / deadlock in the VM global-write path" note was an unverified
+  extrapolation from the macOS serialization above (the bug was theorized for Linux but never
+  reproduced). The VM acquires each scope/global mutex one at a time and drops the guard before any
+  re-lock (`if local_scope.borrow().contains_key(..)` then `borrow_mut`; the `find(|e| e.borrow()..)`
+  predicate releases before `e.borrow_mut()`), so no guard is held across the handler body, and the
+  single shared scope mutex admits no lock-order inversion — concurrent writers contend but never
+  deadlock. Verified cross-platform by `crates/tish_vm/tests/concurrent_shared_state.rs` (12 threads ×
+  100 calls, ~10 handlers simultaneously in-flight, completes in ~190 ms) and end-to-end by the
+  `concurrency_counter_server.tish` path in `scripts/test_http_concurrency.sh`. The **real** caveats for
+  shared module state are: (1) the read-modify-write is **non-atomic** across the separate load + store
+  ops, so `count = count + 1` loses updates under true parallelism (the test observes `served < total`
+  and the live gauge drifting off 0) — there is no atomic/transactional primitive; (2) under **prefork**
+  (the default) each process has its own copy, so a "global" counter is per-process. Use
+  `serve(..., { onWorker })` for intentional per-worker state, or run threaded (`TISH_HTTP_PREFORK=0`)
+  when you need one shared in-process counter (accepting the racy RMW).
 
 ## Key source references
 

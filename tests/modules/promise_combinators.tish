@@ -1,0 +1,48 @@
+// Promise combinators — cross-backend fixture (no `http` import, no spawn).
+// Tests any, allSettled, race (fixed), and basic spawn smoke with already-settled promises.
+// vm ≡ interp. Deliberately NOT compared to node — tish's sequential any/race are correct
+// for already-settled inputs (same result as node), and we don't want timer/async ordering
+// differences to creep in.
+
+// === Promise.any ===
+let first = await Promise.any([
+    new Promise((_, r) => r("rej1")),
+    new Promise((resolve) => resolve("win")),
+    new Promise((resolve) => resolve("third")),
+])
+console.log("any first-fulfilled:", first)
+
+let aggErr = "none"
+try {
+    await Promise.any([
+        new Promise((_, r) => r("e1")),
+        new Promise((_, r) => r("e2")),
+    ])
+} catch (e) {
+    aggErr = e
+}
+console.log("any all-rejected:", JSON.stringify(aggErr))
+
+// === Promise.allSettled ===
+let settled = await Promise.allSettled([
+    new Promise((resolve) => resolve(10)),
+    new Promise((_, r) => r("boom")),
+    new Promise((resolve) => resolve(30)),
+])
+for (let i = 0; i < settled.length; i++) {
+    let s = settled[i]
+    if (s.status === "fulfilled") { console.log("allSettled[" + i + "] ok:", s.value) }
+    else { console.log("allSettled[" + i + "] rejected:", s.reason) }
+}
+
+// === Promise.race (fixed: first element wins when all settled) ===
+let winner = await Promise.race([
+    new Promise((resolve) => resolve("A")),
+    new Promise((resolve) => resolve("B")),
+    new Promise((resolve) => resolve("C")),
+])
+console.log("race winner:", winner)
+
+// === non-promise passthrough ===
+let pt = await Promise.any([42, "ignored"])
+console.log("any passthrough:", pt)

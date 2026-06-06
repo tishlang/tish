@@ -3142,6 +3142,9 @@ impl Evaluator {
                 "reject" => Ok(Value::Native(Self::promise_reject)),
                 "all" => Ok(Value::Native(Self::promise_all)),
                 "race" => Ok(Value::Native(Self::promise_race)),
+                "any" => Ok(Value::Native(Self::promise_any)),
+                "allSettled" => Ok(Value::Native(Self::promise_all_settled)),
+                "spawn" => Ok(Value::Native(Self::promise_spawn_interp)),
                 _ => Ok(Value::Null),
             },
             Value::Opaque(o) => {
@@ -3677,6 +3680,124 @@ impl Evaluator {
             }
         }
         Err("Promise.race requires at least one promise".to_string())
+    }
+
+    /// Helper: settle a new promise fulfilled with `v` (interp Value).
+    #[cfg(feature = "http")]
+    fn eval_fulfilled(v: Value) -> Result<Value, String> {
+        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+        let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+        crate::promise::settle_promise(&resolve, v, true)?;
+        Ok(promise)
+    }
+
+    /// Helper: settle a new promise rejected with `v` (interp Value).
+    #[cfg(feature = "http")]
+    fn eval_rejected(v: Value) -> Result<Value, String> {
+        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+        let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+        crate::promise::settle_promise(&reject, v, false)?;
+        Ok(promise)
+    }
+
+    /// Await one interp promise/core-promise/value → `Result<Value, Value>`.
+    #[cfg(feature = "http")]
+    fn settle_one(v: Value) -> Result<Value, Value> {
+        match v {
+            Value::Promise(ref p) => match crate::promise::block_until_settled(p) {
+                crate::promise::PromiseAwaitResult::Fulfilled(x) => Ok(x),
+                crate::promise::PromiseAwaitResult::Rejected(x) => Err(x),
+                crate::promise::PromiseAwaitResult::Error(e) => {
+                    Err(Value::String(e.into()))
+                }
+            },
+            Value::CorePromise(ref p) => match p.block_until_settled() {
+                Ok(x) => Ok(crate::value_convert::core_to_eval(x)),
+                Err(x) => Err(crate::value_convert::core_to_eval(x)),
+            },
+            other => Ok(other),
+        }
+    }
+
+    /// `Promise.any(iterable)` — first fulfilled wins; rejects with array of reasons if all reject.
+    #[cfg(feature = "http")]
+    fn promise_any(args: &[Value]) -> Result<Value, String> {
+        let iterable = args
+            .first()
+            .ok_or_else(|| "Promise.any requires an iterable".to_string())?;
+        let values: Vec<Value> = match iterable {
+            Value::Array(arr) => arr.borrow().clone(),
+            _ => return Err("Promise.any requires an array".to_string()),
+        };
+        let n = values.len();
+        if n == 0 {
+            return Self::eval_rejected(Value::Array(Rc::new(RefCell::new(vec![]))));
+        }
+        let mut errors = Vec::with_capacity(n);
+        for v in values {
+            match Self::settle_one(v) {
+                Ok(x) => return Self::eval_fulfilled(x),
+                Err(e) => errors.push(e),
+            }
+        }
+        Self::eval_rejected(Value::Array(Rc::new(RefCell::new(errors))))
+    }
+
+    /// `Promise.allSettled(iterable)` — always fulfills with array of `{status,value|reason}`.
+    #[cfg(feature = "http")]
+    fn promise_all_settled(args: &[Value]) -> Result<Value, String> {
+        use crate::value::EvalObjectData;
+        let iterable = args
+            .first()
+            .ok_or_else(|| "Promise.allSettled requires an iterable".to_string())?;
+        let values: Vec<Value> = match iterable {
+            Value::Array(arr) => arr.borrow().clone(),
+            _ => return Err("Promise.allSettled requires an array".to_string()),
+        };
+        let mut out = Vec::with_capacity(values.len());
+        for v in values {
+            let r = Self::settle_one(v);
+            let mut data = EvalObjectData::default();
+            match r {
+                Ok(x) => {
+                    data.strings.insert(std::sync::Arc::from("status"), Value::String("fulfilled".into()));
+                    data.strings.insert(std::sync::Arc::from("value"), x);
+                }
+                Err(e) => {
+                    data.strings.insert(std::sync::Arc::from("status"), Value::String("rejected".into()));
+                    data.strings.insert(std::sync::Arc::from("reason"), e);
+                }
+            }
+            out.push(Value::Object(Rc::new(RefCell::new(data))));
+        }
+        Self::eval_fulfilled(Value::Array(Rc::new(RefCell::new(out))))
+    }
+
+    /// `Promise.spawn(fn)` — on the interpreter, runs the function synchronously and wraps
+    /// the result in an immediate promise. The interpreter uses `Rc<RefCell<…>>` for closures,
+    /// which is `!Send`, so we cannot move the function to a background thread here. Real
+    /// cross-thread parallelism via spawn is available on the bytecode VM (which uses the
+    /// `send-values` / Arc path for the shipped `full` build). For the interpreter, `any` and
+    /// `race` over spawn-created promises still work correctly — they just don't run concurrently.
+    #[cfg(feature = "http")]
+    fn promise_spawn_interp(args: &[Value]) -> Result<Value, String> {
+        let callable = match args.first() {
+            Some(v @ (Value::Native(_) | Value::Function { .. })) => v.clone(),
+            _ => return Err("Promise.spawn: expected a function argument".to_string()),
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match &callable {
+                Value::Native(f) => f(&[]).map_err(|e| e.to_string()),
+                // Interpreter closures (Value::Function) can't be called from a static native fn
+                // (no evaluator state / Rc captures). Use the VM backend for concurrent CPU spawn.
+                _ => Err("Promise.spawn: tish closures are not supported on the interpreter backend; use the vm backend (tish run) or pass a native module function".to_string()),
+            }
+        }));
+        match result {
+            Ok(Ok(v))  => Self::eval_fulfilled(v),
+            Ok(Err(e)) => Self::eval_rejected(Value::String(e.into())),
+            Err(_)     => Self::eval_rejected(Value::String("Promise.spawn: task panicked".into())),
+        }
     }
 
     #[cfg(feature = "ws")]

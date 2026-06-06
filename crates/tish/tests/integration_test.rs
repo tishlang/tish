@@ -579,6 +579,53 @@ fn test_vm_date_now() {
     }
 }
 
+/// `Promise.any`, `Promise.allSettled`, fixed `Promise.race` — cross-backend, network-free, CI-gated.
+/// vm ≡ interp exact match.
+#[test]
+fn test_promise_combinators() {
+    let bin = tish_bin();
+    if !bin.exists() {
+        return;
+    }
+    let path = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("promise_combinators.tish");
+    if !path.exists() {
+        return;
+    }
+    let expected = "\
+any first-fulfilled: win
+any all-rejected: [\"e1\",\"e2\"]
+allSettled[0] ok: 10
+allSettled[1] rejected: boom
+allSettled[2] ok: 30
+race winner: A
+any passthrough: 42
+";
+    for backend_args in [vec!["run"], vec!["run", "--backend", "interp"]] {
+        let mut args = backend_args.clone();
+        args.push(path.to_string_lossy().to_string().leak());
+        let out = Command::new(&bin)
+            .args(&args)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish binary");
+        assert!(
+            out.status.success(),
+            "promise_combinators ({:?}) failed: stderr={}",
+            backend_args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected,
+            "Promise.any/allSettled/race divergence on backend {:?}",
+            backend_args
+        );
+    }
+}
+
 /// Pins tish's DOCUMENTED async/Promise ordering (docs/concurrency-model.md) — network-free, so it
 /// runs in CI (unlike the `#[ignore]`'d network async tests). Asserts Promise.all order + non-promise
 /// passthrough, `.then` chaining, await-reject catch, Promise.all reject short-circuit, AND the
