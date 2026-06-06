@@ -14,3 +14,8 @@ send-values = ["tishlang_core/send-values"]
 
 [dependencies]
 tishlang_core = { path = "../tish_core", version = ">=0.1" }
+
+# Native cdylib loading (B2). Not for wasm — there is no dlopen in wasm; wasi resolves the SAME
+# handle+accessor contract via host imports (B4), so the loader is gated to non-wasm targets.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libloading = "0.8"

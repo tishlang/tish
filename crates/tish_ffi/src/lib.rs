@@ -257,6 +257,76 @@ pub unsafe extern "C" fn tish_value_drop(r: TishValueRef) {
     }
 }
 
+// ── B2: loader + dispatch shim ───────────────────────────────────────────────
+
+/// Wrap an `extern "C"` native function as a tish `Value::native`, marshaling each call's
+/// `&[Value]` into owned handles, invoking the C-ABI function, and unwrapping the returned handle.
+///
+/// This is the bridge the loader and every backend's `register_native_module` use: the only thing
+/// that changes vs a Rust built-in is that the call crosses the C ABI instead of a direct closure.
+/// Args are passed as **clones** (arrays/objects share their `Arc`/`Rc` container, matching tish's
+/// reference semantics, so an extension can mutate a passed array); the per-call handles and the
+/// result handle are dropped here.
+pub fn wrap_native_fn(func: TishNativeFn) -> Value {
+    Value::native(move |args: &[Value]| -> Value {
+        let handles: Vec<TishValueRef> = args.iter().map(|v| box_value(v.clone())).collect();
+        // Calling an `extern "C"` fn pointer is a safe operation; the unsafety is in the accessors.
+        let result = func(handles.as_ptr(), handles.len());
+        // SAFETY: every `handles[i]` came from `box_value`; `result` is a freshly-owned handle
+        // from a `_new_*`/`_clone` accessor (the documented return contract).
+        unsafe {
+            let out = as_value(result).cloned().unwrap_or(Value::Null);
+            for h in handles {
+                tish_value_drop(h);
+            }
+            tish_value_drop(result);
+            out
+        }
+    })
+}
+
+/// Load a native C-ABI extension (`cdylib`) and return its exports as a name→`Value::native` map,
+/// ready for the interpreter's `with_modules` or the VM's `register_native_module`. The module
+/// must export `extern "C" fn tish_module_register() -> *const TishExportTable`.
+///
+/// The extension imports the host's `tish_value_*` accessors, so the host must export them at link
+/// time (`-rdynamic` / `-Wl,-export_dynamic`). The loaded library is intentionally leaked so the
+/// function pointers stay valid for the process — the load-once model (matches the JIT module).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_module(path: &str) -> Result<tishlang_core::ObjectMap, String> {
+    use tishlang_core::ObjectMap;
+    // SAFETY: dlopen of a caller-supplied path; the export table is validated (null checks) and the
+    // function pointers are wrapped behind the marshaling shim.
+    unsafe {
+        let lib =
+            libloading::Library::new(path).map_err(|e| format!("ffi: load {}: {}", path, e))?;
+        let register: libloading::Symbol<unsafe extern "C" fn() -> *const TishExportTable> = lib
+            .get(b"tish_module_register")
+            .map_err(|e| format!("ffi: {}: no tish_module_register: {}", path, e))?;
+        let table = register();
+        if table.is_null() {
+            return Err(format!("ffi: {}: tish_module_register returned null", path));
+        }
+        let table = &*table;
+        if table.count > 0 && table.exports.is_null() {
+            return Err(format!("ffi: {}: null export table", path));
+        }
+        let exports = std::slice::from_raw_parts(table.exports, table.count);
+        let mut map = ObjectMap::default();
+        for exp in exports {
+            if exp.name.is_null() {
+                continue;
+            }
+            let name = CStr::from_ptr(exp.name)
+                .to_str()
+                .map_err(|_| format!("ffi: {}: non-UTF-8 export name", path))?;
+            map.insert(name.into(), wrap_native_fn(exp.func));
+        }
+        std::mem::forget(lib); // keep symbols live for the process lifetime
+        Ok(map)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,6 +447,60 @@ mod tests {
             let exports = [TishExport { name: name.as_ptr(), func: add_fn }];
             let table = TishExportTable { exports: exports.as_ptr(), count: 1 };
             assert_eq!(table.count, 1);
+        }
+    }
+
+    // B2: the marshaling shim turns a C-ABI fn into a tish `Value::native` end-to-end.
+    #[test]
+    fn wrap_native_fn_marshals() {
+        let wrapped = wrap_native_fn(add_fn);
+        match wrapped {
+            Value::Function(f) => {
+                let r = f(&[Value::Number(2.0), Value::Number(40.0)]);
+                match r {
+                    Value::Number(n) => assert_eq!(n, 42.0),
+                    other => panic!("expected Number(42), got {:?}", other),
+                }
+                // argc < 2 → the extension returns null; the shim unwraps it.
+                assert!(matches!(f(&[]), Value::Null));
+            }
+            other => panic!("expected Value::Function, got {:?}", other),
+        }
+    }
+
+    // The shim shares array containers (reference semantics): an extension can read passed arrays.
+    extern "C" fn sum_array(args: *const TishValueRef, argc: usize) -> TishValueRef {
+        unsafe {
+            if argc < 1 {
+                return tish_value_new_number(0.0);
+            }
+            let arr = *args;
+            let n = tish_value_array_len(arr);
+            let mut total = 0.0;
+            for i in 0..n {
+                let e = tish_value_array_get(arr, i);
+                total += tish_value_as_number(e);
+                tish_value_drop(e);
+            }
+            tish_value_new_number(total)
+        }
+    }
+
+    #[test]
+    fn wrap_native_fn_array_arg() {
+        let wrapped = wrap_native_fn(sum_array);
+        if let Value::Function(f) = wrapped {
+            let arr = Value::Array(VmRef::new(vec![
+                Value::Number(1.0),
+                Value::Number(2.0),
+                Value::Number(3.0),
+            ]));
+            match f(&[arr]) {
+                Value::Number(n) => assert_eq!(n, 6.0),
+                other => panic!("expected Number(6), got {:?}", other),
+            }
+        } else {
+            panic!("expected function");
         }
     }
 }
