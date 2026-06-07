@@ -67,20 +67,35 @@ Append a line to `repos.tsv`. Most tish-ecosystem repos in `~/Projects` are loca
 (no git remote) → use `local:`; they run locally but are skipped in CI. Give a repo a public git
 remote and switch it to `git:` to get CI coverage.
 
-## First-run calibration (tish-program repos)
+## First-run calibration (DONE — `--git-only` baseline, tish HEAD `ad61d002`)
 
-The `tish`-program entries (`lattish`, `tish-audio`, `tish-learn`, `tish-playground`, `tish-ide-panels`,
-`tish-midi`, `tish-tailwind`) are seeded as `expected=pass` — the language surface only *grew* on this
-branch, so they *should* keep working. But their statuses are **aspirational until calibrated**: run
-the suite once and flip any repo that is **pre-existing-broken on HEAD** (i.e. broken for reasons
-unrelated to this branch) to `xfail`, so the suite tracks real regressions, not standing issues. Known
-candidates:
+The `tish`-program entries were seeded `expected=pass` (the language surface only *grew* on this branch).
+The first `--git-only` baseline calibrated them against reality:
 
-- **`lattish`** — `src/Lattish.tish` hits `Unexpected token: RBrace` under the default parser (the
-  vestigial off-side/indent lexer — see memory `tish-indent-lexer-vestigial`), likely a *pre-existing*
-  parse limitation, not a feature/perf break. If its `npm test` fails for that reason → mark `xfail`.
-- Repos whose build needs feature flags or heavy frontend toolchains may fail for non-tish reasons —
-  refine the `cmd` (entry file, `--feature` flags) per repo before trusting the result.
+**PASS (9):** `ffi-mathext` `ffi-statext` (in-repo C-ABI guarantee) · `tish-apple` (`tish-apple-common`) ·
+`lattish` · `tish-ide-panels` · `tish-learn` · `tish-playground` · `spider3-tish` · `spacekinematics`.
+The private `tishlang/*` repos (`tish-apple`, `tish-ide-panels`, `learn`) **do** clone in CI when a `gh`
+credential helper is configured — they SKIP only if auth is absent. `lattish` itself builds clean (the
+feared `RBrace` indent-parse issue did **not** materialize via its `npm test`).
+
+**xfail — calibrated this run:**
+- **`tish-polars`** — heavy polars `cargo check`, broken by the `Value`/`Callable` API change (cargo: ext).
+- **`tish-audio`** & **`tish-midi`** — both are **lattish applications**. They are *not* tish HEAD breaks:
+  `tish-audio` builds every step against the HEAD binary (CSS + esbuild bridge + 12 audio worklets) and
+  fails only at `import {createRoot} from "lattish"`; `tish-midi` (deckard) has no `npm test` and its real
+  build is monorepo-bound (`cd ../tish`). The common blocker is that **`lattish` isn't resolvable in an
+  isolated `git clone`** (its npm package name is still being fixed — see lattish's `@npm-package-name-fix`
+  ref). They run + are tracked; flip to `pass` once the harness provisions `lattish` (clone it as a
+  sibling / into `node_modules`) — then they give real HEAD coverage of two substantial lattish apps.
+
+**SKIP in CI (local-only):** the `cargo:` extensions (`tish-pg`, `tish-callbacks`, …), `tish-unity` (ffi),
+`tish-tailwind` — run them with `regression/downstream/run.sh all` on a dev machine where `~/Projects` has
+the working copies.
+
+When refreshing this baseline, flip any repo that is **pre-existing-broken on HEAD** (broken for reasons
+unrelated to this branch) to `xfail` so the suite tracks real regressions, not standing issues. Repos
+whose build needs feature flags or heavy frontend toolchains may fail for non-tish reasons — refine the
+`cmd` per repo before trusting the result.
 
 `tish-apple`: only the cross-platform `tish-apple-common` crate is checked (verified clean on HEAD).
 Its `tish-macos` / `tish-ios` crates are macOS-only and heavily use `Value` (likely hit the
