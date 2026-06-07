@@ -39,11 +39,20 @@ impl LexerOptions {
     /// `ignore_indent`, so every parse path (run/build/dump-ast/fmt/lint/lsp) honors it
     /// without threading a flag through the whole pipeline.
     pub fn from_env() -> Self {
-        let ignore_indent = std::env::var_os("TISH_IGNORE_INDENT")
-            .map(|v| v == "1" || v == "true" || v == "yes")
-            .unwrap_or(false);
-        Self { ignore_indent }
+        Self {
+            ignore_indent: env_truthy(std::env::var_os("TISH_IGNORE_INDENT")),
+        }
     }
+}
+
+/// Interpret an environment-variable value as a boolean flag: `1`, `true`, or `yes`
+/// (exact, case-sensitive) enable it; anything else — including unset — leaves it off.
+/// Split out from the `std::env` read so the rule is unit-testable without mutating
+/// process-global state (which `Lexer::new` reads, so env-mutating tests would race).
+fn env_truthy(value: Option<std::ffi::OsString>) -> bool {
+    value
+        .map(|v| v == "1" || v == "true" || v == "yes")
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone)]
@@ -781,5 +790,22 @@ mod tests {
             "expected no Indent/Dedent with ignore_indent, got: {:?}",
             tokens.iter().map(|t| t.kind).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn env_truthy_enables_only_on_recognized_values() {
+        use std::ffi::OsString;
+        let v = |s: &str| env_truthy(Some(OsString::from(s)));
+        // Recognized truthy values turn the flag on.
+        assert!(v("1"));
+        assert!(v("true"));
+        assert!(v("yes"));
+        // Everything else leaves it off, including unset, empty, and near-misses.
+        assert!(!env_truthy(None));
+        assert!(!v(""));
+        assert!(!v("0"));
+        assert!(!v("false"));
+        assert!(!v("no"));
+        assert!(!v("TRUE")); // exact match only — case-sensitive by design
     }
 }
