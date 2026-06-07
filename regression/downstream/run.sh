@@ -77,8 +77,12 @@ run_one() {
       local spec="${source#git:}" url="${spec%@*}" ref="${spec##*@}"
       [[ "$ref" == "$url" ]] && ref=""
       echo "── $name ── cloning $url${ref:+ @$ref}"
-      if ! git clone --depth 1 ${ref:+--branch "$ref"} "$url" "$dir" >/dev/null 2>&1; then
-        echo "   SKIP (clone failed — private/unreachable)"; SKIP+=("$name"); return
+      # Build args as an array — `${ref:+--branch "$ref"}` inline mis-passes `--branch main` as one arg.
+      local clone_args=(clone --depth 1)
+      [[ -n "$ref" ]] && clone_args+=(--branch "$ref")
+      clone_args+=("$url" "$dir")
+      if ! git "${clone_args[@]}" >/dev/null 2>&1; then
+        echo "   SKIP (clone failed — private/unreachable/bad-ref)"; SKIP+=("$name"); return
       fi ;;
     self:*)
       # a subdir of the tish checkout under test (e.g. the in-repo ffi examples) — always available.
