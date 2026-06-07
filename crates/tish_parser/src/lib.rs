@@ -359,24 +359,28 @@ mod tests {
     }
 
     #[test]
-    fn ignore_indent_does_not_form_braceless_blocks() {
-        // Off-side rule: under `if (x)`, two indented statements form the body. With
-        // indentation ignored there is no block, so the second statement becomes a sibling
-        // of the `if` — exposing the indentation-driven nesting the flag is meant to debug.
-        let src = "if (x)\n  a()\n  b()\n";
+    fn ignore_indent_drops_indentation_induced_block() {
+        // A leading-indented line makes the lexer open an indent level, so the parser wraps
+        // `a()` in a `Block` — the kind of stray, indentation-driven nesting that can give
+        // transpiled JS the wrong lexical scope. Ignoring indentation removes that wrapper.
+        let src = "  a()\nb()\n";
 
         let normal = parse(src).expect("parse normal");
-        assert_eq!(normal.statements.len(), 1, "indent groups a()+b() under the if");
+        assert!(
+            matches!(normal.statements.first(), Some(Statement::Block { .. })),
+            "indentation should wrap a() in a Block, got: {:?}",
+            normal.statements
+        );
 
         let ignored = parse_with_options(src, LexerOptions { ignore_indent: true })
             .expect("parse ignored");
-        assert_eq!(
-            ignored.statements.len(),
-            2,
-            "with indentation ignored, b() is a sibling of the if, got: {:?}",
+        assert!(
+            ignored
+                .statements
+                .iter()
+                .all(|s| matches!(s, Statement::ExprStmt { .. })),
+            "with indentation ignored, both calls are flat expression statements, got: {:?}",
             ignored.statements
         );
-        assert!(matches!(ignored.statements[0], Statement::If { .. }));
-        assert!(matches!(ignored.statements[1], Statement::ExprStmt { .. }));
     }
 }
