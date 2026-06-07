@@ -65,10 +65,56 @@ rewrite_tish_paths() {
       done
 }
 
+# Provision tish-PACKAGE deps (e.g. lattish) into a consumer's node_modules so the tish
+# resolver finds them in an isolated clone. Real consumers link these via a `file:` dep to a
+# sibling checkout (tish-audio: "lattish":"file:../tish/lattish") that doesn't exist on a CI
+# runner. spec = "pkg:SRC[,pkg2:SRC2...]" where SRC is git:URL@ref | local:PATH | self:SUBDIR.
+# The JS-target resolver (resolve.rs `resolve_package_root_to_entry`) matches package.json
+# `name` against the bare import spec, so we normalize the provisioned copy's name to `pkg`
+# (lattish publishes as @tishlang/lattish but consumers import bare `lattish`).
+provision_tish_pkgs() {
+  local dir="$1" subdir="$2" spec="$3"
+  [[ -z "$spec" ]] && return 0
+  local nm_root="$dir/$subdir/node_modules"
+  local entry
+  IFS=',' read -ra _prov_entries <<< "$spec"
+  for entry in "${_prov_entries[@]}"; do
+    local pkg="${entry%%:*}"
+    local psrc="${entry#*:}"
+    local dest="$nm_root/$pkg"
+    rm -rf "$dest"; mkdir -p "$dest"
+    case "$psrc" in
+      git:*)
+        local pspec="${psrc#git:}"
+        local purl="${pspec%@*}"
+        local pref="${pspec##*@}"
+        [[ "$pref" == "$purl" ]] && pref=""
+        local pargs=(clone --depth 1)
+        [[ -n "$pref" ]] && pargs+=(--branch "$pref")
+        pargs+=("$purl" "$dest")
+        git "${pargs[@]}" >/dev/null 2>&1 || { echo "   ⚠ provision: clone $pkg ($purl) failed"; return 1; } ;;
+      local:*) local ps="${psrc#local:}"; ps="${ps/#\~/$HOME}"; rsync -a --exclude target --exclude node_modules --exclude .git "$ps/" "$dest/" >/dev/null 2>&1 ;;
+      self:*)  rsync -a --exclude target --exclude node_modules "$TISH/${psrc#self:}/" "$dest/" >/dev/null 2>&1 ;;
+      *) echo "   ⚠ provision: bad source for $pkg: $psrc"; return 1 ;;
+    esac
+    if [[ -f "$dest/package.json" ]]; then
+      TISH_PKG="$pkg" python3 - "$dest/package.json" <<'PY' 2>/dev/null || true
+import json, os, sys
+p = sys.argv[1]
+try: d = json.load(open(p))
+except Exception: sys.exit(0)
+d["name"] = os.environ["TISH_PKG"]
+json.dump(d, open(p, "w"), indent=2)
+PY
+    fi
+    echo "   provisioned tish-dep: $pkg <- $psrc"
+  done
+}
+
 PASS=(); FAIL=(); XFAIL=(); UNXPASS=(); SKIP=()
 
 run_one() {
-  local name="$1" source="$2" subdir="$3" kind="$4" cmd="$5" expected="$6"
+  local name="$1" source="$2" subdir="$3" kind="$4" cmd="$5" expected="$6" provision="${7:-}"
   local dir="$WORKDIR/$name"
 
   # 1. source
@@ -119,6 +165,10 @@ run_one() {
     fi
   fi
 
+  # 2b. provision tish-package deps (e.g. lattish) into node_modules so the resolver finds them.
+  # AFTER npm install (which may partial-fail on a sibling `file:` dep) so it isn't clobbered.
+  provision_tish_pkgs "$dir" "$subdir" "$provision"
+
   # 3. build + test
   echo "   running: $cmd  (in $subdir, expected=$expected)"
   local log="$WORKDIR/$name.log" rc
@@ -135,13 +185,13 @@ run_one() {
 }
 
 # read manifest: name<TAB>source<TAB>subdir<TAB>kind<TAB>cmd<TAB>expected
-while IFS=$'\t' read -r name source subdir kind cmd expected; do
+while IFS=$'\t' read -r name source subdir kind cmd expected provision; do
   [[ -z "${name:-}" || "$name" =~ ^[[:space:]]*# ]] && continue
   if [[ ${#SELECT[@]} -gt 0 ]]; then
     local_match=0; for s in "${SELECT[@]}"; do [[ "$s" == "$name" ]] && local_match=1; done
     [[ $local_match -eq 1 ]] || continue
   fi
-  run_one "$name" "$source" "${subdir:-.}" "$kind" "$cmd" "$expected"
+  run_one "$name" "$source" "${subdir:-.}" "$kind" "$cmd" "$expected" "${provision:-}"
 done < <(rg -v '^\s*#|^\s*$' "$MANIFEST")
 
 echo ""
