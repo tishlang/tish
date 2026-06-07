@@ -108,7 +108,7 @@ run_one() {
     # tish-program harnesses invoke the PINNED npm @tishlang/tish (npx / scripts/tish.mjs), so PATH
     # alone won't exercise HEAD. Install deps, then overwrite the bundled native binary with HEAD so
     # the repo's own `npm test`/`npm run build` actually runs against this tish.
-    if [[ -f "$dir/$subdir/package.json" ]]; then
+    if [[ -f "$dir/$subdir/package.json" && "$cmd" == *npm* ]]; then
       ( cd "$dir/$subdir" && npm install --silent --no-audit --no-fund --no-progress >/dev/null 2>&1 ) || true
       find "$dir/$subdir/node_modules" -path '*@tishlang*' -name 'tish' -type f 2>/dev/null | while IFS= read -r bin; do
         if file "$bin" 2>/dev/null | rg -qi 'mach-o|elf|executable'; then cp -f "$TISH/target/release/tish" "$bin" 2>/dev/null || true; fi
