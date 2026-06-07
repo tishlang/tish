@@ -1,0 +1,45 @@
+name: Downstream regression
+
+# Build + test tish CONSUMERS against this tish HEAD, to catch API/semantic breaks in the
+# ecosystem (the kind that silently broke tish-pg / tish-callbacks when NativeFn→Callable and
+# String→ArcStr landed). Manifest + runner: regression/downstream/.
+#
+# CI runs `--git-only`: the in-repo `self:` ffi examples (always available — they GUARANTEE the
+# extern-C ABI stays stable) plus any `git:` consumers that are reachable. `local:` consumers are
+# skipped on the runner; run `regression/downstream/run.sh all` locally before an API-changing PR
+# to cover the full set in ~/Projects.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC — catch ecosystem drift
+  pull_request:
+    paths:
+      - "crates/tish_core/**"
+      - "crates/tish_runtime/**"
+      - "crates/tish_ffi/**"
+      - "regression/downstream/**"
+
+jobs:
+  downstream:
+    name: Downstream consumers vs tish HEAD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: downstream-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run downstream regression suite
+        run: |
+          set -euo pipefail
+          bash regression/downstream/run.sh --git-only
