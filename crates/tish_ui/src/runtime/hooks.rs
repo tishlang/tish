@@ -167,7 +167,7 @@ fn run_all_effect_cleanups(cells: &RefCell<Vec<EffectCell>>) {
     for cell in cells.borrow_mut().iter_mut() {
         if let Some(c) = cell.cleanup.take() {
             if let Value::Function(f) = c {
-                let _ = f(&[]);
+                let _ = f.call(&[]);
             }
         }
     }
@@ -252,7 +252,7 @@ pub fn native_use_state(args: &[Value]) -> Value {
                     }
                     let prev = st.state_slots.borrow()[idx].clone();
                     let new_v = match &arg {
-                        Value::Function(f) => f(&[prev.clone()]),
+                        Value::Function(f) => f.call(&[prev.clone()]),
                         _ => arg.clone(),
                     };
                     if memo_dep_eq(&prev, &new_v) {
@@ -301,7 +301,7 @@ pub fn native_use_memo(args: &[Value]) -> Value {
         if reuse {
             return c[i].as_ref().unwrap().1.clone();
         }
-        let produced = factory(&[]);
+        let produced = factory.call(&[]);
         c[i] = Some((deps, produced.clone()));
         produced
     })
@@ -419,10 +419,10 @@ fn flush_pending_effects_for(
             cells[p.slot].cleanup.take()
         };
         if let Some(Value::Function(f)) = cleanup_fn {
-            let _ = f(&[]);
+            let _ = f.call(&[]);
         }
         let run_result = if let Value::Function(f) = &p.effect_fn {
-            f(&[])
+            f.call(&[])
         } else {
             Value::Null
         };
@@ -548,7 +548,7 @@ fn drain_flush_queue_on_current_thread() {
         });
 
         if let Some(f) = app_fn {
-            let tree = f(&[]);
+            let tree = f.call(&[]);
             HOOKS.with(|h| {
                 if let Some(st) = h.borrow_mut().get_mut(&root_id) {
                     st.root_vnode = Some(tree.clone());

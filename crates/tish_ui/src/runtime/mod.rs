@@ -29,7 +29,7 @@ pub fn fragment_value() -> Value {
 /// Returns true if `tag` refers to [`fragment_value`].
 pub fn is_fragment_tag(tag: &Value) -> bool {
     match tag {
-        Value::String(s) => s.as_ref() == FRAGMENT_SENTINEL,
+        Value::String(s) => s.as_str() == FRAGMENT_SENTINEL,
         Value::Symbol(s) => s.registry_key.as_deref() == Some("tish.fragment"),
         _ => false,
     }
@@ -73,7 +73,7 @@ pub fn ui_h(args: &[Value]) -> Value {
                 Value::Array(VmRef::new(children_vec.clone())),
             );
         }
-        return f(&[Value::object(merged)]);
+        return f.call(&[Value::object(merged)]);
     }
 
     if is_fragment_tag(&tag) {
@@ -81,7 +81,7 @@ pub fn ui_h(args: &[Value]) -> Value {
     }
 
     let tag_str: Arc<str> = match tag {
-        Value::String(s) => s,
+        Value::String(s) => Arc::from(s.as_str()),
         _ => return Value::Null,
     };
 
@@ -112,7 +112,7 @@ fn flatten_vnode_children(items: &[Value]) -> Vec<Value> {
 
 fn vnode_element(tag: Arc<str>, props: Value, children: Vec<Value>) -> Value {
     let mut m = ObjectMap::default();
-    m.insert(Arc::from("tag"), Value::String(tag));
+    m.insert(Arc::from("tag"), Value::String(tag.as_ref().into()));
     m.insert(
         Arc::from("props"),
         if matches!(props, Value::Null) {

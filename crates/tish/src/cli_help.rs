@@ -321,6 +321,8 @@ pub fn cli_after_help() -> String {
 {oh}Environment variables:{r}
   {t}TISH_NO_OPTIMIZE=1{r}
           Disable AST and bytecode optimizations for run/build
+  {t}TISH_IGNORE_INDENT=1{r}
+          Ignore indentation syntax: parse blocks by braces only (debug nested-block transpilation)
 
 See {t}tish run --help{r} and {t}tish build --help{r} for backend and feature options."
     )
@@ -561,5 +563,8 @@ pub(crate) enum Commands {
     DumpAst {
         #[arg(required = true, value_name = "FILE", help_heading = "Arguments")]
         file: String,
+        /// Ignore indentation syntax: parse blocks by braces only (same as TISH_IGNORE_INDENT=1).
+        #[arg(long, help_heading = "Options")]
+        ignore_indent: bool,
     },
 }

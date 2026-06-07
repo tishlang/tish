@@ -383,7 +383,7 @@ mod tests {
         assert!(matches!(json_parse("false").unwrap(), Value::Bool(false)));
         assert!(matches!(json_parse("42").unwrap(), Value::Number(n) if n == 42.0));
         assert!(
-            matches!(json_parse("\"hello\"").unwrap(), Value::String(s) if s.as_ref() == "hello")
+            matches!(json_parse("\"hello\"").unwrap(), Value::String(s) if s.as_str() == "hello")
         );
     }
 
