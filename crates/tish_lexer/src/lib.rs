@@ -749,25 +749,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ignore_indent_emits_no_virtual_tokens() {
-        let src = "fn f()\n  let a = 1\n  let b = 2\n";
-        let tokens: Vec<_> = Lexer::with_options(src, LexerOptions { ignore_indent: true })
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(
-            !tokens
-                .iter()
-                .any(|t| matches!(t.kind, TokenKind::Indent | TokenKind::Dedent)),
-            "expected no Indent/Dedent with ignore_indent, got: {:?}",
-            tokens.iter().map(|t| t.kind).collect::<Vec<_>>()
-        );
-    }
+    /// A leading-indented line is what actually drives the lexer to emit virtual tokens:
+    /// `  a()` opens an indent level (Indent) and the dedented `b()` closes it (Dedent).
+    const INDENTED_SRC: &str = "  a()\nb()\n";
 
     #[test]
     fn default_options_still_emit_indent_and_dedent() {
-        let src = "fn f()\n  let a = 1\n";
-        let tokens: Vec<_> = Lexer::with_options(src, LexerOptions::default())
+        let tokens: Vec<_> = Lexer::with_options(INDENTED_SRC, LexerOptions::default())
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(
@@ -777,6 +765,21 @@ mod tests {
         assert!(
             tokens.iter().any(|t| t.kind == TokenKind::Dedent),
             "expected a Dedent token in the default (indentation-significant) mode"
+        );
+    }
+
+    #[test]
+    fn ignore_indent_emits_no_virtual_tokens() {
+        let tokens: Vec<_> =
+            Lexer::with_options(INDENTED_SRC, LexerOptions { ignore_indent: true })
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+        assert!(
+            !tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Indent | TokenKind::Dedent)),
+            "expected no Indent/Dedent with ignore_indent, got: {:?}",
+            tokens.iter().map(|t| t.kind).collect::<Vec<_>>()
         );
     }
 }
