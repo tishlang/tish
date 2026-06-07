@@ -24,6 +24,28 @@ struct JsxEl {
     attr_value_braces: i32,
 }
 
+/// Lexer configuration.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LexerOptions {
+    /// When true, suppress the virtual `Indent`/`Dedent` tokens so blocks are delimited
+    /// **only** by braces. Indentation is treated as ordinary whitespace, so off-side
+    /// (brace-less) blocks no longer form. Useful for debugging how nested blocks
+    /// transpile — see the `TISH_IGNORE_INDENT` environment variable for a global toggle.
+    pub ignore_indent: bool,
+}
+
+impl LexerOptions {
+    /// Build options from the environment. `TISH_IGNORE_INDENT=1` (or `true`/`yes`) sets
+    /// `ignore_indent`, so every parse path (run/build/dump-ast/fmt/lint/lsp) honors it
+    /// without threading a flag through the whole pipeline.
+    pub fn from_env() -> Self {
+        let ignore_indent = std::env::var_os("TISH_IGNORE_INDENT")
+            .map(|v| v == "1" || v == "true" || v == "yes")
+            .unwrap_or(false);
+        Self { ignore_indent }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Lexer<'a> {
     chars: Peekable<Chars<'a>>,
@@ -41,10 +63,17 @@ pub struct Lexer<'a> {
     jsx_depth: i32,
     jsx_child_brace_depth: i32,
     jsx_in_closing_tag: bool,
+    ignore_indent: bool,
 }
 
 impl<'a> Lexer<'a> {
+    /// Create a lexer, reading options from the environment (e.g. `TISH_IGNORE_INDENT`).
     pub fn new(source: &'a str) -> Self {
+        Self::with_options(source, LexerOptions::from_env())
+    }
+
+    /// Create a lexer with explicit options, bypassing the environment.
+    pub fn with_options(source: &'a str, options: LexerOptions) -> Self {
         Self {
             chars: source.chars().peekable(),
             pos: 0,
@@ -61,6 +90,7 @@ impl<'a> Lexer<'a> {
             jsx_depth: 0,
             jsx_child_brace_depth: 0,
             jsx_in_closing_tag: false,
+            ignore_indent: options.ignore_indent,
         }
     }
 
@@ -323,8 +353,13 @@ impl<'a> Lexer<'a> {
 
         if self.at_line_start {
             self.at_line_start = false;
+            // Always consume the leading whitespace; only *emit* Indent/Dedent when indentation
+            // is significant. With `ignore_indent`, the level is discarded so the indent stack
+            // stays at `[0]` and no virtual tokens are produced (brace-only blocks).
             let level = self.read_indent_level();
-            if level > 0 || self.peek().map(|c| c != '\n').unwrap_or(false) {
+            if !self.ignore_indent
+                && (level > 0 || self.peek().map(|c| c != '\n').unwrap_or(false))
+            {
                 if let Some(tok) = self.emit_indent_or_dedent(level) {
                     return Ok(Some(tok));
                 }
@@ -711,6 +746,37 @@ mod tests {
                 .iter()
                 .map(|t| format!("{:?}", t.kind))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn ignore_indent_emits_no_virtual_tokens() {
+        let src = "fn f()\n  let a = 1\n  let b = 2\n";
+        let tokens: Vec<_> = Lexer::with_options(src, LexerOptions { ignore_indent: true })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            !tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Indent | TokenKind::Dedent)),
+            "expected no Indent/Dedent with ignore_indent, got: {:?}",
+            tokens.iter().map(|t| t.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn default_options_still_emit_indent_and_dedent() {
+        let src = "fn f()\n  let a = 1\n";
+        let tokens: Vec<_> = Lexer::with_options(src, LexerOptions::default())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            tokens.iter().any(|t| t.kind == TokenKind::Indent),
+            "expected an Indent token in the default (indentation-significant) mode"
+        );
+        assert!(
+            tokens.iter().any(|t| t.kind == TokenKind::Dedent),
+            "expected a Dedent token in the default (indentation-significant) mode"
         );
     }
 }

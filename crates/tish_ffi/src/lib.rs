@@ -456,13 +456,13 @@ mod tests {
         let wrapped = wrap_native_fn(add_fn);
         match wrapped {
             Value::Function(f) => {
-                let r = f(&[Value::Number(2.0), Value::Number(40.0)]);
+                let r = f.call(&[Value::Number(2.0), Value::Number(40.0)]);
                 match r {
                     Value::Number(n) => assert_eq!(n, 42.0),
                     other => panic!("expected Number(42), got {:?}", other),
                 }
                 // argc < 2 → the extension returns null; the shim unwraps it.
-                assert!(matches!(f(&[]), Value::Null));
+                assert!(matches!(f.call(&[]), Value::Null));
             }
             other => panic!("expected Value::Function, got {:?}", other),
         }
@@ -495,7 +495,7 @@ mod tests {
                 Value::Number(2.0),
                 Value::Number(3.0),
             ]));
-            match f(&[arr]) {
+            match f.call(&[arr]) {
                 Value::Number(n) => assert_eq!(n, 6.0),
                 other => panic!("expected Number(6), got {:?}", other),
             }

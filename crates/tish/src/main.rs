@@ -123,7 +123,10 @@ fn main() {
             a.ios_triple.as_deref(),
             &a.crate_type,
         ),
-        Some(Commands::DumpAst { file }) => dump_ast(&file),
+        Some(Commands::DumpAst {
+            file,
+            ignore_indent,
+        }) => dump_ast(&file, ignore_indent),
         None => {
             if io::stdin().is_terminal() {
                 run_repl("vm", no_opt_env, &[])
@@ -823,9 +826,15 @@ mod cli_tests {
     }
 }
 
-fn dump_ast(path: &str) -> Result<(), String> {
+fn dump_ast(path: &str, ignore_indent: bool) -> Result<(), String> {
     let source = fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
-    let program = tishlang_parser::parse(&source)?;
+    // The `--ignore-indent` flag ORs with the `TISH_IGNORE_INDENT` env var, mirroring how
+    // `--no-optimize` combines with `TISH_NO_OPTIMIZE`.
+    let ignore_indent = ignore_indent || tishlang_parser::LexerOptions::from_env().ignore_indent;
+    let program = tishlang_parser::parse_with_options(
+        &source,
+        tishlang_parser::LexerOptions { ignore_indent },
+    )?;
     println!("{:#?}", program);
     Ok(())
 }
