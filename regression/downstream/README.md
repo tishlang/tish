@@ -72,24 +72,23 @@ remote and switch it to `git:` to get CI coverage.
 The `tish`-program entries were seeded `expected=pass` (the language surface only *grew* on this branch).
 The first `--git-only` baseline calibrated them against reality:
 
-**PASS (11):** `ffi-mathext` `ffi-statext` (in-repo C-ABI guarantee) · `tish-apple` (`tish-apple-common`) ·
-`lattish` · `tish-ide-panels` · `tish-learn` · `tish-playground` · `spider3-tish` · `spacekinematics` ·
-**`tish-audio`** · **`tish-midi`**. The private `tishlang/*` repos (`tish-apple`, `tish-ide-panels`,
-`learn`) **do** clone in CI when a `gh` credential helper is configured — they SKIP only if auth is absent.
-`lattish` itself builds clean (the feared `RBrace` indent-parse issue did **not** materialize via `npm test`).
-
-**`tish-audio` + `tish-midi` — lattish apps, made to PASS via dep provisioning.** Both `import {createRoot}
-from "lattish"`. Their real lattish dependency is a **sibling `file:` link** (tish-audio:
-`"lattish":"file:../tish/lattish"`) that doesn't exist in an isolated CI clone — and lattish *publishes* as
-`@tishlang/lattish` while the apps import bare `lattish`. The suite bridges this with the **`provision`
-column** (see manifest header): it clones lattish into the consumer's `node_modules/lattish` and normalizes
-that copy's `package.json` `name` to `lattish` so the bare import resolves. HEAD tish then does **real
-work** — `tish-audio` produces a 1.3 MB `dist/main.js` with lattish's `createRoot` inlined; `tish-midi`'s
-56 `src/` files (no native `tish:` imports; `services/` daemons excluded) all transpile clean. This is the
-mechanism for any lattish-consuming app — add a `provision` entry rather than marking it `xfail`.
+**PASS (9):** `ffi-mathext` `ffi-statext` (in-repo C-ABI guarantee) · `tish-apple` (`tish-apple-common`) ·
+`lattish` · `tish-ide-panels` · `tish-learn` · `tish-playground` · `spider3-tish` · `spacekinematics`.
+The private `tishlang/*` repos (`tish-apple`, `tish-ide-panels`, `learn`) **do** clone in CI when a `gh`
+credential helper is configured — they SKIP only if auth is absent. `lattish` itself builds clean (the
+feared `RBrace` indent-parse issue did **not** materialize via its `npm test`).
 
 **xfail — calibrated this run:**
 - **`tish-polars`** — heavy polars `cargo check`, broken by the `Value`/`Callable` API change (cargo: ext).
+- **`tish-audio`** & **`tish-midi`** — **lattish applications** that import bare `lattish`. The lattish
+  package is named **`@tishlang/lattish`** on every ref, and tish's module resolver (both the native
+  `find_package_dir` and the `--target js` resolver) requires the resolved package's `package.json` `name`
+  to **equal the import specifier**. So a bare `import "lattish"` does not resolve even when npm has placed
+  `node_modules/lattish` (the `file:../tish/lattish` dep symlink) — *verified*: it still errors `Package
+  'lattish' not found`. This is an **ecosystem npm-naming state** (lattish's package name is being fixed),
+  **not** a feature/perf break — the name-check predates the branch (on `main`). The suite does **not**
+  hardcode a workaround; these stay `xfail` and **auto-flip to PASS** (reported as UNEXPECTED PASS) once
+  lattish publishes as `lattish` or the apps import `@tishlang/lattish`.
 
 **SKIP in CI (local-only):** the `cargo:` extensions (`tish-pg`, `tish-callbacks`, …), `tish-unity` (ffi),
 `tish-tailwind` — run them with `regression/downstream/run.sh all` on a dev machine where `~/Projects` has
