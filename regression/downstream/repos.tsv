@@ -35,10 +35,18 @@ tish-apple	git:https://github.com/tishlang/tish-apple.git@main	.	rust	cargo chec
 # needs per-repo tuning (entry/feature flags). Refine the cmd as you wire each repo.
 lattish	git:https://github.com/spacedevin/lattish.git@npm-package-name-fix	.	tish	npm test	pass
 tish-ide-panels	git:https://github.com/tishlang/tish-ide-panels.git@main	.	tish	npm test	pass
-tish-audio	git:https://github.com/spacedevin/tish-audio.git@main	.	tish	npm run build	pass
+# tish-audio: a lattish APP. Builds every step against HEAD (css + esbuild bridge + 12 worklets via the
+# HEAD tish binary) and fails ONLY at `import {createRoot} from "lattish"` — lattish isn't resolvable in
+# an isolated clone (its npm package name is still being fixed; see lattish's @npm-package-name-fix ref).
+# NOT a HEAD break → xfail until the harness provisions lattish as a sibling/node_modules package.
+tish-audio	git:https://github.com/spacedevin/tish-audio.git@main	.	tish	npm run build	xfail
 tish-learn	git:https://github.com/tishlang/learn.git@main	.	tish	npm run build:css	pass
 tish-playground	git:https://github.com/spacedevin/tish-playground.git@main	.	tish	npm run build	pass
-tish-midi	git:https://github.com/spacedevin/deckard.git@main	.	tish	npm test	pass
+# tish-midi (deckard): a lattish APP. Its own npm scripts are monorepo-bound (`cd ../tish && cargo run`,
+# no `test` script) so they can't run under the copy-to-workdir model. We instead transpile-smoke its
+# JS-targetable `src/` (excluding `services/`, which are native-module `tish run` daemons). Currently
+# xfails on `import ... from "lattish"` (same lattish-resolution gap as tish-audio) — NOT a HEAD break.
+tish-midi	git:https://github.com/spacedevin/deckard.git@main	.	tish	bash -c 'rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_m.js >/tmp/_m.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_m.err; rc=1; }; done < <(find src -name "*.tish" -not -path "*/node_modules/*"); exit $rc'	xfail
 tish-tailwind	local:~/Projects/tish-audio/tish-tailwind	.	tish	bash -c 'f=$(find . -name "*.tish" -not -path "*/node_modules/*" | head -1); [ -z "$f" ] || tish build --target js "$f" -o /tmp/_tw.js'	pass
 spider3-tish	git:https://github.com/schlopai/spider-gwen-webgpu.git@main	.	tish	bash -c 'rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_s.js >/tmp/_s.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_s.err; rc=1; }; done < <(find . -name "*.tish" -not -path "*/node_modules/*" -not -path "*/vendor/*" -not -path "*/dist/*"); exit $rc'	pass
 spacekinematics	git:https://github.com/spacedevin/solar-system-webgpu.git@main	.	tish	bash -c 'rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_s.js >/tmp/_s.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_s.err; rc=1; }; done < <(find . -name "*.tish" -not -path "*/node_modules/*" -not -path "*/vendor/*" -not -path "*/sgp4-wasm/*"); exit $rc'	pass
