@@ -229,7 +229,7 @@ impl TishOpaque for HttpReadableStream {
             return None;
         }
         let body = Arc::clone(&self.body);
-        Some(Arc::new(move |_args: &[Value]| match body.take_stream() {
+        Some(tishlang_core::native_fn(move |_args: &[Value]| match body.take_stream() {
             Ok(stream) => {
                 let inner = Arc::new(tokio::sync::Mutex::new(StreamSlot { stream }));
                 Value::Opaque(Arc::new(HttpStreamReader {
@@ -270,7 +270,7 @@ impl TishOpaque for HttpStreamReader {
         }
         let inner = Arc::clone(&self.inner);
         let body = Arc::clone(&self.body);
-        Some(Arc::new(move |_args: &[Value]| {
+        Some(tishlang_core::native_fn(move |_args: &[Value]| {
             let inner = Arc::clone(&inner);
             let body = Arc::clone(&body);
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -313,13 +313,13 @@ pub fn response_value_from_reqwest(response: reqwest::Response) -> Value {
     let ok = response.status().is_success();
     let headers_val = headers_to_value(response.headers());
     let body_holder = Arc::new(HttpBody::new(response));
-    let stream = Arc::new(HttpReadableStream {
+    let stream = HttpReadableStream {
         body: Arc::clone(&body_holder),
-    });
-    let body_stream_val = Value::Opaque(stream);
+    };
+    let body_stream_val = Value::Opaque(Arc::new(stream));
     let bh_text = Arc::clone(&body_holder);
     let bh_json = Arc::clone(&body_holder);
-    let text_fn: NativeFn = Arc::new(move |_args: &[Value]| {
+    let text_fn: NativeFn = tishlang_core::native_fn(move |_args: &[Value]| {
         let bh = Arc::clone(&bh_text);
         let (tx, rx) = tokio::sync::oneshot::channel();
         crate::http::RUNTIME.with(|rt| {
@@ -330,7 +330,7 @@ pub fn response_value_from_reqwest(response: reqwest::Response) -> Value {
         });
         crate::promise_io::string_result_promise(rx)
     });
-    let json_fn: NativeFn = Arc::new(move |_args: &[Value]| {
+    let json_fn: NativeFn = tishlang_core::native_fn(move |_args: &[Value]| {
         let bh = Arc::clone(&bh_json);
         let (tx, rx) = tokio::sync::oneshot::channel();
         crate::http::RUNTIME.with(|rt| {

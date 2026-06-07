@@ -539,7 +539,7 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
             }
             clients_listen.borrow_mut().push(ws.clone());
             if let Value::Function(f) = cb {
-                let _ = f(&[ws]);
+                let _ = f.call(&[ws]);
             }
         }
         Value::Null

@@ -729,8 +729,12 @@ fn try_fold_binop(left: &Literal, op: BinOp, right: &Literal) -> Option<Literal>
         }
         Sub => Literal::Number(ln - rn),
         Mul => Literal::Number(ln * rn),
-        Div => Literal::Number(if rn == 0.0 { f64::NAN } else { ln / rn }),
-        Mod => Literal::Number(if rn == 0.0 { f64::NAN } else { ln % rn }),
+        // IEEE division/remainder, matching JS + the VM's `eval_binop` + interp + rust-AOT:
+        // `5/0` → Infinity, `-5/0` → -Infinity, `0/0` → NaN, `5%0` → NaN. The former
+        // `if rn == 0.0 { NaN }` folded `5/0` to NaN at compile time, diverging from every runtime
+        // path (which all produce Infinity) — a constant-fold-vs-runtime inconsistency.
+        Div => Literal::Number(ln / rn),
+        Mod => Literal::Number(ln % rn),
         Pow => Literal::Number(ln.powf(rn)),
         Eq => Literal::Bool(literal_strict_eq(left, right)),
         Ne => Literal::Bool(!literal_strict_eq(left, right)),

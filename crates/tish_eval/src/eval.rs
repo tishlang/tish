@@ -2138,7 +2138,13 @@ impl Evaluator {
                     s.push_str(b);
                     Ok(Value::String(s.into()))
                 }
-                _ => Err(format!("Cannot add {:?} and {:?}", l, r)),
+                // Neither operand is a string: numeric add, coercing non-numbers
+                // (Null/Bool/Object/…) to NaN exactly like the VM's
+                // `as_number().unwrap_or(NaN)` (vm.rs eval_binop). e.g. an out-of-bounds
+                // array read is `Null` (JS `undefined`), so `15 + arr[oob]` → NaN, not an error.
+                _ => Ok(Value::Number(
+                    l.as_number().unwrap_or(f64::NAN) + r.as_number().unwrap_or(f64::NAN),
+                )),
             },
             BinOp::Sub => self.binop_number(l, r, |a, b| Value::Number(a - b)),
             BinOp::Mul => self.binop_number(l, r, |a, b| Value::Number(a * b)),
@@ -2254,30 +2260,30 @@ impl Evaluator {
         false
     }
 
-    fn to_int32(v: &Value) -> Result<i32, String> {
-        match v {
-            Value::Number(n) => Ok(*n as i32),
-            _ => Err(format!("Bitwise operands must be numbers, got {:?}", v)),
-        }
+    /// ToInt32 coercion matching the VM (`vm.rs` eval_binop: `as_number().unwrap_or(NaN) as i32`).
+    /// Non-numbers coerce to NaN, and `NaN as i32` saturates to 0 — so `arr[oob] | 0` → 0, like JS.
+    fn to_int32(v: &Value) -> i32 {
+        v.as_number().unwrap_or(f64::NAN) as i32
     }
 
     fn binop_int32<F>(&self, l: &Value, r: &Value, f: F) -> Result<Value, String>
     where
         F: FnOnce(i32, i32) -> Value,
     {
-        let a = Self::to_int32(l)?;
-        let b = Self::to_int32(r)?;
-        Ok(f(a, b))
+        Ok(f(Self::to_int32(l), Self::to_int32(r)))
     }
 
+    /// Numeric binop, coercing each operand to a number the way the VM does
+    /// (`as_number().unwrap_or(NaN)`): non-numbers (Null/Bool/Object/…) become NaN rather
+    /// than erroring. Keeps the interpreter in parity with the VM and Node on out-of-bounds
+    /// reads and other `undefined`-like operands.
     fn binop_number<F>(&self, l: &Value, r: &Value, f: F) -> Result<Value, String>
     where
         F: FnOnce(f64, f64) -> Value,
     {
-        match (l, r) {
-            (Value::Number(a), Value::Number(b)) => Ok(f(*a, *b)),
-            _ => Err(format!("Expected numbers, got {:?} and {:?}", l, r)),
-        }
+        let a = l.as_number().unwrap_or(f64::NAN);
+        let b = r.as_number().unwrap_or(f64::NAN);
+        Ok(f(a, b))
     }
 
     fn eval_unary(&self, op: UnaryOp, v: &Value) -> Result<Value, String> {
@@ -2292,7 +2298,7 @@ impl Evaluator {
                 _ => Err(format!("Cannot apply unary + to {:?}", v)),
             },
             UnaryOp::BitNot => {
-                let n = Self::to_int32(v)?;
+                let n = Self::to_int32(v);
                 Ok(Value::Number((!n) as f64))
             }
             UnaryOp::Void => Ok(Value::Null),
@@ -2586,7 +2592,7 @@ impl Evaluator {
                     .map(crate::value_convert::eval_to_core)
                     .collect();
                 let ca = ca.map_err(EvalError::Error)?;
-                Ok(crate::value_convert::core_to_eval(f(&ca)))
+                Ok(crate::value_convert::core_to_eval(f.call(&ca)))
             }
             #[cfg(feature = "regex")]
             Value::RegExp(_) => Err(EvalError::Error("RegExp is not callable".to_string())),
@@ -2609,7 +2615,7 @@ impl Evaluator {
                     .map(crate::value_convert::eval_to_core)
                     .collect();
                 let core_args = core_args.map_err(EvalError::Error)?;
-                let result = method(&core_args);
+                let result = method.call(&core_args);
                 Ok(crate::value_convert::core_to_eval(result))
             }
             Value::Function {

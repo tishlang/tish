@@ -44,7 +44,7 @@ fn symbol_key_for_impl(args: &[Value]) -> Value {
         Some(Value::Symbol(s)) => s
             .registry_key
             .as_ref()
-            .map(|k| Value::String(Arc::clone(k)))
+            .map(|k| Value::String(tishlang_core::ArcStr::from(k.as_ref())))
             .unwrap_or(Value::Null),
         _ => Value::Null,
     }

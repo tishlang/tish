@@ -12,6 +12,7 @@ use tishlang_builtins::helpers::make_error_value;
 pub use tishlang_builtins::symbol::symbol_object;
 pub use tishlang_core::ObjectMap;
 pub use tishlang_core::Value;
+pub use tishlang_core::ArcStr;
 /// Used by native codegen for `f()` / `obj()` dispatch (`Value::Function` or `__call` on objects).
 pub use tishlang_core::value_call;
 // Re-export the shared-mutable wrapper so the Rust code emitted by
@@ -190,7 +191,13 @@ pub mod ops {
                 s.push_str(b);
                 Ok(Value::String(s.into()))
             }
-            _ => Err(format!("Cannot add {:?} and {:?}", left, right).into()),
+            // Neither operand is a string here ⇒ numeric coercion, matching the VM's `eval_binop`
+            // (`as_number().unwrap_or(NaN)`): a null/bool/object operand (e.g. an out-of-bounds array
+            // read) coerces to NaN, so `number + null` is NaN — NOT an error that the codegen's
+            // `.unwrap_or(Value::Null)` would silently turn into `null` (the old rust-AOT divergence).
+            (a, b) => Ok(Value::Number(
+                a.as_number().unwrap_or(f64::NAN) + b.as_number().unwrap_or(f64::NAN),
+            )),
         }
     }
 
@@ -198,7 +205,10 @@ pub mod ops {
     pub fn sub(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a - b)),
-            _ => Err(format!("Cannot subtract {:?} from {:?}", right, left).into()),
+            // VM-parity numeric coercion (null/non-number → NaN), see `add`.
+            (a, b) => Ok(Value::Number(
+                a.as_number().unwrap_or(f64::NAN) - b.as_number().unwrap_or(f64::NAN),
+            )),
         }
     }
 
@@ -206,7 +216,10 @@ pub mod ops {
     pub fn mul(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a * b)),
-            _ => Err(format!("Cannot multiply {:?} and {:?}", left, right).into()),
+            // VM-parity numeric coercion (null/non-number → NaN), see `add`.
+            (a, b) => Ok(Value::Number(
+                a.as_number().unwrap_or(f64::NAN) * b.as_number().unwrap_or(f64::NAN),
+            )),
         }
     }
 
@@ -214,7 +227,10 @@ pub mod ops {
     pub fn div(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a / b)),
-            _ => Err(format!("Cannot divide {:?} by {:?}", left, right).into()),
+            // VM-parity numeric coercion (null/non-number → NaN), see `add`.
+            (a, b) => Ok(Value::Number(
+                a.as_number().unwrap_or(f64::NAN) / b.as_number().unwrap_or(f64::NAN),
+            )),
         }
     }
 
@@ -223,7 +239,7 @@ pub mod ops {
     pub fn lt(left: &Value, right: &Value) -> Value {
         let b = match (left, right) {
             (Value::Number(a), Value::Number(b)) => a < b,
-            (Value::String(a), Value::String(b)) => a.as_ref() < b.as_ref(),
+            (Value::String(a), Value::String(b)) => a.as_str() < b.as_str(),
             _ => false,
         };
         Value::Bool(b)
@@ -233,7 +249,7 @@ pub mod ops {
     pub fn le(left: &Value, right: &Value) -> Value {
         let b = match (left, right) {
             (Value::Number(a), Value::Number(b)) => a <= b,
-            (Value::String(a), Value::String(b)) => a.as_ref() <= b.as_ref(),
+            (Value::String(a), Value::String(b)) => a.as_str() <= b.as_str(),
             _ => false,
         };
         Value::Bool(b)
@@ -243,7 +259,7 @@ pub mod ops {
     pub fn gt(left: &Value, right: &Value) -> Value {
         let b = match (left, right) {
             (Value::Number(a), Value::Number(b)) => a > b,
-            (Value::String(a), Value::String(b)) => a.as_ref() > b.as_ref(),
+            (Value::String(a), Value::String(b)) => a.as_str() > b.as_str(),
             _ => false,
         };
         Value::Bool(b)
@@ -253,7 +269,7 @@ pub mod ops {
     pub fn ge(left: &Value, right: &Value) -> Value {
         let b = match (left, right) {
             (Value::Number(a), Value::Number(b)) => a >= b,
-            (Value::String(a), Value::String(b)) => a.as_ref() >= b.as_ref(),
+            (Value::String(a), Value::String(b)) => a.as_str() >= b.as_str(),
             _ => false,
         };
         Value::Bool(b)
@@ -263,7 +279,10 @@ pub mod ops {
     pub fn modulo(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a % b)),
-            _ => Err(format!("Cannot modulo {:?} by {:?}", left, right).into()),
+            // VM-parity numeric coercion (null/non-number → NaN), see `add`.
+            (a, b) => Ok(Value::Number(
+                a.as_number().unwrap_or(f64::NAN) % b.as_number().unwrap_or(f64::NAN),
+            )),
         }
     }
 }
@@ -750,7 +769,7 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
         // is required for `catch`, a reserved word). Keeps the rust backend on par with the VM.
         #[cfg(any(feature = "http", feature = "promise"))]
         Value::Promise(_) => match index {
-            Value::String(k) => get_prop(obj, k.as_ref()),
+            Value::String(k) => get_prop(obj, k.as_str()),
             _ => Value::Null,
         },
         _ => Value::Null,
@@ -804,7 +823,7 @@ pub fn in_operator(key: &Value, obj: &Value) -> Value {
         Value::Object(_) => Value::Bool(tishlang_core::object_has(obj, key)),
         Value::Array(arr) => {
             let key_str: Arc<str> = match key {
-                Value::String(s) => Arc::clone(s),
+                Value::String(s) => Arc::from(s.as_str()),
                 Value::Number(n) => n.to_string().into(),
                 _ => return Value::Bool(false),
             };
@@ -930,7 +949,7 @@ pub fn http_serve_per_worker(
     };
     let factory: tishlang_core::NativeFn = factory;
     http::serve_per_worker(args, move |worker_id| {
-        let handler_val = factory(&[Value::Number(worker_id as f64)]);
+        let handler_val = factory.call(&[Value::Number(worker_id as f64)]);
         match handler_val {
             Value::Function(f) => f,
             _ => panic!(
@@ -1105,7 +1124,7 @@ pub fn string_split_regex(s: &Value, separator: &Value, limit: Option<usize>) ->
         }
         Value::String(sep) => {
             let parts: Vec<Value> = input
-                .splitn(max, sep.as_ref())
+                .splitn(max, sep.as_str())
                 .map(|s| Value::String(s.into()))
                 .collect();
             Value::Array(VmRef::new(parts))
@@ -1199,7 +1218,7 @@ fn string_replace_regex_or_callback(s: &Value, search: &Value, replacement: &Val
             args.push(Value::Number(char_index as f64));
             args.push(Value::String(input.into()));
 
-            let repl_val = cb(&args);
+            let repl_val = cb.call(&args);
             let repl_str = repl_val.to_display_string();
             result.push_str(&input[last_end..byte_start]);
             result.push_str(&repl_str);

@@ -15,7 +15,7 @@ use crate::value::{EvalObjectData, PropMap, Value};
 pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
     match v {
         Value::Number(n) => Ok(CoreValue::Number(*n)),
-        Value::String(s) => Ok(CoreValue::String(Arc::clone(s))),
+        Value::String(s) => Ok(CoreValue::String(tishlang_core::ArcStr::from(s.as_ref()))),
         Value::Bool(b) => Ok(CoreValue::Bool(*b)),
         Value::Null => Ok(CoreValue::Null),
         Value::Array(arr) => {
@@ -55,7 +55,7 @@ pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
 pub fn core_to_eval(v: CoreValue) -> Value {
     match v {
         CoreValue::Number(n) => Value::Number(n),
-        CoreValue::String(s) => Value::String(s),
+        CoreValue::String(s) => Value::String(Arc::from(s.as_str())),
         CoreValue::Bool(b) => Value::Bool(b),
         CoreValue::Null => Value::Null,
         CoreValue::Array(arr) => {

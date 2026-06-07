@@ -131,14 +131,14 @@ impl TishPromise for ThenPromise {
         match self.pred.block_until_settled() {
             Ok(v) => {
                 if let Some(Value::Function(f)) = &self.on_fulfilled {
-                    flatten_chain_out(f(&[v]))
+                    flatten_chain_out(f.call(&[v]))
                 } else {
                     Ok(v)
                 }
             }
             Err(e) => {
                 if let Some(Value::Function(f)) = &self.on_rejected {
-                    flatten_chain_out(f(&[e]))
+                    flatten_chain_out(f.call(&[e]))
                 } else {
                     Err(e)
                 }
@@ -415,7 +415,7 @@ pub fn promise_spawn(args: &[Value]) -> Value {
         std::thread::spawn(move || {
             // Wrap in catch_unwind so a panicking GPU/CPU kernel rejects the promise
             // rather than aborting the whole process.
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&[])));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f.call(&[])));
             let _ = tx.send(match result {
                 Ok(v)  => Ok(v),
                 Err(_) => Err(Value::String("Promise.spawn: task panicked".into())),
@@ -428,7 +428,7 @@ pub fn promise_spawn(args: &[Value]) -> Value {
     #[cfg(not(feature = "send-values"))]
     {
         // No threads available (wasm/wasi): run synchronously, wrap result.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&[])));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f.call(&[])));
         match result {
             Ok(v)  => fulfilled(v),
             Err(_) => rejected(Value::String("Promise.spawn: task panicked".into())),
@@ -466,7 +466,7 @@ pub fn promise_object() -> Value {
                     Value::Null
                 }
             });
-            let _ = f(&[resolve, reject]);
+            let _ = f.call(&[resolve, reject]);
             Value::Promise(Arc::new(DeferredChannelPromise {
                 rx: Mutex::new(Some(rx)),
             }))

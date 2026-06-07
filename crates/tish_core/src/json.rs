@@ -345,7 +345,7 @@ fn parse_object(input: &str, depth: usize) -> Result<(Value, &str), String> {
 
         let (key_val, rest) = parse_string(input)?;
         let key: Arc<str> = match key_val {
-            Value::String(s) => s,
+            Value::String(s) => Arc::from(s.as_str()),
             _ => unreachable!(),
         };
 

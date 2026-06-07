@@ -78,7 +78,7 @@ pub fn object_keys(args: &[Value]) -> Value {
         let keys: Vec<Value> = obj_borrow
             .strings
             .keys()
-            .map(|k| Value::String(Arc::clone(k)))
+            .map(|k| Value::String(tishlang_core::ArcStr::from(k.as_ref())))
             .collect();
         Value::Array(VmRef::new(keys))
     } else {
@@ -104,7 +104,7 @@ pub fn object_entries(args: &[Value]) -> Value {
         let entries: Vec<Value> = obj_borrow
             .strings
             .iter()
-            .map(|(k, v)| Value::Array(VmRef::new(vec![Value::String(Arc::clone(k)), v.clone()])))
+            .map(|(k, v)| Value::Array(VmRef::new(vec![Value::String(tishlang_core::ArcStr::from(k.as_ref())), v.clone()])))
             .collect();
         Value::Array(VmRef::new(entries))
     } else {
@@ -200,7 +200,7 @@ pub fn object_from_entries(args: &[Value]) -> Value {
                 let pair_borrow = pair.borrow();
                 if pair_borrow.len() >= 2 {
                     let key: Arc<str> = match &pair_borrow[0] {
-                        Value::String(s) => Arc::clone(s),
+                        Value::String(s) => Arc::from(s.as_str()),
                         v => v.to_display_string().into(),
                     };
                     obj.insert(key, pair_borrow[1].clone());

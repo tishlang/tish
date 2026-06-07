@@ -56,7 +56,7 @@ fn run_due_timers() {
         }
         for (id, callback, args, interval_ms) in due {
             if let Value::Function(f) = &callback {
-                let _ = f(&args);
+                let _ = f.call(&args);
             }
             if interval_ms > 0 {
                 re_register_interval(id, callback, args, interval_ms);

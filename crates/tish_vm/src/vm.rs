@@ -29,7 +29,7 @@ fn make_native_fn<F>(f: F) -> NativeFn
 where
     F: Fn(&[Value]) -> Value + Send + Sync + 'static,
 {
-    Arc::new(f)
+    tishlang_core::native_fn(f)
 }
 
 #[cfg(not(feature = "send-values"))]
@@ -38,7 +38,7 @@ fn make_native_fn<F>(f: F) -> NativeFn
 where
     F: Fn(&[Value]) -> Value + 'static,
 {
-    Rc::new(f)
+    tishlang_core::native_fn(f)
 }
 
 // Array / string / object methods have the same shape as `NativeFn`, which
@@ -162,7 +162,7 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                             obj_ref.strings.get(&std::sync::Arc::from("onWorker")).cloned()
                         {
                             let args_for_init = [Value::Number(0.0)];
-                            on_worker(&args_for_init)
+                            on_worker.call(&args_for_init)
                         } else if let Some(h) =
                             obj_ref.strings.get(&std::sync::Arc::from("handler")).cloned()
                         {
@@ -174,7 +174,7 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                     _ => Value::Null,
                 };
                 if let Value::Function(f) = handler_value {
-                    tishlang_runtime::http_serve(args, move |req_args| f(req_args))
+                    tishlang_runtime::http_serve(args, move |req_args| f.call(req_args))
                 } else {
                     Value::Null
                 }
@@ -757,7 +757,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
                             obj_ref.strings.get(&std::sync::Arc::from("onWorker")).cloned()
                         {
                             let args_for_init = [Value::Number(0.0)];
-                            on_worker(&args_for_init)
+                            on_worker.call(&args_for_init)
                         } else if let Some(h) =
                             obj_ref.strings.get(&std::sync::Arc::from("handler")).cloned()
                         {
@@ -769,7 +769,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
                     _ => Value::Null,
                 };
                 if let Value::Function(f) = handler_value {
-                    tishlang_runtime::http_serve(args, move |req_args| f(req_args))
+                    tishlang_runtime::http_serve(args, move |req_args| f.call(req_args))
                 } else {
                     Value::Null
                 }
@@ -839,6 +839,143 @@ pub struct Vm {
     /// [`register_native_module`]). Phase-2 item 11: unblocks `cargo:`
     /// imports on the cranelift and llvm backends which run this VM.
     native_modules: VmRef<HashMap<String, VmRef<ObjectMap>>>,
+}
+
+/// A bytecode-VM closure: a compiled chunk plus its captured lexical chain and shared VM state.
+/// Implements [`tishlang_core::Callable`] so it lives in `Value::Function` like any callable, but
+/// the `Call` opcode can `as_any`-downcast to it to run the call on the VM's explicit frame stack
+/// (the frame-VM, task #39) instead of recursively re-entering `run_chunk`. `call()` is the
+/// fallback path (builtin callbacks, and any not-yet-framed call) — byte-identical to the former
+/// inline `Value::native` closure, so building these instead of raw closures changes nothing on
+/// its own; the behavioural win comes when `Call` starts using the downcast + frame stack.
+/// Try the array-mode JIT for `nf` (`array_param_mask != 0`). Splits `args` into numeric `f64`s and
+/// flat [`crate::jit::ArrayHandle`]s — extracting all-numeric `Value::Array`s into scratch `Vec<f64>`s
+/// that outlive the call. Returns `None` (caller falls back to the interpreter, so behaviour is always
+/// correct) when an array arg is not an all-numeric `Value::Array` (covers `NumberArray`, whose
+/// NaN-hole semantics differ), a numeric arg isn't a `Number`, or the JIT signals an OOB deopt.
+#[cfg(not(target_arch = "wasm32"))]
+fn try_call_array_jit(
+    nf: &crate::jit::NumericFn,
+    args: &[Value],
+    arity: usize,
+    mask: u8,
+) -> Option<Value> {
+    let mut numeric: Vec<f64> = Vec::with_capacity(arity);
+    // `scratch` OWNS the extracted f64 data; handles point into it. Build handles only AFTER scratch is
+    // fully populated so its backing buffers never reallocate out from under a live pointer.
+    let mut scratch: Vec<Vec<f64>> = Vec::new();
+    for i in 0..arity {
+        if (mask >> i) & 1 == 1 {
+            match &args[i] {
+                Value::Array(a) => {
+                    let b = a.borrow();
+                    let mut buf: Vec<f64> = Vec::with_capacity(b.len());
+                    for el in b.iter() {
+                        match el {
+                            Value::Number(n) => buf.push(*n),
+                            _ => return None, // non-numeric element → interpreter
+                        }
+                    }
+                    scratch.push(buf);
+                }
+                _ => return None, // NumberArray / non-array → interpreter
+            }
+        } else {
+            match &args[i] {
+                Value::Number(n) => numeric.push(*n),
+                _ => return None,
+            }
+        }
+    }
+    let handles: Vec<crate::jit::ArrayHandle> = scratch
+        .iter()
+        .map(|buf| crate::jit::ArrayHandle {
+            ptr: buf.as_ptr(),
+            len: buf.len(),
+        })
+        .collect();
+    let (res, deopt) = nf.call_arrays(&numeric, &handles);
+    if deopt {
+        return None; // OOB access → re-run interpreter (OOB reads coerce as Value::Null)
+    }
+    Some(Value::Number(res))
+}
+
+struct VmClosure {
+    chunk: Arc<Chunk>,
+    /// Whether this closure can run on the frame stack — computed ONCE at creation (eligibility is an
+    /// O(chunk) bytecode scan; doing it per call regressed perf). `true` iff the chunk is frame-eligible
+    /// and there is no numeric JIT for it.
+    frameable: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    jit_fn: Option<crate::jit::NumericFn>,
+    enclosing: SharedChain,
+    globals: VmRef<ObjectMap>,
+    capabilities: Arc<HashSet<String>>,
+    native_modules: VmRef<HashMap<String, VmRef<ObjectMap>>>,
+}
+
+impl tishlang_core::Callable for VmClosure {
+    fn call(&self, args: &[Value]) -> Value {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(nf) = self.jit_fn {
+                let arity = nf.arity();
+                if args.len() >= arity {
+                    let mask = nf.array_param_mask();
+                    if mask == 0 {
+                        // Pure-numeric register-f64 path.
+                        let mut nums = [0f64; 8];
+                        let mut all_numbers = true;
+                        for i in 0..arity {
+                            if let Value::Number(n) = &args[i] {
+                                nums[i] = *n;
+                            } else {
+                                all_numbers = false;
+                                break;
+                            }
+                        }
+                        if all_numbers {
+                            let res = nf.call(&nums[..arity]);
+                            return if nf.result_is_bool() {
+                                Value::Bool(res != 0.0)
+                            } else {
+                                Value::Number(res)
+                            };
+                        }
+                    } else if let Some(v) = try_call_array_jit(&nf, args, arity, mask) {
+                        // Array-mode path: succeeded (all-numeric arrays, in-bounds). On any bail
+                        // (non-numeric element, NumberArray, OOB deopt) this returns None and we fall
+                        // through to the interpreter — so behaviour is always correct.
+                        return v;
+                    }
+                }
+            }
+        }
+        let mut vm = Vm {
+            stack: Vec::new(),
+            scope: ObjectMap::default(),
+            enclosing: self.enclosing.clone(),
+            globals: self.globals.clone(),
+            capabilities: Arc::clone(&self.capabilities),
+            native_modules: self.native_modules.clone(),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
+                vm.run_chunk(self.chunk.as_ref(), &self.chunk.nested, args, false)
+                    .unwrap_or(Value::Null)
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            vm.run_chunk(&self.chunk, &self.chunk.nested, args, false)
+                .unwrap_or(Value::Null)
+        }
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl Vm {
@@ -926,6 +1063,312 @@ impl Vm {
     /// Run a chunk using this VM's capability set. `repl_mode` persists top-level `let` across REPL lines.
     pub fn run_with_options(&mut self, chunk: &Chunk, repl_mode: bool) -> Result<Value, String> {
         self.run_chunk(chunk, &chunk.nested, &[], repl_mode)
+    }
+
+    /// Whether the experimental frame-VM path is on (`TISH_FRAME_VM=1`). Flag-off (default) is
+    /// byte-identical to the recursive `run_chunk` model — every `Value::Function` call goes through
+    /// `VmClosure::call` exactly as before.
+    #[inline]
+    fn frame_vm_enabled() -> bool {
+        // Read the env var ONCE and cache it. This is checked on the hot path (every Call opcode +
+        // every closure creation), so a per-call `std::env::var` (a lock + String alloc) is a severe
+        // regression to the DEFAULT path — caching makes the flag-off check a single atomic load.
+        use std::sync::OnceLock;
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var("TISH_FRAME_VM").map(|v| v == "1").unwrap_or(false))
+    }
+
+    /// A `VmClosure` runs on the frame stack iff its chunk is frame-eligible AND it has no numeric
+    /// JIT (jit'd functions stay on the faster native path via `VmClosure::call`; the frame loop's
+    /// niche is non-jit'd call-heavy / mutually-recursive functions + wasi where there is no JIT).
+    fn vmclosure_frameable(vc: &VmClosure) -> bool {
+        vc.frameable
+    }
+
+    /// A chunk is frame-eligible iff slot-based and every opcode is one `run_framed` handles.
+    /// `LoadConst` of a nested `Closure` is excluded (closure creation needs the full `run_chunk`).
+    fn chunk_frame_eligible(chunk: &Chunk) -> bool {
+        if !chunk.slot_based {
+            return false;
+        }
+        let code = &chunk.code;
+        let mut ip = 0usize;
+        while ip < code.len() {
+            let op = match Opcode::from_u8(code[ip]) {
+                Some(o) => o,
+                None => return false,
+            };
+            match op {
+                Opcode::Nop
+                | Opcode::LoadLocal
+                | Opcode::StoreLocal
+                | Opcode::LoadVar
+                | Opcode::BinOp
+                | Opcode::Jump
+                | Opcode::JumpIfFalse
+                | Opcode::JumpBack
+                | Opcode::Pop
+                | Opcode::Call
+                | Opcode::SelfCall
+                | Opcode::Return => {}
+                Opcode::LoadConst => {
+                    let idx = (((*code.get(ip + 1).unwrap_or(&0)) as usize) << 8)
+                        | ((*code.get(ip + 2).unwrap_or(&0)) as usize);
+                    if matches!(chunk.constants.get(idx), Some(Constant::Closure(_))) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+            ip += match op.instruction_size(code, ip) {
+                Some(s) => s,
+                None => return false,
+            };
+        }
+        true
+    }
+
+    /// Iterative frame-stack execution of a frame-eligible `VmClosure` (the frame-VM, flag-on).
+    /// Returns `None` if the entry chunk is ineligible (caller falls back to `VmClosure::call`).
+    /// Calls + recursion run on the heap `frames` stack — no per-call `Vm`, no recursive `run_chunk`
+    /// re-entry, so deep + mutual recursion can't overflow and it works on wasi (no JIT there).
+    fn run_framed(&mut self, top: &VmClosure, args: &[Value]) -> Option<Result<Value, String>> {
+        if !Self::vmclosure_frameable(top) {
+            return None;
+        }
+        let mut cur: Arc<Chunk> = top.chunk.clone();
+        let mut enclosing: SharedChain = top.enclosing.clone();
+        let mut ip: usize = 0;
+        let mut stack_base: usize = self.stack.len();
+        // Slot-region pooling: ALL frames' locals share one `slots` Vec; each frame occupies
+        // `slots[slot_base .. slot_base + num_slots]`. A call does `resize` (amortized, no per-call
+        // heap alloc — unlike `run_chunk` which `vec!`s a fresh `slot_locals` every call); a return
+        // does `truncate`. This is what makes the frame loop cheaper than the recursive path.
+        let mut slots: Vec<Value> = Vec::new();
+        let mut slot_base: usize = 0;
+        slots.resize(cur.num_slots as usize, Value::Null);
+        for i in 0..(cur.param_count as usize) {
+            if let Some(v) = args.get(i) {
+                if let Some(d) = slots.get_mut(slot_base + i) {
+                    *d = v.clone();
+                }
+            }
+        }
+        // Suspended callers: (chunk, return ip, caller slot_base, caller stack_base, enclosing).
+        let mut frames: Vec<(Arc<Chunk>, usize, usize, usize, SharedChain)> = Vec::new();
+
+        macro_rules! ferr {
+            ($($t:tt)*) => {
+                return Some(Err(format!($($t)*)))
+            };
+        }
+        macro_rules! fpop {
+            () => {
+                match self.stack.pop() {
+                    Some(v) => v,
+                    None => ferr!("Stack underflow in run_framed"),
+                }
+            };
+        }
+
+        // SAFETY: `code` aliases the current frame's chunk bytecode. The chunk is kept alive by `cur`
+        // (and suspended-frame chunks by `frames`), so the slice stays valid for as long as we read
+        // it; it is re-derived via `rebind_code!()` after every frame switch (Call/Return/end).
+        // Laundering the borrow lets the hot opcode path index `code[ip]` directly with no per-opcode
+        // Arc deref — matching run_chunk (the per-opcode Arc deref was a measured ~10% shallow-call regression).
+        let mut code: &[u8] = unsafe { &*(cur.code.as_slice() as *const [u8]) };
+
+        loop {
+            if ip >= code.len() {
+                self.stack.truncate(stack_base);
+                slots.truncate(slot_base);
+                match frames.pop() {
+                    Some((c, rip, sbase, sb, enc)) => {
+                        cur = c;
+                        ip = rip;
+                        slot_base = sbase;
+                        stack_base = sb;
+                        enclosing = enc;
+                        code = unsafe { &*(cur.code.as_slice() as *const [u8]) };
+                        self.stack.push(Value::Null);
+                        continue;
+                    }
+                    None => return Some(Ok(Value::Null)),
+                }
+            }
+            let op = match Opcode::from_u8(code[ip]) {
+                Some(o) => o,
+                None => ferr!("Bad opcode {} in run_framed", code[ip]),
+            };
+            ip += 1;
+            match op {
+                Opcode::Nop => {}
+                Opcode::LoadLocal => {
+                    let slot = Self::read_u16(code, &mut ip) as usize;
+                    match slots.get(slot_base + slot) {
+                        Some(v) => self.stack.push(v.clone()),
+                        None => ferr!("Local slot out of bounds: {}", slot),
+                    }
+                }
+                Opcode::StoreLocal => {
+                    let slot = Self::read_u16(code, &mut ip) as usize;
+                    let v = fpop!();
+                    match slots.get_mut(slot_base + slot) {
+                        Some(d) => *d = v,
+                        None => ferr!("Local slot out of bounds: {}", slot),
+                    }
+                }
+                Opcode::LoadConst => {
+                    let idx = Self::read_u16(code, &mut ip) as usize;
+                    let v = match cur.constants.get(idx) {
+                        Some(Constant::Number(n)) => Value::Number(*n),
+                        Some(Constant::String(s)) => Value::String(tishlang_core::ArcStr::from(s.as_ref())),
+                        Some(Constant::Bool(b)) => Value::Bool(*b),
+                        Some(Constant::Null) => Value::Null,
+                        _ => ferr!("Ineligible constant {} in run_framed", idx),
+                    };
+                    self.stack.push(v);
+                }
+                Opcode::LoadVar => {
+                    let idx = Self::read_u16(code, &mut ip) as usize;
+                    let name = match cur.names.get(idx) {
+                        Some(n) => n.clone(),
+                        None => ferr!("Name index out of bounds: {}", idx),
+                    };
+                    let v = enclosing
+                        .iter()
+                        .find_map(|e| e.borrow().get(name.as_ref()).cloned())
+                        .or_else(|| self.scope.get(name.as_ref()).cloned())
+                        .or_else(|| self.globals.borrow().get(name.as_ref()).cloned());
+                    match v {
+                        Some(v) => self.stack.push(v),
+                        None => ferr!("Undefined variable: {}", name),
+                    }
+                }
+                Opcode::BinOp => {
+                    let op_u8 = Self::read_u16(code, &mut ip) as u8;
+                    let r = fpop!();
+                    let l = fpop!();
+                    let bop = match u8_to_binop(op_u8) {
+                        Some(b) => b,
+                        None => ferr!("Unknown binop: {}", op_u8),
+                    };
+                    match eval_binop(bop, &l, &r) {
+                        Ok(res) => self.stack.push(res),
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+                Opcode::Jump => {
+                    let offset = Self::read_i16(code, &mut ip) as isize;
+                    ip = (ip as isize + offset).max(0) as usize;
+                }
+                Opcode::JumpIfFalse => {
+                    let offset = Self::read_i16(code, &mut ip) as isize;
+                    let v = fpop!();
+                    if !v.is_truthy() {
+                        ip = (ip as isize + offset).max(0) as usize;
+                    }
+                }
+                Opcode::JumpBack => {
+                    let dist = Self::read_u16(code, &mut ip) as usize;
+                    ip = ip.saturating_sub(dist);
+                }
+                Opcode::Pop => {
+                    let _ = fpop!();
+                }
+                Opcode::SelfCall => {
+                    let argc = Self::read_u16(code, &mut ip) as usize;
+                    let mut call_args = Vec::with_capacity(argc);
+                    for _ in 0..argc {
+                        call_args.push(fpop!());
+                    }
+                    call_args.reverse();
+                    frames.push((cur.clone(), ip, slot_base, stack_base, enclosing.clone()));
+                    let new_base = slots.len();
+                    slots.resize(new_base + cur.num_slots as usize, Value::Null);
+                    slot_base = new_base;
+                    ip = 0;
+                    stack_base = self.stack.len();
+                    for i in 0..(cur.param_count as usize) {
+                        if let Some(v) = call_args.get(i) {
+                            if let Some(d) = slots.get_mut(slot_base + i) {
+                                *d = v.clone();
+                            }
+                        }
+                    }
+                }
+                Opcode::Call => {
+                    let argc = Self::read_u16(code, &mut ip) as usize;
+                    let mut call_args = Vec::with_capacity(argc);
+                    for _ in 0..argc {
+                        call_args.push(fpop!());
+                    }
+                    call_args.reverse();
+                    let callee = fpop!();
+                    match &callee {
+                        Value::Function(f) => {
+                            let framed = f
+                                .as_any()
+                                .downcast_ref::<VmClosure>()
+                                .filter(|vc| Self::vmclosure_frameable(vc));
+                            if let Some(vc) = framed {
+                                let next_chunk = vc.chunk.clone();
+                                let next_enc = vc.enclosing.clone();
+                                // Move (not clone) the caller's chunk+chain into the frame; the Arc
+                                // refcounts are unchanged (the chunk heap data doesn't move, so the
+                                // laundered `code` ptr stays valid until rebind below). Halves the
+                                // per-call Arc traffic vs cloning for the push.
+                                frames.push((cur, ip, slot_base, stack_base, enclosing));
+                                cur = next_chunk;
+                                enclosing = next_enc;
+                                code = unsafe { &*(cur.code.as_slice() as *const [u8]) };
+                                let new_base = slots.len();
+                                slots.resize(new_base + cur.num_slots as usize, Value::Null);
+                                slot_base = new_base;
+                                ip = 0;
+                                stack_base = self.stack.len();
+                                for i in 0..(cur.param_count as usize) {
+                                    if let Some(v) = call_args.get(i) {
+                                        if let Some(d) = slots.get_mut(slot_base + i) {
+                                            *d = v.clone();
+                                        }
+                                    }
+                                }
+                            } else {
+                                let r = f.call(&call_args);
+                                self.stack.push(r);
+                            }
+                        }
+                        Value::Object(o) => {
+                            let cf = match o.borrow().strings.get("__call") {
+                                Some(Value::Function(cf)) => cf.clone(),
+                                _ => ferr!("Call of non-function: {}", callee.type_name()),
+                            };
+                            self.stack.push(cf.call(&call_args));
+                        }
+                        _ => ferr!("Call of non-function: {}", callee.type_name()),
+                    }
+                }
+                Opcode::Return => {
+                    let result = self.stack.pop().unwrap_or(Value::Null);
+                    self.stack.truncate(stack_base);
+                    slots.truncate(slot_base);
+                    match frames.pop() {
+                        Some((c, rip, sbase, sb, enc)) => {
+                            cur = c;
+                            ip = rip;
+                            slot_base = sbase;
+                            stack_base = sb;
+                            enclosing = enc;
+                            code = unsafe { &*(cur.code.as_slice() as *const [u8]) };
+                            self.stack.push(result);
+                        }
+                        None => return Some(Ok(result)),
+                    }
+                }
+                other => ferr!("Unhandled opcode {:?} in run_framed", other),
+            }
+        }
     }
 
     fn run_chunk(
@@ -1041,7 +1484,7 @@ impl Vm {
                         .ok_or_else(|| format!("Constant index out of bounds: {}", idx))?;
                     let v = match c {
                         Constant::Number(n) => Value::Number(*n),
-                        Constant::String(s) => Value::String(Arc::clone(s)),
+                        Constant::String(s) => Value::String(tishlang_core::ArcStr::from(s.as_ref())),
                         Constant::Bool(b) => Value::Bool(*b),
                         Constant::Null => Value::Null,
                         Constant::Closure(nested_idx) => {
@@ -1087,70 +1530,38 @@ impl Vm {
                             });
                             let capabilities = Arc::clone(&self.capabilities);
                             let native_modules = self.native_modules.clone();
-                            Value::native(move |args: &[Value]| {
-                                #[cfg(not(target_arch = "wasm32"))]
-                                {
-                                    if let Some(nf) = jit_fn {
-                                        // JS array methods call back with (element, index, array);
-                                        // a callback that declares `arity` params uses only the
-                                        // first `arity` args, so accept >= arity and check just those.
-                                        let arity = nf.arity();
-                                        if args.len() >= arity {
-                                            // Sized to the JIT arity ceiling (try_compile_numeric
-                                            // bails above 8); arities 5..=8 would otherwise index
-                                            // past a fixed [0f64; 4] and panic.
-                                            let mut nums = [0f64; 8];
-                                            let mut all_numbers = true;
-                                            for i in 0..arity {
-                                                if let Value::Number(n) = &args[i] {
-                                                    nums[i] = *n;
-                                                } else {
-                                                    all_numbers = false;
-                                                    break;
-                                                }
-                                            }
-                                            if all_numbers {
-                                                let res = nf.call(&nums[..arity]);
-                                                return if nf.result_is_bool() {
-                                                    Value::Bool(res != 0.0)
-                                                } else {
-                                                    Value::Number(res)
-                                                };
-                                            }
-                                        }
+                            // Frame-eligibility is an O(chunk) bytecode scan; gate it behind the
+                            // (cached) frame-VM flag so the DEFAULT path skips it entirely — flag-off
+                            // closure creation pays nothing.
+                            let frameable = Vm::frame_vm_enabled()
+                                && {
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    {
+                                        jit_fn.is_none() && Vm::chunk_frame_eligible(&inner_clone)
                                     }
-                                }
-                                let mut vm = Vm {
-                                    stack: Vec::new(),
-                                    scope: ObjectMap::default(),
-                                    enclosing: enclosing_chain.clone(),
-                                    globals: globals.clone(),
-                                    capabilities: Arc::clone(&capabilities),
-                                    native_modules: native_modules.clone(),
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        Vm::chunk_frame_eligible(&inner_clone)
+                                    }
                                 };
-                                // Grow the OS thread stack on demand so deep tish recursion
-                                // doesn't abort the process. Each tish call adds a real Rust
-                                // frame; without this, ~500 levels overflows the default ~8 MB
-                                // thread stack. stacker mmap-allocates new segments (no fixed
-                                // ceiling) using the same mechanism rustc itself uses.
+                            let vmclosure = VmClosure {
+                                chunk: std::sync::Arc::new(inner_clone),
+                                frameable,
                                 #[cfg(not(target_arch = "wasm32"))]
-                                {
-                                    stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
-                                        vm.run_chunk(
-                                            &inner_clone,
-                                            &inner_clone.nested,
-                                            args,
-                                            false,
-                                        )
-                                        .unwrap_or(Value::Null)
-                                    })
-                                }
-                                #[cfg(target_arch = "wasm32")]
-                                {
-                                    vm.run_chunk(&inner_clone, &inner_clone.nested, args, false)
-                                        .unwrap_or(Value::Null)
-                                }
-                            })
+                                jit_fn,
+                                enclosing: enclosing_chain,
+                                globals,
+                                capabilities,
+                                native_modules,
+                            };
+                            #[cfg(feature = "send-values")]
+                            {
+                                Value::Function(std::sync::Arc::new(vmclosure))
+                            }
+                            #[cfg(not(feature = "send-values"))]
+                            {
+                                Value::Function(std::rc::Rc::new(vmclosure))
+                            }
                         }
                     };
                     self.stack.push(v);
@@ -1345,7 +1756,23 @@ impl Vm {
                     // Call the function in place — no `Arc` clone on the hot direct-call path. The
                     // immutable borrow of `callee` is held only across the call, which never touches it.
                     let result = match &callee {
-                        Value::Function(f) => f(&args),
+                        Value::Function(f) => {
+                            // Frame-VM (flag-on): a frameable VmClosure runs on the heap frame stack
+                            // (iterative, no per-call Vm / native recursion). Else the normal path.
+                            if Self::frame_vm_enabled() {
+                                match f.as_any().downcast_ref::<VmClosure>() {
+                                    Some(vc) if Self::vmclosure_frameable(vc) => {
+                                        match self.run_framed(vc, &args) {
+                                            Some(res) => res?,
+                                            None => f.call(&args),
+                                        }
+                                    }
+                                    _ => f.call(&args),
+                                }
+                            } else {
+                                f.call(&args)
+                            }
+                        }
                         Value::Object(o) => {
                             let call_fn = match o.borrow().strings.get("__call") {
                                 Some(Value::Function(cf)) => cf.clone(),
@@ -1356,7 +1783,7 @@ impl Vm {
                                     ))
                                 }
                             };
-                            call_fn(&args)
+                            call_fn.call(&args)
                         }
                         _ => {
                             return Err(format!("Call of non-function: {}", callee.type_name()));
@@ -1433,7 +1860,7 @@ impl Vm {
                             return Err(format!("Call of non-function: {}", callee.type_name()));
                         }
                     };
-                    let result = f(&args);
+                    let result = f.call(&args);
                     self.stack.push(result);
                 }
                 Opcode::Construct => {
@@ -2027,8 +2454,13 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
         }
         Sub => Ok(Number(ln - rn)),
         Mul => Ok(Number(ln * rn)),
-        Div => Ok(Number(if rn == 0.0 { f64::NAN } else { ln / rn })),
-        Mod => Ok(Number(if rn == 0.0 { f64::NAN } else { ln % rn })),
+        // IEEE division/remainder, matching JS (and the interp + rust-AOT backends): `5/0` → Infinity,
+        // `-5/0` → -Infinity, `0/0` → NaN, `5%0` → NaN. The former `if rn==0 { NaN }` special-case made
+        // the VM the only backend that returned NaN for `n/0` at runtime (literals were masked by
+        // constant-folding) — a cross-backend divergence. Null/non-number operands already coerce to
+        // NaN via `as_number().unwrap_or(NaN)` above, so `5/null` stays NaN (tish's null-coercion).
+        Div => Ok(Number(ln / rn)),
+        Mod => Ok(Number(ln % rn)),
         Pow => Ok(Number(ln.powf(rn))),
         Eq => Ok(Bool(l.strict_eq(r))),
         Ne => Ok(Bool(!l.strict_eq(r))),
@@ -2049,7 +2481,7 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
             Value::Object(_) => object_has(r, l),
             Value::Array(a) => {
                 let key_s: Arc<str> = match l {
-                    Value::String(s) => Arc::clone(s),
+                    Value::String(s) => Arc::from(s.as_str()),
                     Value::Number(n) => n.to_string().into(),
                     _ => l.to_display_string().into(),
                 };
@@ -2063,7 +2495,7 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
             }
             Value::NumberArray(a) => {
                 let key_s: Arc<str> = match l {
-                    Value::String(s) => Arc::clone(s),
+                    Value::String(s) => Arc::from(s.as_str()),
                     Value::Number(n) => n.to_string().into(),
                     _ => l.to_display_string().into(),
                 };
@@ -2426,25 +2858,25 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             let key_s = key.as_ref();
             if let Ok(idx) = key_s.parse::<usize>() {
                 return match s.chars().nth(idx) {
-                    Some(c) => Ok(Value::String(Arc::from(c.to_string()))),
+                    Some(c) => Ok(Value::String(tishlang_core::ArcStr::from(c.to_string()))),
                     None => Err("Index out of bounds".to_string()),
                 };
             }
             if key_s == "length" {
                 return Ok(Value::Number(s.chars().count() as f64));
             }
-            let s_clone: Arc<str> = Arc::clone(s);
+            let s_clone: tishlang_core::ArcStr = s.clone();
             let method: ArrayMethodFn = match key_s {
                 "indexOf" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let from = args.get(1);
-                    str_builtins::index_of(&Value::String(Arc::clone(&s_clone)), search, from)
+                    str_builtins::index_of(&Value::String(s_clone.clone()), search, from)
                 }),
                 "lastIndexOf" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let position = args.get(1).cloned().unwrap_or(Value::Number(f64::INFINITY));
                     str_builtins::last_index_of(
-                        &Value::String(Arc::clone(&s_clone)),
+                        &Value::String(s_clone.clone()),
                         search,
                         &position,
                     )
@@ -2452,46 +2884,46 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "includes" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let from = args.get(1);
-                    str_builtins::includes(&Value::String(Arc::clone(&s_clone)), search, from)
+                    str_builtins::includes(&Value::String(s_clone.clone()), search, from)
                 }),
                 "slice" => make_native_fn(move |args: &[Value]| {
                     let start = args.first().unwrap_or(&Value::Null);
                     let end = args.get(1).unwrap_or(&Value::Null);
-                    str_builtins::slice(&Value::String(Arc::clone(&s_clone)), start, end)
+                    str_builtins::slice(&Value::String(s_clone.clone()), start, end)
                 }),
                 "substring" => make_native_fn(move |args: &[Value]| {
                     let start = args.first().unwrap_or(&Value::Null);
                     let end = args.get(1).unwrap_or(&Value::Null);
-                    str_builtins::substring(&Value::String(Arc::clone(&s_clone)), start, end)
+                    str_builtins::substring(&Value::String(s_clone.clone()), start, end)
                 }),
                 "split" => make_native_fn(move |args: &[Value]| {
                     let sep = args.first().unwrap_or(&Value::Null);
                     #[cfg(feature = "regex")]
                     if matches!(sep, Value::RegExp(_)) {
                         return tishlang_runtime::string_split_regex(
-                            &Value::String(Arc::clone(&s_clone)),
+                            &Value::String(s_clone.clone()),
                             sep,
                             None,
                         );
                     }
-                    str_builtins::split(&Value::String(Arc::clone(&s_clone)), sep)
+                    str_builtins::split(&Value::String(s_clone.clone()), sep)
                 }),
                 "trim" => make_native_fn(move |_args: &[Value]| {
-                    str_builtins::trim(&Value::String(Arc::clone(&s_clone)))
+                    str_builtins::trim(&Value::String(s_clone.clone()))
                 }),
                 "toUpperCase" => make_native_fn(move |_args: &[Value]| {
-                    str_builtins::to_upper_case(&Value::String(Arc::clone(&s_clone)))
+                    str_builtins::to_upper_case(&Value::String(s_clone.clone()))
                 }),
                 "toLowerCase" => make_native_fn(move |_args: &[Value]| {
-                    str_builtins::to_lower_case(&Value::String(Arc::clone(&s_clone)))
+                    str_builtins::to_lower_case(&Value::String(s_clone.clone()))
                 }),
                 "startsWith" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
-                    str_builtins::starts_with(&Value::String(Arc::clone(&s_clone)), search)
+                    str_builtins::starts_with(&Value::String(s_clone.clone()), search)
                 }),
                 "endsWith" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
-                    str_builtins::ends_with(&Value::String(Arc::clone(&s_clone)), search)
+                    str_builtins::ends_with(&Value::String(s_clone.clone()), search)
                 }),
                 "replace" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
@@ -2501,18 +2933,18 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     #[cfg(feature = "regex")]
                     if matches!(search, Value::RegExp(_)) {
                         return tishlang_runtime::string_replace(
-                            &Value::String(Arc::clone(&s_clone)),
+                            &Value::String(s_clone.clone()),
                             search,
                             replacement,
                         );
                     }
-                    str_builtins::replace(&Value::String(Arc::clone(&s_clone)), search, replacement)
+                    str_builtins::replace(&Value::String(s_clone.clone()), search, replacement)
                 }),
                 "replaceAll" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let replacement = args.get(1).unwrap_or(&Value::Null);
                     str_builtins::replace_all(
-                        &Value::String(Arc::clone(&s_clone)),
+                        &Value::String(s_clone.clone()),
                         search,
                         replacement,
                     )
@@ -2520,34 +2952,34 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 #[cfg(feature = "regex")]
                 "match" => make_native_fn(move |args: &[Value]| {
                     let re = args.first().unwrap_or(&Value::Null);
-                    tishlang_runtime::string_match_regex(&Value::String(Arc::clone(&s_clone)), re)
+                    tishlang_runtime::string_match_regex(&Value::String(s_clone.clone()), re)
                 }),
                 #[cfg(feature = "regex")]
                 "search" => make_native_fn(move |args: &[Value]| {
                     let re = args.first().unwrap_or(&Value::Null);
-                    tishlang_runtime::string_search_regex(&Value::String(Arc::clone(&s_clone)), re)
+                    tishlang_runtime::string_search_regex(&Value::String(s_clone.clone()), re)
                 }),
                 "charAt" => make_native_fn(move |args: &[Value]| {
                     let idx = args.first().unwrap_or(&Value::Null);
-                    str_builtins::char_at(&Value::String(Arc::clone(&s_clone)), idx)
+                    str_builtins::char_at(&Value::String(s_clone.clone()), idx)
                 }),
                 "charCodeAt" => make_native_fn(move |args: &[Value]| {
                     let idx = args.first().unwrap_or(&Value::Null);
-                    str_builtins::char_code_at(&Value::String(Arc::clone(&s_clone)), idx)
+                    str_builtins::char_code_at(&Value::String(s_clone.clone()), idx)
                 }),
                 "repeat" => make_native_fn(move |args: &[Value]| {
                     let count = args.first().unwrap_or(&Value::Null);
-                    str_builtins::repeat(&Value::String(Arc::clone(&s_clone)), count)
+                    str_builtins::repeat(&Value::String(s_clone.clone()), count)
                 }),
                 "padStart" => make_native_fn(move |args: &[Value]| {
                     let target_len = args.first().unwrap_or(&Value::Null);
                     let pad = args.get(1).unwrap_or(&Value::Null);
-                    str_builtins::pad_start(&Value::String(Arc::clone(&s_clone)), target_len, pad)
+                    str_builtins::pad_start(&Value::String(s_clone.clone()), target_len, pad)
                 }),
                 "padEnd" => make_native_fn(move |args: &[Value]| {
                     let target_len = args.first().unwrap_or(&Value::Null);
                     let pad = args.get(1).unwrap_or(&Value::Null);
-                    str_builtins::pad_end(&Value::String(Arc::clone(&s_clone)), target_len, pad)
+                    str_builtins::pad_end(&Value::String(s_clone.clone()), target_len, pad)
                 }),
                 _ => return Err(format!("Property '{}' not found", key)),
             };
@@ -2692,7 +3124,7 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
                 }
             };
             match s.chars().nth(i) {
-                Some(c) => Ok(Value::String(Arc::from(c.to_string()))),
+                Some(c) => Ok(Value::String(tishlang_core::ArcStr::from(c.to_string()))),
                 None => Err("Index out of bounds".to_string()),
             }
         }
@@ -2705,7 +3137,7 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
         #[cfg(any(feature = "http", feature = "promise"))]
         Value::Promise(_) => {
             let key_arc: std::sync::Arc<str> = match idx {
-                Value::String(s) => std::sync::Arc::clone(s),
+                Value::String(s) => std::sync::Arc::from(s.as_str()),
                 _ => {
                     return Err(format!(
                         "Promise bracket access requires a string key, got {}",

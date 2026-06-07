@@ -65,10 +65,63 @@ use fancy_regex::Regex;
 /// `Rc<dyn Fn>` for zero-overhead single-threaded execution (wasm / wasi /
 /// interpreter / cranelift / llvm VMs and any Rust native build without
 /// `http`).
+/// A callable value's behaviour. Replaces the former `Arc<dyn Fn(&[Value]) -> Value>`:
+/// the trait lets a *bytecode-VM* closure additionally expose its compiled chunk (via the
+/// `as_any` downcast), so the VM's `Call` opcode can run tish→tish calls on an explicit
+/// frame stack (task #39, the frame-VM) instead of recursively re-entering `run_chunk` —
+/// while native builtins use the blanket [`FnCallable`] adapter and keep plain `Fn`
+/// behaviour. `Send + Sync` is conditional on `send-values`, exactly like `NativeFn` was.
 #[cfg(feature = "send-values")]
-pub type NativeFn = Arc<dyn Fn(&[Value]) -> Value + Send + Sync>;
+pub trait Callable: Send + Sync {
+    fn call(&self, args: &[Value]) -> Value;
+    /// Downcast hook for the VM frame path; native adapters return themselves (downcast fails).
+    fn as_any(&self) -> &dyn std::any::Any;
+}
 #[cfg(not(feature = "send-values"))]
-pub type NativeFn = std::rc::Rc<dyn Fn(&[Value]) -> Value>;
+pub trait Callable {
+    fn call(&self, args: &[Value]) -> Value;
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// Adapter wrapping a plain `Fn` closure (every native builtin) as a [`Callable`].
+pub struct FnCallable<F>(pub F);
+#[cfg(feature = "send-values")]
+impl<F: Fn(&[Value]) -> Value + Send + Sync + 'static> Callable for FnCallable<F> {
+    #[inline]
+    fn call(&self, args: &[Value]) -> Value {
+        (self.0)(args)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+#[cfg(not(feature = "send-values"))]
+impl<F: Fn(&[Value]) -> Value + 'static> Callable for FnCallable<F> {
+    #[inline]
+    fn call(&self, args: &[Value]) -> Value {
+        (self.0)(args)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[cfg(feature = "send-values")]
+pub type NativeFn = Arc<dyn Callable>;
+#[cfg(not(feature = "send-values"))]
+pub type NativeFn = std::rc::Rc<dyn Callable>;
+
+/// Build a raw [`NativeFn`] from a plain closure (wraps it in [`FnCallable`]). For sites that
+/// need a `NativeFn` handle directly rather than a `Value::Function` (e.g. HTTP/promise/timer
+/// internals that store the callable). The `Value::Function` variant is built via [`Value::native`].
+#[cfg(feature = "send-values")]
+pub fn native_fn<F: Fn(&[Value]) -> Value + Send + Sync + 'static>(f: F) -> NativeFn {
+    Arc::new(FnCallable(f))
+}
+#[cfg(not(feature = "send-values"))]
+pub fn native_fn<F: Fn(&[Value]) -> Value + 'static>(f: F) -> NativeFn {
+    std::rc::Rc::new(FnCallable(f))
+}
 
 /// Trait for opaque Rust types exposed to Tish (e.g. Polars DataFrame).
 /// Implementors provide method dispatch so Tish can call methods on the value.
@@ -294,7 +347,7 @@ impl TishRegExp {
 #[derive(Clone)]
 pub enum Value {
     Number(f64),
-    String(Arc<str>),
+    String(arcstr::ArcStr),
     Bool(bool),
     Null,
     Array(VmRef<Vec<Value>>),
@@ -316,13 +369,16 @@ pub enum Value {
     Opaque(Arc<dyn TishOpaque>),
 }
 
-// Size-regression guard for the NaN-box workstream (docs/nan-box-value-plan.md). On 64-bit targets
-// `Value` is 24 bytes today: `String(Arc<str>)` and `Promise`/`Opaque`/`Function(Arc<dyn …>)` are fat
-// (16B) pointers, so a 16B payload + discriminant ⇒ 24. The staged plan drives this DOWN: Stage B
-// (thin those variants to 8B handles) flips this to 16; Stage C (NaN-box to `struct Value(u64)`) to 8.
-// The assert makes each stage's target a compile-time check and catches accidental growth meanwhile.
-// Gated to 64-bit: wasm32 (wasi) has 32-bit pointers, so the size differs there and the guard
-// would not hold — the perf-relevant targets are all 64-bit anyway.
+// Size guard. `Value` is 24 bytes: `String` is thin (`ArcStr`, 8B), but `Function`/`Promise`/`Opaque`
+// are fat `Arc<dyn …>` (data+vtable, 16B) ⇒ 16B payload + discriminant = 24.
+//
+// NOTE — shrinking to 16B was tried and REVERTED (see docs/perf.md "Value-shrink"): thinning the
+// three `Arc<dyn>` variants to `Arc<Box<dyn>>` (8B) DID make `Value` 16B and stayed green on all 6
+// backends, but it REGRESSED numeric dispatch ~8–10% (measured A/B interleaved, both in- AND
+// out-of-cache). tish is dispatch-bound, NOT memory-bandwidth-bound on `Value` size; the
+// boxing/enum-layout change pessimized the hot `Number` path. Smaller `Value` ≠ faster here. Do not
+// re-attempt the box trick; only a dispatch-level change (e.g. NaN-box's branch-free tag test, not
+// its size) could pay off. Gated to 64-bit: wasm32 (wasi) has 32-bit pointers, so size differs there.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<Value>() == 24);
 
@@ -687,7 +743,7 @@ pub fn object_set(obj: &Value, key: &Value, val: Value) -> Result<(), String> {
             Ok(())
         }
         Value::String(k) => {
-            b.strings.insert(Arc::clone(k), val);
+            b.strings.insert(Arc::from(k.as_str()), val);
             Ok(())
         }
         _ => Err(format!(
@@ -717,7 +773,7 @@ pub fn object_has(obj: &Value, key: &Value) -> bool {
 /// Invoke a callable [`Value`]: [`Value::Function`], or an object exposing `__call` (e.g. `Symbol`).
 pub fn value_call(callee: &Value, args: &[Value]) -> Value {
     match callee {
-        Value::Function(f) => f(args),
+        Value::Function(f) => f.call(args),
         Value::Object(o) => {
             let inner = o.borrow().strings.get("__call").cloned();
             if let Some(inner) = inner {
@@ -761,7 +817,7 @@ impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Number(n) => write!(f, "Number({})", n),
-            Value::String(s) => write!(f, "String({:?})", s.as_ref()),
+            Value::String(s) => write!(f, "String({:?})", s.as_str()),
             Value::Bool(b) => write!(f, "Bool({})", b),
             Value::Null => write!(f, "Null"),
             Value::Array(arr) => write!(f, "Array({:?})", arr.borrow()),
@@ -922,7 +978,7 @@ impl Value {
     where
         F: Fn(&[Value]) -> Value + Send + Sync + 'static,
     {
-        Value::Function(Arc::new(f))
+        Value::Function(Arc::new(FnCallable(f)))
     }
 
     #[cfg(not(feature = "send-values"))]
@@ -930,7 +986,7 @@ impl Value {
     where
         F: Fn(&[Value]) -> Value + 'static,
     {
-        Value::Function(std::rc::Rc::new(f))
+        Value::Function(std::rc::Rc::new(FnCallable(f)))
     }
 
     /// Create a new array Value from a Vec.

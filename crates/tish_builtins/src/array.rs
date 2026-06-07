@@ -248,7 +248,7 @@ pub fn map(arr: &Value, callback: &Value) -> Value {
         let result: Vec<Value> = arr_borrow
             .iter()
             .enumerate()
-            .map(|(i, v)| cb(&[v.clone(), Value::Number(i as f64)]))
+            .map(|(i, v)| cb.call(&[v.clone(), Value::Number(i as f64)]))
             .collect();
         Value::Array(VmRef::new(result))
     } else {
@@ -264,7 +264,7 @@ pub fn filter(arr: &Value, callback: &Value) -> Value {
             .iter()
             .enumerate()
             .filter_map(|(i, v)| {
-                let keep = cb(&[v.clone(), Value::Number(i as f64)]);
+                let keep = cb.call(&[v.clone(), Value::Number(i as f64)]);
                 if keep.is_truthy() {
                     Some(v.clone())
                 } else {
@@ -291,7 +291,7 @@ pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
         };
         for i in start_idx..len {
             let v = arr_borrow[i].clone();
-            acc = cb(&[acc, v.clone(), Value::Number(i as f64)]);
+            acc = cb.call(&[acc, v.clone(), Value::Number(i as f64)]);
         }
         acc
     } else {
@@ -304,7 +304,7 @@ pub fn for_each(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
-            cb(&[v.clone(), Value::Number(i as f64)]);
+            cb.call(&[v.clone(), Value::Number(i as f64)]);
         }
     }
     Value::Null
@@ -315,7 +315,7 @@ pub fn find(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
-            let result = cb(&[v.clone(), Value::Number(i as f64)]);
+            let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
             if result.is_truthy() {
                 return v.clone();
             }
@@ -329,7 +329,7 @@ pub fn find_index(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
-            let result = cb(&[v.clone(), Value::Number(i as f64)]);
+            let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
             if result.is_truthy() {
                 return Value::Number(i as f64);
             }
@@ -343,7 +343,7 @@ pub fn some(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
-            let result = cb(&[v.clone(), Value::Number(i as f64)]);
+            let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
             if result.is_truthy() {
                 return Value::Bool(true);
             }
@@ -357,7 +357,7 @@ pub fn every(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
-            let result = cb(&[v.clone(), Value::Number(i as f64)]);
+            let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
             if !result.is_truthy() {
                 return Value::Bool(false);
             }
@@ -374,7 +374,7 @@ pub fn flat_map(arr: &Value, callback: &Value) -> Value {
         let arr_borrow = arr.borrow();
         let mut result: Vec<Value> = Vec::new();
         for (i, v) in arr_borrow.iter().enumerate() {
-            let mapped = cb(&[v.clone(), Value::Number(i as f64)]);
+            let mapped = cb.call(&[v.clone(), Value::Number(i as f64)]);
             if let Value::Array(inner) = mapped {
                 result.extend(inner.borrow().iter().cloned());
             } else {
@@ -416,7 +416,7 @@ pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
         indices.sort_by(|&a, &b| {
             args_buf[0] = elements[a].clone();
             args_buf[1] = elements[b].clone();
-            match cmp_fn(&args_buf) {
+            match cmp_fn.call(&args_buf) {
                 Value::Number(n) if n < 0.0 => std::cmp::Ordering::Less,
                 Value::Number(n) if n > 0.0 => std::cmp::Ordering::Greater,
                 _ => std::cmp::Ordering::Equal,

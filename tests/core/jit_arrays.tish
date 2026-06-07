@@ -1,0 +1,29 @@
+// Array-element JIT (TISH_JIT_ARRAYS, default on) — cross-backend regression guard.
+// `arr[i]` / `arr[const]` reads inside JIT'd numeric loops. The VM compiles numeric-array-reduction
+// functions to native code with bounds-checked loads; non-numeric elements, NumberArrays, and
+// out-of-bounds accesses bail/deopt to the interpreter. A miscompile here is SILENT, so this fixture
+// pins vm(JIT) ≡ interp ≡ node ≡ all backends. Output must be deterministic (no timings).
+function sumArr(arr, n) { let s = 0; for (let i = 0; i < n; i++) { s = s + arr[i]; } return s; }
+function dot(a, b, n) { let s = 0; for (let i = 0; i < n; i++) { s = s + a[i] * b[i]; } return s; }
+function maxArr(arr, n) { let m = arr[0]; for (let i = 1; i < n; i++) { if (arr[i] > m) { m = arr[i]; } } return m; }
+function third(arr) { return arr[2]; }
+function scaleSum(arr, n, k) { let s = 0; for (let i = 0; i < n; i++) { s = s + arr[i] * k; } return s; }
+
+let a = [1, 2, 3, 4, 5];
+let b = [10, 20, 30, 40, 50];
+let f = [1.5, -2.25, 3.125, 0, 100.0625];
+
+console.log(sumArr(a, 5));            // 15
+console.log(dot(a, b, 5));            // 550
+console.log(maxArr(a, 5));            // 5
+console.log(third(a));                // 3 (const index)
+console.log(scaleSum(a, 5, 3));       // 45 (array + numeric param mix)
+console.log(sumArr(f, 5));            // 102.4375 (floats incl 0 and negative)
+console.log(sumArr(a, 0));            // 0 (empty loop)
+console.log(maxArr([5, 3, 9, 1, 7], 5)); // 9
+// NOTE: this fixture is the array-JIT HAPPY PATH (pure numeric). The bail/deopt EDGES live in sibling
+// fixtures: `null_arith.tish` pins OOB-read → deopt → `number+null → NaN`, and
+// `numeric_local_demote.tish` pins a non-numeric element → bail → string concat. Both underlying gaps
+// are fixed — tish_runtime `ops` now coerces non-number operands to NaN like the VM's `eval_binop`
+// (so `a[i]*b[i]` with a string element is `NaN` on every backend, rust-AOT included), and the
+// rust-AOT backend boxes a reassignable accumulator instead of lowering it to a panicking native f64.

@@ -186,7 +186,7 @@ where
     let mut count = 0usize;
     while let Ok((req_prim, resp_tx)) = rx.recv() {
         let req_value = req_prim.into_value_pub();
-        let response_value = handler(&[req_value]);
+        let response_value = handler.call(&[req_value]);
         let resp_prim = ResponsePrimitive::from_value_pub(&response_value);
         let _ = resp_tx.send(resp_prim);
 

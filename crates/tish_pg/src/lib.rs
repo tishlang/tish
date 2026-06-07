@@ -203,13 +203,13 @@ fn row_to_value_direct(row: &Row) -> tishlang_runtime::Value {
                 .try_get::<_, Option<&str>>(i)
                 .ok()
                 .flatten()
-                .map(|s| RtValue::String(StdArcInner::from(s)))
+                .map(|s| RtValue::String(tishlang_runtime::ArcStr::from(s)))
                 .unwrap_or(RtValue::Null),
             _ => {
                 // Anything else goes through the JSON path for backwards
                 // compat. Hot TFB rows never hit this branch.
                 if let Ok(s) = row.try_get::<_, Option<String>>(i) {
-                    s.map(|s| RtValue::String(StdArcInner::from(s.as_str())))
+                    s.map(|s| RtValue::String(tishlang_runtime::ArcStr::from(s.as_str())))
                         .unwrap_or(RtValue::Null)
                 } else {
                     RtValue::Null
@@ -853,7 +853,7 @@ mod tish_sync {
             return tish_err("migrate: unknown client handle");
         };
 
-        let dir = std::path::PathBuf::from(dir.as_ref());
+        let dir = std::path::PathBuf::from(dir.as_str());
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
             Err(e) => return tish_err(format!("migrate: read_dir({:?}): {e}", dir)),

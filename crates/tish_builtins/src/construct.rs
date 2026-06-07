@@ -14,18 +14,18 @@ const CONSTRUCT: &str = "__construct";
 /// divergence on the most common promise idiom.
 pub fn construct(callee: &Value, args: &[Value]) -> Value {
     match callee {
-        Value::Function(f) => f(args),
+        Value::Function(f) => f.call(args),
         Value::Object(o) => {
             let b = o.borrow();
             if let Some(Value::Function(ctor)) = b.strings.get(CONSTRUCT) {
                 let c = ctor.clone();
                 drop(b);
-                return c(args);
+                return c.call(args);
             }
             if let Some(Value::Function(call)) = b.strings.get("__call") {
                 let c = call.clone();
                 drop(b);
-                return c(args);
+                return c.call(args);
             }
             Value::Null
         }

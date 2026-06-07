@@ -375,7 +375,7 @@ impl ResponsePrimitive {
                     }
                 } else if let Some(b) = obj_ref.strings.get("body") {
                     match b {
-                        Value::String(s) => ResponseBody::Text(Arc::clone(&s)),
+                        Value::String(s) => ResponseBody::Text(Arc::from(s.as_str())),
                         Value::Array(a) => {
                             let borrow = a.borrow();
                             if !borrow.is_empty()
@@ -438,7 +438,7 @@ impl ResponsePrimitive {
             Value::String(s) => Self {
                 status: default_status,
                 headers: vec![],
-                body: ResponseBody::Text(Arc::clone(s)),
+                body: ResponseBody::Text(Arc::from(s.as_str())),
             },
             _ => Self {
                 status: default_status,
@@ -837,7 +837,7 @@ pub fn serve<F>(args: &[Value], handler: F) -> Value
 where
     F: Fn(&[Value]) -> Value + Send + Sync + 'static,
 {
-    serve_impl_with_factory(args, None, Some(Arc::new(handler)))
+    serve_impl_with_factory(args, None, Some(tishlang_core::native_fn(handler)))
 }
 
 /// `serve(port, { onWorker, workers? })` — each accept thread calls the
@@ -850,12 +850,12 @@ where
 #[cfg(feature = "send-values")]
 pub fn serve_per_worker<FF>(args: &[Value], factory: FF) -> Value
 where
-    FF: Fn(usize) -> Arc<dyn Fn(&[Value]) -> Value + Send + Sync> + Send + Sync + 'static,
+    FF: Fn(usize) -> tishlang_core::NativeFn + Send + Sync + 'static,
 {
     serve_impl_with_factory(
         args,
         Some(Arc::new(factory)
-            as Arc<dyn Fn(usize) -> Arc<dyn Fn(&[Value]) -> Value + Send + Sync> + Send + Sync>),
+            as Arc<dyn Fn(usize) -> tishlang_core::NativeFn + Send + Sync>),
         None,
     )
 }
@@ -875,9 +875,9 @@ where
 fn serve_impl_with_factory(
     args: &[Value],
     factory: Option<
-        Arc<dyn Fn(usize) -> Arc<dyn Fn(&[Value]) -> Value + Send + Sync> + Send + Sync>,
+        Arc<dyn Fn(usize) -> tishlang_core::NativeFn + Send + Sync>,
     >,
-    shared_handler: Option<Arc<dyn Fn(&[Value]) -> Value + Send + Sync>>,
+    shared_handler: Option<tishlang_core::NativeFn>,
 ) -> Value {
     debug_assert!(factory.is_some() ^ shared_handler.is_some());
     let port = match args.first() {
@@ -1004,7 +1004,7 @@ fn serve_impl_with_factory(
         let stop = Arc::clone(&stop);
         let processed = Arc::clone(&processed);
         let max = max_requests;
-        let worker_handler: Arc<dyn Fn(&[Value]) -> Value + Send + Sync> =
+        let worker_handler: tishlang_core::NativeFn =
             if let Some(f) = &factory {
                 f(global_worker_base + idx)
             } else {
@@ -1109,7 +1109,7 @@ where
     let mut count = 0usize;
     while let Ok((req_prim, resp_tx)) = rx.recv() {
         let req_value = req_prim.into_value();
-        let response_value = handler(&[req_value]);
+        let response_value = handler.call(&[req_value]);
         let resp_prim = ResponsePrimitive::from_value(&response_value);
         let _ = resp_tx.send(resp_prim);
 
@@ -1138,7 +1138,7 @@ where
 #[cfg(feature = "send-values")]
 fn worker_loop_direct(
     listener: std::net::TcpListener,
-    handler: Arc<dyn Fn(&[Value]) -> Value + Send + Sync>,
+    handler: tishlang_core::NativeFn,
     stop: Arc<AtomicBool>,
     processed: Arc<AtomicUsize>,
     max_requests: Option<usize>,
@@ -1163,7 +1163,7 @@ fn worker_loop_direct(
                 } else {
                     let req_prim = RequestPrimitive::from_tiny_http(&mut request);
                     let req_value = req_prim.into_value();
-                    let response_value = handler(&[req_value]);
+                    let response_value = handler.call(&[req_value]);
                     let resp_prim = ResponsePrimitive::from_value(&response_value);
                     respond_from_primitive(request, resp_prim);
                 }

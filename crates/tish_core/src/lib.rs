@@ -15,5 +15,6 @@ pub use console_style::{format_value_styled, format_values_for_console, use_cons
 pub use json::{json_parse, json_stringify, json_stringify_into};
 pub use shape::{ShapeId, DICT_SHAPE, EMPTY_SHAPE};
 pub use uri::{percent_decode, percent_encode};
+pub use arcstr::ArcStr;
 pub use value::*;
 pub use vmref::{VmReadGuard, VmRef, VmWriteGuard};

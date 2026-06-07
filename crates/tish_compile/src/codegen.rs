@@ -736,6 +736,14 @@ struct Codegen {
     /// free `fn f_native(f64,..)->f64` (all params `: number`, returns `number`, native-safe
     /// body). Direct calls to these route to the native fn, bypassing the boxed `value_call`.
     native_fns: std::collections::HashSet<String>,
+    /// Names of `number`-typed locals demoted to a boxed `Value` because some reassignment can
+    /// store a non-number — e.g. `let s = 0; s = s + arr[i]` where `arr` is a boxed Value: `+` is
+    /// JS string concat, so `s` may become a `String`. Lowering `s` to a native `f64` would panic
+    /// at the store's `from_value_expr(F64)` coercion (`_ => panic!("expected number")`). Computed
+    /// once in `emit_program` (after type aliases + `native_fns`), consulted at `VarDecl` to force
+    /// `RustType::Value`. This is the rust-AOT analogue of the VM array-JIT bailing to the
+    /// interpreter on a non-numeric element. See `collect_demoted_numeric_locals`.
+    demoted_numeric_locals: std::collections::HashSet<String>,
     /// Scopes of names whose Rust binding is actually `Rc<RefCell<_>>` (emitted at VarDecl).
     /// `refcell_wrapped_vars` alone is insufficient: it is set by prepasses before decl may run.
     rc_cell_storage_scopes: Vec<std::collections::HashSet<String>>,
@@ -788,6 +796,7 @@ impl Codegen {
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
             native_fns: std::collections::HashSet::new(),
+            demoted_numeric_locals: std::collections::HashSet::new(),
             rc_cell_storage_scopes: vec![std::collections::HashSet::new()],
             usage_analyzer: None,
             type_context: TypeContext::new(),
@@ -1050,7 +1059,7 @@ impl Codegen {
                     // latter dispatches into `http_serve_per_worker`, which
                     // calls onWorker once per accept thread to build that
                     // thread's handler.
-                    "serve" => Some("Value::native(|args: &[Value]| { let handler = args.get(1).cloned().unwrap_or(Value::Null); match handler { Value::Function(f) => tish_http_serve(args, move |req_args| f(req_args)), Value::Object(ref opts) => { let factory = opts.borrow().strings.get(\"onWorker\").cloned().unwrap_or(Value::Null); tishlang_runtime::http_serve_per_worker(args, factory) }, _ => Value::Null } })"),
+                    "serve" => Some("Value::native(|args: &[Value]| { let handler = args.get(1).cloned().unwrap_or(Value::Null); match handler { Value::Function(f) => tish_http_serve(args, move |req_args| f.call(req_args)), Value::Object(ref opts) => { let factory = opts.borrow().strings.get(\"onWorker\").cloned().unwrap_or(Value::Null); tishlang_runtime::http_serve_per_worker(args, factory) }, _ => Value::Null } })"),
                     "Promise" => Some("tish_promise_object()"),
                     "Symbol" => Some("tish_symbol_object()"),
                     _ => None,
@@ -1243,6 +1252,24 @@ impl Codegen {
         }
     }
 
+    /// Emit a valid Rust `f64` expression for `n`, handling non-finite values. Constant-folding can
+    /// produce Infinity/NaN (e.g. `5/0` → `f64::INFINITY`, `0/0` → `f64::NAN`), which the plain
+    /// `format!("{}_f64", n)` would render as the INVALID Rust `inf_f64` / `NaN_f64`. Finite values
+    /// keep the literal `{n}_f64` form.
+    fn f64_lit(n: f64) -> String {
+        if n.is_nan() {
+            "f64::NAN".to_string()
+        } else if n.is_infinite() {
+            if n > 0.0 {
+                "f64::INFINITY".to_string()
+            } else {
+                "f64::NEG_INFINITY".to_string()
+            }
+        } else {
+            format!("{}_f64", n)
+        }
+    }
+
     /// Generate code for a bitwise binary operation.
     fn emit_bitwise_binop(l: &str, r: &str, op: &str) -> String {
         format!(
@@ -1402,6 +1429,12 @@ impl Codegen {
                 self.writeln("");
             }
         }
+        // Soundness pass — must run after type aliases + `native_fns` are known (both feed the
+        // native-type oracle): find `number`-typed locals a reassignment can turn non-numeric so
+        // `VarDecl` lowers them as boxed `Value` rather than native `f64` (else the store coerces
+        // and panics on a JS string-concat result like `s = s + arr[i]`). See
+        // `collect_demoted_numeric_locals` / `demoted_numeric_locals`.
+        self.demoted_numeric_locals = self.collect_demoted_numeric_locals(&program.statements);
         if self.is_async {
             self.writeln("async fn run() -> Result<(), Box<dyn std::error::Error>> {");
         } else if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
@@ -1594,7 +1627,7 @@ impl Codegen {
             self.writeln("match handler {");
             self.indent += 1;
             self.writeln(
-                "Value::Function(f) => tish_http_serve(args, move |req_args| f(req_args)),",
+                "Value::Function(f) => tish_http_serve(args, move |req_args| f.call(req_args)),",
             );
             self.writeln("Value::Object(ref opts) => {");
             self.indent += 1;
@@ -1863,12 +1896,21 @@ impl Codegen {
                 // user-declared `type` aliases so a `let x: World = ...`
                 // resolves to `RustType::Named { name: "World", fields }`
                 // and we can emit a struct move instead of a Value box.
-                let rust_type = type_ann
+                let mut rust_type = type_ann
                     .as_ref()
                     .map(|t| {
                         crate::types::RustType::from_annotation_with_aliases(t, &self.type_aliases)
                     })
                     .unwrap_or(RustType::Value);
+
+                // Soundness: a `number` local that a reassignment can turn non-numeric (e.g.
+                // `s = s + arr[i]`, JS string concat) must stay a boxed `Value` — a native-f64
+                // store would panic at the `from_value_expr(F64)` coercion. See
+                // `demoted_numeric_locals`.
+                if rust_type == RustType::F64 && self.demoted_numeric_locals.contains(name.as_ref())
+                {
+                    rust_type = RustType::Value;
+                }
 
                 // Track the variable type
                 self.type_context.define(name.as_ref(), rust_type.clone());
@@ -2012,7 +2054,7 @@ impl Codegen {
                 self.writeln("for _ch in _s.chars() {");
                 self.indent += 1;
                 self.writeln(&format!(
-                    "let {} = Value::String(std::sync::Arc::from(_ch.to_string()));",
+                    "let {} = Value::String(tishlang_runtime::ArcStr::from(_ch.to_string()));",
                     Self::escape_ident(name.as_ref())
                 ));
                 self.emit_statement(body)?;
@@ -2863,7 +2905,7 @@ impl Codegen {
     fn emit_expr(&mut self, expr: &Expr) -> Result<String, CompileError> {
         Ok(match expr {
             Expr::Literal { value, .. } => match value {
-                Literal::Number(n) => format!("Value::Number({}_f64)", n),
+                Literal::Number(n) => format!("Value::Number({})", Self::f64_lit(*n)),
                 Literal::String(s) => format!("Value::String({:?}.into())", s.as_ref()),
                 Literal::Bool(b) => format!("Value::Bool({})", b),
                 Literal::Null => "Value::Null".to_string(),
@@ -5395,7 +5437,7 @@ impl Codegen {
         if let Expr::Literal { value, .. } = expr {
             match (target_type, value) {
                 (RustType::F64, Literal::Number(n)) => {
-                    return Ok(format!("{}_f64", n));
+                    return Ok(Self::f64_lit(*n));
                 }
                 (RustType::String, Literal::String(s)) => {
                     return Ok(format!("{:?}.to_string()", s.as_ref()));
@@ -5507,6 +5549,421 @@ impl Codegen {
     // ───────────────────────── M5: native monomorphic functions ─────────────────────────
     fn ann_is_number(ann: &TypeAnnotation) -> bool {
         RustType::from_annotation(ann) == RustType::F64
+    }
+
+    // ── Soundness: demote `number` locals that a reassignment can turn non-numeric ──────────────
+    //
+    // `let s = 0` is inferred `number` → lowered to a native `f64`, and a reassignment stores into
+    // it via `s = match &<rhs> { Value::Number(n) => *n, _ => panic!("expected number") }`. That
+    // coercion PANICS when `<rhs>` is not a number — which `s = s + arr[i]` produces whenever
+    // `arr[i]` is a String (JS `+` is string concat). Node, the interpreter, and the VM all yield
+    // a string there (the VM array-JIT bails to the interpreter on a non-numeric element). The
+    // fix: keep such a local a boxed `Value`, so the boxed `ops::add` — which concatenates —
+    // flows through unchanged.
+    //
+    // A reassignment is SAFE iff its RHS lowers to a native `f64`, which is exactly what
+    // `emit_typed_expr` decides. `expr_native_type` is a read-only mirror of that decision and is
+    // deliberately conservative: any form it does not model → `Value` → demote (sound; at worst an
+    // unnecessary box). A fixpoint propagates demotions through chains (`y = y + s` once `s` is
+    // demoted). The map is name-flat across the whole program (a name demoted in one function is
+    // demoted in all) — still sound, and harmless to the perf gauntlet, where each kernel is its
+    // own program with unique accumulator names.
+    fn collect_demoted_numeric_locals(&self, stmts: &[Statement]) -> HashSet<String> {
+        // 1. Flat env: every annotated local/param name → its native `RustType`.
+        let mut env: HashMap<String, RustType> = HashMap::new();
+        Self::collect_annotated_types(stmts, &self.type_aliases, &mut env);
+        // 2. Every reassignment `(name, rhs)` anywhere in the program (incl. nested exprs/closures).
+        let mut reassigns: Vec<(String, &Expr)> = Vec::new();
+        Self::collect_reassignments_stmts(stmts, &mut reassigns);
+        // 3. Fixpoint: demote a `number` local whose any reassignment RHS isn't native `f64`.
+        let mut demoted: HashSet<String> = HashSet::new();
+        loop {
+            let mut changed = false;
+            for (name, rhs) in &reassigns {
+                if demoted.contains(name) {
+                    continue;
+                }
+                if env.get(name) == Some(&RustType::F64)
+                    && self.expr_native_type(rhs, &env) != RustType::F64
+                {
+                    demoted.insert(name.clone());
+                    env.insert(name.clone(), RustType::Value);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        demoted
+    }
+
+    /// Record every annotated `VarDecl`/param name → its native `RustType`, recursing through all
+    /// nested statements (loops, ifs, blocks, switch/try, function bodies). Flat; last write wins.
+    fn collect_annotated_types(
+        stmts: &[Statement],
+        aliases: &HashMap<String, RustType>,
+        env: &mut HashMap<String, RustType>,
+    ) {
+        for s in stmts {
+            match s {
+                Statement::VarDecl {
+                    name,
+                    type_ann: Some(ann),
+                    ..
+                } => {
+                    env.insert(
+                        name.to_string(),
+                        RustType::from_annotation_with_aliases(ann, aliases),
+                    );
+                }
+                Statement::Block { statements, .. } => {
+                    Self::collect_annotated_types(statements, aliases, env)
+                }
+                Statement::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::collect_annotated_types(std::slice::from_ref(then_branch), aliases, env);
+                    if let Some(e) = else_branch {
+                        Self::collect_annotated_types(std::slice::from_ref(e), aliases, env);
+                    }
+                }
+                Statement::While { body, .. }
+                | Statement::DoWhile { body, .. }
+                | Statement::ForOf { body, .. } => {
+                    Self::collect_annotated_types(std::slice::from_ref(body), aliases, env)
+                }
+                Statement::For { init, body, .. } => {
+                    if let Some(i) = init {
+                        Self::collect_annotated_types(std::slice::from_ref(i), aliases, env);
+                    }
+                    Self::collect_annotated_types(std::slice::from_ref(body), aliases, env);
+                }
+                Statement::FunDecl { params, body, .. } => {
+                    for p in params {
+                        if let FunParam::Simple(tp) = p {
+                            if let Some(ann) = &tp.type_ann {
+                                env.insert(
+                                    tp.name.to_string(),
+                                    RustType::from_annotation_with_aliases(ann, aliases),
+                                );
+                            }
+                        }
+                    }
+                    Self::collect_annotated_types(std::slice::from_ref(body), aliases, env);
+                }
+                Statement::Switch {
+                    cases,
+                    default_body,
+                    ..
+                } => {
+                    for (_, body) in cases {
+                        Self::collect_annotated_types(body, aliases, env);
+                    }
+                    if let Some(b) = default_body {
+                        Self::collect_annotated_types(b, aliases, env);
+                    }
+                }
+                Statement::Try {
+                    body,
+                    catch_body,
+                    finally_body,
+                    ..
+                } => {
+                    Self::collect_annotated_types(std::slice::from_ref(body), aliases, env);
+                    if let Some(b) = catch_body {
+                        Self::collect_annotated_types(std::slice::from_ref(b), aliases, env);
+                    }
+                    if let Some(b) = finally_body {
+                        Self::collect_annotated_types(std::slice::from_ref(b), aliases, env);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_reassignments_stmts<'a>(stmts: &'a [Statement], out: &mut Vec<(String, &'a Expr)>) {
+        for s in stmts {
+            Self::collect_reassignments_stmt(s, out);
+        }
+    }
+
+    /// Collect every `(name, rhs)` reassignment (`=`, compound `+=`, logical `||=`) reachable from
+    /// `s` — descending through nested statements and expressions (including closures).
+    fn collect_reassignments_stmt<'a>(s: &'a Statement, out: &mut Vec<(String, &'a Expr)>) {
+        match s {
+            Statement::Block { statements, .. } => Self::collect_reassignments_stmts(statements, out),
+            Statement::VarDecl { init: Some(e), .. } => Self::collect_reassignments_expr(e, out),
+            Statement::VarDeclDestructure { init, .. } => {
+                Self::collect_reassignments_expr(init, out)
+            }
+            Statement::ExprStmt { expr, .. } => Self::collect_reassignments_expr(expr, out),
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_reassignments_expr(cond, out);
+                Self::collect_reassignments_stmt(then_branch, out);
+                if let Some(e) = else_branch {
+                    Self::collect_reassignments_stmt(e, out);
+                }
+            }
+            Statement::While { cond, body, .. } => {
+                Self::collect_reassignments_expr(cond, out);
+                Self::collect_reassignments_stmt(body, out);
+            }
+            Statement::DoWhile { body, cond, .. } => {
+                Self::collect_reassignments_stmt(body, out);
+                Self::collect_reassignments_expr(cond, out);
+            }
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
+                if let Some(i) = init {
+                    Self::collect_reassignments_stmt(i, out);
+                }
+                if let Some(c) = cond {
+                    Self::collect_reassignments_expr(c, out);
+                }
+                if let Some(u) = update {
+                    Self::collect_reassignments_expr(u, out);
+                }
+                Self::collect_reassignments_stmt(body, out);
+            }
+            Statement::ForOf { iterable, body, .. } => {
+                Self::collect_reassignments_expr(iterable, out);
+                Self::collect_reassignments_stmt(body, out);
+            }
+            Statement::Return { value: Some(e), .. } => Self::collect_reassignments_expr(e, out),
+            Statement::Throw { value, .. } => Self::collect_reassignments_expr(value, out),
+            Statement::FunDecl { body, .. } => Self::collect_reassignments_stmt(body, out),
+            Statement::Switch {
+                expr,
+                cases,
+                default_body,
+                ..
+            } => {
+                Self::collect_reassignments_expr(expr, out);
+                for (g, body) in cases {
+                    if let Some(g) = g {
+                        Self::collect_reassignments_expr(g, out);
+                    }
+                    Self::collect_reassignments_stmts(body, out);
+                }
+                if let Some(b) = default_body {
+                    Self::collect_reassignments_stmts(b, out);
+                }
+            }
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
+                Self::collect_reassignments_stmt(body, out);
+                if let Some(b) = catch_body {
+                    Self::collect_reassignments_stmt(b, out);
+                }
+                if let Some(b) = finally_body {
+                    Self::collect_reassignments_stmt(b, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_reassignments_expr<'a>(e: &'a Expr, out: &mut Vec<(String, &'a Expr)>) {
+        match e {
+            Expr::Assign { name, value, .. }
+            | Expr::CompoundAssign { name, value, .. }
+            | Expr::LogicalAssign { name, value, .. } => {
+                out.push((name.to_string(), value.as_ref()));
+                Self::collect_reassignments_expr(value, out);
+            }
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                Self::collect_reassignments_expr(left, out);
+                Self::collect_reassignments_expr(right, out);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::TypeOf { operand, .. }
+            | Expr::Await { operand, .. } => Self::collect_reassignments_expr(operand, out),
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                Self::collect_reassignments_expr(callee, out);
+                for a in args {
+                    match a {
+                        CallArg::Expr(x) | CallArg::Spread(x) => {
+                            Self::collect_reassignments_expr(x, out)
+                        }
+                    }
+                }
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::collect_reassignments_expr(object, out);
+                if let MemberProp::Expr(p) = prop {
+                    Self::collect_reassignments_expr(p, out);
+                }
+            }
+            Expr::Index { object, index, .. } => {
+                Self::collect_reassignments_expr(object, out);
+                Self::collect_reassignments_expr(index, out);
+            }
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_reassignments_expr(cond, out);
+                Self::collect_reassignments_expr(then_branch, out);
+                Self::collect_reassignments_expr(else_branch, out);
+            }
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(x) | ArrayElement::Spread(x) => {
+                            Self::collect_reassignments_expr(x, out)
+                        }
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for p in props {
+                    match p {
+                        ObjectProp::KeyValue(_, v) => Self::collect_reassignments_expr(v, out),
+                        ObjectProp::Spread(x) => Self::collect_reassignments_expr(x, out),
+                    }
+                }
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                Self::collect_reassignments_expr(object, out);
+                Self::collect_reassignments_expr(value, out);
+            }
+            Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            } => {
+                Self::collect_reassignments_expr(object, out);
+                Self::collect_reassignments_expr(index, out);
+                Self::collect_reassignments_expr(value, out);
+            }
+            Expr::TemplateLiteral { exprs, .. } => {
+                for x in exprs {
+                    Self::collect_reassignments_expr(x, out);
+                }
+            }
+            Expr::ArrowFunction { body, .. } => match body {
+                ArrowBody::Expr(x) => Self::collect_reassignments_expr(x, out),
+                ArrowBody::Block(b) => Self::collect_reassignments_stmt(b, out),
+            },
+            _ => {}
+        }
+    }
+
+    /// Read-only mirror of `emit_typed_expr`'s native-type decision (no code generated), over a
+    /// flat `name → RustType` env. Returns `RustType::F64` only for forms that provably lower to a
+    /// native `f64`; everything else → `RustType::Value`. Conservative by construction: it never
+    /// claims `F64` where `emit_typed_expr` would box, so a numeric local is never wrongly kept
+    /// native (which would reintroduce the coercion panic).
+    fn expr_native_type(&self, e: &Expr, env: &HashMap<String, RustType>) -> RustType {
+        match e {
+            Expr::Literal { value, .. } => match value {
+                Literal::Number(_) => RustType::F64,
+                Literal::String(_) => RustType::String,
+                Literal::Bool(_) => RustType::Bool,
+                Literal::Null => RustType::Value,
+            },
+            Expr::Ident { name, .. } => env
+                .get(name.as_ref())
+                .filter(|t| t.is_native())
+                .cloned()
+                .unwrap_or(RustType::Value),
+            Expr::Binary {
+                left, op, right, ..
+            } => {
+                let lt = self.expr_native_type(left, env);
+                let rt = self.expr_native_type(right, env);
+                RustType::result_type_of_binop(*op, &lt, &rt).unwrap_or(RustType::Value)
+            }
+            // `vec[i]` where `vec` is a `number[]` (Vec<f64>) → the element type. A `Vec<f64>`
+            // can only hold numbers, so this never feeds a string into the accumulator.
+            Expr::Index {
+                object,
+                optional: false,
+                ..
+            } => {
+                if let Expr::Ident { name, .. } = object.as_ref() {
+                    if let Some(RustType::Vec(inner)) = env.get(name.as_ref()) {
+                        return (**inner).clone();
+                    }
+                }
+                RustType::Value
+            }
+            // `o.field` where `o` is a native struct local and `field` is a native field.
+            Expr::Member {
+                object,
+                prop: MemberProp::Name { name: prop_name, .. },
+                optional: false,
+                ..
+            } => {
+                if let Expr::Ident { name: var_name, .. } = object.as_ref() {
+                    if let Some(RustType::Named { fields, .. }) = env.get(var_name.as_ref()) {
+                        if let Some((_, field_ty)) =
+                            fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                        {
+                            if field_ty.is_native() {
+                                return field_ty.clone();
+                            }
+                        }
+                    }
+                }
+                RustType::Value
+            }
+            Expr::Call { callee, args, .. } => {
+                // M5 native fn (`fn f_native(..) -> f64`); requires all-positional args.
+                if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                    if self.native_fns.contains(fname.as_ref())
+                        && args.iter().all(|a| matches!(a, CallArg::Expr(_)))
+                    {
+                        return RustType::F64;
+                    }
+                }
+                // Single-arg `Math.<intrinsic>(x)` lowered to a direct `f64` method → number.
+                if let [CallArg::Expr(_)] = args.as_slice() {
+                    if let Expr::Member {
+                        object,
+                        prop: MemberProp::Name { name: method, .. },
+                        ..
+                    } = callee.as_ref()
+                    {
+                        if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                            && matches!(
+                                method.as_ref(),
+                                "sqrt" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil" | "exp"
+                                    | "trunc" | "log"
+                            )
+                        {
+                            return RustType::F64;
+                        }
+                    }
+                }
+                RustType::Value
+            }
+            // Unary, Conditional, etc. are not modelled by `emit_typed_expr` (it boxes them), so a
+            // store from one already coerces; treat as `Value` to match (→ demote if it feeds an
+            // accumulator). Sound and consistent.
+            _ => RustType::Value,
+        }
     }
 
     /// Names of top-level fns eligible for a parallel native `fn f_native(f64,..)->f64`:
@@ -5792,7 +6249,7 @@ impl Codegen {
         match expr {
             // ── literals ─────────────────────────────────────────────────────────
             Expr::Literal { value, .. } => match value {
-                Literal::Number(n) => Ok((format!("{}_f64", n), RustType::F64)),
+                Literal::Number(n) => Ok((Self::f64_lit(*n), RustType::F64)),
                 Literal::String(s) => {
                     Ok((format!("{:?}.to_string()", s.as_ref()), RustType::String))
                 }

@@ -34,7 +34,7 @@ impl Constant {
     pub fn to_value(&self) -> Value {
         match self {
             Constant::Number(n) => Value::Number(*n),
-            Constant::String(s) => Value::String(Arc::clone(s)),
+            Constant::String(s) => Value::String(tishlang_core::ArcStr::from(s.as_ref())),
             Constant::Bool(b) => Value::Bool(*b),
             Constant::Null => Value::Null,
             Constant::Closure(_) => {

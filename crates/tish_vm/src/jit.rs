@@ -23,7 +23,7 @@ use std::sync::{Mutex, OnceLock};
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::types;
 use cranelift::prelude::{
-    AbiParam, Block, FloatCC, FunctionBuilder, FunctionBuilderContext, InstBuilder,
+    AbiParam, Block, FloatCC, FunctionBuilder, FunctionBuilderContext, InstBuilder, IntCC, MemFlags,
     Value as ClifValue, Variable,
 };
 use cranelift_jit::{JITBuilder, JITModule};
@@ -43,6 +43,35 @@ pub struct NumericFn {
     /// boxes the returned f64 as `Value::Bool` (1.0→true) instead of
     /// `Value::Number`. Needed for callbacks like `x => x === c` used by `map`.
     result_bool: bool,
+    /// Array-param bitmask (bit k set ⇒ param k is an ARRAY, read as `arr[i]`). `0` ⇒ the ordinary
+    /// pure-numeric register-`f64` ABI (the [`NumericFn::call`] path, unchanged). Nonzero ⇒ the
+    /// array-mode uniform 3-pointer ABI (the [`NumericFn::call_arrays`] path). Kept as a `u8` (arity
+    /// ≤ 8) so `NumericFn` stays `Copy`. `TISH_JIT_ARRAYS`-gated; `0` in every default build.
+    array_param_mask: u8,
+}
+
+/// A flat numeric array handed to an array-mode JIT function: a raw `f64` slice (`ptr`, `len`).
+/// Built by the VM wrapper from a `NumberArray` (zero-copy) or by extracting an all-numeric
+/// `Array` into a scratch `Vec<f64>` (the wrapper only builds one when every element is a
+/// `Value::Number` — non-numeric arrays never reach the JIT, so the slice is always valid `f64`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ArrayHandle {
+    pub ptr: *const f64,
+    pub len: usize,
+}
+
+/// Array-element reads inside JIT'd loops (`arr[i]`/`arr[const]`). **Default ON**; `TISH_JIT_ARRAYS=0`
+/// disables it (escape hatch). Cached in a `OnceLock` — NEVER read the env var on a hot path (see the
+/// frame-VM regression note in docs/perf.md). Purely ADDITIVE: only numeric-array-reduction functions
+/// are array-compiled, and the VM wrapper bails to the interpreter for any non-numeric element,
+/// `NumberArray`, or out-of-bounds deopt — so a non-fast case is always correct, just interpreted.
+/// Validated: full cross-backend suite 17/0 both ON and OFF; vm(JIT) ≡ interp ≡ node on
+/// sum/dot/max/const-index/OOB/non-numeric/float fixtures; 38× on `sumArr`-style reductions.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn jit_arrays_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("TISH_JIT_ARRAYS").map(|v| v != "0").unwrap_or(true))
 }
 
 // SAFETY: `ptr` references immutable executable code in a module that is never
@@ -111,6 +140,40 @@ impl NumericFn {
                 _ => f64::NAN,
             }
         }
+    }
+
+    /// Bit k set ⇒ param k is an array param (read via `arr[i]`). `0` ⇒ pure-numeric (use [`call`]).
+    #[inline]
+    pub fn array_param_mask(&self) -> u8 {
+        self.array_param_mask
+    }
+
+    /// Call an array-mode function (`array_param_mask != 0`). `numeric` holds the f64 values for the
+    /// numeric params in numeric-param order; `arrays` the [`ArrayHandle`]s for the array params in
+    /// array-param order. Returns `(result, deopt)` — when `deopt` is true an out-of-bounds access
+    /// was hit and the JIT bailed, so the caller MUST discard `result` and re-run the interpreter
+    /// (OOB reads return `Value::Null` in the VM, whose per-operator coercion the JIT can't replicate).
+    #[inline]
+    pub fn call_arrays(&self, numeric: &[f64], arrays: &[ArrayHandle]) -> (f64, bool) {
+        let mut deopt: u8 = 0;
+        // ONE uniform signature for every array-mode fn: (numeric*, handles*, deopt*) -> f64. Empty
+        // slices pass a dangling-but-aligned non-null ptr (the body only loads indices it uses).
+        let num_ptr = if numeric.is_empty() {
+            std::ptr::NonNull::<f64>::dangling().as_ptr() as *const f64
+        } else {
+            numeric.as_ptr()
+        };
+        let arr_ptr = if arrays.is_empty() {
+            std::ptr::NonNull::<ArrayHandle>::dangling().as_ptr() as *const ArrayHandle
+        } else {
+            arrays.as_ptr()
+        };
+        let res = unsafe {
+            let f: extern "C" fn(*const f64, *const ArrayHandle, *mut u8) -> f64 =
+                std::mem::transmute(self.ptr);
+            f(num_ptr, arr_ptr, &mut deopt as *mut u8)
+        };
+        (res, deopt != 0)
     }
 }
 
@@ -197,6 +260,20 @@ fn fcmp_f64(bcx: &mut FunctionBuilder, cc: FloatCC, a: ClifValue, b: ClifValue) 
 fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     let arity = chunk.param_count as usize;
 
+    // Array-mode (`TISH_JIT_ARRAYS`): if a param is used purely as `arr[i]`/`arr[const]`, compile the
+    // 3-pointer array ABI instead of the register-`f64` ABI. mask 0 ⇒ ordinary numeric path below.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let array_mask = if jit_arrays_enabled() {
+            classify_params(chunk, arity)
+        } else {
+            0
+        };
+        if array_mask != 0 {
+            return compile_chunk_arrays(g, chunk, arity, array_mask);
+        }
+    }
+
     let mut sig = g.module.make_signature();
     for _ in 0..arity {
         sig.params.push(AbiParam::new(types::F64));
@@ -219,7 +296,8 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     ctx.func.signature = sig.clone();
     let self_ref = g.module.declare_func_in_func(id, &mut ctx.func);
     let mut fbctx = FunctionBuilderContext::new();
-    let result_bool = match build_body_cfg(&mut ctx.func, &mut fbctx, chunk, arity, Some(self_ref)) {
+    let result_bool = match build_body_cfg(&mut ctx.func, &mut fbctx, chunk, arity, Some(self_ref), 0)
+    {
         Some(b) => b,
         None => {
             g.module.clear_context(&mut ctx);
@@ -250,6 +328,124 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         ptr: ptr as usize,
         arity: arity as u8,
         result_bool,
+        array_param_mask: 0,
+    })
+}
+
+/// Classify each param slot of an array-mode candidate. Returns a bitmask: **bit k set ⇒ param k is
+/// an ARRAY** used only as `arr[i]` / `arr[const]`. Returns `0` when there are no array params OR the
+/// function is ineligible for array mode (a param used both as an array and as a number, a `GetIndex`
+/// the peephole can't consume, etc.) — the caller then takes the ordinary numeric path, which itself
+/// bails on `GetIndex`, so a `0` here is always safe (never a miscompile, just no array-JIT).
+#[cfg(not(target_arch = "wasm32"))]
+fn classify_params(chunk: &Chunk, arity: usize) -> u8 {
+    if arity == 0 || arity > 8 || (chunk.num_slots as usize) == 0 {
+        return 0;
+    }
+    let code = &chunk.code;
+    let mut used_numeric = [false; 8];
+    let mut used_array = [false; 8];
+    let mut ip = 0usize;
+    while ip < code.len() {
+        let op = match Opcode::from_u8(code[ip]) {
+            Some(o) => o,
+            None => return 0,
+        };
+        let size = match op_size(op) {
+            Some(s) => s,
+            None => return 0, // an opcode the array CFG can't handle ⇒ ineligible
+        };
+        match op {
+            Opcode::LoadLocal => {
+                let slot = match peek_u16(code, ip + 1) {
+                    Some(s) => s as usize,
+                    None => return 0,
+                };
+                // Peephole: `LoadLocal(arr) ; (LoadLocal|LoadConst) ; GetIndex` ⇒ array access of arr.
+                let idx_then_getindex = matches!(
+                    (
+                        code.get(ip + 3).copied().and_then(Opcode::from_u8),
+                        code.get(ip + 6).copied().and_then(Opcode::from_u8),
+                    ),
+                    (Some(Opcode::LoadLocal), Some(Opcode::GetIndex))
+                        | (Some(Opcode::LoadConst), Some(Opcode::GetIndex))
+                );
+                if idx_then_getindex && slot < arity {
+                    used_array[slot] = true;
+                    ip += 7; // consume LoadLocal(arr) + index op + GetIndex
+                    continue;
+                } else if slot < arity {
+                    used_numeric[slot] = true;
+                }
+            }
+            Opcode::StoreLocal => {
+                let slot = match peek_u16(code, ip + 1) {
+                    Some(s) => s as usize,
+                    None => return 0,
+                };
+                if slot < arity {
+                    used_numeric[slot] = true; // a written param is numeric-shaped (can't be our array)
+                }
+            }
+            // Any `GetIndex` not already consumed by the peephole above ⇒ an index shape we don't
+            // handle (e.g. `arr[i+1]`, `arr[brr[i]]`) ⇒ ineligible.
+            Opcode::GetIndex => return 0,
+            _ => {}
+        }
+        ip += size;
+    }
+    let mut mask = 0u8;
+    for k in 0..arity {
+        if used_array[k] {
+            if used_numeric[k] {
+                return 0; // used as BOTH array and number ⇒ ambiguous ⇒ bail
+            }
+            mask |= 1u8 << k;
+        }
+    }
+    mask
+}
+
+/// Compile an array-mode function: numeric params + array params (read as `arr[i]`). Uses ONE uniform
+/// ABI for every such function — `extern "C" fn(numeric: *const f64, handles: *const ArrayHandle,
+/// deopt: *mut u8) -> f64` — so there is a single transmute (no per-arity explosion). Out-of-bounds
+/// reads set `*deopt` and bail (the caller re-runs the interpreter); non-numeric arrays never reach
+/// here (the VM wrapper only calls this when every element is a `Value::Number`).
+#[cfg(not(target_arch = "wasm32"))]
+fn compile_chunk_arrays(g: &mut JitGlobal, chunk: &Chunk, arity: usize, mask: u8) -> Option<NumericFn> {
+    let ptr_ty = g.module.target_config().pointer_type();
+    let mut sig = g.module.make_signature();
+    sig.params.push(AbiParam::new(ptr_ty)); // numeric_ptr
+    sig.params.push(AbiParam::new(ptr_ty)); // handles_ptr
+    sig.params.push(AbiParam::new(ptr_ty)); // deopt_ptr
+    sig.returns.push(AbiParam::new(types::F64));
+
+    let name = format!("tish_arr_{}", g.counter);
+    g.counter += 1;
+    let id = g.module.declare_function(&name, Linkage::Export, &sig).ok()?;
+
+    let mut ctx = g.module.make_context();
+    ctx.func.signature = sig.clone();
+    let mut fbctx = FunctionBuilderContext::new();
+    // No self-call in array mode (recursive call would need the array signature) → pass None.
+    if build_body_cfg(&mut ctx.func, &mut fbctx, chunk, arity, None, mask).is_none() {
+        g.module.clear_context(&mut ctx);
+        return None;
+    }
+    if g.module.define_function(id, &mut ctx).is_err() {
+        g.module.clear_context(&mut ctx);
+        return None;
+    }
+    g.module.clear_context(&mut ctx);
+    if g.module.finalize_definitions().is_err() {
+        return None;
+    }
+    let ptr = g.module.get_finalized_function(id);
+    Some(NumericFn {
+        ptr: ptr as usize,
+        arity: arity as u8,
+        result_bool: false,
+        array_param_mask: mask,
     })
 }
 
@@ -418,7 +614,7 @@ fn falsy_flag(bcx: &mut FunctionBuilder, cond: ClifValue) -> ClifValue {
 fn op_size(op: Opcode) -> Option<usize> {
     use Opcode::*;
     Some(match op {
-        Nop | Pop | Dup | Return | LoopVarsEnd | EnterBlock | ExitBlock => 1,
+        Nop | Pop | Dup | Return | LoopVarsEnd | EnterBlock | ExitBlock | GetIndex => 1,
         LoadLocal | StoreLocal | LoadConst | BinOp | UnaryOp | Jump | JumpIfFalse | JumpBack
         | LoopVarsBegin | SelfCall => 3,
         _ => return None,
@@ -449,6 +645,10 @@ fn build_body_cfg(
     chunk: &Chunk,
     arity: usize,
     self_ref: Option<cranelift::codegen::ir::FuncRef>,
+    // Array-mode bitmask (bit k ⇒ param k is an array). `0` ⇒ ordinary register-`f64` ABI (every
+    // existing caller passes 0, so that path is byte-identical). Nonzero ⇒ the 3-pointer array ABI:
+    // params are `[numeric_ptr, handles_ptr, deopt_ptr]` and `arr[i]` lowers to a bounds-checked load.
+    array_mask: u8,
 ) -> Option<bool> {
     let code = &chunk.code;
     let num_slots = chunk.num_slots as usize;
@@ -512,15 +712,49 @@ fn build_body_cfg(
     bcx.switch_to_block(entry);
     let params: Vec<ClifValue> = bcx.block_params(entry).to_vec();
 
-    // 2. A Variable per slot, all defined at entry (params, else 0.0) so every path defines them.
+    // 2. A Variable per slot, all defined at entry so every path defines them.
     let vars: Vec<Variable> = (0..num_slots).map(|_| bcx.declare_var(types::F64)).collect();
-    for (i, &v) in vars.iter().enumerate() {
-        let init = if i < arity {
-            params[i]
-        } else {
-            bcx.ins().f64const(0.0)
-        };
-        bcx.def_var(v, init);
+    // Array-mode state: per-array-param `(ptr,len)` loaded from the handles array + the deopt pad.
+    let mut array_slots: HashMap<usize, (ClifValue, ClifValue)> = HashMap::new();
+    let mut deopt_block: Option<Block> = None;
+    let mut deopt_ptr: Option<ClifValue> = None;
+    if array_mask != 0 {
+        // ABI params: [numeric_ptr, handles_ptr, deopt_ptr]. Numeric params load from numeric_ptr in
+        // numeric-param order; array params load (ptr,len) from handles_ptr in array-param order.
+        let numeric_ptr = *params.first()?;
+        let handles_ptr = *params.get(1)?;
+        deopt_ptr = Some(*params.get(2)?);
+        let mut numeric_i = 0i32;
+        let mut array_i = 0i64;
+        for slot in 0..num_slots {
+            let init = if slot < arity && (array_mask >> slot) & 1 == 1 {
+                let base = bcx.ins().iadd_imm(handles_ptr, array_i * 16);
+                let p = bcx.ins().load(types::I64, MemFlags::new(), base, 0);
+                let l = bcx.ins().load(types::I64, MemFlags::new(), base, 8);
+                array_slots.insert(slot, (p, l));
+                array_i += 1;
+                bcx.ins().f64const(0.0) // an array slot's f64 Variable is never read
+            } else if slot < arity {
+                let v = bcx
+                    .ins()
+                    .load(types::F64, MemFlags::new(), numeric_ptr, numeric_i * 8);
+                numeric_i += 1;
+                v
+            } else {
+                bcx.ins().f64const(0.0)
+            };
+            bcx.def_var(vars[slot], init);
+        }
+        deopt_block = Some(bcx.create_block());
+    } else {
+        for (i, &v) in vars.iter().enumerate() {
+            let init = if i < arity {
+                params[i]
+            } else {
+                bcx.ins().f64const(0.0)
+            };
+            bcx.def_var(v, init);
+        }
     }
 
     // 3. Translate. The operand stack is empty at every block boundary (statement-level control flow).
@@ -551,6 +785,43 @@ fn build_body_cfg(
         match op {
             Opcode::LoadLocal => {
                 let slot = peek_u16(code, ip + 1)? as usize;
+                // Array-mode peephole: `LoadLocal(arrayparam) ; (LoadLocal|LoadConst) ; GetIndex` →
+                // a bounds-checked native f64 load; out-of-bounds branches to the deopt pad.
+                if array_mask != 0 && slot < arity && (array_mask >> slot) & 1 == 1 {
+                    let (aptr, alen) = *array_slots.get(&slot)?;
+                    let idx_op = Opcode::from_u8(*code.get(ip + 3)?)?;
+                    let idx_f64 = match idx_op {
+                        Opcode::LoadLocal => {
+                            let islot = peek_u16(code, ip + 4)? as usize;
+                            bcx.use_var(*vars.get(islot)?)
+                        }
+                        Opcode::LoadConst => {
+                            let ci = peek_u16(code, ip + 4)? as usize;
+                            match chunk.constants.get(ci) {
+                                Some(Constant::Number(n)) => bcx.ins().f64const(*n),
+                                _ => return None,
+                            }
+                        }
+                        _ => return None,
+                    };
+                    if Opcode::from_u8(*code.get(ip + 6)?)? != Opcode::GetIndex {
+                        return None;
+                    }
+                    // i = idx as usize (saturating: NaN→0, neg→0 — matches the VM's `n as usize`).
+                    let i = bcx.ins().fcvt_to_uint_sat(types::I64, idx_f64);
+                    let inb = bcx.ins().icmp(IntCC::UnsignedLessThan, i, alen);
+                    let cont = bcx.create_block();
+                    let db = deopt_block?;
+                    bcx.ins().brif(inb, cont, &[], db, &[]);
+                    bcx.switch_to_block(cont);
+                    cur = cont; // keep block-boundary tracking accurate after the mid-stream split
+                    let off = bcx.ins().imul_imm(i, 8);
+                    let addr = bcx.ins().iadd(aptr, off);
+                    let val = bcx.ins().load(types::F64, MemFlags::new(), addr, 0);
+                    stack.push((val, false));
+                    ip += 7; // LoadLocal(arr) + index op + GetIndex
+                    continue;
+                }
                 let v = *vars.get(slot)?;
                 stack.push((bcx.use_var(v), false));
                 ip += 3;
@@ -650,6 +921,15 @@ fn build_body_cfg(
 
     if !terminated {
         return None;
+    }
+    // Array-mode deopt landing pad: `*deopt = 1; return 0.0`. Reached from every OOB bounds-check; the
+    // VM wrapper sees the flag and re-runs the interpreter (so OOB → `Value::Null` stays correct).
+    if let (Some(db), Some(dp)) = (deopt_block, deopt_ptr) {
+        bcx.switch_to_block(db);
+        let one = bcx.ins().iconst(types::I8, 1);
+        bcx.ins().store(MemFlags::new(), one, dp, 0);
+        let zero = bcx.ins().f64const(0.0);
+        bcx.ins().return_(&[zero]);
     }
     bcx.seal_all_blocks();
     bcx.finalize();

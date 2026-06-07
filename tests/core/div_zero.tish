@@ -1,0 +1,16 @@
+// Division / remainder by zero — IEEE/JS semantics, cross-backend regression guard (all 6 + node).
+// Was a cross-backend divergence: the VM's `eval_binop` returned NaN for `n/0` at RUNTIME (the only
+// backend that did — interp/rust-AOT/node give Infinity), and the `tish_opt` constant-folder folded
+// LITERAL `n/0` to NaN everywhere (inconsistent with the runtime path). Both now use IEEE division:
+// `n/0` → ±Infinity, `0/0` → NaN, `n%0` → NaN — matching JS and every backend. Deterministic output.
+console.log(5 / 0);        // Infinity   (literal — was NaN via the optimizer fold)
+console.log(-5 / 0);       // -Infinity
+console.log(0 / 0);        // NaN
+console.log(5 % 0);        // NaN
+console.log(100 / 0 + 1);  // Infinity
+let z = 0;
+console.log(7 / z);        // Infinity   (runtime — was NaN on the VM only)
+function divs(a, b) { return a / b; }
+console.log(divs(9, 0));   // Infinity   (runtime, through a function)
+console.log(divs(0, 0));   // NaN
+console.log(divs(-8, 0));  // -Infinity

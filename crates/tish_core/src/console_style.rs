@@ -67,7 +67,7 @@ fn format_value_styled_inner(value: &Value, colors: bool, quote_strings: bool) -
                 let escaped = escape_string_for_display(s);
                 format!("{STRING}\"{escaped}\"{RESET}")
             } else {
-                format!("{STRING}{}{RESET}", s.as_ref())
+                format!("{STRING}{}{RESET}", s.as_str())
             }
         }
         Value::Bool(b) => format!("{BOOLEAN}{b}{RESET}"),

@@ -1,4 +1,37 @@
 ################################################################################
+##  ★ FLAGSHIP WIN — array-element JIT (`arr[i]` in JIT'd loops), 38× (2026-06-06). DEFAULT ON.
+################################################################################
+The numeric JIT can now read array elements inside compiled loops, so numeric-array-REDUCTION
+functions (`sum`, `dot`, `max`, scale-sum, …) run at native speed instead of per-element interpreter
+dispatch. MEASURED: `sumArr(arr, n)` over a 100k array × 1000 calls = **7782ms → 205ms (38×)**, result
+identical. This is the lever the rigorous Value-shrink null-result pointed to: tish is dispatch-bound,
+so the win is ELIMINATING dispatch (native loop), not shrinking data.
+
+HOW (crates/tish_vm/src/jit.rs + vm.rs): the f64-only JIT ABI can't pass arrays, so array-mode uses
+ONE uniform signature for every such fn — `extern "C" fn(numeric: *const f64, handles: *const
+ArrayHandle, deopt: *mut u8) -> f64` (a single transmute, no per-arity explosion). `classify_params`
+marks a param as ARRAY iff it's used only as `arr[i]`/`arr[const]` (peephole `LoadLocal(arr);
+LoadLocal|LoadConst; GetIndex`); ambiguous/complex-index/written params → bail. `arr[i]` lowers to a
+bounds-checked native f64 load. The VM wrapper (`try_call_array_jit`) splits args, extracts each
+all-numeric `Value::Array` into a scratch `Vec<f64>`, and calls.
+
+CORRECTNESS (a JIT miscompile is SILENT — validated hard): purely ADDITIVE + bail-safe, three guards
+keep it bit-exact with the interpreter:
+  • non-numeric element → wrapper returns None → interpreter (e.g. `[1,2,"x",4]` → `"3x4"`).
+  • out-of-bounds read → JIT sets the deopt byte & returns → wrapper re-runs the interpreter (OOB →
+    `Value::Null`, whose per-operator coercion the JIT can't replicate).
+  • `NumberArray` (packed, NaN=hole) → wrapper bails (hole semantics differ).
+Validated: full cross-backend suite **17/0 both default-on AND `TISH_JIT_ARRAYS=0`**; new fixture
+`tests/core/jit_arrays.tish` pins vm(JIT) ≡ interp ≡ node ≡ all 6 backends (sum/dot/max/const-index/
+scale/float/empty); micros unchanged off-vs-on (it only fires on the target pattern, bails otherwise).
+`TISH_JIT_ARRAYS=0` is the escape hatch. Carries to cranelift/wasi/llvm (they embed the VM).
+
+TWO PRE-EXISTING divergences surfaced (orthogonal, spun off as tasks, NOT array-JIT bugs): the
+eval-interpreter ERRORS on `number + null` where VM/node give NaN; the rust-AOT backend PANICS on a
+string element in a numeric-typed reduction (its inference assumes f64). Both excluded from the parity
+fixture (a cross-backend fixture can only hold cases all backends agree on).
+
+################################################################################
 ##  ★ FLAGSHIP WIN — recursion-JIT via SelfCall (2026-06-06). fib(35) BEATS Node.
 ################################################################################
 The numeric JIT now compiles SELF-RECURSIVE calls to native cranelift recursion. A new `SelfCall`
@@ -53,6 +86,85 @@ A high-level "what are we missing" pass, grounded in two fresh profiles:
   miscompile, for code the benchmarks don't even exercise; known/mutual-fn calls need cross-fn FuncId
   ordering (batch declaration). Verdict: the two BIG broad wins (NaN-box Value, frame-VM) are the real
   levers — both multi-session reps. The 275ns/call number is the concrete frame-VM justification.
+
+################################################################################
+##  VALUE-SHRINK rearchitecture, step 1: String → thin `ArcStr` (2026-06-06)
+################################################################################
+The profile is unambiguous: even object_stress is INTERPRETER-DISPATCH-bound (`run_chunk` ~76% flat,
+alloc/PropMap/Mutex all ≤3 samples). The one broad lever is a SMALLER `Value` (every opcode clones /
+pushes / pops a 24-byte `Value`; a `Number` does a 24-byte memcpy to move an 8-byte float).
+
+STEP 1 DONE + VALIDATED (17/0 all backends incl rust-AOT): `Value::String(Arc<str>)` → `String(ArcStr)`
+(the `arcstr` crate — a thin 8-byte `Arc<str>`, transparent `Deref<str>`). ~60 sites across 6 crates,
+compile-guided; `ArcStr` re-exported from tish_core + tish_runtime; rust-AOT codegen char-template fixed
+(`std::sync::Arc::from` → `ArcStr::from`); object KEYs stay `Arc<str>` (converted only at the rare
+dynamic-key boundary). String payloads now clone as 8 bytes + one atomic vs `Arc<str>`'s 16-byte fat
+pointer.
+  MEASURED: object_stress 51ms (≤ baseline 60, NO regression); bundle 160-170ms vs 180 baseline. HONEST
+  CAVEAT: object_stress also improved without an object change → some of the bundle delta is machine
+  state; the ArcStr clone win is mechanistically real but its isolated magnitude isn't cleanly proven
+  (no apples-to-apples revert-compare on this tangled tree). Net: validated, correct, no regression.
+  STILL 24 BYTES: `Value` size is unchanged because the `Arc<dyn>` variants (`Function`/`Promise`/
+  `Opaque`, 16B) still cap it. So the BROAD dispatch win is NOT banked yet.
+STEP 2 (24→16) — ATTEMPTED, MEASURED AS A REGRESSION, REVERTED (2026-06-06). Thinned all 3 `Arc<dyn>`
+variants (`Function`/`Promise`/`Opaque`) to `Arc<Box<dyn>>` (thin 8B handle: the box makes the Arc thin;
+clone stays a refcount bump, the box is never copied). Implemented cleanly via a `boxed_promise`/
+`boxed_opaque` helper + a `NativeFn = Arc<Box<dyn Callable>>` alias; ~30 sites; the eval↔core boundary
+kept consistent (eval's own Value variants thinned too so the conversion is a plain `Arc::clone`).
+  RESULT: `Value` DID drop to **16 bytes** and the full suite stayed **17/0 green on all 6 backends**.
+  BUT it REGRESSED numeric dispatch ~8–10%, proven by a rigorous A/B (two binaries, INTERLEAVED min-of-N
+  so machine drift hits both equally):
+    • large WS (3M-elem `Vec<Value>`, 72MB→48MB, memory-heavy):  24B = 1783ms,  16B = 1957ms  (+9.8%)
+    • small WS (1000 elems, fits L1, ZERO memory pressure):       24B = 4435ms,  16B = 4812ms  (+8.5%)
+  The small-WS case is the smoking gun: with the working set in L1 there is NO memory-bandwidth effect,
+  yet 16B is STILL ~8.5% slower → the cost is in DISPATCH, not memory traffic. Shrinking `Value` does not
+  help because tish is dispatch-bound on per-opcode WORK, not bandwidth-bound on `Value` size; the
+  boxing/enum-layout change pessimized the hot `Number` extraction path (likely a niche/discriminant-offset
+  effect once every non-`Number` variant became a thin pointer). On the micros the change was perf-NEUTRAL
+  (object_stress/array_stress/etc. all within ±1ms interleaved) — they fit in cache, so neither the size
+  win nor the dispatch loss showed; only the bigger numeric loops exposed the loss.
+  IMPLICATION (reshapes the NaN-box plan): a smaller `Value` is NOT a win on its own for this VM. NaN-box
+  (16→8) would only pay off via its OTHER property — a branch-free `is_number` TAG TEST replacing the enum
+  match — i.e. a DISPATCH change, not a size change. Pursue NaN-box only if that tag-test path is the goal;
+  do NOT chase `Value` size for its own sake. Reverted to the fast 24B state (parity re-verified 17/0).
+  The real broad lever is reducing dispatch WORK: wider JIT coverage (array-element access in JIT'd loops)
+  or superinstruction fusion — see the JIT sections above.
+
+################################################################################
+##  FRAME-VM (task #39) — BUILT + VALIDATED, flag-gated `TISH_FRAME_VM` (2026-06-06)
+################################################################################
+The iterative frame-stack execution path is built and validated. Calls + recursion run on a heap
+`CallFrame` stack instead of recursively re-entering `run_chunk` (no per-call `Vm`, no native-stack
+growth). Three pieces, all landed + green:
+  1. `Callable` trait (tish_core): `NativeFn` = `Arc<dyn Callable>` (was opaque `Arc<dyn Fn>`), so a
+     tish-closure exposes its chunk via `as_any` downcast. + `FnCallable` adapter + `native_fn()`.
+     Fixed ~25 sites across 5 crates + the rust-AOT codegen (`f(req_args)`→`f.call`).
+  2. `VmClosure` (tish_vm): every tish fn is now this — chunk (`Arc<Chunk>`) + captured chain + jit_fn
+     + a precomputed `frameable` flag. `call()` is the fallback (= old behaviour, byte-identical).
+  3. `run_framed`: the Call opcode (flag-on) downcasts a frameable callee and runs it on the frame
+     stack — push on Call/SelfCall, pop on Return. `code` is bound once per frame (laundered borrow,
+     re-derived on frame switch) to keep the hot opcode path Arc-deref-free.
+VALIDATION: flag-off 17/0 (byte-identical) AND flag-on 17/0 (full corpus, incl. the unsafe binding);
+flag-on ≡ interp on mutual recursion / helpers / fib; `ev(100000)` deep mutual recursion runs flag-on
+with ZERO overflow (the wasi-trap + overflow fix made real, since the frame loop needs no JIT/stacker).
+
+HONEST PERF VERDICT (data-backed) — a ROBUSTNESS mechanism, NOT a speed win. Keep flag-gated OFF.
+  shallow mutual recursion (ev(20)×200k = 4.2M calls): flag-off ~660ms, flag-ON ~720ms (~9% SLOWER).
+  deep mutual recursion (ev(20000)×2k = 80M calls):     flag-off 25.6s, flag-ON 24.5s (~5% faster).
+  THREE optimizations tried — none closed the shallow gap: (1) bind `code` once per frame (laundered
+  ptr, kills per-opcode Arc-deref); (2) slot-region pooling (shared `slots` Vec + per-frame base, no
+  per-call slot alloc); (3) move-not-clone the caller frame on push (halve Arc traffic). flag-ON stayed
+  ~9% slower. CONCLUSION: a heap CallFrame stack costs ≈ the recursive path's native stack + `Vm` for
+  SHALLOW calls — it is NOT cheaper; the premise "killing the per-call Vm makes calls faster" is FALSE
+  for this VM. The frame loop only wins where the native stack genuinely can't go: wasi deep recursion
+  (stacker is a no-op on wasm) + unbounded depth without `maybe_grow`. That's a narrow robustness niche.
+  ALSO: the ~275ns/call wall (jit'd `add2` loop-called) is JIT-DISPATCH overhead (LoadVar global lookup +
+  `Arc<dyn Callable>` vtable + arg-number-check + result-wrap) — jit'd fns never create a per-call Vm, so
+  the frame-VM was aimed at the wrong target for it. The real call-overhead levers are the JIT-dispatch
+  path (for jit'd fns) and the closure-invocation model (shared by both exec paths), NOT per-call Vm.
+  STATUS: built, validated (17/0 flag-off + flag-on), flag-gated OFF (zero shipped impact). The Callable
+  trait + VmClosure are kept (cleaner than `Arc<dyn Fn>`, useful foundation); run_framed stays as the
+  wasi/deep-recursion option. Not promoted to default — it would regress the common path.
 
 ================================================================================
   CORRECTNESS FIX — interp deep-recursion stack-overflow guard (2026-06-06)

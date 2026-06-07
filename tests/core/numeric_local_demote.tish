@@ -1,0 +1,16 @@
+// Sound numeric-local demotion in the rust-AOT backend (cross-backend regression guard).
+// An inferred-`number` accumulator (`let s = 0`) that a reassignment can turn non-numeric must
+// NOT lower to a native `f64`: JS `+` is string concat, so `s = s + arr[i]` may yield a String,
+// and a native-f64 store would panic ("expected number"). The backend boxes such an `s` so it
+// matches interp/vm/node. Pure-numeric accumulators (RHS provably numeric, e.g. `s = s + i*2`)
+// keep the native fast path — that is covered by the perf gauntlet (numeric_loop/matmul). Output
+// must be deterministic (no timings). Pins rust-AOT ≡ interp ≡ vm ≡ cranelift ≡ wasi ≡ node.
+function reduceAdd(arr, n) { let s = 0; for (let i = 0; i < n; i++) { s = s + arr[i]; } return s; }
+function reduceLen(arr) { let s = 0; for (let i = 0; i < arr.length; i++) { s = s + arr[i]; } return s; }
+
+console.log(reduceAdd([1, 2, 3, 4, 5], 5));   // 15   — pure numeric
+console.log(reduceAdd([1, 2, "x", 4], 4));    // 3x4  — the reported panic (number sum, then concat)
+console.log(reduceAdd(["a", 1, 2], 3));       // 0a12 — string from the first add
+console.log(reduceAdd([1.5, -2.25, 4], 3));   // 3.25 — floats, pure numeric
+console.log(reduceLen([10, 20, 30]));         // 60   — `arr.length` bound, pure numeric
+console.log(reduceLen([7, "k", 9]));          // 7k9  — concat via length-bounded loop
