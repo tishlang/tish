@@ -74,7 +74,10 @@ run_one() {
   # 1. source
   case "$source" in
     git:*)
-      local spec="${source#git:}" url="${spec%@*}" ref="${spec##*@}"
+      # NOTE: split across statements — a single `local a=.. b=$a` reads the OUTER `a`, not the one
+      # being declared, so url/ref would come out empty.
+      local spec="${source#git:}"
+      local url="${spec%@*}" ref="${spec##*@}"
       [[ "$ref" == "$url" ]] && ref=""
       echo "── $name ── cloning $url${ref:+ @$ref}"
       # Build args as an array — `${ref:+--branch "$ref"}` inline mis-passes `--branch main` as one arg.
