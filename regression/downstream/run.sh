@@ -117,6 +117,25 @@ run_one() {
         if file "$bin" 2>/dev/null | rg -qi 'mach-o|elf|executable'; then cp -f "$TISH/target/release/tish" "$bin" 2>/dev/null || true; fi
       done
     fi
+    # Wire any `lattish` dependency to the LOCAL WORKSPACE lattish — the npm analog of rewrite_tish_paths
+    # for the Rust crates. We test consumers against the lattish being DEVELOPED next to this tish
+    # checkout, not the published package (else we'd only re-test already-released code). Consumers pin
+    # lattish to a local monorepo path (file:../tish/lattish) absent in an isolated clone, so npm leaves a
+    # dangling symlink; replace it with the workspace copy. (Resolver matches node_modules by directory,
+    # so lattish's own @tishlang/lattish name is irrelevant.) Falls back to the cloned lattish in CI.
+    if [[ -f "$dir/$subdir/package.json" ]] && rg -q '"lattish"[[:space:]]*:' "$dir/$subdir/package.json" 2>/dev/null; then
+      local lat_src=""
+      if [[ -d "$TISH/../lattish" ]]; then lat_src="$(cd "$TISH/.." && pwd)/lattish"
+      elif [[ -d "$WORKDIR/lattish" ]]; then lat_src="$WORKDIR/lattish"; fi
+      if [[ -n "$lat_src" ]]; then
+        rm -rf "$dir/$subdir/node_modules/lattish"
+        mkdir -p "$dir/$subdir/node_modules"
+        rsync -a --exclude node_modules --exclude .git "$lat_src/" "$dir/$subdir/node_modules/lattish/" >/dev/null 2>&1
+        echo "   wired LOCAL lattish ($lat_src) -> node_modules/lattish"
+      else
+        echo "   ⚠ depends on lattish but no local workspace ($TISH/../lattish) or clone ($WORKDIR/lattish) found"
+      fi
+    fi
   fi
 
   # 3. build + test

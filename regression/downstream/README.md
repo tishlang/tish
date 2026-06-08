@@ -72,23 +72,30 @@ remote and switch it to `git:` to get CI coverage.
 The `tish`-program entries were seeded `expected=pass` (the language surface only *grew* on this branch).
 The first `--git-only` baseline calibrated them against reality:
 
-**PASS (9):** `ffi-mathext` `ffi-statext` (in-repo C-ABI guarantee) · `tish-apple` (`tish-apple-common`) ·
-`lattish` · `tish-ide-panels` · `tish-learn` · `tish-playground` · `spider3-tish` · `spacekinematics`.
-The private `tishlang/*` repos (`tish-apple`, `tish-ide-panels`, `learn`) **do** clone in CI when a `gh`
-credential helper is configured — they SKIP only if auth is absent. `lattish` itself builds clean (the
-feared `RBrace` indent-parse issue did **not** materialize via its `npm test`).
+**PASS (11):** `ffi-mathext` `ffi-statext` (in-repo C-ABI guarantee) · `tish-apple` (`tish-apple-common`) ·
+`lattish` · `tish-ide-panels` · `tish-learn` · `tish-playground` · `spider3-tish` · `spacekinematics` ·
+**`tish-audio`** · **`tish-midi`**. The private `tishlang/*` repos (`tish-apple`, `tish-ide-panels`,
+`learn`) **do** clone in CI when a `gh` credential helper is configured — they SKIP only if auth is absent.
+`lattish` itself builds clean (the feared `RBrace` indent-parse issue did **not** materialize via `npm test`).
+
+**`tish-audio` + `tish-midi` — lattish apps, tested against the LOCAL WORKSPACE lattish.** Both
+`import "lattish"`. The runner wires the **local workspace** lattish (`$TISH/../lattish`) into
+`node_modules/lattish` — the npm analog of `rewrite_tish_paths` for the Rust crates — so we test against
+the lattish being *developed* next to this tish checkout, **not** the published package (which would only
+re-test already-released code). Two enablers made this work:
+- **Resolver fix** (`tish_compile/src/resolve.rs`): a bare `import "x"` now resolves `node_modules/x` by
+  **directory** (Node semantics), not by requiring the package's `package.json` `name` to equal `x`. npm
+  installs a dep under its *key*/directory (here `lattish`), even though the package's own name is
+  `@tishlang/lattish`. (CI falls back to the cloned `lattish` entry when no local workspace is present.)
+- With a valid workspace lattish, HEAD tish does real work: `tish-audio` → a 1.3 MB `dist/main.js` with
+  `createRoot` inlined; `tish-midi`'s 56 `src/` files transpile clean.
+
+Because it tests the *working tree*, this immediately catches WIP breakage in lattish: a brace-unbalanced
+`Lattish.tish` (uncommitted stray `}`) makes both apps fail — which is the suite doing its job, not a
+false alarm. Fix the workspace lattish and they go green.
 
 **xfail — calibrated this run:**
 - **`tish-polars`** — heavy polars `cargo check`, broken by the `Value`/`Callable` API change (cargo: ext).
-- **`tish-audio`** & **`tish-midi`** — **lattish applications** that import bare `lattish`. The lattish
-  package is named **`@tishlang/lattish`** on every ref, and tish's module resolver (both the native
-  `find_package_dir` and the `--target js` resolver) requires the resolved package's `package.json` `name`
-  to **equal the import specifier**. So a bare `import "lattish"` does not resolve even when npm has placed
-  `node_modules/lattish` (the `file:../tish/lattish` dep symlink) — *verified*: it still errors `Package
-  'lattish' not found`. This is an **ecosystem npm-naming state** (lattish's package name is being fixed),
-  **not** a feature/perf break — the name-check predates the branch (on `main`). The suite does **not**
-  hardcode a workaround; these stay `xfail` and **auto-flip to PASS** (reported as UNEXPECTED PASS) once
-  lattish publishes as `lattish` or the apps import `@tishlang/lattish`.
 
 **SKIP in CI (local-only):** the `cargo:` extensions (`tish-pg`, `tish-callbacks`, …), `tish-unity` (ffi),
 `tish-tailwind` — run them with `regression/downstream/run.sh all` on a dev machine where `~/Projects` has
