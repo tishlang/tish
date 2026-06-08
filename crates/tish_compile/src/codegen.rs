@@ -1123,6 +1123,17 @@ impl Codegen {
     }
 
     /// Escape Rust reserved keywords by prefixing with r#
+    /// Binding keyword that stays valid for the wildcard `_`. A `_` binding cannot be `mut`
+    /// (`error: mut must be followed by a named binding`) and is never reassigned, so it always
+    /// takes a plain `let`. `base` is the keyword for a normal binding here (e.g. `"let mut"`).
+    fn mut_kw_for<'a>(name: &str, base: &'a str) -> &'a str {
+        if name == "_" {
+            "let"
+        } else {
+            base
+        }
+    }
+
     fn escape_ident(name: &str) -> Cow<'_, str> {
         // Rust standard library macros that conflict with variable names
         const RUST_MACROS: &[&str] = &[
@@ -2585,7 +2596,8 @@ impl Codegen {
                                     i
                                 ));
                                 self.writeln(&format!(
-                                    "let mut {} = {};",
+                                    "{} {} = {};",
+                                    Self::mut_kw_for(tp.name.as_ref(), "let mut"),
                                     Self::escape_ident(tp.name.as_ref()),
                                     coercion
                                 ));
@@ -2598,14 +2610,16 @@ impl Codegen {
                                 // reference them, e.g. `(a, b = a + 1)`.
                                 let default_str = self.emit_expr(default_expr)?;
                                 self.writeln(&format!(
-                                    "let mut {} = match args.get({}) {{ Some(v) => v.clone(), None => {} }};",
+                                    "{} {} = match args.get({}) {{ Some(v) => v.clone(), None => {} }};",
+                                    Self::mut_kw_for(tp.name.as_ref(), "let mut"),
                                     Self::escape_ident(tp.name.as_ref()),
                                     i,
                                     default_str
                                 ));
                             } else {
                                 self.writeln(&format!(
-                                    "let mut {} = args.get({}).cloned().unwrap_or(Value::Null);",
+                                    "{} {} = args.get({}).cloned().unwrap_or(Value::Null);",
+                                    Self::mut_kw_for(tp.name.as_ref(), "let mut"),
                                     Self::escape_ident(tp.name.as_ref()),
                                     i
                                 ));
@@ -2800,7 +2814,7 @@ impl Codegen {
                             DestructElement::Ident(name, _) => {
                                 self.writeln(&format!(
                                     "{} {} = match &({}) {{ Value::Array(ref _a) => _a.borrow().get({}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
-                                    mutability,
+                                    Self::mut_kw_for(name.as_ref(), mutability),
                                     Self::escape_ident(name.as_ref()),
                                     value_expr,
                                     i
@@ -2817,7 +2831,7 @@ impl Codegen {
                             DestructElement::Rest(name, _) => {
                                 self.writeln(&format!(
                                     "{} {} = match &({}) {{ Value::Array(ref _a) => {{ let _b = _a.borrow(); Value::Array(VmRef::new(_b.iter().skip({}).cloned().collect())) }}, _ => Value::Array(VmRef::new(Vec::new())) }};",
-                                    mutability,
+                                    Self::mut_kw_for(name.as_ref(), mutability),
                                     Self::escape_ident(name.as_ref()),
                                     value_expr,
                                     i
@@ -2834,7 +2848,7 @@ impl Codegen {
                         DestructElement::Ident(name, _) => {
                             self.writeln(&format!(
                                 "{} {} = match &({}) {{ Value::Object(ref _o) => _o.borrow().strings.get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
-                                mutability,
+                                Self::mut_kw_for(name.as_ref(), mutability),
                                 Self::escape_ident(name.as_ref()),
                                 value_expr,
                                 key
@@ -5323,14 +5337,16 @@ impl Codegen {
                         let prelude = std::mem::replace(&mut self.output, saved);
                         code.push_str(&prelude);
                         code.push_str(&format!(
-                            "        let mut {} = match args.get({}) {{ Some(v) => v.clone(), None => {} }};\n",
+                            "        {} {} = match args.get({}) {{ Some(v) => v.clone(), None => {} }};\n",
+                            Self::mut_kw_for(tp.name.as_ref(), "let mut"),
                             Self::escape_ident(tp.name.as_ref()),
                             i,
                             default_str
                         ));
                     } else {
                         code.push_str(&format!(
-                            "        let mut {} = args.get({}).cloned().unwrap_or(Value::Null);\n",
+                            "        {} {} = args.get({}).cloned().unwrap_or(Value::Null);\n",
+                            Self::mut_kw_for(tp.name.as_ref(), "let mut"),
                             Self::escape_ident(tp.name.as_ref()),
                             i
                         ));
