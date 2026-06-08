@@ -35,20 +35,20 @@ tish-apple	git:https://github.com/tishlang/tish-apple.git@main	.	rust	cargo chec
 # needs per-repo tuning (entry/feature flags). Refine the cmd as you wire each repo.
 lattish	git:https://github.com/spacedevin/lattish.git@npm-package-name-fix	.	tish	npm test	pass
 tish-ide-panels	git:https://github.com/tishlang/tish-ide-panels.git@main	.	tish	npm test	pass
-# tish-audio / tish-midi import bare `lattish`, but the lattish package is named `@tishlang/lattish`
-# on every ref. tish's resolver (native find_package_dir AND --target js) requires the resolved
-# package's package.json `name` to EQUAL the import specifier, so the bare import does not resolve —
-# verified: with node_modules/lattish present (the `file:` dep symlink npm creates) it still errors
-# "Package 'lattish' not found". This is an ECOSYSTEM npm-name state (lattish's package name), NOT a
-# feature/perf break (the name-check predates the branch, on main). xfail — auto-flips to PASS once
-# lattish publishes as `lattish` (or the apps import `@tishlang/lattish`); the suite does NOT hardcode it.
-tish-audio	git:https://github.com/spacedevin/tish-audio.git@main	.	tish	npm run build	xfail
+# tish-audio / tish-midi are lattish APPS that import bare `lattish`. The runner wires the LOCAL WORKSPACE
+# lattish ($TISH/../lattish) into node_modules/lattish — the npm analog of rewrite_tish_paths for the Rust
+# crates — so we test against the lattish being DEVELOPED next to this tish, NOT the published package
+# (which would only re-test already-released code). HEAD tish then transpiles the workspace lattish + the
+# whole app (tish-audio -> 1.3 MB dist/main.js with createRoot inlined). Just `npm run build` — the runner
+# does npm install + HEAD-binary override + the lattish wiring.
+tish-audio	git:https://github.com/spacedevin/tish-audio.git@main	.	tish	npm run build	pass
 tish-learn	git:https://github.com/tishlang/learn.git@main	.	tish	npm run build:css	pass
 tish-playground	git:https://github.com/spacedevin/tish-playground.git@main	.	tish	npm run build	pass
-# tish-midi (deckard): a lattish APP; its own npm scripts are monorepo-bound (`cd ../tish && cargo run`,
-# no `test` script) so we transpile-smoke its JS-targetable `src/` (no native `tish:` imports;
-# `services/` daemons excluded). Same bare-`lattish`-vs-`@tishlang/lattish` resolution gap as tish-audio.
-tish-midi	git:https://github.com/spacedevin/deckard.git@main	.	tish	bash -c 'rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_m.js >/tmp/_m.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_m.err; rc=1; }; done < <(find src -name "*.tish" -not -path "*/node_modules/*"); exit $rc'	xfail
+# tish-midi (deckard): a lattish APP; own npm scripts are monorepo-bound (`cd ../tish`, no `test`), so we
+# transpile-smoke its JS-targetable `src/` (no native `tish:` imports; `services/` daemons excluded). The
+# runner wires the LOCAL workspace lattish into node_modules (see tish-audio note), so the bare imports
+# resolve to the workspace lattish.
+tish-midi	git:https://github.com/spacedevin/deckard.git@main	.	tish	rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_m.js >/tmp/_m.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_m.err; rc=1; }; done < <(find src -name "*.tish" -not -path "*/node_modules/*"); exit $rc	pass
 tish-tailwind	local:~/Projects/tish-audio/tish-tailwind	.	tish	bash -c 'f=$(find . -name "*.tish" -not -path "*/node_modules/*" | head -1); [ -z "$f" ] || tish build --target js "$f" -o /tmp/_tw.js'	pass
 spider3-tish	git:https://github.com/schlopai/spider-gwen-webgpu.git@main	.	tish	bash -c 'rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_s.js >/tmp/_s.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_s.err; rc=1; }; done < <(find . -name "*.tish" -not -path "*/node_modules/*" -not -path "*/vendor/*" -not -path "*/dist/*"); exit $rc'	pass
 spacekinematics	git:https://github.com/spacedevin/solar-system-webgpu.git@main	.	tish	bash -c 'rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_s.js >/tmp/_s.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_s.err; rc=1; }; done < <(find . -name "*.tish" -not -path "*/node_modules/*" -not -path "*/vendor/*" -not -path "*/sgp4-wasm/*"); exit $rc'	pass
