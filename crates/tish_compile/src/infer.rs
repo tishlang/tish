@@ -9,7 +9,7 @@
 //!   - Comparison of two `number` expressions → `boolean`
 //!   - Already-annotated vars are left unchanged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tishlang_ast::{
     ArrowBody, BinOp, CallArg, Expr, FunParam, Literal, Program, Statement, TypeAnnotation,
 };
@@ -55,6 +55,10 @@ fn is_number(ann: &TypeAnnotation) -> bool {
     matches!(ann, TypeAnnotation::Simple(s) if s.as_ref() == "number")
 }
 
+fn is_string(ann: &TypeAnnotation) -> bool {
+    matches!(ann, TypeAnnotation::Simple(s) if s.as_ref() == "string")
+}
+
 fn number_ann() -> TypeAnnotation {
     TypeAnnotation::Simple("number".into())
 }
@@ -93,6 +97,14 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
                     | BinOp::Ge
                     | BinOp::StrictEq
                     | BinOp::StrictNe => Some(bool_ann()),
+                    _ => None,
+                }
+            } else if is_string(&lt) && is_string(&rt) {
+                // M2: `string + string` concatenates → string; `===`/`!==` → boolean. Relational
+                // comparisons stay boxed (UTF-16 vs UTF-8 ordering differs outside the BMP).
+                match op {
+                    BinOp::Add => Some(string_ann()),
+                    BinOp::StrictEq | BinOp::StrictNe => Some(bool_ann()),
                     _ => None,
                 }
             } else {
@@ -167,13 +179,17 @@ fn pi_stmt(s: Statement) -> Statement {
         span,
     } = s
     {
+        // Locals provably numeric in this body (annotated, incl. base-inferred `let i = 0`), so a
+        // bare loop counter `i` counts as a numeric operand and `i < n` can prove the param `n`.
+        let mut nums = HashSet::new();
+        collect_numeric_locals(&body, &mut nums);
         let new_params = params
             .into_iter()
             .map(|p| match p {
                 FunParam::Simple(mut tp) => {
                     if tp.type_ann.is_none()
                         && tp.default.is_none()
-                        && nus_stmt(&body, tp.name.as_ref())
+                        && nus_stmt(&body, tp.name.as_ref(), &nums)
                     {
                         tp.type_ann = Some(TypeAnnotation::Simple(std::sync::Arc::from("number")));
                     }
@@ -197,36 +213,76 @@ fn pi_stmt(s: Statement) -> Statement {
     }
 }
 
+/// Names of locals in `s` annotated (or base-inferred) `: number`. Consulted by `numeric_provable`
+/// so a bare numeric local (e.g. a `let i: number` loop counter) counts as a numeric operand —
+/// letting `i < n` / `i * n + k` prove the *param* `n` numeric. Flat across nested scopes; at worst
+/// it over-includes a shadowed name, which only widens inference (still bounded by the same
+/// caller-passes-a-number assumption M4 already makes).
+fn collect_numeric_locals(s: &Statement, out: &mut HashSet<String>) {
+    use Statement::*;
+    match s {
+        VarDecl {
+            name, type_ann, ..
+        } => {
+            if type_ann.as_ref().map_or(false, is_number) {
+                out.insert(name.to_string());
+            }
+        }
+        Block { statements, .. } => statements.iter().for_each(|x| collect_numeric_locals(x, out)),
+        If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_numeric_locals(then_branch, out);
+            if let Some(e) = else_branch {
+                collect_numeric_locals(e, out);
+            }
+        }
+        For { init, body, .. } => {
+            if let Some(i) = init {
+                collect_numeric_locals(i, out);
+            }
+            collect_numeric_locals(body, out);
+        }
+        While { body, .. } => collect_numeric_locals(body, out),
+        _ => {}
+    }
+}
+
 /// One side of an OVERLOADED binop (`+`, comparisons). If `operand` is bare `name`, the `other`
 /// side must be PROVABLY numeric (else `name + x` / `name < x` could be string ops, and `name`
 /// a string). If `operand` is a sub-expr, recurse (its own context decides).
-fn nus_overloaded(operand: &Expr, other: &Expr, name: &str) -> bool {
+fn nus_overloaded(operand: &Expr, other: &Expr, name: &str, nums: &HashSet<String>) -> bool {
     if matches!(operand, Expr::Ident { name: n, .. } if n.as_ref() == name) {
-        return numeric_provable(other);
+        return numeric_provable(other, nums);
     }
-    nus_expr(operand, name)
+    nus_expr(operand, name, nums)
 }
 
 /// `e` is PROVABLY a number: a number literal, arithmetic (`-`/`*`/`/`/`%`/`**`), numeric unary,
 /// or a Math intrinsic. Bare variables and `+`/comparisons are NOT provable (could be strings).
-fn numeric_provable(e: &Expr) -> bool {
+fn numeric_provable(e: &Expr, nums: &HashSet<String>) -> bool {
     use Expr::*;
     match e {
         Literal {
             value: tishlang_ast::Literal::Number(_),
             ..
         } => true,
+        // A local proven numeric in this function (annotated `: number`, incl. base-inferred
+        // `let i = 0`) — so `i` as the OTHER operand of `i < n` / `i * n` proves `n` numeric.
+        Ident { name: n, .. } => nums.contains(n.as_ref()),
         Binary {
             left, op, right, ..
         } => {
             use tishlang_ast::BinOp::*;
             matches!(op, Sub | Mul | Div | Mod | Pow)
-                && numeric_provable(left)
-                && numeric_provable(right)
+                && numeric_provable(left, nums)
+                && numeric_provable(right, nums)
         }
         Unary { op, operand, .. } => {
             matches!(op, tishlang_ast::UnaryOp::Neg | tishlang_ast::UnaryOp::Pos)
-                && numeric_provable(operand)
+                && numeric_provable(operand, nums)
         }
         Call { callee, .. } => matches!(callee.as_ref(),
             Expr::Member { object, prop: tishlang_ast::MemberProp::Name { name: m, .. }, .. }
@@ -238,23 +294,23 @@ fn numeric_provable(e: &Expr) -> bool {
 }
 
 /// Every use of `name` within `s` is a numeric-operand use (so `name` can lower to `f64`).
-fn nus_stmt(s: &Statement, name: &str) -> bool {
+fn nus_stmt(s: &Statement, name: &str, nums: &HashSet<String>) -> bool {
     use Statement::*;
     match s {
-        Block { statements, .. } => statements.iter().all(|x| nus_stmt(x, name)),
-        Return { value, .. } => value.as_ref().map_or(true, |e| nus_num_operand(e, name)),
+        Block { statements, .. } => statements.iter().all(|x| nus_stmt(x, name, nums)),
+        Return { value, .. } => value.as_ref().map_or(true, |e| nus_num_operand(e, name, nums)),
         If {
             cond,
             then_branch,
             else_branch,
             ..
         } => {
-            nus_expr(cond, name)
-                && nus_stmt(then_branch, name)
-                && else_branch.as_ref().map_or(true, |e| nus_stmt(e, name))
+            nus_expr(cond, name, nums)
+                && nus_stmt(then_branch, name, nums)
+                && else_branch.as_ref().map_or(true, |e| nus_stmt(e, name, nums))
         }
-        ExprStmt { expr, .. } => nus_expr(expr, name),
-        While { cond, body, .. } => nus_expr(cond, name) && nus_stmt(body, name),
+        ExprStmt { expr, .. } => nus_expr(expr, name, nums),
+        While { cond, body, .. } => nus_expr(cond, name, nums) && nus_stmt(body, name, nums),
         For {
             init,
             cond,
@@ -262,14 +318,14 @@ fn nus_stmt(s: &Statement, name: &str) -> bool {
             body,
             ..
         } => {
-            init.as_ref().map_or(true, |x| nus_stmt(x, name))
-                && cond.as_ref().map_or(true, |e| nus_expr(e, name))
-                && update.as_ref().map_or(true, |e| nus_expr(e, name))
-                && nus_stmt(body, name)
+            init.as_ref().map_or(true, |x| nus_stmt(x, name, nums))
+                && cond.as_ref().map_or(true, |e| nus_expr(e, name, nums))
+                && update.as_ref().map_or(true, |e| nus_expr(e, name, nums))
+                && nus_stmt(body, name, nums)
         }
         VarDecl {
             name: vn, init, ..
-        } => vn.as_ref() != name && init.as_ref().map_or(true, |e| nus_expr(e, name)),
+        } => vn.as_ref() != name && init.as_ref().map_or(true, |e| nus_expr(e, name, nums)),
         Break { .. } | Continue { .. } => true,
         // Any other statement (switch/throw/try/nested fn/...) -> bail (don't infer this param).
         _ => false,
@@ -278,7 +334,7 @@ fn nus_stmt(s: &Statement, name: &str) -> bool {
 
 /// `e` with `name` used only as a numeric operand. A bare `Ident(name)` at THIS level is not a
 /// numeric operand (only valid inside a numeric parent), so it returns false here.
-fn nus_expr(e: &Expr, name: &str) -> bool {
+fn nus_expr(e: &Expr, name: &str, nums: &HashSet<String>) -> bool {
     use Expr::*;
     match e {
         Literal { .. } => true,
@@ -290,13 +346,14 @@ fn nus_expr(e: &Expr, name: &str) -> bool {
             match op {
                 // Unambiguously numeric — `name` as either operand is definitely a number.
                 Sub | Mul | Div | Mod | Pow => {
-                    nus_num_operand(left, name) && nus_num_operand(right, name)
+                    nus_num_operand(left, name, nums) && nus_num_operand(right, name, nums)
                 }
                 // OVERLOADED: `+` is also string concat, `<`/`===` also compare strings. If
                 // `name` is a DIRECT operand here, the OTHER side must be PROVABLY numeric to
                 // conclude `name` is a number — this is what stops `first + ":"` typing `first`.
                 Add | Lt | Le | Gt | Ge | StrictEq | StrictNe => {
-                    nus_overloaded(left, right, name) && nus_overloaded(right, left, name)
+                    nus_overloaded(left, right, name, nums)
+                        && nus_overloaded(right, left, name, nums)
                 }
                 // Logical (&&, ||, ??) etc.: `name` must be absent.
                 _ => !pi_mentions(left, name) && !pi_mentions(right, name),
@@ -307,16 +364,18 @@ fn nus_expr(e: &Expr, name: &str) -> bool {
                 op,
                 tishlang_ast::UnaryOp::Neg | tishlang_ast::UnaryOp::Pos | tishlang_ast::UnaryOp::BitNot
             ) {
-                nus_num_operand(operand, name)
+                nus_num_operand(operand, name, nums)
             } else {
                 !pi_mentions(operand, name)
             }
         }
-        Index { object, index, .. } => !pi_mentions(object, name) && nus_num_operand(index, name),
+        Index { object, index, .. } => {
+            !pi_mentions(object, name) && nus_num_operand(index, name, nums)
+        }
         Call { callee, args, .. } => {
             !pi_mentions(callee, name)
                 && args.iter().all(|a| match a {
-                    tishlang_ast::CallArg::Expr(x) => nus_arg(x, name),
+                    tishlang_ast::CallArg::Expr(x) => nus_arg(x, name, nums),
                     tishlang_ast::CallArg::Spread(_) => false,
                 })
         }
@@ -326,16 +385,16 @@ fn nus_expr(e: &Expr, name: &str) -> bool {
             else_branch,
             ..
         } => {
-            nus_expr(cond, name)
-                && nus_num_operand(then_branch, name)
-                && nus_num_operand(else_branch, name)
+            nus_expr(cond, name, nums)
+                && nus_num_operand(then_branch, name, nums)
+                && nus_num_operand(else_branch, name, nums)
         }
         // Assignment to a DIFFERENT var, where the RHS may use `name` numerically (e.g.
         // `sum = sum + a[i*N+k]`). Writing to `name` itself bails (its type could change).
         Assign { name: an, value, .. }
         | CompoundAssign { name: an, value, .. }
         | LogicalAssign { name: an, value, .. } => {
-            an.as_ref() != name && nus_expr(value, name)
+            an.as_ref() != name && nus_expr(value, name, nums)
         }
         PostfixInc { name: n, .. }
         | PostfixDec { name: n, .. }
@@ -349,11 +408,11 @@ fn nus_expr(e: &Expr, name: &str) -> bool {
             ..
         } => {
             !pi_mentions(object, name)
-                && nus_num_operand(index, name)
-                && nus_expr(value, name)
+                && nus_num_operand(index, name, nums)
+                && nus_expr(value, name, nums)
         }
         MemberAssign { object, value, .. } => {
-            !pi_mentions(object, name) && nus_expr(value, name)
+            !pi_mentions(object, name) && nus_expr(value, name, nums)
         }
         // any other context where `name` could appear non-numerically -> require it absent.
         _ => !pi_mentions(e, name),
@@ -361,19 +420,19 @@ fn nus_expr(e: &Expr, name: &str) -> bool {
 }
 
 /// A numeric-operand position: `name` may appear directly, or as a numeric sub-expr.
-fn nus_num_operand(e: &Expr, name: &str) -> bool {
+fn nus_num_operand(e: &Expr, name: &str, nums: &HashSet<String>) -> bool {
     if matches!(e, Expr::Ident { name: n, .. } if n.as_ref() == name) {
         return true;
     }
-    nus_expr(e, name)
+    nus_expr(e, name, nums)
 }
 
 /// A call argument: passing `name` BARE bails (callee param type unknown); a numeric sub-expr ok.
-fn nus_arg(e: &Expr, name: &str) -> bool {
+fn nus_arg(e: &Expr, name: &str, nums: &HashSet<String>) -> bool {
     if matches!(e, Expr::Ident { name: n, .. } if n.as_ref() == name) {
         return false;
     }
-    nus_expr(e, name)
+    nus_expr(e, name, nums)
 }
 
 /// Does `name` appear anywhere in `e`? Conservative: unhandled forms -> true (assume present).
@@ -1023,3 +1082,61 @@ fn infer_statement(stmt: &Statement, ctx: &mut InferCtx) -> Statement {
 fn _uses_call_arg(_: &CallArg) {}
 #[allow(dead_code)]
 fn _uses_arrow_body(_: &ArrowBody) {}
+
+#[cfg(test)]
+mod param_infer_tests {
+    use super::*;
+    use tishlang_parser::parse;
+
+    /// Run base inference, then M4 param inference, and return the inferred annotation name (if
+    /// any) for parameter `param` of `fn <fn_name>`.
+    fn inferred_param(src: &str, fn_name: &str, param: &str) -> Option<String> {
+        let parsed = parse(src).unwrap();
+        let base = Program {
+            statements: infer_statements(&parsed.statements, &mut InferCtx::new()),
+        };
+        let prog = param_infer_program(base);
+        for s in &prog.statements {
+            if let Statement::FunDecl { name, params, .. } = s {
+                if name.as_ref() == fn_name {
+                    for p in params {
+                        if let FunParam::Simple(tp) = p {
+                            if tp.name.as_ref() == param {
+                                return tp.type_ann.as_ref().map(|a| match a {
+                                    TypeAnnotation::Simple(s) => s.to_string(),
+                                    _ => "<complex>".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn infers_loop_bound_param_via_numeric_local() {
+        // `n` is the bare operand of `i < n`; `i` (`let i = 0`, base-inferred numeric) makes the
+        // OTHER operand provably numeric, so `n` is inferred `number` (the numeric-locals fix).
+        let src = "fn countUp(n) { let total = 0; for (let i = 0; i < n; i = i + 1) { total = total + i } return total }";
+        assert_eq!(inferred_param(src, "countUp", "n").as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn does_not_infer_string_concat_param() {
+        // `x` is the bare operand of `+` against a string literal — NOT provably numeric, so `x`
+        // must stay dynamic (else `label("hi")` would mistype to f64 and panic at runtime).
+        let src = "fn label(x) { return \"v=\" + x }";
+        assert_eq!(inferred_param(src, "label", "x"), None);
+    }
+
+    #[test]
+    fn does_not_treat_other_param_as_numeric_local() {
+        // `a < b`: neither operand is a known numeric *local* (both are params), so neither is
+        // provable and neither param is inferred — the relaxation is locals-only.
+        let src = "fn cmp(a, b) { if (a < b) { return 1 } return 0 }";
+        assert_eq!(inferred_param(src, "cmp", "a"), None);
+        assert_eq!(inferred_param(src, "cmp", "b"), None);
+    }
+}

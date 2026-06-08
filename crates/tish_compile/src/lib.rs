@@ -41,9 +41,11 @@ mod tests {
 
     #[test]
     fn typed_assign_conversion() {
-        // With the inference pass and native emit, `total: number = 0` becomes f64.
-        // Assignment `total = total + n` (where n comes from ForOf over a Value::Array)
-        // emits a native f64 assignment that unboxes the Value result via from_value_expr.
+        // Soundness pass (`collect_demoted_numeric_locals`): a `number` local whose reassignment
+        // RHS could be non-numeric is demoted to a boxed `Value`. Here `...args: number[]` lowers
+        // to a boxed `Value::Array` (typed rest-params → `Vec<f64>` is future M3 work), so the
+        // ForOf element `n` is an untyped `Value` and `total = total + n` could be non-numeric at
+        // runtime (JS `number + string`). `total` is therefore correctly kept boxed.
         let src = r#"
 fn sum(...args: number[]): number {
     let total: number = 0
@@ -53,12 +55,29 @@ fn sum(...args: number[]): number {
 "#;
         let program = parse(src).unwrap();
         let rust = compile(&program).unwrap();
-        // total should be declared as f64
-        assert!(rust.contains("let mut total: f64"), "expected total: f64");
-        // The return value of run() should convert total back to Value
+        assert!(
+            rust.contains("let mut total = Value::Number(0_f64)"),
+            "rest-param element is a boxed Value, so `total` is soundly demoted to Value"
+        );
+
+        // When every reassignment is provably numeric, the `number` local stays native `f64` and
+        // is wrapped back to `Value` only at the return boundary.
+        let src_native = r#"
+fn count(): number {
+    let total: number = 0
+    for (let i: number = 0; i < 10; i = i + 1) { total = total + i }
+    return total
+}
+"#;
+        let program = parse(src_native).unwrap();
+        let rust = compile(&program).unwrap();
+        assert!(
+            rust.contains("let mut total: f64"),
+            "numeric-only reassignment keeps `total` native f64"
+        );
         assert!(
             rust.contains("Value::Number(total)"),
-            "expected Value::Number(total) wrapping"
+            "f64 total is wrapped back to Value at the return boundary"
         );
     }
 

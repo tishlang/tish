@@ -159,6 +159,16 @@ impl RustType {
                 BinOp::StrictEq | BinOp::StrictNe => Some(RustType::Bool),
                 _ => None,
             }
+        } else if lhs == &RustType::String && rhs == &RustType::String {
+            // M2: native string concat + value equality. `+` concatenates; `===`/`!==` compare by
+            // value (byte-identical to JS and to the boxed `Value::String` path). Relational
+            // `< <= > >=` deliberately stay on the boxed path: JS orders strings by UTF-16 code
+            // units while Rust `String` orders by UTF-8 bytes — they diverge outside the BMP.
+            match op {
+                BinOp::Add => Some(RustType::String),
+                BinOp::StrictEq | BinOp::StrictNe => Some(RustType::Bool),
+                _ => None,
+            }
         } else {
             None
         }

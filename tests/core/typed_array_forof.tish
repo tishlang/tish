@@ -1,0 +1,24 @@
+// M3: `for (let x of xs)` over a typed array iterates natively (index-based over the Vec, no
+// per-element boxing) and the accumulator stays native. Output is identical to the boxed path on
+// every backend, with or without the typing flags.
+
+let xs: number[] = [3, 1, 4, 1, 5, 9, 2, 6]
+let total: number = 0
+for (let x of xs) { total = total + x }
+console.log(total)
+
+let prod: number = 1
+for (let x of xs) { prod = prod * x }
+console.log(prod)
+
+// string[] -> Vec<String>: native element type, so it iterates natively too (concat uses M2).
+let words: string[] = ["a", "b", "c"]
+let joined: string = ""
+for (let w of words) { joined = joined + w }
+console.log(joined)
+
+// Guard: an untyped array still iterates correctly via the boxed path.
+let ys = [10, 20, 30]
+let s = 0
+for (let y of ys) { s = s + y }
+console.log(s)

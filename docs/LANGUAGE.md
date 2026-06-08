@@ -100,14 +100,14 @@ Build: `cargo build --features full`. CLI artifact output: `tish build … --fea
 
 | Route | What you get |
 |-------|----------------|
-| `tish build --native-backend rust` (default) | Rust source emitted by `tishlang_compile` that calls **`tishlang_runtime`** (`get_index`, `set_index`, arithmetic on `Value`, etc.). `cargo build --release` optimizes the **glue**, not “the Tish program as a flat `f64` kernel.” |
+| `tish build --native-backend rust` (default) | Rust source emitted by `tishlang_compile`. Untyped code calls **`tishlang_runtime`** (`get_index`, arithmetic on `Value`, etc.); **explicitly-typed** numeric code lowers to native `f64` / `Vec<f64>` kernels (no boxing in the hot loop), and the opt-in typed-native flags (`TISH_PARAM_NATIVE` / `TISH_PARAM_INFER` / `TISH_NATIVE_FN`) extend that to params, inferred numerics, and recursive calls — typed `fib(35)` drops ~11× and matmul ~16×. See **[type-system-roadmap.md](type-system-roadmap.md)**. |
 | `tish build --native-backend cranelift` | Native binary that loads **embedded serialized bytecode** and runs **`tishlang_vm`** (`tish_cranelift_runtime`). Cranelift is used only to build a tiny object file holding the blob; **bytecode is not lowered to CLIF**. Throughput is **VM-class** (similar order to `tish run --backend vm`), not “rustc/LLVM on numeric loops.” |
 | `tish build --native-backend llvm` | Same **embedded bytecode + VM** link pattern as Cranelift (see `tishlang_llvm` + `tishlang_cranelift_runtime`). |
 | `tish build --target js` | Emitted JavaScript; the host (V8, etc.) may **JIT** tight loops. |
 
 **Interop:** `tish:*` and npm-style native imports require **`--native-backend rust`**. The Cranelift/LLVM native-binary paths are **pure Tish** only (no external native modules).
 
-**Direction (in progress):** Where semantics allow, lower to **Rust or machine primitives** (e.g. `Vec<f64>`, `f32`/`f64` buffers, fixed layouts) instead of universal `Value`; use optional types and **inference** to choose representations; add **real bytecode → Cranelift IR** (or similar) for AOT hot paths. The syntax resembles JS/TS; **compiled output is not intended to stay a boxed dynamic VM forever.**
+**Direction (in progress):** Where semantics allow, lower to **Rust or machine primitives** (e.g. `Vec<f64>`, `f32`/`f64` buffers, fixed layouts) instead of universal `Value`; use optional types and **inference** to choose representations; add **real bytecode → Cranelift IR** (or similar) for AOT hot paths. The syntax resembles JS/TS; **compiled output is not intended to stay a boxed dynamic VM forever.** **Landed (dark-shipped, opt-in flags):** typed scalar params (M1), numeric param/return inference (M4), native monomorphic numeric functions (M5), and native `string` concat/equality (M2) — details and benchmarks in **[type-system-roadmap.md](type-system-roadmap.md)**.
 
 ---
 

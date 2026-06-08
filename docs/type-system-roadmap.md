@@ -50,8 +50,9 @@ Supported: primitives (`number/string/boolean/void/null/any`), `T[]`, `{k:T}`, `
 `T|null→Option<T>`, `{..}`→emitted `TishStruct_*`, `(T)=>R→Rc<dyn Fn>`. **Everything else →
 `RustType::Value`** (the dynamic tagged enum, `tish_core/src/value.rs:284`). Codegen gates on
 `RustType::is_native()` to pick native vs boxed emission; `f64`/`bool` arithmetic, `Vec<f64>`,
-and struct field access all emit natively. `result_type_of_binop` (`types.rs:142`) only handles
-`f64×f64` and `bool×bool` — **not even string `+`**.
+and struct field access all emit natively. `result_type_of_binop` (`types.rs:142`) handles
+`f64×f64`, `bool×bool`, and — since M2 — `String×String` for `+` / `===` / `!==`; relational
+string comparison and mixed-type ops still fall back to the boxed runtime.
 
 ### Three architecture facts that dominate the roadmap
 
@@ -83,6 +84,61 @@ can't cross a function call, parameter, return, array element, or member access*
 to `Value`. This is why only ~5–15% of typical code currently goes native. **Unlocking
 cross-function typing is the single highest-leverage change** and is Phase 1's centerpiece.
 
+### Implemented today: typed native codegen (dark-shipped behind flags)
+
+Phase-1 milestones **M1, M4, M5 are implemented** and **M2 landed** (string concat/equality),
+all gated by opt-in env flags so the default build stays byte-identical (dark-ship discipline).
+Set them at `tish build` time, always with `--native-backend rust` (the only backend that
+consumes type info):
+
+| Flag | Milestone | What it does |
+|---|---|---|
+| `TISH_PARAM_NATIVE=1` | M1 | Annotated scalar params (`a: number/boolean/string`) get a native shadow (`f64`/`bool`/`String`) so the body lowers natively instead of boxing. |
+| `TISH_PARAM_INFER=1` | M4 | Unannotated params used *purely numerically* are inferred `number` (conservative, sound), feeding M1/M5. |
+| `TISH_NATIVE_FN=1` | M5 | Top-level numeric-only functions (numeric params+returns; bodies calling only other such fns or whitelisted `Math.*`) are emitted as a parallel native `fn f_native(a: f64,…) -> f64`; direct calls route to it, bypassing the boxed `value_call` ABI. |
+
+`number×number`, `bool×bool`, (M2) `string` concat/equality, and (M3) `for (let x of xs)` over a
+typed array lower natively **regardless of flags** when operands/iterables are already typed (base
+typed codegen — explicit annotations like `let x: number` / `let a: number[]` always emit `f64` /
+`Vec<f64>`; M3 iterates that `Vec` **index-based**, since `.iter().cloned()` failed to optimize
+inside the monolithic generated `run()`).
+
+**Verified speedups** (Apple Silicon, `--native-backend rust`, identical output):
+
+| Program | slow | fast | speedup | path |
+|---|---|---|---|---|
+| `fib(35)`, `fn fib(n: number): number` | 475 ms | 41 ms | **11.6×** | M1 + M5 (flags) |
+| `fib(35)`, untyped `function fib(n)` | 487 ms | 46 ms | **10.6×** | M4 + M5 (flags) |
+| matmul 256, `fn bench(N: number)` | 230 ms | 14 ms | **16×** | M1 (flags) |
+| matmul 256, fully-untyped → annotated locals | 497 ms | 230 ms | 2.2× | base typed codegen |
+| 3M-elem `for (x of xs)` reduction, compute-heavy body | 53 ms *(untyped, boxed)* | 4 ms *(typed `number[]`)* | **~13×** | M3 (base codegen) |
+
+*(M3 note: a trivial sum is memory-bandwidth-bound, so the win shows on compute-heavy bodies where
+boxing each intermediate dominated; correctness/no-boxing holds either way.)*
+
+**Correctness:** the whole `tests/core` corpus is byte-identical across interpreter / VM / native
+/ cranelift / wasi / js with flags **off**, and the native corpus + cross-runtime parity (incl.
+node) stay correct with flags **on**. Fixtures: `tests/core/typed_strings.tish` (M2),
+`typed_param_loopbound.tish` (M4), `typed_array_forof.tish` (M3), plus `infer::param_infer_tests`.
+(This pass also fixed a real compile bug: a default-param expression referencing a native-shadowed
+param — `fn dependent(a, b = a + 1)` under M4 — emitted boxed `ops::add(&a, …)` against an `f64`;
+such params are now kept boxed.)
+
+**Known limitations / next coverage wins:**
+- **M4 now infers loop-bound params:** a param compared to a numeric *local* (`for (let i = 0;
+  i < n; i++)`) is inferred `number` — `numeric_provable` consults a per-function set of
+  known-numeric locals (`infer.rs` `collect_numeric_locals`), so `i < n` proves `n` numeric.
+  **Still bails on string-coercion uses:** matmul's `fn bench(N)` interpolates `${N}` in a
+  `console.log` template — a stringify use that conservatively bails — so `bench(N)` still needs an
+  explicit `N: number`. A "compatible-but-not-proving" use model (permit stringify/template uses
+  when another use already proves numeric) would close this.
+- **M3 done for Vec *locals*:** `for (let x of xs)` over a typed `let xs: number[]` now iterates
+  the native `Vec` index-based (loop var bound to the element type; the demotion pass
+  `collect_annotated_types` binds it too, so accumulators stay `f64`). **Still open:** typed
+  **rest-params** — `...args: number[]` still lowers to a boxed `Value::Array` (not `Vec<f64>`), so
+  `sum(...args)` reductions still demote; and **member-on-non-ident** (`xs[i].field`) still boxes.
+- **No type checker yet** (Phase 2): mismatches still surface as runtime panics, not compile errors.
+
 ---
 
 ## Part 2 — Roadmap (sequenced)
@@ -112,16 +168,19 @@ calls to it, bypassing `value_call` entirely.
 | # | Milestone | Core change | Files |
 |---|---|---|---|
 | **M0** | Function **signature table** (no-op pre-pass) | `FnSig{params,rest,returns,native_safe}` + `FnSigTable`, built after `collect_type_aliases`; unused at first so it can't regress | `types.rs` (new), `codegen.rs:~1348` |
-| **M2** | **String** concat + native string methods | add `String+String→String` (+ comparisons) to `result_type_of_binop` (`types.rs:142`) and mirror in `infer.rs`; whitelist UTF-safe `str` methods | `types.rs:142`, `infer.rs:80`, `codegen.rs:~3060/5170` |
-| **M3** | **Collections**: arrays-of-structs + nested element typing | much may be free (`Vec<Named>` composes); generalize the typed Member fast path to any `object` whose type is `Named` (not just `Ident`) so `xs[i].field`/`a.b.c` lower native | `codegen.rs:3124`, `infer.rs` (Array arm) |
+| **M2 ✅** | **String** concat + value equality *(DONE)* | `String×String`: `+` emits a `format!`, `===`/`!==` compare by value; added to `result_type_of_binop` + `infer.rs`. Relational `< <= > >=` deliberately stay boxed (JS UTF-16 vs Rust UTF-8 order). Native string *methods* deferred. | `types.rs` (String arm), `infer.rs` (`is_string`), `codegen.rs` `emit_typed_expr` Add |
+| **M3** ◑ | **Collections** | ✅ native `for (let x of xs)` over a typed `Vec` (index-based; loop var + demotion pass bind the element type). ◻ Remaining: typed rest-params `...args: number[]`→`Vec<f64>`; generalize the typed Member fast path to non-`Ident` objects (`xs[i].field`/`a.b.c`); array-literal element inference | `codegen.rs` ForOf + `collect_annotated_types`; (todo) `3124`, `infer.rs` Array arm |
 | **M1** | **Cross-function param + return typing** (keystone) | type annotated params via `from_value_expr` native shadow; thread return type; add a `Call` arm to `emit_typed_expr` that reports the signature's `returns` (wrapping `value_call` result with `from_value_expr`) | `types.rs:384`, `codegen.rs:2303,1906,5127,5258` |
 | **M4** | **Inference upgrade** (bidirectional, dark-shipped) | extend `infer.rs` to propagate through call returns (via table), member access on structs, array elements, string concat, loop/closure vars; **param inference** from use-sites ∩ call-sites behind `TISH_PARAM_INFER` (mirrors `TISH_STRUCT_INFER`) | `infer.rs:71,123,656` |
 | **M5** | **Native monomorphic `fn`** (stretch, Strategy B) | emit parallel `fn f_native` for eligible (`native_safe`) functions; route direct calls; keep closure wrapper as safety net | `codegen.rs:2069,5127` |
 
-**Ship order:** **M0 → M2 → M3 → M1 → M4 → M5** (build confidence on low-risk surface before
-touching the param ABI). Highest-risk audit point before M1: `emit_expr`'s `Expr::Ident` arm
-(`codegen.rs:2593`) must auto-box a native-typed ident used in a `Value` position via
-`to_value_expr`.
+**Status:** **M1, M2, M4, M5 are implemented**, and **M3 is partially done** (native ForOf over a
+typed `Vec` local — see *Implemented today* above). **M0** was never built as a standalone table —
+M5 rolled its own `collect_native_fns` fixpoint analysis instead. **Highest-leverage remaining
+Phase-1 work:** typed **rest-params** (`...args: number[]`→`Vec<f64>`, reusing the same native-ForOf
++ demotion-bind machinery) so `sum(...args)` reductions go fully native; **member-on-non-ident**
+(`xs[i].field`); and the M4 "compatible-but-not-proving" use model (templates/stringify). Original
+planned order was M0 → M2 → M3 → M1 → M4 → M5; param/native-fn work (M1/M4/M5) landed first in practice.
 
 **Reuse, don't reinvent:** `from_value_expr`/`to_value_expr` (`types.rs:227/278`) for every
 boundary; `is_native`/`result_type_of_binop`/`from_annotation_with_aliases`; the

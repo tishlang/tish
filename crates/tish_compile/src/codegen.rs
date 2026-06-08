@@ -2042,42 +2042,82 @@ impl Codegen {
                 body,
                 ..
             } => {
-                let iter_expr = self.emit_expr(iterable)?;
-                self.writeln(&format!("{{ let _fof = ({}).clone();", iter_expr));
-                self.indent += 1;
-                self.writeln("match &_fof {");
-                self.indent += 1;
-                self.writeln("Value::Array(ref _arr) => {");
-                self.indent += 1;
-                self.writeln("for _v in _arr.borrow().iter() {");
-                self.indent += 1;
-                self.writeln(&format!(
-                    "let {} = _v.clone();",
-                    Self::escape_ident(name.as_ref())
-                ));
-                self.emit_statement(body)?;
-                self.indent -= 1;
-                self.writeln("}");
-                self.indent -= 1;
-                self.writeln("}");
-                self.writeln("Value::String(ref _s) => {");
-                self.indent += 1;
-                self.writeln("for _ch in _s.chars() {");
-                self.indent += 1;
-                self.writeln(&format!(
-                    "let {} = Value::String(tishlang_runtime::ArcStr::from(_ch.to_string()));",
-                    Self::escape_ident(name.as_ref())
-                ));
-                self.emit_statement(body)?;
-                self.indent -= 1;
-                self.writeln("}");
-                self.indent -= 1;
-                self.writeln("}");
-                self.writeln("_ => panic!(\"for-of requires array or string\"),");
-                self.indent -= 1;
-                self.writeln("}");
-                self.indent -= 1;
-                self.writeln("}");
+                // M3 native fast path: the iterable is a `Vec<elem>` local with a native element
+                // type (e.g. `let xs: number[]` -> `Vec<f64>`) and the body never mentions it (so
+                // iterating by reference can't alias a mutation). Bind the loop var as `elem` so the
+                // body lowers natively — no per-element `Value::clone`, and accumulators stay f64.
+                let mut emitted_native = false;
+                if let Expr::Ident { name: it_name, .. } = iterable {
+                    if let RustType::Vec(elem) = self.type_context.get_type(it_name.as_ref()) {
+                        if elem.is_native() {
+                            let mut body_idents = std::collections::HashSet::new();
+                            Self::collect_stmt_idents(body, &mut body_idents);
+                            if !body_idents.contains(it_name.as_ref()) {
+                                let esc_it = Self::escape_ident(it_name.as_ref()).into_owned();
+                                let esc_name = Self::escape_ident(name.as_ref()).into_owned();
+                                // Index-based iteration (not `.iter().cloned()`, which rustc fails to
+                                // tighten here): `0..len` indexing of a `Vec<f64>` matches a hand-
+                                // written C-style loop. Unique counter names keep nested ForOf sound.
+                                let idx = self.loop_label_index;
+                                self.loop_label_index += 1;
+                                let copy_elem = matches!(*elem, RustType::F64 | RustType::Bool);
+                                let bind = if copy_elem {
+                                    format!("let {} = {}[_fof_i{}];", esc_name, esc_it, idx)
+                                } else {
+                                    format!("let {} = {}[_fof_i{}].clone();", esc_name, esc_it, idx)
+                                };
+                                self.writeln(&format!("for _fof_i{} in 0..{}.len() {{", idx, esc_it));
+                                self.indent += 1;
+                                self.writeln(&bind);
+                                self.type_context.push_scope();
+                                self.type_context.define(name.as_ref(), *elem);
+                                self.emit_statement(body)?;
+                                self.type_context.pop_scope();
+                                self.indent -= 1;
+                                self.writeln("}");
+                                emitted_native = true;
+                            }
+                        }
+                    }
+                }
+                if !emitted_native {
+                    let iter_expr = self.emit_expr(iterable)?;
+                    self.writeln(&format!("{{ let _fof = ({}).clone();", iter_expr));
+                    self.indent += 1;
+                    self.writeln("match &_fof {");
+                    self.indent += 1;
+                    self.writeln("Value::Array(ref _arr) => {");
+                    self.indent += 1;
+                    self.writeln("for _v in _arr.borrow().iter() {");
+                    self.indent += 1;
+                    self.writeln(&format!(
+                        "let {} = _v.clone();",
+                        Self::escape_ident(name.as_ref())
+                    ));
+                    self.emit_statement(body)?;
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.writeln("Value::String(ref _s) => {");
+                    self.indent += 1;
+                    self.writeln("for _ch in _s.chars() {");
+                    self.indent += 1;
+                    self.writeln(&format!(
+                        "let {} = Value::String(tishlang_runtime::ArcStr::from(_ch.to_string()));",
+                        Self::escape_ident(name.as_ref())
+                    ));
+                    self.emit_statement(body)?;
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.writeln("_ => panic!(\"for-of requires array or string\"),");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
             }
             Statement::For {
                 init,
@@ -2573,11 +2613,29 @@ impl Codegen {
                 // simple params, native-scalar annotation, no default value.
                 let param_native =
                     std::env::var("TISH_PARAM_NATIVE").map(|v| v != "0").unwrap_or(false);
+                // A param referenced by ANY sibling default expr (e.g. `(a, b = a + 1)`) must NOT
+                // get a native f64 shadow: the default binding is emitted on the boxed Value path
+                // (`ops::add(&a, …)` expects `&Value`), so a native `a: f64` would mistype the
+                // generated Rust. Keep such params boxed — correctness over the M1 optimization;
+                // defaults referencing params are rare in hot code. Also covers the M4 case where
+                // an unannotated param (e.g. `dependent(a, b = a + 1)`) is inferred numeric.
+                let mut default_referenced: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for p in params {
+                    if let FunParam::Simple(tp) = p {
+                        if let Some(d) = &tp.default {
+                            Self::collect_expr_idents(d, &mut default_referenced);
+                        }
+                    }
+                }
                 let mut native_params: Vec<(String, RustType)> = Vec::new();
                 for (i, p) in params.iter().enumerate() {
                     match p {
                         FunParam::Simple(tp) => {
-                            let native_ty = if param_native && tp.default.is_none() {
+                            let native_ty = if param_native
+                                && tp.default.is_none()
+                                && !default_referenced.contains(tp.name.as_ref())
+                            {
                                 tp.type_ann
                                     .as_ref()
                                     .map(RustType::from_annotation)
@@ -5646,9 +5704,27 @@ impl Codegen {
                         Self::collect_annotated_types(std::slice::from_ref(e), aliases, env);
                     }
                 }
-                Statement::While { body, .. }
-                | Statement::DoWhile { body, .. }
-                | Statement::ForOf { body, .. } => {
+                Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+                    Self::collect_annotated_types(std::slice::from_ref(body), aliases, env)
+                }
+                Statement::ForOf {
+                    name,
+                    iterable,
+                    body,
+                    ..
+                } => {
+                    // A loop var iterating a `Vec<elem>` local binds `elem` — so `total += n` (n the
+                    // loop var over a `number[]`) is seen as native f64 and `total` is NOT demoted.
+                    // Sound: the Vec's elements are genuinely that native type at runtime.
+                    if let Expr::Ident { name: it_name, .. } = iterable {
+                        let elem_ty = match env.get(it_name.as_ref()) {
+                            Some(RustType::Vec(elem)) => Some((**elem).clone()),
+                            _ => None,
+                        };
+                        if let Some(t) = elem_ty {
+                            env.insert(name.to_string(), t);
+                        }
+                    }
                     Self::collect_annotated_types(std::slice::from_ref(body), aliases, env)
                 }
                 Statement::For { init, body, .. } => {
@@ -6307,6 +6383,12 @@ impl Codegen {
                 if let Some(result_ty) = RustType::result_type_of_binop(*op, &lt, &rt) {
                     // Both sides are compatible native types → emit native op.
                     let code = match op {
+                        BinOp::Add if result_ty == RustType::String => {
+                            // M2: Rust `String + String` is illegal; build a fresh String.
+                            // `format!` borrows both operands, so chained concats (`a + b + c`)
+                            // nest cleanly with no move/clone hazards.
+                            format!("format!(\"{{}}{{}}\", {}, {})", l, r)
+                        }
                         BinOp::Add => format!("({} + {})", l, r),
                         BinOp::Sub => format!("({} - {})", l, r),
                         BinOp::Mul => format!("({} * {})", l, r),
