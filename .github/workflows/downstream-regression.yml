@@ -20,6 +20,9 @@ on:
       - "crates/tish_ffi/**"
       - "regression/downstream/**"
 
+permissions:
+  contents: read
+
 jobs:
   downstream:
     name: Downstream consumers vs tish HEAD
