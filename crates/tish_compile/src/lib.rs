@@ -2,10 +2,13 @@
 //!
 //! Emits Rust source that links to tishlang_runtime.
 
+mod check;
 mod codegen;
 mod infer;
 mod resolve;
 mod types;
+
+pub use check::{check_program, TypeDiagnostic};
 
 /// How generated Rust is linked (desktop binary vs embedded iOS staticlib).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,11 +44,9 @@ mod tests {
 
     #[test]
     fn typed_assign_conversion() {
-        // Soundness pass (`collect_demoted_numeric_locals`): a `number` local whose reassignment
-        // RHS could be non-numeric is demoted to a boxed `Value`. Here `...args: number[]` lowers
-        // to a boxed `Value::Array` (typed rest-params → `Vec<f64>` is future M3 work), so the
-        // ForOf element `n` is an untyped `Value` and `total = total + n` could be non-numeric at
-        // runtime (JS `number + string`). `total` is therefore correctly kept boxed.
+        // Typed rest-param `...args: number[]` lowers to a native `Vec<f64>` (M3), so the ForOf
+        // element `n` is `f64`, `total = total + n` stays native, and `total` is NOT demoted — the
+        // whole reduction compiles to native f64 with the return wrapping `total` back to `Value`.
         let src = r#"
 fn sum(...args: number[]): number {
     let total: number = 0
@@ -56,8 +57,12 @@ fn sum(...args: number[]): number {
         let program = parse(src).unwrap();
         let rust = compile(&program).unwrap();
         assert!(
-            rust.contains("let mut total = Value::Number(0_f64)"),
-            "rest-param element is a boxed Value, so `total` is soundly demoted to Value"
+            rust.contains("let mut total: f64"),
+            "typed rest-param `Vec<f64>` keeps `total` native f64 (no demotion)"
+        );
+        assert!(
+            rust.contains("Value::Number(total)"),
+            "f64 total is wrapped back to Value at the return boundary"
         );
 
         // When every reassignment is provably numeric, the `number` local stays native `f64` and

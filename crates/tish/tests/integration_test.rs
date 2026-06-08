@@ -855,6 +855,28 @@ fn has_js_sibling(name: &str) -> bool {
         .exists()
 }
 
+/// The gradual type checker must produce ZERO diagnostics on the (valid) corpus — any diagnostic is
+/// a false positive. Lists every offender so they can be inspected/fixed.
+#[test]
+fn checker_no_false_positives_on_corpus() {
+    let mut flagged: Vec<String> = Vec::new();
+    for name in discover_core_tests() {
+        let src = std::fs::read_to_string(core_dir().join(&name)).unwrap();
+        if let Ok(prog) = tishlang_parser::parse(&src) {
+            let diags = tishlang_compile::check_program(&prog);
+            if !diags.is_empty() {
+                let msgs: Vec<String> = diags.iter().map(|d| d.message.clone()).collect();
+                flagged.push(format!("{name}: {}", msgs.join(" | ")));
+            }
+        }
+    }
+    assert!(
+        flagged.is_empty(),
+        "type checker flagged valid corpus programs (false positives):\n{}",
+        flagged.join("\n")
+    );
+}
+
 /// Run each .tish file with interpreter and compare stdout to static expected.
 /// Set REGENERATE_EXPECTED=1 to write .expected files from interpreter output (run once, then commit).
 #[test]

@@ -1322,11 +1322,18 @@ impl<'a> Compiler<'a> {
                 // ES per-iteration `let` for `for (let v of …)`: register the loop var so a closure
                 // in the body captures this iteration's element (emitted once, before loop_start).
                 self.emit_u16(Opcode::LoopVarsBegin, name_idx);
-                let loop_start = self.chunk.code.len();
+                // Pre-tested loop, like the C-style `for` above: test `i < len` at the TOP, before
+                // reading `arr[i]`. A bottom-tested loop ran the body once on an empty array (reading
+                // `arr[0]` → null) and spun forever on `continue` (which skipped the increment).
+                let cond_start = self.chunk.code.len();
+                self.emit_u16(Opcode::LoadVar, i_idx);
+                self.emit_u16(Opcode::LoadVar, len_idx);
+                self.emit_u8(Opcode::BinOp, 10);
+                let jump_out = self.emit_jump(Opcode::JumpIfFalse);
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
                     continue_patches: Vec::new(),
-                    continue_is_forward_jump: false,
+                    continue_is_forward_jump: true,
                 });
                 self.breakable_stack.push(Breakable::Loop {
                     unwind_depth: self.block_depth,
@@ -1340,25 +1347,23 @@ impl<'a> Compiler<'a> {
                     .unwrap()
                     .insert(Arc::clone(name), false);
                 self.compile_statement(body)?;
+                // `continue` lands here: increment `i`, then fall through to the JumpBack → re-test.
+                let update_start = self.chunk.code.len();
                 self.emit_u16(Opcode::LoadVar, i_idx);
                 let one_idx = self.constant_idx(Constant::Number(1.0));
                 self.emit(Opcode::LoadConst);
                 self.chunk.write_u16(one_idx);
                 self.emit_u8(Opcode::BinOp, 0);
                 self.emit_u16(Opcode::StoreVar, i_idx);
-                self.emit_u16(Opcode::LoadVar, i_idx);
-                self.emit_u16(Opcode::LoadVar, len_idx);
-                self.emit_u8(Opcode::BinOp, 10);
-                let jump_out = self.emit_jump(Opcode::JumpIfFalse);
-                let jump_back_dist = (self.chunk.code.len() + 3).saturating_sub(loop_start);
-                self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
-                let end = self.chunk.code.len();
-                self.patch_jump(jump_out, end);
                 let info = self.loop_stack.pop().unwrap();
                 self.breakable_stack.pop();
                 for p in info.continue_patches {
-                    self.patch_jump_back(p, loop_start);
+                    self.patch_jump(p, update_start);
                 }
+                let jump_back_dist = (self.chunk.code.len() + 3).saturating_sub(cond_start);
+                self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
+                let end = self.chunk.code.len();
+                self.patch_jump(jump_out, end);
                 for p in info.break_patches {
                     self.patch_jump(p, end);
                 }

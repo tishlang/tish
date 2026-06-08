@@ -1,0 +1,27 @@
+// M3 rest-params: `...args: number[]` lowers to a native `Vec<f64>` (each trailing arg unboxed),
+// so the for-of reduction over it is fully native (loop var `f64`, accumulator stays `f64`).
+// Output is identical across backends. (Empty-call cases are omitted: a separate pre-existing
+// interp/VM bug mis-binds an empty rest-param — tracked elsewhere.)
+
+fn sum(...args: number[]): number {
+  let total: number = 0
+  for (let n of args) { total = total + n }
+  return total
+}
+console.log(sum(1, 2, 3, 4, 5))
+console.log(sum(10, 20))
+
+fn maxOf(...xs: number[]): number {
+  let m: number = 0
+  for (let x of xs) { if (x > m) { m = x } }
+  return m
+}
+console.log(maxOf(3, 9, 2, 7))
+
+// fixed params before the rest, all numeric
+fn scaledSum(k: number, ...rest: number[]): number {
+  let acc: number = 0
+  for (let r of rest) { acc = acc + r * k }
+  return acc
+}
+console.log(scaledSum(2, 1, 2, 3))

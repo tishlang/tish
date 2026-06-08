@@ -199,7 +199,7 @@ serve(8080, handleRequest)
 
 ## Roadmap: checked types (Phase 2)
 
-**Today:** `type` / `declare` / optional annotations on `let`/`const`/`fn` are parsed (see **Runtime model today**) but **not** checked against values. **Next:** a unifier/checker in `tish build` and **`tish-lsp`** diagnostics; richer type references with navigation on `: Foo`; possibly `interface` with **structural** matching. Generics, declaration merging, and full ECMAScript type compatibility stay **out of scope** until spelled out here. Keep **`tree-sitter-tish`** in sync when the grammar surface changes.
+**Today:** a **gradual type checker** (`tishlang_compile::check_program`, in `crates/tish_compile/src/check.rs`) runs in `tish build` behind **`TISH_CHECK`** (`=warn` prints `line:col` diagnostics, `=error` blocks the build; off by default). It flags *provable* annotation violations — wrong-typed initializers, returns, reassignments, call arguments, and struct-literal fields — and is gradual, so anything it can't prove (dynamic values, unsignatured calls, `any`, unannotated locals) is never flagged (zero corpus false positives). **Next:** a dedicated `Ty` IR for real unions/narrowing; a `--checked` CLI flag + **`tish-lsp`** diagnostics; turning the codegen unbox-`panic!`s into compile-time errors for checked code; richer navigation on `: Foo`; possibly `interface` with **structural** matching. Generics, declaration merging, and full ECMAScript type compatibility stay **out of scope** until spelled out here. Keep **`tree-sitter-tish`** in sync when the grammar surface changes. Full status: **[type-system-roadmap.md](type-system-roadmap.md)**.
 
 ---
 

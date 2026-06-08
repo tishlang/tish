@@ -1,0 +1,15 @@
+// Array-literal element inference (opt-in via TISH_STRUCT_INFER): a read-only `let xs = [scalars]`
+// used only in for-of / `.length` infers a native `T[]`. Output is identical with or without the
+// flag and across backends; mutation or index-read keeps the array boxed (sound), so behavior never
+// changes — this fixture just exercises the inferred-native path.
+
+let nums = [10, 20, 30, 40]
+let total = 0
+for (let n of nums) { total = total + n }
+console.log(total)
+console.log(nums.length)
+
+let names = ["a", "b", "c"]
+let joined = ""
+for (let s of names) { joined = joined + s }
+console.log(joined)

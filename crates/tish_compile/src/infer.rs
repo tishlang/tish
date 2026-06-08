@@ -59,6 +59,37 @@ fn is_string(ann: &TypeAnnotation) -> bool {
     matches!(ann, TypeAnnotation::Simple(s) if s.as_ref() == "string")
 }
 
+fn is_bool(ann: &TypeAnnotation) -> bool {
+    matches!(ann, TypeAnnotation::Simple(s) if s.as_ref() == "boolean")
+}
+
+/// Element type of an array literal of uniform native scalars (number/string/boolean), for
+/// `let xs = [1, 2, 3]` -> `number[]`. Bails (None) on empty, spread, mixed, or non-scalar
+/// elements so the binding stays a boxed array.
+fn infer_array_elem(elements: &[tishlang_ast::ArrayElement], ctx: &InferCtx) -> Option<TypeAnnotation> {
+    use tishlang_ast::ArrayElement;
+    if elements.is_empty() {
+        return None;
+    }
+    let mut elem: Option<TypeAnnotation> = None;
+    for el in elements {
+        let e = match el {
+            ArrayElement::Expr(e) => e,
+            ArrayElement::Spread(_) => return None,
+        };
+        let t = infer_expr_type(e, ctx)?;
+        if !(is_number(&t) || is_string(&t) || is_bool(&t)) {
+            return None;
+        }
+        match &elem {
+            None => elem = Some(t),
+            Some(prev) if prev != &t => return None,
+            _ => {}
+        }
+    }
+    elem
+}
+
 fn number_ann() -> TypeAnnotation {
     TypeAnnotation::Simple("number".into())
 }
@@ -624,6 +655,34 @@ fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx)
     let n = stmts.len();
     let mut out: Vec<Statement> = Vec::with_capacity(n);
     for (i, stmt) in stmts.iter().enumerate() {
+        // Candidate: `let xs = [ ...uniform native scalars... ]` with no annotation -> native `T[]`,
+        // but only when every later use is read-only (`uses_are_array_safe`), so a `Vec<f64>`
+        // assumption can't be violated by a later `push`/`xs[i] = …`.
+        if let Statement::VarDecl {
+            name,
+            name_span,
+            mutable,
+            type_ann: None,
+            init: Some(Expr::Array { elements, .. }),
+            span,
+        } = stmt
+        {
+            if let Some(elem) = infer_array_elem(elements, ctx) {
+                if uses_are_array_safe(name.as_ref(), &stmts[i + 1..]) {
+                    let arr_ann = TypeAnnotation::Array(Box::new(elem));
+                    ctx.define(name.as_ref(), arr_ann.clone());
+                    out.push(Statement::VarDecl {
+                        name: name.clone(),
+                        name_span: *name_span,
+                        mutable: *mutable,
+                        type_ann: Some(arr_ann),
+                        init: stmt_init_clone(stmt),
+                        span: *span,
+                    });
+                    continue;
+                }
+            }
+        }
         // Candidate: `let o = { ...object literal... }` with no annotation.
         if let Statement::VarDecl {
             name,
@@ -771,6 +830,166 @@ fn si_recurse(stmt: &Statement, reg: &mut StructRegistry, ctx: &mut InferCtx) ->
 /// shapes also return false, so this can never wrongly green-light.
 fn uses_are_struct_safe(name: &str, keys: &std::collections::HashSet<&str>, tail: &[Statement]) -> bool {
     tail.iter().all(|s| stmt_name_safe(s, name, keys))
+}
+
+/// Sound array-literal inference: `let name = [scalars]` may lower to a native `T[]` only if every
+/// later use is READ-ONLY — `for (_ of name)`, a non-optional index read `name[i]`, or `name.length`.
+/// Any mutation (`name.push(…)`, `name[i] = …`), reassignment, bare escape, or other method call on
+/// `name` bails (it stays a boxed array). Conservative: unhandled forms that mention `name` bail.
+fn uses_are_array_safe(name: &str, tail: &[Statement]) -> bool {
+    tail.iter().all(|s| arr_stmt_safe(s, name))
+}
+
+fn arr_opt_expr_safe(e: &Option<Expr>, name: &str) -> bool {
+    e.as_ref().map(|e| arr_expr_safe(e, name)).unwrap_or(true)
+}
+
+fn arr_stmt_safe(s: &Statement, name: &str) -> bool {
+    use Statement::*;
+    match s {
+        VarDecl { name: n, init, .. } => n.as_ref() != name && arr_opt_expr_safe(init, name),
+        ExprStmt { expr, .. } => arr_expr_safe(expr, name),
+        Block { statements, .. } => statements.iter().all(|s| arr_stmt_safe(s, name)),
+        If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            arr_expr_safe(cond, name)
+                && arr_stmt_safe(then_branch, name)
+                && else_branch.as_ref().map(|e| arr_stmt_safe(e, name)).unwrap_or(true)
+        }
+        While { cond, body, .. } => arr_expr_safe(cond, name) && arr_stmt_safe(body, name),
+        DoWhile { body, cond, .. } => arr_stmt_safe(body, name) && arr_expr_safe(cond, name),
+        For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
+            init.as_ref().map(|i| arr_stmt_safe(i, name)).unwrap_or(true)
+                && cond.as_ref().map(|c| arr_expr_safe(c, name)).unwrap_or(true)
+                && update.as_ref().map(|u| arr_expr_safe(u, name)).unwrap_or(true)
+                && arr_stmt_safe(body, name)
+        }
+        // `for (_ of name)` is the key read-only use; rebinding `name` bails.
+        ForOf {
+            name: n,
+            iterable,
+            body,
+            ..
+        } => {
+            if n.as_ref() == name {
+                return false;
+            }
+            let iter_ok = matches!(iterable, Expr::Ident { name: it, .. } if it.as_ref() == name)
+                || arr_expr_safe(iterable, name);
+            iter_ok && arr_stmt_safe(body, name)
+        }
+        Return { value, .. } => arr_opt_expr_safe(value, name),
+        Throw { value, .. } => arr_expr_safe(value, name),
+        Break { .. } | Continue { .. } | TypeAlias { .. } => true,
+        // Nested fn could capture+mutate; switch/try and anything else: be safe, bail.
+        _ => false,
+    }
+}
+
+fn arr_expr_safe(e: &Expr, name: &str) -> bool {
+    use Expr::*;
+    match e {
+        Literal { .. } => true,
+        Ident { name: n, .. } => n.as_ref() != name, // bare escape is unsafe
+        // `name[i]` lowers to a native `Vec` index that PANICS out-of-bounds, whereas the boxed
+        // array yields `undefined` — so an index read of `name` is unsound for inference. (Only
+        // `for (_ of name)` and `name.length` are safe reads.) Indexing a DIFFERENT array is fine.
+        Index { object, index, .. } => {
+            !matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == name)
+                && arr_expr_safe(object, name)
+                && arr_expr_safe(index, name)
+        }
+        // `name.length` READ is safe; any other `name.<prop>` (incl. a method receiver) bails.
+        Member {
+            object,
+            prop,
+            optional,
+            ..
+        } => {
+            if let Ident { name: n, .. } = object.as_ref() {
+                if n.as_ref() == name {
+                    return !optional
+                        && matches!(prop, tishlang_ast::MemberProp::Name { name: k, .. } if k.as_ref() == "length");
+                }
+            }
+            arr_expr_safe(object, name)
+                && match prop {
+                    tishlang_ast::MemberProp::Expr(p) => arr_expr_safe(p, name),
+                    tishlang_ast::MemberProp::Name { .. } => true,
+                }
+        }
+        Binary { left, right, .. } | NullishCoalesce { left, right, .. } => {
+            arr_expr_safe(left, name) && arr_expr_safe(right, name)
+        }
+        Unary { operand, .. } | TypeOf { operand, .. } | Await { operand, .. } => {
+            arr_expr_safe(operand, name)
+        }
+        Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            arr_expr_safe(cond, name)
+                && arr_expr_safe(then_branch, name)
+                && arr_expr_safe(else_branch, name)
+        }
+        Call { callee, args, .. } | New { callee, args, .. } => {
+            arr_expr_safe(callee, name)
+                && args.iter().all(|a| match a {
+                    tishlang_ast::CallArg::Expr(x) | tishlang_ast::CallArg::Spread(x) => {
+                        arr_expr_safe(x, name)
+                    }
+                })
+        }
+        Assign { name: an, value, .. }
+        | CompoundAssign { name: an, value, .. }
+        | LogicalAssign { name: an, value, .. } => {
+            an.as_ref() != name && arr_expr_safe(value, name) // reassigning `name` bails
+        }
+        // Mutating `name` via index/member assignment bails; otherwise recurse.
+        IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => {
+            !matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == name)
+                && arr_expr_safe(object, name)
+                && arr_expr_safe(index, name)
+                && arr_expr_safe(value, name)
+        }
+        MemberAssign { object, value, .. } => {
+            !matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == name)
+                && arr_expr_safe(object, name)
+                && arr_expr_safe(value, name)
+        }
+        PostfixInc { name: n, .. }
+        | PostfixDec { name: n, .. }
+        | PrefixInc { name: n, .. }
+        | PrefixDec { name: n, .. } => n.as_ref() != name,
+        Array { elements, .. } => elements.iter().all(|el| match el {
+            tishlang_ast::ArrayElement::Expr(x) | tishlang_ast::ArrayElement::Spread(x) => {
+                arr_expr_safe(x, name)
+            }
+        }),
+        Object { props, .. } => props.iter().all(|p| match p {
+            tishlang_ast::ObjectProp::KeyValue(_, v) => arr_expr_safe(v, name),
+            tishlang_ast::ObjectProp::Spread(v) => arr_expr_safe(v, name),
+        }),
+        // Anything else that mentions `name`: be safe, bail.
+        _ => !pi_mentions(e, name),
+    }
 }
 
 fn opt_expr_safe(e: &Option<Expr>, name: &str, keys: &std::collections::HashSet<&str>) -> bool {

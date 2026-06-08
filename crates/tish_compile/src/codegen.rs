@@ -652,6 +652,34 @@ pub fn compile_with_native_modules(
     )
 }
 
+/// Opt-in gradual type check. `TISH_CHECK=1`/`warn` prints provable annotation violations to stderr
+/// as warnings; `TISH_CHECK=error` also fails the build. Unset/`0` → no-op (default builds are
+/// unaffected). The checker is gradual (see `check.rs`): it never flags code it can't prove wrong.
+fn run_type_check(program: &Program) -> Result<(), CompileError> {
+    let mode = std::env::var("TISH_CHECK").unwrap_or_default();
+    if mode.is_empty() || mode == "0" {
+        return Ok(());
+    }
+    let diags = crate::check::check_program(program);
+    if diags.is_empty() {
+        return Ok(());
+    }
+    let kind = if mode == "error" { "error" } else { "warning" };
+    for d in &diags {
+        eprintln!(
+            "tish type {}: {}:{}: {}",
+            kind, d.span.start.0, d.span.start.1, d.message
+        );
+    }
+    if mode == "error" {
+        return Err(CompileError::new(
+            format!("type checking failed: {} error(s)", diags.len()),
+            Some(diags[0].span),
+        ));
+    }
+    Ok(())
+}
+
 pub fn compile_with_native_modules_emit(
     program: &Program,
     project_root: Option<&Path>,
@@ -666,6 +694,10 @@ pub fn compile_with_native_modules_emit(
     } else {
         program.clone()
     };
+    // Gradual type check (opt-in via `TISH_CHECK`): `=1`/`=warn` prints provable annotation
+    // violations as warnings; `=error` blocks the build. Off by default — never affects the
+    // standard build. Run on the optimized, pre-inference program (real user annotations only).
+    run_type_check(&program)?;
     // Type-inference pass: fills in `type_ann` on unannotated VarDecl nodes where
     // the type is unambiguous (literals, arithmetic of typed vars, etc.).
     let program = crate::infer::infer_program(&program);
@@ -2693,12 +2725,34 @@ impl Codegen {
                         }
                     }
                 }
+                // A typed rest-param `...args: number[]` lowers to a native `Vec<elem>` (unbox each
+                // trailing arg) instead of a boxed `Value::Array`, so the body iterates/indexes it
+                // natively (and `for (let x of args)` keeps accumulators `f64`). Non-native element
+                // types fall back to the boxed array.
+                let rest_native: Option<RustType> = rest_param.as_ref().and_then(|rp| {
+                    rp.type_ann.as_ref().and_then(|ann| {
+                        match RustType::from_annotation_with_aliases(ann, &self.type_aliases) {
+                            RustType::Vec(elem) if elem.is_native() => Some(RustType::Vec(elem)),
+                            _ => None,
+                        }
+                    })
+                });
                 if let Some(rest) = rest_param {
-                    self.writeln(&format!(
-                        "let {} = Value::Array(VmRef::new(args[{}..].to_vec()));",
-                        Self::escape_ident(rest.name.as_ref()),
-                        params.len()
-                    ));
+                    if let Some(RustType::Vec(elem)) = &rest_native {
+                        self.writeln(&format!(
+                            "let {}: Vec<{}> = args[{}..].iter().map(|v| {}).collect();",
+                            Self::escape_ident(rest.name.as_ref()),
+                            elem.to_rust_type_str(),
+                            params.len(),
+                            elem.from_value_expr("v")
+                        ));
+                    } else {
+                        self.writeln(&format!(
+                            "let {} = Value::Array(VmRef::new(args[{}..].to_vec()));",
+                            Self::escape_ident(rest.name.as_ref()),
+                            params.len()
+                        ));
+                    }
                 }
 
                 self.type_context
@@ -2707,6 +2761,10 @@ impl Codegen {
                 // body lowers them exactly like native locals (binops, indices, etc.).
                 for (pname, pty) in &native_params {
                     self.type_context.define(pname, pty.clone());
+                }
+                // A native `Vec` rest-param: register so the body iterates/indexes it natively.
+                if let (Some(rest), Some(rt)) = (rest_param.as_ref(), rest_native.as_ref()) {
+                    self.type_context.define(rest.name.as_ref(), rt.clone());
                 }
 
                 let fun_body_res: Result<(), CompileError> = (|| -> Result<(), CompileError> {
@@ -3571,6 +3629,27 @@ impl Codegen {
                                     )
                                 };
                                 // Caller expects a `Value`; wrap.
+                                return Ok(field_ty.to_value_expr(&access));
+                            }
+                        }
+                    }
+                }
+                // Generalize the typed struct-field fast path to `xs[i].field` (array-of-structs):
+                // when `object` indexes a `Vec<Named>`, do native struct field access.
+                if !optional {
+                    if let (Expr::Index { .. }, MemberProp::Name { name: prop_name, .. }) =
+                        (object.as_ref(), prop)
+                    {
+                        let (obj_code, obj_ty) = self.emit_typed_expr(object)?;
+                        if let RustType::Named { fields, .. } = &obj_ty {
+                            if let Some((_, field_ty)) =
+                                fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                            {
+                                let access = format!(
+                                    "({}).{}",
+                                    obj_code,
+                                    crate::types::field_ident(prop_name.as_ref())
+                                );
                                 return Ok(field_ty.to_value_expr(&access));
                             }
                         }
@@ -5733,7 +5812,12 @@ impl Codegen {
                     }
                     Self::collect_annotated_types(std::slice::from_ref(body), aliases, env);
                 }
-                Statement::FunDecl { params, body, .. } => {
+                Statement::FunDecl {
+                    params,
+                    rest_param,
+                    body,
+                    ..
+                } => {
                     for p in params {
                         if let FunParam::Simple(tp) = p {
                             if let Some(ann) = &tp.type_ann {
@@ -5742,6 +5826,16 @@ impl Codegen {
                                     RustType::from_annotation_with_aliases(ann, aliases),
                                 );
                             }
+                        }
+                    }
+                    // Typed rest-param `...args: number[]` -> `Vec<f64>`, so a ForOf loop var over it
+                    // binds the element type and accumulators stay native.
+                    if let Some(rp) = rest_param {
+                        if let Some(ann) = &rp.type_ann {
+                            env.insert(
+                                rp.name.to_string(),
+                                RustType::from_annotation_with_aliases(ann, aliases),
+                            );
                         }
                     }
                     Self::collect_annotated_types(std::slice::from_ref(body), aliases, env);
