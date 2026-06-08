@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use tishlang_ast::{Expr, ObjectProp, Program, Statement};
+use tishlang_ast::{Expr, Literal, ObjectProp, Program, Statement};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Severity {
@@ -34,6 +34,50 @@ pub fn lint_program(program: &Program) -> Vec<LintDiagnostic> {
 pub fn lint_source(source: &str) -> Result<Vec<LintDiagnostic>, String> {
     let program = tishlang_parser::parse(source)?;
     Ok(lint_program(&program))
+}
+
+/// Like [`lint_program`], plus name-resolution diagnostics from `tishlang_resolve`
+/// (unused imports/parameters/variables and unresolved identifiers). Results are sorted
+/// by source position. `source` is required for the resolver's span math.
+pub fn lint_program_with_resolution(program: &Program, source: &str) -> Vec<LintDiagnostic> {
+    let mut out = lint_program(program);
+    for b in tishlang_resolve::collect_unused_bindings(program, source) {
+        let (code, what) = match b.kind {
+            tishlang_resolve::UnusedBindingKind::Import => {
+                ("tish-unused-import", "imported but never used")
+            }
+            tishlang_resolve::UnusedBindingKind::Parameter => {
+                ("tish-unused-parameter", "declared but never read")
+            }
+            tishlang_resolve::UnusedBindingKind::Variable => {
+                ("tish-unused-variable", "declared but its value is never read")
+            }
+        };
+        out.push(LintDiagnostic {
+            code,
+            message: format!("`{}` is {what}", b.name),
+            line: b.span.start.0 as u32,
+            col: b.span.start.1 as u32,
+            severity: Severity::Warning,
+        });
+    }
+    for u in tishlang_resolve::collect_unresolved_identifiers(program) {
+        out.push(LintDiagnostic {
+            code: "tish-unresolved-name",
+            message: format!("no binding in scope for `{}`", u.name),
+            line: u.span.start.0 as u32,
+            col: u.span.start.1 as u32,
+            severity: Severity::Warning,
+        });
+    }
+    out.sort_by_key(|d| (d.line, d.col));
+    out
+}
+
+/// Parse then lint with resolution diagnostics (see [`lint_program_with_resolution`]).
+pub fn lint_source_with_resolution(source: &str) -> Result<Vec<LintDiagnostic>, String> {
+    let program = tishlang_parser::parse(source)?;
+    Ok(lint_program_with_resolution(&program, source))
 }
 
 fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
@@ -239,7 +283,12 @@ fn lint_expr(e: &Expr, out: &mut Vec<LintDiagnostic>) {
             tishlang_ast::ArrowBody::Expr(x) => lint_expr(x, out),
             tishlang_ast::ArrowBody::Block(b) => lint_stmt(b, out),
         },
-        Expr::TemplateLiteral { exprs, .. } => {
+        Expr::TemplateLiteral { quasis, exprs, span } => {
+            for q in quasis {
+                if let Some(label) = detect_secret(q) {
+                    out.push(secret_diag(label, span));
+                }
+            }
             for x in exprs {
                 lint_expr(x, out);
             }
@@ -272,7 +321,48 @@ fn lint_expr(e: &Expr, out: &mut Vec<LintDiagnostic>) {
                 }
             }
         }
+        Expr::Literal {
+            value: Literal::String(s),
+            span,
+        } => {
+            if let Some(label) = detect_secret(s) {
+                out.push(secret_diag(label, span));
+            }
+        }
         _ => {}
+    }
+}
+
+/// Returns a provider label when `s` looks like a hardcoded credential.
+fn detect_secret(s: &str) -> Option<&'static str> {
+    if s.strip_prefix("sk-live-").is_some_and(|rest| !rest.is_empty()) {
+        return Some("sk-live- API key");
+    }
+    if s.len() == 20
+        && s.starts_with("AKIA")
+        && s.as_bytes()[4..]
+            .iter()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    {
+        return Some("AWS access key id");
+    }
+    if s.strip_prefix("ghp_")
+        .is_some_and(|rest| rest.len() >= 20 && rest.bytes().all(|b| b.is_ascii_alphanumeric()))
+    {
+        return Some("GitHub token");
+    }
+    None
+}
+
+fn secret_diag(label: &str, span: &tishlang_ast::Span) -> LintDiagnostic {
+    LintDiagnostic {
+        code: "tish-hardcoded-secret",
+        message: format!(
+            "Possible hardcoded secret ({label}); load it from the environment instead."
+        ),
+        line: span.start.0 as u32,
+        col: span.start.1 as u32,
+        severity: Severity::Error,
     }
 }
 
@@ -286,4 +376,110 @@ pub const RULES: &[(&str, &str)] = &[
         "tish-duplicate-key",
         "Warns when an object literal repeats the same key.",
     ),
+    (
+        "tish-hardcoded-secret",
+        "Flags string literals that look like hardcoded credentials (sk-live-, AWS, GitHub tokens).",
+    ),
+    (
+        "tish-unused-import",
+        "Warns when an import binding is never used.",
+    ),
+    (
+        "tish-unused-parameter",
+        "Warns when a function parameter is never read.",
+    ),
+    (
+        "tish-unused-variable",
+        "Warns when a variable's value is never read.",
+    ),
+    (
+        "tish-unresolved-name",
+        "Warns when an identifier has no binding in scope.",
+    ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn codes(src: &str) -> Vec<&'static str> {
+        lint_source(src)
+            .expect("parse")
+            .into_iter()
+            .map(|d| d.code)
+            .collect()
+    }
+
+    fn codes_resolved(src: &str) -> Vec<&'static str> {
+        lint_source_with_resolution(src)
+            .expect("parse")
+            .into_iter()
+            .map(|d| d.code)
+            .collect()
+    }
+
+    #[test]
+    fn empty_catch_flagged() {
+        let src = "fn risky() {\n  try {\n    mightThrow()\n  } catch (e) {\n  }\n}\n";
+        assert!(codes(src).contains(&"tish-empty-catch"));
+    }
+
+    #[test]
+    fn empty_catch_clean_when_handled() {
+        let src =
+            "fn risky() {\n  try {\n    mightThrow()\n  } catch (e) {\n    console.error(e)\n  }\n}\n";
+        assert!(!codes(src).contains(&"tish-empty-catch"));
+    }
+
+    #[test]
+    fn duplicate_key_flagged() {
+        assert!(codes("let o = { a: 1, a: 2 }\n").contains(&"tish-duplicate-key"));
+    }
+
+    #[test]
+    fn duplicate_key_clean() {
+        assert!(!codes("let o = { a: 2 }\n").contains(&"tish-duplicate-key"));
+    }
+
+    #[test]
+    fn hardcoded_secret_flagged() {
+        let src = "let apiKey = \"sk-live-000000000000000000000000\"\n";
+        assert!(codes(src).contains(&"tish-hardcoded-secret"));
+    }
+
+    #[test]
+    fn ordinary_string_not_flagged() {
+        assert!(!codes("let s = \"hello world\"\n").contains(&"tish-hardcoded-secret"));
+    }
+
+    #[test]
+    fn detect_secret_providers() {
+        assert!(detect_secret("sk-live-abc").is_some());
+        assert!(detect_secret("AKIAIOSFODNN7EXAMPLE").is_some());
+        assert!(detect_secret("ghp_0123456789abcdef0123456789abcdef0123").is_some());
+        assert!(detect_secret("sk-live-").is_none());
+        assert!(detect_secret("just a normal string").is_none());
+    }
+
+    #[test]
+    fn unused_variable_surfaced() {
+        assert!(codes_resolved("let dead = 1\n").contains(&"tish-unused-variable"));
+    }
+
+    #[test]
+    fn unused_import_surfaced() {
+        let src = "import { a, b } from \"./m\"\nlet x = a\nx\n";
+        assert!(codes_resolved(src).contains(&"tish-unused-import"));
+    }
+
+    #[test]
+    fn unresolved_name_surfaced() {
+        assert!(codes_resolved("let y = totallyMissing\ny\n").contains(&"tish-unresolved-name"));
+    }
+
+    #[test]
+    fn clean_source_has_no_resolution_noise() {
+        let out = codes_resolved("let x = 1\nlet y = x\ny\n");
+        assert!(out.is_empty(), "expected clean, got {out:?}");
+    }
+}

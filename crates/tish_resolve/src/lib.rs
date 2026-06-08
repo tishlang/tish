@@ -1525,6 +1525,7 @@ pub fn is_runtime_global_ident(name: &str) -> bool {
             | "Array"
             | "String"
             | "Date"
+            | "Symbol"
             | "Uint8Array"
             | "AudioContext"
             | "RegExp"

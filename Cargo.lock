@@ -3395,6 +3395,7 @@ dependencies = [
  "serde_json",
  "tishlang_ast",
  "tishlang_parser",
+ "tishlang_resolve",
  "walkdir",
 ]
 

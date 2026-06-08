@@ -20,6 +20,12 @@ struct Cli {
     #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text)]
     output_format: OutputFormat,
 
+    /// Also run name-resolution lints (unused bindings, unresolved identifiers).
+    /// Off by default: these need whole-project context and can false-positive on
+    /// single files (e.g. feature-gated globals like `process`).
+    #[arg(long = "with-resolution", short = 'R')]
+    with_resolution: bool,
+
     #[arg(required = true)]
     paths: Vec<String>,
 }
@@ -36,7 +42,7 @@ struct Issue {
 
 fn main() {
     let cli = Cli::parse();
-    if let Err(e) = run(&cli.paths, cli.output_format) {
+    if let Err(e) = run(&cli.paths, cli.output_format, cli.with_resolution) {
         eprintln!("{}", e);
         std::process::exit(1);
     }
@@ -67,12 +73,17 @@ fn collect_files(paths: &[String]) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-fn run(paths: &[String], format: OutputFormat) -> Result<(), String> {
+fn run(paths: &[String], format: OutputFormat, with_resolution: bool) -> Result<(), String> {
     let files = collect_files(paths)?;
     let mut issues: Vec<Issue> = Vec::new();
     for f in files {
         let src = fs::read_to_string(&f).map_err(|e| format!("{}: {}", f.display(), e))?;
-        match tishlang_lint::lint_source(&src) {
+        let lint_result = if with_resolution {
+            tishlang_lint::lint_source_with_resolution(&src)
+        } else {
+            tishlang_lint::lint_source(&src)
+        };
+        match lint_result {
             Ok(diags) => {
                 for d in diags {
                     let level = match d.severity {
