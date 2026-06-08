@@ -21,25 +21,32 @@ use crate::value::{
     eval_object_get, eval_object_has, eval_object_set, EvalObjectData, PropMap, Value,
 };
 
-struct Scope {
-    vars: PropMap,
-    consts: std::collections::HashSet<Arc<str>>,
+pub struct Scope {
+    // Scope vars: order is never observed (no Object.keys over a scope), so use a fast
+    // unordered aHash map — NOT the object-strings PropMap (an insertion-ordered IndexMap),
+    // which would pay SipHash + ordered-bucket overhead on every variable lookup.
+    vars: AHashMap<Arc<str>, Value>,
+    consts: ahash::AHashSet<Arc<str>>,
     parent: Option<Rc<std::cell::RefCell<Scope>>>,
 }
+
+/// A reference-counted lexical scope. A `Value::Function` captures one of these at creation
+/// (the *defining* scope) so calls resolve free variables lexically — real closures.
+pub type ScopeRef = Rc<std::cell::RefCell<Scope>>;
 
 impl Scope {
     fn new() -> Rc<std::cell::RefCell<Self>> {
         Rc::new(std::cell::RefCell::new(Self {
-            vars: PropMap::default(),
-            consts: std::collections::HashSet::new(),
+            vars: AHashMap::default(),
+            consts: ahash::AHashSet::default(),
             parent: None,
         }))
     }
 
     fn child(parent: Rc<std::cell::RefCell<Scope>>) -> Rc<std::cell::RefCell<Self>> {
         Rc::new(std::cell::RefCell::new(Self {
-            vars: PropMap::default(),
-            consts: std::collections::HashSet::new(),
+            vars: AHashMap::default(),
+            consts: ahash::AHashSet::default(),
             parent: Some(parent),
         }))
     }
@@ -187,11 +194,13 @@ impl Evaluator {
                 true,
             );
 
-            let mut string_obj = PropMap::with_capacity(1);
+            let mut string_obj = PropMap::with_capacity(2);
             string_obj.insert(
                 "fromCharCode".into(),
                 Value::Native(natives::string_from_char_code),
             );
+            // `String(value)` callable: dispatched via `__call` in `call_func`, like `Symbol`.
+            string_obj.insert("__call".into(), Value::Native(natives::string_convert));
             s.set(
                 "String".into(),
                 Value::object(string_obj),
@@ -403,16 +412,26 @@ impl Evaluator {
                         )));
                     }
                 };
+                // Each element gets a FRESH per-iteration binding (ES6 `for (let v of …)`), so a
+                // closure created in the body captures that element, not the last one.
+                let outer = Rc::clone(&self.scope);
+                let mut ret = Ok(Value::Null);
                 for elem in elements {
-                    self.scope.borrow_mut().set(Arc::clone(name), elem, true);
+                    let iter_env = Scope::child(Rc::clone(&outer));
+                    iter_env.borrow_mut().set(Arc::clone(name), elem, true);
+                    self.scope = Rc::clone(&iter_env);
                     match self.eval_statement(body) {
                         Ok(_) => {}
                         Err(EvalError::Break) => break,
                         Err(EvalError::Continue) => continue,
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            ret = Err(e);
+                            break;
+                        }
                     }
                 }
-                Ok(Value::Null)
+                self.scope = outer;
+                ret
             }
             Statement::For {
                 init,
@@ -421,34 +440,76 @@ impl Evaluator {
                 body,
                 ..
             } => {
+                // `let`/`const` declared in `init` get a FRESH per-iteration binding (ES6), so a
+                // closure created in the body captures THAT iteration's value, not the final one.
+                // The canonical values live in `loop_env`; each iteration's body runs in a fresh
+                // `iter_env` copy, and mutations are copied back for the next test/update.
+                let outer = Rc::clone(&self.scope);
+                let loop_env = Scope::child(Rc::clone(&outer));
+                self.scope = Rc::clone(&loop_env);
                 if let Some(i) = init {
-                    self.eval_statement(i)?;
+                    if let Err(e) = self.eval_statement(i) {
+                        self.scope = outer;
+                        return Err(e);
+                    }
                 }
+                let per_iter: Vec<Arc<str>> = loop_env.borrow().vars.keys().cloned().collect();
+                let copy_vars = |from: &ScopeRef, to: &ScopeRef, names: &[Arc<str>]| {
+                    let src = from.borrow();
+                    let mut dst = to.borrow_mut();
+                    for n in names {
+                        if let Some(v) = src.vars.get(n.as_ref()) {
+                            dst.set(Arc::clone(n), v.clone(), true);
+                        }
+                    }
+                };
+                let mut ret = Ok(Value::Null);
                 loop {
-                    let cond_ok = cond
-                        .as_ref()
-                        .map(|c| self.eval_expr(c).map(|v| v.is_truthy()))
-                        .transpose()?
-                        .unwrap_or(true);
+                    self.scope = Rc::clone(&loop_env);
+                    let cond_ok = match cond.as_ref() {
+                        Some(c) => match self.eval_expr(c) {
+                            Ok(v) => v.is_truthy(),
+                            Err(e) => {
+                                ret = Err(e);
+                                break;
+                            }
+                        },
+                        None => true,
+                    };
                     if !cond_ok {
                         break;
                     }
-                    match self.eval_statement(body) {
+                    let iter_env = if per_iter.is_empty() {
+                        Rc::clone(&loop_env)
+                    } else {
+                        let e = Scope::child(Rc::clone(&outer));
+                        copy_vars(&loop_env, &e, &per_iter);
+                        e
+                    };
+                    self.scope = Rc::clone(&iter_env);
+                    let flow = self.eval_statement(body);
+                    if !per_iter.is_empty() {
+                        copy_vars(&iter_env, &loop_env, &per_iter);
+                    }
+                    match flow {
                         Ok(_) => {}
                         Err(EvalError::Break) => break,
-                        Err(EvalError::Continue) => {
-                            if let Some(u) = update {
-                                self.eval_expr(u)?;
-                            }
-                            continue;
+                        Err(EvalError::Continue) => {}
+                        Err(e) => {
+                            ret = Err(e);
+                            break;
                         }
-                        Err(e) => return Err(e),
                     }
+                    self.scope = Rc::clone(&loop_env);
                     if let Some(u) = update {
-                        self.eval_expr(u)?;
+                        if let Err(e) = self.eval_expr(u) {
+                            ret = Err(e);
+                            break;
+                        }
                     }
                 }
-                Ok(Value::Null)
+                self.scope = outer;
+                ret
             }
             Statement::Return { value, .. } => {
                 let v = value
@@ -474,6 +535,9 @@ impl Evaluator {
                     formals,
                     rest_param: rest_param_name,
                     body,
+                    // Capture the defining scope. It's the SAME Rc we insert into below, so the
+                    // function sees itself → recursion works.
+                    env: Rc::clone(&self.scope),
                 };
                 self.scope.borrow_mut().set(Arc::clone(name), func, true);
                 Ok(Value::Null)
@@ -584,6 +648,12 @@ impl Evaluator {
                 };
 
                 if let Some(finally_stmt) = finally_body {
+                    // KNOWN BUG (shared with the VM/compiled backends): a throw/return/
+                    // break/continue inside `finally` should supersede the try/catch
+                    // outcome (JS completion semantics) but is swallowed here. Fixing it
+                    // in the interp alone (`?`) breaks interp==vm parity because the VM has
+                    // the same bug, and the VM fix is a bytecode-compiler-level
+                    // finally-completion change. Deferred as a coordinated cross-backend fix.
                     let _ = self.eval_statement(finally_stmt);
                 }
 
@@ -998,7 +1068,15 @@ impl Evaluator {
                                     _ => ",".to_string(),
                                 };
                                 let arr_borrow = arr.borrow();
-                                let parts: Vec<String> = arr_borrow.iter().map(|v| v.to_string()).collect();
+                                // JS join: null/undefined → "", else JS ToString (nested arrays
+                                // recurse to a comma-join, objects → "[object Object]").
+                                let parts: Vec<String> = arr_borrow
+                                    .iter()
+                                    .map(|v| match v {
+                                        Value::Null => String::new(),
+                                        other => other.to_js_string(),
+                                    })
+                                    .collect();
                                 return Ok(Value::String(parts.join(&sep).into()));
                             }
                             "reverse" => {
@@ -2018,6 +2096,7 @@ impl Evaluator {
                     formals,
                     rest_param: None,
                     body: Arc::new(body_stmt),
+                    env: Rc::clone(&self.scope),
                 })
             }
             Expr::TemplateLiteral { quasis, exprs, .. } => {
@@ -2027,7 +2106,7 @@ impl Evaluator {
                     result.push_str(quasi);
                     if i < exprs.len() {
                         let val = self.eval_expr(&exprs[i])?;
-                        result.push_str(&val.to_string());
+                        result.push_str(&val.to_js_string());
                     }
                 }
                 Ok(Value::String(result.into()))
@@ -2046,20 +2125,26 @@ impl Evaluator {
                     Ok(Value::String(s.into()))
                 }
                 (Value::String(a), b) => {
-                    let b_str = b.to_string();
+                    let b_str = b.to_js_string();
                     let mut s = String::with_capacity(a.len() + b_str.len());
                     s.push_str(a);
                     s.push_str(&b_str);
                     Ok(Value::String(s.into()))
                 }
                 (a, Value::String(b)) => {
-                    let a_str = a.to_string();
+                    let a_str = a.to_js_string();
                     let mut s = String::with_capacity(a_str.len() + b.len());
                     s.push_str(&a_str);
                     s.push_str(b);
                     Ok(Value::String(s.into()))
                 }
-                _ => Err(format!("Cannot add {:?} and {:?}", l, r)),
+                // Neither operand is a string: numeric add, coercing non-numbers
+                // (Null/Bool/Object/…) to NaN exactly like the VM's
+                // `as_number().unwrap_or(NaN)` (vm.rs eval_binop). e.g. an out-of-bounds
+                // array read is `Null` (JS `undefined`), so `15 + arr[oob]` → NaN, not an error.
+                _ => Ok(Value::Number(
+                    l.as_number().unwrap_or(f64::NAN) + r.as_number().unwrap_or(f64::NAN),
+                )),
             },
             BinOp::Sub => self.binop_number(l, r, |a, b| Value::Number(a - b)),
             BinOp::Mul => self.binop_number(l, r, |a, b| Value::Number(a * b)),
@@ -2104,7 +2189,10 @@ impl Evaluator {
                 };
                 Ok(Value::Bool(ok))
             }
-            BinOp::Eq | BinOp::Ne => Err("Loose equality not supported".to_string()),
+            // Loose ==/!= : match the VM (vm.rs maps Eq/Ne to strict_eq) so interp == vm ==
+            // compiled. Previously the interpreter alone errored on `==`.
+            BinOp::Eq => Ok(Value::Bool(l.strict_eq(r))),
+            BinOp::Ne => Ok(Value::Bool(!l.strict_eq(r))),
         }
     }
 
@@ -2172,30 +2260,30 @@ impl Evaluator {
         false
     }
 
-    fn to_int32(v: &Value) -> Result<i32, String> {
-        match v {
-            Value::Number(n) => Ok(*n as i32),
-            _ => Err(format!("Bitwise operands must be numbers, got {:?}", v)),
-        }
+    /// ToInt32 coercion matching the VM (`vm.rs` eval_binop: `as_number().unwrap_or(NaN) as i32`).
+    /// Non-numbers coerce to NaN, and `NaN as i32` saturates to 0 — so `arr[oob] | 0` → 0, like JS.
+    fn to_int32(v: &Value) -> i32 {
+        v.as_number().unwrap_or(f64::NAN) as i32
     }
 
     fn binop_int32<F>(&self, l: &Value, r: &Value, f: F) -> Result<Value, String>
     where
         F: FnOnce(i32, i32) -> Value,
     {
-        let a = Self::to_int32(l)?;
-        let b = Self::to_int32(r)?;
-        Ok(f(a, b))
+        Ok(f(Self::to_int32(l), Self::to_int32(r)))
     }
 
+    /// Numeric binop, coercing each operand to a number the way the VM does
+    /// (`as_number().unwrap_or(NaN)`): non-numbers (Null/Bool/Object/…) become NaN rather
+    /// than erroring. Keeps the interpreter in parity with the VM and Node on out-of-bounds
+    /// reads and other `undefined`-like operands.
     fn binop_number<F>(&self, l: &Value, r: &Value, f: F) -> Result<Value, String>
     where
         F: FnOnce(f64, f64) -> Value,
     {
-        match (l, r) {
-            (Value::Number(a), Value::Number(b)) => Ok(f(*a, *b)),
-            _ => Err(format!("Expected numbers, got {:?} and {:?}", l, r)),
-        }
+        let a = l.as_number().unwrap_or(f64::NAN);
+        let b = r.as_number().unwrap_or(f64::NAN);
+        Ok(f(a, b))
     }
 
     fn eval_unary(&self, op: UnaryOp, v: &Value) -> Result<Value, String> {
@@ -2210,7 +2298,7 @@ impl Evaluator {
                 _ => Err(format!("Cannot apply unary + to {:?}", v)),
             },
             UnaryOp::BitNot => {
-                let n = Self::to_int32(v)?;
+                let n = Self::to_int32(v);
                 Ok(Value::Number((!n) as f64))
             }
             UnaryOp::Void => Ok(Value::Null),
@@ -2504,7 +2592,7 @@ impl Evaluator {
                     .map(crate::value_convert::eval_to_core)
                     .collect();
                 let ca = ca.map_err(EvalError::Error)?;
-                Ok(crate::value_convert::core_to_eval(f(&ca)))
+                Ok(crate::value_convert::core_to_eval(f.call(&ca)))
             }
             #[cfg(feature = "regex")]
             Value::RegExp(_) => Err(EvalError::Error("RegExp is not callable".to_string())),
@@ -2527,15 +2615,30 @@ impl Evaluator {
                     .map(crate::value_convert::eval_to_core)
                     .collect();
                 let core_args = core_args.map_err(EvalError::Error)?;
-                let result = method(&core_args);
+                let result = method.call(&core_args);
                 Ok(crate::value_convert::core_to_eval(result))
             }
             Value::Function {
                 formals,
                 rest_param,
                 body,
+                env,
             } => {
-                let scope = Scope::child(Rc::clone(&self.scope));
+                // A real closure: the call frame's parent is the function's DEFINING scope (env),
+                // not the call site — so free variables resolve lexically.
+                let scope = Scope::child(Rc::clone(env));
+                // The call-frame evaluator, built up front so default-parameter expressions
+                // evaluate in this *call* scope — where earlier params are already bound (so a
+                // default like `b = a + 1` can see `a`) and free vars still resolve lexically
+                // through the closure's `env`. Evaluating against `self.scope` (the call *site*)
+                // would see neither, matching the bytecode VM's ArgMissing prologue, which runs
+                // defaults in the frame after the supplied args are bound.
+                let mut eval = Evaluator {
+                    scope: Rc::clone(&scope),
+                    module_cache: Rc::clone(&self.module_cache),
+                    current_dir: RefCell::new(self.current_dir.borrow().clone()),
+                    virtual_builtins: Rc::clone(&self.virtual_builtins),
+                };
                 {
                     let mut s = scope.borrow_mut();
                     for (i, formal) in formals.iter().enumerate() {
@@ -2548,7 +2651,7 @@ impl Evaluator {
                                 };
                                 if let Some(default_expr) = def {
                                     drop(s);
-                                    let default_val = self.eval_expr(default_expr)?;
+                                    let default_val = eval.eval_expr(default_expr)?;
                                     s = scope.borrow_mut();
                                     default_val
                                 } else {
@@ -2577,13 +2680,33 @@ impl Evaluator {
                         );
                     }
                 }
-                let mut eval = Evaluator {
-                    scope,
-                    module_cache: Rc::clone(&self.module_cache),
-                    current_dir: RefCell::new(self.current_dir.borrow().clone()),
-                    virtual_builtins: Rc::clone(&self.virtual_builtins),
+                // Grow the native stack on demand so deep (non-tail) recursion doesn't overflow
+                // the OS thread stack — same idea as the bytecode VM's `stacker::maybe_grow` around
+                // recursive `run_chunk` (vm.rs:1138). Without it the tree-walker aborts (SIGABRT,
+                // "stack overflow") on deep recursion, which the cross-backend parity run surfaced
+                // on `recursion_stress`. This is the recursion ACCUMULATOR (every user-function call
+                // lands here); the per-element HOF path (`call_with_scope`) is deliberately NOT
+                // guarded — it never nests deeply, so it avoids the per-call check on hot map/filter.
+                //
+                // Red zone = 1 MiB, NOT the VM's 128 KiB: one tree-walker recursion level spans a
+                // long eval chain (eval_statement → eval_expr(if) → eval_expr(binary) → eval_expr(call)
+                // → eval_call_args → call_func → …), each frame large — far more per level than the
+                // VM's single `run_chunk` re-entry. 128 KiB is smaller than one level's chain, so the
+                // stack overflows BETWEEN checks; 1 MiB comfortably covers a level (verified to depth
+                // 20000 in both debug and release). 16 MiB segments keep grow frequency low.
+                let body_result = {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        stacker::maybe_grow(1024 * 1024, 16 * 1024 * 1024, || {
+                            eval.eval_statement(body)
+                        })
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        eval.eval_statement(body)
+                    }
                 };
-                match eval.eval_statement(body) {
+                match body_result {
                     Ok(v) => Ok(v),
                     Err(EvalError::Return(v)) => Ok(v),
                     Err(EvalError::Throw(v)) => Err(EvalError::Throw(v)),
@@ -3051,6 +3174,9 @@ impl Evaluator {
                 "reject" => Ok(Value::Native(Self::promise_reject)),
                 "all" => Ok(Value::Native(Self::promise_all)),
                 "race" => Ok(Value::Native(Self::promise_race)),
+                "any" => Ok(Value::Native(Self::promise_any)),
+                "allSettled" => Ok(Value::Native(Self::promise_all_settled)),
+                "spawn" => Ok(Value::Native(Self::promise_spawn_interp)),
                 _ => Ok(Value::Null),
             },
             Value::Opaque(o) => {
@@ -3316,30 +3442,21 @@ impl Evaluator {
                 format!("[{}]", inner.join(","))
             }
             Value::Object(map) => {
-                let mut entries: Vec<_> = map
+                // Insertion order (PropMap is an IndexMap) — matches JS/Node and the
+                // VM/rust backends. No key sort.
+                let entries: Vec<String> = map
                     .borrow()
                     .strings
                     .iter()
                     .map(|(k, v)| {
-                        (
-                            k.as_ref().to_string(),
-                            format!(
-                                "\"{}\":{}",
-                                k.replace('\\', "\\\\").replace('"', "\\\""),
-                                Self::json_stringify_value(v)
-                            ),
+                        format!(
+                            "\"{}\":{}",
+                            k.replace('\\', "\\\\").replace('"', "\\\""),
+                            Self::json_stringify_value(v)
                         )
                     })
                     .collect();
-                entries.sort_by(|a, b| a.0.cmp(&b.0));
-                format!(
-                    "{{{}}}",
-                    entries
-                        .into_iter()
-                        .map(|(_, s)| s)
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
+                format!("{{{}}}", entries.join(","))
             }
             Value::Symbol(_) => "null".to_string(),
             Value::Function { .. } | Value::Native(_) => "null".to_string(),
@@ -3595,6 +3712,124 @@ impl Evaluator {
             }
         }
         Err("Promise.race requires at least one promise".to_string())
+    }
+
+    /// Helper: settle a new promise fulfilled with `v` (interp Value).
+    #[cfg(feature = "http")]
+    fn eval_fulfilled(v: Value) -> Result<Value, String> {
+        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+        let (resolve, _) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+        crate::promise::settle_promise(&resolve, v, true)?;
+        Ok(promise)
+    }
+
+    /// Helper: settle a new promise rejected with `v` (interp Value).
+    #[cfg(feature = "http")]
+    fn eval_rejected(v: Value) -> Result<Value, String> {
+        let (promise, resolve_val, reject_val) = crate::promise::create_promise();
+        let (_, reject) = crate::promise::extract_resolvers(&resolve_val, &reject_val);
+        crate::promise::settle_promise(&reject, v, false)?;
+        Ok(promise)
+    }
+
+    /// Await one interp promise/core-promise/value → `Result<Value, Value>`.
+    #[cfg(feature = "http")]
+    fn settle_one(v: Value) -> Result<Value, Value> {
+        match v {
+            Value::Promise(ref p) => match crate::promise::block_until_settled(p) {
+                crate::promise::PromiseAwaitResult::Fulfilled(x) => Ok(x),
+                crate::promise::PromiseAwaitResult::Rejected(x) => Err(x),
+                crate::promise::PromiseAwaitResult::Error(e) => {
+                    Err(Value::String(e.into()))
+                }
+            },
+            Value::CorePromise(ref p) => match p.block_until_settled() {
+                Ok(x) => Ok(crate::value_convert::core_to_eval(x)),
+                Err(x) => Err(crate::value_convert::core_to_eval(x)),
+            },
+            other => Ok(other),
+        }
+    }
+
+    /// `Promise.any(iterable)` — first fulfilled wins; rejects with array of reasons if all reject.
+    #[cfg(feature = "http")]
+    fn promise_any(args: &[Value]) -> Result<Value, String> {
+        let iterable = args
+            .first()
+            .ok_or_else(|| "Promise.any requires an iterable".to_string())?;
+        let values: Vec<Value> = match iterable {
+            Value::Array(arr) => arr.borrow().clone(),
+            _ => return Err("Promise.any requires an array".to_string()),
+        };
+        let n = values.len();
+        if n == 0 {
+            return Self::eval_rejected(Value::Array(Rc::new(RefCell::new(vec![]))));
+        }
+        let mut errors = Vec::with_capacity(n);
+        for v in values {
+            match Self::settle_one(v) {
+                Ok(x) => return Self::eval_fulfilled(x),
+                Err(e) => errors.push(e),
+            }
+        }
+        Self::eval_rejected(Value::Array(Rc::new(RefCell::new(errors))))
+    }
+
+    /// `Promise.allSettled(iterable)` — always fulfills with array of `{status,value|reason}`.
+    #[cfg(feature = "http")]
+    fn promise_all_settled(args: &[Value]) -> Result<Value, String> {
+        use crate::value::EvalObjectData;
+        let iterable = args
+            .first()
+            .ok_or_else(|| "Promise.allSettled requires an iterable".to_string())?;
+        let values: Vec<Value> = match iterable {
+            Value::Array(arr) => arr.borrow().clone(),
+            _ => return Err("Promise.allSettled requires an array".to_string()),
+        };
+        let mut out = Vec::with_capacity(values.len());
+        for v in values {
+            let r = Self::settle_one(v);
+            let mut data = EvalObjectData::default();
+            match r {
+                Ok(x) => {
+                    data.strings.insert(std::sync::Arc::from("status"), Value::String("fulfilled".into()));
+                    data.strings.insert(std::sync::Arc::from("value"), x);
+                }
+                Err(e) => {
+                    data.strings.insert(std::sync::Arc::from("status"), Value::String("rejected".into()));
+                    data.strings.insert(std::sync::Arc::from("reason"), e);
+                }
+            }
+            out.push(Value::Object(Rc::new(RefCell::new(data))));
+        }
+        Self::eval_fulfilled(Value::Array(Rc::new(RefCell::new(out))))
+    }
+
+    /// `Promise.spawn(fn)` — on the interpreter, runs the function synchronously and wraps
+    /// the result in an immediate promise. The interpreter uses `Rc<RefCell<…>>` for closures,
+    /// which is `!Send`, so we cannot move the function to a background thread here. Real
+    /// cross-thread parallelism via spawn is available on the bytecode VM (which uses the
+    /// `send-values` / Arc path for the shipped `full` build). For the interpreter, `any` and
+    /// `race` over spawn-created promises still work correctly — they just don't run concurrently.
+    #[cfg(feature = "http")]
+    fn promise_spawn_interp(args: &[Value]) -> Result<Value, String> {
+        let callable = match args.first() {
+            Some(v @ (Value::Native(_) | Value::Function { .. })) => v.clone(),
+            _ => return Err("Promise.spawn: expected a function argument".to_string()),
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match &callable {
+                Value::Native(f) => f(&[]).map_err(|e| e.to_string()),
+                // Interpreter closures (Value::Function) can't be called from a static native fn
+                // (no evaluator state / Rc captures). Use the VM backend for concurrent CPU spawn.
+                _ => Err("Promise.spawn: tish closures are not supported on the interpreter backend; use the vm backend (tish run) or pass a native module function".to_string()),
+            }
+        }));
+        match result {
+            Ok(Ok(v))  => Self::eval_fulfilled(v),
+            Ok(Err(e)) => Self::eval_rejected(Value::String(e.into())),
+            Err(_)     => Self::eval_rejected(Value::String("Promise.spawn: task panicked".into())),
+        }
     }
 
     #[cfg(feature = "ws")]

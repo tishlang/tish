@@ -1,3 +1,37 @@
 === Recursion & Closure Stress Tests ===
 
 --- Tail Recursion Patterns ---
+Tail recursion (500 depth x100): 21ms
+Fibonacci tail-rec (50 depth x1000): 19ms
+
+--- Tree Recursion ---
+Binary tree (depth 15, 2^15 calls): 13ms
+Ternary tree (depth 10, 3^10 calls): 16ms
+
+--- Mutual Recursion ---
+Mutual recursion (100 depth x500): 11ms
+
+--- Nested Function Calls ---
+Nested helper fn (5000x): 4ms
+4-level nested fn (5000x): 11ms
+Multi-helper fn (5000x): 7ms
+
+--- Arrow Function Creation ---
+Create simple arrow (5000x): 1ms
+Create 3-param arrow (5000x): 2ms
+
+--- Arrow Function Invocation ---
+Call simple arrow (10000x): 2ms
+Call 2-param arrow (10000x): 3ms
+
+--- Higher Order Functions ---
+Apply twice (5000x): 2ms
+Apply both (5000x): 3ms
+3-func pipeline (3000x): 2ms
+
+--- Recursive Data Processing ---
+Build binary tree (depth 10): 1ms
+Sum tree (2047 nodes x50): 47ms
+Tree has 2047 nodes
+
+=== Recursion Stress Tests Complete ===

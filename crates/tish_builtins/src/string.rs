@@ -4,7 +4,6 @@
 //! JavaScript, matching .length and .charAt(). Byte offsets are never exposed.
 
 use crate::helpers::normalize_index;
-use std::sync::Arc;
 use tishlang_core::Value;
 use tishlang_core::VmRef;
 
@@ -25,7 +24,7 @@ fn char_to_byte_offset(s: &str, char_index: usize) -> usize {
 
 /// Create a new string Value from a string slice.
 pub fn from_str(s: &str) -> Value {
-    Value::String(Arc::from(s))
+    Value::String(tishlang_core::ArcStr::from(s))
 }
 
 /// Get the length of a string (character count).
@@ -118,7 +117,7 @@ pub fn index_of(s: &Value, search: &Value, from: Option<&Value>) -> Value {
             _ => 0,
         };
         let byte_start = char_to_byte_offset(s, from_char);
-        let search_str = search.as_ref();
+        let search_str = search.as_str();
         if let Some(byte_pos) = s[byte_start..].find(search_str) {
             let char_idx = from_char + byte_to_char_index(&s[byte_start..], byte_pos);
             Value::Number(char_idx as f64)
@@ -141,7 +140,7 @@ pub fn includes(s: &Value, search: &Value, from: Option<&Value>) -> Value {
             _ => 0,
         };
         let byte_start = char_to_byte_offset(s, from_char);
-        Value::Bool(s[byte_start..].contains(search.as_ref()))
+        Value::Bool(s[byte_start..].contains(search.as_str()))
     } else {
         Value::Bool(false)
     }
@@ -218,8 +217,8 @@ pub fn substr(s: &Value, start: &Value, length: &Value) -> Value {
 pub fn split(s: &Value, sep: &Value) -> Value {
     if let Value::String(s) = s {
         let separator = match sep {
-            Value::String(ss) => ss.as_ref(),
-            _ => return Value::Array(VmRef::new(vec![Value::String(Arc::clone(s))])),
+            Value::String(ss) => ss.as_str(),
+            _ => return Value::Array(VmRef::new(vec![Value::String(s.clone())])),
         };
         let parts: Vec<Value> = s
             .split(separator)
@@ -257,7 +256,7 @@ pub fn to_lower_case(s: &Value) -> Value {
 
 pub fn starts_with(s: &Value, search: &Value) -> Value {
     if let (Value::String(s), Value::String(search)) = (s, search) {
-        Value::Bool(s.starts_with(search.as_ref()))
+        Value::Bool(s.starts_with(search.as_str()))
     } else {
         Value::Bool(false)
     }
@@ -265,7 +264,7 @@ pub fn starts_with(s: &Value, search: &Value) -> Value {
 
 pub fn ends_with(s: &Value, search: &Value) -> Value {
     if let (Value::String(s), Value::String(search)) = (s, search) {
-        Value::Bool(s.ends_with(search.as_ref()))
+        Value::Bool(s.ends_with(search.as_str()))
     } else {
         Value::Bool(false)
     }
@@ -274,11 +273,11 @@ pub fn ends_with(s: &Value, search: &Value) -> Value {
 fn replace_impl(s: &Value, search: &Value, replacement: &Value, all: bool) -> Value {
     if let Value::String(s) = s {
         let search_str = match search {
-            Value::String(ss) => ss.as_ref(),
-            _ => return Value::String(Arc::clone(s)),
+            Value::String(ss) => ss.as_str(),
+            _ => return Value::String(s.clone()),
         };
         let repl_str = match replacement {
-            Value::String(ss) => ss.as_ref(),
+            Value::String(ss) => ss.as_str(),
             _ => "",
         };
         let result = if all {
@@ -305,8 +304,8 @@ pub fn replace_all(s: &Value, search: &Value, replacement: &Value) -> Value {
 /// character needs escaping. Matches TFB's fortunes verifier byte-for-byte.
 pub fn escape_html(s: &Value) -> Value {
     let input = match s {
-        Value::String(s) => s.as_ref(),
-        Value::Null => return Value::String(Arc::from("")),
+        Value::String(s) => s.as_str(),
+        Value::Null => return Value::String(tishlang_core::ArcStr::from("")),
         _ => return Value::Null,
     };
     let bytes = input.as_bytes();
@@ -321,10 +320,10 @@ pub fn escape_html(s: &Value) -> Value {
         }
     }
     if extra == 0 {
-        return Value::String(Arc::clone(match s {
-            Value::String(s) => s,
+        return Value::String(match s {
+            Value::String(s) => s.clone(),
             _ => unreachable!(),
-        }));
+        });
     }
     let mut out = String::with_capacity(input.len() + extra);
     let mut last = 0usize;
@@ -344,7 +343,7 @@ pub fn escape_html(s: &Value) -> Value {
         }
     }
     out.push_str(&input[last..]);
-    Value::String(Arc::from(out))
+    Value::String(tishlang_core::ArcStr::from(out))
 }
 
 fn char_at_idx(s: &str, idx: usize) -> Option<char> {
@@ -395,15 +394,15 @@ fn pad_impl(s: &Value, target_len: &Value, pad: &Value, at_start: bool) -> Value
     if let Value::String(s) = s {
         let target_len = match target_len {
             Value::Number(n) => *n as usize,
-            _ => return Value::String(Arc::clone(s)),
+            _ => return Value::String(s.clone()),
         };
         let pad_str = match pad {
-            Value::String(p) if !p.is_empty() => p.as_ref(),
+            Value::String(p) if !p.is_empty() => p.as_str(),
             _ => " ",
         };
         let char_count = s.chars().count();
         if char_count >= target_len {
-            return Value::String(Arc::clone(s));
+            return Value::String(s.clone());
         }
         let needed = target_len - char_count;
         let padding: String = pad_str.chars().cycle().take(needed).collect();

@@ -121,7 +121,7 @@ fn document_symbol(
     }
 }
 
-fn publish_parse_and_lint(client: &Client, uri: Url, text: &str) {
+async fn publish_parse_and_lint(client: &Client, uri: Url, text: &str) {
     let mut diags = Vec::new();
     match tishlang_parser::parse(text) {
         Ok(program) => {
@@ -183,7 +183,9 @@ fn publish_parse_and_lint(client: &Client, uri: Url, text: &str) {
             });
         }
     }
-    let _ = client.publish_diagnostics(uri, diags, None);
+    // MUST be awaited — `publish_diagnostics` is async; a bare `let _ = …` drops the future
+    // unsent, which silently disables ALL LSP diagnostics (parse errors, lints, unused bindings).
+    client.publish_diagnostics(uri, diags, None).await;
 }
 
 #[tower_lsp::async_trait]
@@ -268,7 +270,7 @@ impl LanguageServer for Backend {
         let uri = p.text_document.uri;
         let text = p.text_document.text;
         self.docs.write().unwrap().insert(uri.clone(), text.clone());
-        publish_parse_and_lint(&self.client, uri, &text);
+        publish_parse_and_lint(&self.client, uri, &text).await;
     }
 
     async fn did_change(&self, p: DidChangeTextDocumentParams) {
@@ -278,15 +280,15 @@ impl LanguageServer for Backend {
                 .write()
                 .unwrap()
                 .insert(uri.clone(), chg.text.clone());
-            publish_parse_and_lint(&self.client, uri, &chg.text);
+            publish_parse_and_lint(&self.client, uri, &chg.text).await;
         }
     }
 
     async fn did_close(&self, p: DidCloseTextDocumentParams) {
         self.docs.write().unwrap().remove(&p.text_document.uri);
-        let _ = self
-            .client
-            .publish_diagnostics(p.text_document.uri, vec![], None);
+        self.client
+            .publish_diagnostics(p.text_document.uri, vec![], None)
+            .await;
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {

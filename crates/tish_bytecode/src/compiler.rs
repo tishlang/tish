@@ -1,6 +1,6 @@
 //! AST to bytecode compiler.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tishlang_ast::{
@@ -83,9 +83,500 @@ struct Compiler<'a> {
     block_depth: usize,
     /// When true (REPL mode), last ExprStmt leaves its value on the stack and we skip trailing LoadConst Null.
     retain_last_expr: bool,
+    /// When `Some`, this chunk is being compiled in the SIMPLE slot mode: identifier references
+    /// resolve to frame slots (`LoadLocal`) via this param→slot map instead of name-keyed `LoadVar`.
+    /// Set only for self-contained param-only functions (see [`simple_fn_slots`]).
+    slot_ctx: Option<HashMap<Arc<str>, u16>>,
+    /// GENERAL slot mode (`TISH_VM_SLOTS`, capture-aware): a block-scoped stack of name→slot maps,
+    /// innermost last. Allocated DURING compilation so block scoping + shadowing are correct (each
+    /// `let` gets a fresh slot; resolution walks innermost-first; a block pops its frame). Empty unless
+    /// [`general_slots`] is set. Captured names (in [`slot_captured`]) are never allocated here — they
+    /// stay name-based in `local_scope` (which closures capture).
+    slot_scopes: Vec<HashMap<Arc<str>, u16>>,
+    /// Names referenced by a nested closure (over-approx) → must stay name-based even in slot mode.
+    slot_captured: HashSet<Arc<str>>,
+    /// Monotonic slot allocator for [`slot_scopes`] (never reclaimed; final value = frame size).
+    next_slot: u16,
+    /// True while compiling a chunk in general slot mode (see [`slot_scopes`]).
+    general_slots: bool,
+    /// Active `finally` bodies of enclosing `try`s in the CURRENT function (innermost last). A
+    /// `return` that escapes these trys must run each one on the way out (the bytecode VM jumps
+    /// straight to the function return otherwise). Reset per function — nested fns get a fresh
+    /// `Compiler`. The exception-unwind path is handled separately in the `Try` emitter.
+    finally_stack: Vec<Box<Statement>>,
+    /// When `Some(name)`, this chunk is the body of `fn name(...)` and `name`'s binding is provably
+    /// stable (no param shadows it, no reassignment/redeclaration in the body — see [`stmt_rebinds`]).
+    /// A direct call `name(args)` then compiles to `SelfCall` (no name lookup / closure dispatch; the
+    /// JIT lowers it to a native recursive call). `None` for anonymous fns, top-level, or anywhere the
+    /// self-binding can't be proven stable.
+    self_fn_name: Option<Arc<str>>,
+}
+
+/// Does `e` reference only the given params (no free/global vars, no nested
+/// functions, no mutation)? Such a function can run on a bare slot frame.
+fn expr_is_param_only(e: &Expr, params: &HashSet<&str>) -> bool {
+    match e {
+        Expr::Literal { .. } => true,
+        Expr::Ident { name, .. } => params.contains(name.as_ref()),
+        Expr::Binary { left, right, .. } => {
+            expr_is_param_only(left, params) && expr_is_param_only(right, params)
+        }
+        Expr::Unary { operand, .. } => expr_is_param_only(operand, params),
+        Expr::Call { callee, args, .. } => {
+            expr_is_param_only(callee, params)
+                && args.iter().all(|a| match a {
+                    CallArg::Expr(x) => expr_is_param_only(x, params),
+                    CallArg::Spread(_) => false,
+                })
+        }
+        Expr::Member { object, prop, .. } => {
+            expr_is_param_only(object, params)
+                && match prop {
+                    MemberProp::Name { .. } => true,
+                    MemberProp::Expr(x) => expr_is_param_only(x, params),
+                }
+        }
+        Expr::Index { object, index, .. } => {
+            expr_is_param_only(object, params) && expr_is_param_only(index, params)
+        }
+        Expr::Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_is_param_only(cond, params)
+                && expr_is_param_only(then_branch, params)
+                && expr_is_param_only(else_branch, params)
+        }
+        Expr::NullishCoalesce { left, right, .. } => {
+            expr_is_param_only(left, params) && expr_is_param_only(right, params)
+        }
+        Expr::Array { elements, .. } => elements.iter().all(|el| match el {
+            ArrayElement::Expr(x) => expr_is_param_only(x, params),
+            ArrayElement::Spread(_) => false,
+        }),
+        Expr::Object { props, .. } => props.iter().all(|p| match p {
+            ObjectProp::KeyValue(_, x) => expr_is_param_only(x, params),
+            ObjectProp::Spread(_) => false,
+        }),
+        Expr::TemplateLiteral { exprs, .. } => {
+            exprs.iter().all(|x| expr_is_param_only(x, params))
+        }
+        Expr::TypeOf { operand, .. } => expr_is_param_only(operand, params),
+        // Mutation, nested fns, async, jsx, native, `new` — not eligible.
+        _ => false,
+    }
+}
+
+/// Statement form of [`expr_is_param_only`]. Only the small set of statements a
+/// pure leaf function body uses is allowed; anything that declares a binding or
+/// loops bails (those keep the name-based path).
+fn stmt_is_param_only(s: &Statement, params: &HashSet<&str>) -> bool {
+    match s {
+        Statement::Block { statements, .. } => {
+            statements.iter().all(|st| stmt_is_param_only(st, params))
+        }
+        Statement::ExprStmt { expr, .. } => expr_is_param_only(expr, params),
+        Statement::Return { value, .. } => {
+            value.as_ref().map_or(true, |e| expr_is_param_only(e, params))
+        }
+        Statement::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_is_param_only(cond, params)
+                && stmt_is_param_only(then_branch, params)
+                && else_branch
+                    .as_ref()
+                    .map_or(true, |b| stmt_is_param_only(b, params))
+        }
+        _ => false,
+    }
+}
+
+/// If a function with these `params` (all simple, no rest) has a body that
+/// references only its params, returns the param→slot map for slot-based
+/// compilation. Slots are the parameter positions (0-based). Returns `None`
+/// when the function must use the name-based path (captures outer scope,
+/// declares locals, mutates, or defines nested functions).
+fn simple_fn_slots(
+    params: &[FunParam],
+    has_rest: bool,
+    body_ok: impl FnOnce(&HashSet<&str>) -> bool,
+) -> Option<HashMap<Arc<str>, u16>> {
+    if has_rest {
+        return None;
+    }
+    let mut map: HashMap<Arc<str>, u16> = HashMap::with_capacity(params.len());
+    for (i, p) in params.iter().enumerate() {
+        match p {
+            FunParam::Simple(tp) => {
+                map.insert(Arc::clone(&tp.name), i as u16);
+            }
+            FunParam::Destructure { .. } => return None,
+        }
+    }
+    let pset: HashSet<&str> = map.keys().map(|k| k.as_ref()).collect();
+    if body_ok(&pset) {
+        Some(map)
+    } else {
+        None
+    }
+}
+
+/// Capture-aware general slot-based locals (params + uncaptured body/top-level `let`s → frame slots).
+/// **Default ON** — validated across the full cross-backend suite + the compute micros (−22..27%) +
+/// the `main.tish` bundle (−22%). Set `TISH_VM_SLOTS=0` to disable (name-based, the old path).
+fn slots_enabled() -> bool {
+    std::env::var("TISH_VM_SLOTS").map(|v| v != "0").unwrap_or(true)
+}
+
+/// Is `name` bound by one of `params` (so it would shadow a function's own name)? Conservative:
+/// any destructuring param returns `true` (it could bind `name` via a nested pattern we don't analyze).
+fn params_bind_name(params: &[FunParam], name: &str) -> bool {
+    params.iter().any(|p| match p {
+        FunParam::Simple(tp) => tp.name.as_ref() == name,
+        FunParam::Destructure { .. } => true,
+    })
+}
+
+/// Conservative scan: does `name` get REBOUND (assigned `=`, `+=`, `??=`, `++`/`--`, or re-declared
+/// via `let`/`for-of`) anywhere in `s`? Returns `true` on a rebind OR on any node it can't fully
+/// analyze. Used to decide whether `fn NAME`'s body may emit `SelfCall` for `NAME(...)`: only when
+/// NAME's binding is PROVABLY stable throughout the body, because a wrong `SelfCall` would call the
+/// original chunk after a reassignment — a silent miscompile. Erring toward `true` only costs the
+/// optimization, never correctness.
+fn stmt_rebinds(s: &Statement, name: &str) -> bool {
+    match s {
+        Statement::Block { statements, .. } => statements.iter().any(|s| stmt_rebinds(s, name)),
+        Statement::VarDecl { name: n, init, .. } => {
+            n.as_ref() == name || init.as_ref().is_some_and(|e| expr_rebinds(e, name))
+        }
+        Statement::ExprStmt { expr, .. } => expr_rebinds(expr, name),
+        Statement::Return { value, .. } => value.as_ref().is_some_and(|e| expr_rebinds(e, name)),
+        Statement::Throw { value, .. } => expr_rebinds(value, name),
+        Statement::If { cond, then_branch, else_branch, .. } => {
+            expr_rebinds(cond, name)
+                || stmt_rebinds(then_branch, name)
+                || else_branch.as_ref().is_some_and(|s| stmt_rebinds(s, name))
+        }
+        Statement::While { cond, body, .. } => expr_rebinds(cond, name) || stmt_rebinds(body, name),
+        Statement::DoWhile { body, cond, .. } => stmt_rebinds(body, name) || expr_rebinds(cond, name),
+        Statement::For { init, cond, update, body, .. } => {
+            init.as_ref().is_some_and(|s| stmt_rebinds(s, name))
+                || cond.as_ref().is_some_and(|e| expr_rebinds(e, name))
+                || update.as_ref().is_some_and(|e| expr_rebinds(e, name))
+                || stmt_rebinds(body, name)
+        }
+        Statement::ForOf { name: n, iterable, body, .. } => {
+            n.as_ref() == name || expr_rebinds(iterable, name) || stmt_rebinds(body, name)
+        }
+        Statement::Switch { expr, cases, default_body, .. } => {
+            expr_rebinds(expr, name)
+                || cases.iter().any(|(t, body)| {
+                    t.as_ref().is_some_and(|e| expr_rebinds(e, name))
+                        || body.iter().any(|s| stmt_rebinds(s, name))
+                })
+                || default_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(|s| stmt_rebinds(s, name)))
+        }
+        Statement::Try { body, catch_body, finally_body, .. } => {
+            stmt_rebinds(body, name)
+                || catch_body.as_ref().is_some_and(|s| stmt_rebinds(s, name))
+                || finally_body.as_ref().is_some_and(|s| stmt_rebinds(s, name))
+        }
+        Statement::Break { .. } | Statement::Continue { .. } => false,
+        // VarDeclDestructure (could bind `name`), FunDecl (could shadow), and any unknown construct
+        // → conservative: assume it may rebind `name`.
+        _ => true,
+    }
+}
+
+/// Expression half of [`stmt_rebinds`]. `true` if `name` is an assignment/update target, or unknown.
+fn expr_rebinds(e: &Expr, name: &str) -> bool {
+    match e {
+        Expr::Assign { name: n, value, .. }
+        | Expr::CompoundAssign { name: n, value, .. }
+        | Expr::LogicalAssign { name: n, value, .. } => n.as_ref() == name || expr_rebinds(value, name),
+        Expr::PostfixInc { name: n, .. }
+        | Expr::PostfixDec { name: n, .. }
+        | Expr::PrefixInc { name: n, .. }
+        | Expr::PrefixDec { name: n, .. } => n.as_ref() == name,
+        Expr::Literal { .. } | Expr::Ident { .. } => false,
+        Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+            expr_rebinds(left, name) || expr_rebinds(right, name)
+        }
+        Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } | Expr::Await { operand, .. } => {
+            expr_rebinds(operand, name)
+        }
+        Expr::Conditional { cond, then_branch, else_branch, .. } => {
+            expr_rebinds(cond, name) || expr_rebinds(then_branch, name) || expr_rebinds(else_branch, name)
+        }
+        Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+            expr_rebinds(callee, name)
+                || args.iter().any(|a| match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => expr_rebinds(e, name),
+                })
+        }
+        Expr::Member { object, .. } => expr_rebinds(object, name),
+        Expr::Index { object, index, .. } => expr_rebinds(object, name) || expr_rebinds(index, name),
+        Expr::Array { elements, .. } => elements.iter().any(|el| match el {
+            ArrayElement::Expr(e) | ArrayElement::Spread(e) => expr_rebinds(e, name),
+        }),
+        Expr::Object { props, .. } => props.iter().any(|p| match p {
+            ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => expr_rebinds(e, name),
+        }),
+        Expr::MemberAssign { object, value, .. } => expr_rebinds(object, name) || expr_rebinds(value, name),
+        Expr::IndexAssign { object, index, value, .. } => {
+            expr_rebinds(object, name) || expr_rebinds(index, name) || expr_rebinds(value, name)
+        }
+        Expr::TemplateLiteral { exprs, .. } => exprs.iter().any(|e| expr_rebinds(e, name)),
+        // A nested closure could reassign the outer `name`; recurse (over-conservative if it shadows,
+        // which only costs the optimization).
+        Expr::ArrowFunction { body, .. } => match body {
+            ArrowBody::Expr(e) => expr_rebinds(e, name),
+            ArrowBody::Block(s) => stmt_rebinds(s, name),
+        },
+        // Jsx, NativeModuleLoad, and anything unknown → conservative.
+        _ => true,
+    }
+}
+
+/// One conservative pass computing the over-approximated CAPTURED set: every identifier that appears
+/// textually inside any nested closure (`ArrowFunction`/`FunDecl`) — its body AND its parameter
+/// defaults (which evaluate in the enclosing scope, e.g. `(a = secret) => a` captures `secret`). A
+/// captured local must stay name-based in `local_scope` (which closures capture); only uncaptured
+/// locals are slotted. Recurses ALL ordinary control flow (so it finds every closure → the capture
+/// set is complete); returns `false` ONLY on ambient/module constructs it cannot traverse, so the
+/// caller leaves the whole chunk name-based (safe default-bail: a missed closure could otherwise let a
+/// captured local be wrongly slotted). Slot ALLOCATION happens during compilation (scope-aware), not
+/// here — so block scoping + shadowing are handled by the slot-scope stack, not a flat map.
+#[derive(Default)]
+struct SlotScan {
+    captured: HashSet<Arc<str>>,
+}
+
+impl SlotScan {
+    fn stmt(&mut self, s: &Statement, in_closure: bool) -> bool {
+        match s {
+            Statement::Block { statements, .. } => statements.iter().all(|s| self.stmt(s, in_closure)),
+            Statement::VarDecl { init, .. } => init.as_ref().map_or(true, |e| self.expr(e, in_closure)),
+            Statement::VarDeclDestructure { init, .. } => self.expr(init, in_closure),
+            Statement::ExprStmt { expr, .. } => self.expr(expr, in_closure),
+            Statement::If { cond, then_branch, else_branch, .. } => {
+                self.expr(cond, in_closure)
+                    && self.stmt(then_branch, in_closure)
+                    && else_branch.as_ref().map_or(true, |s| self.stmt(s, in_closure))
+            }
+            Statement::While { cond, body, .. } => self.expr(cond, in_closure) && self.stmt(body, in_closure),
+            Statement::DoWhile { body, cond, .. } => self.stmt(body, in_closure) && self.expr(cond, in_closure),
+            Statement::For { init, cond, update, body, .. } => {
+                init.as_ref().map_or(true, |i| self.stmt(i, in_closure))
+                    && cond.as_ref().map_or(true, |e| self.expr(e, in_closure))
+                    && update.as_ref().map_or(true, |e| self.expr(e, in_closure))
+                    && self.stmt(body, in_closure)
+            }
+            Statement::ForOf { iterable, body, .. } => {
+                self.expr(iterable, in_closure) && self.stmt(body, in_closure)
+            }
+            Statement::Return { value, .. } => value.as_ref().map_or(true, |e| self.expr(e, in_closure)),
+            Statement::Throw { value, .. } => self.expr(value, in_closure),
+            Statement::Break { .. } | Statement::Continue { .. } => true,
+            Statement::Switch { expr, cases, default_body, .. } => {
+                if !self.expr(expr, in_closure) {
+                    return false;
+                }
+                for (test, body) in cases {
+                    if let Some(t) = test {
+                        if !self.expr(t, in_closure) {
+                            return false;
+                        }
+                    }
+                    if !body.iter().all(|s| self.stmt(s, in_closure)) {
+                        return false;
+                    }
+                }
+                default_body
+                    .as_ref()
+                    .map_or(true, |b| b.iter().all(|s| self.stmt(s, in_closure)))
+            }
+            Statement::Try { body, catch_body, finally_body, .. } => {
+                self.stmt(body, in_closure)
+                    && catch_body.as_ref().map_or(true, |s| self.stmt(s, in_closure))
+                    && finally_body.as_ref().map_or(true, |s| self.stmt(s, in_closure))
+            }
+            // A nested named function: its param defaults (enclosing-scope) + whole body capture.
+            Statement::FunDecl { params, body, .. } => {
+                self.scan_closure_param_defaults(params) && self.stmt(body, true)
+            }
+            // Ambient/module constructs (Import/Export/TypeAlias/DeclareVar/DeclareFun) → bail.
+            _ => false,
+        }
+    }
+
+    fn expr(&mut self, e: &Expr, in_closure: bool) -> bool {
+        match e {
+            Expr::Literal { .. } => true,
+            Expr::Ident { name, .. } => {
+                if in_closure {
+                    self.captured.insert(Arc::clone(name));
+                }
+                true
+            }
+            Expr::Binary { left, right, .. } => self.expr(left, in_closure) && self.expr(right, in_closure),
+            Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } | Expr::Await { operand, .. } => {
+                self.expr(operand, in_closure)
+            }
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                self.expr(cond, in_closure) && self.expr(then_branch, in_closure) && self.expr(else_branch, in_closure)
+            }
+            Expr::NullishCoalesce { left, right, .. } => self.expr(left, in_closure) && self.expr(right, in_closure),
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                self.expr(callee, in_closure)
+                    && args.iter().all(|a| match a {
+                        CallArg::Expr(e) | CallArg::Spread(e) => self.expr(e, in_closure),
+                    })
+            }
+            Expr::Member { object, .. } => self.expr(object, in_closure),
+            Expr::Index { object, index, .. } => self.expr(object, in_closure) && self.expr(index, in_closure),
+            Expr::Array { elements, .. } => elements.iter().all(|el| match el {
+                ArrayElement::Expr(e) | ArrayElement::Spread(e) => self.expr(e, in_closure),
+            }),
+            Expr::Object { props, .. } => props.iter().all(|p| match p {
+                ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => self.expr(e, in_closure),
+            }),
+            Expr::Assign { name, value, .. }
+            | Expr::CompoundAssign { name, value, .. }
+            | Expr::LogicalAssign { name, value, .. } => {
+                if in_closure {
+                    self.captured.insert(Arc::clone(name));
+                }
+                self.expr(value, in_closure)
+            }
+            Expr::MemberAssign { object, value, .. } => self.expr(object, in_closure) && self.expr(value, in_closure),
+            Expr::IndexAssign { object, index, value, .. } => {
+                self.expr(object, in_closure) && self.expr(index, in_closure) && self.expr(value, in_closure)
+            }
+            Expr::PostfixInc { name, .. }
+            | Expr::PostfixDec { name, .. }
+            | Expr::PrefixInc { name, .. }
+            | Expr::PrefixDec { name, .. } => {
+                if in_closure {
+                    self.captured.insert(Arc::clone(name));
+                }
+                true
+            }
+            Expr::TemplateLiteral { exprs, .. } => exprs.iter().all(|e| self.expr(e, in_closure)),
+            Expr::ArrowFunction { params, body, .. } => {
+                if !self.scan_closure_param_defaults(params) {
+                    return false;
+                }
+                match body {
+                    ArrowBody::Expr(e) => self.expr(e, true),
+                    ArrowBody::Block(s) => self.stmt(s, true),
+                }
+            }
+            // Jsx, NativeModuleLoad → bail.
+            _ => false,
+        }
+    }
+
+    /// A nested closure's parameter default expressions evaluate in the ENCLOSING scope → captured.
+    fn scan_closure_param_defaults(&mut self, params: &[FunParam]) -> bool {
+        for p in params {
+            let default = match p {
+                FunParam::Simple(tp) => &tp.default,
+                FunParam::Destructure { default, .. } => default,
+            };
+            if let Some(d) = default {
+                if !self.expr(d, true) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+/// Capture-aware eligibility for general slot-based locals in a FUNCTION. Returns the captured-name set
+/// (names that must stay name-based) when eligible, else `None` (compile name-based). Eligible iff the
+/// flag is on, no rest param, all params simple, the body fully analysable, and no PARAM is captured
+/// (the VM binds params into slots 0..n, but a closure reads captures by name from `local_scope`).
+fn slot_analyze(params: &[FunParam], has_rest: bool, body: &Statement) -> Option<HashSet<Arc<str>>> {
+    if !slots_enabled() || has_rest {
+        return None;
+    }
+    for p in params {
+        if let FunParam::Destructure { .. } = p {
+            return None;
+        }
+    }
+    let mut scan = SlotScan::default();
+    if !scan.stmt(body, false) {
+        return None;
+    }
+    for p in params {
+        if let FunParam::Simple(tp) = p {
+            if scan.captured.contains(&tp.name) {
+                return None;
+            }
+        }
+    }
+    Some(scan.captured)
+}
+
+/// Same, for the TOP-LEVEL program (no params). Caller must additionally ensure non-REPL mode.
+fn slot_analyze_toplevel(statements: &[Statement]) -> Option<HashSet<Arc<str>>> {
+    if !slots_enabled() {
+        return None;
+    }
+    let mut scan = SlotScan::default();
+    for s in statements {
+        if !scan.stmt(s, false) {
+            return None;
+        }
+    }
+    Some(scan.captured)
 }
 
 impl<'a> Compiler<'a> {
+    /// Resolve a name to its frame slot. `None` ⇒ name-based (a captured local, a global, or a
+    /// builtin) — the single source of truth for slot-vs-name. Checks the simple param-only map first
+    /// (a chunk is in exactly one mode), then the general scope stack innermost-first (shadowing).
+    #[inline]
+    fn resolve_slot(&self, name: &str) -> Option<u16> {
+        if let Some(m) = self.slot_ctx.as_ref() {
+            if let Some(s) = m.get(name) {
+                return Some(*s);
+            }
+        }
+        self.slot_scopes.iter().rev().find_map(|m| m.get(name).copied())
+    }
+
+    /// Emit a variable READ: `LoadLocal` if slotted, else name-based `LoadVar`.
+    fn emit_var_load(&mut self, name: &Arc<str>) {
+        if let Some(slot) = self.resolve_slot(name) {
+            self.emit_u16(Opcode::LoadLocal, slot);
+        } else {
+            let idx = self.name_idx(name);
+            self.emit_u16(Opcode::LoadVar, idx);
+        }
+    }
+
+    /// Emit a variable WRITE (value already on stack): `StoreLocal` if slotted, else `StoreVar`.
+    fn emit_var_store(&mut self, name: &Arc<str>) {
+        if let Some(slot) = self.resolve_slot(name) {
+            self.emit_u16(Opcode::StoreLocal, slot);
+        } else {
+            let idx = self.name_idx(name);
+            self.emit_u16(Opcode::StoreVar, idx);
+        }
+    }
+
     fn new(chunk: &'a mut Chunk, retain_last_expr: bool) -> Self {
         Self {
             chunk,
@@ -95,7 +586,54 @@ impl<'a> Compiler<'a> {
             breakable_stack: Vec::new(),
             block_depth: 0,
             retain_last_expr,
+            slot_ctx: None,
+            slot_scopes: Vec::new(),
+            slot_captured: HashSet::new(),
+            next_slot: 0,
+            general_slots: false,
+            finally_stack: Vec::new(),
+            self_fn_name: None,
         }
+    }
+
+    /// Begin a lexical block: push a name-scope frame and (in general slot mode) a slot-scope frame,
+    /// so block-local `let`s shadow correctly and are reclaimed at block end. Pair with [`exit_block_scope`].
+    fn enter_block_scope(&mut self) {
+        self.scope.push(HashMap::default());
+        if self.general_slots {
+            self.slot_scopes.push(HashMap::default());
+        }
+    }
+
+    fn exit_block_scope(&mut self) {
+        let _popped = self.scope.pop();
+        if self.general_slots {
+            self.slot_scopes.pop();
+        }
+    }
+
+    /// Allocate a fresh frame slot for `name` in the innermost slot scope (general mode).
+    fn declare_slot(&mut self, name: &Arc<str>) -> u16 {
+        let slot = self.next_slot;
+        self.next_slot += 1;
+        if let Some(frame) = self.slot_scopes.last_mut() {
+            frame.insert(Arc::clone(name), slot);
+        }
+        slot
+    }
+
+    /// Emit the pending `finally` bodies (innermost first) before a `return` escapes them. While
+    /// emitting, the stack is cleared so a `return` *inside* one of these finallys doesn't recurse.
+    fn emit_pending_finallys(&mut self) -> Result<(), CompileError> {
+        if self.finally_stack.is_empty() {
+            return Ok(());
+        }
+        let saved = std::mem::take(&mut self.finally_stack);
+        for finally in saved.iter().rev() {
+            self.compile_statement(finally)?;
+        }
+        self.finally_stack = saved;
+        Ok(())
     }
 
     fn emit_exit_blocks_until_depth(&mut self, target_depth: usize) {
@@ -154,6 +692,56 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// Emit the default-parameter prologue: for each simple param `p_i` with a default,
+    /// `if (arg i was not supplied) p_i = <default>`. Runs at the top of the function body so
+    /// later defaults can reference earlier (already-bound) params, e.g. `(a, b = a + 1)`.
+    ///
+    /// Uses `ArgMissing(i)` (true iff `i >= argc`) + `JumpIfFalse` so the default applies only
+    /// to *missing* positional args — matching the interpreter, where an explicit `null` keeps
+    /// the `null` (tish has no `undefined`). The store mirrors variable resolution: a slot-based
+    /// chunk writes the slot directly (`StoreLocal`); a name-based chunk binds the name
+    /// (`DeclareVarPlain`, since a missing param is absent from the frame scope).
+    fn emit_param_defaults_prologue(&mut self, params: &[FunParam]) -> Result<(), CompileError> {
+        for (i, p) in params.iter().enumerate() {
+            let FunParam::Simple(tp) = p else { continue };
+            let Some(default_expr) = &tp.default else {
+                continue;
+            };
+            self.emit_u16(Opcode::ArgMissing, i as u16);
+            let skip = self.emit_jump(Opcode::JumpIfFalse);
+            self.compile_expr(default_expr)?;
+            let slot = self
+                .slot_ctx
+                .as_ref()
+                .and_then(|m| m.get(tp.name.as_ref()))
+                .copied();
+            match slot {
+                Some(slot) => self.emit_u16(Opcode::StoreLocal, slot),
+                None => {
+                    let idx = self.name_idx(&tp.name);
+                    self.emit_u16(Opcode::DeclareVarPlain, idx);
+                }
+            }
+            self.patch_jump(skip, self.chunk.code.len());
+        }
+        Ok(())
+    }
+
+    /// Names `let`/`const`-declared DIRECTLY in a loop body block (not nested blocks). Each is a
+    /// fresh per-iteration binding (ES `let`), so closures created in the body must capture this
+    /// iteration's value — registered via `LoopVarsBegin`.
+    fn loop_body_block_lets(body: &Statement) -> Vec<Arc<str>> {
+        let mut out = Vec::new();
+        if let Statement::Block { statements, .. } = body {
+            for s in statements {
+                if let Statement::VarDecl { name, .. } = s {
+                    out.push(Arc::clone(name));
+                }
+            }
+        }
+        out
+    }
+
     fn compile_for_init_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
         match stmt {
             Statement::VarDecl {
@@ -169,12 +757,17 @@ impl<'a> Compiler<'a> {
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(idx);
                 }
-                let idx = self.name_idx(name);
-                self.emit_u16(Opcode::DeclareVarPlain, idx);
-                self.scope
-                    .last_mut()
-                    .unwrap()
-                    .insert(Arc::clone(name), false);
+                if self.general_slots && !self.slot_captured.contains(name.as_ref()) {
+                    let slot = self.declare_slot(name);
+                    self.emit_u16(Opcode::StoreLocal, slot);
+                } else {
+                    let idx = self.name_idx(name);
+                    self.emit_u16(Opcode::DeclareVarPlain, idx);
+                    self.scope
+                        .last_mut()
+                        .unwrap()
+                        .insert(Arc::clone(name), false);
+                }
             }
             Statement::VarDeclDestructure { pattern, init, .. } => {
                 self.compile_expr(init)?;
@@ -487,6 +1080,16 @@ impl<'a> Compiler<'a> {
 
     fn compile_program(&mut self, program: &Program) -> Result<(), CompileError> {
         let stmts = &program.statements;
+        // Top-level general slot-based locals — NON-REPL only (REPL persists top-level `let`s to
+        // globals across lines, which slots can't do). Set up before compiling; the frame size is the
+        // monotonic `next_slot` high-water, applied to the chunk after compilation.
+        if !self.retain_last_expr {
+            if let Some(cap) = slot_analyze_toplevel(stmts) {
+                self.general_slots = true;
+                self.slot_captured = cap;
+                self.slot_scopes.push(HashMap::default());
+            }
+        }
         let last_is_expr = self.retain_last_expr
             && stmts
                 .last()
@@ -509,6 +1112,11 @@ impl<'a> Compiler<'a> {
             self.emit(Opcode::LoadConst);
             self.chunk.write_u16(idx);
         }
+        // Apply the top-level slot frame size (only if any local was actually slotted).
+        if self.general_slots && self.next_slot > 0 {
+            self.chunk.slot_based = true;
+            self.chunk.num_slots = self.next_slot;
+        }
         Ok(())
     }
 
@@ -517,11 +1125,11 @@ impl<'a> Compiler<'a> {
             Statement::Block { statements, .. } => {
                 self.emit(Opcode::EnterBlock);
                 self.block_depth += 1;
-                self.scope.push(HashMap::new());
+                self.enter_block_scope();
                 for s in statements {
                     self.compile_statement(s)?;
                 }
-                self.scope.pop();
+                self.exit_block_scope();
                 self.emit(Opcode::ExitBlock);
                 self.block_depth -= 1;
             }
@@ -538,12 +1146,18 @@ impl<'a> Compiler<'a> {
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(idx);
                 }
-                let idx = self.name_idx(name);
-                self.emit_u16(Opcode::DeclareVar, idx);
-                self.scope
-                    .last_mut()
-                    .unwrap()
-                    .insert(Arc::clone(name), false);
+                if self.general_slots && !self.slot_captured.contains(name.as_ref()) {
+                    // Uncaptured local → allocate a fresh frame slot + write it directly.
+                    let slot = self.declare_slot(name);
+                    self.emit_u16(Opcode::StoreLocal, slot);
+                } else {
+                    let idx = self.name_idx(name);
+                    self.emit_u16(Opcode::DeclareVar, idx);
+                    self.scope
+                        .last_mut()
+                        .unwrap()
+                        .insert(Arc::clone(name), false);
+                }
             }
             Statement::VarDeclDestructure { pattern, init, .. } => {
                 self.compile_expr(init)?;
@@ -570,6 +1184,14 @@ impl<'a> Compiler<'a> {
                 self.patch_jump(jump_end, self.chunk.code.len());
             }
             Statement::While { cond, body, .. } => {
+                // Per-iteration `let`: a `let` declared directly in the loop body is a fresh binding
+                // each iteration, so a closure created in the body captures THIS iteration's value.
+                // Register those names (same overlay mechanism as for/for-of loop vars).
+                let body_lets = Self::loop_body_block_lets(body);
+                for n in &body_lets {
+                    let idx = self.name_idx(n);
+                    self.emit_u16(Opcode::LoopVarsBegin, idx);
+                }
                 let start = self.chunk.code.len();
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
@@ -595,6 +1217,9 @@ impl<'a> Compiler<'a> {
                 for p in info.break_patches {
                     self.patch_jump(p, end);
                 }
+                for _ in &body_lets {
+                    self.emit(Opcode::LoopVarsEnd);
+                }
             }
             Statement::For {
                 init,
@@ -603,9 +1228,21 @@ impl<'a> Compiler<'a> {
                 body,
                 ..
             } => {
-                self.scope.push(HashMap::new());
+                self.enter_block_scope();
                 if let Some(i) = init {
                     self.compile_for_init_statement(i.as_ref())?;
+                }
+                // ES per-iteration `let`: register the loop var so a closure created in the body
+                // captures THIS iteration's value (not the final one). One push per loop entry; the
+                // per-iteration snapshot only happens when a closure is actually created, so
+                // closure-free loops are unaffected.
+                let loop_var: Option<Arc<str>> = match init.as_deref() {
+                    Some(Statement::VarDecl { name, .. }) => Some(Arc::clone(name)),
+                    _ => None,
+                };
+                if let Some(ref n) = loop_var {
+                    let idx = self.name_idx(n);
+                    self.emit_u16(Opcode::LoopVarsBegin, idx);
                 }
                 let cond_start = self.chunk.code.len();
                 if let Some(c) = cond {
@@ -641,8 +1278,13 @@ impl<'a> Compiler<'a> {
                 for p in info.break_patches {
                     self.patch_jump(p, end);
                 }
+                // After the loop fully exits (normal or break, both land at `end`): close the
+                // per-iteration region.
+                if loop_var.is_some() {
+                    self.emit(Opcode::LoopVarsEnd);
+                }
                 self.breakable_stack.pop();
-                self.scope.pop();
+                self.exit_block_scope();
             }
             Statement::ForOf {
                 name,
@@ -651,7 +1293,7 @@ impl<'a> Compiler<'a> {
                 ..
             } => {
                 self.compile_expr(iterable)?;
-                self.scope.push(HashMap::new());
+                self.enter_block_scope();
                 let arr_name = Arc::from("__forof_arr__");
                 let i_name = Arc::from("__forof_i__");
                 let len_name = Arc::from("__forof_len__");
@@ -677,6 +1319,9 @@ impl<'a> Compiler<'a> {
                 self.chunk.write_u16(zero_idx);
                 self.emit_u16(Opcode::DeclareVar, i_idx);
                 self.scope.last_mut().unwrap().insert(i_name.clone(), false);
+                // ES per-iteration `let` for `for (let v of …)`: register the loop var so a closure
+                // in the body captures this iteration's element (emitted once, before loop_start).
+                self.emit_u16(Opcode::LoopVarsBegin, name_idx);
                 let loop_start = self.chunk.code.len();
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
@@ -717,9 +1362,12 @@ impl<'a> Compiler<'a> {
                 for p in info.break_patches {
                     self.patch_jump(p, end);
                 }
-                self.scope.pop();
+                self.emit(Opcode::LoopVarsEnd);
+                self.exit_block_scope();
             }
             Statement::Return { value, .. } => {
+                // Evaluate the return value first (JS order), then run any enclosing `finally`
+                // blocks (they're stack-neutral, so the value stays on top), then return.
                 if let Some(v) = value {
                     self.compile_expr(v)?;
                 } else {
@@ -727,6 +1375,7 @@ impl<'a> Compiler<'a> {
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(idx);
                 }
+                self.emit_pending_finallys()?;
                 self.emit(Opcode::Return);
             }
             Statement::Break { .. } => {
@@ -794,6 +1443,17 @@ impl<'a> Compiler<'a> {
             } => {
                 let formal_len = params.len();
                 let (mut param_names, slots) = Self::plan_function_params(params)?;
+                let simple_slots = simple_fn_slots(params, rest_param.is_some(), |pset| {
+                    stmt_is_param_only(body, pset)
+                });
+                // Capture-aware general slot-based locals when the simple param-only fast path doesn't
+                // apply. Gated by `TISH_VM_SLOTS` (off ⇒ None ⇒ byte-identical). Frame size is known only
+                // AFTER compilation (slots are allocated as the body declares locals) → set on the chunk below.
+                let captured = if simple_slots.is_none() {
+                    slot_analyze(params, rest_param.is_some(), body)
+                } else {
+                    None
+                };
                 let mut inner = Chunk::new();
                 if let Some(rp) = rest_param {
                     param_names.push(Arc::clone(&rp.name));
@@ -803,17 +1463,53 @@ impl<'a> Compiler<'a> {
                     inner.add_name(Arc::clone(p));
                 }
                 inner.param_count = param_names.len() as u16;
+                if simple_slots.is_some() {
+                    inner.slot_based = true;
+                    inner.num_slots = param_names.len() as u16;
+                }
                 let mut inner_comp = Compiler::new(&mut inner, false);
-                inner_comp.scope = vec![param_names
-                    .iter()
-                    .map(|n| (Arc::clone(n), false))
-                    .collect::<HashMap<_, _>>()];
-                inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
-                inner_comp.compile_statement(body)?;
+                // Recursion-JIT enabler: if `name`'s binding is provably stable in the body (no
+                // param shadows it, no reassignment/redeclaration), direct `name(args)` calls inside
+                // compile to `SelfCall` — no name lookup, and the numeric JIT lowers it to a native
+                // recursive call. Conservative `stmt_rebinds` errs toward NOT enabling (safe).
+                if !params_bind_name(params, name.as_ref()) && !stmt_rebinds(body, name.as_ref()) {
+                    inner_comp.self_fn_name = Some(Arc::clone(name));
+                }
+                let mut general_frame_slots: Option<u16> = None;
+                if let Some(map) = simple_slots {
+                    inner_comp.slot_ctx = Some(map);
+                    inner_comp.emit_param_defaults_prologue(params)?;
+                    inner_comp.compile_statement(body)?;
+                } else if let Some(cap) = captured {
+                    // Params (all uncaptured — gated) → slots 0..n (matching the VM's param binding);
+                    // uncaptured body `let`s get fresh slots via the scope-aware allocator; captured
+                    // locals stay name-based in `local_scope` (which closures capture).
+                    inner_comp.general_slots = true;
+                    inner_comp.slot_captured = cap;
+                    inner_comp.slot_scopes.push(HashMap::new());
+                    for p in &param_names {
+                        inner_comp.declare_slot(p);
+                    }
+                    inner_comp.emit_param_defaults_prologue(params)?;
+                    inner_comp.compile_statement(body)?;
+                    general_frame_slots = Some(inner_comp.next_slot);
+                } else {
+                    inner_comp.scope = vec![param_names
+                        .iter()
+                        .map(|n| (Arc::clone(n), false))
+                        .collect::<HashMap<_, _>>()];
+                    inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
+                    inner_comp.emit_param_defaults_prologue(params)?;
+                    inner_comp.compile_statement(body)?;
+                }
                 inner_comp.emit(Opcode::LoadConst);
                 let idx = inner_comp.constant_idx(Constant::Null);
                 inner_comp.chunk.write_u16(idx);
                 inner_comp.emit(Opcode::Return);
+                if let Some(n) = general_frame_slots {
+                    inner_comp.chunk.slot_based = true;
+                    inner_comp.chunk.num_slots = n;
+                }
                 let nested_idx = self.chunk.add_nested(inner);
                 self.emit(Opcode::LoadConst);
                 let idx = self.constant_idx(Constant::Closure(nested_idx));
@@ -826,6 +1522,11 @@ impl<'a> Compiler<'a> {
                     .insert(Arc::clone(name), false);
             }
             Statement::DoWhile { body, cond, .. } => {
+                let body_lets = Self::loop_body_block_lets(body);
+                for n in &body_lets {
+                    let idx = self.name_idx(n);
+                    self.emit_u16(Opcode::LoopVarsBegin, idx);
+                }
                 let start = self.chunk.code.len();
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
@@ -850,6 +1551,9 @@ impl<'a> Compiler<'a> {
                 }
                 for p in info.break_patches {
                     self.patch_jump(p, end);
+                }
+                for _ in &body_lets {
+                    self.emit(Opcode::LoopVarsEnd);
                 }
             }
             Statement::Switch {
@@ -931,6 +1635,10 @@ impl<'a> Compiler<'a> {
                 let catch_offset_pos = self.chunk.code.len();
                 self.emit(Opcode::EnterTry);
                 self.chunk.write_u16(0);
+                // A `return` inside the body/catch must run this finally on the way out.
+                if let Some(f) = finally_body {
+                    self.finally_stack.push(f.clone());
+                }
                 self.compile_statement(body)?;
                 self.emit(Opcode::ExitTry);
                 let jump_over_catch = self.emit_jump(Opcode::Jump);
@@ -939,7 +1647,7 @@ impl<'a> Compiler<'a> {
                     if let Some(param) = catch_param {
                         self.emit(Opcode::EnterBlock);
                         self.block_depth += 1;
-                        self.scope.push(HashMap::new());
+                        self.enter_block_scope();
                         let param_idx = self.name_idx(param);
                         self.emit_u16(Opcode::DeclareVar, param_idx);
                         self.scope
@@ -947,7 +1655,7 @@ impl<'a> Compiler<'a> {
                             .unwrap()
                             .insert(Arc::clone(param), false);
                         self.compile_statement(catch_stmt)?;
-                        self.scope.pop();
+                        self.exit_block_scope();
                         self.emit(Opcode::ExitBlock);
                         self.block_depth -= 1;
                     } else {
@@ -955,10 +1663,19 @@ impl<'a> Compiler<'a> {
                         self.compile_statement(catch_stmt)?;
                     }
                 } else {
+                    // No catch: run `finally` on the exception path, then re-raise (propagate).
+                    if let Some(f) = finally_body {
+                        self.compile_statement(f)?;
+                    }
                     self.emit(Opcode::Throw);
                 }
                 let after_catch = self.chunk.code.len();
                 self.patch_jump(jump_over_catch, after_catch);
+                // The finally is no longer pending for enclosing returns once we emit its inline
+                // (normal-path) copy below.
+                if finally_body.is_some() {
+                    self.finally_stack.pop();
+                }
                 if let Some(finally) = finally_body {
                     self.compile_statement(finally)?;
                 }
@@ -1017,10 +1734,36 @@ impl<'a> Compiler<'a> {
                                 .unwrap()
                                 .insert(Arc::clone(name), false);
                         }
-                        _ => {
-                            return Err(CompileError {
-                                message: "Complex destructuring not yet supported".to_string(),
-                            });
+                        // Array hole `[a, , c]`: position is skipped, no binding emitted.
+                        None => {}
+                        // Nested pattern `[[a, b], c]` or `[{x}, y]`: push source[i] and recurse.
+                        // compile_destructure is stack-balanced (consumes exactly the value it
+                        // destructures), so the source array beneath stays intact.
+                        Some(DestructElement::Pattern(sub)) => {
+                            self.emit(Opcode::Dup);
+                            let idx = self.constant_idx(Constant::Number(i as f64));
+                            self.emit(Opcode::LoadConst);
+                            self.chunk.write_u16(idx);
+                            self.emit(Opcode::GetIndex);
+                            self.compile_destructure(sub, mutable, for_header_binding)?;
+                        }
+                        // Rest `[a, ...rest]`: rest = source.slice(i). Use GetMember (not GetIndex)
+                        // so the array's `slice` method resolves via get_member; GetIndex rejects
+                        // string keys on arrays.
+                        Some(DestructElement::Rest(name, _)) => {
+                            self.emit(Opcode::Dup);
+                            let slice_idx = self.name_idx(&Arc::from("slice"));
+                            self.emit_u16(Opcode::GetMember, slice_idx);
+                            let idx = self.constant_idx(Constant::Number(i as f64));
+                            self.emit(Opcode::LoadConst);
+                            self.chunk.write_u16(idx);
+                            self.emit_u16(Opcode::Call, 1);
+                            let nidx = self.name_idx(name);
+                            self.emit_u16(decl_op, nidx);
+                            self.scope
+                                .last_mut()
+                                .unwrap()
+                                .insert(Arc::clone(name), false);
                         }
                     }
                 }
@@ -1044,10 +1787,15 @@ impl<'a> Compiler<'a> {
                                     .insert(Arc::clone(name), false);
                             }
                         }
-                        _ => {
+                        // Nested value `{ outer: { inner } }` or `{ arr: [a, b] }`: obj[key] is
+                        // already on the stack (GetIndex above); recurse to destructure it.
+                        DestructElement::Pattern(sub) => {
+                            self.compile_destructure(sub, mutable, for_header_binding)?;
+                        }
+                        // `{ ...rest }` needs the set of *remaining* keys; not yet supported.
+                        DestructElement::Rest(_, _) => {
                             return Err(CompileError {
-                                message: "Nested object destructuring not yet supported"
-                                    .to_string(),
+                                message: "Object rest destructuring not yet supported".to_string(),
                             });
                         }
                     }
@@ -1072,8 +1820,8 @@ impl<'a> Compiler<'a> {
                 self.chunk.write_u16(idx);
             }
             Expr::Ident { name, .. } => {
-                let idx = self.name_idx(name);
-                self.emit_u16(Opcode::LoadVar, idx);
+                // `resolve_slot` checks BOTH the simple param-only map and the general scope stack.
+                self.emit_var_load(name);
             }
             Expr::Binary {
                 left, op, right, ..
@@ -1202,13 +1950,30 @@ impl<'a> Compiler<'a> {
                     self.compile_expr(callee)?;
                     self.emit(Opcode::CallSpread);
                 } else {
-                    self.compile_expr(callee)?;
-                    for arg in args {
-                        if let CallArg::Expr(e) = arg {
-                            self.compile_expr(e)?;
+                    // Self-recursion fast path: `name(args)` where `name` is this function's own
+                    // provably-stable binding → `SelfCall` (no callee LoadVar, no closure dispatch;
+                    // the JIT lowers it to a native recursive call). `self_fn_name` is only `Some`
+                    // when the compiler proved `name` isn't shadowed or rebound (see FunDecl).
+                    let is_self_call = matches!(
+                        callee.as_ref(),
+                        Expr::Ident { name, .. } if self.self_fn_name.as_deref() == Some(name.as_ref())
+                    );
+                    if is_self_call {
+                        for arg in args {
+                            if let CallArg::Expr(e) = arg {
+                                self.compile_expr(e)?;
+                            }
                         }
+                        self.emit_u16(Opcode::SelfCall, args.len() as u16);
+                    } else {
+                        self.compile_expr(callee)?;
+                        for arg in args {
+                            if let CallArg::Expr(e) = arg {
+                                self.compile_expr(e)?;
+                            }
+                        }
+                        self.emit_u16(Opcode::Call, args.len() as u16);
                     }
-                    self.emit_u16(Opcode::Call, args.len() as u16);
                 }
             }
             Expr::Member {
@@ -1355,9 +2120,8 @@ impl<'a> Compiler<'a> {
             }
             Expr::Assign { name, value, .. } => {
                 self.compile_expr(value)?;
-                let idx = self.name_idx(name);
-                self.emit_u16(Opcode::StoreVar, idx);
-                self.emit_u16(Opcode::LoadVar, idx); // assign yields value
+                self.emit_var_store(name);
+                self.emit_var_load(name); // assign yields value
             }
             Expr::TypeOf { operand, .. } => {
                 let typeof_idx = self.name_idx(&Arc::from("typeof"));
@@ -1368,17 +2132,30 @@ impl<'a> Compiler<'a> {
             Expr::ArrowFunction { params, body, .. } => {
                 let formal_len = params.len();
                 let (param_names, slots) = Self::plan_function_params(params)?;
+                let simple_slots = simple_fn_slots(params, false, |pset| match body {
+                    ArrowBody::Expr(e) => expr_is_param_only(e, pset),
+                    ArrowBody::Block(s) => stmt_is_param_only(s, pset),
+                });
                 let mut inner = Chunk::new();
                 for p in &param_names {
                     inner.add_name(Arc::clone(p));
                 }
                 inner.param_count = param_names.len() as u16;
+                if simple_slots.is_some() {
+                    inner.slot_based = true;
+                    inner.num_slots = param_names.len() as u16;
+                }
                 let mut inner_comp = Compiler::new(&mut inner, false);
-                inner_comp.scope = vec![param_names
-                    .iter()
-                    .map(|n| (Arc::clone(n), false))
-                    .collect::<HashMap<_, _>>()];
-                inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
+                if let Some(map) = simple_slots {
+                    inner_comp.slot_ctx = Some(map);
+                } else {
+                    inner_comp.scope = vec![param_names
+                        .iter()
+                        .map(|n| (Arc::clone(n), false))
+                        .collect::<HashMap<_, _>>()];
+                    inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
+                }
+                inner_comp.emit_param_defaults_prologue(params)?;
                 match body {
                     ArrowBody::Expr(e) => {
                         inner_comp.compile_expr(e)?;
@@ -1421,54 +2198,49 @@ impl<'a> Compiler<'a> {
                 }
             }
             Expr::PostfixInc { name, .. } => {
-                let idx = self.name_idx(name);
                 let one = self.constant_idx(Constant::Number(1.0));
-                self.emit_u16(Opcode::LoadVar, idx);
+                self.emit_var_load(name);
                 self.emit(Opcode::Dup);
                 self.emit(Opcode::LoadConst);
                 self.chunk.write_u16(one);
                 self.emit_u8(Opcode::BinOp, 0);
-                self.emit_u16(Opcode::StoreVar, idx);
+                self.emit_var_store(name);
             }
             Expr::PostfixDec { name, .. } => {
-                let idx = self.name_idx(name);
                 let one = self.constant_idx(Constant::Number(1.0));
-                self.emit_u16(Opcode::LoadVar, idx);
+                self.emit_var_load(name);
                 self.emit(Opcode::Dup);
                 self.emit(Opcode::LoadConst);
                 self.chunk.write_u16(one);
                 self.emit_u8(Opcode::BinOp, 1);
-                self.emit_u16(Opcode::StoreVar, idx);
+                self.emit_var_store(name);
             }
             Expr::PrefixInc { name, .. } => {
-                let idx = self.name_idx(name);
                 let one = self.constant_idx(Constant::Number(1.0));
-                self.emit_u16(Opcode::LoadVar, idx);
+                self.emit_var_load(name);
                 self.emit(Opcode::LoadConst);
                 self.chunk.write_u16(one);
                 self.emit_u8(Opcode::BinOp, 0);
                 self.emit(Opcode::Dup);
-                self.emit_u16(Opcode::StoreVar, idx);
+                self.emit_var_store(name);
             }
             Expr::PrefixDec { name, .. } => {
-                let idx = self.name_idx(name);
                 let one = self.constant_idx(Constant::Number(1.0));
-                self.emit_u16(Opcode::LoadVar, idx);
+                self.emit_var_load(name);
                 self.emit(Opcode::LoadConst);
                 self.chunk.write_u16(one);
                 self.emit_u8(Opcode::BinOp, 1);
                 self.emit(Opcode::Dup);
-                self.emit_u16(Opcode::StoreVar, idx);
+                self.emit_var_store(name);
             }
             Expr::CompoundAssign {
                 name, op, value, ..
             } => {
-                let idx = self.name_idx(name);
-                self.emit_u16(Opcode::LoadVar, idx);
+                self.emit_var_load(name);
                 self.compile_expr(value)?;
                 self.emit_u8(Opcode::BinOp, compound_op_to_u8(*op));
                 self.emit(Opcode::Dup);
-                self.emit_u16(Opcode::StoreVar, idx);
+                self.emit_var_store(name);
             }
             Expr::MemberAssign {
                 object,
@@ -1521,31 +2293,30 @@ impl<'a> Compiler<'a> {
             Expr::LogicalAssign {
                 name, op, value, ..
             } => {
-                let idx = self.name_idx(name);
                 match op {
                     LogicalAssignOp::OrOr => {
                         // ||= : if current is truthy, keep it; else eval rhs, assign, yield rhs
-                        self.emit_u16(Opcode::LoadVar, idx);
+                        self.emit_var_load(name);
                         self.emit(Opcode::Dup);
                         let j_rhs = self.emit_jump(Opcode::JumpIfFalse);
                         let j_end = self.emit_jump(Opcode::Jump);
                         self.patch_jump(j_rhs, self.chunk.code.len());
                         self.emit(Opcode::Pop);
                         self.compile_expr(value)?;
-                        self.emit_u16(Opcode::StoreVar, idx);
-                        self.emit_u16(Opcode::LoadVar, idx);
+                        self.emit_var_store(name);
+                        self.emit_var_load(name);
                         let end = self.chunk.code.len();
                         self.patch_jump(j_end, end);
                     }
                     LogicalAssignOp::AndAnd => {
                         // &&= : if current is falsy, keep it; else eval rhs, assign, yield rhs
-                        self.emit_u16(Opcode::LoadVar, idx);
+                        self.emit_var_load(name);
                         self.emit(Opcode::Dup);
                         let j_short = self.emit_jump(Opcode::JumpIfFalse);
                         self.emit(Opcode::Pop);
                         self.compile_expr(value)?;
-                        self.emit_u16(Opcode::StoreVar, idx);
-                        self.emit_u16(Opcode::LoadVar, idx);
+                        self.emit_var_store(name);
+                        self.emit_var_load(name);
                         let j_end = self.emit_jump(Opcode::Jump);
                         let end = self.chunk.code.len();
                         self.patch_jump(j_short, end);
@@ -1554,7 +2325,7 @@ impl<'a> Compiler<'a> {
                     LogicalAssignOp::Nullish => {
                         // ??= : assign only when current === null (matches interpreter)
                         let null_c = self.constant_idx(Constant::Null);
-                        self.emit_u16(Opcode::LoadVar, idx);
+                        self.emit_var_load(name);
                         self.emit(Opcode::Dup);
                         self.emit(Opcode::LoadConst);
                         self.chunk.write_u16(null_c);
@@ -1562,8 +2333,8 @@ impl<'a> Compiler<'a> {
                         let j_not_null = self.emit_jump(Opcode::JumpIfFalse);
                         self.emit(Opcode::Pop);
                         self.compile_expr(value)?;
-                        self.emit_u16(Opcode::StoreVar, idx);
-                        self.emit_u16(Opcode::LoadVar, idx);
+                        self.emit_var_store(name);
+                        self.emit_var_load(name);
                         let j_end = self.emit_jump(Opcode::Jump);
                         let end = self.chunk.code.len();
                         self.patch_jump(j_not_null, end);

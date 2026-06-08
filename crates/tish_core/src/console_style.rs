@@ -67,7 +67,7 @@ fn format_value_styled_inner(value: &Value, colors: bool, quote_strings: bool) -
                 let escaped = escape_string_for_display(s);
                 format!("{STRING}\"{escaped}\"{RESET}")
             } else {
-                format!("{STRING}{}{RESET}", s.as_ref())
+                format!("{STRING}{}{RESET}", s.as_str())
             }
         }
         Value::Bool(b) => format!("{BOOLEAN}{b}{RESET}"),
@@ -79,6 +79,15 @@ fn format_value_styled_inner(value: &Value, colors: bool, quote_strings: bool) -
                 .map(|v| format_value_styled_inner(v, colors, true))
                 .collect();
             let sep = format!("{PUNCT}, {RESET}");
+            format!("{PUNCT}[{RESET}{}{PUNCT}]{RESET}", inner.join(&sep))
+        }
+        Value::NumberArray(arr) => {
+            let sep = format!("{PUNCT}, {RESET}");
+            let inner: Vec<String> = arr
+                .borrow()
+                .iter()
+                .map(|n| format_value_styled_inner(&Value::Number(*n), colors, true))
+                .collect();
             format!("{PUNCT}[{RESET}{}{PUNCT}]{RESET}", inner.join(&sep))
         }
         Value::Object(obj) => {

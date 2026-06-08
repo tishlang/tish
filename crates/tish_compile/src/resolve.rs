@@ -747,12 +747,28 @@ pub fn has_native_imports(program: &Program) -> bool {
 pub fn has_external_native_imports(program: &Program) -> bool {
     for stmt in &program.statements {
         for spec in stmt_native_specs(stmt) {
-            if !is_builtin_native_spec(spec.as_ref()) {
+            // `ffi:` is portable (loadable on every backend via the C ABI), so it is NOT an
+            // "external native import" that non-rust backends must reject — only `cargo:` is.
+            if !is_builtin_native_spec(spec.as_ref()) && !is_ffi_native_spec(&spec) {
                 return true;
             }
         }
     }
     false
+}
+
+/// Every `ffi:…` spec imported anywhere in `program` (deduplicated, in first-seen order). The CLI
+/// loads each cdylib with `tish_ffi::load_module` and registers it before running.
+pub fn ffi_native_specs(program: &Program) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for stmt in &program.statements {
+        for spec in stmt_native_specs(stmt) {
+            if is_ffi_native_spec(&spec) && !out.contains(&spec) {
+                out.push(spec);
+            }
+        }
+    }
+    out
 }
 
 /// A resolved module: path and its parsed program.
@@ -907,12 +923,21 @@ fn load_module_recursive(
 /// - fs, http, timers, process, ws (Node-compatible aliases for tish:*)
 /// - tish:egui, tish:polars, etc.
 /// - cargo:… (Cargo `rustDependencies` + generated wrapper; Rust native backend)
+/// - ffi:… (a C-ABI cdylib loaded via `tish_ffi::load_module` — portable across backends)
 ///
 /// Scoped npm packages (`@scope/pkg`) are merged as Tish source unless imported via `tish:…`.
 pub fn is_native_import(spec: &str) -> bool {
     spec.starts_with("tish:")
         || spec.starts_with("cargo:")
+        || spec.starts_with("ffi:")
         || matches!(spec, "fs" | "http" | "timers" | "process" | "ws")
+}
+
+/// True for `ffi:…` specs (portable C-ABI cdylib extensions, loadable on every backend). The
+/// path after `ffi:` is resolved relative to the importing program and loaded with
+/// `tish_ffi::load_module`. Unlike `cargo:` (rust-AOT only), `ffi:` is allowed everywhere.
+pub fn is_ffi_native_spec(spec: &str) -> bool {
+    spec.starts_with("ffi:")
 }
 
 /// Map native spec to Cargo feature name for built-in tish:* modules.
@@ -921,14 +946,24 @@ pub fn native_spec_to_feature(spec: &str) -> Option<String> {
     canonical.strip_prefix("tish:").map(|s| s.to_string())
 }
 
-/// Resolve `package.json` at `pkg_root` to the package's main `.tish` entry, if `name` matches `spec`.
-fn resolve_package_root_to_entry(pkg_root: &Path, spec: &str) -> Option<PathBuf> {
+/// Resolve `package.json` at `pkg_root` to the package's main `.tish` entry.
+///
+/// `require_name`: when `Some(spec)`, the package's `package.json` `name` must equal `spec` (used for
+/// the sibling / walk-up heuristic, where a coincidental directory name would otherwise false-match).
+/// When `None`, the directory is authoritative — used for a `node_modules/<spec>` lookup, because npm
+/// installs a dependency under its *dependency key* (the directory), not the package's internal `name`
+/// (e.g. an aliased / scoped package, or a `file:`/workspace link). This matches Node's resolution and
+/// tish's own path-dep rewriting, so a workspace package linked in as `lattish` resolves even though its
+/// own `name` is `@tishlang/lattish`.
+fn resolve_package_entry(pkg_root: &Path, require_name: Option<&str>) -> Option<PathBuf> {
     let pkg_json = pkg_root.join("package.json");
     if !pkg_json.exists() {
         return None;
     }
-    if read_package_name(&pkg_json).as_deref() != Some(spec) {
-        return None;
+    if let Some(spec) = require_name {
+        if read_package_name(&pkg_json).as_deref() != Some(spec) {
+            return None;
+        }
     }
     let content = std::fs::read_to_string(&pkg_json).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -958,15 +993,18 @@ fn resolve_package_root_to_entry(pkg_root: &Path, spec: &str) -> Option<PathBuf>
 pub fn resolve_bare_spec(spec: &str, from_dir: &Path, _project_root: &Path) -> Option<PathBuf> {
     let mut search = from_dir.to_path_buf();
     loop {
-        if let Some(p) =
-            resolve_package_root_to_entry(&search.join("node_modules").join(spec), spec)
-        {
+        // node_modules/<spec>: the directory is authoritative (npm installs by dependency key, like
+        // Node) — do NOT require the package's internal `name` to match, so aliased/scoped/`file:`
+        // workspace packages linked in under this name resolve.
+        if let Some(p) = resolve_package_entry(&search.join("node_modules").join(spec), None) {
             return Some(p);
         }
-        if let Some(p) = resolve_package_root_to_entry(&search.join(spec), spec) {
+        // sibling <spec>/ and the search dir itself: require name match (a bare directory name is a
+        // weaker signal — guard against a coincidental same-named dir in a monorepo walk).
+        if let Some(p) = resolve_package_entry(&search.join(spec), Some(spec)) {
             return Some(p);
         }
-        if let Some(p) = resolve_package_root_to_entry(&search, spec) {
+        if let Some(p) = resolve_package_entry(&search, Some(spec)) {
             return Some(p);
         }
         if let Some(parent) = search.parent() {

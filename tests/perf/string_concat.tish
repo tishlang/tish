@@ -1,0 +1,7 @@
+// GAUNTLET: string building in a loop. tish's `s + "x"` reallocates (O(n^2)); V8 uses
+// cons-strings (rope). EXPECTED FAIL — target: a native string builder / rope. (valid both)
+let s = ""
+let i = 0
+let t0 = Date.now()
+while (i < 100000) { s = s + "x"; i = i + 1 }
+console.log("GAUNTLET string_concat " + (Date.now() - t0) + " " + s.length)

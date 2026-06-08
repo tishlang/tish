@@ -82,6 +82,20 @@ fn unregister(id: u32) {
     CONNS.lock().unwrap().remove(&id);
 }
 
+/// Max simultaneous WebSocket connections. Each accepted conn registers in `CONNS` and
+/// spawns tasks + channels, freed only on close — unbounded accepts exhaust tasks/memory.
+/// Override with `TISH_WS_MAX_CONNS`; default 10000.
+fn max_ws_connections() -> usize {
+    use std::sync::OnceLock;
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("TISH_WS_MAX_CONNS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000)
+    })
+}
+
 fn conn_send(id: u32, data: String) -> bool {
     let guard = match CONNS.lock() {
         Ok(g) => g,
@@ -366,6 +380,11 @@ pub fn web_socket_server_listen(args: &[Value]) -> Value {
                     Ok(s) => s,
                     Err(_) => break,
                 };
+                // Cap total connections — unbounded accepts would exhaust tasks/memory.
+                if CONNS.lock().map(|c| c.len()).unwrap_or(0) >= max_ws_connections() {
+                    drop(stream);
+                    continue;
+                }
                 let ws_stream = match tokio_tungstenite::accept_async(stream).await {
                     Ok(ws) => {
                         eprintln!(
@@ -520,7 +539,7 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
             }
             clients_listen.borrow_mut().push(ws.clone());
             if let Value::Function(f) = cb {
-                let _ = f(&[ws]);
+                let _ = f.call(&[ws]);
             }
         }
         Value::Null
@@ -584,7 +603,7 @@ mod tests {
             for _ in 0..50 {
                 let recv_fn = wso.borrow().strings.get("receive").cloned();
                 if let Some(Value::Function(rf)) = recv_fn {
-                    let msg = rf(&[]);
+                    let msg = rf.call(&[]);
                     if !matches!(msg, Value::Null) {
                         let data = match msg {
                             Value::Object(ev) => ev
@@ -598,7 +617,7 @@ mod tests {
                         if let Some(Value::Function(sf)) =
                             wso.borrow().strings.get("send").cloned()
                         {
-                            let _ = sf(&[Value::String(data.into())]);
+                            let _ = sf.call(&[Value::String(data.into())]);
                         }
                         break;
                     }
@@ -619,7 +638,7 @@ mod tests {
         let Value::Function(send_f) = send else {
             panic!("no send");
         };
-        let _ = send_f(&[Value::String("hello".into())]);
+        let _ = send_f.call(&[Value::String("hello".into())]);
 
         let recv = co.borrow().strings.get("receive").cloned().unwrap();
         let Value::Function(recv_f) = recv else {
@@ -627,7 +646,7 @@ mod tests {
         };
         let mut got = Value::Null;
         for _ in 0..100 {
-            got = recv_f(&[]);
+            got = recv_f.call(&[]);
             if !matches!(got, Value::Null) {
                 break;
             }
@@ -673,7 +692,7 @@ mod tests {
             };
             // Poll until we get join
             for _ in 0..200 {
-                let msg = rf(&[]);
+                let msg = rf.call(&[]);
                 if !matches!(msg, Value::Null) {
                     let data = match &msg {
                         Value::Object(ev) => ev
@@ -710,7 +729,7 @@ mod tests {
             panic!("no send");
         };
         let join_msg = r#"{"type":"join","sessionId":"default","role":"agent","laneId":"ai-a"}"#;
-        let _ = send_f(&[Value::String(join_msg.into())]);
+        let _ = send_f.call(&[Value::String(join_msg.into())]);
 
         // Client uses receiveTimeout like the agent
         let recv_timeout = co
@@ -724,7 +743,7 @@ mod tests {
         };
         let timeout_arg = Value::Number(2000.0);
 
-        let got1 = recv_timeout_f(&[timeout_arg.clone()]);
+        let got1 = recv_timeout_f.call(&[timeout_arg.clone()]);
         let Value::Object(ev1) = got1 else {
             panic!("first recv: expected object, got {:?}", got1);
         };
@@ -740,7 +759,7 @@ mod tests {
             data1
         );
 
-        let got2 = recv_timeout_f(&[timeout_arg]);
+        let got2 = recv_timeout_f.call(&[timeout_arg]);
         let Value::Object(ev2) = got2 else {
             panic!("second recv: expected object, got {:?}", got2);
         };

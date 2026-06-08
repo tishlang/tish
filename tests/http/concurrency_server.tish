@@ -1,0 +1,25 @@
+// HTTP concurrency correctness fixture — driven by scripts/test_http_concurrency.sh.
+//
+// Each /slow request busy-holds the handler ~150ms (a CPU spin, not a timer — timers drain at program
+// exit, but a server never exits). Firing N concurrent /slow requests then distinguishes:
+//   * handlers run in PARALLEL  -> wall ≈ one hold (≈150ms)
+//   * handlers run SERIALIZED   -> wall ≈ N * hold
+// No shared mutable global on purpose: this fixture reads concurrency off the wall clock, so a shared
+// counter (whose racy read-modify-write would jitter the timing) would only add noise. Concurrent
+// handlers CAN safely mutate a module-level `let` — it does NOT deadlock (proven by
+// crates/tish_vm/tests/concurrent_shared_state.rs; the earlier "deadlock" claim was an unverified
+// extrapolation). The real caveats for shared module state are lost updates from the non-atomic
+// read-modify-write, and per-process isolation under prefork. The shared-counter path is exercised by
+// concurrency_counter_server.tish; see docs/concurrency-model.md §3.
+import { serve } from 'http'
+
+fn handleRequest(req) {
+    if (req.path === "/slow") {
+        let start = Date.now()
+        while (Date.now() - start < 150) { }
+        return { status: 200, headers: { "content-type": "text/plain" }, body: "ok" }
+    }
+    return { status: 200, body: "ok" } // /health and everything else: immediate
+}
+
+serve("PORT" in process.env ? parseInt(process.env.PORT) : 8090, handleRequest)

@@ -1,0 +1,53 @@
+// Comprehensive NESTED control flow — every kind, deeply nested. Reference oracle: node (and the
+// interpreter, which matches node here). vm/rust currently DIVERGE — see docs/control-flow-audit.md
+// (rust: `break` in switch breaks the loop, #6; vm: skips `finally` on propagation, #5). Promote
+// into MVP_TEST_FILES per-backend as those fixes land.
+//
+// tish semantics honored: switch does NOT fall through; `break` exits the switch (not the loop);
+// no labeled break/continue (unsupported); `let`/`const` only.
+let out = []
+
+// (1) for x while x switch(no-fallthrough) x continue x inner-break
+for (let i = 0; i < 3; i++) {
+  let j = 0
+  while (j < 4) {
+    j = j + 1
+    if (j === 2) { continue }
+    switch (i) {
+      case 0: out.push("a" + j); break
+      case 1: out.push("b" + j); break
+      default: out.push("c" + j)
+    }
+    if (j === 3) { break }
+  }
+}
+
+// (2) try/catch/finally inside a loop — finally always runs, throw caught locally
+for (let k = 0; k < 3; k++) {
+  try {
+    if (k === 1) { throw "e" + k }
+    out.push("ok" + k)
+  } catch (e) { out.push("catch:" + e) } finally { out.push("fin" + k) }
+}
+
+// (3) nested try/finally (no catch) — exception propagates through finally to an outer catch
+try {
+  out.push("A")
+  try { out.push("B"); throw "boom" } finally { out.push("Cfin") }
+} catch (e) { out.push("Dcatch:" + e) }
+
+// (4) deep block let/const shadowing — each enclosing level restores
+const base = 1
+let a = 10
+{ let a = 20; const inner = base + a; out.push("blk1:" + a + ":" + inner)
+  { let a = 30; out.push("blk2:" + a) }
+  out.push("blk1b:" + a) }
+out.push("a:" + a)
+
+// (5) do-while with block shadowing + accumulation
+let sum = 0
+let d = 0
+do { let step = (d + 1) * 2; sum = sum + step; out.push("d" + d + "=" + step); d = d + 1 } while (d < 3)
+out.push("sum:" + sum)
+
+console.log(out.join(","))

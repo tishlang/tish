@@ -1,0 +1,26 @@
+[package]
+name = "tishlang_ffi"
+version = "0.1.0"
+edition = "2021"
+description = "Stable C ABI for tish native extensions — opaque value handles + extern \"C\" accessors so a cdylib (native) or wasm host-import module can interoperate with any tish backend without sharing tish_core's Rust types. Workstream B (full-backend-parity-plan.md)."
+
+license-file = { workspace = true }
+repository = { workspace = true }
+
+[features]
+default = []
+# An extension that LINKS tishlang_core must match the host's value representation/layout exactly.
+# `send-values` flips arrays/objects to Arc<Mutex<…>>; `regex` adds the `Value::RegExp` variant
+# (which changes the enum's niche/discriminant layout). The shipped `tish` (default="full") enables
+# both, so a linked extension targeting it must too. (The decoupled, host-exported-accessor model
+# avoids all of this — there is then a single tish_core.)
+send-values = ["tishlang_core/send-values"]
+regex = ["tishlang_core/regex"]
+
+[dependencies]
+tishlang_core = { path = "../tish_core", version = ">=0.1" }
+
+# Native cdylib loading (B2). Not for wasm — there is no dlopen in wasm; wasi resolves the SAME
+# handle+accessor contract via host imports (B4), so the loader is gated to non-wasm targets.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libloading = "0.8"

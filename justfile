@@ -258,6 +258,14 @@ perf-suite *ARGS:
 perf-suite-gen:
     ./scripts/generate_perf_ci_main.sh
 
+# HTTP throughput: tish vs Node, single vs multi-worker, plaintext + json (needs oha + jq)
+perf-http *ARGS:
+    ./scripts/run_http_perf.sh {{ARGS}}
+
+# Perf gauntlet: compute benchmarks vs Node, incl. known-fail targets to evolve past (needs node)
+perf-gauntlet *ARGS:
+    ./scripts/run_perf_gauntlet.sh {{ARGS}}
+
 # Show binary sizes for different builds
 sizes:
     @echo "Building secure binary..."

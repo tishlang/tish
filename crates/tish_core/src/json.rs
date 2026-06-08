@@ -9,7 +9,7 @@ pub fn json_parse(json: &str) -> Result<Value, String> {
     if json.is_empty() {
         return Err("SyntaxError: Unexpected end of JSON input".to_string());
     }
-    let (value, rest) = parse_value(json)?;
+    let (value, rest) = parse_value(json, 0)?;
     if !rest.trim().is_empty() {
         return Err("SyntaxError: Unexpected token at end of JSON".to_string());
     }
@@ -66,22 +66,36 @@ pub fn json_stringify_into(buf: &mut String, value: &Value) {
             }
             buf.push(']');
         }
+        Value::NumberArray(arr) => {
+            let borrowed = arr.borrow();
+            buf.push('[');
+            use std::fmt::Write;
+            for (i, n) in borrowed.iter().enumerate() {
+                if i > 0 {
+                    buf.push(',');
+                }
+                if n.is_nan() || n.is_infinite() {
+                    buf.push_str("null");
+                } else {
+                    let _ = write!(buf, "{}", n);
+                }
+            }
+            buf.push(']');
+        }
         Value::Object(obj) => {
             let borrowed = obj.borrow();
-            // Sort keys for deterministic output. Pre-allocate to avoid
-            // a fresh `Vec` realloc inside `keys().collect()`.
-            let mut keys: Vec<&Arc<str>> = Vec::with_capacity(borrowed.strings.len());
-            keys.extend(borrowed.strings.keys());
-            keys.sort_unstable_by(|a, b| a.as_ref().cmp(b.as_ref()));
+            // Iterate in insertion order (PropMap preserves it) — matches JS/Node
+            // and `Object.keys`. No intermediate key Vec, no sort: one fewer
+            // allocation per object on the JSON hot path (e.g. TFB /json, /db).
             buf.push('{');
-            for (i, key) in keys.into_iter().enumerate() {
+            for (i, (key, val)) in borrowed.strings.iter().enumerate() {
                 if i > 0 {
                     buf.push(',');
                 }
                 buf.push('"');
                 escape_json_string_into(buf, key);
                 buf.push_str("\":");
-                json_stringify_into(buf, borrowed.strings.get(key).unwrap());
+                json_stringify_into(buf, val);
             }
             buf.push('}');
         }
@@ -134,14 +148,12 @@ fn escape_json_string_into(buf: &mut String, s: &str) {
     }
 }
 
-#[allow(dead_code)]
-fn escape_json_string(s: &str) -> String {
-    let mut buf = String::with_capacity(s.len());
-    escape_json_string_into(&mut buf, s);
-    buf
-}
+/// Max nesting depth for `JSON.parse`. Bounds recursion so deeply-nested untrusted
+/// input errors instead of overflowing the stack — a Rust stack overflow aborts the
+/// whole process (uncatchable, SIGABRT). 128 matches serde_json's default limit.
+const MAX_JSON_DEPTH: usize = 128;
 
-fn parse_value(input: &str) -> Result<(Value, &str), String> {
+fn parse_value(input: &str, depth: usize) -> Result<(Value, &str), String> {
     let input = input.trim_start();
     if input.is_empty() {
         return Err("Unexpected end of JSON input".to_string());
@@ -151,8 +163,8 @@ fn parse_value(input: &str) -> Result<(Value, &str), String> {
         'n' => parse_null(input),
         't' | 'f' => parse_bool(input),
         '"' => parse_string(input),
-        '[' => parse_array(input),
-        '{' => parse_object(input),
+        '[' => parse_array(input, depth),
+        '{' => parse_object(input, depth),
         c if c == '-' || c.is_ascii_digit() => parse_number(input),
         c => Err(format!("Unexpected character '{}' in JSON", c)),
     }
@@ -249,44 +261,46 @@ fn parse_string(input: &str) -> Result<(Value, &str), String> {
 }
 
 fn parse_number(input: &str) -> Result<(Value, &str), String> {
+    // Byte scan (all number chars are ASCII) — O(token), not O(remaining input).
+    // The old `input.chars().collect::<Vec<char>>()` per number made parsing an
+    // N-number array O(N^2): a CPU-exhaustion DoS on untrusted JSON.
+    let bytes = input.as_bytes();
     let mut end = 0;
-    let chars: Vec<char> = input.chars().collect();
 
-    if chars.get(end) == Some(&'-') {
+    if bytes.first() == Some(&b'-') {
         end += 1;
     }
-
-    while end < chars.len() && chars[end].is_ascii_digit() {
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
         end += 1;
     }
-
-    if chars.get(end) == Some(&'.') {
+    if bytes.get(end) == Some(&b'.') {
         end += 1;
-        while end < chars.len() && chars[end].is_ascii_digit() {
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+    }
+    if matches!(bytes.get(end), Some(&b'e') | Some(&b'E')) {
+        end += 1;
+        if matches!(bytes.get(end), Some(&b'+') | Some(&b'-')) {
+            end += 1;
+        }
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
             end += 1;
         }
     }
 
-    if chars.get(end) == Some(&'e') || chars.get(end) == Some(&'E') {
-        end += 1;
-        if chars.get(end) == Some(&'+') || chars.get(end) == Some(&'-') {
-            end += 1;
-        }
-        while end < chars.len() && chars[end].is_ascii_digit() {
-            end += 1;
-        }
-    }
-
-    let num_str: String = chars[..end].iter().collect();
-    let byte_len: usize = chars[..end].iter().map(|c| c.len_utf8()).sum();
-
+    // `end` lands on an ASCII boundary, so slicing `input` by byte index is valid.
+    let num_str = &input[..end];
     num_str
         .parse::<f64>()
-        .map(|n| (Value::Number(n), &input[byte_len..]))
+        .map(|n| (Value::Number(n), &input[end..]))
         .map_err(|_| format!("Invalid number: {}", num_str))
 }
 
-fn parse_array(input: &str) -> Result<(Value, &str), String> {
+fn parse_array(input: &str, depth: usize) -> Result<(Value, &str), String> {
+    if depth >= MAX_JSON_DEPTH {
+        return Err("JSON nesting too deep".to_string());
+    }
     let mut input = &input[1..]; // skip '['
     let mut items = Vec::new();
 
@@ -296,7 +310,7 @@ fn parse_array(input: &str) -> Result<(Value, &str), String> {
     }
 
     loop {
-        let (value, rest) = parse_value(input)?;
+        let (value, rest) = parse_value(input, depth + 1)?;
         items.push(value);
         input = rest.trim_start();
 
@@ -308,7 +322,10 @@ fn parse_array(input: &str) -> Result<(Value, &str), String> {
     }
 }
 
-fn parse_object(input: &str) -> Result<(Value, &str), String> {
+fn parse_object(input: &str, depth: usize) -> Result<(Value, &str), String> {
+    if depth >= MAX_JSON_DEPTH {
+        return Err("JSON nesting too deep".to_string());
+    }
     let mut input = &input[1..]; // skip '{'
     let mut map = crate::ObjectMap::default();
 
@@ -328,7 +345,7 @@ fn parse_object(input: &str) -> Result<(Value, &str), String> {
 
         let (key_val, rest) = parse_string(input)?;
         let key: Arc<str> = match key_val {
-            Value::String(s) => s,
+            Value::String(s) => Arc::from(s.as_str()),
             _ => unreachable!(),
         };
 
@@ -338,7 +355,7 @@ fn parse_object(input: &str) -> Result<(Value, &str), String> {
         }
         input = &input[1..];
 
-        let (value, rest) = parse_value(input)?;
+        let (value, rest) = parse_value(input, depth + 1)?;
         map.insert(key, value);
         input = rest.trim_start();
 
@@ -366,7 +383,7 @@ mod tests {
         assert!(matches!(json_parse("false").unwrap(), Value::Bool(false)));
         assert!(matches!(json_parse("42").unwrap(), Value::Number(n) if n == 42.0));
         assert!(
-            matches!(json_parse("\"hello\"").unwrap(), Value::String(s) if s.as_ref() == "hello")
+            matches!(json_parse("\"hello\"").unwrap(), Value::String(s) if s.as_str() == "hello")
         );
     }
 
@@ -382,6 +399,32 @@ mod tests {
                 assert_eq!(a.borrow().len_entries(), b.borrow().len_entries());
             }
             _ => panic!("Expected objects"),
+        }
+    }
+
+    #[test]
+    fn deeply_nested_json_is_rejected_not_crash() {
+        // C1 regression: deeply-nested untrusted input must error at the depth limit,
+        // never recurse deep enough to overflow the stack (an uncatchable SIGABRT that
+        // would crash the whole process / HTTP worker).
+        let under = format!("{}{}", "[".repeat(100), "]".repeat(100));
+        assert!(json_parse(&under).is_ok(), "100 < limit should parse");
+        let over = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        assert!(json_parse(&over).is_err(), "200 > limit must error");
+        // Pathological depth must still just error (fast), not overflow the stack.
+        let huge = format!("{}{}", "[".repeat(200_000), "]".repeat(200_000));
+        assert!(json_parse(&huge).is_err(), "huge depth must error, not crash");
+    }
+
+    #[test]
+    fn large_number_array_parses_correctly() {
+        // C2 regression: parse_number byte-scans (O(token)); the old chars().collect()
+        // over the whole remaining input made an N-number array O(N^2) — a CPU DoS.
+        let n = 50_000;
+        let body = format!("[{}]", vec!["7"; n].join(","));
+        match json_parse(&body).unwrap() {
+            Value::Array(arr) => assert_eq!(arr.borrow().len(), n),
+            _ => panic!("expected array"),
         }
     }
 }

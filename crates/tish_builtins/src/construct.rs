@@ -6,16 +6,26 @@ use tishlang_core::{ObjectMap, Value, VmRef};
 
 const CONSTRUCT: &str = "__construct";
 
-/// Host `new`: `Object` with `__construct`, `Function` as plain call, else `Null`.
+/// Host `new`: `Object` with `__construct` (or, failing that, `__call`), `Function` as plain call,
+/// else `Null`. The `__call` fallback matters because builtin objects like `Promise` expose their
+/// constructor as `__call` (so `Promise(f)` works) but have no `__construct`; without this fallback
+/// `new Promise((resolve, reject) => …)` returned `Null` and never ran the executor on the VM family,
+/// while the interpreter (which routes `new` through the same callable) worked — a cross-backend
+/// divergence on the most common promise idiom.
 pub fn construct(callee: &Value, args: &[Value]) -> Value {
     match callee {
-        Value::Function(f) => f(args),
+        Value::Function(f) => f.call(args),
         Value::Object(o) => {
             let b = o.borrow();
-            if let Some(Value::Function(ctor)) = b.strings.get(&Arc::from(CONSTRUCT)) {
+            if let Some(Value::Function(ctor)) = b.strings.get(CONSTRUCT) {
                 let c = ctor.clone();
                 drop(b);
-                return c(args);
+                return c.call(args);
+            }
+            if let Some(Value::Function(call)) = b.strings.get("__call") {
+                let c = call.clone();
+                drop(b);
+                return c.call(args);
             }
             Value::Null
         }

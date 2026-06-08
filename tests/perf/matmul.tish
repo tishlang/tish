@@ -1,0 +1,19 @@
+// GAUNTLET: dense matmul kernel with a typed param (M1 native shadow). WIN guard (~3x node).
+// Build with TISH_PARAM_NATIVE=1.
+fn bench(N: number) {
+  let len: number = N * N
+  let a: number[] = []
+  let b: number[] = []
+  let c: number[] = []
+  for (let i: number = 0; i < len; i++) { a.push((i % 997) / 997); b.push((i % 991) / 991); c.push(0) }
+  let t0: number = Date.now()
+  for (let i: number = 0; i < N; i++) {
+    for (let j: number = 0; j < N; j++) {
+      let sum: number = 0
+      for (let k: number = 0; k < N; k++) { sum = sum + a[i * N + k] * b[k * N + j] }
+      c[i * N + j] = sum
+    }
+  }
+  console.log("GAUNTLET matmul " + (Date.now() - t0) + " " + Math.floor((c[0] + c[N - 1]) * 1000))
+}
+bench(256)

@@ -1,0 +1,56 @@
+// Closure capture-by-reference: a closure that READS an outer variable must see
+// mutations made AFTER the closure was created (capture by reference, not by a
+// snapshot value). Regression guard for the rust-backend capture-by-value bug —
+// the codegen used to cell-wrap a captured var only when it was assigned *inside*
+// a closure, so a read-only capture plus a later outer mutation diverged from
+// node/vm/interp/cranelift. Asserted identical across all backends.
+// See docs/control-flow-audit.md.
+let out = []
+
+// 1. arrow reads an outer var; the outer scope mutates it AFTER `f` is created
+let total = 0
+let f = () => total
+total = 100
+out.push("arrow:" + f()) // 100
+
+// 2. function declaration captures, outer mutates after
+let n = 1
+function getN() { return n }
+n = 42
+out.push("fn:" + getN()) // 42
+
+// 3. sibling closures share one cell: a read-only sibling sees the writer's writes
+let count = 0
+let inc = () => { count = count + 1; return count }
+let get = () => count
+inc()
+inc()
+out.push("siblings:" + get()) // 2
+
+// 4. counter: state mutated only inside the returned closure persists across calls
+function counter() { let c = 0; return () => { c = c + 1; return c } }
+let cc = counter()
+out.push("counter:" + cc() + cc() + cc()) // 123
+
+// 5. capture-then-mutate nested inside a function body
+function inFn() {
+  let v = 0
+  let read = () => v
+  v = 7
+  return read()
+}
+out.push("infn:" + inFn()) // 7
+
+// 6. non-native value (object) captured, then the binding is reassigned
+let obj = { v: 1 }
+let readObj = () => obj.v
+obj = { v: 2 }
+out.push("object:" + readObj()) // 2
+
+// 7. native string captured, then mutated
+let s = "a"
+let readS = () => s
+s = "b"
+out.push("string:" + readS()) // b
+
+console.log(out.join(" "))

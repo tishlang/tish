@@ -1,0 +1,10 @@
+// GAUNTLET: recursion. `fn fib(n: number)` gets a native param shadow (M1), but each CALL still
+// goes through the boxed value_call ABI (clone closure + box arg + dynamic dispatch per call).
+// EXPECTED FAIL until M5 (native monomorphic calls). Build with TISH_PARAM_NATIVE=1.
+fn fib(n: number): number {
+  if (n < 2) { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+let t0: number = Date.now()
+let r: number = fib(35)
+console.log("GAUNTLET recursion_fib " + (Date.now() - t0) + " " + r)

@@ -1,0 +1,43 @@
+=== RegExp constructor ===
+true
+true
+true
+true
+true
+=== test() method ===
+true
+true
+true
+true
+true
+=== exec() method ===
+true
+true
+true
+true
+=== global flag ===
+true
+true
+=== String.match() ===
+true
+true
+true
+true
+=== String.replace() ===
+true
+true
+=== String.search() ===
+true
+true
+=== String.split() ===
+true
+true
+true
+true
+=== multiline flag ===
+true
+true
+=== dotAll flag ===
+true
+true
+=== All regex tests passed ===

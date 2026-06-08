@@ -71,6 +71,32 @@ fn inject_generated_native_mod(rust_code: &str) -> String {
     }
 }
 
+/// Whether to embed mimalloc as the `#[global_allocator]` of rust-AOT BINARY output. tish workloads
+/// are allocation-bound (a sampling profile of object/array code spends most time in malloc/free — see
+/// `docs/perf.md`); mimalloc gives ~20% on object/array/bundle code, the same lever as the `tish` CLI's
+/// own `fast-alloc` and the reason JSC ships bmalloc. Default ON; `TISH_NATIVE_FAST_ALLOC=0` opts out
+/// (e.g. a target whose C toolchain can't build mimalloc). Callers also skip it for staticlib output (a
+/// library does not own the final program's allocator) and cross builds (avoid cross-compiling C).
+fn fast_alloc_enabled() -> bool {
+    std::env::var("TISH_NATIVE_FAST_ALLOC")
+        .map(|v| v != "0")
+        .unwrap_or(true)
+}
+
+/// Insert a mimalloc `#[global_allocator]` into the generated crate root, after the leading
+/// `#![allow(...)]` inner attribute (mirrors [`inject_generated_native_mod`]; an inner attribute must
+/// precede any item, and the codegen emits exactly one — `#![allow(unused, non_snake_case)]`).
+fn inject_global_allocator(rust_code: &str) -> String {
+    const STMT: &str =
+        "#[global_allocator]\nstatic TISH_GLOBAL_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;\n\n";
+    if let Some(pos) = rust_code.find("\n\n") {
+        let (a, b) = rust_code.split_at(pos + 2);
+        format!("{a}{STMT}{b}")
+    } else {
+        format!("{rust_code}\n\n{STMT}")
+    }
+}
+
 pub(crate) fn rust_code_needs_tokio(rust_code: &str) -> bool {
     rust_code.contains("#[tokio::main]") || rust_code.contains("tokio::runtime::Runtime")
 }
@@ -152,6 +178,21 @@ pub fn build_via_cargo_with_config(
         inject_generated_native_mod(rust_code)
     } else {
         rust_code.to_string()
+    };
+
+    // mimalloc as the program's global allocator — binary output only (a staticlib does not own the
+    // allocator), native only (don't cross-compile mimalloc's C). Adds one cached dep + a global_alloc
+    // statement; semantically transparent. `TISH_NATIVE_FAST_ALLOC=0` opts out.
+    let use_fast_alloc = fast_alloc_enabled()
+        && build_config.artifact != NativeArtifact::StaticLib
+        && build_config.cargo_target.is_none();
+    if use_fast_alloc {
+        more_deps.push_str("\nmimalloc = \"0.1\"\n");
+    }
+    let rust_main = if use_fast_alloc {
+        inject_global_allocator(&rust_main)
+    } else {
+        rust_main
     };
 
     let tish_ui_path = std::path::Path::new(&runtime_path)
@@ -322,6 +363,11 @@ pub(crate) fn build_many_via_cargo(
     if !extra_dependencies_toml.trim().is_empty() {
         more_deps.push_str(&format!("\n{}", extra_dependencies_toml));
     }
+    // mimalloc global allocator for every binary in the batch (all are executables, always native here).
+    let use_fast_alloc = fast_alloc_enabled();
+    if use_fast_alloc {
+        more_deps.push_str("\nmimalloc = \"0.1\"\n");
+    }
 
     let tish_ui_path = std::path::Path::new(&runtime_path)
         .parent()
@@ -345,6 +391,11 @@ pub(crate) fn build_many_via_cargo(
             inject_generated_native_mod(rust_code)
         } else {
             rust_code.clone()
+        };
+        let rust_main = if use_fast_alloc {
+            inject_global_allocator(&rust_main)
+        } else {
+            rust_main
         };
 
         fs::write(bin_dir.join("main.rs"), rust_main)

@@ -199,7 +199,7 @@ fn render_generated_lib(
                 name = rust_fn
             ),
             SignatureClass::SerializeRefToResultString => format!(
-                "pub fn {name}(args: &[Value]) -> Value {{\n    let Some(v) = args.first() else {{ return Value::Null }};\n    match _tish_upstream::{name}(&tish_to_json(v)) {{\n        Ok(s) => Value::String(Arc::from(s)),\n        Err(_) => Value::Null,\n    }}\n}}\n\n",
+                "pub fn {name}(args: &[Value]) -> Value {{\n    let Some(v) = args.first() else {{ return Value::Null }};\n    match _tish_upstream::{name}(&tish_to_json(v)) {{\n        Ok(s) => Value::String(arcstr::ArcStr::from(s)),\n        Err(_) => Value::Null,\n    }}\n}}\n\n",
                 name = rust_fn
             ),
             SignatureClass::DeserializeStrToResult => format!(

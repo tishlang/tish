@@ -1,6 +1,13 @@
 // Promise tests (requires http feature)
 
-// Promise(executor) - sync resolve
+// new Promise(executor) — the PRIMARY JS form. This was broken on the VM until 2026-06-06
+// (the Construct opcode routed to construct_builtin which only checked __construct, not __call;
+// executor never ran, await returned null). First test so any regression fails immediately.
+let p0 = new Promise((resolve, reject) => { resolve("new-ctor") })
+let v0 = await p0
+console.log("new Promise:", v0)
+
+// Promise(executor) without new — also supported (goes through __call directly)
 let p1 = Promise((resolve, reject) => { resolve(42) })
 let v1 = await p1
 console.log("Promise sync resolve:", v1)
@@ -38,5 +45,19 @@ console.log("Promise.all:", va[0], va[1], va[2])
 let pr = Promise.race([Promise.resolve("fast"), Promise.resolve("slow")])
 let vr = await pr
 console.log("Promise.race:", vr)
+
+// Promise.any (new) — first fulfilled wins
+let pany = await Promise.any([
+  new Promise((_, r) => r("skip")),
+  new Promise((resolve) => resolve("any-win")),
+])
+console.log("Promise.any:", pany)
+
+// Promise.allSettled (new) — never rejects, collects all
+let ps = await Promise.allSettled([
+  new Promise((resolve) => resolve(1)),
+  new Promise((_, r) => r("reason")),
+])
+console.log("Promise.allSettled:", ps[0].status, ps[1].status, ps[1].reason)
 
 console.log("Promise tests completed")

@@ -7,7 +7,7 @@ use std::sync::Arc;
 #[cfg(feature = "regex")]
 use tishlang_core::TishRegExp;
 use ahash::AHashMap;
-use tishlang_core::{ObjectData, ObjectMap, Value as CoreValue, VmRef};
+use tishlang_core::{ObjectData, Value as CoreValue, VmRef};
 
 use crate::value::{EvalObjectData, PropMap, Value};
 
@@ -15,7 +15,7 @@ use crate::value::{EvalObjectData, PropMap, Value};
 pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
     match v {
         Value::Number(n) => Ok(CoreValue::Number(*n)),
-        Value::String(s) => Ok(CoreValue::String(Arc::clone(s))),
+        Value::String(s) => Ok(CoreValue::String(tishlang_core::ArcStr::from(s.as_ref()))),
         Value::Bool(b) => Ok(CoreValue::Bool(*b)),
         Value::Null => Ok(CoreValue::Null),
         Value::Array(arr) => {
@@ -27,7 +27,7 @@ pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
         }
         Value::Object(map) => {
             let b = map.borrow();
-            let mut strings = ObjectMap::default();
+            let mut strings = tishlang_core::PropMap::default();
             for (k, v) in b.strings.iter() {
                 strings.insert(Arc::clone(k), eval_to_core(v)?);
             }
@@ -55,7 +55,7 @@ pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
 pub fn core_to_eval(v: CoreValue) -> Value {
     match v {
         CoreValue::Number(n) => Value::Number(n),
-        CoreValue::String(s) => Value::String(s),
+        CoreValue::String(s) => Value::String(Arc::from(s.as_str())),
         CoreValue::Bool(b) => Value::Bool(b),
         CoreValue::Null => Value::Null,
         CoreValue::Array(arr) => {
@@ -87,6 +87,12 @@ pub fn core_to_eval(v: CoreValue) -> Value {
         CoreValue::Promise(p) => Value::CorePromise(Arc::clone(&p)),
         #[cfg(not(feature = "http"))]
         CoreValue::Promise(_) => Value::Null,
+        // NumberArray: materialize to boxed Array for the interpreter (it has no packed path).
+        CoreValue::NumberArray(arr) => {
+            let nums = arr.borrow();
+            let out: Vec<Value> = nums.iter().map(|&n| Value::Number(n)).collect();
+            Value::Array(Rc::new(RefCell::new(out)))
+        }
         // `CoreNativeFn` is feature-gated (Rc vs Arc), so use Clone::clone
         // which works for either.
         CoreValue::Function(f) => Value::CoreFn(f.clone()),

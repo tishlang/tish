@@ -1,0 +1,11 @@
+// GAUNTLET: allocate + read 1M small dynamic objects. Boxed Rc<RefCell<PropMap>> per object.
+// EXPECTED FAIL — target: hidden classes / unboxed objects (task #13). (valid both)
+let sum = 0
+let i = 0
+let t0 = Date.now()
+while (i < 1000000) {
+  let o = { x: i, y: i + 1 }
+  sum = sum + o.x + o.y
+  i = i + 1
+}
+console.log("GAUNTLET object_sum " + (Date.now() - t0) + " " + sum)

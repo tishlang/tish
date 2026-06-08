@@ -52,4 +52,39 @@ fn first(arr = []) {
 console.log(first() === null);
 console.log(first([1, 2, 3]) === 1);
 
+// Default referencing an earlier (already-bound) parameter. The default expression
+// evaluates in the call scope, so it can see `a` (interp regression: it used to
+// evaluate in the defining scope and error "Undefined variable: a").
+fn dependent(a, b = a + 1) {
+    return b;
+}
+console.log(dependent(10) === 11);    // b defaults to a + 1
+console.log(dependent(10, 5) === 5);  // explicit b wins
+console.log(dependent(10, 0) === 0);  // explicit falsy 0 wins — only a MISSING arg triggers the default
+
+// Chain of dependent defaults: each one sees all earlier params (supplied args or earlier defaults).
+fn chain(a, b = a * 2, c = b + a) {
+    return [a, b, c];
+}
+let c1 = chain(3);
+console.log(c1[0] === 3 && c1[1] === 6 && c1[2] === 9);
+let c2 = chain(3, 10);
+console.log(c2[1] === 10 && c2[2] === 13);
+
+// Arrow function: default depending on an earlier parameter.
+let addDef = (a, b = a) => a + b;
+console.log(addDef(7) === 14);
+console.log(addDef(7, 1) === 8);
+
+// A default resolves free variables through the closure's DEFINING scope, not the call
+// site: `secret` is the one captured at definition, never a same-named variable that
+// happens to exist where the function is called.
+fn makeReader() {
+    let secret = 42;
+    return (a = secret) => a;
+}
+let reader = makeReader();
+let secret = 999;
+console.log(reader() === 42);
+
 console.log("=== All default parameter tests passed ===");

@@ -96,13 +96,42 @@ pub enum Opcode {
     /// Pop the `await` operand value; if it is a `Promise`, block until settled, push the result,
     /// or unwind to `catch` like `Throw` on rejection.
     AwaitPromise = 43,
+    /// Load a local variable by frame slot (operand: u16 slot). Fast path: direct
+    /// index into the current call frame's locals, no name lookup.
+    LoadLocal = 44,
+    /// Store top of stack into a local frame slot (operand: u16 slot). Leaves nothing.
+    StoreLocal = 45,
+    /// Load a captured variable from an enclosing frame (operands: u16 hops, u16 slot).
+    /// Walks `hops` parent frames, then indexes `slot`.
+    LoadUpvalue = 46,
+    /// Store top of stack into an enclosing frame slot (operands: u16 hops, u16 slot).
+    StoreUpvalue = 47,
+    /// Begin a per-iteration binding region for a loop variable (operand: u16 name index).
+    /// Registers the name so closures created in the loop body snapshot it into a fresh overlay
+    /// (ES `let` per-iteration semantics); the rest of the frame stays shared. Emitted only when
+    /// the loop body creates a closure, so closure-free (hot) loops are untouched.
+    LoopVarsBegin = 48,
+    /// End the innermost per-iteration binding region (no operand).
+    LoopVarsEnd = 49,
+    /// Push `Bool(param_index >= argc)` — true when the positional argument at `param_index`
+    /// was not supplied by the caller (operand: u16 param index). Emitted by the function
+    /// prologue so default parameter values apply only for *missing* args, matching the
+    /// interpreter: an explicit `null` argument does NOT trigger the default.
+    ArgMissing = 50,
+    /// Direct self-recursive call (operand: u16 arg count). Emitted by the compiler ONLY when a
+    /// `fn NAME` body calls `NAME(args)` and `NAME` is provably the function itself (not shadowed
+    /// by a param/local, not reassigned anywhere in the body). Args are on the stack as for `Call`,
+    /// but the callee is implicitly the currently-executing chunk — no name lookup, no closure
+    /// dispatch. The numeric JIT lowers this to a native recursive call (the big recursion win);
+    /// the VM runs the current chunk directly. Behaviour is identical to `LoadVar NAME; Call argc`.
+    SelfCall = 51,
 }
 
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=43 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=51 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 43 {
+        if b <= 51 {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None
@@ -127,11 +156,15 @@ impl Opcode {
             | Opcode::ConstructSpread
             | Opcode::EnterBlock
             | Opcode::ExitBlock
+            | Opcode::LoopVarsEnd
             | Opcode::AwaitPromise => 1,
             Opcode::ArraySortByProperty
             | Opcode::ArrayMapBinOp
             | Opcode::ArrayFilterBinOp
-            | Opcode::LoadNativeExport => 5,
+            | Opcode::LoadNativeExport
+            | Opcode::LoadUpvalue
+            | Opcode::StoreUpvalue => 5,
+            // LoadLocal / StoreLocal take a single u16 operand → 3 bytes (default).
             _ => 3,
         };
         if ip + size > code.len() {

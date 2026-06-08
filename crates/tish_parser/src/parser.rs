@@ -1875,7 +1875,10 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            _ => Err(format!("Unexpected token: {:?}", t.kind)),
+            // Include the token span (matching `expect`'s `at {:?}` convention) so error consumers
+            // — notably the LSP's `parse_error_pos` — can place the diagnostic at the real location
+            // instead of falling back to (0, 0) / top-of-file.
+            _ => Err(format!("Unexpected token: {:?} at {:?}", t.kind, t.span)),
         }
     }
 

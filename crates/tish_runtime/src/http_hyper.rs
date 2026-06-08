@@ -186,7 +186,7 @@ where
     let mut count = 0usize;
     while let Ok((req_prim, resp_tx)) = rx.recv() {
         let req_value = req_prim.into_value_pub();
-        let response_value = handler(&[req_value]);
+        let response_value = handler.call(&[req_value]);
         let resp_prim = ResponsePrimitive::from_value_pub(&response_value);
         let _ = resp_tx.send(resp_prim);
 
@@ -259,6 +259,9 @@ fn worker_thread(
                 });
                 if let Err(e) = http1::Builder::new()
                     .keep_alive(true)
+                    // Slowloris guard: drop a connection that dribbles its request
+                    // headers slower than this instead of pinning the worker task.
+                    .header_read_timeout(std::time::Duration::from_secs(30))
                     .serve_connection(io, svc)
                     .await
                 {
@@ -338,11 +341,26 @@ async fn extract_request(
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
-    let body_bytes = match http_body_util::BodyExt::collect(req.into_body()).await {
+    // Cap the collected body so a huge/chunked request can't exhaust memory.
+    let limited = http_body_util::Limited::new(req.into_body(), hyper_max_body());
+    let body_bytes = match http_body_util::BodyExt::collect(limited).await {
         Ok(c) => c.to_bytes().to_vec(),
-        Err(_) => Vec::new(),
+        Err(_) => Vec::new(), // includes "length limit exceeded"
     };
     (method, url, path, query, headers, body_bytes)
+}
+
+/// Max request body bytes for the hyper backend (mirrors the tiny_http cap).
+/// Override with `TISH_HTTP_MAX_BODY` (bytes); default 16 MiB.
+fn hyper_max_body() -> usize {
+    use std::sync::OnceLock;
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("TISH_HTTP_MAX_BODY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(16 * 1024 * 1024)
+    })
 }
 
 fn primitive_to_hyper(resp: ResponsePrimitive) -> Response<Full<Bytes>> {

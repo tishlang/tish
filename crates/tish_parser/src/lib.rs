@@ -6,9 +6,22 @@ use parser::Parser;
 
 use tishlang_ast::Program;
 use tishlang_lexer::Lexer;
+pub use tishlang_lexer::LexerOptions;
 
+/// Parse `source`, reading lexer options from the environment (e.g. `TISH_IGNORE_INDENT=1`
+/// to ignore indentation syntax). Every backend funnels through here, so the env toggle
+/// reaches run/build/dump-ast/fmt/lint/lsp uniformly.
 pub fn parse(source: &str) -> Result<Program, String> {
-    let lexer = Lexer::new(source);
+    parse_with_options(source, LexerOptions::from_env())
+}
+
+/// Parse with explicit lexer options, bypassing the environment.
+///
+/// With `LexerOptions { ignore_indent: true }`, indentation is treated as ordinary
+/// whitespace and blocks must be brace-delimited — useful for debugging how nested
+/// blocks transpile, since fully brace-delimited code parses identically either way.
+pub fn parse_with_options(source: &str, options: LexerOptions) -> Result<Program, String> {
+    let lexer = Lexer::with_options(source, options);
     let tokens: Result<Vec<_>, _> = lexer.collect();
     let tokens = tokens?;
     let mut parser = Parser::new(&tokens);
@@ -328,5 +341,46 @@ mod tests {
         assert!(matches!(stmts[0], Statement::ExprStmt { .. }));
         assert!(matches!(stmts[1], Statement::VarDecl { .. }));
         assert!(matches!(stmts[2], Statement::If { .. }));
+    }
+
+    #[test]
+    fn ignore_indent_parses_brace_blocks_identically() {
+        // Fully brace-delimited code: braces are authoritative, indentation is decoration.
+        // Ignoring indentation must therefore produce an identical AST.
+        let src = "fn f() {\n  let a = 1\n  if (a) {\n    let b = 2\n    g(b)\n  }\n}\n";
+        let normal = parse(src).expect("parse (indentation significant)");
+        let ignored = parse_with_options(src, LexerOptions { ignore_indent: true })
+            .expect("parse (indentation ignored)");
+        assert_eq!(
+            format!("{normal:#?}"),
+            format!("{ignored:#?}"),
+            "brace-delimited code must parse identically with indentation ignored"
+        );
+    }
+
+    #[test]
+    fn ignore_indent_drops_indentation_induced_block() {
+        // A leading-indented line makes the lexer open an indent level, so the parser wraps
+        // `a()` in a `Block` — the kind of stray, indentation-driven nesting that can give
+        // transpiled JS the wrong lexical scope. Ignoring indentation removes that wrapper.
+        let src = "  a()\nb()\n";
+
+        let normal = parse(src).expect("parse normal");
+        assert!(
+            matches!(normal.statements.first(), Some(Statement::Block { .. })),
+            "indentation should wrap a() in a Block, got: {:?}",
+            normal.statements
+        );
+
+        let ignored = parse_with_options(src, LexerOptions { ignore_indent: true })
+            .expect("parse ignored");
+        assert!(
+            ignored
+                .statements
+                .iter()
+                .all(|s| matches!(s, Statement::ExprStmt { .. })),
+            "with indentation ignored, both calls are flat expression statements, got: {:?}",
+            ignored.statements
+        );
     }
 }

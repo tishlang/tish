@@ -1,0 +1,11 @@
+// GAUNTLET: higher-order array method with a closure, hot. Each reduce callback is a boxed
+// closure call through value_call. EXPECTED FAIL — target: native closure calls (M5) / fused
+// reduce. (valid both)
+let a = []
+let i = 0
+while (i < 1000) { a.push(i); i = i + 1 }
+let t0 = Date.now()
+let sum = 0
+let r = 0
+while (r < 20000) { sum = sum + a.reduce((acc, x) => acc + x, 0); r = r + 1 }
+console.log("GAUNTLET array_hof " + (Date.now() - t0) + " " + sum)

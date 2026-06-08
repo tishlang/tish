@@ -1,0 +1,10 @@
+// GAUNTLET: recursion, UNANNOTATED — same algorithm as recursion_fib but no type annotations.
+// M4 infers `n: number` from its purely-numeric use, M5 infers the numeric return, so this
+// idiomatic untyped code compiles to a native `fib_native` and beats V8. Valid in both tish/node.
+function fib(n) {
+  if (n < 2) { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+let t0 = Date.now()
+let r = fib(35)
+console.log("GAUNTLET recursion_untyped " + (Date.now() - t0) + " " + r)

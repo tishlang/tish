@@ -1,0 +1,71 @@
+// MLX vs Metal race — run both GPU backends concurrently, take the first result.
+//
+// Promise.spawn launches each matmul on a background OS thread so both execute
+// at the same time. Promise.any resolves the moment the faster backend returns.
+// The slower one keeps running until it finishes, but its result is discarded.
+//
+// On Apple Silicon, MLX and Metal use the same GPU hardware through different
+// driver stacks. In practice one consistently edges the other for a given size;
+// this pattern lets you pick the winner automatically rather than committing
+// to a single backend at compile time.
+//
+// Compile:
+//   tish build src/matmul_race.tish -o matmul-race --native-backend rust
+// Run:
+//   ./matmul-race
+
+import { matmul as mlx_matmul, device_name as mlx_device, version as mlx_version } from 'tish:mlx'
+import { matmul as metal_matmul, device_name as metal_device } from 'tish:metal'
+
+console.log("=== MLX vs Metal — concurrent GPU race ===")
+console.log(`MLX:   ${mlx_version()}  device: ${mlx_device()}`)
+console.log(`Metal: device: ${metal_device()}`)
+console.log("")
+
+fn makeMatrix(N: number) {
+  let len: number = N * N
+  let a: number[] = []
+  let b: number[] = []
+  for (let i: number = 0; i < len; i++) {
+    a.push((i % 997) / 997)
+    b.push((i % 991) / 991)
+  }
+  return { a: a, b: b, len: len }
+}
+
+fn bench(N: number) {
+  let m = makeMatrix(N)
+  let a = m.a
+  let b = m.b
+  let len = m.len
+
+  // Warm-up both backends at this shape. Blocks sequentially — one-time cost
+  // that compiles the Metal pipeline and JITs the MLX kernel for this size.
+  mlx_matmul(a, b, N, N, N)
+  metal_matmul(a, b, N, N, N)
+
+  // Race: launch both on background threads, take the first result.
+  let t = Date.now()
+  let winner = await Promise.any([
+    Promise.spawn(() => {
+      let t0 = Date.now()
+      let c = mlx_matmul(a, b, N, N, N)
+      return { backend: "mlx", ms: Date.now() - t0, c: c }
+    }),
+    Promise.spawn(() => {
+      let t0 = Date.now()
+      let c = metal_matmul(a, b, N, N, N)
+      return { backend: "metal", ms: Date.now() - t0, c: c }
+    }),
+  ])
+  let wall = Date.now() - t
+  let c = winner.c
+  let check = c[0] + c[N - 1] + c[(N - 1) * N] + c[len - 1]
+  console.log(`${N}x${N}  winner=${winner.backend}  backend_ms=${winner.ms}  wall_ms=${wall}  check=${check}`)
+}
+
+bench(256)
+bench(512)
+bench(1024)
+bench(2048)
+bench(4096)

@@ -1,0 +1,8 @@
+// GAUNTLET: straight-line numeric loop. Inference + de-boxing => native f64. (WIN guard)
+// Valid in both tish and node. Prints: GAUNTLET <name> <hot-loop-ms> <check>
+let s = 0
+let i = 0
+let n = 40000000
+let t0 = Date.now()
+while (i < n) { s = s + i * 2 - 1; i = i + 1 }
+console.log("GAUNTLET numeric_loop " + (Date.now() - t0) + " " + s)

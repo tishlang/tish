@@ -1,0 +1,99 @@
+// Race all three backends — MLX, Metal, CPU — take the first result.
+//
+// This is the practical production pattern: you want GPU acceleration when
+// available, but never want to block if a GPU backend errors or is slow to
+// warm up. Launching all three concurrently means:
+//
+//   - On Apple Silicon with both GPU backends available: whichever GPU
+//     finishes first wins, typically 5-50x faster than CPU for large N.
+//   - On a machine where GPU is busy or unavailable: the CPU backend
+//     provides a result; the GPU backends either error-out and are skipped
+//     by Promise.any, or finish later and are discarded.
+//   - No if/else backend selection logic: the runtime picks the winner.
+//
+// Note: Promise.any rejects only if ALL promises reject. So even if both
+// GPU backends fail (driver error, kernel JIT timeout, etc.), the CPU
+// result comes through cleanly.
+//
+// Compile:
+//   tish build src/matmul_fastest.tish -o matmul-fastest --native-backend rust
+// Run:
+//   ./matmul-fastest
+
+import { matmul as mlx_matmul } from 'tish:mlx'
+import { matmul as metal_matmul } from 'tish:metal'
+
+console.log("=== Race: MLX vs Metal vs CPU — first result wins ===")
+console.log("")
+
+fn makeMatrix(N: number) {
+  let len: number = N * N
+  let a: number[] = []
+  let b: number[] = []
+  for (let i: number = 0; i < len; i++) {
+    a.push((i % 997) / 997)
+    b.push((i % 991) / 991)
+  }
+  return { a: a, b: b, len: len }
+}
+
+// CPU matmul — no imports, always available, no warm-up needed.
+fn cpu_matmul(a, b, N: number) {
+  let len: number = N * N
+  let c: number[] = []
+  for (let i: number = 0; i < len; i++) { c.push(0) }
+  for (let i: number = 0; i < N; i++) {
+    for (let j: number = 0; j < N; j++) {
+      let sum: number = 0
+      for (let k: number = 0; k < N; k++) {
+        sum = sum + a[i * N + k] * b[k * N + j]
+      }
+      c[i * N + j] = sum
+    }
+  }
+  return c
+}
+
+fn bench(N: number) {
+  let m = makeMatrix(N)
+  let a = m.a
+  let b = m.b
+  let len = m.len
+
+  // Warm-up GPU backends at this shape (one-time kernel/pipeline compile).
+  // CPU has no warm-up; we skip warming it so it doesn't bias the race.
+  mlx_matmul(a, b, N, N, N)
+  metal_matmul(a, b, N, N, N)
+
+  let t = Date.now()
+  let winner = await Promise.any([
+    Promise.spawn(() => {
+      let t0 = Date.now()
+      let c = mlx_matmul(a, b, N, N, N)
+      return { backend: "mlx",   ms: Date.now() - t0, c: c }
+    }),
+    Promise.spawn(() => {
+      let t0 = Date.now()
+      let c = metal_matmul(a, b, N, N, N)
+      return { backend: "metal", ms: Date.now() - t0, c: c }
+    }),
+    Promise.spawn(() => {
+      let t0 = Date.now()
+      let c = cpu_matmul(a, b, N)
+      return { backend: "cpu",   ms: Date.now() - t0, c: c }
+    }),
+  ])
+  let wall = Date.now() - t
+  let c = winner.c
+  let check = c[0] + c[N - 1] + c[(N - 1) * N] + c[len - 1]
+  console.log(`${N}x${N}  winner=${winner.backend}  winner_ms=${winner.ms}  wall_ms=${wall}  check=${check}`)
+}
+
+// Small N: CPU is often competitive (less GPU dispatch overhead).
+bench(128)
+bench(256)
+// Large N: GPU wins by a large margin.
+bench(512)
+bench(1024)
+bench(2048)
+bench(4096)

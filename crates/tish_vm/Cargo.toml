@@ -8,7 +8,10 @@ license-file = { workspace = true }
 repository = { workspace = true }
 [features]
 default = []
-regex = ["tishlang_core/regex"]
+# RegExp needs the runtime's regex impls (regexp_new / regexp_test / regexp_exec and the
+# regex-aware String methods) so the VM routes through the SAME code as the rust backend.
+# Mirror the fs/http pattern: pull in the optional runtime crate + its regex feature.
+regex = ["tishlang_core/regex", "dep:tishlang_runtime", "tishlang_runtime/regex"]
 # Propagate `send-values` so that every native-function closure we build
 # in the VM (array / string / object methods) picks up the right
 # `Rc<dyn Fn>` vs `Arc<dyn Fn + Send + Sync>` wrapper at compile time.
@@ -45,3 +48,12 @@ tishlang_opt = { path = "../tish_opt", version = ">=0.1" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
+
+# Numeric JIT (native codegen slice 1). Not built for wasm — cranelift-jit emits host
+# machine code and cannot target wasm32. The wasm/wasi VM keeps the interpreter path.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cranelift = "0.130"
+cranelift-jit = "0.130"
+cranelift-module = "0.130"
+cranelift-native = "0.130"
+stacker = "0.1"

@@ -9,6 +9,7 @@ pub mod construct;
 pub mod globals;
 pub mod helpers;
 pub mod math;
+pub mod number;
 pub mod object;
 pub mod string;
 pub mod symbol;

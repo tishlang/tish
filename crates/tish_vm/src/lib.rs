@@ -1,5 +1,7 @@
 //! Bytecode VM for Tish execution.
 
+#[cfg(not(target_arch = "wasm32"))]
+mod jit;
 mod vm;
 
 pub use vm::{all_compiled_capabilities, run, run_with_options, Vm, VmRunOptions};

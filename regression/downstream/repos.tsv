@@ -1,0 +1,54 @@
+# Downstream regression manifest — tish CONSUMERS built/tested against tish HEAD.
+# Columns (TAB-separated): name  source  subdir  kind  cmd  expected
+#   source:   git:URL@REF | local:PATH (dev machine only) | self:SUBDIR (a subdir of the tish checkout)
+#   kind:     rust (cargo: extension/embedder) | ffi (extern-C extension) | tish (runs .tish programs)
+#   expected: pass  = must build+test clean (a failure is a REGRESSION → fails the suite)
+#             xfail = known-broken on this branch pending migration (green now; flags if it gets FIXED)
+# For `tish` kind the runner builds the HEAD binary, `npm install`s the repo, and overwrites the
+# bundled @tishlang/tish binary with HEAD so the repo's OWN test/build harness runs against HEAD.
+# Run:  regression/downstream/run.sh all          # local: everything below
+#       regression/downstream/run.sh --git-only   # CI: only git:/self: sources (local: skipped)
+#
+# ── ffi: extern-C extensions — the C-ABI is stable, so these MUST keep working ──
+ffi-mathext	self:examples/ffi/mathext	.	ffi	cargo build --release	pass
+ffi-statext	self:examples/ffi/statext	.	ffi	cargo build --release	pass
+tish-unity	local:~/Projects/tish/tish-unity/native/tish_unity_bridge	.	ffi	cargo build --release	pass
+#
+# ── cargo: Rust extensions/embedders — broken by NativeFn→Callable / String→ArcStr / PropMap ──
+# (CONFIRMED broken by compiling against feature/perf: tish-pg, tish-callbacks. tish-apple-common
+# is CONFIRMED CLEAN — it is in the tish-program section below as pass; its tish-macos/tish-ios
+# crates are macOS-only + heavy Value-use, likely broken, but not Linux-checkable.)
+tish-pg	local:~/Projects/tish-pg	.	rust	cargo test --no-run	xfail
+tish-callbacks	local:~/Projects/tish/tish-callbacks	.	rust	cargo test	xfail
+tish-oidc	local:~/Projects/tish/tish-oidc	.	rust	cargo check	xfail
+tish-stripe	local:~/Projects/tish/tish-stripe	.	rust	cargo check	xfail
+tish-cedar	local:~/Projects/tish/tish-cedar	.	rust	cargo check	xfail
+tish-biscuit	local:~/Projects/tish/tish-biscuit	.	rust	cargo check	xfail
+tish-webauthn	local:~/Projects/tish/tish-webauthn	.	rust	cargo check	xfail
+brainstorm-pg	local:~/Projects/brainstorm/crates/brainstorm-pg	.	rust	cargo check	xfail
+tish-polars	git:https://github.com/spacedevin/tish-polars.git@main	.	rust	cargo check	xfail
+tish-apple	git:https://github.com/tishlang/tish-apple.git@main	.	rust	cargo check -p tish-apple-common	pass
+#
+# ── tish-program consumers — no compile link; hit only by SEMANTIC changes (div-by-zero, key order) ──
+# Tested via the repo's own build/test harness against the HEAD binary (see header). expected=pass —
+# the language surface only GREW, so these should keep working; a RED means a real break OR a cmd that
+# needs per-repo tuning (entry/feature flags). Refine the cmd as you wire each repo.
+lattish	git:https://github.com/spacedevin/lattish.git@npm-package-name-fix	.	tish	npm test	pass
+tish-ide-panels	git:https://github.com/tishlang/tish-ide-panels.git@main	.	tish	npm test	pass
+# tish-audio / tish-midi are lattish APPS that import bare `lattish`. The runner wires the LOCAL WORKSPACE
+# lattish ($TISH/../lattish) into node_modules/lattish — the npm analog of rewrite_tish_paths for the Rust
+# crates — so we test against the lattish being DEVELOPED next to this tish, NOT the published package
+# (which would only re-test already-released code). HEAD tish then transpiles the workspace lattish + the
+# whole app (tish-audio -> 1.3 MB dist/main.js with createRoot inlined). Just `npm run build` — the runner
+# does npm install + HEAD-binary override + the lattish wiring.
+tish-audio	git:https://github.com/spacedevin/tish-audio.git@main	.	tish	npm run build	pass
+tish-learn	git:https://github.com/tishlang/learn.git@main	.	tish	npm run build:css	pass
+tish-playground	git:https://github.com/spacedevin/tish-playground.git@main	.	tish	npm run build	pass
+# tish-midi (deckard): a lattish APP; own npm scripts are monorepo-bound (`cd ../tish`, no `test`), so we
+# transpile-smoke its JS-targetable `src/` (no native `tish:` imports; `services/` daemons excluded). The
+# runner wires the LOCAL workspace lattish into node_modules (see tish-audio note), so the bare imports
+# resolve to the workspace lattish.
+tish-midi	git:https://github.com/spacedevin/deckard.git@main	.	tish	rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_m.js >/tmp/_m.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_m.err; rc=1; }; done < <(find src -name "*.tish" -not -path "*/node_modules/*"); exit $rc	pass
+tish-tailwind	local:~/Projects/tish-audio/tish-tailwind	.	tish	bash -c 'f=$(find . -name "*.tish" -not -path "*/node_modules/*" | head -1); [ -z "$f" ] || tish build --target js "$f" -o /tmp/_tw.js'	pass
+spider3-tish	git:https://github.com/schlopai/spider-gwen-webgpu.git@main	.	tish	bash -c 'rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_s.js >/tmp/_s.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_s.err; rc=1; }; done < <(find . -name "*.tish" -not -path "*/node_modules/*" -not -path "*/vendor/*" -not -path "*/dist/*"); exit $rc'	pass
+spacekinematics	git:https://github.com/spacedevin/solar-system-webgpu.git@main	.	tish	bash -c 'rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_s.js >/tmp/_s.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_s.err; rc=1; }; done < <(find . -name "*.tish" -not -path "*/node_modules/*" -not -path "*/vendor/*" -not -path "*/sgp4-wasm/*"); exit $rc'	pass

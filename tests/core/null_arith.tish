@@ -1,0 +1,19 @@
+// Runtime null coercion in arithmetic — cross-backend regression guard (all 6 backends + node).
+// An out-of-bounds array read yields a RUNTIME null; `number <op> null` must coerce to NaN (matching
+// the VM's `as_number().unwrap_or(NaN)` rule), NOT swallow to `null`. The rust-AOT backend used to
+// emit `ops::add(...).unwrap_or(Value::Null)` over an `ops` that ERRORED on number+null, so OOB reads
+// produced `null` instead of NaN — fixed by making tish_runtime's ops coerce like the VM. Deterministic.
+function sumArr(arr, n) { let s = 0; for (let i = 0; i < n; i++) { s = s + arr[i]; } return s; }
+let a = [10, 20, 30];
+let h = [1];
+console.log("oob_sum: " + sumArr(a, 5));   // 60 + null + null → NaN
+console.log("add: " + (5 + h[9]));         // NaN
+console.log("radd: " + (h[9] + 5));        // NaN
+console.log("sub: " + (5 - h[9]));         // NaN
+console.log("mul: " + (5 * h[9]));         // NaN
+console.log("div: " + (5 / h[9]));         // NaN
+console.log("strconcat: " + ("v" + null)); // "vnull" (string concat preserved; explicit null so the
+                                           // JS backend agrees — an OOB read prints "undefined" there)
+console.log("num: " + (2 + 3));            // 5 (pure-number path unchanged)
+console.log("numdiv: " + (6 / 2));         // 3
+console.log("strnum: " + ("x" + 7));       // "x7"

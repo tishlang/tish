@@ -15,7 +15,9 @@ use tishlang_core::NativeFn as CoreNativeFn;
 use tishlang_core::TishSymbol;
 
 /// Property map for interpreter object string keys (uses `eval::Value`, not `tishlang_core::Value`).
-pub type PropMap = AHashMap<Arc<str>, Value>;
+/// `IndexMap` preserves insertion order so `Object.keys` / `JSON.stringify` match JS/Node
+/// (and the VM/rust backends, which use `tishlang_core`'s insertion-ordered `PropMap`).
+pub type PropMap = indexmap::IndexMap<Arc<str>, Value>;
 
 /// Interpreter object: string keys plus optional symbol-keyed properties.
 #[derive(Clone, Debug, Default)]
@@ -110,11 +112,14 @@ pub enum Value {
     Array(Rc<RefCell<Vec<Value>>>),
     Object(Rc<RefCell<EvalObjectData>>),
     Symbol(Arc<TishSymbol>),
-    /// User-defined function with AST body
+    /// User-defined function with AST body. `env` is the lexical scope captured at definition
+    /// time, so the body resolves free variables against where it was DEFINED (a real closure),
+    /// not where it is called.
     Function {
         formals: Arc<[FunParam]>,
         rest_param: Option<Arc<str>>,
         body: Arc<Statement>,
+        env: crate::eval::ScopeRef,
     },
     /// Native/builtin function
     Native(NativeFn),
@@ -262,6 +267,27 @@ impl Value {
             Value::Number(n) => *n != 0.0 && !n.is_nan(),
             Value::String(s) => !s.is_empty(),
             _ => true,
+        }
+    }
+
+    /// JavaScript `ToString` coercion (as used by `Array.prototype.join`), distinct from the
+    /// `Display`/inspect form: a nested **array** stringifies to its own comma-joined `toString`
+    /// (recursively, always `,`), an **object** becomes `"[object Object]"`, and `null`/`undefined`
+    /// elements elide to `""`. Mirrors `tishlang_core::Value::to_js_string` so interp output matches
+    /// the VM/rust/cranelift/wasi backends (and Node) for join/coercion.
+    pub fn to_js_string(&self) -> String {
+        match self {
+            Value::Array(arr) => arr
+                .borrow()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => String::new(),
+                    other => other.to_js_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+            Value::Object(_) => "[object Object]".to_string(),
+            _ => self.to_string(),
         }
     }
 

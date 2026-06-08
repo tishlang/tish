@@ -711,6 +711,15 @@ struct Codegen {
     /// Stack: true = async Rust context (run body), false = sync closure (Tish fn body)
     async_context_stack: Vec<bool>,
     loop_stack: Vec<(String, Option<String>)>, // (break_label, continue_update) for innermost loop
+    /// Break targets for innermost breakable construct — loops AND switches (JS `break` exits the
+    /// nearest loop OR switch; `continue` uses loop_stack). Loops push to both; switches push here only.
+    break_stack: Vec<String>,
+    /// How many enclosing `try`-body closures we're currently emitting inside (within the current
+    /// function). A try body compiles to `(|| -> Result<Option<Value>, _> { … })()` — a *completion*
+    /// closure: `Ok(None)`=normal, `Ok(Some(v))`=pending `return v`, `Err(Throw)`=pending throw. When
+    /// depth>0, `return`/`throw` emit the closure-escaping completion form so they unwind through
+    /// `finally`; at depth 0 they're a plain `return`/panic (the fast path is untouched).
+    try_closure_depth: u32,
     /// Stack of scopes, each containing function names declared in that scope
     /// Used to capture sibling functions for mutual recursion
     function_scope_stack: Vec<Vec<String>>,
@@ -723,6 +732,18 @@ struct Codegen {
     /// Variables currently wrapped in Rc<RefCell<Value>> for mutable capture in closures
     /// These need special handling: reads via .borrow().clone(), writes via *var.borrow_mut()
     refcell_wrapped_vars: std::collections::HashSet<String>,
+    /// M5 (dark-shipped behind `TISH_NATIVE_FN`): top-level functions eligible for a parallel
+    /// free `fn f_native(f64,..)->f64` (all params `: number`, returns `number`, native-safe
+    /// body). Direct calls to these route to the native fn, bypassing the boxed `value_call`.
+    native_fns: std::collections::HashSet<String>,
+    /// Names of `number`-typed locals demoted to a boxed `Value` because some reassignment can
+    /// store a non-number — e.g. `let s = 0; s = s + arr[i]` where `arr` is a boxed Value: `+` is
+    /// JS string concat, so `s` may become a `String`. Lowering `s` to a native `f64` would panic
+    /// at the store's `from_value_expr(F64)` coercion (`_ => panic!("expected number")`). Computed
+    /// once in `emit_program` (after type aliases + `native_fns`), consulted at `VarDecl` to force
+    /// `RustType::Value`. This is the rust-AOT analogue of the VM array-JIT bailing to the
+    /// interpreter on a non-numeric element. See `collect_demoted_numeric_locals`.
+    demoted_numeric_locals: std::collections::HashSet<String>,
     /// Scopes of names whose Rust binding is actually `Rc<RefCell<_>>` (emitted at VarDecl).
     /// `refcell_wrapped_vars` alone is insufficient: it is set by prepasses before decl may run.
     rc_cell_storage_scopes: Vec<std::collections::HashSet<String>>,
@@ -768,10 +789,14 @@ impl Codegen {
             native_module_init,
             async_context_stack: Vec::new(),
             loop_stack: Vec::new(),
+            break_stack: Vec::new(),
+            try_closure_depth: 0,
             function_scope_stack: vec![Vec::new()], // Start with global scope
             outer_params_stack: Vec::new(),
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
+            native_fns: std::collections::HashSet::new(),
+            demoted_numeric_locals: std::collections::HashSet::new(),
             rc_cell_storage_scopes: vec![std::collections::HashSet::new()],
             usage_analyzer: None,
             type_context: TypeContext::new(),
@@ -1034,7 +1059,7 @@ impl Codegen {
                     // latter dispatches into `http_serve_per_worker`, which
                     // calls onWorker once per accept thread to build that
                     // thread's handler.
-                    "serve" => Some("Value::native(|args: &[Value]| { let handler = args.get(1).cloned().unwrap_or(Value::Null); match handler { Value::Function(f) => tish_http_serve(args, move |req_args| f(req_args)), Value::Object(ref opts) => { let factory = opts.borrow().strings.get(\"onWorker\").cloned().unwrap_or(Value::Null); tishlang_runtime::http_serve_per_worker(args, factory) }, _ => Value::Null } })"),
+                    "serve" => Some("Value::native(|args: &[Value]| { let handler = args.get(1).cloned().unwrap_or(Value::Null); match handler { Value::Function(f) => tish_http_serve(args, move |req_args| f.call(req_args)), Value::Object(ref opts) => { let factory = opts.borrow().strings.get(\"onWorker\").cloned().unwrap_or(Value::Null); tishlang_runtime::http_serve_per_worker(args, factory) }, _ => Value::Null } })"),
                     "Promise" => Some("tish_promise_object()"),
                     "Symbol" => Some("tish_symbol_object()"),
                     _ => None,
@@ -1098,6 +1123,17 @@ impl Codegen {
     }
 
     /// Escape Rust reserved keywords by prefixing with r#
+    /// Binding keyword that stays valid for the wildcard `_`. A `_` binding cannot be `mut`
+    /// (`error: mut must be followed by a named binding`) and is never reassigned, so it always
+    /// takes a plain `let`. `base` is the keyword for a normal binding here (e.g. `"let mut"`).
+    fn mut_kw_for<'a>(name: &str, base: &'a str) -> &'a str {
+        if name == "_" {
+            "let"
+        } else {
+            base
+        }
+    }
+
     fn escape_ident(name: &str) -> Cow<'_, str> {
         // Rust standard library macros that conflict with variable names
         const RUST_MACROS: &[&str] = &[
@@ -1227,6 +1263,24 @@ impl Codegen {
         }
     }
 
+    /// Emit a valid Rust `f64` expression for `n`, handling non-finite values. Constant-folding can
+    /// produce Infinity/NaN (e.g. `5/0` → `f64::INFINITY`, `0/0` → `f64::NAN`), which the plain
+    /// `format!("{}_f64", n)` would render as the INVALID Rust `inf_f64` / `NaN_f64`. Finite values
+    /// keep the literal `{n}_f64` form.
+    fn f64_lit(n: f64) -> String {
+        if n.is_nan() {
+            "f64::NAN".to_string()
+        } else if n.is_infinite() {
+            if n > 0.0 {
+                "f64::INFINITY".to_string()
+            } else {
+                "f64::NEG_INFINITY".to_string()
+            }
+        } else {
+            format!("{}_f64", n)
+        }
+    }
+
     /// Generate code for a bitwise binary operation.
     fn emit_bitwise_binop(l: &str, r: &str, op: &str) -> String {
         format!(
@@ -1308,7 +1362,7 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, register_static_route as tish_register_static_route, ObjectMap, TishError, Value, VmRef};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -1319,8 +1373,11 @@ impl Codegen {
             self.write("use tishlang_runtime::{timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, timer_set_interval as tish_timer_set_interval, timer_clear_interval as tish_timer_clear_interval};\n");
         }
         if self.has_feature("http") {
+            // `register_static_route` is http-gated in the runtime; emit its import only when http is
+            // linked, else a non-http `tish build --feature …` fails with an unresolved import.
+            self.write("use tishlang_runtime::register_static_route as tish_register_static_route;\n");
             if self.is_async {
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, promise_object as tish_promise_object, await_promise as tish_await_promise};\n");
+                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, promise_object as tish_promise_object, await_promise as tish_await_promise, await_promise_throw as tish_await_promise_throw};\n");
             } else {
                 self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve};\n");
             }
@@ -1374,6 +1431,21 @@ impl Codegen {
             self.writeln("}");
             self.writeln("");
         }
+        // M5 (dark-shipped behind TISH_NATIVE_FN): emit a parallel native `fn f_native` for each
+        // eligible top-level numeric fn at top level; direct calls route to it in emit_typed_expr.
+        if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+            self.native_fns = Self::collect_native_fns(&program.statements);
+            if !self.native_fns.is_empty() {
+                self.emit_native_fns(&program.statements)?;
+                self.writeln("");
+            }
+        }
+        // Soundness pass — must run after type aliases + `native_fns` are known (both feed the
+        // native-type oracle): find `number`-typed locals a reassignment can turn non-numeric so
+        // `VarDecl` lowers them as boxed `Value` rather than native `f64` (else the store coerces
+        // and panics on a JS string-concat result like `s = s + arr[i]`). See
+        // `collect_demoted_numeric_locals` / `demoted_numeric_locals`.
+        self.demoted_numeric_locals = self.collect_demoted_numeric_locals(&program.statements);
         if self.is_async {
             self.writeln("async fn run() -> Result<(), Box<dyn std::error::Error>> {");
         } else if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
@@ -1398,9 +1470,13 @@ impl Codegen {
         self.writeln("let parseFloat = Value::native(|args: &[Value]| tish_parse_float(args));");
         self.writeln("let decodeURI = Value::native(|args: &[Value]| tish_decode_uri(args));");
         self.writeln("let encodeURI = Value::native(|args: &[Value]| tish_encode_uri(args));");
-        self.writeln(
-            r#"let registerStaticRoute = Value::native(|args: &[Value]| { let path = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => return Value::Null }; let body = match args.get(1) { Some(Value::String(s)) => s.as_bytes().to_vec(), _ => return Value::Null }; let ct = match args.get(2) { Some(Value::String(s)) => s.to_string(), _ => "application/octet-stream".to_string() }; tish_register_static_route(&path, &body, &ct); Value::Null });"#,
-        );
+        // `registerStaticRoute` calls the http-gated runtime fn, so only bind it when http is linked
+        // (matches the conditional `use` above; otherwise non-http builds fail to resolve it).
+        if self.has_feature("http") {
+            self.writeln(
+                r#"let registerStaticRoute = Value::native(|args: &[Value]| { let path = match args.get(0) { Some(Value::String(s)) => s.to_string(), _ => return Value::Null }; let body = match args.get(1) { Some(Value::String(s)) => s.as_bytes().to_vec(), _ => return Value::Null }; let ct = match args.get(2) { Some(Value::String(s)) => s.to_string(), _ => "application/octet-stream".to_string() }; tish_register_static_route(&path, &body, &ct); Value::Null });"#,
+            );
+        }
         self.writeln(
             "let htmlEscape = Value::native(|args: &[Value]| tish_escape_html(args.first().unwrap_or(&Value::Null)));",
         );
@@ -1467,6 +1543,8 @@ impl Codegen {
         self.writeln("let String = Value::object(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"fromCharCode\"), Value::native(|args: &[Value]| tish_string_from_char_code(args))),");
+        // `String(value)` callable: `value_call` dispatches objects via `__call`, like `Symbol`.
+        self.writeln("(Arc::from(\"__call\"), Value::native(|args: &[Value]| tish_string_convert(args))),");
         self.indent -= 1;
         self.writeln("]));");
 
@@ -1560,7 +1638,7 @@ impl Codegen {
             self.writeln("match handler {");
             self.indent += 1;
             self.writeln(
-                "Value::Function(f) => tish_http_serve(args, move |req_args| f(req_args)),",
+                "Value::Function(f) => tish_http_serve(args, move |req_args| f.call(req_args)),",
             );
             self.writeln("Value::Object(ref opts) => {");
             self.indent += 1;
@@ -1620,7 +1698,7 @@ impl Codegen {
         self.usage_analyzer = Some(analyzer);
 
         // Prepass: vars mutated by nested closures must be RefCell from the start (top-level)
-        let top_level_mutated = Self::collect_vars_mutated_by_nested_closures(&program.statements);
+        let top_level_mutated = Self::collect_vars_needing_capture_cell(&program.statements);
         for v in &top_level_mutated {
             self.refcell_wrapped_vars.insert(v.clone());
         }
@@ -1633,6 +1711,14 @@ impl Codegen {
         }
         if self.is_async {
             self.async_context_stack.pop();
+        }
+
+        // Run pending timers to completion before exiting — the JS event loop drains the
+        // timer queue after top-level code finishes. Without this the rust backend drops
+        // `setTimeout(cb, 0)` callbacks that never coincided with a blocking-op drain,
+        // diverging from interp/vm/cranelift/wasi (which drain at end-of-program).
+        if self.has_feature("timers") {
+            self.writeln("tishlang_runtime::drain_timers();");
         }
 
         self.writeln("Ok(())");
@@ -1655,6 +1741,122 @@ impl Codegen {
         Ok(())
     }
 
+    /// Emit an expression in **statement position** (its value is discarded). For a native
+    /// assignment this emits only the side-effect — NOT the boxed `Value::Number(..)` that the
+    /// expression form returns (JS "assignment yields its value"). In a hot loop that boxed
+    /// value was constructed + dropped every iteration, and because `Value` has a non-trivial
+    /// `Drop` (other variants hold `Rc`/`Arc`) LLVM couldn't prove it dead — so it could not
+    /// vectorize/fold the loop. Falls back to `emit_expr` for everything else (whose trailing
+    /// value is simply dropped by the `;`).
+    fn emit_expr_discard(&mut self, expr: &Expr) -> Result<String, CompileError> {
+        match expr {
+            Expr::Assign { name, value, .. } => {
+                let rust_type = self.type_context.get_type(name.as_ref());
+                // String self-append `s = s + rhs` -> in-place push_str (amortized O(1)). The
+                // general path boxes via `ops::add(Value::String(s.clone()), ...)` which clones
+                // the whole string per concat -> O(n^2) string building. rhs must be String-typed.
+                if rust_type == RustType::String {
+                    if let Expr::Binary {
+                        left,
+                        op: BinOp::Add,
+                        right,
+                        ..
+                    } = value.as_ref()
+                    {
+                        if matches!(left.as_ref(), Expr::Ident { name: ln, .. } if ln.as_ref() == name.as_ref())
+                        {
+                            let (rhs_code, rhs_ty) = self.emit_typed_expr(right.as_ref())?;
+                            if rhs_ty == RustType::String {
+                                let escaped = Self::escape_ident(name.as_ref());
+                                if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                                    return Ok(format!(
+                                        "{{ let _r = {}; {}.borrow_mut().push_str(&_r); }}",
+                                        rhs_code, escaped
+                                    ));
+                                }
+                                return Ok(format!(
+                                    "{{ let _r = {}; {}.push_str(&_r); }}",
+                                    rhs_code, escaped
+                                ));
+                            }
+                        }
+                    }
+                }
+                if matches!(rust_type, RustType::F64 | RustType::Bool | RustType::String) {
+                    let escaped = Self::escape_ident(name.as_ref());
+                    let is_ref = self.refcell_wrapped_vars.contains(name.as_ref());
+                    let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                    let native_val = if val_ty == RustType::Value {
+                        rust_type.from_value_expr(&val_code)
+                    } else {
+                        val_code
+                    };
+                    if is_ref {
+                        return Ok(format!(
+                            "{{ let _assign_tmp = {}; *{}.borrow_mut() = _assign_tmp; }}",
+                            native_val, escaped
+                        ));
+                    }
+                    return Ok(format!("{} = {}", escaped, native_val));
+                }
+            }
+            // `i++` / `++i` / `i--` / `--i` in statement position (incl. for-loop update):
+            // emit just the native increment, no boxed `Value::Number(_prev)`.
+            Expr::PostfixInc { name, .. } | Expr::PrefixInc { name, .. } => {
+                if self.type_context.get_type(name.as_ref()) == RustType::F64 {
+                    let n = Self::escape_ident(name.as_ref());
+                    if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                        return Ok(format!("*{}.borrow_mut() += 1.0_f64", n));
+                    }
+                    return Ok(format!("{} += 1.0_f64", n));
+                }
+            }
+            Expr::PostfixDec { name, .. } | Expr::PrefixDec { name, .. } => {
+                if self.type_context.get_type(name.as_ref()) == RustType::F64 {
+                    let n = Self::escape_ident(name.as_ref());
+                    if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                        return Ok(format!("*{}.borrow_mut() -= 1.0_f64", n));
+                    }
+                    return Ok(format!("{} -= 1.0_f64", n));
+                }
+            }
+            // `s += x` etc. in statement position: native f64 compound op, no boxed return.
+            Expr::CompoundAssign { name, op, value, .. } => {
+                if self.type_context.get_type(name.as_ref()) == RustType::F64 {
+                    let n = Self::escape_ident(name.as_ref());
+                    let is_refcell = self.refcell_wrapped_vars.contains(name.as_ref());
+                    let (rhs_code, rhs_ty) = self.emit_typed_expr(value)?;
+                    let rhs_f64 = if rhs_ty == RustType::F64 {
+                        rhs_code
+                    } else {
+                        let rhs_val = if rhs_ty.is_native() {
+                            rhs_ty.to_value_expr(&rhs_code)
+                        } else {
+                            rhs_code
+                        };
+                        format!("(match &({}) {{ Value::Number(n) => *n, v => panic!(\"compound assign: expected number, got {{:?}}\", v) }})", rhs_val)
+                    };
+                    let op_str = match op {
+                        CompoundOp::Add => "+=",
+                        CompoundOp::Sub => "-=",
+                        CompoundOp::Mul => "*=",
+                        CompoundOp::Div => "/=",
+                        CompoundOp::Mod => "%=",
+                    };
+                    if is_refcell {
+                        return Ok(format!(
+                            "{{ let _op_rhs = {}; *{}.borrow_mut() {} _op_rhs; }}",
+                            rhs_f64, n, op_str
+                        ));
+                    }
+                    return Ok(format!("{} {} {}", n, op_str, rhs_f64));
+                }
+            }
+            _ => {}
+        }
+        self.emit_expr(expr)
+    }
+
     fn emit_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
         match stmt {
             Statement::Block { statements, .. } => {
@@ -1666,7 +1868,7 @@ impl Codegen {
                     .push(std::collections::HashSet::new());
                 // Prepass: vars that must be RefCell because nested closures capture and mutate them
                 let vars_mutated_by_nested =
-                    Self::collect_vars_mutated_by_nested_closures(statements);
+                    Self::collect_vars_needing_capture_cell(statements);
                 for v in &vars_mutated_by_nested {
                     self.refcell_wrapped_vars.insert(v.clone());
                 }
@@ -1705,12 +1907,21 @@ impl Codegen {
                 // user-declared `type` aliases so a `let x: World = ...`
                 // resolves to `RustType::Named { name: "World", fields }`
                 // and we can emit a struct move instead of a Value box.
-                let rust_type = type_ann
+                let mut rust_type = type_ann
                     .as_ref()
                     .map(|t| {
                         crate::types::RustType::from_annotation_with_aliases(t, &self.type_aliases)
                     })
                     .unwrap_or(RustType::Value);
+
+                // Soundness: a `number` local that a reassignment can turn non-numeric (e.g.
+                // `s = s + arr[i]`, JS string concat) must stay a boxed `Value` — a native-f64
+                // store would panic at the `from_value_expr(F64)` coercion. See
+                // `demoted_numeric_locals`.
+                if rust_type == RustType::F64 && self.demoted_numeric_locals.contains(name.as_ref())
+                {
+                    rust_type = RustType::Value;
+                }
 
                 // Track the variable type
                 self.type_context.define(name.as_ref(), rust_type.clone());
@@ -1789,7 +2000,7 @@ impl Codegen {
                 self.register_destruct_pattern_outer_vars(pattern);
             }
             Statement::ExprStmt { expr, .. } => {
-                let e = self.emit_expr(expr)?;
+                let e = self.emit_expr_discard(expr)?;
                 self.writeln(&format!("{};", e));
             }
             Statement::If {
@@ -1816,9 +2027,11 @@ impl Codegen {
                 let label = format!("'while_loop_{}", self.loop_label_index);
                 self.loop_label_index += 1;
                 self.loop_stack.push((label.clone(), None));
+                self.break_stack.push(label.clone());
                 self.write(&format!("{}: while {} {{\n", label, c));
                 self.indent += 1;
                 self.emit_statement(body)?;
+                self.break_stack.pop();
                 self.loop_stack.pop();
                 self.indent -= 1;
                 self.writeln("}");
@@ -1852,7 +2065,7 @@ impl Codegen {
                 self.writeln("for _ch in _s.chars() {");
                 self.indent += 1;
                 self.writeln(&format!(
-                    "let {} = Value::String(std::sync::Arc::from(_ch.to_string()));",
+                    "let {} = Value::String(tishlang_runtime::ArcStr::from(_ch.to_string()));",
                     Self::escape_ident(name.as_ref())
                 ));
                 self.emit_statement(body)?;
@@ -1885,18 +2098,20 @@ impl Codegen {
                     .map(|c| self.emit_cond_expr(c).unwrap())
                     .unwrap_or_else(|| "true".to_string());
                 let update_code = update.as_ref().map(|u| {
-                    let ue = self.emit_expr(u).unwrap();
+                    let ue = self.emit_expr_discard(u).unwrap();
                     format!("{};", ue)
                 });
                 self.loop_stack.push((label.clone(), update_code));
+                self.break_stack.push(label.clone());
                 self.write(&format!("{}: loop {{\n", label));
                 self.indent += 1;
                 self.writeln(&format!("if !{} {{ break; }}", cond_expr));
                 self.emit_statement(body)?;
                 if let Some(u) = update {
-                    let ue = self.emit_expr(u)?;
+                    let ue = self.emit_expr_discard(u)?;
                     self.writeln(&format!("{};", ue));
                 }
+                self.break_stack.pop();
                 self.loop_stack.pop();
                 self.indent -= 1;
                 self.writeln("}");
@@ -1909,10 +2124,18 @@ impl Codegen {
                     .map(|e| self.emit_expr(e))
                     .transpose()?
                     .unwrap_or_else(|| "Value::Null".to_string());
-                self.writeln(&format!("return {};", v));
+                if self.try_closure_depth > 0 {
+                    // Inside a try-body closure: escape it as a pending-return completion so any
+                    // enclosing `finally` runs on the way out to the function boundary.
+                    self.writeln(&format!("return Ok(Some({}));", v));
+                } else {
+                    self.writeln(&format!("return {};", v));
+                }
             }
             Statement::Break { .. } => {
-                if let Some((label, _)) = self.loop_stack.last() {
+                // `break` exits the innermost loop OR switch (break_stack), not necessarily the
+                // innermost loop. A switch pushes a label here so its `break` stays switch-local.
+                if let Some(label) = self.break_stack.last() {
                     self.writeln(&format!("break {};", label));
                 } else {
                     self.writeln("break;");
@@ -1949,6 +2172,13 @@ impl Codegen {
             } => {
                 let e = self.emit_expr(expr)?;
                 self.writeln(&format!("let _sv = {};", e));
+                // Wrap in a labeled block so `break` inside a case exits the SWITCH, not an
+                // enclosing loop. tish switch has no fall-through (match's first-arm semantics).
+                let sw_label = format!("'switch_{}", self.loop_label_index);
+                self.loop_label_index += 1;
+                self.break_stack.push(sw_label.clone());
+                self.write(&format!("{}: {{\n", sw_label));
+                self.indent += 1;
                 self.writeln("match () {");
                 self.indent += 1;
                 for (case_expr, body) in cases {
@@ -1978,30 +2208,39 @@ impl Codegen {
                 }
                 self.indent -= 1;
                 self.writeln("}");
+                self.indent -= 1;
+                self.writeln("}");
+                self.break_stack.pop();
             }
             Statement::DoWhile { body, cond, .. } => {
                 let c = self.emit_cond_expr(cond)?;
                 let label = format!("'dowhile_loop_{}", self.loop_label_index);
                 self.loop_label_index += 1;
                 self.loop_stack.push((label.clone(), None));
+                self.break_stack.push(label.clone());
                 self.write(&format!("{}: loop {{\n", label));
                 self.indent += 1;
                 self.emit_statement(body)?;
                 self.write(&format!("if !{} {{ break; }}\n", c));
+                self.break_stack.pop();
                 self.loop_stack.pop();
                 self.indent -= 1;
                 self.writeln("}");
             }
             Statement::Throw { value, .. } => {
                 let v = self.emit_expr(value)?;
-                if self.value_fn_depth > 0 {
+                if self.try_closure_depth > 0 || self.value_fn_depth == 0 {
+                    // Inside a try-body closure (so `catch`/`finally` can see it) or at top level
+                    // (run() returns a Result): a catchable error completion.
                     self.writeln(&format!(
-                        "{{ let _th = {}; panic!(\"uncaught throw: {{}}\", _th.to_display_string()); }}",
+                        "return Err(Box::new(tishlang_runtime::TishError::Throw({})) as Box<dyn std::error::Error>);",
                         v
                     ));
                 } else {
+                    // Top of a value-fn body with no enclosing try: there is no error channel
+                    // across the native-fn ABI, so an uncaught throw aborts (matches prior behavior).
                     self.writeln(&format!(
-                        "return Err(Box::new(tishlang_runtime::TishError::Throw({})) as Box<dyn std::error::Error>);",
+                        "{{ let _th = {}; panic!(\"uncaught throw: {{}}\", _th.to_display_string()); }}",
                         v
                     ));
                 }
@@ -2013,58 +2252,81 @@ impl Codegen {
                 finally_body,
                 ..
             } => {
-                self.writeln("let _try_result: Result<Value, Box<dyn std::error::Error>> = (|| {");
+                // The try body runs in a completion closure:
+                //   Ok(None)     = ran to the end normally
+                //   Ok(Some(v))  = a `return v` is pending (must run finally, then return)
+                //   Err(Throw)   = a `throw` is pending (catchable; else runs finally then re-raises)
+                // `return`/`throw` inside the body emit the closure-escaping form (try_closure_depth).
+                self.writeln(
+                    "let mut _flow: Result<Option<Value>, Box<dyn std::error::Error>> = (|| {",
+                );
                 self.indent += 1;
+                self.try_closure_depth += 1;
                 self.emit_statement(body)?;
-                self.writeln("Ok(Value::Null)");
+                self.try_closure_depth -= 1;
+                self.writeln("Ok(None)");
                 self.indent -= 1;
                 self.writeln("})();");
 
                 if let Some(catch_stmt) = catch_body {
+                    // Only a `throw` is catchable; a pending `return` (Ok(Some)) bypasses catch.
+                    self.writeln("_flow = match _flow {");
+                    self.indent += 1;
+                    self.writeln("Err(_e) => match _e.downcast::<tishlang_runtime::TishError>() {");
+                    self.indent += 1;
+                    self.writeln("Ok(_te) => match *_te {");
+                    self.indent += 1;
+                    self.writeln("tishlang_runtime::TishError::Throw(_tv) => {");
+                    self.indent += 1;
                     if let Some(param) = catch_param {
-                        self.writeln("if let Err(e) = _try_result {");
-                        self.indent += 1;
-                        self.writeln("match e.downcast::<tishlang_runtime::TishError>() {");
-                        self.indent += 1;
-                        self.writeln("Ok(tish_err) => {");
-                        self.indent += 1;
-                        self.writeln("if let tishlang_runtime::TishError::Throw(v) = *tish_err {");
-                        self.writeln(&format!(
-                            "let {} = v.clone();",
-                            Self::escape_ident(param.as_ref())
-                        ));
-                        self.emit_statement(catch_stmt)?;
-                        if self.value_fn_depth > 0 {
-                            self.writeln(
-                                "} else { panic!(\"unhandled error in native Tish: {:?}\", *tish_err); }",
-                            );
-                        } else {
-                            self.writeln("} else { return Err(Box::new(tish_err)); }");
-                        }
-                        self.indent -= 1;
-                        self.writeln("}");
-                        if self.value_fn_depth > 0 {
-                            self.writeln(
-                                "Err(orig) => panic!(\"non-Tish error in native Tish: {:?}\", orig),",
-                            );
-                        } else {
-                            self.writeln("Err(orig) => return Err(orig),");
-                        }
-                        self.indent -= 1;
-                        self.writeln("}");
-                        self.indent -= 1;
-                    } else {
-                        self.writeln("if let Err(_e) = _try_result {");
-                        self.indent += 1;
-                        self.emit_statement(catch_stmt)?;
-                        self.indent -= 1;
+                        self.writeln(&format!("let {} = _tv;", Self::escape_ident(param.as_ref())));
                     }
+                    self.writeln(
+                        "(|| -> Result<Option<Value>, Box<dyn std::error::Error>> {",
+                    );
+                    self.indent += 1;
+                    self.try_closure_depth += 1;
+                    self.emit_statement(catch_stmt)?;
+                    self.try_closure_depth -= 1;
+                    self.writeln("Ok(None)");
+                    self.indent -= 1;
+                    self.writeln("})()");
+                    self.indent -= 1;
                     self.writeln("}");
+                    self.writeln("_other => Err(Box::new(_other)),");
+                    self.indent -= 1;
+                    self.writeln("},");
+                    self.writeln("Err(_orig) => Err(_orig),");
+                    self.indent -= 1;
+                    self.writeln("},");
+                    self.writeln("_ok => _ok,");
+                    self.indent -= 1;
+                    self.writeln("};");
                 }
 
                 if let Some(finally_stmt) = finally_body {
                     self.emit_statement(finally_stmt)?;
                 }
+
+                // After finally, propagate any pending completion in the form the enclosing context
+                // expects (an outer try-closure / a value-fn body / top-level run()).
+                self.writeln("match _flow {");
+                self.indent += 1;
+                if self.try_closure_depth > 0 {
+                    self.writeln("Ok(Some(_rv)) => return Ok(Some(_rv)),");
+                    self.writeln("Err(_e) => return Err(_e),");
+                } else if self.value_fn_depth > 0 {
+                    self.writeln("Ok(Some(_rv)) => return _rv,");
+                    self.writeln("Err(_e) => return tishlang_runtime::fn_unwind(_e),");
+                } else {
+                    // Top level (run() -> Result<(), _>): a top-level `return value` just ends the
+                    // script (the value is unobservable); an uncaught throw propagates out of run().
+                    self.writeln("Ok(Some(_)) => return Ok(()),");
+                    self.writeln("Err(_e) => return Err(_e),");
+                }
+                self.writeln("Ok(None) => {}");
+                self.indent -= 1;
+                self.writeln("}");
             }
             Statement::FunDecl {
                 name,
@@ -2142,18 +2404,22 @@ impl Codegen {
                     })
                     .collect();
 
-                // Outer vars that are assigned in the body need RefCell (capture cell, add to refcell_wrapped_vars).
-                // Read-only outer vars get a Value binding to avoid nested_complex param-shadow issues.
+                // Live cell capture: assigned in this body, or already a shared
+                // `VmRef` cell in a parent scope (so a closure that only READS the
+                // var still sees later mutations through the shared cell, instead
+                // of snapshotting it by value at creation time). Truly read-only,
+                // non-cell vars get a Value snapshot (avoids param-shadow issues).
+                // Mirrors `emit_arrow_function`.
                 let mut assigned_in_body = HashSet::new();
                 Self::collect_assigned_idents_in_stmt(body, &mut assigned_in_body);
                 let mutable_outer_vars: Vec<String> = outer_vars
                     .iter()
-                    .filter(|v| assigned_in_body.contains(*v))
+                    .filter(|v| assigned_in_body.contains(*v) || self.rc_cell_storage_contains(*v))
                     .cloned()
                     .collect();
                 let read_only_outer_vars: Vec<String> = outer_vars
                     .iter()
-                    .filter(|v| !assigned_in_body.contains(*v))
+                    .filter(|v| !assigned_in_body.contains(*v) && !self.rc_cell_storage_contains(*v))
                     .cloned()
                     .collect();
 
@@ -2300,14 +2566,64 @@ impl Codegen {
                     .map(|n| n.to_string())
                     .collect();
                 let formal_span = *span;
+                // M1 (keystone, dark-shipped behind TISH_PARAM_NATIVE): a typed scalar param
+                // normally arrives boxed (`args.get(i).cloned()`), which poisons native math in
+                // the body (e.g. `i*N+k` boxes). Bind a *native shadow* — coerce once to f64/
+                // bool/String — so the body lowers it like a native local. Conservative: only
+                // simple params, native-scalar annotation, no default value.
+                let param_native =
+                    std::env::var("TISH_PARAM_NATIVE").map(|v| v != "0").unwrap_or(false);
+                let mut native_params: Vec<(String, RustType)> = Vec::new();
                 for (i, p) in params.iter().enumerate() {
                     match p {
                         FunParam::Simple(tp) => {
-                            self.writeln(&format!(
-                                "let mut {} = args.get({}).cloned().unwrap_or(Value::Null);",
-                                Self::escape_ident(tp.name.as_ref()),
-                                i
-                            ));
+                            let native_ty = if param_native && tp.default.is_none() {
+                                tp.type_ann
+                                    .as_ref()
+                                    .map(RustType::from_annotation)
+                                    .filter(|t| {
+                                        matches!(
+                                            t,
+                                            RustType::F64 | RustType::Bool | RustType::String
+                                        )
+                                    })
+                            } else {
+                                None
+                            };
+                            if let Some(nt) = native_ty {
+                                let coercion = nt.from_value_expr(&format!(
+                                    "args.get({}).cloned().unwrap_or(Value::Null)",
+                                    i
+                                ));
+                                self.writeln(&format!(
+                                    "{} {} = {};",
+                                    Self::mut_kw_for(tp.name.as_ref(), "let mut"),
+                                    Self::escape_ident(tp.name.as_ref()),
+                                    coercion
+                                ));
+                                native_params.push((tp.name.to_string(), nt));
+                            } else if let Some(default_expr) = &tp.default {
+                                // Default applies only when the positional arg is MISSING
+                                // (`args.get(i) == None`), matching the interpreter + bytecode VM.
+                                // An explicit `null` argument is "supplied" and keeps the null.
+                                // Earlier params are already bound above, so a default may
+                                // reference them, e.g. `(a, b = a + 1)`.
+                                let default_str = self.emit_expr(default_expr)?;
+                                self.writeln(&format!(
+                                    "{} {} = match args.get({}) {{ Some(v) => v.clone(), None => {} }};",
+                                    Self::mut_kw_for(tp.name.as_ref(), "let mut"),
+                                    Self::escape_ident(tp.name.as_ref()),
+                                    i,
+                                    default_str
+                                ));
+                            } else {
+                                self.writeln(&format!(
+                                    "{} {} = args.get({}).cloned().unwrap_or(Value::Null);",
+                                    Self::mut_kw_for(tp.name.as_ref(), "let mut"),
+                                    Self::escape_ident(tp.name.as_ref()),
+                                    i
+                                ));
+                            }
                         }
                         FunParam::Destructure { pattern, .. } => {
                             let tmp = format!("_formal_{}", i);
@@ -2329,6 +2645,11 @@ impl Codegen {
 
                 self.type_context
                     .push_fun_param_scope(params, rest_param.as_ref());
+                // Register native-shadowed params (bound above) with their native type so the
+                // body lowers them exactly like native locals (binops, indices, etc.).
+                for (pname, pty) in &native_params {
+                    self.type_context.define(pname, pty.clone());
+                }
 
                 let fun_body_res: Result<(), CompileError> = (|| -> Result<(), CompileError> {
                     // Push current params to stack for nested functions
@@ -2362,8 +2683,21 @@ impl Codegen {
                                 escaped
                             ));
                         }
+                        // Vars declared in this body that a nested closure captures
+                        // and that are assigned somewhere in the body must be shared
+                        // `VmRef` cells (e.g. `let t=0; let f=()=>t; t=100`). Block
+                        // scopes get this via emit_statement(Block); a function body
+                        // is iterated directly, so run the same prepass here.
+                        let body_cell_vars =
+                            Self::collect_vars_needing_capture_cell(statements);
+                        for v in &body_cell_vars {
+                            self.refcell_wrapped_vars.insert(v.clone());
+                        }
                         for s in statements {
                             self.emit_statement(s)?;
+                        }
+                        for v in &body_cell_vars {
+                            self.refcell_wrapped_vars.remove(v);
                         }
                         self.function_scope_stack.pop();
                         self.outer_vars_stack.pop();
@@ -2480,7 +2814,7 @@ impl Codegen {
                             DestructElement::Ident(name, _) => {
                                 self.writeln(&format!(
                                     "{} {} = match &({}) {{ Value::Array(ref _a) => _a.borrow().get({}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
-                                    mutability,
+                                    Self::mut_kw_for(name.as_ref(), mutability),
                                     Self::escape_ident(name.as_ref()),
                                     value_expr,
                                     i
@@ -2497,7 +2831,7 @@ impl Codegen {
                             DestructElement::Rest(name, _) => {
                                 self.writeln(&format!(
                                     "{} {} = match &({}) {{ Value::Array(ref _a) => {{ let _b = _a.borrow(); Value::Array(VmRef::new(_b.iter().skip({}).cloned().collect())) }}, _ => Value::Array(VmRef::new(Vec::new())) }};",
-                                    mutability,
+                                    Self::mut_kw_for(name.as_ref(), mutability),
                                     Self::escape_ident(name.as_ref()),
                                     value_expr,
                                     i
@@ -2514,7 +2848,7 @@ impl Codegen {
                         DestructElement::Ident(name, _) => {
                             self.writeln(&format!(
                                 "{} {} = match &({}) {{ Value::Object(ref _o) => _o.borrow().strings.get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }};",
-                                mutability,
+                                Self::mut_kw_for(name.as_ref(), mutability),
                                 Self::escape_ident(name.as_ref()),
                                 value_expr,
                                 key
@@ -2585,7 +2919,7 @@ impl Codegen {
     fn emit_expr(&mut self, expr: &Expr) -> Result<String, CompileError> {
         Ok(match expr {
             Expr::Literal { value, .. } => match value {
-                Literal::Number(n) => format!("Value::Number({}_f64)", n),
+                Literal::Number(n) => format!("Value::Number({})", Self::f64_lit(*n)),
                 Literal::String(s) => format!("Value::String({:?}.into())", s.as_ref()),
                 Literal::Bool(b) => format!("Value::Bool({})", b),
                 Literal::Null => "Value::Null".to_string(),
@@ -2923,10 +3257,21 @@ impl Codegen {
                                 obj_expr, search, replacement
                             ));
                         }
-                        "match" if cfg!(feature = "regex") => {
+                        // Gate on the *requested* feature (has_feature), not tish_compile's own
+                        // cfg!(feature="regex") — the generated binary links the runtime's regex
+                        // impls when the build requests regex, regardless of how tish_compile was
+                        // compiled. Falls through to a generic call (no-regex builds) otherwise.
+                        "match" if self.has_feature("regex") => {
                             let regexp = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tishlang_runtime::string_match_regex(&{}, &{})",
+                                obj_expr, regexp
+                            ));
+                        }
+                        "search" if self.has_feature("regex") => {
+                            let regexp = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::string_search_regex(&{}, &{})",
                                 obj_expr, regexp
                             ));
                         }
@@ -2991,8 +3336,20 @@ impl Codegen {
                             ));
                         }
                         "reduce" => {
-                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let initial = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            // Fused reduce (TISH_FUSED_HOF): `arr.reduce((acc, x) => acc OP x, init)`
+                            // with a plain binop of the two params → a native fold using the SAME
+                            // runtime Value op the closure body would, eliminating the per-element
+                            // `value_call`. Sound (identical Value semantics, incl. string `+`).
+                            // Requires an explicit init; anything else falls back to array_reduce.
+                            if std::env::var("TISH_FUSED_HOF").is_ok() && args.len() == 2 {
+                                if let Some(fold) =
+                                    self.try_fused_reduce(args, &obj_expr, &initial)?
+                                {
+                                    return Ok(fold);
+                                }
+                            }
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tishlang_runtime::array_reduce(&{}, &{}, &{})",
                                 obj_expr, callback, initial
@@ -3294,10 +3651,9 @@ impl Codegen {
                             }
                         }
                     }
-                    format!(
-                        "Value::object(ObjectMap::from([{}]))",
-                        parts.join(", ")
-                    )
+                    // Build the PropMap directly (no intermediate AHashMap) — one
+                    // inline allocation for small objects (the common case).
+                    format!("Value::object_from_pairs([{}])", parts.join(", "))
                 }
             }
             Expr::Assign { name, value, .. } => {
@@ -3359,26 +3715,36 @@ impl Codegen {
                 #[cfg(feature = "http")]
                 if self.is_async {
                     let _in_async = self.async_context_stack.last().copied().unwrap_or(false);
+                    // A rejected awaited promise must THROW (so a surrounding try/catch fires).
+                    // Use the throwing `?`-variant wherever an error channel exists — the SAME
+                    // condition `throw` uses to emit `return Err(..)` (inside a try body, or the
+                    // top-level run()). Elsewhere there is no channel, so fall back to the
+                    // value-returning variant (matches the existing uncaught-throw limitation).
+                    let (awaiter, q) = if self.try_closure_depth > 0 || self.value_fn_depth == 0 {
+                        ("tish_await_promise_throw", "?")
+                    } else {
+                        ("tish_await_promise", "")
+                    };
                     if let Expr::Call { callee, args, .. } = operand.as_ref() {
                         if let Expr::Ident { name, .. } = callee.as_ref() {
                             let args_code = self.emit_call_args(args)?;
                             return Ok(match name.as_ref() {
                                 "fetch" => {
-                                    format!("tish_await_promise(tish_fetch_promise({}))", args_code)
+                                    format!("{}(tish_fetch_promise({})){}", awaiter, args_code, q)
                                 }
                                 "fetchAll" => {
-                                    format!("tish_await_promise(tish_fetch_all_promise({}))", args_code)
+                                    format!("{}(tish_fetch_all_promise({})){}", awaiter, args_code, q)
                                 }
                                 _ => {
                                     let o = self.emit_expr(operand)?;
-                                    return Ok(format!("tish_await_promise({})", o));
+                                    return Ok(format!("{}({}){}", awaiter, o, q));
                                 }
                             });
                         }
                     }
                     // await Call with non-Ident callee, or await Promise value: wrap in await_promise
                     let o = self.emit_expr(operand)?;
-                    return Ok(format!("tish_await_promise({})", o));
+                    return Ok(format!("{}({}){}", awaiter, o, q));
                 }
                 // Fallback: emit operand as sync call (no real .await in our model)
                 let o = self.emit_expr(operand)?;
@@ -3473,7 +3839,7 @@ impl Codegen {
                              Value::Number(n) => {{ let i = *n as i64; if (*n - i as f64).abs() < f64::EPSILON {{ i.to_string() }} else {{ n.to_string() }} }}, \
                              Value::Bool(b) => b.to_string(), \
                              Value::Null => \"null\".to_string(), \
-                             other => format!(\"{{:?}}\", other) }}",
+                             other => other.to_js_string() }}",
                             rhs_val
                         )
                     };
@@ -3500,7 +3866,7 @@ impl Codegen {
                              Value::Number(n) => {{ let i = *n as i64; if (*n - i as f64).abs() < f64::EPSILON {{ i.to_string() }} else {{ n.to_string() }} }}, \
                              Value::Bool(b) => b.to_string(), \
                              Value::Null => \"null\".to_string(), \
-                             other => format!(\"{{:?}}\", other) }}",
+                             other => other.to_js_string() }}",
                             rhs_val
                         )
                     };
@@ -3712,7 +4078,7 @@ impl Codegen {
                     parts.push(format!("\"{}\"", escaped));
                     if i < exprs.len() {
                         let expr_code = self.emit_expr(&exprs[i])?;
-                        parts.push(format!("&({}).to_display_string()", expr_code));
+                        parts.push(format!("&({}).to_js_string()", expr_code));
                     }
                 }
                 format!("Value::String([{}].concat().into())", parts.join(", "))
@@ -3931,7 +4297,18 @@ impl Codegen {
     fn collect_assigned_idents_in_stmt(stmt: &Statement, names: &mut HashSet<String>) {
         match stmt {
             Statement::ExprStmt { expr, .. } => Self::collect_assigned_idents_in_expr(expr, names),
-            Statement::VarDecl { .. } | Statement::VarDeclDestructure { .. } => {}
+            // Descend into initializers: an assignment may live inside a closure
+            // stored in a `let`/`const` (e.g. `let inc = () => { count = count + 1 }`).
+            // The declared name itself is a binding, not an assignment, so it is
+            // not added here. Closing this gap also closes it for arrow-block
+            // bodies, which are scanned via collect_assigned_idents_in_expr.
+            Statement::VarDecl { init: Some(e), .. } => {
+                Self::collect_assigned_idents_in_expr(e, names)
+            }
+            Statement::VarDecl { init: None, .. } => {}
+            Statement::VarDeclDestructure { init, .. } => {
+                Self::collect_assigned_idents_in_expr(init, names)
+            }
             Statement::Block { statements, .. } => {
                 for s in statements {
                     Self::collect_assigned_idents_in_stmt(s, names);
@@ -4197,9 +4574,11 @@ impl Codegen {
         }
     }
 
-    /// Collect variable names that are both captured and mutated by a closure body.
-    /// block_vars: vars declared in the enclosing block (candidates for mutation).
-    fn collect_mutated_captures_from_closure(
+    /// Collect block vars captured (referenced) by this closure and any nested
+    /// closures. block_vars: vars declared in the enclosing block. The caller
+    /// (`collect_vars_needing_capture_cell`) further restricts to vars that are
+    /// also assigned somewhere in the defining scope.
+    fn collect_captured_block_vars_from_closure(
         params: &[FunParam],
         body: &Statement,
         block_vars: &HashSet<String>,
@@ -4214,8 +4593,6 @@ impl Codegen {
         Self::collect_local_var_names(body, &mut local_var_names);
         let mut referenced = HashSet::new();
         Self::collect_stmt_idents(body, &mut referenced);
-        let mut assigned = HashSet::new();
-        Self::collect_assigned_idents_in_stmt(body, &mut assigned);
         let outer_captured: HashSet<String> = referenced
             .difference(&param_names)
             .cloned()
@@ -4223,16 +4600,18 @@ impl Codegen {
             .difference(&local_var_names)
             .cloned()
             .collect();
-        for v in outer_captured.intersection(&assigned) {
+        // Every block var this closure captures is a candidate; the caller keeps
+        // only those also assigned somewhere in the defining scope.
+        for v in &outer_captured {
             if block_vars.contains(v) {
                 result.insert(v.clone());
             }
         }
         // Recurse into nested fns
-        Self::collect_mutated_captures_from_statements(body, block_vars, result);
+        Self::collect_captured_block_vars_from_statements(body, block_vars, result);
     }
 
-    fn collect_mutated_captures_from_arrow(
+    fn collect_captured_block_vars_from_arrow(
         params: &[FunParam],
         body: &ArrowBody,
         block_vars: &HashSet<String>,
@@ -4253,11 +4632,6 @@ impl Codegen {
             ArrowBody::Expr(e) => Self::collect_expr_idents(e, &mut referenced),
             ArrowBody::Block(s) => Self::collect_stmt_idents(s, &mut referenced),
         }
-        let mut assigned = HashSet::new();
-        match body {
-            ArrowBody::Expr(e) => Self::collect_assigned_idents_in_expr(e, &mut assigned),
-            ArrowBody::Block(s) => Self::collect_assigned_idents_in_stmt(s, &mut assigned),
-        }
         let outer_captured: HashSet<String> = referenced
             .difference(&param_names)
             .cloned()
@@ -4265,52 +4639,52 @@ impl Codegen {
             .difference(&local_var_names)
             .cloned()
             .collect();
-        for v in outer_captured.intersection(&assigned) {
+        for v in &outer_captured {
             if block_vars.contains(v) {
                 result.insert(v.clone());
             }
         }
         match body {
-            ArrowBody::Expr(e) => Self::collect_mutated_captures_from_expr(e, block_vars, result),
+            ArrowBody::Expr(e) => Self::collect_captured_block_vars_from_expr(e, block_vars, result),
             ArrowBody::Block(s) => {
-                Self::collect_mutated_captures_from_statements(s, block_vars, result)
+                Self::collect_captured_block_vars_from_statements(s, block_vars, result)
             }
         }
     }
 
-    fn collect_mutated_captures_from_expr(
+    fn collect_captured_block_vars_from_expr(
         expr: &Expr,
         block_vars: &HashSet<String>,
         result: &mut HashSet<String>,
     ) {
         match expr {
             Expr::ArrowFunction { params, body, .. } => {
-                Self::collect_mutated_captures_from_arrow(params, body, block_vars, result);
+                Self::collect_captured_block_vars_from_arrow(params, body, block_vars, result);
             }
             Expr::Call { callee, args, .. } => {
-                Self::collect_mutated_captures_from_expr(callee, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(callee, block_vars, result);
                 for arg in args {
                     match arg {
                         CallArg::Expr(e) | CallArg::Spread(e) => {
-                            Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                            Self::collect_captured_block_vars_from_expr(e, block_vars, result);
                         }
                     }
                 }
             }
             Expr::New { callee, args, .. } => {
-                Self::collect_mutated_captures_from_expr(callee, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(callee, block_vars, result);
                 for arg in args {
                     match arg {
                         CallArg::Expr(e) | CallArg::Spread(e) => {
-                            Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                            Self::collect_captured_block_vars_from_expr(e, block_vars, result);
                         }
                     }
                 }
             }
             Expr::Member { object, prop, .. } => {
-                Self::collect_mutated_captures_from_expr(object, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(object, block_vars, result);
                 if let MemberProp::Expr(e) = prop {
-                    Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                    Self::collect_captured_block_vars_from_expr(e, block_vars, result);
                 }
             }
             Expr::Conditional {
@@ -4319,19 +4693,19 @@ impl Codegen {
                 else_branch,
                 ..
             } => {
-                Self::collect_mutated_captures_from_expr(cond, block_vars, result);
-                Self::collect_mutated_captures_from_expr(then_branch, block_vars, result);
-                Self::collect_mutated_captures_from_expr(else_branch, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(cond, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(then_branch, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(else_branch, block_vars, result);
             }
             Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
-                Self::collect_mutated_captures_from_expr(left, block_vars, result);
-                Self::collect_mutated_captures_from_expr(right, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(left, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(right, block_vars, result);
             }
             Expr::Array { elements, .. } => {
                 for el in elements {
                     match el {
                         ArrayElement::Expr(e) | ArrayElement::Spread(e) => {
-                            Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                            Self::collect_captured_block_vars_from_expr(e, block_vars, result);
                         }
                     }
                 }
@@ -4340,7 +4714,7 @@ impl Codegen {
                 for prop in props {
                     match prop {
                         ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => {
-                            Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                            Self::collect_captured_block_vars_from_expr(e, block_vars, result);
                         }
                     }
                 }
@@ -4349,21 +4723,21 @@ impl Codegen {
         }
     }
 
-    fn collect_mutated_captures_from_statements(
+    fn collect_captured_block_vars_from_statements(
         stmt: &Statement,
         block_vars: &HashSet<String>,
         result: &mut HashSet<String>,
     ) {
         match stmt {
             Statement::FunDecl { params, body, .. } => {
-                Self::collect_mutated_captures_from_closure(params, body, block_vars, result);
+                Self::collect_captured_block_vars_from_closure(params, body, block_vars, result);
             }
             Statement::ExprStmt { expr, .. } => {
-                Self::collect_mutated_captures_from_expr(expr, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(expr, block_vars, result);
             }
             Statement::Block { statements, .. } => {
                 for s in statements {
-                    Self::collect_mutated_captures_from_statements(s, block_vars, result);
+                    Self::collect_captured_block_vars_from_statements(s, block_vars, result);
                 }
             }
             Statement::If {
@@ -4372,10 +4746,10 @@ impl Codegen {
                 else_branch,
                 ..
             } => {
-                Self::collect_mutated_captures_from_expr(cond, block_vars, result);
-                Self::collect_mutated_captures_from_statements(then_branch, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(cond, block_vars, result);
+                Self::collect_captured_block_vars_from_statements(then_branch, block_vars, result);
                 if let Some(eb) = else_branch {
-                    Self::collect_mutated_captures_from_statements(eb, block_vars, result);
+                    Self::collect_captured_block_vars_from_statements(eb, block_vars, result);
                 }
             }
             Statement::For {
@@ -4386,23 +4760,23 @@ impl Codegen {
                 ..
             } => {
                 if let Some(i) = init {
-                    Self::collect_mutated_captures_from_statements(i, block_vars, result);
+                    Self::collect_captured_block_vars_from_statements(i, block_vars, result);
                 }
                 if let Some(c) = cond {
-                    Self::collect_mutated_captures_from_expr(c, block_vars, result);
+                    Self::collect_captured_block_vars_from_expr(c, block_vars, result);
                 }
                 if let Some(u) = update {
-                    Self::collect_mutated_captures_from_expr(u, block_vars, result);
+                    Self::collect_captured_block_vars_from_expr(u, block_vars, result);
                 }
-                Self::collect_mutated_captures_from_statements(body, block_vars, result);
+                Self::collect_captured_block_vars_from_statements(body, block_vars, result);
             }
             Statement::ForOf { iterable, body, .. } => {
-                Self::collect_mutated_captures_from_expr(iterable, block_vars, result);
-                Self::collect_mutated_captures_from_statements(body, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(iterable, block_vars, result);
+                Self::collect_captured_block_vars_from_statements(body, block_vars, result);
             }
             Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
-                Self::collect_mutated_captures_from_expr(cond, block_vars, result);
-                Self::collect_mutated_captures_from_statements(body, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(cond, block_vars, result);
+                Self::collect_captured_block_vars_from_statements(body, block_vars, result);
             }
             Statement::Switch {
                 expr,
@@ -4410,18 +4784,18 @@ impl Codegen {
                 default_body,
                 ..
             } => {
-                Self::collect_mutated_captures_from_expr(expr, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(expr, block_vars, result);
                 for (ce, stmts) in cases {
                     if let Some(e) = ce {
-                        Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                        Self::collect_captured_block_vars_from_expr(e, block_vars, result);
                     }
                     for s in stmts {
-                        Self::collect_mutated_captures_from_statements(s, block_vars, result);
+                        Self::collect_captured_block_vars_from_statements(s, block_vars, result);
                     }
                 }
                 if let Some(stmts) = default_body {
                     for s in stmts {
-                        Self::collect_mutated_captures_from_statements(s, block_vars, result);
+                        Self::collect_captured_block_vars_from_statements(s, block_vars, result);
                     }
                 }
             }
@@ -4431,39 +4805,77 @@ impl Codegen {
                 finally_body,
                 ..
             } => {
-                Self::collect_mutated_captures_from_statements(body, block_vars, result);
+                Self::collect_captured_block_vars_from_statements(body, block_vars, result);
                 if let Some(c) = catch_body {
-                    Self::collect_mutated_captures_from_statements(c, block_vars, result);
+                    Self::collect_captured_block_vars_from_statements(c, block_vars, result);
                 }
                 if let Some(f) = finally_body {
-                    Self::collect_mutated_captures_from_statements(f, block_vars, result);
+                    Self::collect_captured_block_vars_from_statements(f, block_vars, result);
                 }
             }
             Statement::VarDecl { init: Some(e), .. } => {
-                Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(e, block_vars, result);
             }
             Statement::VarDeclDestructure { init, .. } => {
-                Self::collect_mutated_captures_from_expr(init, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(init, block_vars, result);
             }
             Statement::Return { value: Some(e), .. } => {
-                Self::collect_mutated_captures_from_expr(e, block_vars, result);
+                Self::collect_captured_block_vars_from_expr(e, block_vars, result);
             }
             Statement::Throw { value, .. } => {
-                Self::collect_mutated_captures_from_expr(value, block_vars, result)
+                Self::collect_captured_block_vars_from_expr(value, block_vars, result)
             }
             _ => {}
         }
     }
 
-    /// For a block, return var names that must be RefCell (captured and mutated by nested closures).
-    fn collect_vars_mutated_by_nested_closures(statements: &[Statement]) -> HashSet<String> {
+    /// For a block, return the names of block-scoped vars that must live in a
+    /// shared `VmRef` cell because a nested closure captures them by reference.
+    ///
+    /// A var needs a cell when it is BOTH (a) captured (referenced) by some nested
+    /// closure AND (b) assigned somewhere in the defining scope. The assignment may
+    /// be inside a closure (`counter()`, sibling `inc`/`get`) or in the enclosing
+    /// scope — including AFTER the closure is created (`let t = 0; let f = () => t;
+    /// t = 100`). Capture alone is not enough: a never-mutated var can be snapshot
+    /// by value. The previous rule (captured AND mutated *inside* a closure) was too
+    /// narrow — it snapshotted capture-then-mutate vars by value, so the rust backend
+    /// returned the stale value and diverged from node/vm/interp/cranelift.
+    fn collect_vars_needing_capture_cell(statements: &[Statement]) -> HashSet<String> {
         let mut block_vars = HashSet::new();
         Self::collect_block_var_names(statements, &mut block_vars);
-        let mut result = HashSet::new();
+        // (a) Block vars captured by any nested closure.
+        let mut captured = HashSet::new();
         for s in statements {
-            Self::collect_mutated_captures_from_statements(s, &block_vars, &mut result);
+            Self::collect_captured_block_vars_from_statements(s, &block_vars, &mut captured);
         }
-        result
+        // (b) Idents assigned anywhere in this scope (incl. inside closures).
+        let mut assigned_in_scope = HashSet::new();
+        for s in statements {
+            Self::collect_assigned_idents_in_stmt(s, &mut assigned_in_scope);
+        }
+        captured.retain(|v| assigned_in_scope.contains(v));
+        // A `for (let i = 0; …; i++)` counter is declared ONCE in the header but is a
+        // per-iteration `let` in JS: a closure in the body must snapshot THIS iteration's
+        // value, not share one cell across all iterations. The loop's own `i++` would
+        // otherwise pull it in here. (for-of vars are not block vars, and body-`let`s are
+        // re-declared each iteration so they get a fresh cell regardless — only header
+        // counters, declared once, must be excluded.) See loop_let_capture.tish.
+        let mut for_counters = HashSet::new();
+        for s in statements {
+            if let Statement::For { init: Some(i), .. } = s {
+                match i.as_ref() {
+                    Statement::VarDecl { name, .. } => {
+                        for_counters.insert(name.to_string());
+                    }
+                    Statement::VarDeclDestructure { pattern, .. } => {
+                        Self::collect_destruct_names(pattern, &mut for_counters);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        captured.retain(|v| !for_counters.contains(v));
+        captured
     }
 
     /// Collect variable names declared in a statement (VarDecl, Destructure, For init).
@@ -4916,11 +5328,29 @@ impl Codegen {
         for (i, p) in params.iter().enumerate() {
             match p {
                 FunParam::Simple(tp) => {
-                    code.push_str(&format!(
-                        "        let mut {} = args.get({}).cloned().unwrap_or(Value::Null);\n",
-                        Self::escape_ident(tp.name.as_ref()),
-                        i
-                    ));
+                    if let Some(default_expr) = &tp.default {
+                        // Default applies only for a MISSING positional arg (matches interp + VM);
+                        // an explicit `null` keeps the null. emit_expr captured like the destructure
+                        // path below so any prelude lands in `code`, not the outer output buffer.
+                        let saved = std::mem::take(&mut self.output);
+                        let default_str = self.emit_expr(default_expr)?;
+                        let prelude = std::mem::replace(&mut self.output, saved);
+                        code.push_str(&prelude);
+                        code.push_str(&format!(
+                            "        {} {} = match args.get({}) {{ Some(v) => v.clone(), None => {} }};\n",
+                            Self::mut_kw_for(tp.name.as_ref(), "let mut"),
+                            Self::escape_ident(tp.name.as_ref()),
+                            i,
+                            default_str
+                        ));
+                    } else {
+                        code.push_str(&format!(
+                            "        {} {} = args.get({}).cloned().unwrap_or(Value::Null);\n",
+                            Self::mut_kw_for(tp.name.as_ref(), "let mut"),
+                            Self::escape_ident(tp.name.as_ref()),
+                            i
+                        ));
+                    }
                 }
                 FunParam::Destructure { pattern, .. } => {
                     let tmp = format!("_formal_{}", i);
@@ -4961,7 +5391,14 @@ impl Codegen {
         let arrow_body_res: Result<(), CompileError> = match body {
             tishlang_ast::ArrowBody::Expr(expr) => {
                 let expr_code = self.emit_expr(expr)?;
-                code.push_str(&format!("        {}\n", expr_code));
+                // Bind to a temp before the closure returns: if `expr_code` reads a
+                // cell-captured var its `RefCell` borrow guard is a temporary, and a
+                // borrow left in tail position outlives the local cell binding —
+                // which fails to compile (E0597). The `let` releases it at the `;`.
+                code.push_str(&format!(
+                    "        let __arrow_ret = {};\n        __arrow_ret\n",
+                    expr_code
+                ));
                 Ok(())
             }
             tishlang_ast::ArrowBody::Block(block_stmt) => {
@@ -5016,7 +5453,7 @@ impl Codegen {
         if let Expr::Literal { value, .. } = expr {
             match (target_type, value) {
                 (RustType::F64, Literal::Number(n)) => {
-                    return Ok(format!("{}_f64", n));
+                    return Ok(Self::f64_lit(*n));
                 }
                 (RustType::String, Literal::String(s)) => {
                     return Ok(format!("{:?}.to_string()", s.as_ref()));
@@ -5125,11 +5562,710 @@ impl Codegen {
     /// through arithmetic, indexing, and assignments.  For any expression this
     /// function cannot handle natively, it falls back to `emit_expr` and returns
     /// `RustType::Value`.
+    // ───────────────────────── M5: native monomorphic functions ─────────────────────────
+    fn ann_is_number(ann: &TypeAnnotation) -> bool {
+        RustType::from_annotation(ann) == RustType::F64
+    }
+
+    // ── Soundness: demote `number` locals that a reassignment can turn non-numeric ──────────────
+    //
+    // `let s = 0` is inferred `number` → lowered to a native `f64`, and a reassignment stores into
+    // it via `s = match &<rhs> { Value::Number(n) => *n, _ => panic!("expected number") }`. That
+    // coercion PANICS when `<rhs>` is not a number — which `s = s + arr[i]` produces whenever
+    // `arr[i]` is a String (JS `+` is string concat). Node, the interpreter, and the VM all yield
+    // a string there (the VM array-JIT bails to the interpreter on a non-numeric element). The
+    // fix: keep such a local a boxed `Value`, so the boxed `ops::add` — which concatenates —
+    // flows through unchanged.
+    //
+    // A reassignment is SAFE iff its RHS lowers to a native `f64`, which is exactly what
+    // `emit_typed_expr` decides. `expr_native_type` is a read-only mirror of that decision and is
+    // deliberately conservative: any form it does not model → `Value` → demote (sound; at worst an
+    // unnecessary box). A fixpoint propagates demotions through chains (`y = y + s` once `s` is
+    // demoted). The map is name-flat across the whole program (a name demoted in one function is
+    // demoted in all) — still sound, and harmless to the perf gauntlet, where each kernel is its
+    // own program with unique accumulator names.
+    fn collect_demoted_numeric_locals(&self, stmts: &[Statement]) -> HashSet<String> {
+        // 1. Flat env: every annotated local/param name → its native `RustType`.
+        let mut env: HashMap<String, RustType> = HashMap::new();
+        Self::collect_annotated_types(stmts, &self.type_aliases, &mut env);
+        // 2. Every reassignment `(name, rhs)` anywhere in the program (incl. nested exprs/closures).
+        let mut reassigns: Vec<(String, &Expr)> = Vec::new();
+        Self::collect_reassignments_stmts(stmts, &mut reassigns);
+        // 3. Fixpoint: demote a `number` local whose any reassignment RHS isn't native `f64`.
+        let mut demoted: HashSet<String> = HashSet::new();
+        loop {
+            let mut changed = false;
+            for (name, rhs) in &reassigns {
+                if demoted.contains(name) {
+                    continue;
+                }
+                if env.get(name) == Some(&RustType::F64)
+                    && self.expr_native_type(rhs, &env) != RustType::F64
+                {
+                    demoted.insert(name.clone());
+                    env.insert(name.clone(), RustType::Value);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        demoted
+    }
+
+    /// Record every annotated `VarDecl`/param name → its native `RustType`, recursing through all
+    /// nested statements (loops, ifs, blocks, switch/try, function bodies). Flat; last write wins.
+    fn collect_annotated_types(
+        stmts: &[Statement],
+        aliases: &HashMap<String, RustType>,
+        env: &mut HashMap<String, RustType>,
+    ) {
+        for s in stmts {
+            match s {
+                Statement::VarDecl {
+                    name,
+                    type_ann: Some(ann),
+                    ..
+                } => {
+                    env.insert(
+                        name.to_string(),
+                        RustType::from_annotation_with_aliases(ann, aliases),
+                    );
+                }
+                Statement::Block { statements, .. } => {
+                    Self::collect_annotated_types(statements, aliases, env)
+                }
+                Statement::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::collect_annotated_types(std::slice::from_ref(then_branch), aliases, env);
+                    if let Some(e) = else_branch {
+                        Self::collect_annotated_types(std::slice::from_ref(e), aliases, env);
+                    }
+                }
+                Statement::While { body, .. }
+                | Statement::DoWhile { body, .. }
+                | Statement::ForOf { body, .. } => {
+                    Self::collect_annotated_types(std::slice::from_ref(body), aliases, env)
+                }
+                Statement::For { init, body, .. } => {
+                    if let Some(i) = init {
+                        Self::collect_annotated_types(std::slice::from_ref(i), aliases, env);
+                    }
+                    Self::collect_annotated_types(std::slice::from_ref(body), aliases, env);
+                }
+                Statement::FunDecl { params, body, .. } => {
+                    for p in params {
+                        if let FunParam::Simple(tp) = p {
+                            if let Some(ann) = &tp.type_ann {
+                                env.insert(
+                                    tp.name.to_string(),
+                                    RustType::from_annotation_with_aliases(ann, aliases),
+                                );
+                            }
+                        }
+                    }
+                    Self::collect_annotated_types(std::slice::from_ref(body), aliases, env);
+                }
+                Statement::Switch {
+                    cases,
+                    default_body,
+                    ..
+                } => {
+                    for (_, body) in cases {
+                        Self::collect_annotated_types(body, aliases, env);
+                    }
+                    if let Some(b) = default_body {
+                        Self::collect_annotated_types(b, aliases, env);
+                    }
+                }
+                Statement::Try {
+                    body,
+                    catch_body,
+                    finally_body,
+                    ..
+                } => {
+                    Self::collect_annotated_types(std::slice::from_ref(body), aliases, env);
+                    if let Some(b) = catch_body {
+                        Self::collect_annotated_types(std::slice::from_ref(b), aliases, env);
+                    }
+                    if let Some(b) = finally_body {
+                        Self::collect_annotated_types(std::slice::from_ref(b), aliases, env);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_reassignments_stmts<'a>(stmts: &'a [Statement], out: &mut Vec<(String, &'a Expr)>) {
+        for s in stmts {
+            Self::collect_reassignments_stmt(s, out);
+        }
+    }
+
+    /// Collect every `(name, rhs)` reassignment (`=`, compound `+=`, logical `||=`) reachable from
+    /// `s` — descending through nested statements and expressions (including closures).
+    fn collect_reassignments_stmt<'a>(s: &'a Statement, out: &mut Vec<(String, &'a Expr)>) {
+        match s {
+            Statement::Block { statements, .. } => Self::collect_reassignments_stmts(statements, out),
+            Statement::VarDecl { init: Some(e), .. } => Self::collect_reassignments_expr(e, out),
+            Statement::VarDeclDestructure { init, .. } => {
+                Self::collect_reassignments_expr(init, out)
+            }
+            Statement::ExprStmt { expr, .. } => Self::collect_reassignments_expr(expr, out),
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_reassignments_expr(cond, out);
+                Self::collect_reassignments_stmt(then_branch, out);
+                if let Some(e) = else_branch {
+                    Self::collect_reassignments_stmt(e, out);
+                }
+            }
+            Statement::While { cond, body, .. } => {
+                Self::collect_reassignments_expr(cond, out);
+                Self::collect_reassignments_stmt(body, out);
+            }
+            Statement::DoWhile { body, cond, .. } => {
+                Self::collect_reassignments_stmt(body, out);
+                Self::collect_reassignments_expr(cond, out);
+            }
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
+                if let Some(i) = init {
+                    Self::collect_reassignments_stmt(i, out);
+                }
+                if let Some(c) = cond {
+                    Self::collect_reassignments_expr(c, out);
+                }
+                if let Some(u) = update {
+                    Self::collect_reassignments_expr(u, out);
+                }
+                Self::collect_reassignments_stmt(body, out);
+            }
+            Statement::ForOf { iterable, body, .. } => {
+                Self::collect_reassignments_expr(iterable, out);
+                Self::collect_reassignments_stmt(body, out);
+            }
+            Statement::Return { value: Some(e), .. } => Self::collect_reassignments_expr(e, out),
+            Statement::Throw { value, .. } => Self::collect_reassignments_expr(value, out),
+            Statement::FunDecl { body, .. } => Self::collect_reassignments_stmt(body, out),
+            Statement::Switch {
+                expr,
+                cases,
+                default_body,
+                ..
+            } => {
+                Self::collect_reassignments_expr(expr, out);
+                for (g, body) in cases {
+                    if let Some(g) = g {
+                        Self::collect_reassignments_expr(g, out);
+                    }
+                    Self::collect_reassignments_stmts(body, out);
+                }
+                if let Some(b) = default_body {
+                    Self::collect_reassignments_stmts(b, out);
+                }
+            }
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
+                Self::collect_reassignments_stmt(body, out);
+                if let Some(b) = catch_body {
+                    Self::collect_reassignments_stmt(b, out);
+                }
+                if let Some(b) = finally_body {
+                    Self::collect_reassignments_stmt(b, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_reassignments_expr<'a>(e: &'a Expr, out: &mut Vec<(String, &'a Expr)>) {
+        match e {
+            Expr::Assign { name, value, .. }
+            | Expr::CompoundAssign { name, value, .. }
+            | Expr::LogicalAssign { name, value, .. } => {
+                out.push((name.to_string(), value.as_ref()));
+                Self::collect_reassignments_expr(value, out);
+            }
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                Self::collect_reassignments_expr(left, out);
+                Self::collect_reassignments_expr(right, out);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::TypeOf { operand, .. }
+            | Expr::Await { operand, .. } => Self::collect_reassignments_expr(operand, out),
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                Self::collect_reassignments_expr(callee, out);
+                for a in args {
+                    match a {
+                        CallArg::Expr(x) | CallArg::Spread(x) => {
+                            Self::collect_reassignments_expr(x, out)
+                        }
+                    }
+                }
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::collect_reassignments_expr(object, out);
+                if let MemberProp::Expr(p) = prop {
+                    Self::collect_reassignments_expr(p, out);
+                }
+            }
+            Expr::Index { object, index, .. } => {
+                Self::collect_reassignments_expr(object, out);
+                Self::collect_reassignments_expr(index, out);
+            }
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_reassignments_expr(cond, out);
+                Self::collect_reassignments_expr(then_branch, out);
+                Self::collect_reassignments_expr(else_branch, out);
+            }
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(x) | ArrayElement::Spread(x) => {
+                            Self::collect_reassignments_expr(x, out)
+                        }
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for p in props {
+                    match p {
+                        ObjectProp::KeyValue(_, v) => Self::collect_reassignments_expr(v, out),
+                        ObjectProp::Spread(x) => Self::collect_reassignments_expr(x, out),
+                    }
+                }
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                Self::collect_reassignments_expr(object, out);
+                Self::collect_reassignments_expr(value, out);
+            }
+            Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            } => {
+                Self::collect_reassignments_expr(object, out);
+                Self::collect_reassignments_expr(index, out);
+                Self::collect_reassignments_expr(value, out);
+            }
+            Expr::TemplateLiteral { exprs, .. } => {
+                for x in exprs {
+                    Self::collect_reassignments_expr(x, out);
+                }
+            }
+            Expr::ArrowFunction { body, .. } => match body {
+                ArrowBody::Expr(x) => Self::collect_reassignments_expr(x, out),
+                ArrowBody::Block(b) => Self::collect_reassignments_stmt(b, out),
+            },
+            _ => {}
+        }
+    }
+
+    /// Read-only mirror of `emit_typed_expr`'s native-type decision (no code generated), over a
+    /// flat `name → RustType` env. Returns `RustType::F64` only for forms that provably lower to a
+    /// native `f64`; everything else → `RustType::Value`. Conservative by construction: it never
+    /// claims `F64` where `emit_typed_expr` would box, so a numeric local is never wrongly kept
+    /// native (which would reintroduce the coercion panic).
+    fn expr_native_type(&self, e: &Expr, env: &HashMap<String, RustType>) -> RustType {
+        match e {
+            Expr::Literal { value, .. } => match value {
+                Literal::Number(_) => RustType::F64,
+                Literal::String(_) => RustType::String,
+                Literal::Bool(_) => RustType::Bool,
+                Literal::Null => RustType::Value,
+            },
+            Expr::Ident { name, .. } => env
+                .get(name.as_ref())
+                .filter(|t| t.is_native())
+                .cloned()
+                .unwrap_or(RustType::Value),
+            Expr::Binary {
+                left, op, right, ..
+            } => {
+                let lt = self.expr_native_type(left, env);
+                let rt = self.expr_native_type(right, env);
+                RustType::result_type_of_binop(*op, &lt, &rt).unwrap_or(RustType::Value)
+            }
+            // `vec[i]` where `vec` is a `number[]` (Vec<f64>) → the element type. A `Vec<f64>`
+            // can only hold numbers, so this never feeds a string into the accumulator.
+            Expr::Index {
+                object,
+                optional: false,
+                ..
+            } => {
+                if let Expr::Ident { name, .. } = object.as_ref() {
+                    if let Some(RustType::Vec(inner)) = env.get(name.as_ref()) {
+                        return (**inner).clone();
+                    }
+                }
+                RustType::Value
+            }
+            // `o.field` where `o` is a native struct local and `field` is a native field.
+            Expr::Member {
+                object,
+                prop: MemberProp::Name { name: prop_name, .. },
+                optional: false,
+                ..
+            } => {
+                if let Expr::Ident { name: var_name, .. } = object.as_ref() {
+                    if let Some(RustType::Named { fields, .. }) = env.get(var_name.as_ref()) {
+                        if let Some((_, field_ty)) =
+                            fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                        {
+                            if field_ty.is_native() {
+                                return field_ty.clone();
+                            }
+                        }
+                    }
+                }
+                RustType::Value
+            }
+            Expr::Call { callee, args, .. } => {
+                // M5 native fn (`fn f_native(..) -> f64`); requires all-positional args.
+                if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                    if self.native_fns.contains(fname.as_ref())
+                        && args.iter().all(|a| matches!(a, CallArg::Expr(_)))
+                    {
+                        return RustType::F64;
+                    }
+                }
+                // Single-arg `Math.<intrinsic>(x)` lowered to a direct `f64` method → number.
+                if let [CallArg::Expr(_)] = args.as_slice() {
+                    if let Expr::Member {
+                        object,
+                        prop: MemberProp::Name { name: method, .. },
+                        ..
+                    } = callee.as_ref()
+                    {
+                        if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                            && matches!(
+                                method.as_ref(),
+                                "sqrt" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil" | "exp"
+                                    | "trunc" | "log"
+                            )
+                        {
+                            return RustType::F64;
+                        }
+                    }
+                }
+                RustType::Value
+            }
+            // Unary, Conditional, etc. are not modelled by `emit_typed_expr` (it boxes them), so a
+            // store from one already coerces; treat as `Value` to match (→ demote if it feeds an
+            // accumulator). Sound and consistent.
+            _ => RustType::Value,
+        }
+    }
+
+    /// Names of top-level fns eligible for a parallel native `fn f_native(f64,..)->f64`:
+    /// non-async, every param `: number` (no default), `: number` return, and a native-safe
+    /// body (only block/if/return/expr-stmt over native exprs + calls to other eligible fns or
+    /// 1-arg Math intrinsics). Conservative fixpoint — bails on anything else.
+    fn collect_native_fns(statements: &[Statement]) -> std::collections::HashSet<String> {
+        use std::collections::HashSet;
+        let mut cand: HashSet<String> = HashSet::new();
+        let mut decls: Vec<(&str, &Vec<FunParam>, &Statement)> = Vec::new();
+        for s in statements {
+            if let Statement::FunDecl {
+                async_: false,
+                name,
+                params,
+                rest_param: None,
+                return_type,
+                body,
+                ..
+            } = s
+            {
+                let params_ok = params.iter().all(|p| {
+                    matches!(p, FunParam::Simple(tp)
+                        if tp.default.is_none()
+                            && tp.type_ann.as_ref().map(Self::ann_is_number).unwrap_or(false))
+                });
+                // Return: an annotated `: number`, OR unannotated with all-numeric returns
+                // (verified in the fixpoint via `returns_numeric`), so the native `-> f64` holds.
+                let ret_ok = match return_type {
+                    Some(rt) => Self::ann_is_number(rt),
+                    None => true,
+                };
+                if ret_ok && params_ok && !params.is_empty() {
+                    cand.insert(name.to_string());
+                    decls.push((name.as_ref(), params, body));
+                }
+            }
+        }
+        loop {
+            let mut remove: Vec<String> = Vec::new();
+            for &(name, params, body) in &decls {
+                if !cand.contains(name) {
+                    continue;
+                }
+                let pnames: HashSet<String> =
+                    params.iter().flat_map(|p| p.bound_names()).map(|n| n.to_string()).collect();
+                if !Self::native_safe_stmt(body, &pnames, &cand)
+                    || !Self::returns_numeric(body, &pnames, &cand)
+                {
+                    remove.push(name.to_string());
+                }
+            }
+            if remove.is_empty() {
+                break;
+            }
+            for n in remove {
+                cand.remove(&n);
+            }
+        }
+        cand
+    }
+
+    fn native_safe_stmt(
+        stmt: &Statement,
+        params: &std::collections::HashSet<String>,
+        cand: &std::collections::HashSet<String>,
+    ) -> bool {
+        match stmt {
+            Statement::Block { statements, .. } => {
+                statements.iter().all(|s| Self::native_safe_stmt(s, params, cand))
+            }
+            Statement::Return { value, .. } => {
+                value.as_ref().map_or(false, |e| Self::native_safe_expr(e, params, cand))
+            }
+            Statement::If { cond, then_branch, else_branch, .. } => {
+                Self::native_safe_expr(cond, params, cand)
+                    && Self::native_safe_stmt(then_branch, params, cand)
+                    && else_branch.as_ref().map_or(true, |e| Self::native_safe_stmt(e, params, cand))
+            }
+            Statement::ExprStmt { expr, .. } => Self::native_safe_expr(expr, params, cand),
+            _ => false,
+        }
+    }
+
+    fn native_safe_expr(
+        expr: &Expr,
+        params: &std::collections::HashSet<String>,
+        cand: &std::collections::HashSet<String>,
+    ) -> bool {
+        match expr {
+            Expr::Literal { value, .. } => matches!(value, Literal::Number(_) | Literal::Bool(_)),
+            Expr::Ident { name, .. } => params.contains(name.as_ref()),
+            Expr::Binary { left, op, right, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
+                        | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                        | BinOp::StrictEq | BinOp::StrictNe | BinOp::And | BinOp::Or
+                ) && Self::native_safe_expr(left, params, cand)
+                    && Self::native_safe_expr(right, params, cand)
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::Not)
+                    && Self::native_safe_expr(operand, params, cand)
+            }
+            Expr::Call { callee, args, .. } => {
+                let args_ok = args
+                    .iter()
+                    .all(|a| matches!(a, CallArg::Expr(e) if Self::native_safe_expr(e, params, cand)));
+                if !args_ok {
+                    return false;
+                }
+                match callee.as_ref() {
+                    Expr::Ident { name, .. } => cand.contains(name.as_ref()),
+                    Expr::Member { object, prop: MemberProp::Name { name: m, .. }, .. } => {
+                        matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                            && args.len() == 1
+                            && matches!(
+                                m.as_ref(),
+                                "sqrt" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil" | "exp"
+                                    | "trunc" | "log"
+                            )
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Every `return` in `s` yields a numeric-shaped value, so a native `-> f64` body is sound.
+    /// Lets an unannotated-but-numeric-returning fn (e.g. `function fib(n) {...}` after M4 typed
+    /// the param) become M5-eligible.
+    fn returns_numeric(
+        s: &Statement,
+        params: &std::collections::HashSet<String>,
+        cand: &std::collections::HashSet<String>,
+    ) -> bool {
+        match s {
+            Statement::Block { statements, .. } => {
+                statements.iter().all(|x| Self::returns_numeric(x, params, cand))
+            }
+            Statement::Return { value, .. } => {
+                value.as_ref().map_or(false, |e| Self::numeric_shaped(e, params, cand))
+            }
+            Statement::If { then_branch, else_branch, .. } => {
+                Self::returns_numeric(then_branch, params, cand)
+                    && else_branch.as_ref().map_or(true, |e| Self::returns_numeric(e, params, cand))
+            }
+            Statement::While { body, .. } | Statement::For { body, .. } => {
+                Self::returns_numeric(body, params, cand)
+            }
+            _ => true, // no return in this statement form
+        }
+    }
+
+    /// `e` evaluates to a number: built from numeric params, number literals, ARITHMETIC binops
+    /// (comparisons/logical yield bool → excluded), numeric unary, conditionals, and calls to
+    /// eligible native fns / 1-arg Math.
+    fn numeric_shaped(
+        e: &Expr,
+        params: &std::collections::HashSet<String>,
+        cand: &std::collections::HashSet<String>,
+    ) -> bool {
+        match e {
+            Expr::Literal { value: Literal::Number(_), .. } => true,
+            Expr::Ident { name, .. } => params.contains(name.as_ref()),
+            Expr::Binary { left, op, right, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
+                ) && Self::numeric_shaped(left, params, cand)
+                    && Self::numeric_shaped(right, params, cand)
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnaryOp::Neg | UnaryOp::Pos)
+                    && Self::numeric_shaped(operand, params, cand)
+            }
+            Expr::Conditional { then_branch, else_branch, .. } => {
+                Self::numeric_shaped(then_branch, params, cand)
+                    && Self::numeric_shaped(else_branch, params, cand)
+            }
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Ident { name, .. } => cand.contains(name.as_ref()),
+                Expr::Member { object, prop: MemberProp::Name { name: m, .. }, .. } => {
+                    matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                        && matches!(
+                            m.as_ref(),
+                            "sqrt" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil" | "exp"
+                                | "trunc" | "log"
+                        )
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Emit `fn name_native(p: f64, ...) -> f64 { ... }` (top level) for each eligible fn.
+    fn emit_native_fns(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
+        for s in statements {
+            if let Statement::FunDecl { name, params, body, .. } = s {
+                if !self.native_fns.contains(name.as_ref()) {
+                    continue;
+                }
+                let plist: Vec<String> = params
+                    .iter()
+                    .filter_map(|p| match p {
+                        FunParam::Simple(tp) => {
+                            Some(format!("mut {}: f64", Self::escape_ident(tp.name.as_ref())))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                self.type_context.push_scope();
+                for p in params {
+                    if let FunParam::Simple(tp) = p {
+                        self.type_context.define(tp.name.as_ref(), RustType::F64);
+                    }
+                }
+                self.writeln(&format!("fn {}_native({}) -> f64 {{", Self::escape_ident(name.as_ref()), plist.join(", ")));
+                self.indent += 1;
+                self.emit_native_fn_body(body)?;
+                // Functions that fall off the end without returning: JS yields undefined; an
+                // eligible numeric fn shouldn't, but emit a default to keep `-> f64` total.
+                self.writeln("0.0");
+                self.indent -= 1;
+                self.writeln("}");
+                self.type_context.pop_scope();
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_native_fn_body(&mut self, stmt: &Statement) -> Result<(), CompileError> {
+        match stmt {
+            Statement::Block { statements, .. } => {
+                for s in statements {
+                    self.emit_native_fn_body(s)?;
+                }
+            }
+            Statement::Return { value, .. } => {
+                let e = value.as_ref().expect("eligible return has a value");
+                let (code, ty) = self.emit_typed_expr(e)?;
+                let f = if ty == RustType::F64 {
+                    code
+                } else if ty == RustType::Value {
+                    RustType::F64.from_value_expr(&code)
+                } else {
+                    code
+                };
+                self.writeln(&format!("return {};", f));
+            }
+            Statement::If { cond, then_branch, else_branch, .. } => {
+                let (c, ct) = self.emit_typed_expr(cond)?;
+                let c_bool = match ct {
+                    RustType::Bool => c,
+                    RustType::F64 => format!("({} != 0.0)", c),
+                    _ => format!("{}.is_truthy()", c),
+                };
+                self.writeln(&format!("if {} {{", c_bool));
+                self.indent += 1;
+                self.emit_native_fn_body(then_branch)?;
+                self.indent -= 1;
+                if let Some(eb) = else_branch {
+                    self.writeln("} else {");
+                    self.indent += 1;
+                    self.emit_native_fn_body(eb)?;
+                    self.indent -= 1;
+                }
+                self.writeln("}");
+            }
+            Statement::ExprStmt { expr, .. } => {
+                let (code, _) = self.emit_typed_expr(expr)?;
+                self.writeln(&format!("{};", code));
+            }
+            _ => unreachable!("emit_native_fn_body: eligibility guarantees only handled statements"),
+        }
+        Ok(())
+    }
+
     fn emit_typed_expr(&mut self, expr: &Expr) -> Result<(String, RustType), CompileError> {
         match expr {
             // ── literals ─────────────────────────────────────────────────────────
             Expr::Literal { value, .. } => match value {
-                Literal::Number(n) => Ok((format!("{}_f64", n), RustType::F64)),
+                Literal::Number(n) => Ok((Self::f64_lit(*n), RustType::F64)),
                 Literal::String(s) => {
                     Ok((format!("{:?}.to_string()", s.as_ref()), RustType::String))
                 }
@@ -5255,6 +6391,117 @@ impl Codegen {
                 Ok((result, RustType::Value))
             }
 
+            // ── native Math intrinsics ───────────────────────────────────────────
+            // `Math.sqrt(x)` etc. with a native-f64 arg lowers to a direct f64 method,
+            // skipping the boxed value_call per element. Only methods whose Rust f64 op
+            // matches JS semantics (round half-up & sign(0) differ → left to the runtime).
+            Expr::Call { callee, args, .. } => {
+                // M5: direct call to an eligible native fn -> `name_native(<native args>)`.
+                if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                    if self.native_fns.contains(fname.as_ref()) {
+                        let mut argc: Vec<String> = Vec::with_capacity(args.len());
+                        let mut ok = true;
+                        for a in args {
+                            if let CallArg::Expr(e) = a {
+                                let (ac, at) = self.emit_typed_expr(e)?;
+                                argc.push(if at == RustType::Value {
+                                    RustType::F64.from_value_expr(&ac)
+                                } else {
+                                    ac
+                                });
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if ok {
+                            return Ok((
+                                format!(
+                                    "{}_native({})",
+                                    Self::escape_ident(fname.as_ref()),
+                                    argc.join(", ")
+                                ),
+                                RustType::F64,
+                            ));
+                        }
+                    }
+                }
+                if let [CallArg::Expr(arg_expr)] = args.as_slice() {
+                    if let Expr::Member {
+                        object,
+                        prop: MemberProp::Name { name: method, .. },
+                        ..
+                    } = callee.as_ref()
+                    {
+                        if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                        {
+                            let rust_m = match method.as_ref() {
+                                "sqrt" => Some("sqrt"),
+                                "sin" => Some("sin"),
+                                "cos" => Some("cos"),
+                                "tan" => Some("tan"),
+                                "abs" => Some("abs"),
+                                "floor" => Some("floor"),
+                                "ceil" => Some("ceil"),
+                                "exp" => Some("exp"),
+                                "trunc" => Some("trunc"),
+                                "log" => Some("ln"),
+                                _ => None,
+                            };
+                            if let Some(m) = rust_m {
+                                let (arg_code, arg_ty) = self.emit_typed_expr(arg_expr)?;
+                                let arg_f64 = if arg_ty == RustType::F64 {
+                                    arg_code
+                                } else if arg_ty == RustType::Value {
+                                    RustType::F64.from_value_expr(&arg_code)
+                                } else {
+                                    arg_code
+                                };
+                                return Ok((format!("({}).{}()", arg_f64, m), RustType::F64));
+                            }
+                        }
+                    }
+                }
+                let result = self.emit_expr(expr)?;
+                Ok((result, RustType::Value))
+            }
+
+            // ── native struct field access ───────────────────────────────────────
+            // `o.x` where `o` is a `RustType::Named` struct local and `x` is a native
+            // (f64/bool/string) field → a direct Rust field read with that native type,
+            // instead of boxing it through `Value::Number(o.x)`. This keeps `sum + o.x + o.y`
+            // entirely native (the object_sum hot loop) — see emit_expr's struct fast path,
+            // which returns the SAME access but wrapped in `Value::*` for the dynamic callers.
+            Expr::Member {
+                object,
+                prop: MemberProp::Name { name: prop_name, .. },
+                optional: false,
+                ..
+            } => {
+                if let Expr::Ident { name: var_name, .. } = object.as_ref() {
+                    let var_type = self.type_context.get_type(var_name.as_ref());
+                    if let RustType::Named { fields, .. } = &var_type {
+                        if let Some((_, field_ty)) =
+                            fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                        {
+                            if field_ty.is_native() {
+                                let var_esc = Self::escape_ident(var_name.as_ref()).into_owned();
+                                let field = crate::types::field_ident(prop_name.as_ref());
+                                let access = if self.refcell_wrapped_vars.contains(var_name.as_ref())
+                                {
+                                    format!("(*{}.borrow()).{}.clone()", var_esc, field)
+                                } else {
+                                    format!("{}.{}", var_esc, field)
+                                };
+                                return Ok((access, field_ty.clone()));
+                            }
+                        }
+                    }
+                }
+                let result = self.emit_expr(expr)?;
+                Ok((result, RustType::Value))
+            }
+
             // ── everything else: delegate to emit_expr ───────────────────────────
             _ => {
                 let result = self.emit_expr(expr)?;
@@ -5278,6 +6525,104 @@ impl Codegen {
         } else {
             Ok(format!("{}.is_truthy()", code))
         }
+    }
+
+    /// Fused `reduce`: if the callback is exactly `(acc, x) => acc OP x` (or `x OP acc`) with a
+    /// plain binop of the two params, emit a native fold over the array using the SAME runtime
+    /// Value op the closure body would — eliminating the per-element `value_call`. Sound (identical
+    /// Value semantics, including string `+`). Returns `None` to fall back to `array_reduce`.
+    fn try_fused_reduce(
+        &self,
+        args: &[CallArg],
+        obj_expr: &str,
+        initial: &str,
+    ) -> Result<Option<String>, CompileError> {
+        let Some(CallArg::Expr(Expr::ArrowFunction { params, body, .. })) = args.first() else {
+            return Ok(None);
+        };
+        let tishlang_ast::ArrowBody::Expr(be) = body else {
+            return Ok(None);
+        };
+        if params.len() != 2 {
+            return Ok(None);
+        }
+        let pname = |p: &FunParam| -> Option<std::sync::Arc<str>> {
+            match p {
+                FunParam::Simple(tp) if tp.default.is_none() => Some(std::sync::Arc::clone(&tp.name)),
+                _ => None,
+            }
+        };
+        let (Some(acc), Some(cur)) = (pname(&params[0]), pname(&params[1])) else {
+            return Ok(None);
+        };
+        let Expr::Binary {
+            left, op, right, span,
+        } = be.as_ref()
+        else {
+            return Ok(None);
+        };
+        let ident = |e: &Expr| -> Option<std::sync::Arc<str>> {
+            match e {
+                Expr::Ident { name, .. } => Some(std::sync::Arc::clone(name)),
+                _ => None,
+            }
+        };
+        let (Some(ln), Some(rn)) = (ident(left), ident(right)) else {
+            return Ok(None);
+        };
+        // Map each operand to `_acc` / `_x` in the body's actual order.
+        let (ls, rs) = if ln.as_ref() == acc.as_ref() && rn.as_ref() == cur.as_ref() {
+            ("_acc", "_x")
+        } else if ln.as_ref() == cur.as_ref() && rn.as_ref() == acc.as_ref() {
+            ("_x", "_acc")
+        } else {
+            return Ok(None);
+        };
+        let body_code = self.emit_binop(ls, *op, rs, *span)?;
+
+        // Native-f64 fast path for arithmetic reducers in the standard `acc OP x` order. We can't
+        // assume the array is numeric at compile time (`+` concatenates strings in JS), so emit a
+        // runtime all-numeric guard: if the init and every element are `Value::Number`, fold in raw
+        // f64 (no per-element `ops::add` call, no Result, no re-boxing); otherwise fall back to the
+        // boxed fold from the original init — identical semantics either way. This is the array_hof
+        // hot loop; a fully-unboxed `Vec<f64>` (packed arrays / task #13) would go further.
+        let nat_op = if (ls, rs) == ("_acc", "_x") {
+            match op {
+                BinOp::Add => Some("+="),
+                BinOp::Sub => Some("-="),
+                BinOp::Mul => Some("*="),
+                BinOp::Div => Some("/="),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(nat_op) = nat_op {
+            return Ok(Some(format!(
+                "{{ let _init0 = {init}; let _arr = ({obj}).clone(); \
+                 if let Value::Array(ref _a) = _arr {{ let _b = _a.borrow(); \
+                 let mut _accn: f64 = 0.0; let mut _ok = false; \
+                 if let Value::Number(_i0) = &_init0 {{ _accn = *_i0; _ok = true; }} \
+                 if _ok {{ for _el in _b.iter() {{ \
+                 if let Value::Number(_n) = _el {{ _accn {nat_op} *_n; }} else {{ _ok = false; break; }} }} }} \
+                 if _ok {{ Value::Number(_accn) }} \
+                 else {{ let mut _acc = _init0; for _el in _b.iter() {{ let _x = _el.clone(); _acc = {body}; }} _acc }} \
+                 }} else {{ _init0 }} }}",
+                init = initial,
+                obj = obj_expr,
+                nat_op = nat_op,
+                body = body_code
+            )));
+        }
+
+        Ok(Some(format!(
+            "{{ let mut _acc = {init}; let _arr = ({obj}).clone(); \
+             if let Value::Array(ref _a) = _arr {{ for _el in _a.borrow().iter() {{ \
+             let _x = _el.clone(); _acc = {body}; }} }} _acc }}",
+            init = initial,
+            obj = obj_expr,
+            body = body_code
+        )))
     }
 
     fn emit_binop(&self, l: &str, op: BinOp, r: &str, span: Span) -> Result<String, CompileError> {

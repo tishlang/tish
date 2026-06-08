@@ -86,6 +86,12 @@ fn combined_mvp_native_inputs_hash(paths: &[PathBuf]) -> u64 {
     if value_rs.is_file() {
         file_content_hash(&value_rs).hash(&mut h);
     }
+    // Inference (struct/param/return typing — M1/M4/M5) also drives native emission, so the
+    // native batch cache must invalidate when it changes too.
+    let infer_rs = workspace_root().join("crates/tish_compile/src/infer.rs");
+    if infer_rs.is_file() {
+        file_content_hash(&infer_rs).hash(&mut h);
+    }
     h.finish()
 }
 
@@ -142,7 +148,22 @@ fn file_content_hash(path: &Path) -> u64 {
 /// executing a binary still being written).
 fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
     let stem = path.file_stem().unwrap().to_string_lossy();
-    let hash = file_content_hash(path);
+    // The cache must invalidate when the COMPILER changes, not only the `.tish` source: cranelift/wasi
+    // (and native) bake the VM/codegen/runtime into the artifact, so a stale cached binary built before
+    // a VM fix would silently use old behaviour. The `tish` binary's mtime is the precise signal — any
+    // VM/compiler/runtime/codegen source edit rebuilds it. Mix it into the key alongside the file hash.
+    let bin_stamp = std::fs::metadata(bin)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let hash = {
+        let mut h = DefaultHasher::new();
+        file_content_hash(path).hash(&mut h);
+        bin_stamp.hash(&mut h);
+        h.finish()
+    };
     let hash8 = &format!("{:016x}", hash)[..8];
     let cache_base = integration_compile_cache_dir().join(backend);
     let _ = std::fs::create_dir_all(&cache_base);
@@ -473,27 +494,57 @@ fn test_async_await_run() {
     }
 }
 
-/// Run Promise and setTimeout module tests (`promise` needs `http`; `settimeout` needs `timers`, which `http` enables).
-/// Ignored: tishlang_eval::run() does not run the event loop.
+/// `promise.tish` — full Promise API including `new Promise(executor)`, `.then`, `.catch`,
+/// `all`, `race`, `any`, `allSettled`. Runs via the binary (vm + interp), asserts exact output.
+/// This was previously `#[ignore]`'d and only checked "doesn't error" — the old fixture also
+/// avoided `new Promise` entirely, hiding a bug where the executor never ran on the VM. Now
+/// CI-gated and output-asserting. vm ≡ interp.
 #[test]
-#[cfg(feature = "http")]
-#[ignore = "requires async runtime"]
-fn test_promise_and_settimeout() {
-    for name in ["promise", "settimeout"] {
-        let path = workspace_root()
-            .join("tests")
-            .join("modules")
-            .join(format!("{}.tish", name));
-        if path.exists() {
-            let source = std::fs::read_to_string(&path).unwrap();
-            let result = tishlang_eval::run(&source);
-            assert!(
-                result.is_ok(),
-                "Failed to run {}: {:?}",
-                path.display(),
-                result.err()
-            );
-        }
+fn test_promise_core() {
+    let bin = tish_bin();
+    if !bin.exists() {
+        return;
+    }
+    let path = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("promise.tish");
+    if !path.exists() {
+        return;
+    }
+    let expected = "\
+new Promise: new-ctor
+Promise sync resolve: 42
+Promise.resolve: 100
+Promise.reject caught: true
+.then chain: 4
+.catch: handled: fail
+Promise.all: 1 2 3
+Promise.race: fast
+Promise.any: any-win
+Promise.allSettled: fulfilled rejected reason
+Promise tests completed
+";
+    for backend_args in [vec!["run"], vec!["run", "--backend", "interp"]] {
+        let mut args = backend_args.clone();
+        args.push(path.to_string_lossy().to_string().leak());
+        let out = Command::new(&bin)
+            .args(&args)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish binary");
+        assert!(
+            out.status.success(),
+            "promise.tish ({:?}) failed: stderr={}",
+            backend_args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected,
+            "Promise output mismatch on backend {:?} — check new Promise/any/allSettled regressions",
+            backend_args
+        );
     }
 }
 
@@ -554,6 +605,109 @@ fn test_vm_date_now() {
             "tish run failed: stdout={} stderr={}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// `Promise.any`, `Promise.allSettled`, fixed `Promise.race` — cross-backend, network-free, CI-gated.
+/// vm ≡ interp exact match.
+#[test]
+fn test_promise_combinators() {
+    let bin = tish_bin();
+    if !bin.exists() {
+        return;
+    }
+    let path = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("promise_combinators.tish");
+    if !path.exists() {
+        return;
+    }
+    let expected = "\
+any first-fulfilled: win
+any all-rejected: [\"e1\",\"e2\"]
+allSettled[0] ok: 10
+allSettled[1] rejected: boom
+allSettled[2] ok: 30
+race winner: A
+any passthrough: 42
+";
+    for backend_args in [vec!["run"], vec!["run", "--backend", "interp"]] {
+        let mut args = backend_args.clone();
+        args.push(path.to_string_lossy().to_string().leak());
+        let out = Command::new(&bin)
+            .args(&args)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish binary");
+        assert!(
+            out.status.success(),
+            "promise_combinators ({:?}) failed: stderr={}",
+            backend_args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected,
+            "Promise.any/allSettled/race divergence on backend {:?}",
+            backend_args
+        );
+    }
+}
+
+/// Pins tish's DOCUMENTED async/Promise ordering (docs/concurrency-model.md) — network-free, so it
+/// runs in CI (unlike the `#[ignore]`'d network async tests). Asserts Promise.all order + non-promise
+/// passthrough, `.then` chaining, await-reject catch, Promise.all reject short-circuit, AND the
+/// deliberate blocking signature: a 0ms `setTimeout` queued before an `await` fires LAST (a JS event
+/// loop would interleave it earlier — tish's `await` blocks instead of yielding). NOT compared to node
+/// on purpose; this is tish's own contract. vm ≡ interp guards cross-backend agreement.
+#[test]
+fn test_async_ordering_documented() {
+    let bin = tish_bin();
+    if !bin.exists() {
+        return;
+    }
+    let path = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("async_ordering.tish");
+    if !path.exists() {
+        return;
+    }
+    // tish's documented, deliberately-non-JS ordering (timer drains last because await blocks).
+    let expected = "\
+1: sync-start
+2: await = 42
+2b: new Promise = ctor-ran
+3: all = a b c
+4: chain = 13
+5: caught = boom
+6: all-reject = rej
+7: post-await = after-timer-was-queued
+9: sync-end
+8: timer-fires-LAST (await did not yield)
+";
+    // Both the bytecode VM and the tree-walking interpreter must agree on this contract.
+    for backend_args in [vec!["run"], vec!["run", "--backend", "interp"]] {
+        let mut args = backend_args.clone();
+        args.push(path.to_string_lossy().to_string().leak());
+        let out = Command::new(&bin)
+            .args(&args)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish binary");
+        assert!(
+            out.status.success(),
+            "async_ordering ({:?}) failed: stderr={}",
+            backend_args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected,
+            "async ordering divergence on backend {:?} — the documented blocking-await/timer contract changed",
+            backend_args
         );
     }
 }
@@ -637,50 +791,69 @@ fn test_full_stack_parse() {
     }
 }
 
-/// Shared list of MVP test files used for static comparison (interpreter and native).
-const MVP_TEST_FILES: &[&str] = &[
-    "nested_loops.tish",
-    "scopes.tish",
-    "optional_braces.tish",
-    "optional_braces_braced.tish",
-    "tab_indent.tish",
-    "space_indent.tish",
-    "fn_any.tish",
-    "strict_equality.tish",
-    "arrays.tish",
-    "break_continue.tish",
-    "length.tish",
-    "objects.tish",
-    "symbol.tish",
-    "conditional.tish",
-    "switch.tish",
-    "do_while.tish",
-    "typeof.tish",
-    "inc_dec.tish",
-    "try_catch.tish",
-    "builtins.tish",
-    "exponentiation.tish",
-    "for_of.tish",
-    "bitwise.tish",
-    "math.tish",
-    "optional_chaining.tish",
-    "void.tish",
-    "rest_params.tish",
-    "json.tish",
-    "uri.tish",
-    "in_op.tish",
-    "arrow_functions.tish",
-    "template_literals.tish",
-    "compound_assign.tish",
-    "mutation.tish",
-    "string_methods.tish",
-    "array_methods.tish",
-    "object_methods.tish",
-    "types.tish",
-    "logical_assign.tish",
-    "spread.tish",
-    "fn_param_destructuring.tish",
+// (The hand-maintained `MVP_TEST_FILES` allowlist was removed in favor of `discover_core_tests()`
+// below — every `tests/core/*.tish` with a `.expected` now gets cross-backend coverage automatically.)
+
+/// Tests whose `.expected` embeds elapsed-ms timings (perf/stress/probe) — nondeterministic, so
+/// excluded from exact-output comparison. Run them via `just perf-*` instead.
+const TIMING_NONDETERMINISTIC: &[&str] = &[
+    "array_stress.tish",
+    "array_stress_01_large_array_creation.tish",
+    "array_stress_02_iteration.tish",
+    "array_stress_03_map_filter_reduce.tish",
+    "array_stress_04_chained.tish",
+    "array_stress_05_sorting.tish",
+    "array_stress_06_search.tish",
+    "array_stress_07_splice_slice.tish",
+    "array_stress_08_concat_spread.tish",
+    "array_stress_09_flat.tish",
+    "array_stress_10_objects.tish",
+    "basic_types.tish",
+    "benchmark_granular.tish",
+    "new_features_perf.tish",
+    "object_stress.tish",
+    "objects_perf.tish",
+    "string_methods_perf.tish",
+    "recursion_stress.tish",
+    "jit_probe.tish",
 ];
+
+/// Known cross-backend gaps skipped on the interp↔vm parity check, with reason + a tracking note.
+/// Each is a real divergence to fix, not a permanent exclusion.
+///
+/// Empty: the former `nested_complex.tish` gap (the VM's fixed 2-level `enclosing` lost captures
+/// >2 levels deep — `level4` couldn't see `level1`'s `a`) is fixed. The VM now captures the full
+/// lexical chain (`Vm.enclosing: Vec<ScopeMap>`), so closures nested arbitrarily deep resolve
+/// every ancestor's locals. interp↔vm parity holds for all discovered tests.
+const VM_PARITY_SKIP: &[&str] = &[];
+
+/// Discover every `tests/core/*.tish` that has a `.expected` sibling, minus timing-nondeterministic
+/// ones. Replaces the hand-maintained `MVP_TEST_FILES` allowlist so a new `*.tish` + `*.expected`
+/// gets cross-backend coverage automatically (the allowlist silently left ~38 tests running nowhere).
+fn discover_core_tests() -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(core_dir())
+        .expect("read tests/core")
+        .filter_map(|e| {
+            let p = e.ok()?.path();
+            if p.extension().map(|x| x == "tish").unwrap_or(false) && expected_path(&p).exists() {
+                Some(p.file_name()?.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        })
+        .filter(|n| !TIMING_NONDETERMINISTIC.contains(&n.as_str()))
+        .collect();
+    v.sort();
+    v
+}
+
+/// True if `name` has a sibling `.js` (so it can run through the Node oracle).
+fn has_js_sibling(name: &str) -> bool {
+    core_dir()
+        .join(name)
+        .with_extension("js")
+        .exists()
+}
 
 /// Run each .tish file with interpreter and compare stdout to static expected.
 /// Set REGENERATE_EXPECTED=1 to write .expected files from interpreter output (run once, then commit).
@@ -694,7 +867,7 @@ fn test_mvp_programs_interpreter() {
         bin.display()
     );
     let regenerate = std::env::var("REGENERATE_EXPECTED").as_deref() == Ok("1");
-    for name in MVP_TEST_FILES {
+    for name in &discover_core_tests() {
         let path = core_dir.join(name);
         if !path.exists() {
             continue;
@@ -741,7 +914,10 @@ fn test_mvp_programs_interp_vm_stdout_parity() {
         "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
-    for name in MVP_TEST_FILES {
+    for name in &discover_core_tests() {
+        if VM_PARITY_SKIP.contains(&name.as_str()) {
+            continue;
+        }
         let path = core_dir.join(name);
         if !path.exists() {
             continue;
@@ -792,7 +968,7 @@ fn test_mvp_programs_native() {
         bin.display()
     );
 
-    let mut paths: Vec<PathBuf> = MVP_TEST_FILES
+    let mut paths: Vec<PathBuf> = discover_core_tests()
         .iter()
         .filter_map(|name| {
             let p = core_dir.join(name);
@@ -899,26 +1075,14 @@ fn test_mvp_programs_native() {
     assert!(errors.is_empty(), "native failures:\n{}", errors.join("\n"));
 }
 
-/// Curated list: files that pass with Cranelift (some constructs cause stack-underflow; see docs/builtins-gap-analysis.md).
-const CRANELIFT_TEST_FILES: &[&str] = &[
-    "fn_any.tish",
-    "strict_equality.tish",
-    "switch.tish",
-    "do_while.tish",
-    "typeof.tish",
-    "try_catch.tish",
-    "json.tish",
-    "math.tish",
-    "builtins.tish",
-    "uri.tish",
-    "inc_dec.tish",
-    "exponentiation.tish",
-    "void.tish",
-    "rest_params.tish",
-    "arrow_functions.tish",
-    "array_methods.tish",
-    "types.tish",
-];
+// cranelift + wasi now use `discover_core_tests()` (full file discovery), like interp/vm/native —
+// the former curated `CRANELIFT_TEST_FILES` allowlist is gone. They embed the bytecode VM, which
+// has full interp↔vm parity (`VM_PARITY_SKIP` empty), so they inherit it: a disk-safe sweep confirmed
+// cranelift 66/66 and wasi 66/66. The old blocker was build COST — each backend build used to emit a
+// per-program `target/` (~2-5 GB) that accumulated to ~130 GB; now `tish_cranelift`/`tish_wasm` build
+// into a SHARED target dir so the deps compile once (610 MB / 85 MB total for the whole sweep, and a
+// repeat build is ~1 s). If a construct ever regresses on a backend, add it to a documented skip set
+// rather than re-introducing an allowlist.
 
 /// Compile each .tish file with Cranelift backend, run, and compare stdout to static expected (parallelized).
 #[test]
@@ -930,7 +1094,7 @@ fn test_mvp_programs_cranelift() {
         "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
-    let errors: Vec<String> = CRANELIFT_TEST_FILES
+    let errors: Vec<String> = discover_core_tests()
         .par_iter()
         .filter_map(|name| {
             let path = core_dir.join(name);
@@ -994,7 +1158,7 @@ fn test_mvp_programs_wasi() {
         "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
-    let errors: Vec<String> = CRANELIFT_TEST_FILES
+    let errors: Vec<String> = discover_core_tests()
         .par_iter()
         .filter_map(|name| {
             let path = core_dir.join(name);
@@ -1057,8 +1221,9 @@ fn test_mvp_programs_js() {
         "tish binary not found at {}. Run `cargo build -p tishlang` first.",
         bin.display()
     );
-    for name in MVP_TEST_FILES {
-        if JS_SKIP_FILES.contains(name) {
+    for name in &discover_core_tests() {
+        // intentional JS divergences + tests without a `.js` sibling can't use the Node oracle
+        if JS_SKIP_FILES.contains(&name.as_str()) || !has_js_sibling(name) {
             continue;
         }
         let path = core_dir.join(name);

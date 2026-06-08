@@ -12,6 +12,7 @@ use tishlang_builtins::helpers::make_error_value;
 pub use tishlang_builtins::symbol::symbol_object;
 pub use tishlang_core::ObjectMap;
 pub use tishlang_core::Value;
+pub use tishlang_core::ArcStr;
 /// Used by native codegen for `f()` / `obj()` dispatch (`Value::Function` or `__call` on objects).
 pub use tishlang_core::value_call;
 // Re-export the shared-mutable wrapper so the Rust code emitted by
@@ -110,6 +111,12 @@ pub fn string_substr(s: &Value, start: &Value, length: &Value) -> Value {
     string_substr_impl(s, start, length)
 }
 pub fn string_split(s: &Value, sep: &Value) -> Value {
+    // A RegExp separator routes to the regex splitter (matches string_replace's regex handling
+    // and the interpreter/VM), so `"a1b2c".split(RegExp("\\d",""))` works on the rust backend.
+    #[cfg(feature = "regex")]
+    if matches!(sep, Value::RegExp(_)) {
+        return string_split_regex(s, sep, None);
+    }
     string_split_impl(s, sep)
 }
 pub fn string_starts_with(s: &Value, search: &Value) -> Value {
@@ -148,16 +155,12 @@ pub fn string_last_index_of(s: &Value, search: &Value, position: &Value) -> Valu
 }
 
 /// Number.prototype.toFixed(digits) - format number with fixed decimal places (0-20)
+///
+/// Delegates to the single source of truth in `tishlang_builtins::number` so the rust
+/// backend, the bytecode VM, and the interpreter stay byte-identical. See
+/// `tish/docs/full-backend-parity-plan.md` (Workstream A).
 pub fn number_to_fixed(n: &Value, digits: &Value) -> Value {
-    let num = match n {
-        Value::Number(x) => *x,
-        _ => f64::NAN,
-    };
-    let d = match digits {
-        Value::Number(x) => (*x as i32).clamp(0, 20),
-        _ => 0,
-    };
-    Value::String(format!("{:.*}", d as usize, num).into())
+    tishlang_builtins::number::to_fixed(n, digits)
 }
 
 /// Operators module for compound assignment operations
@@ -175,20 +178,26 @@ pub mod ops {
                 Ok(Value::String(s.into()))
             }
             (Value::String(a), b) => {
-                let b_str = b.to_display_string();
+                let b_str = b.to_js_string();
                 let mut s = String::with_capacity(a.len() + b_str.len());
                 s.push_str(a);
                 s.push_str(&b_str);
                 Ok(Value::String(s.into()))
             }
             (a, Value::String(b)) => {
-                let a_str = a.to_display_string();
+                let a_str = a.to_js_string();
                 let mut s = String::with_capacity(a_str.len() + b.len());
                 s.push_str(&a_str);
                 s.push_str(b);
                 Ok(Value::String(s.into()))
             }
-            _ => Err(format!("Cannot add {:?} and {:?}", left, right).into()),
+            // Neither operand is a string here ⇒ numeric coercion, matching the VM's `eval_binop`
+            // (`as_number().unwrap_or(NaN)`): a null/bool/object operand (e.g. an out-of-bounds array
+            // read) coerces to NaN, so `number + null` is NaN — NOT an error that the codegen's
+            // `.unwrap_or(Value::Null)` would silently turn into `null` (the old rust-AOT divergence).
+            (a, b) => Ok(Value::Number(
+                a.as_number().unwrap_or(f64::NAN) + b.as_number().unwrap_or(f64::NAN),
+            )),
         }
     }
 
@@ -196,7 +205,10 @@ pub mod ops {
     pub fn sub(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a - b)),
-            _ => Err(format!("Cannot subtract {:?} from {:?}", right, left).into()),
+            // VM-parity numeric coercion (null/non-number → NaN), see `add`.
+            (a, b) => Ok(Value::Number(
+                a.as_number().unwrap_or(f64::NAN) - b.as_number().unwrap_or(f64::NAN),
+            )),
         }
     }
 
@@ -204,7 +216,10 @@ pub mod ops {
     pub fn mul(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a * b)),
-            _ => Err(format!("Cannot multiply {:?} and {:?}", left, right).into()),
+            // VM-parity numeric coercion (null/non-number → NaN), see `add`.
+            (a, b) => Ok(Value::Number(
+                a.as_number().unwrap_or(f64::NAN) * b.as_number().unwrap_or(f64::NAN),
+            )),
         }
     }
 
@@ -212,7 +227,10 @@ pub mod ops {
     pub fn div(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a / b)),
-            _ => Err(format!("Cannot divide {:?} by {:?}", left, right).into()),
+            // VM-parity numeric coercion (null/non-number → NaN), see `add`.
+            (a, b) => Ok(Value::Number(
+                a.as_number().unwrap_or(f64::NAN) / b.as_number().unwrap_or(f64::NAN),
+            )),
         }
     }
 
@@ -221,7 +239,7 @@ pub mod ops {
     pub fn lt(left: &Value, right: &Value) -> Value {
         let b = match (left, right) {
             (Value::Number(a), Value::Number(b)) => a < b,
-            (Value::String(a), Value::String(b)) => a.as_ref() < b.as_ref(),
+            (Value::String(a), Value::String(b)) => a.as_str() < b.as_str(),
             _ => false,
         };
         Value::Bool(b)
@@ -231,7 +249,7 @@ pub mod ops {
     pub fn le(left: &Value, right: &Value) -> Value {
         let b = match (left, right) {
             (Value::Number(a), Value::Number(b)) => a <= b,
-            (Value::String(a), Value::String(b)) => a.as_ref() <= b.as_ref(),
+            (Value::String(a), Value::String(b)) => a.as_str() <= b.as_str(),
             _ => false,
         };
         Value::Bool(b)
@@ -241,7 +259,7 @@ pub mod ops {
     pub fn gt(left: &Value, right: &Value) -> Value {
         let b = match (left, right) {
             (Value::Number(a), Value::Number(b)) => a > b,
-            (Value::String(a), Value::String(b)) => a.as_ref() > b.as_ref(),
+            (Value::String(a), Value::String(b)) => a.as_str() > b.as_str(),
             _ => false,
         };
         Value::Bool(b)
@@ -251,7 +269,7 @@ pub mod ops {
     pub fn ge(left: &Value, right: &Value) -> Value {
         let b = match (left, right) {
             (Value::Number(a), Value::Number(b)) => a >= b,
-            (Value::String(a), Value::String(b)) => a.as_ref() >= b.as_ref(),
+            (Value::String(a), Value::String(b)) => a.as_str() >= b.as_str(),
             _ => false,
         };
         Value::Bool(b)
@@ -261,7 +279,10 @@ pub mod ops {
     pub fn modulo(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         match (left, right) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a % b)),
-            _ => Err(format!("Cannot modulo {:?} by {:?}", left, right).into()),
+            // VM-parity numeric coercion (null/non-number → NaN), see `add`.
+            (a, b) => Ok(Value::Number(
+                a.as_number().unwrap_or(f64::NAN) % b.as_number().unwrap_or(f64::NAN),
+            )),
         }
     }
 }
@@ -273,6 +294,7 @@ use tishlang_builtins::globals::{
     object_assign as builtins_object_assign, object_entries as builtins_object_entries,
     object_from_entries as builtins_object_from_entries, object_keys as builtins_object_keys,
     object_values as builtins_object_values,
+    string_convert as builtins_string_convert,
     string_from_char_code as builtins_string_from_char_code,
 };
 use tishlang_core::{json_parse as core_json_parse, json_stringify as core_json_stringify};
@@ -321,21 +343,40 @@ pub mod json {
     }
 }
 
-/// Error type for Tish throw/catch.
+/// Error type for Tish throw/catch + non-local control flow (used to model `return`/`throw`
+/// escaping `try`/`finally` in the Rust backend, which has no native exceptions).
 #[derive(Debug, Clone)]
 pub enum TishError {
+    /// A JS `throw` — catchable by `catch`.
     Throw(Value),
+    /// A JS `return value` that must escape an enclosing `try`/`finally` and unwind to the
+    /// function boundary (running each `finally` on the way out). Never caught by `catch`.
+    Return(Value),
 }
 
 impl fmt::Display for TishError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TishError::Throw(v) => write!(f, "{}", v.to_display_string()),
+            TishError::Return(v) => write!(f, "return {}", v.to_display_string()),
         }
     }
 }
 
 impl std::error::Error for TishError {}
+
+/// Function-boundary unwind: convert a completion that escaped a function body's `Result`-closure
+/// back into the function's `Value`. A `return v` yields `v`; an uncaught `throw` panics (matching
+/// the behavior of a throw with no enclosing `try`); any other error panics.
+pub fn fn_unwind(e: Box<dyn std::error::Error>) -> Value {
+    match e.downcast::<TishError>() {
+        Ok(te) => match *te {
+            TishError::Return(v) => v,
+            TishError::Throw(v) => panic!("uncaught throw: {}", v.to_display_string()),
+        },
+        Err(orig) => panic!("error in native Tish: {:?}", orig),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum LogLevel {
@@ -513,6 +554,12 @@ pub fn string_from_char_code(args: &[Value]) -> Value {
     builtins_string_from_char_code(args)
 }
 
+/// `String(value)` as a function (JS `ToString`). Wired into the codegen `String`
+/// global as `__call` so compiled `String(x)` matches the VM/interp.
+pub fn string_convert(args: &[Value]) -> Value {
+    builtins_string_convert(args)
+}
+
 #[cfg(feature = "process")]
 pub fn process_exit(args: &[Value]) -> Value {
     let code = args
@@ -656,26 +703,53 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
             }
         }
         #[cfg(feature = "regex")]
-        Value::RegExp(re) => {
-            let re = re.clone();
-            if key == "exec" {
+        Value::RegExp(re) => match key {
+            "exec" => {
+                let rc = re.clone();
                 Value::native(move |args: &[Value]| {
                     let input = args.first().unwrap_or(&Value::Null);
-                    regexp_exec(&Value::RegExp(re.clone()), input)
+                    regexp_exec(&Value::RegExp(rc.clone()), input)
                 })
-            } else if key == "test" {
-                Value::native(move |args: &[Value]| {
-                    let input = args.first().unwrap_or(&Value::Null);
-                    regexp_test(&Value::RegExp(re.clone()), input)
-                })
-            } else {
-                Value::Null
             }
-        }
+            "test" => {
+                let rc = re.clone();
+                Value::native(move |args: &[Value]| {
+                    let input = args.first().unwrap_or(&Value::Null);
+                    regexp_test(&Value::RegExp(rc.clone()), input)
+                })
+            }
+            // Properties — mirror the interpreter + bytecode VM so all backends agree.
+            "source" => Value::String(re.borrow().source.clone().into()),
+            "flags" => Value::String(re.borrow().flags_string().into()),
+            "lastIndex" => Value::Number(re.borrow().last_index as f64),
+            "global" => Value::Bool(re.borrow().flags.global),
+            "ignoreCase" => Value::Bool(re.borrow().flags.ignore_case),
+            "multiline" => Value::Bool(re.borrow().flags.multiline),
+            "dotAll" => Value::Bool(re.borrow().flags.dot_all),
+            "unicode" => Value::Bool(re.borrow().flags.unicode),
+            "sticky" => Value::Bool(re.borrow().flags.sticky),
+            _ => Value::Null,
+        },
         Value::Opaque(o) => o
             .get_method(key)
             .map(Value::Function)
             .unwrap_or(Value::Null),
+        // Promise instance methods (`.then`/`.catch`), bound to this promise. Returning a
+        // callable here makes the rust backend match the VM family (interp/vm/cranelift/wasi),
+        // which expose these via `GetMember`. Both `p.then(cb)` (member) and `p["catch"](cb)`
+        // (index, used because `catch` is reserved) route through here / `get_index`.
+        #[cfg(any(feature = "http", feature = "promise"))]
+        Value::Promise(p) => match key {
+            "then" => {
+                let pc = p.clone();
+                Value::native(move |args: &[Value]| promise_instance_then(&pc, args))
+            }
+            "catch" => {
+                let pc = p.clone();
+                Value::native(move |args: &[Value]| promise_instance_catch(&pc, args))
+            }
+            _ => Value::Null,
+        },
         _ => Value::Null,
     }
 }
@@ -691,6 +765,13 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
             arr.borrow().get(idx).cloned().unwrap_or(Value::Null)
         }
         Value::Object(_) => tishlang_core::object_get(obj, index).unwrap_or(Value::Null),
+        // `promise["then"|"catch"]` — string-keyed access mirrors `get_prop` (bracket form
+        // is required for `catch`, a reserved word). Keeps the rust backend on par with the VM.
+        #[cfg(any(feature = "http", feature = "promise"))]
+        Value::Promise(_) => match index {
+            Value::String(k) => get_prop(obj, k.as_str()),
+            _ => Value::Null,
+        },
         _ => Value::Null,
     }
 }
@@ -742,7 +823,7 @@ pub fn in_operator(key: &Value, obj: &Value) -> Value {
         Value::Object(_) => Value::Bool(tishlang_core::object_has(obj, key)),
         Value::Array(arr) => {
             let key_str: Arc<str> = match key {
-                Value::String(s) => Arc::clone(s),
+                Value::String(s) => Arc::from(s.as_str()),
                 Value::Number(n) => n.to_string().into(),
                 _ => return Value::Bool(false),
             };
@@ -868,7 +949,7 @@ pub fn http_serve_per_worker(
     };
     let factory: tishlang_core::NativeFn = factory;
     http::serve_per_worker(args, move |worker_id| {
-        let handler_val = factory(&[Value::Number(worker_id as f64)]);
+        let handler_val = factory.call(&[Value::Number(worker_id as f64)]);
         match handler_val {
             Value::Function(f) => f,
             _ => panic!(
@@ -885,7 +966,10 @@ pub use timers::{
 };
 
 #[cfg(any(feature = "http", feature = "promise"))]
-pub use promise::{await_promise, promise_instance_catch, promise_instance_then, promise_object};
+pub use promise::{
+    await_promise, await_promise_throw, promise_instance_catch, promise_instance_then,
+    promise_object, promise_spawn as promise_spawn_value,
+};
 
 #[cfg(feature = "http")]
 pub use native_promise::{fetch_all_promise, fetch_async_promise, fetch_promise};
@@ -1040,7 +1124,7 @@ pub fn string_split_regex(s: &Value, separator: &Value, limit: Option<usize>) ->
         }
         Value::String(sep) => {
             let parts: Vec<Value> = input
-                .splitn(max, sep.as_ref())
+                .splitn(max, sep.as_str())
                 .map(|s| Value::String(s.into()))
                 .collect();
             Value::Array(VmRef::new(parts))
@@ -1134,7 +1218,7 @@ fn string_replace_regex_or_callback(s: &Value, search: &Value, replacement: &Val
             args.push(Value::Number(char_index as f64));
             args.push(Value::String(input.into()));
 
-            let repl_val = cb(&args);
+            let repl_val = cb.call(&args);
             let repl_str = repl_val.to_display_string();
             result.push_str(&input[last_end..byte_start]);
             result.push_str(&repl_str);
