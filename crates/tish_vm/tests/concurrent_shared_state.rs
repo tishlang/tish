@@ -3,7 +3,7 @@
 //! ## What this guards
 //!
 //! Under `send-values` (forced on by the `http` feature), `serve(port, handler)` runs the handler
-//! closure — an `Arc<dyn Fn(&[Value]) -> Value + Send + Sync>` — **directly on each accept thread**
+//! closure — a `NativeFn` (`Arc<dyn Callable>`, `Send + Sync`) — **directly on each accept thread**
 //! (`tish_runtime::http::worker_loop_direct`). So N concurrent requests execute the SAME handler in
 //! parallel, all sharing the captured module scope through `Arc<Mutex>` (`VmRef`). A handler that
 //! mutates a module-level `let` (a request counter / cache / rate-limiter) therefore has many threads
@@ -26,10 +26,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tishlang_bytecode::compile;
-use tishlang_core::Value;
+use tishlang_core::{NativeFn, Value};
 use tishlang_vm::Vm;
 
-type Handler = Arc<dyn Fn(&[Value]) -> Value + Send + Sync>;
+// `Value::Function` holds a `NativeFn` (= `Arc<dyn Callable>`, `Callable: Send + Sync` under
+// send-values); invoke a handler via the trait-object method `.call(args)`.
+type Handler = NativeFn;
 
 /// Compile + run `src`, then pull a function it stored in a global back out.
 fn export(vm: &Vm, name: &str) -> Handler {
@@ -93,7 +95,7 @@ stats = getStats
         let done = Arc::clone(&done);
         handles.push(std::thread::spawn(move || {
             for i in 0..ITERS {
-                let resp = h(&[Value::Number((t * ITERS + i) as f64)]);
+                let resp = h.call(&[Value::Number((t * ITERS + i) as f64)]);
                 assert!(matches!(resp, Value::Object(_)), "handler must return a response object");
                 done.fetch_add(1, Ordering::Relaxed);
             }
@@ -121,7 +123,7 @@ stats = getStats
     }
 
     // All calls returned without hanging. Read the shared counters back.
-    let s = stats(&[]);
+    let s = stats.call(&[]);
     let served = read_num(&s, "served");
     let max_active = read_num(&s, "maxActive");
     let active = read_num(&s, "active");
