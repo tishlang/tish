@@ -24,6 +24,20 @@ pub enum TypeAnnotation {
     },
     /// Union type: T1 | T2
     Union(Vec<TypeAnnotation>),
+    /// Tuple type: [T1, T2, ...]
+    Tuple(Vec<TypeAnnotation>),
+    /// Literal type: "foo" | 42 | true (a value used as a type)
+    Literal(TypeLiteral),
+    /// Intersection type: T1 & T2 (e.g. `interface X extends Y { … }` → `Y & { … }`)
+    Intersection(Vec<TypeAnnotation>),
+}
+
+/// A literal value used in type position (`"a"`, `42`, `true`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeLiteral {
+    Str(Arc<str>),
+    Num(f64),
+    Bool(bool),
 }
 
 /// Function parameter with optional type annotation and default value.

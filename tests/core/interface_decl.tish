@@ -1,0 +1,15 @@
+// `interface` declarations: structural object types that lower to native structs (same as
+// `type X = {…}`) and participate in the gradual type checker's structural matching.
+interface Point { x: number, y: number }
+
+let p: Point = { x: 3, y: 4 }
+console.log(p.x)
+console.log(p.y)
+
+fn manhattan(a: Point): number { return a.x + a.y }
+console.log(manhattan(p))
+
+let pts: Point[] = [{ x: 1, y: 1 }, { x: 2, y: 3 }]
+let sum: number = 0
+for (let q of pts) { sum = sum + manhattan(q) }
+console.log(sum)

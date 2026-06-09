@@ -545,6 +545,9 @@ pub(crate) struct BuildArgs {
     /// For `--target js` project builds: emit `OUTPUT.js.map` and `//# sourceMappingURL=…` so JS/TS tools can jump to original `.tish` (implies `--no-optimize` for that build).
     #[arg(long, help_heading = "Options")]
     pub source_map: bool,
+    /// Run the gradual type checker: `warn` prints `line:col` type diagnostics; `error` also fails the build on them. (Equivalent to setting `TISH_CHECK`.)
+    #[arg(long, value_name = "MODE", help_heading = "Options")]
+    pub check: Option<String>,
     /// Entry `.tish` file (or `.js` where supported).
     #[arg(required = true, value_name = "FILE", help_heading = "Arguments")]
     pub file: String,

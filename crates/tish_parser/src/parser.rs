@@ -55,18 +55,46 @@ use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
     DestructProp, ExportDeclaration, Expr, FunParam, ImportSpecifier, JsxAttrValue, JsxChild,
     JsxProp, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement,
-    TypeAnnotation, TypedParam, UnaryOp,
+    TypeAnnotation, TypeLiteral, TypedParam, UnaryOp,
 };
 use tishlang_lexer::{Token, TokenKind};
 
 pub struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    /// Outstanding `>` owed to enclosing generic-arg lists after a `>>` (`Shr`) token was split,
+    /// so nested `Array<Array<T>>` closes correctly (tish lexes `>>` as one token).
+    gt_debt: u32,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            gt_debt: 0,
+        }
+    }
+
+    /// Close one generic-arg `>`: use a previously-split `>>` debt, consume a `>`, or split a
+    /// `>>` (consuming it and owing one `>` to the parent). Returns false if there's no closer.
+    fn try_close_angle(&mut self) -> bool {
+        if self.gt_debt > 0 {
+            self.gt_debt -= 1;
+            return true;
+        }
+        match self.peek_kind() {
+            Some(TokenKind::Gt) => {
+                self.advance();
+                true
+            }
+            Some(TokenKind::Shr) => {
+                self.advance();
+                self.gt_debt += 1;
+                true
+            }
+            _ => false,
+        }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -173,6 +201,7 @@ impl<'a> Parser<'a> {
             TokenKind::Export => self.parse_export()?,
             TokenKind::Type => self.parse_type_alias()?,
             TokenKind::Declare => self.parse_declare()?,
+            TokenKind::Interface => self.parse_interface()?,
             _ => {
                 let expr = self.parse_expr()?;
                 let span_end = expr.span().end;
@@ -480,28 +509,96 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse a type annotation (number, string, T[], {a: T}, etc.)
-    fn parse_type_annotation(&mut self) -> Result<TypeAnnotation, String> {
-        let base = self.parse_type_primary()?;
-
-        // Check for array suffix: T[]
-        if matches!(self.peek_kind(), Some(TokenKind::LBracket)) {
-            self.advance(); // [
-            self.expect(TokenKind::RBracket)?; // ]
-            return Ok(TypeAnnotation::Array(Box::new(base)));
+    /// Consume a generic type-parameter list `<T, U, …>` on a `fn` / `type` declaration. The
+    /// parameter names are erased: inside the body they act as unknown type names (→ `Value`), so
+    /// generic code type-checks gradually and runs correctly (boxed). (`extends` not yet supported.)
+    fn skip_type_params(&mut self) -> Result<(), String> {
+        if matches!(self.peek_kind(), Some(TokenKind::Lt)) {
+            self.advance(); // <
+            while !matches!(self.peek_kind(), Some(TokenKind::Gt)) {
+                self.expect(TokenKind::Ident)?;
+                if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.expect(TokenKind::Gt)?; // >
         }
+        Ok(())
+    }
 
-        // Check for union: T | U
+    /// Parse a generic type-argument list `<T, U, …>` on a type reference (`Array<number>`,
+    /// `Map<string, number>`). Nested `Array<Array<T>>` works because tish has no `>>` token.
+    fn parse_type_args(&mut self) -> Result<Vec<TypeAnnotation>, String> {
+        self.expect(TokenKind::Lt)?; // <
+        let mut args = Vec::new();
+        if !self.try_close_angle() {
+            loop {
+                args.push(self.parse_type_annotation()?);
+                if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+            if !self.try_close_angle() {
+                return Err("expected `>` to close type arguments".to_string());
+            }
+        }
+        Ok(args)
+    }
+
+    /// Parse a type annotation (number, string, T[], T?, {a: T}, A | B, A & B, Array<T>, etc.)
+    fn parse_type_annotation(&mut self) -> Result<TypeAnnotation, String> {
+        let base = self.parse_type_intersection()?;
+
+        // Union: T | U | ... (binds looser than `&`)
         if matches!(self.peek_kind(), Some(TokenKind::BitOr)) {
             let mut types = vec![base];
             while matches!(self.peek_kind(), Some(TokenKind::BitOr)) {
                 self.advance(); // |
-                types.push(self.parse_type_primary()?);
+                types.push(self.parse_type_intersection()?);
             }
             return Ok(TypeAnnotation::Union(types));
         }
 
         Ok(base)
+    }
+
+    /// `A & B & …` intersection (binds tighter than `|`).
+    fn parse_type_intersection(&mut self) -> Result<TypeAnnotation, String> {
+        let base = self.parse_type_postfix()?;
+        if matches!(self.peek_kind(), Some(TokenKind::BitAnd)) {
+            let mut types = vec![base];
+            while matches!(self.peek_kind(), Some(TokenKind::BitAnd)) {
+                self.advance(); // &
+                types.push(self.parse_type_postfix()?);
+            }
+            return Ok(TypeAnnotation::Intersection(types));
+        }
+        Ok(base)
+    }
+
+    /// A primary type plus any postfix `[]` (array) and `?` (optional, `T? === T | null`),
+    /// chained: `T[]`, `T[][]`, `T?`, `T?[]`, …
+    fn parse_type_postfix(&mut self) -> Result<TypeAnnotation, String> {
+        let mut t = self.parse_type_primary()?;
+        loop {
+            match self.peek_kind() {
+                Some(TokenKind::LBracket) => {
+                    self.advance(); // [
+                    self.expect(TokenKind::RBracket)?; // ]
+                    t = TypeAnnotation::Array(Box::new(t));
+                }
+                Some(TokenKind::Question) => {
+                    self.advance(); // ?
+                    t = TypeAnnotation::Union(vec![t, TypeAnnotation::Simple("null".into())]);
+                }
+                _ => break,
+            }
+        }
+        Ok(t)
     }
 
     /// Parse a primary type (identifier, object, or function type)
@@ -510,6 +607,18 @@ impl<'a> Parser<'a> {
             Some(TokenKind::Ident) => {
                 let tok = self.advance().ok_or("Expected type name")?;
                 let name = tok.literal.clone().ok_or("Expected type name")?;
+                // Generic reference `Name<Args>`: `Array<T>` desugars to the native `T[]`; other
+                // generic refs erase their args (the base name resolves to its alias, whose type
+                // params already act as unknown -> `Value`).
+                if matches!(self.peek_kind(), Some(TokenKind::Lt)) {
+                    let args = self.parse_type_args()?;
+                    if name.as_ref() == "Array" && args.len() == 1 {
+                        return Ok(TypeAnnotation::Array(Box::new(
+                            args.into_iter().next().unwrap(),
+                        )));
+                    }
+                    return Ok(TypeAnnotation::Simple(name));
+                }
                 Ok(TypeAnnotation::Simple(name))
             }
             Some(TokenKind::Type | TokenKind::Declare) => {
@@ -588,6 +697,39 @@ impl<'a> Parser<'a> {
                     returns: Box::new(returns),
                 })
             }
+            // Tuple type: [T1, T2, ...]
+            Some(TokenKind::LBracket) => {
+                self.advance(); // [
+                let mut elems = Vec::new();
+                while !matches!(self.peek_kind(), Some(TokenKind::RBracket)) {
+                    elems.push(self.parse_type_annotation()?);
+                    if !matches!(self.peek_kind(), Some(TokenKind::RBracket)) {
+                        self.expect(TokenKind::Comma)?;
+                    }
+                }
+                self.expect(TokenKind::RBracket)?;
+                Ok(TypeAnnotation::Tuple(elems))
+            }
+            // Literal types: "foo", 42, true, false
+            Some(TokenKind::String) => {
+                let tok = self.advance().ok_or("Expected string literal type")?;
+                let s = tok.literal.clone().ok_or("Expected string literal")?;
+                Ok(TypeAnnotation::Literal(TypeLiteral::Str(s)))
+            }
+            Some(TokenKind::Number) => {
+                let tok = self.advance().ok_or("Expected number literal type")?;
+                let s = tok.literal.as_ref().ok_or("Expected number literal")?;
+                let n: f64 = s.parse().map_err(|_| format!("Invalid number: {}", s))?;
+                Ok(TypeAnnotation::Literal(TypeLiteral::Num(n)))
+            }
+            Some(TokenKind::True) => {
+                self.advance();
+                Ok(TypeAnnotation::Literal(TypeLiteral::Bool(true)))
+            }
+            Some(TokenKind::False) => {
+                self.advance();
+                Ok(TypeAnnotation::Literal(TypeLiteral::Bool(false)))
+            }
             _ => Err("Expected type annotation".to_string()),
         }
     }
@@ -600,6 +742,7 @@ impl<'a> Parser<'a> {
             end: name_tok.span.end,
         };
         let name = name_tok.literal.clone().ok_or("Expected function name")?;
+        self.skip_type_params()?; // generic `fn f<T, U>(…)` — type params erased
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::with_capacity(4);
         let mut rest_param = None;
@@ -695,8 +838,54 @@ impl<'a> Parser<'a> {
             end: name_tok.span.end,
         };
         let name = name_tok.literal.clone().ok_or("Expected type alias name")?;
+        self.skip_type_params()?; // generic `type Box<T> = …` — type params erased
         self.expect(TokenKind::Assign)?;
         let ty = self.parse_type_annotation()?;
+        Ok(Statement::TypeAlias {
+            name,
+            name_span,
+            ty,
+            span: self.span_end(span_start),
+        })
+    }
+
+    /// `interface Name { k: T, ... }` — desugared to `type Name = { ... }` so the checker
+    /// (structural matching) and codegen (native `TishStruct_*`) treat it exactly like an
+    /// object-type alias. (`extends` is not yet supported.)
+    fn parse_interface(&mut self) -> Result<Statement, String> {
+        let span_start = self.expect(TokenKind::Interface)?.span.start;
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let name_span = Span {
+            start: name_tok.span.start,
+            end: name_tok.span.end,
+        };
+        let name = name_tok.literal.clone().ok_or("Expected interface name")?;
+        self.skip_type_params()?; // generic interface `interface Box<T> { … }`
+
+        // `extends Parent1, Parent2` — desugar to an intersection of the parents with the body, so
+        // the inherited fields participate in structural checking + native struct emission.
+        let mut parents: Vec<TypeAnnotation> = Vec::new();
+        if matches!(self.peek_kind(), Some(TokenKind::Ident))
+            && self.peek().and_then(|t| t.literal.as_deref()) == Some("extends")
+        {
+            self.advance(); // extends
+            loop {
+                parents.push(self.parse_type_postfix()?);
+                if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+        }
+
+        let body = self.parse_type_annotation()?;
+        let ty = if parents.is_empty() {
+            body
+        } else {
+            parents.push(body);
+            TypeAnnotation::Intersection(parents)
+        };
         Ok(Statement::TypeAlias {
             name,
             name_span,
@@ -767,6 +956,7 @@ impl<'a> Parser<'a> {
             end: name_tok.span.end,
         };
         let name = name_tok.literal.clone().ok_or("Expected function name")?;
+        self.skip_type_params()?; // generic `fn f<T, U>(…)` — type params erased
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::with_capacity(4);
         let mut rest_param = None;
@@ -1574,6 +1764,13 @@ impl<'a> Parser<'a> {
         };
         while let Some(kind) = self.peek_kind() {
             match kind {
+                // `expr as Type` — a type assertion. Gradual + erased: consume the type and keep the
+                // expression unchanged (no runtime effect; the checker is already lenient on what it
+                // can't prove, so the assertion's only job — silencing a strict error — is moot).
+                TokenKind::As => {
+                    self.advance(); // as
+                    self.parse_type_annotation()?;
+                }
                 TokenKind::LParen => {
                     self.advance();
                     let mut args = Vec::new();

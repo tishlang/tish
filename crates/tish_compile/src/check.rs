@@ -17,8 +17,20 @@
 use std::collections::HashMap;
 use tishlang_ast::{
     ArrayElement, BinOp, CallArg, Expr, FunParam, Literal, MemberProp, ObjectProp, Program, Span,
-    Statement, TypeAnnotation, UnaryOp,
+    Statement, TypeAnnotation, TypeLiteral, UnaryOp,
 };
+
+/// The base primitive of a literal type (`"a"` → `string`, `42` → `number`, `true` → `boolean`).
+fn lit_base(lit: &TypeLiteral) -> TypeAnnotation {
+    TypeAnnotation::Simple(
+        match lit {
+            TypeLiteral::Str(_) => "string",
+            TypeLiteral::Num(_) => "number",
+            TypeLiteral::Bool(_) => "boolean",
+        }
+        .into(),
+    )
+}
 
 #[derive(Debug, Clone)]
 pub struct TypeDiagnostic {
@@ -81,6 +93,17 @@ fn show(ann: &TypeAnnotation) -> String {
             format!("({}) => {}", ps.join(", "), show(returns))
         }
         TypeAnnotation::Union(ts) => ts.iter().map(show).collect::<Vec<_>>().join(" | "),
+        TypeAnnotation::Tuple(ts) => {
+            format!("[{}]", ts.iter().map(show).collect::<Vec<_>>().join(", "))
+        }
+        TypeAnnotation::Literal(lit) => match lit {
+            TypeLiteral::Str(s) => format!("{:?}", s.as_ref()),
+            TypeLiteral::Num(n) => format!("{}", n),
+            TypeLiteral::Bool(b) => format!("{}", b),
+        },
+        TypeAnnotation::Intersection(ts) => {
+            ts.iter().map(show).collect::<Vec<_>>().join(" & ")
+        }
     }
 }
 
@@ -142,6 +165,18 @@ fn assignable(
         // a union actual fits only if every member fits; a union expected accepts any matching member
         (Union(axs), _) => axs.iter().all(|t| assignable(t, e, aliases)),
         (_, Union(eys)) => eys.iter().any(|t| assignable(a, t, aliases)),
+        // Tuples: same arity, element-wise assignable.
+        (Tuple(at), Tuple(et)) => {
+            at.len() == et.len() && at.iter().zip(et).all(|(x, y)| assignable(x, y, aliases))
+        }
+        // A literal type behaves as its base primitive for assignability (gradual — no exact-value
+        // enforcement yet), so `"a"` checks like `string`, `42` like `number`.
+        (Literal(la), _) => assignable(&lit_base(la), e, aliases),
+        (_, Literal(le)) => assignable(a, &lit_base(le), aliases),
+        // To satisfy `A & B`, the actual must be assignable to every member.
+        (_, Intersection(es)) => es.iter().all(|t| assignable(a, t, aliases)),
+        // An intersection actual satisfies `e` if any of its members does.
+        (Intersection(as_), _) => as_.iter().any(|t| assignable(t, e, aliases)),
         // anything else (functions, object-vs-named we couldn't resolve, …) -> lenient
         _ => true,
     }

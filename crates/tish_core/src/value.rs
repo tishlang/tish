@@ -344,11 +344,12 @@ impl TishRegExp {
 /// **Thread safety**: `Value: Send + Sync`. Mutable payloads live inside
 /// [`VmRef`], a `Send + Sync` `Arc<Mutex<T>>` wrapper that preserves the
 /// `RefCell`-style borrow API. Functions are `Arc<dyn Fn + Send + Sync>`.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum Value {
     Number(f64),
     String(arcstr::ArcStr),
     Bool(bool),
+    #[default]
     Null,
     Array(VmRef<Vec<Value>>),
     /// Packed f64 array — `TISH_PACKED_ARRAYS` mode only. All elements are f64; a non-numeric

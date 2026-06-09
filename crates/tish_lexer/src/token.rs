@@ -59,6 +59,8 @@ pub enum TokenKind {
     Export,
     Type,
     Declare,
+    Interface,
+    As,
 
     // Punctuation
     LParen,
@@ -157,6 +159,8 @@ impl TokenKind {
             "export" => TokenKind::Export,
             "type" => TokenKind::Type,
             "declare" => TokenKind::Declare,
+            "interface" => TokenKind::Interface,
+            "as" => TokenKind::As,
             _ => TokenKind::Ident,
         }
     }

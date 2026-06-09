@@ -1072,6 +1072,33 @@ impl Printer {
                     self.type_ann(x);
                 }
             }
+            TypeAnnotation::Tuple(elems) => {
+                self.buf.push('[');
+                for (i, x) in elems.iter().enumerate() {
+                    if i > 0 {
+                        self.buf.push_str(", ");
+                    }
+                    self.type_ann(x);
+                }
+                self.buf.push(']');
+            }
+            TypeAnnotation::Literal(lit) => match lit {
+                tishlang_ast::TypeLiteral::Str(s) => {
+                    self.buf.push('"');
+                    self.buf.push_str(s.as_ref());
+                    self.buf.push('"');
+                }
+                tishlang_ast::TypeLiteral::Num(n) => self.buf.push_str(&n.to_string()),
+                tishlang_ast::TypeLiteral::Bool(b) => self.buf.push_str(&b.to_string()),
+            },
+            TypeAnnotation::Intersection(parts) => {
+                for (i, x) in parts.iter().enumerate() {
+                    if i > 0 {
+                        self.buf.push_str(" & ");
+                    }
+                    self.type_ann(x);
+                }
+            }
         }
     }
 

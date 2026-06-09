@@ -1012,9 +1012,14 @@ impl Codegen {
                             self.write("        buf.push(']');\n");
                         }
                         _ => {
-                            // Fallback: convert the field to a Value and
-                            // delegate to the dynamic stringifier.
-                            let v_expr = t.to_value_expr(&access);
+                            // Fallback: convert the field to a Value and delegate to the dynamic
+                            // stringifier. A `Value` field (e.g. a generic struct's `Box<T>` field)
+                            // is behind `&self` and not `Copy`, so clone it.
+                            let v_expr = if matches!(t, crate::types::RustType::Value) {
+                                format!("{}.clone()", access)
+                            } else {
+                                t.to_value_expr(&access)
+                            };
                             self.write(&format!(
                                 "        let _v: Value = {}; tishlang_runtime::json::stringify_into(buf, &_v);\n",
                                 v_expr
@@ -5624,6 +5629,28 @@ impl Codegen {
             return Ok(format!("vec![{}]", items.join(", ")));
         }
 
+        // Tuple literal: `[a, b]` against a `[T0, T1]` tuple type -> native Rust tuple `(a, b)`.
+        if let (RustType::Tuple(elem_types), Expr::Array { elements, .. }) = (target_type, expr) {
+            if elements.len() == elem_types.len()
+                && elements.iter().all(|e| matches!(e, ArrayElement::Expr(_)))
+            {
+                let mut items = Vec::new();
+                for (elem, ty) in elements.iter().zip(elem_types) {
+                    if let ArrayElement::Expr(e) = elem {
+                        items.push(self.emit_native_expr(e, ty)?);
+                    }
+                }
+                return Ok(if items.len() == 1 {
+                    format!("({},)", items[0])
+                } else {
+                    format!("({})", items.join(", "))
+                });
+            }
+            // arity/shape mismatch -> boxed fallback
+            let value_expr = self.emit_expr(expr)?;
+            return Ok(target_type.from_value_expr(&value_expr));
+        }
+
         // Try to emit object literals directly as a Rust struct literal
         // when the target is a `RustType::Named` (a user `type Foo = {...}`
         // alias). Each property in source order is matched to a struct
@@ -6547,6 +6574,21 @@ impl Codegen {
                                 };
                                 let elem_ty = *elem_type.clone();
                                 return Ok((format!("{}[{}]", esc_obj, idx_usize), elem_ty));
+                            }
+                            // Native tuple access: `tuple[const]` -> `tuple.const` (Rust tuples
+                            // require a literal index; a variable index falls through to boxed).
+                            if let RustType::Tuple(elems) = &obj_type {
+                                if let Expr::Literal {
+                                    value: Literal::Number(n),
+                                    ..
+                                } = index.as_ref()
+                                {
+                                    let i = *n as usize;
+                                    if n.fract() == 0.0 && i < elems.len() {
+                                        let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
+                                        return Ok((format!("{}.{}", esc_obj, i), elems[i].clone()));
+                                    }
+                                }
                             }
                         }
                     }

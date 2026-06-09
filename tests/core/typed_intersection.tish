@@ -1,0 +1,14 @@
+// Intersection `A & B`, `interface extends`, and nested generics `Array<Array<T>>`.
+let m: Array<Array<number>> = [[1, 2], [3, 4]]
+console.log(m[0][1])
+interface Named { name: string }
+interface Aged { age: number }
+type Person = Named & Aged
+let p: Person = { name: "x", age: 30 }
+console.log(p.name)
+console.log(p.age)
+interface Animal { legs: number }
+interface Dog extends Animal { bark: boolean }
+let d: Dog = { legs: 4, bark: true }
+console.log(d.legs)
+console.log(d.bark)

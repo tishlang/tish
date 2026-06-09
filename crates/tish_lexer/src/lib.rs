@@ -73,6 +73,9 @@ pub struct Lexer<'a> {
     jsx_child_brace_depth: i32,
     jsx_in_closing_tag: bool,
     ignore_indent: bool,
+    /// Kind of the last emitted significant token, for `<` disambiguation: after a *value* position
+    /// (ident, `)`, `]`, literal) a `<` is a comparison / generic-args opener (`Lt`), never a JSX tag.
+    last_significant_kind: Option<TokenKind>,
 }
 
 impl<'a> Lexer<'a> {
@@ -100,7 +103,26 @@ impl<'a> Lexer<'a> {
             jsx_child_brace_depth: 0,
             jsx_in_closing_tag: false,
             ignore_indent: options.ignore_indent,
+            last_significant_kind: None,
         }
+    }
+
+    /// True when the previous significant token ends a value, so a following `<` is `Lt`
+    /// (comparison / generic args), not the start of a JSX element.
+    fn last_is_value(&self) -> bool {
+        matches!(
+            self.last_significant_kind,
+            Some(
+                TokenKind::Ident
+                    | TokenKind::RParen
+                    | TokenKind::RBracket
+                    | TokenKind::Number
+                    | TokenKind::String
+                    | TokenKind::True
+                    | TokenKind::False
+                    | TokenKind::Null
+            )
+        )
     }
 
     #[inline]
@@ -346,6 +368,14 @@ impl<'a> Lexer<'a> {
     }
 
     pub fn next_token(&mut self) -> Result<Option<Token>, String> {
+        let tok = self.next_token_inner()?;
+        if let Some(t) = &tok {
+            self.last_significant_kind = Some(t.kind);
+        }
+        Ok(tok)
+    }
+
+    fn next_token_inner(&mut self) -> Result<Option<Token>, String> {
         if let Some(tok) = self.pending_dedents.pop_front() {
             return Ok(Some(tok));
         }
@@ -502,12 +532,15 @@ impl<'a> Lexer<'a> {
                 } else if self.peek() == Some('/') {
                     self.jsx_in_closing_tag = true;
                     TokenKind::Lt
-                } else if self.peek() == Some('>')
+                } else if (self.peek() == Some('>')
                     || self
                         .peek()
                         .map(|c| c.is_ascii_alphabetic() || c == '_')
-                        .unwrap_or(false)
+                        .unwrap_or(false))
+                    && !self.last_is_value()
                 {
+                    // JSX open tag — only in expression position. After a value (`ident<`, `)<`,
+                    // `]<`, literal) this is `Lt`: a comparison or generic-args opener.
                     self.jsx_depth += 1;
                     self.jsx_stack.push(JsxEl {
                         in_opener: true,

@@ -112,17 +112,24 @@ fn main() {
             a.no_optimize || no_opt_env,
         ),
         Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env, &a.features),
-        Some(Commands::Build(a)) => build_file(
-            &a.file,
-            &a.output,
-            &a.target,
-            &a.native_backend,
-            &a.features,
-            a.no_optimize || no_opt_env,
-            a.source_map,
-            a.ios_triple.as_deref(),
-            &a.crate_type,
-        ),
+        Some(Commands::Build(a)) => {
+            // `--check warn|error` drives the gradual type checker via the same channel as the
+            // `TISH_CHECK` env var that `tishlang_compile::run_type_check` reads.
+            if let Some(mode) = &a.check {
+                std::env::set_var("TISH_CHECK", mode);
+            }
+            build_file(
+                &a.file,
+                &a.output,
+                &a.target,
+                &a.native_backend,
+                &a.features,
+                a.no_optimize || no_opt_env,
+                a.source_map,
+                a.ios_triple.as_deref(),
+                &a.crate_type,
+            )
+        }
         Some(Commands::DumpAst {
             file,
             ignore_indent,

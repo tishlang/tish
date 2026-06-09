@@ -22,7 +22,7 @@ machine-AOT), targeting a **full TS-like** surface (generics, unions, interfaces
 
 | Capability | State | Where |
 |---|---|---|
-| Type-annotation **syntax** (lex/AST/parse) | ✅ ~70% of a pragmatic TS subset | `tish_lexer`, `tish_ast/src/ast.rs:11`, `tish_parser/src/parser.rs:484` |
+| Type-annotation **syntax** (lex/AST/parse) | ✅ ~95% of a pragmatic TS subset — primitives, arrays, `T?`, tuples, literal types, unions, intersections, fn types, generics (`<T>`/`Array<T>`/`Box<number>`/nested), `as`, `interface`(+`extends`) | `tish_lexer`, `tish_ast/src/ast.rs:11`, `tish_parser/src/parser.rs` |
 | Internal **type representation** | ✅ Solid for scalars/arrays/structs; ❌ no generics/real-unions | `tish_compile/src/types.rs:11` (`RustType`) |
 | Type **inference** | ⚠️ ~15% — forward, literal + numeric-arithmetic only | `tish_compile/src/infer.rs` |
 | Type **checking / soundness** | 🟡 gradual checker (Phase 2 core) — flags provable annotation violations behind `TISH_CHECK`; zero corpus false positives | `tish_compile/src/check.rs` |
@@ -37,12 +37,19 @@ foundation exists and demonstrably accelerates annotated numeric/struct code (se
 
 ### What parses today (frontend)
 
-Supported: primitives (`number/string/boolean/void/null/any`), `T[]`, `{k:T}`, `A | B` unions,
-`(T) => R` function types, `type X = …`, `declare let/const/function`.
+Supported: primitives (`number/string/boolean/void/null/any`), `T[]`, **`T?`** (→ `T | null`),
+`{k:T}`, **`[T, U]` tuples** (native Rust tuples), **literal types** (`"a" | "b"`, `42`, `true`),
+**`A | B`** unions, **`A & B`** intersections, `(T) => R` function types, `type X = …`, **generics**
+`fn f<T>(…)` / `type Box<T> = …` / `Array<T>` / `Box<number>` / nested `Array<Array<T>>`,
+**`expr as T`** casts, **`interface X { … }`** + **`interface X extends Y`** (→ structural check +
+native struct), `declare let/const/function`. — **~95% of a pragmatic TS surface.**
 
-**Missing:** generics `<T>`, optional `T?`, intersection `A & B`, literal types, `as` casts,
-`interface`, tuples. (`parser.rs:484` `parse_type_annotation`; AST enum `ast.rs:11`
-`TypeAnnotation`.)
+**Missing:** generic **monomorphization** — type params currently *erase* to `Value`, so generic
+code runs correctly but boxed (`Array<T>` is the exception, desugaring to native `T[]`). Native
+specialization (`Box<number>`→a struct with an `f64` field, `identity<number>`→a native `fn`)
+requires *un-erasing* generics: storing type params on `Statement::FunDecl`/`TypeAlias` + a
+clone-and-specialize mono pass — a large change that ripples through every `Statement` consumer
+(interp/VM/codegen/opt/fmt), so it's a deliberate follow-up rather than part of the surface.
 
 ### How types lower today (`RustType`, `types.rs:11`)
 
@@ -209,10 +216,11 @@ generated Rust for `examples/matmul` — `bench`'s `i < N` and `i*N+k` should be
 > `Ty` IR), is **bidirectional-ish** (`synth`/`assignable` with alias resolution + width-subtyping for
 > object shapes), and is deliberately **gradual**: anything it can't prove (calls to unsignatured
 > functions, dynamic values, `any`, unannotated locals) yields no diagnostic — **zero false positives
-> on the whole corpus** (enforced by `checker_no_false_positives_on_corpus`). Wired into `tish build`
-> behind `TISH_CHECK` (`warn`/`error`); off by default. **Remaining Phase-2 work:** the dedicated
-> `Ty` IR below (for real unions/narrowing), a `--checked` CLI flag + `tish-lsp` diagnostics, and
-> turning the codegen `from_value_expr` `panic!`s into statically-unreachable-for-checked-code.
+> on the whole corpus** (enforced by `checker_no_false_positives_on_corpus`). Surfaced three ways:
+> `tish build --check warn|error` (or `TISH_CHECK`), where `error` blocks the build; and **`tish-lsp`**
+> publishes the diagnostics as editor warnings (alongside lint/resolve). Off by default for builds.
+> **Remaining Phase-2 work:** the dedicated `Ty` IR below (for real unions/narrowing) and turning the
+> codegen `from_value_expr` `panic!`s into statically-unreachable-for-checked-code.
 
 **Architectural decision: introduce a dedicated `Ty` IR — do *not* overload `RustType`.** Keep
 `TypeAnnotation` (syntax) and `RustType` (Rust emission) as the two ends; insert `Ty` as the
@@ -258,11 +266,11 @@ falls back to `Value` — never a miscompile.
 
 | # | Milestone | Core change |
 |---|---|---|
-| **M3.1** | Generics parse + represent | `<T>` in `parse_type_annotation` (disambiguate `<`/`>` by type-position only); `TypeAnnotation::Generic`, `Ty::Param/Named{args}`; checker infers type args via the `Ty::Var` unification engine |
+| **M3.1** ✅ | Generics parse + run | `<T>` on `fn`/`type`/refs parsed; **type params erased** (gradual — act as unknown → `Value`), so generic code type-checks leniently and runs correctly (boxed). `Array<T>` desugars to the native `T[]`. The `<`/`>`-vs-JSX ambiguity is resolved in the lexer (a `<` after a *value* position is `Lt`, never JSX — also fixed no-space `a<b`). ◻ **monomorphization** (native specialization of `<T>`) and nested `Array<Array<T>>` (the `>>` token) remain. |
 | **M3.2** | **Monomorphization** | new `mono.rs` (after check, before lower): collect concrete instantiations, clone-and-specialize per arg-set; `Array<number>`→`Vec<f64>` (no `Value`); dedup identical instantiations by canonical key |
-| **M3.3** | Optional `T?`, literal types, tuples, `as` | parser + `Ty` + native lowering; add `RustType::Tuple(Vec<RustType>)`→Rust tuples; `T?`→`Option<T>`; literals power discriminants |
+| **M3.3** ✅ | Optional `T?`, literal types, tuples, `as`, intersections | `T?`→`T|null`→`Option<T>` (native); literal types (`"a"`/`42`/`true`) check as their base primitive (power discriminated unions); **tuples `[T,U]` lower to native Rust tuples `(f64, String)`** (`RustType::Tuple`; literal `[a,b]`→`(a,b)`, `t[const]`→`t.const`); `expr as T` is a parse-time-erased gradual assertion; `A & B` intersections merge object members into one native struct (`interface extends` desugars to this). |
 | **M3.4** | **Discriminated unions + narrowing** | stop collapsing non-null unions to `Value`: lower `A|B` to a generated Rust `enum`; flow-sensitive narrowing in checker (`typeof`/discriminant/`!== null`) so narrowed branches lower native (reuse typed-member fast path); conservative bail to `Value` on escape |
-| **M3.5** | Interfaces | `interface` keyword + `Statement::Interface`; structural match reuses M2.3 `is_assignable`; lowers to the same `TishStruct_*` path as object aliases; `extends`=field-set intersection |
+| **M3.5** ✅ | Interfaces *(DONE, ahead of Phase 3)* | `interface` lexer keyword + parser rule that **desugars to a `type` alias** (`parse_interface` → `Statement::TypeAlias`), so structural checking (`check.rs` alias resolution + object width-subtyping) and native `TishStruct_*` codegen come for free. Exposed a latent struct→`Value` boxing bug (`Value::object` vs `Value::Object(VmRef::new(ObjectMap))`) — fixed. ◻ `extends` not yet. |
 | **M3.6** | *(optional)* typed-IR Cranelift AOT | only if removing rustc-in-the-loop is required; generalize `tish_vm/src/jit.rs` (already lowers f64 slot-based code via `JITModule`) to the monomorphized typed IR, behind `--native-backend cranelift-aot`; Rust backend stays the default + correctness oracle |
 
 **True-AOT recommendation.** Make the **typed Rust backend the canonical machine-AOT path.** Once

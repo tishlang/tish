@@ -41,6 +41,8 @@ pub enum RustType {
         params: Vec<RustType>,
         returns: Box<RustType>,
     },
+    /// Tuple `(T0, T1, …)` for `[T0, T1]` tuple types — a native Rust tuple.
+    Tuple(Vec<RustType>),
 }
 
 impl RustType {
@@ -124,6 +126,38 @@ impl RustType {
                 // Other unions fall back to Value
                 RustType::Value
             }
+            // `[T0, T1]` -> a native Rust tuple `(T0, T1)`.
+            TypeAnnotation::Tuple(elems) => RustType::Tuple(
+                elems
+                    .iter()
+                    .map(|e| Self::from_annotation_with_aliases(e, aliases))
+                    .collect(),
+            ),
+            // A literal type lowers to its base primitive.
+            TypeAnnotation::Literal(lit) => match lit {
+                tishlang_ast::TypeLiteral::Str(_) => RustType::String,
+                tishlang_ast::TypeLiteral::Num(_) => RustType::F64,
+                tishlang_ast::TypeLiteral::Bool(_) => RustType::Bool,
+            },
+            // Intersection of object shapes (e.g. `interface X extends Y { … }` → `Y & { … }`):
+            // merge the fields into one shape. Registered as a `type` alias, this becomes a native
+            // struct. Any non-object member → can't merge → fall back to boxed `Value`.
+            TypeAnnotation::Intersection(parts) => {
+                let mut fields: Vec<(Arc<str>, RustType)> = Vec::new();
+                for p in parts {
+                    match Self::from_annotation_with_aliases(p, aliases) {
+                        RustType::Object(fs) | RustType::Named { fields: fs, .. } => {
+                            for (k, v) in fs {
+                                if !fields.iter().any(|(ek, _)| *ek == k) {
+                                    fields.push((k, v));
+                                }
+                            }
+                        }
+                        _ => return RustType::Value,
+                    }
+                }
+                RustType::Object(fields)
+            }
         }
     }
 
@@ -198,6 +232,7 @@ impl RustType {
                     returns.to_rust_type_str()
                 )
             }
+            RustType::Tuple(elems) => tuple_text(&elems.iter().map(|e| e.to_rust_type_str()).collect::<Vec<_>>()),
         }
     }
 
@@ -230,12 +265,33 @@ impl RustType {
                 )
             }
             RustType::Function { .. } => "Value::Null".to_string(),
+            RustType::Tuple(elems) => {
+                tuple_text(&elems.iter().map(|e| e.default_value()).collect::<Vec<_>>())
+            }
         }
     }
 
     /// Generate code to convert from Value to this native type.
     pub fn from_value_expr(&self, value_expr: &str) -> String {
         match self {
+            RustType::Tuple(elems) => {
+                // `Value::Array([..])` -> `(e0, e1, …)`, converting each slot from its `Value`.
+                let parts: Vec<String> = elems
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| {
+                        e.from_value_expr(&format!(
+                            "_t.get({}).cloned().unwrap_or(Value::Null)",
+                            i
+                        ))
+                    })
+                    .collect();
+                return format!(
+                    "match &{} {{ Value::Array(_a) => {{ let _t = _a.borrow(); {} }}, _ => panic!(\"expected tuple\") }}",
+                    value_expr,
+                    tuple_text(&parts)
+                );
+            }
             RustType::Value => value_expr.to_string(),
             RustType::F64 => format!(
                 "match &{} {{ Value::Number(n) => *n, _ => panic!(\"expected number\") }}",
@@ -287,6 +343,15 @@ impl RustType {
     /// Generate code to convert from this native type to Value.
     pub fn to_value_expr(&self, native_expr: &str) -> String {
         match self {
+            RustType::Tuple(elems) => {
+                // `(e0, e1, …)` -> `Value::Array([e0.into_value(), …])`.
+                let parts: Vec<String> = elems
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| e.to_value_expr(&format!("{}.{}", native_expr, i)))
+                    .collect();
+                return format!("Value::Array(VmRef::new(vec![{}]))", parts.join(", "));
+            }
             RustType::Value => native_expr.to_string(),
             RustType::F64 => format!("Value::Number({})", native_expr),
             RustType::String => format!("Value::String({}.clone().into())", native_expr),
@@ -321,7 +386,14 @@ impl RustType {
                     .iter()
                     .map(|(k, ty)| {
                         let access = format!("{}.{}", native_expr, field_ident(k));
-                        let v_expr = ty.to_value_expr(&access);
+                        // A `Value`-typed field (e.g. from a generic struct `Box<T>`) accessed
+                        // behind `&self` must be cloned — it isn't `Copy` and `to_value_expr(Value)`
+                        // is identity. Native field types clone/copy inside their own `to_value_expr`.
+                        let v_expr = if matches!(ty, RustType::Value) {
+                            format!("{}.clone()", access)
+                        } else {
+                            ty.to_value_expr(&access)
+                        };
                         format!(
                             "_om.insert(::std::sync::Arc::from({:?}), {});",
                             k.as_ref(),
@@ -330,8 +402,12 @@ impl RustType {
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
+                // `Value::object` wraps the `ObjectMap` in an `ObjectData` (what `Value::Object`
+                // actually holds) — emitting `Value::Object(VmRef::new(_om))` directly is a type
+                // error (`ObjectMap` != `ObjectData`); only surfaced once a whole struct is boxed
+                // into a `Value`, e.g. passing it to a function.
                 format!(
-                    "{{ let mut _om = ObjectMap::default(); {} Value::Object(VmRef::new(_om)) }}",
+                    "{{ let mut _om = ObjectMap::default(); {} Value::object(_om) }}",
                     inserts
                 )
             }
@@ -342,6 +418,15 @@ impl RustType {
 
 /// Map a Tish type-alias name to the Rust struct identifier we emit.
 /// Prefixed so user names can never collide with runtime types like `Value`.
+/// Render a Rust tuple type/value from its parts, using the `(T,)` form for 1-tuples.
+fn tuple_text(parts: &[String]) -> String {
+    if parts.len() == 1 {
+        format!("({},)", parts[0])
+    } else {
+        format!("({})", parts.join(", "))
+    }
+}
+
 pub fn named_struct_ident(tish_name: &str) -> String {
     format!("TishStruct_{}", tish_name)
 }

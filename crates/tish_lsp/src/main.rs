@@ -172,6 +172,17 @@ async fn publish_parse_and_lint(client: &Client, uri: Url, text: &str) {
                     ..Default::default()
                 });
             }
+            // Gradual type checker (Phase 2): surface provable annotation violations as warnings.
+            for d in tishlang_compile::check_program(&program) {
+                diags.push(Diagnostic {
+                    range: span_to_range(&d.span, text),
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    code: Some(NumberOrString::String("tish-type".into())),
+                    message: d.message,
+                    source: Some("tish".into()),
+                    ..Default::default()
+                });
+            }
         }
         Err(e) => {
             let (l, c) = parse_error_pos(&e);
