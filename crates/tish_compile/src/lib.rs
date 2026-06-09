@@ -187,3 +187,20 @@ fn factory() {
         );
     }
 }
+
+#[cfg(test)]
+mod monomorphization_tests {
+    use super::*;
+    use tishlang_parser::parse;
+
+    /// `Box<number>` monomorphizes to a synthetic concrete alias whose field is a native `f64`,
+    /// not a boxed `Value` — generic structs participate in native lowering.
+    #[test]
+    fn generic_struct_is_native() {
+        let src = "type Box<T> = { value: T }\nlet b: Box<number> = { value: 42 }\nconsole.log(b.value + 1)";
+        let rust = compile(&parse(src).unwrap()).unwrap();
+        // Box<number> must monomorphize to a struct with a native f64 field (not Value).
+        assert!(rust.contains("value: f64"), "expected native f64 field; got:\n{}",
+            rust.lines().filter(|l| l.contains("struct") || l.contains("value")).take(6).collect::<Vec<_>>().join("\n"));
+    }
+}

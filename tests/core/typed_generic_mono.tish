@@ -1,0 +1,11 @@
+// Generic-struct monomorphization: `Box<number>` / `Pair<A,B>` specialize to concrete native
+// structs (a `Box<number>` has an `f64` field, not a boxed Value). Output identical everywhere.
+type Box<T> = { value: T }
+let b: Box<number> = { value: 42 }
+console.log(b.value + 1)
+let s: Box<string> = { value: "hi" }
+console.log(s.value)
+interface Pair<A, B> { first: A, second: B }
+let p: Pair<number, string> = { first: 7, second: "x" }
+console.log(p.first)
+console.log(p.second)

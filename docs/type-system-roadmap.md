@@ -44,12 +44,18 @@ Supported: primitives (`number/string/boolean/void/null/any`), `T[]`, **`T?`** (
 **`expr as T`** casts, **`interface X { … }`** + **`interface X extends Y`** (→ structural check +
 native struct), `declare let/const/function`. — **~95% of a pragmatic TS surface.**
 
-**Missing:** generic **monomorphization** — type params currently *erase* to `Value`, so generic
-code runs correctly but boxed (`Array<T>` is the exception, desugaring to native `T[]`). Native
-specialization (`Box<number>`→a struct with an `f64` field, `identity<number>`→a native `fn`)
-requires *un-erasing* generics: storing type params on `Statement::FunDecl`/`TypeAlias` + a
-clone-and-specialize mono pass — a large change that ripples through every `Statement` consumer
-(interp/VM/codegen/opt/fmt), so it's a deliberate follow-up rather than part of the surface.
+**Generic monomorphization — structs done, functions remain.** Generic *structs* now specialize
+natively: a reference `Box<number>` is desugared **in the parser** to a synthetic concrete alias
+`type Box__number = { value: number }` (the parser tracks `type Box<T> = …` decls, substitutes the
+args, dedups, and prepends the specializations), which lowers via the normal struct path to a
+`TishStruct_Box__number { value: f64 }` — a real `f64` field, not a boxed `Value` (verified by
+`monomorphization_tests::generic_struct_is_native`). `Array<T>`→native `T[]` likewise. **Still
+boxed:** generic *functions* (`identity<T>`) — their type params erase, so they run correctly but
+boxed; native fn specialization needs cloning the fn body per call-site instantiation (a larger
+codegen pass), the one remaining generic optimization.
+
+**Truly missing:** `keyof`/mapped/conditional types, declaration merging, full ECMAScript type
+compatibility — explicitly out of scope per `LANGUAGE.md`.
 
 ### How types lower today (`RustType`, `types.rs:11`)
 
@@ -266,8 +272,8 @@ falls back to `Value` — never a miscompile.
 
 | # | Milestone | Core change |
 |---|---|---|
-| **M3.1** ✅ | Generics parse + run | `<T>` on `fn`/`type`/refs parsed; **type params erased** (gradual — act as unknown → `Value`), so generic code type-checks leniently and runs correctly (boxed). `Array<T>` desugars to the native `T[]`. The `<`/`>`-vs-JSX ambiguity is resolved in the lexer (a `<` after a *value* position is `Lt`, never JSX — also fixed no-space `a<b`). ◻ **monomorphization** (native specialization of `<T>`) and nested `Array<Array<T>>` (the `>>` token) remain. |
-| **M3.2** | **Monomorphization** | new `mono.rs` (after check, before lower): collect concrete instantiations, clone-and-specialize per arg-set; `Array<number>`→`Vec<f64>` (no `Value`); dedup identical instantiations by canonical key |
+| **M3.1** ✅ | Generics parse + run | `<T>` on `fn`/`type`/refs parsed; nested `Array<Array<T>>` works (`gt_debt` splits the `>>` token). The `<`/`>`-vs-JSX ambiguity is resolved in the lexer (a `<` after a *value* position is `Lt`, never JSX — also fixed no-space `a<b`). |
+| **M3.2** ◑ | **Monomorphization** | ✅ generic **structs**: parser desugars `Box<number>` → a synthetic concrete alias `type Box__number = { value: number }` (tracks decls, substitutes args, dedups, prepends), lowering to a native `TishStruct_Box__number { value: f64 }`. `Array<T>`→native `T[]`. ◻ generic **functions** (`identity<T>`) still erase to `Value` (boxed but correct) — native fn specialization needs per-call-site body cloning. |
 | **M3.3** ✅ | Optional `T?`, literal types, tuples, `as`, intersections | `T?`→`T|null`→`Option<T>` (native); literal types (`"a"`/`42`/`true`) check as their base primitive (power discriminated unions); **tuples `[T,U]` lower to native Rust tuples `(f64, String)`** (`RustType::Tuple`; literal `[a,b]`→`(a,b)`, `t[const]`→`t.const`); `expr as T` is a parse-time-erased gradual assertion; `A & B` intersections merge object members into one native struct (`interface extends` desugars to this). |
 | **M3.4** | **Discriminated unions + narrowing** | stop collapsing non-null unions to `Value`: lower `A|B` to a generated Rust `enum`; flow-sensitive narrowing in checker (`typeof`/discriminant/`!== null`) so narrowed branches lower native (reuse typed-member fast path); conservative bail to `Value` on escape |
 | **M3.5** ✅ | Interfaces *(DONE, ahead of Phase 3)* | `interface` lexer keyword + parser rule that **desugars to a `type` alias** (`parse_interface` → `Statement::TypeAlias`), so structural checking (`check.rs` alias resolution + object width-subtyping) and native `TishStruct_*` codegen come for free. Exposed a latent struct→`Value` boxing bug (`Value::object` vs `Value::Object(VmRef::new(ObjectMap))`) — fixed. ◻ `extends` not yet. |
