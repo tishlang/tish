@@ -110,6 +110,7 @@ consumes type info):
 | `TISH_PARAM_INFER=1` | M4 | Unannotated params used *purely numerically* are inferred `number` (conservative, sound), feeding M1/M5. |
 | `TISH_NATIVE_FN=1` | M5 | Top-level numeric-only functions (numeric params+returns; bodies calling only other such fns or whitelisted `Math.*`) are emitted as a parallel native `fn f_native(a: f64,…) -> f64`; direct calls route to it, bypassing the boxed `value_call` ABI. |
 | `TISH_STRUCT_INFER=1` | struct / array | Unannotated `let o = {…}` / `let xs = […]` are inferred to a native struct / `T[]` when every later use is safe (`uses_are_struct_safe` / `uses_are_array_safe`). Array inference allows only `for-of` + `.length` reads — a native index would panic out-of-bounds where the boxed array yields `undefined`. |
+| `TISH_NATIVE_HOF=1` | M3 (HOFs) | Higher-order methods on a native `number[]` (`Vec<f64>`) — `reduce`/`map`/`filter`/`some`/`every` with a simple arrow callback — lower to a direct Rust iterator chain (`fold`/`map`/`filter`/`any`/`all`), eliminating the per-element `value_call` and all `Value` boxing. Bails to the boxed `array_*` path (correctness over coverage) unless the element is `f64`, the callback is a no-default-param **expression** arrow whose body type-checks native, and the body does **not** mention the receiver (`pi_mentions` guard against aliasing the `.iter()` borrow). |
 | `TISH_CHECK=warn` / `=error` | Phase 2 | Runs the gradual type checker (`check.rs`): `warn` prints provable annotation violations to stderr (`line:col: …`), `error` also **blocks the build**. Catches wrong-typed initializers, returns, reassignments, call args, and struct fields at compile time — instead of a runtime `panic!`. Off by default. |
 
 `number×number`, `bool×bool`, (M2) `string` concat/equality, (M3) `for (let x of xs)` over a typed
@@ -128,6 +129,7 @@ optimize inside the monolithic generated `run()`).
 | matmul 256, `fn bench(N: number)` | 230 ms | 14 ms | **16×** | M1 (flags) |
 | matmul 256, fully-untyped → annotated locals | 497 ms | 230 ms | 2.2× | base typed codegen |
 | 3M-elem `for (x of xs)` reduction, compute-heavy body | 53 ms *(untyped, boxed)* | 4 ms *(typed `number[]`)* | **~13×** | M3 (base codegen) |
+| 32M-elem `number[].reduce((a,b)=>…)`, non-foldable hash body | 1.09 s *(boxed `array_reduce`)* | 0.38 s *(native `fold`)* | **~2.9×** | M3 HOFs (`TISH_NATIVE_HOF`) |
 
 *(M3 note: a trivial sum is memory-bandwidth-bound, so the win shows on compute-heavy bodies where
 boxing each intermediate dominated; correctness/no-boxing holds either way.)*
@@ -136,7 +138,8 @@ boxing each intermediate dominated; correctness/no-boxing holds either way.)*
 / cranelift / wasi / js with flags **off**, and the native corpus + cross-runtime parity (incl.
 node) stay correct with flags **on**. Fixtures under `tests/core/`: `typed_strings` (M2),
 `typed_param_loopbound` (M4), `typed_array_forof` (M3 ForOf), `typed_rest_params` (M3 rest-params),
-`typed_array_of_structs` (M3 member access), `typed_array_literal_infer` (array inference), plus
+`typed_array_of_structs` (M3 member access), `typed_array_literal_infer` (array inference),
+`typed_array_hof` (M3 native `reduce`/`map`/`filter`/`some`/`every` over `number[]`), plus
 `infer::param_infer_tests`. Bugs fixed this work: the default-param-references-native-param compile
 error (`fn dependent(a, b = a + 1)` — now kept boxed); and an unsound array-inference OOB (a native
 `Vec` index panics where the boxed array returns `undefined`, so index reads bail). A *separate*
@@ -189,7 +192,7 @@ calls to it, bypassing `value_call` entirely.
 |---|---|---|---|
 | **M0** | Function **signature table** (no-op pre-pass) | `FnSig{params,rest,returns,native_safe}` + `FnSigTable`, built after `collect_type_aliases`; unused at first so it can't regress | `types.rs` (new), `codegen.rs:~1348` |
 | **M2 ✅** | **String** concat + value equality *(DONE)* | `String×String`: `+` emits a `format!`, `===`/`!==` compare by value; added to `result_type_of_binop` + `infer.rs`. Relational `< <= > >=` deliberately stay boxed (JS UTF-16 vs Rust UTF-8 order). Native string *methods* deferred. | `types.rs` (String arm), `infer.rs` (`is_string`), `codegen.rs` `emit_typed_expr` Add |
-| **M3** ✅ | **Collections** | ✅ native `for (let x of xs)` over a typed `Vec` (index-based); ✅ typed rest-params `...args: number[]`→`Vec<f64>`; ✅ member access on indexed structs (`pts[i].x`); ✅ array-literal inference (`let xs=[…]`→`T[]`, behind `TISH_STRUCT_INFER`, read-only). ◻ Only `a.b.c` deep-nested member chains still box. | `codegen.rs` ForOf/rest-param/Member + `collect_annotated_types`; `infer.rs` `infer_array_elem`/`uses_are_array_safe` |
+| **M3** ✅ | **Collections** | ✅ native `for (let x of xs)` over a typed `Vec` (index-based); ✅ typed rest-params `...args: number[]`→`Vec<f64>`; ✅ member access on indexed structs (`pts[i].x`); ✅ array-literal inference (`let xs=[…]`→`T[]`, behind `TISH_STRUCT_INFER`, read-only); ✅ native HOFs `reduce`/`map`/`filter`/`some`/`every` over a `number[]`→Rust `fold`/`map`/`filter`/`any`/`all` (behind `TISH_NATIVE_HOF`; `try_native_vec_hof`). ◻ Only `a.b.c` deep-nested member chains still box. | `codegen.rs` ForOf/rest-param/Member/`try_native_vec_hof` + `collect_annotated_types`; `infer.rs` `infer_array_elem`/`uses_are_array_safe`/`pi_mentions` |
 | **M1** | **Cross-function param + return typing** (keystone) | type annotated params via `from_value_expr` native shadow; thread return type; add a `Call` arm to `emit_typed_expr` that reports the signature's `returns` (wrapping `value_call` result with `from_value_expr`) | `types.rs:384`, `codegen.rs:2303,1906,5127,5258` |
 | **M4** | **Inference upgrade** (bidirectional, dark-shipped) | extend `infer.rs` to propagate through call returns (via table), member access on structs, array elements, string concat, loop/closure vars; **param inference** from use-sites ∩ call-sites behind `TISH_PARAM_INFER` (mirrors `TISH_STRUCT_INFER`) | `infer.rs:71,123,656` |
 | **M5** | **Native monomorphic `fn`** (stretch, Strategy B) | emit parallel `fn f_native` for eligible (`native_safe`) functions; route direct calls; keep closure wrapper as safety net | `codegen.rs:2069,5127` |

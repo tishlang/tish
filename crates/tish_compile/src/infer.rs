@@ -467,7 +467,7 @@ fn nus_arg(e: &Expr, name: &str, nums: &HashSet<String>) -> bool {
 }
 
 /// Does `name` appear anywhere in `e`? Conservative: unhandled forms -> true (assume present).
-fn pi_mentions(e: &Expr, name: &str) -> bool {
+pub(crate) fn pi_mentions(e: &Expr, name: &str) -> bool {
     use Expr::*;
     match e {
         Literal { .. } => false,

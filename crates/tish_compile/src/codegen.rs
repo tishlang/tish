@@ -5711,6 +5711,17 @@ impl Codegen {
             }
         }
 
+        // Native typed-array HOFs (TISH_NATIVE_HOF): `xs.reduce/map/filter/some/every(<arrow>)`
+        // whose native result type matches this binding's target → emit the iterator chain
+        // directly, with NO box/unbox round-trip (the per-element `value_call` is gone too).
+        if let Expr::Call { callee, args, .. } = expr {
+            if let Some((code, ty)) = self.native_vec_hof_for_call(callee, args)? {
+                if &ty == target_type {
+                    return Ok(code);
+                }
+            }
+        }
+
         // Fall back to emit_expr + conversion
         let value_expr = self.emit_expr(expr)?;
         Ok(target_type.from_value_expr(&value_expr))
@@ -6680,6 +6691,12 @@ impl Codegen {
                         }
                     }
                 }
+                // Native typed-array HOFs over a `Vec<f64>` receiver (TISH_NATIVE_HOF):
+                // `xs.reduce/map/filter/some/every(<arrow>)` → a direct Rust iterator chain,
+                // eliminating the per-element `value_call` and all `Value` boxing.
+                if let Some(res) = self.native_vec_hof_for_call(callee, args)? {
+                    return Ok(res);
+                }
                 let result = self.emit_expr(expr)?;
                 Ok((result, RustType::Value))
             }
@@ -6841,6 +6858,195 @@ impl Codegen {
             obj = obj_expr,
             body = body_code
         )))
+    }
+
+    /// If `callee(args)` is `<Vec<f64>-ident>.reduce/map/filter/some/every(<arrow>)` and the
+    /// `TISH_NATIVE_HOF` flag is set, lower it to a native iterator chain. Shared by
+    /// `emit_typed_expr` (native sub-expressions) and `emit_native_expr` (typed `let` RHS), so a
+    /// typed-array HOF lowers natively whether its result flows into arithmetic or a binding.
+    fn native_vec_hof_for_call(
+        &mut self,
+        callee: &Expr,
+        args: &[CallArg],
+    ) -> Result<Option<(String, RustType)>, CompileError> {
+        if std::env::var("TISH_NATIVE_HOF").is_err() {
+            return Ok(None);
+        }
+        let Expr::Member {
+            object,
+            prop: MemberProp::Name { name: method, .. },
+            optional: false,
+            ..
+        } = callee
+        else {
+            return Ok(None);
+        };
+        let Expr::Ident { name: recv_name, .. } = object.as_ref() else {
+            return Ok(None);
+        };
+        // A RefCell-wrapped receiver would need a borrow to iterate — bail to the boxed path.
+        if self.refcell_wrapped_vars.contains(recv_name.as_ref()) {
+            return Ok(None);
+        }
+        let RustType::Vec(inner) = self.type_context.get_type(recv_name.as_ref()) else {
+            return Ok(None);
+        };
+        if *inner != RustType::F64 {
+            return Ok(None);
+        }
+        let recv_code = Self::escape_ident(recv_name.as_ref()).into_owned();
+        self.try_native_vec_hof(&recv_code, &inner, recv_name.as_ref(), method.as_ref(), args)
+    }
+
+    /// Native typed-array HOFs (`TISH_NATIVE_HOF`): when the receiver is a native `Vec<f64>`
+    /// (a typed `number[]`), lower `reduce`/`map`/`filter`/`some`/`every` to a direct Rust
+    /// iterator chain — no per-element `value_call`, no `Value` boxing.
+    ///
+    /// Preconditions (any failure → `Ok(None)` → boxed `array_*`, correctness over coverage):
+    /// - element type is `f64` (Copy → `.copied()`),
+    /// - the callback is an arrow with simple, no-default params and an **expression** body,
+    /// - the body does **not** mention the receiver — `pi_mentions` is conservative (unknown
+    ///   AST nodes count as "mentions"), so a `&mut`/alias of the array inside the closure can't
+    ///   slip through and break the `.iter()` borrow,
+    /// - the body's emitted native type matches what the method needs (`f64` for `reduce`/`map`
+    ///   element, `bool` for `filter`/`some`/`every`).
+    ///
+    /// The closure params are bound natively (`f64`) only while the body is emitted, then popped.
+    fn try_native_vec_hof(
+        &mut self,
+        recv: &str,
+        elem: &RustType,
+        recv_name: &str,
+        method: &str,
+        args: &[CallArg],
+    ) -> Result<Option<(String, RustType)>, CompileError> {
+        // Only numeric arrays for now: `.copied()` needs a `Copy` element.
+        if *elem != RustType::F64 {
+            return Ok(None);
+        }
+        let Some(CallArg::Expr(Expr::ArrowFunction { params, body, .. })) = args.first() else {
+            return Ok(None);
+        };
+        let tishlang_ast::ArrowBody::Expr(be) = body else {
+            return Ok(None);
+        };
+        // The body must not touch the receiver (aliasing would break the `.iter()` borrow).
+        if crate::infer::pi_mentions(be, recv_name) {
+            return Ok(None);
+        }
+        let simple_name = |p: &FunParam| -> Option<std::sync::Arc<str>> {
+            match p {
+                FunParam::Simple(tp) if tp.default.is_none() => Some(std::sync::Arc::clone(&tp.name)),
+                _ => None,
+            }
+        };
+        // Emit `be` with `binds` (name, type) installed as native locals; restore on the way out.
+        let emit_with = |this: &mut Self,
+                             binds: &[(&std::sync::Arc<str>, RustType)]|
+         -> Result<(String, RustType), CompileError> {
+            this.type_context.push_scope();
+            for (n, t) in binds {
+                this.type_context.define(n.as_ref(), t.clone());
+            }
+            let res = this.emit_typed_expr(be);
+            this.type_context.pop_scope();
+            res
+        };
+        match method {
+            "reduce" => {
+                if args.len() != 2 || params.len() != 2 {
+                    return Ok(None);
+                }
+                let (Some(acc), Some(x)) = (simple_name(&params[0]), simple_name(&params[1])) else {
+                    return Ok(None);
+                };
+                let CallArg::Expr(init_e) = &args[1] else {
+                    return Ok(None);
+                };
+                let (init_code, init_ty) = self.emit_typed_expr(init_e)?;
+                let init_f64 = match init_ty {
+                    RustType::F64 => init_code,
+                    RustType::Value => RustType::F64.from_value_expr(&init_code),
+                    _ => return Ok(None),
+                };
+                let (body_code, body_ty) =
+                    emit_with(self, &[(&acc, RustType::F64), (&x, RustType::F64)])?;
+                if body_ty != RustType::F64 {
+                    return Ok(None);
+                }
+                let acc_esc = Self::escape_ident(acc.as_ref()).into_owned();
+                let x_esc = Self::escape_ident(x.as_ref()).into_owned();
+                Ok(Some((
+                    format!(
+                        "{{ let mut {acc}: f64 = {init}; for {x} in {recv}.iter().copied() {{ {acc} = {body}; }} {acc} }}",
+                        acc = acc_esc, init = init_f64, x = x_esc, recv = recv, body = body_code
+                    ),
+                    RustType::F64,
+                )))
+            }
+            "map" => {
+                if args.len() != 1 || params.len() != 1 {
+                    return Ok(None);
+                }
+                let Some(x) = simple_name(&params[0]) else {
+                    return Ok(None);
+                };
+                let (body_code, body_ty) = emit_with(self, &[(&x, RustType::F64)])?;
+                if !body_ty.is_native() {
+                    return Ok(None);
+                }
+                let x_esc = Self::escape_ident(x.as_ref()).into_owned();
+                Ok(Some((
+                    format!(
+                        "{recv}.iter().copied().map(|{x}| {body}).collect::<Vec<{ety}>>()",
+                        recv = recv, x = x_esc, body = body_code, ety = body_ty.to_rust_type_str()
+                    ),
+                    RustType::Vec(Box::new(body_ty)),
+                )))
+            }
+            "filter" => {
+                if args.len() != 1 || params.len() != 1 {
+                    return Ok(None);
+                }
+                let Some(x) = simple_name(&params[0]) else {
+                    return Ok(None);
+                };
+                let (body_code, body_ty) = emit_with(self, &[(&x, RustType::F64)])?;
+                if body_ty != RustType::Bool {
+                    return Ok(None);
+                }
+                let x_esc = Self::escape_ident(x.as_ref()).into_owned();
+                Ok(Some((
+                    format!(
+                        "{recv}.iter().copied().filter(|&{x}| {body}).collect::<Vec<f64>>()",
+                        recv = recv, x = x_esc, body = body_code
+                    ),
+                    RustType::Vec(Box::new(RustType::F64)),
+                )))
+            }
+            "some" | "every" => {
+                if args.len() != 1 || params.len() != 1 {
+                    return Ok(None);
+                }
+                let Some(x) = simple_name(&params[0]) else {
+                    return Ok(None);
+                };
+                let (body_code, body_ty) = emit_with(self, &[(&x, RustType::F64)])?;
+                if body_ty != RustType::Bool {
+                    return Ok(None);
+                }
+                let x_esc = Self::escape_ident(x.as_ref()).into_owned();
+                let adapter = if method == "some" { "any" } else { "all" };
+                Ok(Some((
+                    format!(
+                        "{recv}.iter().copied().{adapter}(|{x}| {body})",
+                        recv = recv, adapter = adapter, x = x_esc, body = body_code
+                    ),
+                    RustType::Bool,
+                )))
+            }
+            _ => Ok(None),
+        }
     }
 
     fn emit_binop(&self, l: &str, op: BinOp, r: &str, span: Span) -> Result<String, CompileError> {
