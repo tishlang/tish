@@ -135,7 +135,7 @@ These are **illustrative/machine-specific diagnostics**, not a committed scorebo
 | fannkuch | 3929ms | 3906ms | 1.01× | 141ms | 27.7× |
 | spectral_norm | 1965ms | 1941ms | 1.01× | 39ms | 49.8× |
 | nbody | 908ms | 943ms | 0.96× | 12ms | 78.6× |
-| **k_nucleotide** | 16094ms | 15957ms | 1.01× | 9ms | **1773× (len=200k)** |
+| **k_nucleotide** | 16094ms | 15957ms | 1.01× | 9ms | **1773× → 5.6× after the Map fix (Finding 1)** |
 
 All 11 are correctness-clean (typed == boxed == node on every check); all are **slower than V8** — a
 field of gaps to evolve past. Two structural facts jump out:
@@ -151,24 +151,30 @@ field of gaps to evolve past. Two structural facts jump out:
 
 ## 6. Findings — what the numbers reveal
 
-### ★★ Finding 1 (headline): `Map` and `Set` are O(n) per operation — not hash-backed
+### ★★ Finding 1 (headline) — FIXED: `Map`/`Set` were O(n) per operation; now O(1)
 
-`k_nucleotide` is **1773× slower than V8** and the ratio *grows with input size*. A direct scaling
-probe (Map insert+lookup of N entries) confirmed the super-linear cost:
+`k_nucleotide` was **1773× slower than V8** and the ratio *grew with input size*. A direct scaling
+probe (Map insert+lookup of N entries) confirmed the original super-linear cost, and the fix:
 
-| N | node | tish | per-doubling |
+| N | node | tish *before* (O(n)/op) | tish *after* (O(1)/op) |
 |---|---|---|---|
-| 20,000 | 1ms | 505ms | — |
-| 40,000 | 2ms | 2026ms | **4.0×** (⇒ O(n²) total ⇒ O(n)/op) |
-| 80,000 | 5ms | 8166ms | 4.0× |
+| 20,000 | 2ms | 505ms | 5ms |
+| 40,000 | 3ms | 2026ms (**4.0×**/doubling) | 10ms |
+| 80,000 | 5ms | 8166ms (4.0×) | 23ms (**~2.2×**/doubling) |
 
-node stays ~linear (hash table, O(1)/op); tish **quadruples per doubling** ⇒ every `Map.get/set/has`
-is a **linear scan**. Root cause: `tish_builtins/src/collections.rs` backs `Map` with two parallel
-`Vec<Value>` and does `keys.iter().position(|e| same_value_zero(e, &key))` on every `get`/`set`/`has`
-(lines ~240/253/265); `Set` is the same (`iter().any`/`iter().position`, lines ~108/124/137/148). This
-was the correctness-first v1 (the cross-backend "object-with-closures" pattern); the fix is to back
-them with an **insertion-ordered hash map** (e.g. `IndexMap`, to keep JS iteration order) while
-preserving `same_value_zero` key semantics and the `SizeProbe` size hook. **Highest-ROI item found.**
+**Before:** every `Map.get/set/has` was a **linear scan** — `tish_builtins/src/collections.rs` backed
+`Map` with two parallel `Vec<Value>` and did `keys.iter().position(|e| same_value_zero(e, &key))` per op;
+`Set` likewise. Quadrupling-per-doubling ⇒ O(n)/op ⇒ O(n²) for n ops.
+
+**Fix (done):** both `Map` and `Set` are now backed by a single insertion-ordered hash map
+(`indexmap::IndexMap<Key, Value>`). `Key` wraps a `Value` with a `Hash`+`Eq` that implements
+**SameValueZero** — number/string/bool/null keys (the common case) hash by value → true O(1); reference
+keys hash by a per-variant tag, disambiguated by `ptr_eq`. `delete` uses `shift_remove` to preserve
+iteration order. The `.size` hook (`SizeProbe`/`collection_size`/`size_probe_len`) and constructors keep
+their signatures, so **no interp/VM/native edits were needed** — `tests/core/set_map_types.*` stays
+byte-identical on all backends (interp/vm/native verified) and `cargo test -p tishlang_builtins` is green.
+Result: at n=80k, **8166ms → 23ms (~350×)**; `k_nucleotide` **1773× → 5.6× vs V8** (now dominated by
+general object/boxing overhead, Finding 2 — not the Map).
 
 ### Finding 2: object-field access in float loops is ~80× off (nbody)
 
@@ -195,9 +201,8 @@ we overfit. Finding 1 alone justified the exercise.
 
 ## 7. Recommended next steps
 
-1. **★ Fix `Map`/`Set` O(n)-per-op** (`collections.rs`) → back them with an insertion-ordered hash map
-   (`IndexMap`). Highest ROI found here: it's an algorithmic defect (1000×+ at scale, growing), not a
-   tuning gap. Preserve `same_value_zero` keys + the `SizeProbe` hook + cross-backend parity.
+1. **~~Fix `Map`/`Set` O(n)-per-op~~ ✅ DONE** — re-backed with `indexmap::IndexMap` (Finding 1); now
+   O(1)/op, ~350× faster at n=80k, all backends byte-identical.
 2. **Shapes + inline caches for objects** (jsc-bun gap #1) → addresses `nbody`/`megamorphic`/
    `binary_trees` (and is the same "no hashing/specialization" root cause as #1).
 3. **Fix `>>>`** (parser) → unlocks the crypto/hashing benchmark family (SHA-1, MD5, AES, base64) — a

@@ -1,4 +1,19 @@
 ################################################################################
+##  ★ WIN — Map/Set O(n)→O(1) per op (hash-backed), ~350× at scale (2026-06-10). DEFAULT ON.
+################################################################################
+`Map`/`Set` were backed by parallel `Vec<Value>` with a `iter().position(same_value_zero)` LINEAR SCAN
+on every get/set/has/add/delete ⇒ O(n) per op ⇒ O(n²) for a program doing n ops. Surfaced by the new
+`k_nucleotide` benchmark (**1773× slower than V8**, ratio growing with input) — see
+docs/perf-benchmark-suite.md. FIX (crates/tish_builtins/src/collections.rs): both back a single
+`indexmap::IndexMap<Key, Value>` (insertion-ordered hash). `Key(Value)` impls Hash+Eq = SameValueZero
+(number canonical-bits so +0/-0 and NaN unify; string/bool/null by value → true O(1); reference types by
+per-variant tag + `ptr_eq`). `delete` = `shift_remove` (preserves order). MEASURED (Map insert+lookup of
+N, release): n=80k **8166ms → 23ms (~350×)**; scaling went from 4×/doubling (O(n)/op) to ~2.2×/doubling
+(O(1)/op); k_nucleotide **1773× → 5.6× vs V8**. The `.size` hook + constructor signatures were kept
+identical, so ZERO interp/VM/native edits — `tests/core/set_map_types.*` byte-identical on all backends,
+`cargo test -p tishlang_builtins` green. (Object-keyed maps stay bucket-by-variant — rare, no regression.)
+
+################################################################################
 ##  ★ FLAGSHIP WIN — array-element JIT (`arr[i]` in JIT'd loops), 38× (2026-06-06). DEFAULT ON.
 ################################################################################
 The numeric JIT can now read array elements inside compiled loops, so numeric-array-REDUCTION

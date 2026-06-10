@@ -3227,6 +3227,8 @@ dependencies = [
 name = "tishlang_builtins"
 version = "0.1.0"
 dependencies = [
+ "ahash",
+ "indexmap",
  "rand 0.10.1",
  "tishlang_core",
 ]

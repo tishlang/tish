@@ -181,6 +181,14 @@ pub enum Statement {
         init: Expr,
         span: Span,
     },
+    /// A transparent group of statements that execute in the *current* scope
+    /// (no new block scope). Produced for comma-separated declarators
+    /// (`let a = 1, b = 2`) so each declarator lowers to its own VarDecl while
+    /// still occupying a single statement slot (e.g. a `for` initializer).
+    Multi {
+        statements: Vec<Statement>,
+        span: Span,
+    },
     ExprStmt {
         expr: Expr,
         span: Span,
@@ -580,6 +588,8 @@ pub enum BinOp {
     BitXor,
     Shl,
     Shr,
+    /// `>>>` — unsigned (logical) right shift; JS ToUint32 semantics.
+    UShr,
     In,
 }
 

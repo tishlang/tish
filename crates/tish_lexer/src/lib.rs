@@ -239,11 +239,42 @@ impl<'a> Lexer<'a> {
             if c.is_ascii_digit() || c == '.' {
                 s.push(c);
                 self.advance();
+            } else if (c == 'e' || c == 'E') && self.exponent_follows() {
+                // Scientific notation: `e`/`E` then optional sign then digits.
+                // Guarded by lookahead so `3em` lexes as `3` + `em`, not a bad number.
+                s.push(c);
+                self.advance(); // consume e/E
+                if matches!(self.peek(), Some('+') | Some('-')) {
+                    s.push(self.peek().unwrap());
+                    self.advance();
+                }
+                while let Some(d) = self.peek() {
+                    if d.is_ascii_digit() {
+                        s.push(d);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                break; // the exponent terminates the numeric literal
             } else {
                 break;
             }
         }
         s
+    }
+
+    /// With the current peek positioned at an `e`/`E`, decide (without consuming)
+    /// whether a valid exponent `[+-]?\d` follows. `Chars` is `Clone`, so we look
+    /// ahead on a throwaway clone of the iterator.
+    fn exponent_follows(&self) -> bool {
+        let mut la = self.chars.clone();
+        la.next(); // skip the e/E currently under peek()
+        match la.next() {
+            Some(d) if d.is_ascii_digit() => true,
+            Some('+') | Some('-') => la.next().is_some_and(|d| d.is_ascii_digit()),
+            _ => false,
+        }
     }
 
     /// Handle escape sequence, returning the unescaped character.
@@ -558,7 +589,12 @@ impl<'a> Lexer<'a> {
                     TokenKind::Ge
                 } else if self.peek() == Some('>') {
                     self.advance();
-                    TokenKind::Shr
+                    if self.peek() == Some('>') {
+                        self.advance();
+                        TokenKind::UShr // `>>>`
+                    } else {
+                        TokenKind::Shr
+                    }
                 } else {
                     if self.jsx_in_closing_tag
                         || (self.jsx_in_opening_tag && self.jsx_saw_slash_before_gt)

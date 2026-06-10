@@ -154,6 +154,12 @@ impl<'a> Parser<'a> {
                 self.gt_debt += 1;
                 true
             }
+            Some(TokenKind::UShr) => {
+                // `>>>` closing three generic args, e.g. `Foo<Bar<Baz<T>>>`.
+                self.advance();
+                self.gt_debt += 2;
+                true
+            }
             _ => false,
         }
     }
@@ -373,7 +379,37 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::Const)?.span.start
         };
 
-        // Check for destructuring pattern
+        // First declarator keeps the `let`/`const`-anchored span (single-decl is
+        // the overwhelmingly common case and stays byte-identical to before).
+        let first = self.parse_one_declarator(mutable, span_start)?;
+        if !matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+            return Ok(first);
+        }
+
+        // Comma-separated declarators: `let a = 1, b = 2, c`. Each lowers to its
+        // own VarDecl inside a transparent `Multi` group (no new scope), so it
+        // composes anywhere a single statement is expected (incl. `for` init).
+        let mut statements = vec![first];
+        while matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+            self.advance(); // consume ','
+            let decl_start = self.peek().map(|t| t.span.start).unwrap_or(span_start);
+            statements.push(self.parse_one_declarator(mutable, decl_start)?);
+        }
+        Ok(Statement::Multi {
+            statements,
+            span: self.span_end(span_start),
+        })
+    }
+
+    /// Parse one declarator — `ident[: Type] [= init]` or `pattern = init` — into
+    /// its own statement. The leading `let`/`const` keyword is consumed by the
+    /// caller; `span_start` anchors this declarator's span.
+    fn parse_one_declarator(
+        &mut self,
+        mutable: bool,
+        span_start: usize,
+    ) -> Result<Statement, String> {
+        // Destructuring pattern declarator.
         if matches!(
             self.peek_kind(),
             Some(TokenKind::LBracket) | Some(TokenKind::LBrace)
@@ -1686,7 +1722,7 @@ impl<'a> Parser<'a> {
     binary_single_op!(parse_bit_xor, parse_bit_and, BitXor, BinOp::BitXor);
     binary_single_op!(parse_bit_and, parse_shift, BitAnd, BinOp::BitAnd);
 
-    binary_multi_op!(parse_shift, parse_equality, Shl => BinOp::Shl, Shr => BinOp::Shr);
+    binary_multi_op!(parse_shift, parse_equality, Shl => BinOp::Shl, Shr => BinOp::Shr, UShr => BinOp::UShr);
     binary_multi_op!(parse_equality, parse_comparison,
         StrictEq => BinOp::StrictEq, StrictNe => BinOp::StrictNe,
         Eq => BinOp::Eq, Ne => BinOp::Ne);

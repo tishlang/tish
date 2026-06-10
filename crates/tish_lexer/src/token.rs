@@ -110,6 +110,7 @@ pub enum TokenKind {
     BitNot,
     Shl,
     Shr,
+    UShr,
     OptionalChain,
     NullishCoalesce,
     Question,
