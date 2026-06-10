@@ -23,6 +23,10 @@ fn optimize_statement(stmt: &Statement) -> Statement {
                 span: *span,
             }
         }
+        Statement::Multi { statements, span } => Statement::Multi {
+            statements: statements.iter().map(optimize_statement).collect(),
+            span: *span,
+        },
         Statement::VarDecl {
             name,
             name_span,
@@ -746,11 +750,13 @@ fn try_fold_binop(left: &Literal, op: BinOp, right: &Literal) -> Option<Literal>
         Ge => Literal::Bool(ln >= rn),
         And => Literal::Bool(literal_is_truthy(left) && literal_is_truthy(right)),
         Or => Literal::Bool(literal_is_truthy(left) || literal_is_truthy(right)),
-        BitAnd => Literal::Number((ln as i32 & rn as i32) as f64),
-        BitOr => Literal::Number((ln as i32 | rn as i32) as f64),
-        BitXor => Literal::Number((ln as i32 ^ rn as i32) as f64),
-        Shl => Literal::Number(((ln as i32) << (rn as i32)) as f64),
-        Shr => Literal::Number(((ln as i32) >> (rn as i32)) as f64),
+        // `as i64 as i32` = JS ToInt32 (modulo 2³²), matching the VM/interp exactly.
+        BitAnd => Literal::Number((ln as i64 as i32 & rn as i64 as i32) as f64),
+        BitOr => Literal::Number((ln as i64 as i32 | rn as i64 as i32) as f64),
+        BitXor => Literal::Number((ln as i64 as i32 ^ rn as i64 as i32) as f64),
+        Shl => Literal::Number((ln as i64 as i32).wrapping_shl(rn as i64 as u32) as f64),
+        Shr => Literal::Number((ln as i64 as i32).wrapping_shr(rn as i64 as u32) as f64),
+        UShr => Literal::Number((ln as i64 as u32).wrapping_shr(rn as i64 as u32) as f64),
         In => return None, // Requires object/array on right
     };
     Some(result)
@@ -940,7 +946,7 @@ fn try_fold_unary(op: UnaryOp, operand: &Literal) -> Option<Literal> {
         Not => Literal::Bool(!literal_is_truthy(operand)),
         Neg => Literal::Number(-literal_as_number(operand)),
         Pos => Literal::Number(literal_as_number(operand)),
-        BitNot => Literal::Number(!(literal_as_number(operand) as i32) as f64),
+        BitNot => Literal::Number(!(literal_as_number(operand) as i64 as i32) as f64),
         Void => Literal::Null,
     };
     Some(result)

@@ -259,7 +259,9 @@ fn collect_numeric_locals(s: &Statement, out: &mut HashSet<String>) {
                 out.insert(name.to_string());
             }
         }
-        Block { statements, .. } => statements.iter().for_each(|x| collect_numeric_locals(x, out)),
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().for_each(|x| collect_numeric_locals(x, out))
+        }
         If {
             then_branch,
             else_branch,

@@ -57,7 +57,9 @@ impl UsageAnalyzer {
                     self.analyze_statement(e);
                 }
             }
-            Statement::Block { statements, .. } => self.analyze_statements(statements),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                self.analyze_statements(statements)
+            }
             Statement::For {
                 init,
                 cond,
@@ -310,7 +312,9 @@ fn program_uses_async(program: &Program) -> bool {
     fn stmt_has_async(s: &Statement) -> bool {
         match s {
             Statement::FunDecl { async_, .. } if *async_ => true,
-            Statement::Block { statements, .. } => statements.iter().any(stmt_has_async),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().any(stmt_has_async)
+            }
             Statement::If {
                 then_branch,
                 else_branch,
@@ -427,7 +431,9 @@ fn program_uses_async(program: &Program) -> bool {
     }
     fn stmt_has_await(s: &Statement) -> bool {
         match s {
-            Statement::Block { statements, .. } => statements.iter().any(stmt_has_await),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().any(stmt_has_await)
+            }
             Statement::VarDecl { init, .. } => init.as_ref().is_some_and(expr_has_await),
             Statement::VarDeclDestructure { init, .. } => expr_has_await(init),
             Statement::ExprStmt { expr, .. } => expr_has_await(expr),
@@ -891,7 +897,9 @@ impl Codegen {
                 Statement::TypeAlias { name, ty, .. } => {
                     out.push((name.to_string(), ty));
                 }
-                Statement::Block { statements, .. } => Self::walk_type_aliases(statements, out),
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    Self::walk_type_aliases(statements, out)
+                }
                 Statement::If {
                     then_branch,
                     else_branch,
@@ -1318,12 +1326,25 @@ impl Codegen {
         }
     }
 
-    /// Generate code for a bitwise binary operation.
+    /// Generate code for a bitwise binary operation (`& | ^`). `as i64 as i32` is
+    /// JS ToInt32 (modulo 2³²) — out-of-range operands wrap, not saturate.
     fn emit_bitwise_binop(l: &str, r: &str, op: &str) -> String {
         format!(
             "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
-             let Value::Number(b) = &({}) else {{ panic!() }}; ((*a as i32) {} (*b as i32)) as f64 }})",
+             let Value::Number(b) = &({}) else {{ panic!() }}; ((*a as i64 as i32) {} (*b as i64 as i32)) as f64 }})",
             l, r, op
+        )
+    }
+
+    /// Generate code for a shift (`<< >> >>>`). `a_cast` is the left-operand cast
+    /// (`i64 as i32` signed, `i64 as u32` for the logical `>>>`); `method` is the
+    /// `wrapping_sh*` call. Counts mask to 5 bits — exact JS semantics, panic-free.
+    fn emit_shift_binop(l: &str, r: &str, a_cast: &str, method: &str) -> String {
+        format!(
+            "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
+             let Value::Number(b) = &({}) else {{ panic!() }}; \
+             (*a as {}).{}(*b as i64 as u32) as f64 }})",
+            l, r, a_cast, method
         )
     }
 
@@ -1939,6 +1960,13 @@ impl Codegen {
                 self.indent -= 1;
                 self.writeln("}");
             }
+            // Comma-declarators: emit each declarator into the *current* Rust scope
+            // (no wrapping `{}`), so the bindings stay visible to later statements.
+            Statement::Multi { statements, .. } => {
+                for s in statements {
+                    self.emit_statement(s)?;
+                }
+            }
             Statement::VarDecl {
                 name,
                 mutable,
@@ -2125,7 +2153,12 @@ impl Codegen {
                 }
                 if !emitted_native {
                     let iter_expr = self.emit_expr(iterable)?;
-                    self.writeln(&format!("{{ let _fof = ({}).clone();", iter_expr));
+                    // `normalize_for_of` drains a JS iterator object (Map/Set `.values()` etc.)
+                    // into an array; arrays/strings/everything else pass through unchanged.
+                    self.writeln(&format!(
+                        "{{ let _fof = tishlang_runtime::normalize_for_of(({}).clone());",
+                        iter_expr
+                    ));
                     self.indent += 1;
                     self.writeln("match &_fof {");
                     self.indent += 1;
@@ -2923,7 +2956,7 @@ impl Codegen {
                     }
                     CallArg::Spread(e) => {
                         let val = self.emit_expr(e)?;
-                        parts.push(format!("if let Value::Array(ref _spread) = {} {{ _args.extend(_spread.borrow().iter().cloned()); }}", val));
+                        parts.push(format!("if let Value::Array(ref _spread) = tishlang_runtime::normalize_for_of(({}).clone()) {{ _args.extend(_spread.borrow().iter().cloned()); }}", val));
                     }
                 }
             }
@@ -3121,7 +3154,7 @@ impl Codegen {
                         o
                     ),
                     UnaryOp::BitNot => format!(
-                        "Value::Number({{ let Value::Number(n) = &({}) else {{ panic!(\"Expected number\") }}; (!(*n as i32)) as f64 }})",
+                        "Value::Number({{ let Value::Number(n) = &({}) else {{ panic!(\"Expected number\") }}; (!(*n as i64 as i32)) as f64 }})",
                         o
                     ),
                     UnaryOp::Void => format!("{{ {}; Value::Null }}", o),
@@ -3718,7 +3751,7 @@ impl Codegen {
                             }
                             ArrayElement::Spread(e) => {
                                 let val = self.emit_expr(e)?;
-                                parts.push(format!("if let Value::Array(ref _spread) = {} {{ _arr.extend(_spread.borrow().iter().cloned()); }}", val));
+                                parts.push(format!("if let Value::Array(ref _spread) = tishlang_runtime::normalize_for_of(({}).clone()) {{ _arr.extend(_spread.borrow().iter().cloned()); }}", val));
                             }
                         }
                     }
@@ -4468,7 +4501,7 @@ impl Codegen {
             Statement::VarDeclDestructure { init, .. } => {
                 Self::collect_assigned_idents_in_expr(init, names)
             }
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 for s in statements {
                     Self::collect_assigned_idents_in_stmt(s, names);
                 }
@@ -4894,7 +4927,7 @@ impl Codegen {
             Statement::ExprStmt { expr, .. } => {
                 Self::collect_captured_block_vars_from_expr(expr, block_vars, result);
             }
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 for s in statements {
                     Self::collect_captured_block_vars_from_statements(s, block_vars, result);
                 }
@@ -5046,7 +5079,7 @@ impl Codegen {
             Statement::VarDeclDestructure { pattern, .. } => {
                 Self::collect_destruct_names(pattern, names);
             }
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 for s in statements {
                     Self::collect_local_var_names(s, names);
                 }
@@ -5143,7 +5176,7 @@ impl Codegen {
                 }
             }
             Statement::VarDeclDestructure { init, .. } => Self::collect_expr_idents(init, idents),
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 for s in statements {
                     Self::collect_stmt_idents(s, idents);
                 }
@@ -5837,7 +5870,7 @@ impl Codegen {
                         RustType::from_annotation_with_aliases(ann, aliases),
                     );
                 }
-                Statement::Block { statements, .. } => {
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                     Self::collect_annotated_types(statements, aliases, env)
                 }
                 Statement::If {
@@ -5948,7 +5981,9 @@ impl Codegen {
     /// `s` — descending through nested statements and expressions (including closures).
     fn collect_reassignments_stmt<'a>(s: &'a Statement, out: &mut Vec<(String, &'a Expr)>) {
         match s {
-            Statement::Block { statements, .. } => Self::collect_reassignments_stmts(statements, out),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                Self::collect_reassignments_stmts(statements, out)
+            }
             Statement::VarDecl { init: Some(e), .. } => Self::collect_reassignments_expr(e, out),
             Statement::VarDeclDestructure { init, .. } => {
                 Self::collect_reassignments_expr(init, out)
@@ -6285,7 +6320,7 @@ impl Codegen {
         cand: &std::collections::HashSet<String>,
     ) -> bool {
         match stmt {
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 statements.iter().all(|s| Self::native_safe_stmt(s, params, cand))
             }
             Statement::Return { value, .. } => {
@@ -6356,7 +6391,7 @@ impl Codegen {
         cand: &std::collections::HashSet<String>,
     ) -> bool {
         match s {
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 statements.iter().all(|x| Self::returns_numeric(x, params, cand))
             }
             Statement::Return { value, .. } => {
@@ -6453,7 +6488,7 @@ impl Codegen {
 
     fn emit_native_fn_body(&mut self, stmt: &Statement) -> Result<(), CompileError> {
         match stmt {
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 for s in statements {
                     self.emit_native_fn_body(s)?;
                 }
@@ -6564,6 +6599,30 @@ impl Codegen {
                         BinOp::StrictNe => format!("({} != {})", l, r),
                         BinOp::And => format!("({} && {})", l, r),
                         BinOp::Or => format!("({} || {})", l, r),
+                        // Native int32 bitwise/shift (operands are f64 here). `as i64 as i32`
+                        // is JS ToInt32 (modulo 2³², not saturating); shift counts mask to
+                        // 5 bits via `wrapping_sh*` (JS semantics, no panic).
+                        BinOp::BitAnd => {
+                            format!("((({} as i64 as i32) & ({} as i64 as i32)) as f64)", l, r)
+                        }
+                        BinOp::BitOr => {
+                            format!("((({} as i64 as i32) | ({} as i64 as i32)) as f64)", l, r)
+                        }
+                        BinOp::BitXor => {
+                            format!("((({} as i64 as i32) ^ ({} as i64 as i32)) as f64)", l, r)
+                        }
+                        BinOp::Shl => format!(
+                            "(({} as i64 as i32).wrapping_shl({} as i64 as u32) as f64)",
+                            l, r
+                        ),
+                        BinOp::Shr => format!(
+                            "(({} as i64 as i32).wrapping_shr({} as i64 as u32) as f64)",
+                            l, r
+                        ),
+                        BinOp::UShr => format!(
+                            "(({} as i64 as u32).wrapping_shr({} as i64 as u32) as f64)",
+                            l, r
+                        ),
                         _ => unreachable!("result_type_of_binop covers all handled ops"),
                     };
                     return Ok((code, result_ty));
@@ -7116,8 +7175,9 @@ impl Codegen {
             BinOp::BitAnd => Self::emit_bitwise_binop(l, r, "&"),
             BinOp::BitOr => Self::emit_bitwise_binop(l, r, "|"),
             BinOp::BitXor => Self::emit_bitwise_binop(l, r, "^"),
-            BinOp::Shl => Self::emit_bitwise_binop(l, r, "<<"),
-            BinOp::Shr => Self::emit_bitwise_binop(l, r, ">>"),
+            BinOp::Shl => Self::emit_shift_binop(l, r, "i64 as i32", "wrapping_shl"),
+            BinOp::Shr => Self::emit_shift_binop(l, r, "i64 as i32", "wrapping_shr"),
+            BinOp::UShr => Self::emit_shift_binop(l, r, "i64 as u32", "wrapping_shr"),
             BinOp::In => format!("tish_in_operator(&{}, &{})", l, r),
             BinOp::Eq | BinOp::Ne => {
                 return Err(CompileError::new(

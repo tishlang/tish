@@ -10,6 +10,7 @@ pub mod construct;
 pub mod date;
 pub mod globals;
 pub mod helpers;
+pub mod iterator;
 pub mod math;
 pub mod number;
 pub mod object;

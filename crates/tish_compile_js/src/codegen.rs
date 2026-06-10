@@ -143,6 +143,13 @@ impl Codegen {
                 self.indent -= 1;
                 self.writeln("}");
             }
+            // Comma-declarators: emit each declarator as its own JS statement in the
+            // current scope (no wrapping braces).
+            Statement::Multi { statements, .. } => {
+                for s in statements {
+                    self.emit_statement(s)?;
+                }
+            }
             Statement::VarDecl {
                 name,
                 mutable,
@@ -224,6 +231,34 @@ impl Codegen {
                         Statement::ExprStmt { expr, .. } => {
                             let ex = self.emit_expr(expr)?;
                             header.push_str(&ex);
+                        }
+                        // Comma-declarators (`for (let i = 0, n = len; …)`): emit JS-native
+                        // `let i = 0, n = len` — one keyword, declarators joined by `, `.
+                        Statement::Multi { statements, .. } => {
+                            let mut decl_kw = "let";
+                            let mut parts: Vec<String> = Vec::new();
+                            for (idx, st) in statements.iter().enumerate() {
+                                let Statement::VarDecl {
+                                    name,
+                                    mutable,
+                                    init: opt_init,
+                                    ..
+                                } = st
+                                else {
+                                    return Err(CompileError::new("Unsupported for init"));
+                                };
+                                if idx == 0 {
+                                    decl_kw = if *mutable { "let" } else { "const" };
+                                }
+                                let escaped = Self::escape_ident(name.as_ref());
+                                if let Some(e) = opt_init {
+                                    let ex = self.emit_expr(e)?;
+                                    parts.push(format!("{} = {}", escaped, ex));
+                                } else {
+                                    parts.push(escaped);
+                                }
+                            }
+                            header.push_str(&format!("{} {}", decl_kw, parts.join(", ")));
                         }
                         _ => return Err(CompileError::new("Unsupported for init")),
                     }
@@ -488,6 +523,7 @@ impl Codegen {
                     BinOp::BitXor => "^",
                     BinOp::Shl => "<<",
                     BinOp::Shr => ">>",
+                    BinOp::UShr => ">>>",
                     BinOp::In => {
                         // key in object (property/index existence check)
                         return Ok(format!("({} in {})", l, r));

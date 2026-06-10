@@ -1751,6 +1751,19 @@ impl Vm {
                         .clone();
                     self.stack.push(v);
                 }
+                Opcode::IterNormalize => {
+                    // `for…of`: turn a JS iterator object (callable `next()` → `{ value, done }`,
+                    // e.g. a Map/Set `.values()` result) into an array so the index loop iterates
+                    // it. Arrays/strings/everything else pass through unchanged.
+                    let v = self
+                        .stack
+                        .last()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    if let Some(items) = tishlang_core::drain_iterator(v) {
+                        self.stack.pop();
+                        self.stack.push(Value::Array(VmRef::new(items)));
+                    }
+                }
                 Opcode::Call => {
                     let argc = Self::read_u16(code, &mut ip) as usize;
                     let mut args = Vec::with_capacity(argc);
@@ -1846,6 +1859,11 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow in CallSpread".to_string())?;
+                    // A lone iterator spread (`f(...m.values())`) — drain to an array.
+                    let args_array = match tishlang_core::drain_iterator(&args_array) {
+                        Some(items) => Value::Array(VmRef::new(items)),
+                        None => args_array,
+                    };
                     let args: Vec<Value> = match &args_array {
                         Value::Array(a) => a.borrow().clone(),
                         _ => {
@@ -1903,6 +1921,11 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow in ConstructSpread".to_string())?;
+                    // A lone iterator spread (`new X(...m.values())`) — drain to an array.
+                    let args_array = match tishlang_core::drain_iterator(&args_array) {
+                        Some(items) => Value::Array(VmRef::new(items)),
+                        None => args_array,
+                    };
                     let args: Vec<Value> = match &args_array {
                         Value::Array(a) => a.borrow().clone(),
                         _ => {
@@ -2113,6 +2136,15 @@ impl Vm {
                     // Materialise NumberArray on either side before concatenation.
                     let left = left.coerce_number_array();
                     let right = right.coerce_number_array();
+                    // Spread of a Map/Set iterator (`[...m.values()]`): drain to an array.
+                    let left = match tishlang_core::drain_iterator(&left) {
+                        Some(items) => Value::Array(VmRef::new(items)),
+                        None => left,
+                    };
+                    let right = match tishlang_core::drain_iterator(&right) {
+                        Some(items) => Value::Array(VmRef::new(items)),
+                        None => right,
+                    };
                     let (mut a, b) = (
                         match &left {
                             Value::Array(arr) => arr.borrow().clone(),
@@ -2485,11 +2517,16 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
         Ge => Ok(Bool(ln >= rn)),
         And => Ok(Bool(l.is_truthy() && r.is_truthy())),
         Or => Ok(Bool(l.is_truthy() || r.is_truthy())),
-        BitAnd => Ok(Number((ln as i32 & rn as i32) as f64)),
-        BitOr => Ok(Number((ln as i32 | rn as i32) as f64)),
-        BitXor => Ok(Number((ln as i32 ^ rn as i32) as f64)),
-        Shl => Ok(Number(((ln as i32) << (rn as i32)) as f64)),
-        Shr => Ok(Number(((ln as i32) >> (rn as i32)) as f64)),
+        // `as i64 as i32` = JS ToInt32 (modulo 2³², not a saturating cast), so
+        // out-of-range operands wrap exactly like JS instead of clamping.
+        BitAnd => Ok(Number((ln as i64 as i32 & rn as i64 as i32) as f64)),
+        BitOr => Ok(Number((ln as i64 as i32 | rn as i64 as i32) as f64)),
+        BitXor => Ok(Number((ln as i64 as i32 ^ rn as i64 as i32) as f64)),
+        // JS shifts mask the count to 5 bits; `wrapping_sh*` matches that and avoids
+        // the debug-mode panic that plain `<<`/`>>` raise for a count of 32+.
+        Shl => Ok(Number((ln as i64 as i32).wrapping_shl(rn as i64 as u32) as f64)),
+        Shr => Ok(Number((ln as i64 as i32).wrapping_shr(rn as i64 as u32) as f64)),
+        UShr => Ok(Number((ln as i64 as u32).wrapping_shr(rn as i64 as u32) as f64)),
         In => Ok(Bool(match r {
             Value::Object(_) => object_has(r, l),
             Value::Array(a) => {
@@ -2532,7 +2569,7 @@ fn eval_unary(op: UnaryOp, o: &Value) -> Result<Value, String> {
         Not => Ok(Bool(!o.is_truthy())),
         Neg => Ok(Number(-o.as_number().unwrap_or(f64::NAN))),
         Pos => Ok(Number(o.as_number().unwrap_or(f64::NAN))),
-        BitNot => Ok(Number(!(o.as_number().unwrap_or(0.0) as i32) as f64)),
+        BitNot => Ok(Number(!(o.as_number().unwrap_or(0.0) as i64 as i32) as f64)),
         Void => Ok(Null),
     }
 }

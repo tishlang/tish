@@ -546,12 +546,15 @@ fn emit_simple_op(
                     let p = bcx.ins().fmul(t, r);
                     bcx.ins().fsub(l, p)
                 }
-                // Bitwise AND/OR/XOR. The VM does `((a as i32) OP (b as i32)) as f64`;
-                // Rust's `f64 as i32` is *saturating*, which `fcvt_to_sint_sat` matches
-                // exactly. Shifts / `>>>` stay on the VM (shift-amount edge cases).
+                // Bitwise AND/OR/XOR. The VM does `((a as i64 as i32) OP …) as f64` —
+                // JS ToInt32 (modulo 2³²), so convert to I64 (saturating, exact for the
+                // `< 2⁵³` values real code produces) then `ireduce` to I32 to take the low
+                // 32 bits. Shifts / `>>>` stay on the VM (shift-amount edge cases).
                 BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
-                    let li = bcx.ins().fcvt_to_sint_sat(types::I32, l);
-                    let ri = bcx.ins().fcvt_to_sint_sat(types::I32, r);
+                    let l64 = bcx.ins().fcvt_to_sint_sat(types::I64, l);
+                    let r64 = bcx.ins().fcvt_to_sint_sat(types::I64, r);
+                    let li = bcx.ins().ireduce(types::I32, l64);
+                    let ri = bcx.ins().ireduce(types::I32, r64);
                     let res = match bop {
                         BinOp::BitAnd => bcx.ins().band(li, ri),
                         BinOp::BitOr => bcx.ins().bor(li, ri),
@@ -581,9 +584,11 @@ fn emit_simple_op(
                     let zero = bcx.ins().f64const(0.0);
                     (fcmp_f64(bcx, FloatCC::Equal, o, zero), true)
                 }
-                // `~x` = `!(x as i32) as f64` (matches the VM; saturating cast).
+                // `~x` = `!(x as i64 as i32) as f64` — JS ToInt32 (modulo) via I64→ireduce,
+                // matching the VM so a JIT-compiled `~` can't diverge on large values.
                 UnaryOp::BitNot => {
-                    let oi = bcx.ins().fcvt_to_sint_sat(types::I32, o);
+                    let o64 = bcx.ins().fcvt_to_sint_sat(types::I64, o);
+                    let oi = bcx.ins().ireduce(types::I32, o64);
                     let res = bcx.ins().bnot(oi);
                     (bcx.ins().fcvt_from_sint(types::F64, res), false)
                 }

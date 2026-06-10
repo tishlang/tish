@@ -772,6 +772,36 @@ pub fn object_has(obj: &Value, key: &Value) -> bool {
     }
 }
 
+/// Drain a JS-style iterator object — one with a callable `next()` that returns
+/// `{ value, done }` — into a `Vec`, calling `next()` until `done` is truthy. Returns
+/// `None` when `obj` is not such an object (no callable `next`), so callers fall back
+/// to their array/string handling. This is what makes a `Map`/`Set` iterator (the result
+/// of `.values()`/`.keys()`/`.entries()`) usable in `for…of`, spread, and `Array.from`.
+/// A missing/absent `done` is treated as truthy so a malformed object can't spin forever;
+/// the native iterators always set `done`, so well-formed iteration is exact.
+pub fn drain_iterator(obj: &Value) -> Option<Vec<Value>> {
+    if !matches!(obj, Value::Object(_)) {
+        return None;
+    }
+    let Value::Function(next) = object_get(obj, &Value::String("next".into()))? else {
+        return None;
+    };
+    let done_key = Value::String("done".into());
+    let value_key = Value::String("value".into());
+    let mut out = Vec::new();
+    loop {
+        let res = next.call(&[]);
+        let done = object_get(&res, &done_key)
+            .map(|v| v.is_truthy())
+            .unwrap_or(true);
+        if done {
+            break;
+        }
+        out.push(object_get(&res, &value_key).unwrap_or(Value::Null));
+    }
+    Some(out)
+}
+
 /// Invoke a callable [`Value`]: [`Value::Function`], or an object exposing `__call` (e.g. `Symbol`).
 pub fn value_call(callee: &Value, args: &[Value]) -> Value {
     match callee {

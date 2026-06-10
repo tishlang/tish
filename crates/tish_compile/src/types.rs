@@ -179,6 +179,15 @@ impl RustType {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow => {
                     Some(RustType::F64)
                 }
+                // Bitwise / shift ops: JS coerces both sides to int32, computes, and
+                // returns a Number — so the native result is still F64. Big win for
+                // crypto/hashing loops that would otherwise box every `^`/`>>>`.
+                BinOp::BitAnd
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::Shl
+                | BinOp::Shr
+                | BinOp::UShr => Some(RustType::F64),
                 BinOp::Lt
                 | BinOp::Le
                 | BinOp::Gt

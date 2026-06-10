@@ -29,6 +29,7 @@ pub fn binop_to_u8(op: BinOp) -> u8 {
         Shl => 19,
         Shr => 20,
         In => 21,
+        UShr => 22,
     }
 }
 
@@ -58,6 +59,7 @@ pub fn u8_to_binop(b: u8) -> Option<BinOp> {
         19 => Shl,
         20 => Shr,
         21 => In,
+        22 => UShr,
         _ => return None,
     })
 }

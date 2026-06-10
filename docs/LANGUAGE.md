@@ -4,7 +4,7 @@
 
 Tish is a minimal JS/TS-like language: same source runs in a **tree-walking interpreter**, a **bytecode VM**, or **compiled targets** — Rust transpilation linked to **`tishlang_runtime`**, standalone binaries that **embed bytecode and run the same VM**, **WASM/WASI**, or **JavaScript**. Tish is **not** JavaScript; the JS path is a **compile target** with deliberate limits (wrong scope, invalid emit, and a few keyword collisions with DOM/JSX are fixed; arbitrary ECMAScript surface is not a goal). See **[js-emit-philosophy.md](js-emit-philosophy.md)**. See **Native compile (implementation status)** for what each path does today versus the long-term goal (primitive lowering, true AOT). **Secure-by-default:** network, filesystem, and process APIs are feature-gated.
 
-**No `undefined`** — use `null`. **`typeof null`** is `"null"` (not `"object"`). **`typeof`** for a symbol value is `"symbol"`. **Strict equality only:** `===` / `!==`. **`let` / `const` only** (no `var`). **No `this`**, prototypes, or `class` / `super`. Plain objects and arrays. **`?.` yields `null`**, not undefined. Parser also accepts **`new`** expressions (no class syntax; uncommon in idiomatic Tish).
+**No `undefined`** — use `null`. **`typeof null`** is `"null"` (not `"object"`). **`typeof`** for a symbol value is `"symbol"`. **Strict equality only:** `===` / `!==`. **`let` / `const` only** (no `var`; comma-separated declarators `let a = 1, b = 2`). **No `this`**, prototypes, or `class` / `super`. Plain objects and arrays. **`?.` yields `null`**, not undefined. Parser also accepts **`new`** expressions (no class syntax; uncommon in idiomatic Tish).
 
 ---
 
@@ -12,13 +12,13 @@ Tish is a minimal JS/TS-like language: same source runs in a **tree-walking inte
 
 **Keywords:** `fn` / `function`, `let`, `const`, `if` `else`, `while`, `do` `while`, `for`, `switch` `case` `default`, `return` `break` `continue`, `try` `catch` `throw`, `async` `await`, `import` `export`, `new`, `typeof`, `void`, `true` `false` `null`.
 
-**Literals:** numbers; strings `"`/`'` (escapes `\n` `\r` `\t` `\\` `\"` `\'`); arrays `[]`; objects `{ k: v }` (fixed keys at parse time); template literals `` `x ${e} y` ``; JSX supported in lexer.
+**Literals:** numbers (decimal + scientific notation, e.g. `1.5e-3`, `2E+3`); strings `"`/`'` (escapes `\n` `\r` `\t` `\\` `\"` `\'`); arrays `[]`; objects `{ k: v }` (fixed keys at parse time); template literals `` `x ${e} y` ``; JSX supported in lexer.
 
-**Operators:** `+` (add/concat), `-` `*` `/` `%` `**`; bitwise `&` `|` `^` `~` `<<` `>>` (32-bit int semantics); compare `<` `<=` `>` `>=`; logical `&&` `||` `!`; ternary `? :`; `??`; `?.`; compound assign `+=` `-=` …; postfix `++` `--` on identifiers.
+**Operators:** `+` (add/concat), `-` `*` `/` `%` `**`; bitwise `&` `|` `^` `~` `<<` `>>` `>>>` (JS 32-bit int semantics — `ToInt32`/`ToUint32` modulo 2³², not saturating); compare `<` `<=` `>` `>=`; logical `&&` `||` `!`; ternary `? :`; `??`; `?.`; compound assign `+=` `-=` …; postfix `++` `--` on identifiers.
 
 **Functions:** `fn name(a, b) { … }`, single-expr body `fn f(x) = x * 2`, arrows `let g = (a, b) => a + b`, `async fn …` with `await`.
 
-**Control flow:** `if`/`else`, `while`, `do`/`while`, C-style `for`, `for (let|const x of arr)` (arrays/strings), `switch`, `try`/`catch`.
+**Control flow:** `if`/`else`, `while`, `do`/`while`, C-style `for` (comma-separated init declarators: `for (let i = 0, n = len; …)`), `for (let|const x of …)` over arrays, strings, and **iterators** (e.g. `Map`/`Set` `.values()` / `.keys()` / `.entries()`), `switch`, `try`/`catch`.
 
 **Blocks:** `{ … }` **or** indentation (lexer emits `Indent`/`Dedent`). **1 tab = 1 level; 2 spaces = 1 level.** **Debug:** set **`TISH_IGNORE_INDENT=1`** (or `tish dump-ast --ignore-indent`) to ignore indentation and delimit blocks by braces only — handy for isolating whether a nested-block transpilation issue comes from indentation grouping.
 

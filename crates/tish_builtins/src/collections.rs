@@ -13,10 +13,13 @@
 //! ## v1 scope / known gaps (documented in tishlang-web)
 //! - `add`/`set` return `undefined` (no method chaining yet — native object methods receive no
 //!   `this`).
-//! - Iterate with `.values()` / `.keys()` / `.entries()` (each returns an array); direct
-//!   `for (x of set)` / `[...set]` and `forEach` are not wired yet (`forEach` would pass a callback
-//!   into a core native fn, which the interpreter's closures cannot cross — a callback bridge is a
-//!   follow-up).
+//! - `.values()` / `.keys()` / `.entries()` return real **iterators** (objects with a `next()`
+//!   that yields `{ value, done }`), so they work both directly (`it.next()`) and in `for…of` /
+//!   spread / `Array.from` via [`tishlang_core::drain_iterator`]. The iterator snapshots the
+//!   collection when created; mutating the source mid-iteration is not reflected (a live iterator
+//!   is a follow-up). Direct `for (x of set)` (iterating the collection itself) and `forEach`
+//!   (a callback the interpreter's closures cannot cross into a core native fn) are still
+//!   follow-ups — iterate via `.values()` / `.entries()`.
 //! - Keys/values use **SameValueZero** equality (NaN equals NaN; `+0`/`-0` are the same; objects by
 //!   identity).
 
@@ -224,7 +227,7 @@ pub fn set_instance(initial: &[Value]) -> Value {
         let s = store.clone();
         let values = move |_args: &[Value]| {
             let out: Vec<Value> = s.borrow().keys().map(|k| k.0.clone()).collect();
-            Value::Array(VmRef::new(out))
+            crate::iterator::array_iterator(out)
         };
         m.insert(Arc::from("values"), Value::native(values.clone()));
         m.insert(Arc::from("keys"), Value::native(values));
@@ -239,7 +242,7 @@ pub fn set_instance(initial: &[Value]) -> Value {
                     .keys()
                     .map(|k| Value::Array(VmRef::new(vec![k.0.clone(), k.0.clone()])))
                     .collect();
-                Value::Array(VmRef::new(pairs))
+                crate::iterator::array_iterator(pairs)
             }),
         );
     }
@@ -337,7 +340,7 @@ pub fn map_instance(pairs: &[Value]) -> Value {
             Arc::from("keys"),
             Value::native(move |_args: &[Value]| {
                 let out: Vec<Value> = s.borrow().keys().map(|k| k.0.clone()).collect();
-                Value::Array(VmRef::new(out))
+                crate::iterator::array_iterator(out)
             }),
         );
     }
@@ -347,7 +350,7 @@ pub fn map_instance(pairs: &[Value]) -> Value {
             Arc::from("values"),
             Value::native(move |_args: &[Value]| {
                 let out: Vec<Value> = s.borrow().values().cloned().collect();
-                Value::Array(VmRef::new(out))
+                crate::iterator::array_iterator(out)
             }),
         );
     }
@@ -361,7 +364,7 @@ pub fn map_instance(pairs: &[Value]) -> Value {
                     .iter()
                     .map(|(k, v)| Value::Array(VmRef::new(vec![k.0.clone(), v.clone()])))
                     .collect();
-                Value::Array(VmRef::new(pairs))
+                crate::iterator::array_iterator(pairs)
             }),
         );
     }

@@ -407,7 +407,7 @@ impl<'a> Parser<'a> {
     fn parse_one_declarator(
         &mut self,
         mutable: bool,
-        span_start: usize,
+        span_start: (usize, usize),
     ) -> Result<Statement, String> {
         // Destructuring pattern declarator.
         if matches!(
@@ -1245,17 +1245,33 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
-                self.advance();
-            }
-            Some(Box::new(Statement::VarDecl {
+            let first = Statement::VarDecl {
                 name,
                 name_span,
                 mutable,
                 type_ann,
                 init: init_expr,
                 span: self.span_end(var_span_start),
-            }))
+            };
+            // Comma-separated for-init declarators: `for (let i = 0, n = len; ...)`.
+            let decl = if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                let mut statements = vec![first];
+                while matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                    self.advance();
+                    let decl_start = self.peek().map(|t| t.span.start).unwrap_or(var_span_start);
+                    statements.push(self.parse_one_declarator(mutable, decl_start)?);
+                }
+                Statement::Multi {
+                    statements,
+                    span: self.span_end(var_span_start),
+                }
+            } else {
+                first
+            };
+            if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
+                self.advance();
+            }
+            Some(Box::new(decl))
         } else if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
             None
         } else {

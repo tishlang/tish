@@ -20,6 +20,16 @@ pub use tishlang_core::value_call;
 // a direct dependency on `tishlang_core` from the generated crate.
 pub use tishlang_core::{VmReadGuard, VmRef, VmWriteGuard};
 
+/// `for…of` iterable normalization for the native backend: a JS iterator object (one with a
+/// callable `next()` returning `{ value, done }`, e.g. a `Map`/`Set` `.values()` result) is
+/// drained into a `Value::Array`; arrays, strings, and everything else pass through unchanged.
+pub fn normalize_for_of(v: Value) -> Value {
+    match tishlang_core::drain_iterator(&v) {
+        Some(items) => Value::Array(VmRef::new(items)),
+        None => v,
+    }
+}
+
 pub use tishlang_builtins::construct::{
     audio_context_constructor_value as tish_audio_context_constructor, construct as tish_construct,
 };

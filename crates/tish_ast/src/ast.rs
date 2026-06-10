@@ -619,6 +619,7 @@ impl Statement {
             Statement::Block { span, .. }
             | Statement::VarDecl { span, .. }
             | Statement::VarDeclDestructure { span, .. }
+            | Statement::Multi { span, .. }
             | Statement::ExprStmt { span, .. }
             | Statement::If { span, .. }
             | Statement::While { span, .. }

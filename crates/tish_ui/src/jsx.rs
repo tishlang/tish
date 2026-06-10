@@ -142,6 +142,11 @@ fn collect_fun_decl_names_stmt(stmt: &Statement, names: &mut HashSet<String>) {
                 collect_fun_decl_names_stmt(s, names);
             }
         }
+        Statement::Multi { statements, .. } => {
+            for s in statements {
+                collect_fun_decl_names_stmt(s, names);
+            }
+        }
         Statement::VarDecl { init, .. } => {
             if let Some(e) = init {
                 collect_fun_decl_names_expr(e, names);
@@ -537,6 +542,7 @@ fn stmt_contains_jsx(stmt: &tishlang_ast::Statement) -> bool {
     use tishlang_ast::{ExportDeclaration, Statement};
     match stmt {
         Statement::Block { statements, .. } => statements.iter().any(stmt_contains_jsx),
+        Statement::Multi { statements, .. } => statements.iter().any(stmt_contains_jsx),
         Statement::VarDecl { init, .. } => init.as_ref().is_some_and(expr_contains_jsx),
         Statement::VarDeclDestructure { init, .. } => expr_contains_jsx(init),
         Statement::ExprStmt { expr, .. } => expr_contains_jsx(expr),

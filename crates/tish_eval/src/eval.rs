@@ -361,6 +361,15 @@ impl Evaluator {
                 self.scope = prev;
                 Ok(last)
             }
+            // Comma-declarators: a transparent group — evaluate each declarator in
+            // the *current* scope (no child scope).
+            Statement::Multi { statements, .. } => {
+                let mut last = Value::Null;
+                for s in statements {
+                    last = self.eval_statement(s)?;
+                }
+                Ok(last)
+            }
             Statement::VarDecl {
                 name,
                 mutable,
@@ -432,12 +441,19 @@ impl Evaluator {
                         .chars()
                         .map(|c| crate::value::Value::String(Arc::from(c.to_string())))
                         .collect::<Vec<_>>(),
-                    _ => {
-                        return Err(EvalError::Error(format!(
-                            "for-of requires iterable (array or string), got {}",
-                            iter_val
-                        )));
-                    }
+                    // Iterator protocol: an object with a callable `next()` returning
+                    // `{ value, done }` — e.g. a Map/Set iterator from `.values()` /
+                    // `.keys()` / `.entries()`. Drain it ONCE (draining advances the
+                    // iterator's shared position, so it must not be re-run).
+                    _ => match self.drain_eval_iterator(&iter_val) {
+                        Some(elems) => elems,
+                        None => {
+                            return Err(EvalError::Error(format!(
+                                "for-of requires iterable (array, string, or iterator), got {}",
+                                iter_val
+                            )));
+                        }
+                    },
                 };
                 // Each element gets a FRESH per-iteration binding (ES6 `for (let v of …)`), so a
                 // closure created in the body captures that element, not the last one.
@@ -1864,8 +1880,11 @@ impl Evaluator {
                         }
                         tishlang_ast::ArrayElement::Spread(e) => {
                             let spread_val = self.eval_expr(e)?;
-                            if let Value::Array(arr) = spread_val {
+                            if let Value::Array(arr) = &spread_val {
                                 vals.extend(arr.borrow().iter().cloned());
+                            } else if let Some(items) = self.drain_eval_iterator(&spread_val) {
+                                // Spread a Map/Set iterator (`[...m.values()]`).
+                                vals.extend(items);
                             }
                         }
                     }
@@ -2189,8 +2208,18 @@ impl Evaluator {
             BinOp::BitAnd => self.binop_int32(l, r, |a, b| Value::Number((a & b) as f64)),
             BinOp::BitOr => self.binop_int32(l, r, |a, b| Value::Number((a | b) as f64)),
             BinOp::BitXor => self.binop_int32(l, r, |a, b| Value::Number((a ^ b) as f64)),
-            BinOp::Shl => self.binop_int32(l, r, |a, b| Value::Number((a << b) as f64)),
-            BinOp::Shr => self.binop_int32(l, r, |a, b| Value::Number((a >> b) as f64)),
+            // JS shifts mask the count to the low 5 bits; `wrapping_sh*` does exactly
+            // that and never panics (plain `<<`/`>>` panic in debug for count >= 32).
+            BinOp::Shl => {
+                self.binop_int32(l, r, |a, b| Value::Number(a.wrapping_shl(b as u32) as f64))
+            }
+            BinOp::Shr => {
+                self.binop_int32(l, r, |a, b| Value::Number(a.wrapping_shr(b as u32) as f64))
+            }
+            // `>>>` — unsigned (logical) right shift: ToUint32(a) >>> (b & 31).
+            BinOp::UShr => self.binop_int32(l, r, |a, b| {
+                Value::Number((a as u32).wrapping_shr(b as u32) as f64)
+            }),
             BinOp::In => {
                 let ok = match r {
                     Value::Object(_) => eval_object_has(r, l),
@@ -2287,10 +2316,13 @@ impl Evaluator {
         false
     }
 
-    /// ToInt32 coercion matching the VM (`vm.rs` eval_binop: `as_number().unwrap_or(NaN) as i32`).
-    /// Non-numbers coerce to NaN, and `NaN as i32` saturates to 0 — so `arr[oob] | 0` → 0, like JS.
+    /// JS ToInt32 coercion. Non-numbers coerce to NaN → 0. Going through `i64`
+    /// (not a direct `as i32`) gives modulo-2³² truncation instead of a saturating
+    /// cast, so out-of-i32-range values (e.g. a `0..2³²` hash) wrap exactly like JS:
+    /// `4294967295 | 0 === -1`, not the saturated `i32::MAX`. Realistic values are
+    /// `< 2⁵³` so they fit `i64` exactly; the two casts stay cheap.
     fn to_int32(v: &Value) -> i32 {
-        v.as_number().unwrap_or(f64::NAN) as i32
+        v.as_number().unwrap_or(f64::NAN) as i64 as i32
     }
 
     fn binop_int32<F>(&self, l: &Value, r: &Value, f: F) -> Result<Value, String>
@@ -3034,8 +3066,11 @@ impl Evaluator {
                 }
                 tishlang_ast::CallArg::Spread(e) => {
                     let spread_val = self.eval_expr(e)?;
-                    if let Value::Array(arr) = spread_val {
+                    if let Value::Array(arr) = &spread_val {
                         result.extend(arr.borrow().iter().cloned());
+                    } else if let Some(items) = self.drain_eval_iterator(&spread_val) {
+                        // Spread a Map/Set iterator into call args (`f(...m.values())`).
+                        result.extend(items);
                     }
                 }
             }
@@ -3148,6 +3183,32 @@ impl Evaluator {
             tishlang_core::Value::Number(n) => Value::Number(n),
             _ => Value::Number(-1.0),
         }
+    }
+
+    /// Drain a JS iterator object — one whose `next()` is a bridged core fn (`CoreFn`)
+    /// returning `{ value, done }`, e.g. a Map/Set iterator from `.values()` / `.keys()` /
+    /// `.entries()` — into a `Vec` by calling `next()` until `done`. Returns `None` when `v`
+    /// is not such an object. Shared by `for…of` and spread so both treat iterators like JS.
+    fn drain_eval_iterator(&self, v: &Value) -> Option<Vec<Value>> {
+        if !matches!(v, Value::Object(_)) {
+            return None;
+        }
+        let Ok(Value::CoreFn(next)) = self.get_prop(v, "next") else {
+            return None;
+        };
+        let mut out = Vec::new();
+        loop {
+            let res = crate::value_convert::core_to_eval(next.call(&[]));
+            let done = self
+                .get_prop(&res, "done")
+                .map(|x| x.is_truthy())
+                .unwrap_or(true);
+            if done {
+                break;
+            }
+            out.push(self.get_prop(&res, "value").unwrap_or(Value::Null));
+        }
+        Some(out)
     }
 
     fn get_prop(&self, obj: &Value, key: &str) -> Result<Value, String> {

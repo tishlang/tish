@@ -177,6 +177,9 @@ fn stmt_is_param_only(s: &Statement, params: &HashSet<&str>) -> bool {
         Statement::Block { statements, .. } => {
             statements.iter().all(|st| stmt_is_param_only(st, params))
         }
+        Statement::Multi { statements, .. } => {
+            statements.iter().all(|st| stmt_is_param_only(st, params))
+        }
         Statement::ExprStmt { expr, .. } => expr_is_param_only(expr, params),
         Statement::Return { value, .. } => {
             value.as_ref().is_none_or(|e| expr_is_param_only(e, params))
@@ -252,6 +255,7 @@ fn params_bind_name(params: &[FunParam], name: &str) -> bool {
 fn stmt_rebinds(s: &Statement, name: &str) -> bool {
     match s {
         Statement::Block { statements, .. } => statements.iter().any(|s| stmt_rebinds(s, name)),
+        Statement::Multi { statements, .. } => statements.iter().any(|s| stmt_rebinds(s, name)),
         Statement::VarDecl { name: n, init, .. } => {
             n.as_ref() == name || init.as_ref().is_some_and(|e| expr_rebinds(e, name))
         }
@@ -364,6 +368,7 @@ impl SlotScan {
     fn stmt(&mut self, s: &Statement, in_closure: bool) -> bool {
         match s {
             Statement::Block { statements, .. } => statements.iter().all(|s| self.stmt(s, in_closure)),
+            Statement::Multi { statements, .. } => statements.iter().all(|s| self.stmt(s, in_closure)),
             Statement::VarDecl { init, .. } => init.as_ref().is_none_or(|e| self.expr(e, in_closure)),
             Statement::VarDeclDestructure { init, .. } => self.expr(init, in_closure),
             Statement::ExprStmt { expr, .. } => self.expr(expr, in_closure),
@@ -1134,6 +1139,13 @@ impl<'a> Compiler<'a> {
                 self.emit(Opcode::ExitBlock);
                 self.block_depth -= 1;
             }
+            // Comma-declarators: a transparent group — compile each declarator in
+            // the *current* block scope (no EnterBlock/ExitBlock).
+            Statement::Multi { statements, .. } => {
+                for s in statements {
+                    self.compile_statement(s)?;
+                }
+            }
             Statement::VarDecl {
                 name,
                 init,
@@ -1294,6 +1306,9 @@ impl<'a> Compiler<'a> {
                 ..
             } => {
                 self.compile_expr(iterable)?;
+                // Normalize a JS iterator object (Map/Set `.values()` etc.) to an array so the
+                // index-based loop below can iterate it; arrays/strings pass through untouched.
+                self.emit(Opcode::IterNormalize);
                 self.enter_block_scope();
                 let arr_name = Arc::from("__forof_arr__");
                 let i_name = Arc::from("__forof_i__");

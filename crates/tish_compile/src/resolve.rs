@@ -251,7 +251,9 @@ pub fn program_uses_document(program: &Program) -> bool {
                         .as_ref()
                         .is_some_and(|stmts| stmts.iter().any(stmt_uses_document))
             }
-            Statement::Block { statements, .. } => statements.iter().any(stmt_uses_document),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().any(stmt_uses_document)
+            }
             Statement::FunDecl { body, .. } => stmt_uses_document(body),
             Statement::Try {
                 body,

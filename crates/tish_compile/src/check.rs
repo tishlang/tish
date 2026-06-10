@@ -283,6 +283,12 @@ impl CheckCtx {
                 let bound = type_ann.clone().unwrap_or_else(|| simple("any"));
                 self.define(name.as_ref(), bound);
             }
+            // Comma-declarators: check + bind each declarator in the current scope.
+            Statement::Multi { statements, .. } => {
+                for st in statements {
+                    self.check_stmt(st);
+                }
+            }
             Statement::VarDeclDestructure { init, .. } => {
                 self.synth(init);
             }
@@ -650,7 +656,7 @@ fn bin_type(
 /// recursive pre-passes. Single-statement bodies are passed as one-element slices.
 fn for_each_child_block(s: &Statement, f: &mut dyn FnMut(&[Statement])) {
     match s {
-        Statement::Block { statements, .. } => f(statements),
+        Statement::Block { statements, .. } | Statement::Multi { statements, .. } => f(statements),
         Statement::If {
             then_branch,
             else_branch,

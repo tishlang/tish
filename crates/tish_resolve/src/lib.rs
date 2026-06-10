@@ -151,6 +151,11 @@ fn collect_stmt(
                 collect_stmt(s, source, lsp_line, lsp_char, best);
             }
         }
+        Statement::Multi { statements, .. } => {
+            for s in statements {
+                collect_stmt(s, source, lsp_line, lsp_char, best);
+            }
+        }
         Statement::FunDecl {
             name,
             name_span,
@@ -881,6 +886,11 @@ fn member_chain_collect_stmt(
                 member_chain_collect_stmt(s, source, lsp_line, lsp_char, best);
             }
         }
+        Statement::Multi { statements, .. } => {
+            for s in statements {
+                member_chain_collect_stmt(s, source, lsp_line, lsp_char, best);
+            }
+        }
         Statement::FunDecl { params, body, .. } => {
             for p in params {
                 member_chain_collect_fun_param(p, source, lsp_line, lsp_char, best);
@@ -1300,6 +1310,17 @@ fn walk_stmt_resolve(
                 }
             }
             scopes.pop();
+            out
+        }
+        // Transparent group (comma-declarators): same scope, no push/pop.
+        Statement::Multi { statements, .. } => {
+            let mut out = None;
+            for s in statements {
+                if let Some(x) = walk_stmt_resolve(s, scopes, target) {
+                    out = Some(x);
+                    break;
+                }
+            }
             out
         }
         Statement::FunDecl {
@@ -1806,6 +1827,12 @@ fn check_unresolved_stmt(
             }
             scopes.pop();
         }
+        // Transparent group (comma-declarators): same scope, no push/pop.
+        Statement::Multi { statements, .. } => {
+            for s in statements {
+                check_unresolved_stmt(s, scopes, out);
+            }
+        }
         Statement::FunDecl {
             name,
             name_span,
@@ -2296,6 +2323,11 @@ fn enumerate_stmt(stmt: &Statement, exported: bool, out: &mut Vec<BindingSite>) 
             }
         }
         Statement::Block { statements, .. } => {
+            for s in statements {
+                enumerate_stmt(s, exported, out);
+            }
+        }
+        Statement::Multi { statements, .. } => {
             for s in statements {
                 enumerate_stmt(s, exported, out);
             }
@@ -2910,6 +2942,11 @@ fn walk_stmt_completion(
                 walk_stmt_completion(s, source, lsp_line, lsp_char, stack, best);
             }
         }
+        Statement::Multi { statements, .. } => {
+            for s in statements {
+                walk_stmt_completion(s, source, lsp_line, lsp_char, stack, best);
+            }
+        }
         Statement::FunDecl {
             params,
             rest_param,
@@ -3175,6 +3212,11 @@ fn refs_stmt(
             }
         }
         Statement::Block { statements, .. } => {
+            for s in statements {
+                refs_stmt(s, program, source, name, def_span, out);
+            }
+        }
+        Statement::Multi { statements, .. } => {
             for s in statements {
                 refs_stmt(s, program, source, name, def_span, out);
             }

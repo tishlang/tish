@@ -508,6 +508,16 @@ impl Printer {
         self.depth = level;
         match s {
             Statement::Block { statements, span } => self.block(statements, *span, level, true),
+            // Comma-declarators: render each as its own statement line. The caller
+            // (print_seq) emits the trailing newline, so only separate internally.
+            Statement::Multi { statements, .. } => {
+                for (i, st) in statements.iter().enumerate() {
+                    if i > 0 {
+                        self.buf.push('\n');
+                    }
+                    self.stmt(st, level);
+                }
+            }
             Statement::VarDecl {
                 name,
                 mutable,
@@ -1487,7 +1497,7 @@ fn binop_prec(op: BinOp) -> u8 {
         BinOp::BitOr => 5,
         BinOp::BitXor => 6,
         BinOp::BitAnd => 7,
-        BinOp::Shl | BinOp::Shr => 8,
+        BinOp::Shl | BinOp::Shr | BinOp::UShr => 8,
         BinOp::Eq | BinOp::Ne | BinOp::StrictEq | BinOp::StrictNe => 9,
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::In => 10,
         BinOp::Add | BinOp::Sub => 11,
@@ -1546,6 +1556,7 @@ fn binop(op: BinOp) -> &'static str {
         BinOp::BitXor => "^",
         BinOp::Shl => "<<",
         BinOp::Shr => ">>",
+        BinOp::UShr => ">>>",
         BinOp::In => "in",
     }
 }

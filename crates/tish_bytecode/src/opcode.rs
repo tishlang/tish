@@ -125,13 +125,18 @@ pub enum Opcode {
     /// dispatch. The numeric JIT lowers this to a native recursive call (the big recursion win);
     /// the VM runs the current chunk directly. Behaviour is identical to `LoadVar NAME; Call argc`.
     SelfCall = 51,
+    /// Normalize the top-of-stack iterable for `for…of`: a JS iterator object (one with a
+    /// callable `next()` returning `{ value, done }`, e.g. a `Map`/`Set` `.values()` result)
+    /// is drained into an array; arrays/strings/anything else pass through unchanged. Emitted
+    /// right after the iterable expression so the existing index-based loop can iterate it.
+    IterNormalize = 52,
 }
 
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=51 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=52 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 51 {
+        if b <= 52 {
             Some(unsafe { std::mem::transmute::<u8, Opcode>(b) })
         } else {
             None
@@ -157,6 +162,7 @@ impl Opcode {
             | Opcode::EnterBlock
             | Opcode::ExitBlock
             | Opcode::LoopVarsEnd
+            | Opcode::IterNormalize
             | Opcode::AwaitPromise => 1,
             Opcode::ArraySortByProperty
             | Opcode::ArrayMapBinOp
