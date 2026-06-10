@@ -85,6 +85,67 @@ and the foundation for inferring index reads.
 - **(orthogonal) i32-local representation** for pure-int hash loops (`fnv_hash`), and feeding M4's
   inference into the **VM JIT** (the default `tish run` path).
 
+## Update 2026-06-10 — phase 2: mutable typed arrays (local `number[]` / `boolean[]`)
+
+Lever **#2** (the local-array half) landed. A `let a = []` (or `[lits]`) that is only ever
+**index-read / index-assigned / `.push`ed / `.length`ed / `for…of`-iterated** — never escaping to a
+boxed context — now lowers to a native `Vec<f64>` / `Vec<bool>` instead of a boxed `Value::Array`.
+Three pieces, all still fully flag-gated (dark-ship intact):
+
+1. **OOB-safe index-assign** (`codegen.rs` `IndexAssign`): JS `a[i] = x` past the end *grows* the
+   array (holes read back as `undefined`), it does not panic — so for `Vec<f64>`/`Vec<bool>` we emit
+   `{ let _idx = i; if _idx >= v.len() { v.resize(_idx+1, <NaN/false>); } v[_idx] = x; }`. In-bounds
+   is the same direct store. (Reads were already OOB-safe via `.get().unwrap_or(NaN/false)` in phase 1.)
+2. **Element-type inference from `push`** (`infer.rs` `infer_expr_type` gained `Index`→elem and the
+   bitwise family→number), so `let a = []; a.push(1.0)` infers `number[]` even with no array literal.
+3. **A block-level verified-hypothesis fixpoint** (`block_native_arrays`): collect every top-level
+   `let X = []` candidate, hypothesize *all* are `elem[]`, verify each (every value written/pushed is
+   provably `elem` under the hypothesis, and the array never escapes — bare ident reference, foreign
+   method, reassignment, or return all bail), drop failures, repeat until stable. The stable set is
+   self-consistent, hence **sound**. Run once per element type (`number[]`, then `boolean[]`). This is
+   what handles cross-referencing arrays a per-array pass can't — `perm[i] = perm1[i]` (fannkuch) only
+   types if *both* `perm` and `perm1` survive together.
+
+**Results (full 21-benchmark gauntlet, min of 3, idle machine). Soundness held: 0 `TYPED≠BOXED`,
+0 `≠NODE`.**
+
+| benchmark | boxed (off) | typed (on) | typing-speedup | node (ratio) | element type | note |
+|-----------|------------:|-----------:|---------------:|-------------:|----|----|
+| **`nsieve`** | 467 ms | **102 ms** | **4.58×** | 70 ms (1.46×) | `Vec<bool>` | was 5.88× off V8 → 1.46× |
+| **`fannkuch`** | 3532 ms | **1405 ms** | **2.51×** | 143 ms (9.83×) | `Vec<f64>` | cross-ref arrays (`perm`/`perm1`) |
+| `queens` | 1079 ms | 1077 ms | 1.00× | 123 ms (8.76×) | — (escapes) | arrays passed to `place()` → correctly stays boxed |
+| `spectral_norm` | 1820 ms | 1753 ms | 1.04× | 39 ms (44.95×) | — (escapes) | arrays passed to `multiply*()` → needs array **params** |
+
+`queens`/`spectral_norm` are the **escape** cases: their arrays are created locally but passed as
+arguments to other functions, so the local-array analysis correctly bails (the value `42600` /
+`norm` is byte-identical to boxed and node — sound, just not yet faster). They need the cross-function
+**typed-array-params** sub-lever below. A soundness probe (`[1,2,3]` summed alongside a *string* array
+`["x","y"]`) stays boxed for the string array and prints `6xy` identically typed vs node — the
+analysis provably can't store a string into a `number[]`.
+
+### Updated remaining levers (post phase 2)
+
+- **#2b Typed array *params* (cross-function).** The biggest remaining single target —
+  `spectral_norm` (45× off) and `queens` (8.8× off), plus most of the Benchmarks-Game suite. Needs an
+  **M4-analog whole-program fixpoint**: a param (or local) is a native f64/bool array iff every use is
+  array-safe *or* it is forwarded to another position that is itself a native-array param. Then codegen
+  emits `&Vec<f64>` (read-only) / `&mut Vec<f64>` (written — mutability inferred) params, threads
+  `&x`/`&mut x` (or reborrows `&**p`) at callsites, and **bails on aliasing** (same ident passed to two
+  array params in one call, which Rust's borrow checker would reject). Conceptually clear; the codegen
+  borrow-threading tail is the careful part.
+- **#3 Tighter native HOF — already largely done.** The native `reduce` *already* lowers to a tight
+  native loop (`{ let mut acc = init; for x in v.iter().copied() { acc = body; } acc }`) — no closure
+  dispatch, no boxing. `typed_array_hof`'s residual 3.0× gap is its body `(a*31+b) % 1000003` emitting
+  f64 `fmul`/`frem` where V8 uses **integer** ops. So #3 **collapses into the i32-representation
+  lever** (shared with `fnv_hash`), not closure inlining.
+- **i32-local representation (shared: `fnv_hash` 4.1×, `typed_array_hof` 3.0×).** Detect integer-valued
+  numeric locals/reducers and emit `i32`/`i64` arithmetic instead of `f64` (round-tripping through
+  `to_int32` per bitwise op, and `frem` for `%`, is the cost). Needs sound range modelling (or i53) —
+  the highest-reward orthogonal lever now that it covers two benchmarks.
+- **#4 Arrays of structs (`Vec<Struct>`).** `nbody` (79× off). **#5 Native recursive struct alloc.**
+  `binary_trees` (24× off, hardest). Both extend `TISH_STRUCT_INFER`. `megamorphic` (12× off) is
+  polymorphic dispatch → a VM inline-cache concern, not typed codegen.
+
 ## Baseline (Apple Silicon, release, min of 3 runs — pre-phase-1 reference, 9-benchmark set)
 
 | benchmark | boxed (off) | typed (on) | typing-speedup | node (ratio) | status | validates |

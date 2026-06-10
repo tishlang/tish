@@ -15,7 +15,7 @@ use tishlang_ast::{
 };
 
 /// Scoped type environment used during inference.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct InferCtx {
     scopes: Vec<HashMap<String, TypeAnnotation>>,
 }
@@ -119,9 +119,10 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
             let rt = infer_expr_type(right, ctx)?;
             if is_number(&lt) && is_number(&rt) {
                 match op {
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow => {
-                        Some(number_ann())
-                    }
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
+                    // Bitwise/shift coerce to int32 and yield a Number.
+                    | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                    | BinOp::Shl | BinOp::Shr | BinOp::UShr => Some(number_ann()),
                     BinOp::Lt
                     | BinOp::Le
                     | BinOp::Gt
@@ -154,9 +155,19 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
                     }
                 }
                 UnaryOp::Not => Some(bool_ann()),
+                // `~x` is a Number.
+                UnaryOp::BitNot => {
+                    let t = infer_expr_type(operand, ctx)?;
+                    is_number(&t).then(number_ann)
+                }
                 _ => None,
             }
         }
+        // Index of a typed array yields its element type (`a[i]` where `a: T[]` → `T`).
+        Expr::Index { object, .. } => match infer_expr_type(object, ctx) {
+            Some(TypeAnnotation::Array(elem)) => Some(*elem),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -688,6 +699,11 @@ fn zero_span() -> tishlang_ast::Span {
 /// into nested blocks. `ctx` provides field-type inference for initializers.
 fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx) -> Vec<Statement> {
     ctx.push_scope();
+    // Co-infer mutable `number[]` locals across the whole block (cross-referencing arrays) up front.
+    // Co-infer mutable native arrays (number[] and boolean[]) across the block; an array of the
+    // wrong element type simply fails its run and stays boxed.
+    let native_num_arrays = block_native_arrays(&stmts, ctx, &number_ann());
+    let native_bool_arrays = block_native_arrays(&stmts, ctx, &bool_ann());
     let n = stmts.len();
     let mut out: Vec<Statement> = Vec::with_capacity(n);
     for (i, stmt) in stmts.iter().enumerate() {
@@ -703,6 +719,7 @@ fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx)
             span,
         } = stmt
         {
+            // (a) Read-only typed array: uniform scalar literals, every later use read-only.
             if let Some(elem) = infer_array_elem(elements, ctx) {
                 if uses_are_array_safe(name.as_ref(), &stmts[i + 1..]) {
                     let arr_ann = TypeAnnotation::Array(Box::new(elem));
@@ -717,6 +734,30 @@ fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx)
                     });
                     continue;
                 }
+            }
+            // (b) Mutable native `number[]` / `boolean[]`: `let a = []` / `[lits]` driven by push +
+            // index read/write (`fannkuch`/`queens`/`nsieve`, incl. cross-referencing siblings).
+            // Sound via the block-level fixpoint above (every accepted array's elements are provably
+            // of the chosen element type). `number[]` wins over `boolean[]` if somehow in both.
+            let native_elem = if native_num_arrays.contains(name.as_ref()) {
+                Some(number_ann())
+            } else if native_bool_arrays.contains(name.as_ref()) {
+                Some(bool_ann())
+            } else {
+                None
+            };
+            if let Some(elem) = native_elem {
+                let arr_ann = TypeAnnotation::Array(Box::new(elem));
+                ctx.define(name.as_ref(), arr_ann.clone());
+                out.push(Statement::VarDecl {
+                    name: name.clone(),
+                    name_span: *name_span,
+                    mutable: *mutable,
+                    type_ann: Some(arr_ann),
+                    init: stmt_init_clone(stmt),
+                    span: *span,
+                });
+                continue;
             }
         }
         // Candidate: `let o = { ...object literal... }` with no annotation.
@@ -845,16 +886,30 @@ fn si_recurse(stmt: &Statement, reg: &mut StructRegistry, ctx: &mut InferCtx) ->
             return_type,
             body,
             span,
-        } => Statement::FunDecl {
-            async_: *async_,
-            name: name.clone(),
-            name_span: *name_span,
-            params: params.clone(),
-            rest_param: rest_param.clone(),
-            return_type: return_type.clone(),
-            body: Box::new(si_recurse(body, reg, ctx)),
-            span: *span,
-        },
+        } => {
+            // Define the (annotated or M4-inferred) scalar params in a body scope so the body's
+            // local-type + mutable-array inference can use them (`let r = n` ⇒ `r: number`).
+            ctx.push_scope();
+            for p in params {
+                if let FunParam::Simple(tp) = p {
+                    if let Some(ann) = &tp.type_ann {
+                        ctx.define(tp.name.as_ref(), ann.clone());
+                    }
+                }
+            }
+            let new_body = Box::new(si_recurse(body, reg, ctx));
+            ctx.pop_scope();
+            Statement::FunDecl {
+                async_: *async_,
+                name: name.clone(),
+                name_span: *name_span,
+                params: params.clone(),
+                rest_param: rest_param.clone(),
+                return_type: return_type.clone(),
+                body: new_body,
+                span: *span,
+            }
+        }
         other => other.clone(),
     }
 }
@@ -868,10 +923,238 @@ fn uses_are_struct_safe(name: &str, keys: &std::collections::HashSet<&str>, tail
     tail.iter().all(|s| stmt_name_safe(s, name, keys))
 }
 
-/// Sound array-literal inference: `let name = [scalars]` may lower to a native `T[]` only if every
-/// later use is READ-ONLY — `for (_ of name)`, a non-optional index read `name[i]`, or `name.length`.
-/// Any mutation (`name.push(…)`, `name[i] = …`), reassignment, bare escape, or other method call on
-/// `name` bails (it stays a boxed array). Conservative: unhandled forms that mention `name` bail.
+/// Define every provably-numeric block-local into `hyp` (flat across nested scopes): annotated
+/// `: number`, a number-literal init, or any init `infer_expr_type` proves `number` *under the
+/// current hypothesis* — so `let temp = perm[i]` becomes `number` once `perm` is hypothesized
+/// `number[]`. Run a few times to resolve derived chains (`let b = temp + 1`).
+fn seed_numeric_locals(s: &Statement, hyp: &mut InferCtx) {
+    use Statement::*;
+    match s {
+        VarDecl { name, type_ann, init, .. } => {
+            let numeric = type_ann.as_ref().is_some_and(is_number)
+                || init
+                    .as_ref()
+                    .and_then(|e| infer_expr_type(e, hyp))
+                    .as_ref()
+                    .is_some_and(is_number);
+            if numeric {
+                hyp.define(name, number_ann());
+            }
+        }
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().for_each(|x| seed_numeric_locals(x, hyp))
+        }
+        If { then_branch, else_branch, .. } => {
+            seed_numeric_locals(then_branch, hyp);
+            if let Some(e) = else_branch {
+                seed_numeric_locals(e, hyp);
+            }
+        }
+        For { init, body, .. } => {
+            if let Some(i) = init {
+                seed_numeric_locals(i, hyp);
+            }
+            seed_numeric_locals(body, hyp);
+        }
+        While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+            seed_numeric_locals(body, hyp)
+        }
+        _ => {}
+    }
+}
+
+/// Block-level co-inference of mutable native arrays of element type `elem` (`number[]` or
+/// `boolean[]`) — handles cross-referencing arrays (`perm[i] = perm1[i]`) that a per-array pass can't.
+/// Collects every top-level `let X = []` / `[elem literals]` candidate, then runs a monotone
+/// **fixpoint**: hypothesize ALL candidates are `elem[]`, verify each (a candidate fails if any
+/// value written/pushed isn't provably `elem` under the hypothesis, or it escapes), drop the
+/// failures, repeat until stable. The stable set is self-consistent, so it's sound. Run once per
+/// element type; an array of the wrong type simply fails this run (its pushes aren't `elem`).
+fn block_native_arrays(
+    stmts: &[Statement],
+    outer_ctx: &InferCtx,
+    elem: &TypeAnnotation,
+) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let mut cands: Vec<(usize, String)> = Vec::new();
+    for (i, s) in stmts.iter().enumerate() {
+        if let Statement::VarDecl {
+            name,
+            type_ann: None,
+            init: Some(Expr::Array { elements, .. }),
+            ..
+        } = s
+        {
+            // Empty `[]` is a candidate for either element type; literal elements must match `elem`.
+            let lit_ok = elements.is_empty()
+                || matches!(infer_array_elem(elements, outer_ctx), Some(t) if &t == elem);
+            if lit_ok {
+                cands.push((i, name.to_string()));
+            }
+        }
+    }
+    if cands.is_empty() {
+        return HashSet::new();
+    }
+    let mut accepted: HashSet<String> = cands.iter().map(|c| c.1.clone()).collect();
+    loop {
+        let mut hyp = outer_ctx.clone();
+        for n in &accepted {
+            hyp.define(n, TypeAnnotation::Array(Box::new(elem.clone())));
+        }
+        // Seed numeric block-locals under the array hypothesis so values like `temp` in
+        // `let temp = perm[i]; perm[k-i] = temp` are known (`perm[i]` is `elem` because `perm` is
+        // hypothesized `elem[]`). A few passes resolve derived chains (`let b = temp + 1`).
+        for _ in 0..4 {
+            for s in stmts {
+                seed_numeric_locals(s, &mut hyp);
+            }
+        }
+        let mut removed = false;
+        for (idx, name) in &cands {
+            if accepted.contains(name)
+                && !stmts[idx + 1..].iter().all(|s| mut_arr_stmt_ok(s, name, elem, &hyp))
+            {
+                accepted.remove(name);
+                removed = true;
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+    accepted
+}
+
+/// A value written into / pushed onto `name` must have the array's element type `elem`: a `name[_]`
+/// self-read (already `elem` by hypothesis) or any expression `infer_expr_type` proves is `elem`.
+fn mut_arr_value_ok(v: &Expr, name: &str, elem: &TypeAnnotation, hyp: &InferCtx) -> bool {
+    if let Expr::Index { object, .. } = v {
+        if matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == name) {
+            return true;
+        }
+    }
+    infer_expr_type(v, hyp).as_ref() == Some(elem)
+}
+
+fn mut_arr_stmt_ok(s: &Statement, name: &str, elem: &TypeAnnotation, hyp: &InferCtx) -> bool {
+    use Statement::*;
+    match s {
+        VarDecl { name: n, init, .. } => {
+            n.as_ref() != name && init.as_ref().is_none_or(|e| mut_arr_expr_ok(e, name, elem, hyp))
+        }
+        ExprStmt { expr, .. } => mut_arr_expr_ok(expr, name, elem, hyp),
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().all(|s| mut_arr_stmt_ok(s, name, elem, hyp))
+        }
+        If { cond, then_branch, else_branch, .. } => {
+            mut_arr_expr_ok(cond, name, elem, hyp)
+                && mut_arr_stmt_ok(then_branch, name, elem, hyp)
+                && else_branch.as_ref().is_none_or(|e| mut_arr_stmt_ok(e, name, elem, hyp))
+        }
+        While { cond, body, .. } => {
+            mut_arr_expr_ok(cond, name, elem, hyp) && mut_arr_stmt_ok(body, name, elem, hyp)
+        }
+        DoWhile { body, cond, .. } => {
+            mut_arr_stmt_ok(body, name, elem, hyp) && mut_arr_expr_ok(cond, name, elem, hyp)
+        }
+        For { init, cond, update, body, .. } => {
+            init.as_ref().is_none_or(|i| mut_arr_stmt_ok(i, name, elem, hyp))
+                && cond.as_ref().is_none_or(|c| mut_arr_expr_ok(c, name, elem, hyp))
+                && update.as_ref().is_none_or(|u| mut_arr_expr_ok(u, name, elem, hyp))
+                && mut_arr_stmt_ok(body, name, elem, hyp)
+        }
+        ForOf { name: n, iterable, body, .. } => {
+            if n.as_ref() == name {
+                return false;
+            }
+            let iter_ok = matches!(iterable, Expr::Ident { name: it, .. } if it.as_ref() == name)
+                || mut_arr_expr_ok(iterable, name, elem, hyp);
+            iter_ok && mut_arr_stmt_ok(body, name, elem, hyp)
+        }
+        Return { value, .. } => value.as_ref().is_none_or(|e| mut_arr_expr_ok(e, name, elem, hyp)),
+        Throw { value, .. } => mut_arr_expr_ok(value, name, elem, hyp),
+        Break { .. } | Continue { .. } | TypeAlias { .. } => true,
+        _ => false, // switch / try / nested fn / etc: bail
+    }
+}
+
+fn mut_arr_expr_ok(e: &Expr, name: &str, elem: &TypeAnnotation, hyp: &InferCtx) -> bool {
+    use Expr::*;
+    let is_name = |x: &Expr| matches!(x, Expr::Ident { name: n, .. } if n.as_ref() == name);
+    match e {
+        Literal { .. } => true,
+        Ident { name: n, .. } => n.as_ref() != name, // bare escape is unsafe
+        Index { object, index, .. } => {
+            (is_name(object) || mut_arr_expr_ok(object, name, elem, hyp))
+                && mut_arr_expr_ok(index, name, elem, hyp)
+        }
+        // `name[i] = v`: OK iff `v` has type `elem`; else recurse (writing to a DIFFERENT array).
+        IndexAssign { object, index, value, .. } => {
+            if is_name(object) {
+                mut_arr_expr_ok(index, name, elem, hyp)
+                    && mut_arr_value_ok(value, name, elem, hyp)
+                    && mut_arr_expr_ok(value, name, elem, hyp)
+            } else {
+                mut_arr_expr_ok(object, name, elem, hyp)
+                    && mut_arr_expr_ok(index, name, elem, hyp)
+                    && mut_arr_expr_ok(value, name, elem, hyp)
+            }
+        }
+        // `name.push(v…)`: OK iff each `v` has type `elem`. Any other method on `name`: bail.
+        Call { callee, args, .. } => {
+            if let Member { object, prop: tishlang_ast::MemberProp::Name { name: m, .. }, .. } =
+                callee.as_ref()
+            {
+                if is_name(object) {
+                    return m.as_ref() == "push"
+                        && args.iter().all(|a| match a {
+                            tishlang_ast::CallArg::Expr(v) => {
+                                mut_arr_value_ok(v, name, elem, hyp) && mut_arr_expr_ok(v, name, elem, hyp)
+                            }
+                            tishlang_ast::CallArg::Spread(_) => false,
+                        });
+                }
+            }
+            mut_arr_expr_ok(callee, name, elem, hyp)
+                && args.iter().all(|a| match a {
+                    tishlang_ast::CallArg::Expr(v) => mut_arr_expr_ok(v, name, elem, hyp),
+                    tishlang_ast::CallArg::Spread(_) => false,
+                })
+        }
+        Member { object, prop, .. } => {
+            if is_name(object) {
+                matches!(prop, tishlang_ast::MemberProp::Name { name: p, .. } if p.as_ref() == "length")
+            } else {
+                mut_arr_expr_ok(object, name, elem, hyp)
+            }
+        }
+        Binary { left, right, .. } => {
+            mut_arr_expr_ok(left, name, elem, hyp) && mut_arr_expr_ok(right, name, elem, hyp)
+        }
+        Unary { operand, .. } => mut_arr_expr_ok(operand, name, elem, hyp),
+        Conditional { cond, then_branch, else_branch, .. } => {
+            mut_arr_expr_ok(cond, name, elem, hyp)
+                && mut_arr_expr_ok(then_branch, name, elem, hyp)
+                && mut_arr_expr_ok(else_branch, name, elem, hyp)
+        }
+        Assign { name: an, value, .. }
+        | CompoundAssign { name: an, value, .. }
+        | LogicalAssign { name: an, value, .. } => {
+            an.as_ref() != name && mut_arr_expr_ok(value, name, elem, hyp)
+        }
+        PostfixInc { name: n, .. }
+        | PostfixDec { name: n, .. }
+        | PrefixInc { name: n, .. }
+        | PrefixDec { name: n, .. } => n.as_ref() != name,
+        MemberAssign { object, value, .. } => {
+            mut_arr_expr_ok(object, name, elem, hyp) && mut_arr_expr_ok(value, name, elem, hyp)
+        }
+        // Anything else: `name` must be absent (would alias the Vec into a boxed context).
+        _ => !pi_mentions(e, name),
+    }
+}
+
 fn uses_are_array_safe(name: &str, tail: &[Statement]) -> bool {
     tail.iter().all(|s| arr_stmt_safe(s, name))
 }

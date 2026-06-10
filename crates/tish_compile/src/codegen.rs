@@ -4209,10 +4209,25 @@ impl Codegen {
                                 // both native but different type — best effort
                                 val_code
                             };
-                            return Ok(format!(
-                                "{{ {}[{}] = {}; Value::Null }}",
-                                esc_obj, idx_usize, native_val
-                            ));
+                            // OOB-safe write for numeric/bool Vecs: JS `a[i] = x` past the end
+                            // grows the array (holes read back as `undefined` → NaN/false), it does
+                            // not panic. In-bounds is the same direct store. Other element types keep
+                            // the direct store (their OOB semantics aren't a native-inference target).
+                            let assign = match elem_type.as_ref() {
+                                RustType::F64 | RustType::Bool => {
+                                    let pad = if matches!(elem_type.as_ref(), RustType::F64) {
+                                        "f64::NAN"
+                                    } else {
+                                        "false"
+                                    };
+                                    format!(
+                                        "{{ let _idx = {}; if _idx >= {}.len() {{ {}.resize(_idx + 1, {}); }} {}[_idx] = {}; Value::Null }}",
+                                        idx_usize, esc_obj, esc_obj, pad, esc_obj, native_val
+                                    )
+                                }
+                                _ => format!("{{ {}[{}] = {}; Value::Null }}", esc_obj, idx_usize, native_val),
+                            };
+                            return Ok(assign);
                         }
                     }
                 }
