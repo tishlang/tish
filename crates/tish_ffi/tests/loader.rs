@@ -47,7 +47,7 @@ fn load_and_call_real_cdylib() {
 
     // `triple(7) === 21`
     match module.get("triple") {
-        Some(Value::Function(f)) => match f(&[Value::Number(7.0)]) {
+        Some(Value::Function(f)) => match f.call(&[Value::Number(7.0)]) {
             Value::Number(n) => assert_eq!(n, 21.0),
             other => panic!("triple(7) = {other:?}"),
         },
@@ -56,7 +56,7 @@ fn load_and_call_real_cdylib() {
 
     // `make_pair(1, 2)` builds an array of length 2 inside the extension, via the C ABI.
     match module.get("make_pair") {
-        Some(Value::Function(f)) => match f(&[Value::Number(1.0), Value::Number(2.0)]) {
+        Some(Value::Function(f)) => match f.call(&[Value::Number(1.0), Value::Number(2.0)]) {
             Value::Array(a) => assert_eq!(a.borrow().len(), 2),
             other => panic!("make_pair = {other:?}"),
         },

@@ -65,7 +65,7 @@ fn fetch_readable_stream_read_chunks() {
         Value::Opaque(s) => s.as_ref(),
         _ => panic!("expected ReadableStream opaque"),
     };
-    let reader_val = stream.get_method("getReader").expect("getReader")(&[]);
+    let reader_val = stream.get_method("getReader").expect("getReader").call(&[]);
     let reader = match reader_val {
         Value::Opaque(r) => r,
         _ => panic!("expected reader opaque, got {:?}", reader_val),
@@ -73,7 +73,7 @@ fn fetch_readable_stream_read_chunks() {
 
     let mut acc = Vec::new();
     loop {
-        let read_p = reader.get_method("read").expect("read")(&[]);
+        let read_p = reader.get_method("read").expect("read").call(&[]);
         let chunk = await_promise(read_p);
         let (done, chunk_bytes) = match chunk {
             Value::Object(o) => {
