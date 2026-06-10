@@ -603,7 +603,10 @@ pub fn generate_native_wrapper_rs(
                 key_lit, shim_crate, rust_fn
             ));
         }
-        file.push_str("    Value::Object(VmRef::new(m))\n}\n\n");
+        // `Value::object(m)` wraps the `ObjectMap` into the `ObjectData` that `Value::Object`
+        // now holds; `Value::Object(VmRef::new(m))` (raw map) stopped type-checking after the
+        // PropMap/ObjectData refactor (#78).
+        file.push_str("    Value::object(m)\n}\n\n");
     }
     if !any {
         return String::new();

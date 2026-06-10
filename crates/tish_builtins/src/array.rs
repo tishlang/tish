@@ -29,6 +29,25 @@ fn as_boxed_array(arr: &Value) -> std::borrow::Cow<'_, Value> {
     }
 }
 
+/// Packed-HOF fast-path gate: when `arr` is a packed [`Value::NumberArray`] and `callback` is
+/// callable, snapshot the `Vec<f64>` so a higher-order method can fold/scan it WITHOUT first
+/// materialising a boxed `Vec<Value>` (the `as_boxed_array` deopt that otherwise allocates a
+/// 24-byte-per-element copy on every call). Snapshotting — rather than holding the `VmRef` borrow
+/// across the callback — matches the boxed path's copy semantics (mutations to the array from inside
+/// the callback aren't observed mid-scan) and can't deadlock if the callback re-enters the same
+/// array. Returns `None` to fall through to the generic boxed path (regular arrays, or a non-callable
+/// second argument).
+#[inline]
+fn packed_snapshot<'c>(
+    arr: &Value,
+    callback: &'c Value,
+) -> Option<(Vec<f64>, &'c tishlang_core::NativeFn)> {
+    match (arr, callback) {
+        (Value::NumberArray(na), Value::Function(cb)) => Some((na.borrow().clone(), cb)),
+        _ => None,
+    }
+}
+
 pub fn push(arr: &Value, args: &[Value]) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
@@ -242,6 +261,17 @@ pub fn flat(arr: &Value, depth: &Value) -> Value {
 // These take NativeFn from tishlang_core::Value::Function
 
 pub fn map(arr: &Value, callback: &Value) -> Value {
+    // Packed fast path: scan the `Vec<f64>` snapshot directly, boxing one element at a time for the
+    // callback — no upfront boxed `Vec<Value>` materialisation. The result is a boxed array (the
+    // callback may return anything), matching the generic path. See [`packed_snapshot`].
+    if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        let result: Vec<Value> = data
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| cb.call(&[Value::Number(n), Value::Number(i as f64)]))
+            .collect();
+        return Value::Array(VmRef::new(result));
+    }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
@@ -257,6 +287,21 @@ pub fn map(arr: &Value, callback: &Value) -> Value {
 }
 
 pub fn filter(arr: &Value, callback: &Value) -> Value {
+    // Packed fast path: keep the f64 elements whose predicate is truthy, no boxed materialisation.
+    if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        let result: Vec<Value> = data
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &n)| {
+                if cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
+                    Some(Value::Number(n))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        return Value::Array(VmRef::new(result));
+    }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
@@ -279,6 +324,20 @@ pub fn filter(arr: &Value, callback: &Value) -> Value {
 }
 
 pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
+    // Packed fast path: fold the `Vec<f64>` snapshot directly. Same no-initial rule as the boxed
+    // path (absent init → first element as the seed, scan from index 1).
+    if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        let (start_idx, mut acc) = if matches!(initial, Value::Null) && !data.is_empty() {
+            (1usize, Value::Number(data[0]))
+        } else {
+            (0usize, initial.clone())
+        };
+        // `skip(start_idx)` preserves the true element index for the callback's 3rd arg.
+        for (i, &x) in data.iter().enumerate().skip(start_idx) {
+            acc = cb.call(&[acc, Value::Number(x), Value::Number(i as f64)]);
+        }
+        return acc;
+    }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
@@ -300,6 +359,12 @@ pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
 }
 
 pub fn for_each(arr: &Value, callback: &Value) -> Value {
+    if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        for (i, &n) in data.iter().enumerate() {
+            cb.call(&[Value::Number(n), Value::Number(i as f64)]);
+        }
+        return Value::Null;
+    }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
@@ -311,6 +376,14 @@ pub fn for_each(arr: &Value, callback: &Value) -> Value {
 }
 
 pub fn find(arr: &Value, callback: &Value) -> Value {
+    if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        for (i, &n) in data.iter().enumerate() {
+            if cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
+                return Value::Number(n);
+            }
+        }
+        return Value::Null;
+    }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
@@ -325,6 +398,14 @@ pub fn find(arr: &Value, callback: &Value) -> Value {
 }
 
 pub fn find_index(arr: &Value, callback: &Value) -> Value {
+    if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        for (i, &n) in data.iter().enumerate() {
+            if cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
+                return Value::Number(i as f64);
+            }
+        }
+        return Value::Number(-1.0);
+    }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
@@ -339,6 +420,14 @@ pub fn find_index(arr: &Value, callback: &Value) -> Value {
 }
 
 pub fn some(arr: &Value, callback: &Value) -> Value {
+    if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        for (i, &n) in data.iter().enumerate() {
+            if cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
+                return Value::Bool(true);
+            }
+        }
+        return Value::Bool(false);
+    }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
@@ -353,6 +442,14 @@ pub fn some(arr: &Value, callback: &Value) -> Value {
 }
 
 pub fn every(arr: &Value, callback: &Value) -> Value {
+    if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        for (i, &n) in data.iter().enumerate() {
+            if !cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
+                return Value::Bool(false);
+            }
+        }
+        return Value::Bool(true);
+    }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
@@ -533,5 +630,95 @@ fn get_prop_number(v: &Value, prop: &std::sync::Arc<str>) -> f64 {
         Value::String(s) if prop.as_ref() == "length" => s.chars().count() as f64,
         Value::Array(a) if prop.as_ref() == "length" => a.borrow().len() as f64,
         _ => f64::NAN,
+    }
+}
+
+#[cfg(test)]
+mod packed_hof_tests {
+    //! The packed (`NumberArray`) HOF fast paths must be observably IDENTICAL to the boxed path —
+    //! same element + index callback args, same result shape — since cross-backend parity depends
+    //! on it. These run with packing semantics directly (the helpers don't read the env flag; a
+    //! `NumberArray` value is enough to take the fast path).
+    use super::*;
+    use tishlang_core::Value;
+
+    fn na(xs: &[f64]) -> Value {
+        Value::NumberArray(VmRef::new(xs.to_vec()))
+    }
+    fn nums(v: &Value) -> Vec<f64> {
+        match v {
+            Value::Array(a) => a.borrow().iter().map(|e| e.as_number().unwrap_or(f64::NAN)).collect(),
+            Value::NumberArray(a) => a.borrow().clone(),
+            _ => vec![],
+        }
+    }
+    fn cb_num(f: fn(f64, f64) -> f64) -> Value {
+        Value::native(move |a: &[Value]| {
+            Value::Number(f(a[0].as_number().unwrap_or(0.0), a[1].as_number().unwrap_or(0.0)))
+        })
+    }
+    fn cb_pred(f: fn(f64, f64) -> bool) -> Value {
+        Value::native(move |a: &[Value]| {
+            Value::Bool(f(a[0].as_number().unwrap_or(0.0), a[1].as_number().unwrap_or(0.0)))
+        })
+    }
+
+    #[test]
+    fn reduce_packed() {
+        let n = na(&[3.0, 1.0, 4.0, 1.0, 5.0]);
+        let add = cb_num(|acc, x| acc + x);
+        // With init.
+        assert_eq!(reduce(&n, &add, &Value::Number(0.0)).as_number(), Some(14.0));
+        // No init → first element seeds, scan from index 1 (same total here).
+        assert_eq!(reduce(&n, &add, &Value::Null).as_number(), Some(14.0));
+        // Index arg: callback (acc, _elem, index) — sum the indices 0..5 = 10.
+        let sum_idx = Value::native(|a: &[Value]| {
+            Value::Number(a[0].as_number().unwrap() + a[2].as_number().unwrap())
+        });
+        assert_eq!(reduce(&n, &sum_idx, &Value::Number(0.0)).as_number(), Some(10.0));
+    }
+
+    #[test]
+    fn map_filter_packed() {
+        let n = na(&[3.0, 1.0, 4.0, 1.0, 5.0]);
+        assert_eq!(nums(&map(&n, &cb_num(|x, _i| x * 2.0))), vec![6.0, 2.0, 8.0, 2.0, 10.0]);
+        assert_eq!(nums(&filter(&n, &cb_pred(|x, _i| x > 2.0))), vec![3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn scan_packed() {
+        let n = na(&[3.0, 1.0, 4.0, 1.0, 5.0]);
+        assert!(matches!(some(&n, &cb_pred(|x, _i| x > 4.0)), Value::Bool(true)));
+        assert!(matches!(some(&n, &cb_pred(|x, _i| x > 9.0)), Value::Bool(false)));
+        assert!(matches!(every(&n, &cb_pred(|x, _i| x > 0.0)), Value::Bool(true)));
+        assert!(matches!(every(&n, &cb_pred(|x, _i| x > 2.0)), Value::Bool(false)));
+        // first element > 3 is 4.0 at index 2.
+        assert_eq!(find(&n, &cb_pred(|x, _i| x > 3.0)).as_number(), Some(4.0));
+        assert_eq!(find_index(&n, &cb_pred(|x, _i| x > 3.0)).as_number(), Some(2.0));
+        assert_eq!(find_index(&n, &cb_pred(|x, _i| x > 99.0)).as_number(), Some(-1.0));
+    }
+
+    #[test]
+    fn for_each_packed_passes_element_and_index() {
+        use std::sync::{Arc, Mutex};
+        let n = na(&[3.0, 1.0, 4.0, 1.0, 5.0]);
+        let acc = Arc::new(Mutex::new(0.0f64));
+        let a2 = acc.clone();
+        let collect = Value::native(move |a: &[Value]| {
+            *a2.lock().unwrap() += a[0].as_number().unwrap() + a[1].as_number().unwrap();
+            Value::Null
+        });
+        assert!(matches!(for_each(&n, &collect), Value::Null));
+        // sum(elems)=14 + sum(idx 0..5)=10.
+        assert_eq!(*acc.lock().unwrap(), 24.0);
+    }
+
+    #[test]
+    fn non_function_callback_falls_through() {
+        // A NumberArray with a non-callable 2nd arg must not take the fast path; mirrors the boxed
+        // path's `Value::Null` (map/filter) without panicking.
+        let n = na(&[1.0, 2.0]);
+        assert!(matches!(map(&n, &Value::Number(1.0)), Value::Null));
+        assert!(matches!(filter(&n, &Value::Null), Value::Null));
     }
 }

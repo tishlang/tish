@@ -3,13 +3,13 @@
 **Question:** is the multithreaded, non-blocking HTTP server still working as part of the TechEmpower
 (TFB) requirements, after the typing / stdlib-types work?
 
-**TL;DR — yes, the server works.** The default `tiny_http` backend serves correctly and concurrently
-on both the VM and the native-AOT path (prefork, 14 processes here), the multithreaded handler-
-dispatch regression test passes, and none of this session's typing/stdlib changes regressed it. The
-**hyper** backend (which the TFB build selects via `--feature http-hyper`) was broken — but by the
-`#78` perf-branch merge (2026-06-07), **not** this session; it is **fixed here** with two small
-changes. The only remaining blocker for the *DB-backed* TFB endpoints is the **`tish-pg` sibling
-crate**, which is stale against the post-`#78` `tish_core` API (separate repo, pre-existing).
+**TL;DR — yes, the server works, and the full TFB suite (incl. all DB endpoints) now builds and runs.**
+The default `tiny_http` backend serves correctly and concurrently on both the VM and native-AOT path
+(prefork, 14 processes here); the multithreaded handler-dispatch regression test passes; none of this
+session's typing/stdlib changes regressed it. Three pre-existing breakages from the `#78` perf-branch
+merge (2026-06-07) — **not** this session — blocked the hyper backend and the DB suite; **all three
+are fixed here**, and all 7 TFB endpoints (`/plaintext`, `/json`, `/db`, `/queries`,
+`/cached-queries`, `/updates`, `/fortunes`) now serve correctly against a real Postgres.
 
 ## Architecture (what "multithreaded non-blocking" means here)
 
@@ -41,35 +41,52 @@ crate**, which is stale against the post-`#78` `tish_core` API (separate repo, p
 | `tiny_http`, **VM path** (`tish run`): `/plaintext` + `/json`, 16 concurrent | ✅ 200, prefork 14 procs |
 | `tiny_http`, **native AOT** (`tish build --native-backend rust`): `/plaintext` + `/json`, 32 concurrent | ✅ 32/32 200 |
 | `scripts/test_http_concurrency.sh` shared-counter regression (PREFORK=0, contended) | ✅ pass, no deadlock |
-| `hyper` backend, native AOT (`--feature http-hyper --feature process`), 32 concurrent | ✅ 32/32 200, 0 panics *(after the two fixes below)* |
-| Full TFB app `tish build src/main.tish` (DB endpoints) | ❌ blocked — `tish-pg` stale API (below) |
+| `hyper` backend, native AOT (`--feature http-hyper --feature process`), 32 concurrent | ✅ 32/32 200, 0 panics *(after the fixes below)* |
+| Full TFB app `tish build src/main.tish` (DB endpoints) | ✅ builds *(after the fixes below)* |
+| All 7 endpoints vs local Postgres (`/db`,`/queries`,`/cached-queries`,`/updates`,`/fortunes`) | ✅ correct rows, writes, HTML+XSS-escaped fortunes, no panics |
 
-## Fixes applied (hyper backend — both pre-existing `#78` breakage)
+## Fixes applied (all three pre-existing `#78` breakage, none from this session)
 
-`crates/tish_runtime/src/http_hyper.rs` (compiled only under `--feature http-hyper`, so the default
-build never surfaced these):
+1. **`crates/tish_runtime/src/http_hyper.rs` — build error** `E0658 use of unstable fn_traits`:
+   `handler.call(&[req_value])` bound the unstable `Fn::call` (tuple arg). `handler` is the generic
+   `F: Fn(&[Value]) -> Value`, so → direct call `handler(&[req_value])`. (The `tiny_http` path converts
+   to `NativeFn` first, so its `.call` is the stable inherent method — that's why only hyper broke.)
+   This file is compiled only under `--feature http-hyper`, so the default build never surfaced it.
+2. **`crates/tish_runtime/src/http_hyper.rs` — runtime panic** `header_read_timeout set, but no timer
+   set`: hyper 1.x requires a `Timer` whenever a timeout is configured. Added
+   `.timer(hyper_util::rt::TokioTimer::new())` to the `http1::Builder`.
+3. **`crates/tish_compile/src/resolve.rs:606` — codegen for `cargo:` native-module wrappers**:
+   `generate_native_wrapper_rs` emitted `Value::Object(VmRef::new(m))` (raw `ObjectMap`), which stopped
+   type-checking after the `ObjectData`/PropMap refactor → `Value::object(m)`. Affects **every** `cargo:`
+   import (not just tish-pg); the wrapper for the `tish_pg` module is what main.tish links.
 
-1. **Build error** `E0658 use of unstable fn_traits`: `handler.call(&[req_value])` bound the unstable
-   `Fn::call` (tuple arg). `handler` is the generic `F: Fn(&[Value]) -> Value`, so → direct call
-   `handler(&[req_value])`. (The `tiny_http` path converts to `NativeFn` first, so its `.call` is the
-   stable inherent method — that's why only hyper broke.)
-2. **Runtime panic** `header_read_timeout set, but no timer set`: hyper 1.x requires a `Timer` whenever
-   a timeout is configured. Added `.timer(hyper_util::rt::TokioTimer::new())` to the `http1::Builder`.
+Plus the **`tish-pg` DB driver** (`/Users/a_/Projects/tish-pg`, a separate repo pulled in via the
+`cargo:tish_pg` import, pinned by `tish-techempower/package.json`'s
+`"tish_pg": { "package": "tish-pg", "path": "../../tish-pg" }`): it was a stale **pre-`#45`** copy using
+the pre-`#78` `Value` API (`Arc<str>`→`ArcStr`, raw `ObjectMap`→`Value::object`, `.iter()`/`.get()` →
+`.strings`). The **monorepo `crates/tish_pg` is the already-fixed version of the same crate**, so the
+sibling's `src/{lib.rs,error.rs}` were synced from it (its standalone `Cargo.toml` kept). It needs
+`send-values`, which it gets from feature-unification when the native build enables `--feature http`.
 
-After these, the hyper backend builds and serves with no panics.
+After all four, `tish build src/main.tish --native-backend rust --feature http --feature http-hyper
+--feature process` produces a working binary, and every endpoint returns correct data against Postgres.
 
-## Remaining blocker: `tish-pg` (DB endpoints only, pre-existing)
+## Running the DB endpoints
 
-`/Users/a_/Projects/tish-pg` (a **separate repo**, pulled in via the `cargo:` import for
-`@tishlang/pg`) does not compile against the current `tish_core`. It uses the **pre-`#78` `Value`
-representation** — 8 errors:
-- `Value::String(Arc<str>)` → now `Value::String(ArcStr)` (`arcstr::ArcStr`).
-- `Value::Object(VmRef::new(ObjectMap))` → now `VmRef<ObjectData>`; build with `Value::object(map)`.
-- `.iter()` / `.get()` on `MutexGuard<ObjectData>` → go through `.strings` (the `PropMap`).
+They need a Postgres with the TFB schema (`sql/create-postgres.sql` → `world` (10k rows) + `fortune`
+(12 rows)). Verified locally:
 
-These are the same `PropMap` + `ArcStr` refactor `docs/perf-branch-breaking-changes.md` documents, and
-identical in shape to the `Value::object(...)` fix already made inside this repo. They block
-`/db`, `/queries`, `/cached-queries`, `/fortunes`, `/updates`; `/plaintext` + `/json` are unaffected.
+```bash
+psql -d hello_world -f sql/create-postgres.sql
+PORT=8175 DATABASE_URL="postgres://<user>@127.0.0.1:5432/hello_world" /tmp/tfb_full &
+curl 'localhost:8175/db'                  # {"id":…,"randomNumber":…}
+curl 'localhost:8175/queries?queries=3'   # 3 rows
+curl 'localhost:8175/updates?queries=2'   # 2 rows, written back
+curl 'localhost:8175/fortunes'            # HTML table, XSS-escaped
+```
+
+The benchmark's own `docker/` compose provides `tfb-database`; `package.json start` points
+`DATABASE_URL` at it.
 
 ## Reproduce / verify
 
