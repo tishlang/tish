@@ -779,6 +779,7 @@ fn member_chain_collect_fun_param(
     }
 }
 
+#[allow(clippy::only_used_in_recursion)] // params threaded to recurse the pattern tree (mirrors sibling collectors)
 fn member_chain_collect_destruct_pattern(
     pattern: &DestructPattern,
     source: &str,

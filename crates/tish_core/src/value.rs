@@ -671,6 +671,7 @@ impl<'a> Iterator for PropMapValues<'a> {
 }
 
 /// Owning iterator over [`PropMap`] entries (insertion order).
+#[allow(clippy::large_enum_variant)] // `Inline` is intentionally unboxed to keep PropMap iteration allocation-free
 pub enum PropMapIntoIter {
     Inline(smallvec::IntoIter<[(Arc<str>, Value); PROPMAP_INLINE]>),
     Map(indexmap::map::IntoIter<Arc<str>, Value>),

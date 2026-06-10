@@ -2142,6 +2142,21 @@ impl Codegen {
                     self.writeln("}");
                     self.indent -= 1;
                     self.writeln("}");
+                    // Packed `Float64Array` (`TISH_PACKED_ARRAYS`): iterate the `Vec<f64>` directly,
+                    // re-boxing each element to `Value::Number` for the loop body.
+                    self.writeln("Value::NumberArray(ref _arr) => {");
+                    self.indent += 1;
+                    self.writeln("for _v in _arr.borrow().iter() {");
+                    self.indent += 1;
+                    self.writeln(&format!(
+                        "let {} = Value::Number(*_v);",
+                        Self::escape_ident(name.as_ref())
+                    ));
+                    self.emit_statement(body)?;
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.indent -= 1;
+                    self.writeln("}");
                     self.writeln("Value::String(ref _s) => {");
                     self.indent += 1;
                     self.writeln("for _ch in _s.chars() {");

@@ -72,8 +72,7 @@ fn write_tish_banner_frame(out: &mut impl Write, reveal_t: f32, color_frame: usi
         let visible = ((len as f32) * reveal_t).round() as usize;
         let visible = visible.min(len);
 
-        for col in 0..len {
-            let ch = chars[col];
+        for (col, &ch) in chars.iter().enumerate() {
             if col >= visible || ch == ' ' {
                 let _ = write!(out, " ");
             } else {

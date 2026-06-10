@@ -35,6 +35,7 @@ impl TishPromise for FetchResponsePromise {
 }
 
 struct FetchAllResponsesPromise {
+    #[allow(clippy::type_complexity)]
     rx: Mutex<
         Option<
             tokio::sync::oneshot::Receiver<Result<Vec<Result<reqwest::Response, String>>, String>>,
@@ -158,6 +159,7 @@ impl HttpBody {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn take_stream(
         &self,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>, String> {
@@ -434,6 +436,7 @@ pub fn fetch_all_promise_from_args(args: Vec<Value>) -> Value {
             }));
         }
     };
+    #[allow(clippy::type_complexity)]
     let mut parts: Vec<(String, String, Vec<(String, String)>, Option<String>)> = Vec::new();
     for req in requests {
         let (url, opt) = match &req {

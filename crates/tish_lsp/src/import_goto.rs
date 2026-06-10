@@ -304,6 +304,7 @@ pub struct NativeMemberDefinition {
 
 /// Static member chain `root.a.b` where `root` is an import: resolve the leaf to a Rust `pub fn`,
 /// else to `lsp-pragmas.d.tish` in the native package (e.g. `tish-macos`).
+#[allow(clippy::too_many_arguments)] // LSP request context (program/file/text/roots/cache/position/word)
 pub fn native_member_definition(
     program: &Program,
     file_path: &Path,
@@ -411,6 +412,7 @@ pub fn native_member_definition(
 
 /// Static member chain `root.a.b` where `root` is an import: resolve the leaf name to a Rust `pub fn`
 /// (native / `cargo:`) or a single-level export in a relative `.tish` module.
+#[allow(clippy::too_many_arguments)] // LSP request context (program/file/text/roots/cache/position/word)
 pub fn definition_for_native_receiver_member(
     program: &Program,
     file_path: &Path,

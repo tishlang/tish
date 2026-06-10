@@ -12,7 +12,7 @@
 //! `mpsc::channel`. The main thread reads from that channel:
 //!   - `race`  → first message wins (fulfilled or rejected).
 //!   - `any`   → first *fulfilled* message wins; collect rejections; if all reject →
-//!               `AggregateError` (array of reasons).
+//!     `AggregateError` (array of reasons).
 //!   - `allSettled` → drain all N messages, sort by index, build `{status,value|reason}`.
 //!
 //! This requires `Value: Send`, which holds under the `send-values` feature (all handles
@@ -215,6 +215,7 @@ fn combinator_items(args: &[Value]) -> Option<Vec<Value>> {
 ///
 /// Returns the receiving end of the channel plus the count of items it will send.
 #[cfg(feature = "send-values")]
+#[allow(clippy::type_complexity)]
 fn race_channel(
     items: Vec<Value>,
 ) -> (mpsc::Receiver<(usize, std::result::Result<Value, Value>)>, usize) {

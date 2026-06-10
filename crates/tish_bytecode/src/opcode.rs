@@ -132,7 +132,7 @@ impl Opcode {
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
         if b <= 51 {
-            Some(unsafe { std::mem::transmute(b) })
+            Some(unsafe { std::mem::transmute::<u8, Opcode>(b) })
         } else {
             None
         }

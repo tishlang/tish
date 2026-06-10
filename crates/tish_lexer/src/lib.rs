@@ -560,11 +560,9 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     TokenKind::Shr
                 } else {
-                    if self.jsx_in_closing_tag {
-                        self.jsx_depth = (self.jsx_depth - 1).max(0);
-                        self.jsx_stack.pop();
-                        self.jsx_sync_in_opening_tag();
-                    } else if self.jsx_in_opening_tag && self.jsx_saw_slash_before_gt {
+                    if self.jsx_in_closing_tag
+                        || (self.jsx_in_opening_tag && self.jsx_saw_slash_before_gt)
+                    {
                         self.jsx_depth = (self.jsx_depth - 1).max(0);
                         self.jsx_stack.pop();
                         self.jsx_sync_in_opening_tag();

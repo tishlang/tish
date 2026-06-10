@@ -452,6 +452,7 @@ fn compile_chunk_arrays(g: &mut JitGlobal, chunk: &Chunk, arity: usize, mask: u8
 /// Outcome of trying to emit one *straight-line* numeric opcode.
 enum SimpleOp {
     /// Handled: bytecode consumed, IR emitted, `bool` flags a comparison/`!` result.
+    #[allow(dead_code)] // reserved: the flag will carry a comparison/`!` result; currently always false
     Handled(bool),
     /// The opcode is control flow / `Return` / non-numeric — NOT consumed; caller decides.
     NotSimple,
@@ -726,6 +727,7 @@ fn build_body_cfg(
         deopt_ptr = Some(*params.get(2)?);
         let mut numeric_i = 0i32;
         let mut array_i = 0i64;
+        #[allow(clippy::needless_range_loop)] // `slot` drives bit-mask math (`array_mask >> slot`) + map keys, not just indexing
         for slot in 0..num_slots {
             let init = if slot < arity && (array_mask >> slot) & 1 == 1 {
                 let base = bcx.ins().iadd_imm(handles_ptr, array_i * 16);

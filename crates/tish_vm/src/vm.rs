@@ -876,6 +876,7 @@ fn try_call_array_jit(
     // `scratch` OWNS the extracted f64 data; handles point into it. Build handles only AFTER scratch is
     // fully populated so its backing buffers never reallocate out from under a live pointer.
     let mut scratch: Vec<Vec<f64>> = Vec::new();
+    #[allow(clippy::needless_range_loop)] // `i` drives bit-mask math (`mask >> i`), not just indexing
     for i in 0..arity {
         if (mask >> i) & 1 == 1 {
             match &args[i] {

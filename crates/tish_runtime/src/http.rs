@@ -467,7 +467,10 @@ pub fn value_to_response(value: &Value) -> (u16, Vec<(String, String)>, String) 
     (r.status, r.headers, body)
 }
 
-fn extract_file_from_response(value: &Value) -> Option<(u16, Vec<(String, String)>, String)> {
+/// `(status, headers, file path)` extracted from a response object's `file` key.
+type FileResponse = (u16, Vec<(String, String)>, String);
+
+fn extract_file_from_response(value: &Value) -> Option<FileResponse> {
     let Value::Object(obj) = value else {
         return None;
     };

@@ -103,10 +103,13 @@ pub fn value_to_response(value: &Value) -> (u16, Vec<(String, String)>, String) 
     (status, headers, body)
 }
 
+/// `(status, headers, file path)` extracted from a response object's `file` key.
+type FileResponse = (u16, Vec<(String, String)>, String);
+
 /// If the response value has a `file` key, stream that path (binary-safe). Matches `tishlang_runtime` HTTP behavior.
 pub(crate) fn extract_file_from_response(
     value: &Value,
-) -> Option<(u16, Vec<(String, String)>, String)> {
+) -> Option<FileResponse> {
     let Value::Object(obj) = value else {
         return None;
     };

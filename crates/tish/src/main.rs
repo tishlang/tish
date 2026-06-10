@@ -621,7 +621,7 @@ fn compile_to_js(
     Ok(())
 }
 
-#[allow(clippy::vec_init_then_push)]
+#[allow(clippy::vec_init_then_push, clippy::too_many_arguments)] // build_file maps CLI build flags 1:1
 fn build_file(
     input_path: &str,
     output_path: &str,

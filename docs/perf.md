@@ -247,6 +247,45 @@ that use `[1,2,...,N]` syntax) and sort/HOF chains starting from those. For the 
 benchmarks to benefit: need to upgrade push-accumulated arrays to NumberArray (not done — requires
 a different mechanism than &Value mutation, e.g. a "tagging" approach on the VmRef).
 
+--------------------------------------------------------------------------------
+  PHASE 2b — packed-native `Float64Array` (rust-AOT codegen only) (2026-06-10)
+--------------------------------------------------------------------------------
+Extends packed arrays to the typed-array constructor on the NATIVE rust-AOT path: `new Float64Array(...)`
+lowers in codegen.rs (the real `Expr::New` emit site) to `tishlang_runtime::float64_array_packed(&[...])`
+instead of the generic `tish_construct` → boxed `Value::Array`. The helper builds a `Value::NumberArray`
+(`Vec<f64>`) directly when `TISH_PACKED_ARRAYS=1`, and returns the BYTE-IDENTICAL boxed value when the
+flag is off (default), so stock builds are unchanged. `Float64Array` is the only view whose element type
+IS `f64` — no coercion — so it maps onto the existing `NumberArray` with zero element work. The integer /
+`Float32Array` views have no packed `Value` variant (would need `Vec<i32>`/`Vec<f32>`/… + the 24-byte
+size assertion + every exhaustive match — a separate, larger effort) and keep the boxed path.
+
+  WHY NATIVE-ONLY: the interp (`tishlang_eval::Value`) has no `NumberArray` variant and the core↔eval
+  value bridge can't carry one, so the runtime constructor still returns boxed `Value::Array` for all
+  backends; only codegen special-cases it. Consequence: on the native path a `NumberArray` is ALWAYS a
+  `Float64Array` (codegen never packs array literals here), so the native runtime additions are sound.
+
+  NATIVE RUNTIME ADDITIONS (tish_runtime/src/lib.rs — the VM had these, the rust runtime did NOT):
+    get_prop (`.length` + numeric key), get_index, set_index, in_operator → NumberArray arms; plus the
+    emitted for-of `match &_fof` grew a `Value::NumberArray` arm (codegen.rs). set_index stores the f64
+    (`val.as_number().unwrap_or(NaN)`) — because NumberArray≡Float64Array here, this is the CORRECT view
+    semantics and incidentally closes the v1 "no write-coercion" gap for this one view. Array methods
+    (reduce/map/filter/…) already deopt through `as_boxed_array`, so they keep working unchanged.
+
+  BENCHMARK (/tmp/f64_bench.tish: N=1,000,000, 30 rounds; one binary, flag toggles at runtime; M-series):
+    op                       boxed (flag=0)   packed (flag=1)   ratio
+    construct(N) zero-fill        ~90 ms           ~1.5 ms       ~60×   ★ headline: memset vs N boxed Values
+    construct(from 1M src)        ~7 ms            ~5 ms         ~1.3×
+    index-sum  (big[i])           ~540 ms          ~499 ms       ~1.08×  denser scan; per-elem rebox dominates
+    forof-sum  (for x of big)     ~188 ms          ~173 ms       ~1.09×
+    reduce     (a,b)=>a+b         ~344 ms          ~398 ms       ~0.86×  REGRESSION — materializes to boxed first
+  Output (sums/lengths) byte-identical between modes. Memory: 8 B/elem vs 24 B/elem = 3× denser.
+
+  TAKEAWAY: the win is CONSTRUCTION (no per-element boxing) + footprint, not iteration (the loop body
+  re-boxes each element to `Value::Number`, so scans only gain cache density ~8-9%). `reduce` REGRESSES
+  because `as_boxed_array` copies the whole `Vec<f64>` → `Vec<Value>` per call; a packed HOF fast path
+  (fold over `Vec<f64>` without materializing) is the obvious follow-up, same family as the fused-reduce
+  work. So: enable for Float64-construction-heavy / memory-bound code; not yet for typed-array HOF chains.
+
 ################################################################################
 ##  WIN — parking_lot::Mutex on the send-values path (2026-06-06). 2nd profile lever.
 ################################################################################

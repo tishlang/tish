@@ -103,7 +103,7 @@ struct Compiler<'a> {
     /// `return` that escapes these trys must run each one on the way out (the bytecode VM jumps
     /// straight to the function return otherwise). Reset per function — nested fns get a fresh
     /// `Compiler`. The exception-unwind path is handled separately in the `Try` emitter.
-    finally_stack: Vec<Box<Statement>>,
+    finally_stack: Vec<Statement>,
     /// When `Some(name)`, this chunk is the body of `fn name(...)` and `name`'s binding is provably
     /// stable (no param shadows it, no reassignment/redeclaration in the body — see [`stmt_rebinds`]).
     /// A direct call `name(args)` then compiles to `SelfCall` (no name lookup / closure dispatch; the
@@ -645,6 +645,7 @@ impl<'a> Compiler<'a> {
 
     /// C-style `for` init: bindings are not inside the `{ ... }` body for block-undo purposes.
     /// Formal parameters as VM slot names plus optional destructure patterns (one per formal).
+    #[allow(clippy::type_complexity)] // (slot names, optional destructure patterns) — single-use return
     fn plan_function_params(
         params: &[FunParam],
     ) -> Result<(Vec<Arc<str>>, Vec<Option<DestructPattern>>), CompileError> {
@@ -1642,7 +1643,7 @@ impl<'a> Compiler<'a> {
                 self.chunk.write_u16(0);
                 // A `return` inside the body/catch must run this finally on the way out.
                 if let Some(f) = finally_body {
-                    self.finally_stack.push(f.clone());
+                    self.finally_stack.push((**f).clone());
                 }
                 self.compile_statement(body)?;
                 self.emit(Opcode::ExitTry);

@@ -536,6 +536,9 @@ pub(crate) fn pi_mentions(e: &Expr, name: &str) -> bool {
 // Automatic struct inference (conservative, sound, opt-in)
 // ---------------------------------------------------------------------------
 
+/// One emitted `type` decl: alias name plus its field list.
+type StructDecl = (String, Vec<(std::sync::Arc<str>, TypeAnnotation)>);
+
 /// Registry of distinct inferred object shapes → synthetic alias name, so
 /// identical shapes share one generated struct.
 #[derive(Default)]
@@ -543,7 +546,7 @@ struct StructRegistry {
     /// canonical "k1:ty1;k2:ty2;…" → alias name
     by_shape: HashMap<String, String>,
     /// alias name → field list (for emitting the `type` decls)
-    decls: Vec<(String, Vec<(std::sync::Arc<str>, TypeAnnotation)>)>,
+    decls: Vec<StructDecl>,
 }
 
 impl StructRegistry {
