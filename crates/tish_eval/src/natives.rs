@@ -276,14 +276,6 @@ pub fn math_trunc(args: &[Value]) -> Result<Value, String> {
     ))
 }
 
-pub fn date_now(_args: &[Value]) -> Result<Value, String> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as f64)
-        .unwrap_or(0.0);
-    Ok(Value::Number(ms))
-}
 
 pub fn array_is_array(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Bool(matches!(args.first(), Some(Value::Array(_)))))

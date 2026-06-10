@@ -1399,7 +1399,7 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_date_constructor, tish_set_constructor, tish_map_constructor, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -1585,11 +1585,9 @@ impl Codegen {
         self.indent -= 1;
         self.writeln("]));");
 
-        self.writeln("let Date = Value::object(ObjectMap::from([");
-        self.indent += 1;
-        self.writeln("(Arc::from(\"now\"), Value::native(|args: &[Value]| tish_date_now(args))),");
-        self.indent -= 1;
-        self.writeln("]));");
+        self.writeln("let Date = tish_date_constructor();");
+        self.writeln("let Set = tish_set_constructor();");
+        self.writeln("let Map = tish_map_constructor();");
 
         self.writeln("let Symbol = tish_symbol_object();");
 
@@ -1611,7 +1609,15 @@ impl Codegen {
         self.indent -= 1;
         self.writeln("]));");
 
+        self.writeln("let Float64Array = tish_float64_array_constructor();");
+        self.writeln("let Float32Array = tish_float32_array_constructor();");
+        self.writeln("let Int8Array = tish_int8_array_constructor();");
         self.writeln("let Uint8Array = tish_uint8_array_constructor();");
+        self.writeln("let Uint8ClampedArray = tish_uint8_clamped_array_constructor();");
+        self.writeln("let Int16Array = tish_int16_array_constructor();");
+        self.writeln("let Uint16Array = tish_uint16_array_constructor();");
+        self.writeln("let Int32Array = tish_int32_array_constructor();");
+        self.writeln("let Uint32Array = tish_uint32_array_constructor();");
         self.writeln("let AudioContext = tish_audio_context_constructor();");
         if self.program_uses_document {
             self.writeln("let document = VmRef::new(tish_canvas_document());");
@@ -2466,6 +2472,8 @@ impl Codegen {
                             "Math",
                             "JSON",
                             "Date",
+                            "Set",
+                            "Map",
                             "Object",
                             "process",
                             "setTimeout",
@@ -2569,8 +2577,18 @@ impl Codegen {
                     "Math",
                     "JSON",
                     "Date",
+                    "Set",
+                    "Map",
                     "Object",
+                    "Float64Array",
+                    "Float32Array",
+                    "Int8Array",
                     "Uint8Array",
+                    "Uint8ClampedArray",
+                    "Int16Array",
+                    "Uint16Array",
+                    "Int32Array",
+                    "Uint32Array",
                     "AudioContext",
                     "process",
                     "setTimeout",
@@ -5272,6 +5290,8 @@ impl Codegen {
                     "Math",
                     "JSON",
                     "Date",
+                    "Set",
+                    "Map",
                     "Object",
                     "process",
                     "setTimeout",
@@ -5344,8 +5364,18 @@ impl Codegen {
             "Math",
             "JSON",
             "Date",
+            "Set",
+            "Map",
             "Object",
+            "Float64Array",
+            "Float32Array",
+            "Int8Array",
             "Uint8Array",
+            "Uint8ClampedArray",
+            "Int16Array",
+            "Uint16Array",
+            "Int32Array",
+            "Uint32Array",
             "AudioContext",
             "process",
             "setTimeout",

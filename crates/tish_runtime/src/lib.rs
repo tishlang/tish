@@ -22,7 +22,22 @@ pub use tishlang_core::{VmReadGuard, VmRef, VmWriteGuard};
 
 pub use tishlang_builtins::construct::{
     audio_context_constructor_value as tish_audio_context_constructor, construct as tish_construct,
+};
+pub use tishlang_builtins::typedarrays::{
+    float32_array_constructor_value as tish_float32_array_constructor,
+    float64_array_constructor_value as tish_float64_array_constructor,
+    int16_array_constructor_value as tish_int16_array_constructor,
+    int32_array_constructor_value as tish_int32_array_constructor,
+    int8_array_constructor_value as tish_int8_array_constructor,
+    uint16_array_constructor_value as tish_uint16_array_constructor,
+    uint32_array_constructor_value as tish_uint32_array_constructor,
     uint8_array_constructor_value as tish_uint8_array_constructor,
+    uint8_clamped_array_constructor_value as tish_uint8_clamped_array_constructor,
+};
+pub use tishlang_builtins::date::date_constructor_value as tish_date_constructor;
+pub use tishlang_builtins::collections::{
+    collection_size, map_constructor_value as tish_map_constructor,
+    set_constructor_value as tish_set_constructor,
 };
 
 // Re-export array methods from tishlang_builtins
@@ -537,14 +552,6 @@ pub fn json_parse(args: &[Value]) -> Value {
     core_json_parse(&s).unwrap_or(Value::Null)
 }
 
-pub fn date_now(_args: &[Value]) -> Value {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as f64)
-        .unwrap_or(0.0);
-    Value::Number(now)
-}
 
 pub fn array_is_array(args: &[Value]) -> Value {
     builtins_array_is_array(args)
@@ -679,6 +686,13 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
     let key = key.as_ref();
     match obj {
         Value::Object(map) => {
+            // `Set`/`Map` instances expose a computed `.size` (the backing store has no real
+            // `size` key); `collection_size` returns `None` for any other object.
+            if key == "size" {
+                if let Some(n) = collection_size(obj) {
+                    return Value::Number(n);
+                }
+            }
             // The map's key type is `Arc<str>`, which implements
             // `Borrow<str>` — so we can look up with a borrowed `&str`
             // directly. Previously we allocated a fresh `Arc<str>` on

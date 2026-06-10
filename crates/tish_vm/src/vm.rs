@@ -569,24 +569,36 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         tishlang_builtins::symbol::symbol_object(),
     );
 
-    // Date - at minimum Date.now() for timing
-    let mut date = ObjectMap::default();
-    date.insert(
-        "now".into(),
-        Value::native(|_args: &[Value]| {
-            let ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as f64;
-            Value::Number(ms)
-        }),
-    );
-    g.insert("Date".into(), value_object_from_map(date));
-
+    // Date - full constructor (new Date(...)) plus statics now()/parse()/UTC().
     g.insert(
-        "Uint8Array".into(),
-        construct_builtin::uint8_array_constructor_value(),
+        "Date".into(),
+        tishlang_builtins::date::date_constructor_value(),
     );
+    g.insert(
+        "Set".into(),
+        tishlang_builtins::collections::set_constructor_value(),
+    );
+    g.insert(
+        "Map".into(),
+        tishlang_builtins::collections::map_constructor_value(),
+    );
+
+    for (name, ctor) in [
+        (
+            "Float64Array",
+            tishlang_builtins::typedarrays::float64_array_constructor_value as fn() -> Value,
+        ),
+        ("Float32Array", tishlang_builtins::typedarrays::float32_array_constructor_value),
+        ("Int8Array", tishlang_builtins::typedarrays::int8_array_constructor_value),
+        ("Uint8Array", tishlang_builtins::typedarrays::uint8_array_constructor_value),
+        ("Uint8ClampedArray", tishlang_builtins::typedarrays::uint8_clamped_array_constructor_value),
+        ("Int16Array", tishlang_builtins::typedarrays::int16_array_constructor_value),
+        ("Uint16Array", tishlang_builtins::typedarrays::uint16_array_constructor_value),
+        ("Int32Array", tishlang_builtins::typedarrays::int32_array_constructor_value),
+        ("Uint32Array", tishlang_builtins::typedarrays::uint32_array_constructor_value),
+    ] {
+        g.insert(name.into(), ctor());
+    }
     g.insert(
         "AudioContext".into(),
         construct_builtin::audio_context_constructor_value(),
@@ -2602,6 +2614,12 @@ fn ic_set_member(
 fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
     match obj {
         Value::Object(m) => {
+            // `Set`/`Map` instances expose a computed `.size` (via a hidden `SizeProbe` opaque).
+            if key.as_ref() == "size" {
+                if let Some(n) = tishlang_builtins::collections::collection_size(obj) {
+                    return Ok(Value::Number(n));
+                }
+            }
             let map = m.borrow();
             map.strings
                 .get(key.as_ref())

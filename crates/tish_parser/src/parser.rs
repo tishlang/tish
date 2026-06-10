@@ -188,11 +188,17 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// After `.` / `?.`, allow `type` as a member name (`TokenKind::Type`); see `docs/js-emit-philosophy.md`.
+    /// After `.` / `?.`, allow contextual keywords as member names. In JS any `IdentifierName`
+    /// (including reserved words) is a valid property name — `arr.of`, `x.as`, `o.in`, `o.type` —
+    /// but the lexer emits dedicated keyword tokens for these, so they must be accepted explicitly
+    /// here. (`TypedArray.of` is the motivating case.) See `docs/js-emit-philosophy.md`.
     fn expect_ident_or_type_member_name(&mut self) -> Result<&Token, String> {
         match self.peek_kind() {
             Some(TokenKind::Ident) => self.expect(TokenKind::Ident),
             Some(TokenKind::Type) => self.expect(TokenKind::Type),
+            Some(TokenKind::Of) => self.expect(TokenKind::Of),
+            Some(TokenKind::As) => self.expect(TokenKind::As),
+            Some(TokenKind::In) => self.expect(TokenKind::In),
             other => Err(format!(
                 "Expected property name after `.` or `?.`, got {:?}",
                 other

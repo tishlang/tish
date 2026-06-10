@@ -207,11 +207,25 @@ impl Evaluator {
                 true,
             );
 
-            let mut date = PropMap::with_capacity(1);
-            date.insert("now".into(), Value::Native(natives::date_now));
             s.set(
                 "Date".into(),
-                Value::object(date),
+                crate::value_convert::core_to_eval(
+                    tishlang_builtins::date::date_constructor_value(),
+                ),
+                true,
+            );
+            s.set(
+                "Set".into(),
+                crate::value_convert::core_to_eval(
+                    tishlang_builtins::collections::set_constructor_value(),
+                ),
+                true,
+            );
+            s.set(
+                "Map".into(),
+                crate::value_convert::core_to_eval(
+                    tishlang_builtins::collections::map_constructor_value(),
+                ),
                 true,
             );
 
@@ -220,13 +234,26 @@ impl Evaluator {
                 crate::value_convert::core_to_eval(tishlang_builtins::symbol::symbol_object()),
                 true,
             );
-            s.set(
-                "Uint8Array".into(),
-                crate::value_convert::core_to_eval(
-                    tishlang_builtins::construct::uint8_array_constructor_value(),
+            for (name, ctor) in [
+                (
+                    "Float64Array",
+                    tishlang_builtins::typedarrays::float64_array_constructor_value
+                        as fn() -> tishlang_core::Value,
                 ),
-                true,
-            );
+                ("Float32Array", tishlang_builtins::typedarrays::float32_array_constructor_value),
+                ("Int8Array", tishlang_builtins::typedarrays::int8_array_constructor_value),
+                ("Uint8Array", tishlang_builtins::typedarrays::uint8_array_constructor_value),
+                (
+                    "Uint8ClampedArray",
+                    tishlang_builtins::typedarrays::uint8_clamped_array_constructor_value,
+                ),
+                ("Int16Array", tishlang_builtins::typedarrays::int16_array_constructor_value),
+                ("Uint16Array", tishlang_builtins::typedarrays::uint16_array_constructor_value),
+                ("Int32Array", tishlang_builtins::typedarrays::int32_array_constructor_value),
+                ("Uint32Array", tishlang_builtins::typedarrays::uint32_array_constructor_value),
+            ] {
+                s.set(name.into(), crate::value_convert::core_to_eval(ctor()), true);
+            }
             s.set(
                 "AudioContext".into(),
                 crate::value_convert::core_to_eval(
@@ -3128,12 +3155,20 @@ impl Evaluator {
 
     fn get_prop(&self, obj: &Value, key: &str) -> Result<Value, String> {
         match obj {
-            Value::Object(map) => Ok(map
-                .borrow()
-                .strings
-                .get(key)
-                .cloned()
-                .unwrap_or(Value::Null)),
+            Value::Object(map) => {
+                // `Set`/`Map` instances expose a computed `.size` via a hidden `SizeProbe` opaque
+                // (shared, not copied, across the value bridge — so it reflects the live store).
+                if key == "size" {
+                    if let Some(Value::Opaque(op)) =
+                        map.borrow().strings.get(tishlang_builtins::collections::SIZE_SLOT)
+                    {
+                        if let Some(n) = tishlang_builtins::collections::size_probe_len(op.as_ref()) {
+                            return Ok(Value::Number(n));
+                        }
+                    }
+                }
+                Ok(map.borrow().strings.get(key).cloned().unwrap_or(Value::Null))
+            }
             Value::Array(arr) => {
                 if key == "length" {
                     Ok(Value::Number(arr.borrow().len() as f64))
