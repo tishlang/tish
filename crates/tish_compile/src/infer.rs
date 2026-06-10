@@ -164,25 +164,29 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
 /// Run inference over a program, returning a modified Program with additional
 /// type annotations filled in on `VarDecl` nodes.
 pub fn infer_program(program: &Program) -> Program {
+    // M4 (opt-in via TISH_PARAM_INFER) runs FIRST: give unannotated params used PURELY
+    // numerically a synthetic `: number`. Doing this *before* local/struct inference is what
+    // lets derived numeric locals (`let x0 = (px / w) * 3`) be proven numeric off the now-known
+    // param types — otherwise they fall back to boxed `Value` and the whole hot loop boxes with
+    // them (the difference between an idiomatic numeric fn going native vs staying boxed).
+    // Conservative — any non-numeric / write / escape use bails (param stays boxed Value).
+    let p = if std::env::var("TISH_PARAM_INFER").map(|v| v != "0").unwrap_or(false) {
+        param_infer_program(program.clone())
+    } else {
+        program.clone()
+    };
+    // Base + local-numeric inference (annotates `let` nodes), now seeing M4's param types.
     let mut ctx = InferCtx::new();
     let p = Program {
-        statements: infer_statements(&program.statements, &mut ctx),
+        statements: infer_statements(&p.statements, &mut ctx),
     };
     // Automatic struct inference (opt-in via TISH_STRUCT_INFER until proven):
     // give unannotated object literals a concrete struct type so the Rust
     // backend emits unboxed structs with direct field access. Conservative —
     // only applies when every use of the binding is a literal-key field read,
     // so it can never miscompile (any uncertainty falls back to boxed Value).
-    let p = if std::env::var("TISH_STRUCT_INFER").map(|v| v != "0").unwrap_or(false) {
+    if std::env::var("TISH_STRUCT_INFER").map(|v| v != "0").unwrap_or(false) {
         struct_infer_program(p)
-    } else {
-        p
-    };
-    // M4 (opt-in via TISH_PARAM_INFER): give unannotated params used PURELY numerically a
-    // synthetic `: number` so M1 (native shadow) + M5 (native fn) lower them. Conservative —
-    // any non-numeric / write / escape use bails (param stays boxed Value), so it can't miscompile.
-    if std::env::var("TISH_PARAM_INFER").map(|v| v != "0").unwrap_or(false) {
-        param_infer_program(p)
     } else {
         p
     }
@@ -253,9 +257,26 @@ fn collect_numeric_locals(s: &Statement, out: &mut HashSet<String>) {
     use Statement::*;
     match s {
         VarDecl {
-            name, type_ann, ..
+            name,
+            type_ann,
+            init,
+            ..
         } => {
-            if type_ann.as_ref().is_some_and(is_number) {
+            // Annotated `: number`, OR **base-inferred** from a numeric-literal initializer
+            // (`let i = 0`, `let x = 0.0`) — the common loop-counter / accumulator pattern. A
+            // numeric literal is unambiguously a number at init; this is what lets `i < n` prove
+            // the *param* `n` numeric. Over-inclusion (if the local is later reassigned to a
+            // non-number) only *widens* param inference, still bounded by M4's
+            // caller-passes-a-number / NaN-coercion soundness and the corpus/gauntlet guards.
+            let numeric = type_ann.as_ref().is_some_and(is_number)
+                || matches!(
+                    init,
+                    Some(tishlang_ast::Expr::Literal {
+                        value: tishlang_ast::Literal::Number(_),
+                        ..
+                    })
+                );
+            if numeric {
                 out.insert(name.to_string());
             }
         }
@@ -309,13 +330,17 @@ fn numeric_provable(e: &Expr, nums: &HashSet<String>) -> bool {
             left, op, right, ..
         } => {
             use tishlang_ast::BinOp::*;
-            matches!(op, Sub | Mul | Div | Mod | Pow)
-                && numeric_provable(left, nums)
+            matches!(
+                op,
+                Sub | Mul | Div | Mod | Pow | BitAnd | BitOr | BitXor | Shl | Shr | UShr
+            ) && numeric_provable(left, nums)
                 && numeric_provable(right, nums)
         }
         Unary { op, operand, .. } => {
-            matches!(op, tishlang_ast::UnaryOp::Neg | tishlang_ast::UnaryOp::Pos)
-                && numeric_provable(operand, nums)
+            matches!(
+                op,
+                tishlang_ast::UnaryOp::Neg | tishlang_ast::UnaryOp::Pos | tishlang_ast::UnaryOp::BitNot
+            ) && numeric_provable(operand, nums)
         }
         Call { callee, .. } => matches!(callee.as_ref(),
             Expr::Member { object, prop: tishlang_ast::MemberProp::Name { name: m, .. }, .. }
@@ -378,7 +403,9 @@ fn nus_expr(e: &Expr, name: &str, nums: &HashSet<String>) -> bool {
             use tishlang_ast::BinOp::*;
             match op {
                 // Unambiguously numeric — `name` as either operand is definitely a number.
-                Sub | Mul | Div | Mod | Pow => {
+                // Includes the bitwise/shift family: JS coerces both sides to int32, so
+                // `name & x` / `name >>> x` proves `name` numeric just like `name * x`.
+                Sub | Mul | Div | Mod | Pow | BitAnd | BitOr | BitXor | Shl | Shr | UShr => {
                     nus_num_operand(left, name, nums) && nus_num_operand(right, name, nums)
                 }
                 // OVERLOADED: `+` is also string concat, `<`/`===` also compare strings. If
@@ -388,7 +415,11 @@ fn nus_expr(e: &Expr, name: &str, nums: &HashSet<String>) -> bool {
                     nus_overloaded(left, right, name, nums)
                         && nus_overloaded(right, left, name, nums)
                 }
-                // Logical (&&, ||, ??) etc.: `name` must be absent.
+                // Logical `&&`/`||`: recurse — a param used numerically *inside* a condition
+                // operand (e.g. `iter < maxIter && x*x + y*y <= 4`) is a numeric use; a bare
+                // `name && x` is not (the recursion's `Ident(name)` case returns false).
+                And | Or => nus_expr(left, name, nums) && nus_expr(right, name, nums),
+                // Anything else (`Eq`/`Ne`/`In`): `name` must be absent.
                 _ => !pi_mentions(left, name) && !pi_mentions(right, name),
             }
         }
