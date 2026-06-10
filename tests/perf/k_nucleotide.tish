@@ -23,7 +23,9 @@ function kNucleotide(seq, k) {
   return m
 }
 
-let len = 200000
+// NOTE: tish's Map is currently O(n) per op (linear scan — see docs/perf-benchmark-suite.md §6), so
+// this is intentionally kept modest; the gap GROWS with `len` (the super-linear tell).
+let len = 100000
 let seq = []
 for (let i = 0; i < len; i++) { seq.push(nextBase()) }
 
