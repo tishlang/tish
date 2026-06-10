@@ -86,34 +86,29 @@ divergence). Sources: Are We Fast Yet (AWFY) and the Computer Language Benchmark
 
 Still **deliberately not added** (and why): **Richards / DeltaBlue** (the OO macro-benchmarks) — high
 value but a large, error-prone port; `megamorphic` is a compact proxy for the dispatch signal until a
-faithful Richards lands. **Crypto / SHA / base64** — blocked on a parser gap (`>>>`, see §4).
-**regex-dna** — tish has `tests/core/regex_perf.js` but no gauntlet regex program yet; a good next add.
-**Speedometer** — DOM, N/A.
+faithful Richards lands. **SHA / base64 / AES** — now unblocked (`>>>` landed, see §4) and a good next
+add; `fnv_hash` (FNV-1a) is the first of the family. **regex-dna** — tish has `tests/core/regex_perf.js`
+but no gauntlet regex program yet; a good next add. **Speedometer** — DOM, N/A.
 
 ---
 
 ## 4. ★ Compatibility gaps discovered while porting standard benchmarks
 
-Porting real-world JS benchmark code surfaced four tish/JS divergences. The first three are **parser
-gaps** (valid JS that tish rejects); the fourth is a **documented semantic deviation**. These are
-worth tracking independently of perf — they are exactly the kind of "obvious failure" the JS-emit
-philosophy says we should close.
+Porting real-world JS benchmark code surfaced four tish/JS divergences. **All four have since been
+fixed** (across interp/VM/native with parity — see the `tish-js-compat-features` memory note and the
+`tests/core/{unsigned_right_shift,scientific_notation,comma_declarators,map_set_iterators}` fixtures);
+kept here as the record of how the benchmarks drove conformance work.
 
-1. **Unsigned right shift `>>>` is unsupported.** The lexer reads `a >>> b` as three `>` (`Gt`) tokens
-   and the parser errors. Blocks the entire crypto/hashing family (SHA-1/MD5/AES, base64) which relies
-   on `>>> 0` / `>>> n` for 32-bit-unsigned semantics. `>>`, `<<`, `&`, `|`, `^` all work.
-2. **Scientific / exponent notation `1.66e-3` is unsupported.** The lexer stops the number at `1.66`
-   and treats `e` as an identifier ("Undefined variable: e"). Worked around in `nbody` by writing the
-   constants as plain decimals.
-3. **Comma-separated declarators `let a = 0, b = 0` are unsupported** ("Expected Comma, got Ident").
-   Split into separate `let` statements.
-4. **`Map.values()` / `keys()` / `entries()` return arrays, not iterators** (a documented deviation).
-   Indexing `.values()[i]` works on tish but is `undefined` on node (iterators have no `.length`), so
-   it silently diverges. **Portable idiom: `for (const v of m.values())`** — iterates identically on
-   both. (Used in `k_nucleotide`.)
-
-None block the benchmarks above (worked around), but **(1) blocks a whole benchmark category** and is
-the highest-value fix if we want crypto/hashing coverage.
+1. ~~**Unsigned right shift `>>>` unsupported**~~ → **FIXED.** New `BinOp::UShr`; and the whole bitwise
+   family now uses JS ToInt32/ToUint32 (modulo 2³², NaN/±∞→0) instead of a saturating cast, so `>>> 0`
+   on a >2³¹ hash is exact. Unblocks the crypto/hashing family; `fnv_hash` is added (a later test pass
+   also caught + fixed `Infinity | 0` → was `-1`, now `0`).
+2. ~~**Scientific notation `1.66e-3` unsupported**~~ → **FIXED** (lexer). (`nbody` still uses plain
+   decimals — harmless.)
+3. ~~**Comma-separated declarators `let a = 0, b = 0` unsupported**~~ → **FIXED** (`Statement::Multi`).
+4. ~~**`Map.values()`/`keys()`/`entries()` return arrays, not iterators**~~ → **FIXED.** They now return
+   real iterators (`{ next() → {value, done} }`) usable via `.next()`, `for…of`, and spread. (Indexing
+   `.values()[i]` no longer works — matching JS, where iterators have no `.length`; use `for…of`.)
 
 ---
 
@@ -205,12 +200,12 @@ we overfit. Finding 1 alone justified the exercise.
    O(1)/op, ~350× faster at n=80k, all backends byte-identical.
 2. **Shapes + inline caches for objects** (jsc-bun gap #1) → addresses `nbody`/`megamorphic`/
    `binary_trees` (and is the same "no hashing/specialization" root cause as #1).
-3. **Fix `>>>`** (parser) → unlocks the crypto/hashing benchmark family (SHA-1, MD5, AES, base64) — a
-   whole optimization dimension (32-bit integer/bitwise) we currently can't measure.
+3. **~~Fix `>>>` + sci-notation + comma-declarators~~ ✅ DONE** — all landed across backends; `fnv_hash`
+   added (32-bit integer/bitwise dimension now measurable). Next in the bitwise/hashing family: SHA-1 /
+   base64. **Open perf item it exposed:** the JIT bails on shifts, so hashing loops run on the VM
+   interpreter (`fnv_hash` ~33× V8); teaching the JIT `<<`/`>>`/`>>>` would close most of it.
 4. **Port Richards + DeltaBlue** (AWFY versions, prototype-style) → the canonical megamorphic-dispatch
    macro-benchmarks; the single best signal for object/IC work.
 5. **Add a regex gauntlet program** (regex-dna) → wire the existing regex workload into the vs-node A/B.
 6. **Consider a JetStream-style aggregate score** (geomean over the suite) so a single number tracks
    progress, while keeping the per-benchmark diagnostics.
-7. **Add scientific-notation + comma-declarator parsing** → removes friction porting any future
-   standard benchmark.

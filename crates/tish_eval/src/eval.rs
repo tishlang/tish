@@ -2322,7 +2322,14 @@ impl Evaluator {
     /// `4294967295 | 0 === -1`, not the saturated `i32::MAX`. Realistic values are
     /// `< 2⁵³` so they fit `i64` exactly; the two casts stay cheap.
     fn to_int32(v: &Value) -> i32 {
-        v.as_number().unwrap_or(f64::NAN) as i64 as i32
+        // NaN / ±Infinity → 0 (the `is_finite` guard): `f64 as i64` *saturates* (`+∞ → i64::MAX
+        // → -1`), which is not the JS ToInt32 result. Finite values use the cheap modulo cast.
+        let x = v.as_number().unwrap_or(f64::NAN);
+        if x.is_finite() {
+            x as i64 as i32
+        } else {
+            0
+        }
     }
 
     fn binop_int32<F>(&self, l: &Value, r: &Value, f: F) -> Result<Value, String>
@@ -3192,6 +3199,13 @@ impl Evaluator {
     fn drain_eval_iterator(&self, v: &Value) -> Option<Vec<Value>> {
         if !matches!(v, Value::Object(_)) {
             return None;
+        }
+        // Fast path: tish's Map/Set iterators expose `__drain__`, returning all remaining items as
+        // one array — skips the per-element bridge + `{ value, done }` alloc of the generic loop.
+        if let Ok(Value::CoreFn(drain)) = self.get_prop(v, "__drain__") {
+            if let Value::Array(arr) = crate::value_convert::core_to_eval(drain.call(&[])) {
+                return Some(arr.borrow().clone());
+            }
         }
         let Ok(Value::CoreFn(next)) = self.get_prop(v, "next") else {
             return None;

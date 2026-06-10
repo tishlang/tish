@@ -1,0 +1,17 @@
+// GAUNTLET: FNV-1a hashing — a 32-bit integer/bitwise hot loop (`^`, `*`, `>>>`, `<<`, `|`). This is
+// the workload `>>>` exists for (crypto/hashing); it exercises the JS ToInt32/ToUint32 (modulo 2^32,
+// NaN/±Infinity → 0) bitwise path end-to-end. Was un-runnable before `>>>` landed. Valid in both tish
+// and node; integer check (final hash — tish and node do the same f64 arithmetic so they agree).
+function fnv1a(n) {
+  let h = 2166136261
+  for (let i = 0; i < n; i++) {
+    h = h ^ (i & 255)
+    h = (h * 16777619) >>> 0
+    h = ((h << 13) | (h >>> 19)) >>> 0
+  }
+  return h >>> 0
+}
+
+let t0 = Date.now()
+let check = fnv1a(20000000)
+console.log("GAUNTLET fnv_hash " + (Date.now() - t0) + " " + check)

@@ -15,6 +15,8 @@ pub use tishlang_core::Value;
 pub use tishlang_core::ArcStr;
 /// Used by native codegen for `f()` / `obj()` dispatch (`Value::Function` or `__call` on objects).
 pub use tishlang_core::value_call;
+/// JS ToInt32/ToUint32 for the emitted bitwise/shift code (modulo 2³², NaN/±Infinity → 0).
+pub use tishlang_core::{to_int32, to_uint32};
 // Re-export the shared-mutable wrapper so the Rust code emitted by
 // `tishlang_compile::codegen` can write `VmRef::new(...)` without needing
 // a direct dependency on `tishlang_core` from the generated crate.

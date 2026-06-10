@@ -783,6 +783,14 @@ pub fn drain_iterator(obj: &Value) -> Option<Vec<Value>> {
     if !matches!(obj, Value::Object(_)) {
         return None;
     }
+    // Fast path: tish's own `Map`/`Set` iterators expose `__drain__`, which returns the remaining
+    // items as one array (respecting the current position) and exhausts the iterator — so `for…of`
+    // and spread don't pay the per-element `{ value, done }` allocation of the generic `next()` loop.
+    if let Some(Value::Function(drain)) = object_get(obj, &Value::String("__drain__".into())) {
+        if let Value::Array(arr) = drain.call(&[]) {
+            return Some(arr.borrow().clone());
+        }
+    }
     let Value::Function(next) = object_get(obj, &Value::String("next".into()))? else {
         return None;
     };
@@ -800,6 +808,30 @@ pub fn drain_iterator(obj: &Value) -> Option<Vec<Value>> {
         out.push(object_get(&res, &value_key).unwrap_or(Value::Null));
     }
     Some(out)
+}
+
+/// JS `ToInt32`: NaN and ±Infinity map to `0`; every other value is truncated toward zero and
+/// reduced modulo 2³². `f64 as i64` is exact for the finite `< 2⁶³` magnitudes real bitwise code
+/// produces (then `as i32` truncates the low 32 bits = the modulo); the `is_finite` guard is what
+/// makes `Infinity`/`-Infinity` correct — `f64 as i64` *saturates* (`+∞ → i64::MAX → -1`), which is
+/// NOT the JS result. One always-predicted branch, so the hot path (finite hash values) is unaffected.
+#[inline]
+pub fn to_int32(x: f64) -> i32 {
+    if x.is_finite() {
+        x as i64 as i32
+    } else {
+        0
+    }
+}
+
+/// JS `ToUint32`: as [`to_int32`] but reinterpreted unsigned (NaN/±Infinity → `0`).
+#[inline]
+pub fn to_uint32(x: f64) -> u32 {
+    if x.is_finite() {
+        x as i64 as u32
+    } else {
+        0
+    }
 }
 
 /// Invoke a callable [`Value`]: [`Value::Function`], or an object exposing `__call` (e.g. `Symbol`).

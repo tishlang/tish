@@ -1326,25 +1326,25 @@ impl Codegen {
         }
     }
 
-    /// Generate code for a bitwise binary operation (`& | ^`). `as i64 as i32` is
-    /// JS ToInt32 (modulo 2³²) — out-of-range operands wrap, not saturate.
+    /// Generate code for a bitwise binary operation (`& | ^`). `to_int32` is JS ToInt32
+    /// (modulo 2³², NaN/±Infinity → 0) — out-of-range operands wrap, not saturate.
     fn emit_bitwise_binop(l: &str, r: &str, op: &str) -> String {
         format!(
             "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
-             let Value::Number(b) = &({}) else {{ panic!() }}; ((*a as i64 as i32) {} (*b as i64 as i32)) as f64 }})",
+             let Value::Number(b) = &({}) else {{ panic!() }}; (tishlang_runtime::to_int32(*a) {} tishlang_runtime::to_int32(*b)) as f64 }})",
             l, r, op
         )
     }
 
-    /// Generate code for a shift (`<< >> >>>`). `a_cast` is the left-operand cast
-    /// (`i64 as i32` signed, `i64 as u32` for the logical `>>>`); `method` is the
-    /// `wrapping_sh*` call. Counts mask to 5 bits — exact JS semantics, panic-free.
-    fn emit_shift_binop(l: &str, r: &str, a_cast: &str, method: &str) -> String {
+    /// Generate code for a shift (`<< >> >>>`). `a_to` is the left-operand coercion
+    /// (`to_int32` signed, `to_uint32` for the logical `>>>`); `method` is the `wrapping_sh*`
+    /// call. Counts go through `to_uint32` then mask to 5 bits — exact JS semantics, panic-free.
+    fn emit_shift_binop(l: &str, r: &str, a_to: &str, method: &str) -> String {
         format!(
             "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
              let Value::Number(b) = &({}) else {{ panic!() }}; \
-             (*a as {}).{}(*b as i64 as u32) as f64 }})",
-            l, r, a_cast, method
+             tishlang_runtime::{}(*a).{}(tishlang_runtime::to_uint32(*b)) as f64 }})",
+            l, r, a_to, method
         )
     }
 
@@ -3154,7 +3154,7 @@ impl Codegen {
                         o
                     ),
                     UnaryOp::BitNot => format!(
-                        "Value::Number({{ let Value::Number(n) = &({}) else {{ panic!(\"Expected number\") }}; (!(*n as i64 as i32)) as f64 }})",
+                        "Value::Number({{ let Value::Number(n) = &({}) else {{ panic!(\"Expected number\") }}; (!tishlang_runtime::to_int32(*n)) as f64 }})",
                         o
                     ),
                     UnaryOp::Void => format!("{{ {}; Value::Null }}", o),
@@ -6599,28 +6599,32 @@ impl Codegen {
                         BinOp::StrictNe => format!("({} != {})", l, r),
                         BinOp::And => format!("({} && {})", l, r),
                         BinOp::Or => format!("({} || {})", l, r),
-                        // Native int32 bitwise/shift (operands are f64 here). `as i64 as i32`
-                        // is JS ToInt32 (modulo 2³², not saturating); shift counts mask to
+                        // Native int32 bitwise/shift (operands are f64 here). `to_int32`/`to_uint32`
+                        // is JS ToInt32/ToUint32 (modulo 2³², NaN/±Infinity → 0; `#[inline]` so the
+                        // `is_finite` guard folds away on the hot finite path); shift counts mask to
                         // 5 bits via `wrapping_sh*` (JS semantics, no panic).
-                        BinOp::BitAnd => {
-                            format!("((({} as i64 as i32) & ({} as i64 as i32)) as f64)", l, r)
-                        }
-                        BinOp::BitOr => {
-                            format!("((({} as i64 as i32) | ({} as i64 as i32)) as f64)", l, r)
-                        }
-                        BinOp::BitXor => {
-                            format!("((({} as i64 as i32) ^ ({} as i64 as i32)) as f64)", l, r)
-                        }
+                        BinOp::BitAnd => format!(
+                            "((tishlang_runtime::to_int32({}) & tishlang_runtime::to_int32({})) as f64)",
+                            l, r
+                        ),
+                        BinOp::BitOr => format!(
+                            "((tishlang_runtime::to_int32({}) | tishlang_runtime::to_int32({})) as f64)",
+                            l, r
+                        ),
+                        BinOp::BitXor => format!(
+                            "((tishlang_runtime::to_int32({}) ^ tishlang_runtime::to_int32({})) as f64)",
+                            l, r
+                        ),
                         BinOp::Shl => format!(
-                            "(({} as i64 as i32).wrapping_shl({} as i64 as u32) as f64)",
+                            "(tishlang_runtime::to_int32({}).wrapping_shl(tishlang_runtime::to_uint32({})) as f64)",
                             l, r
                         ),
                         BinOp::Shr => format!(
-                            "(({} as i64 as i32).wrapping_shr({} as i64 as u32) as f64)",
+                            "(tishlang_runtime::to_int32({}).wrapping_shr(tishlang_runtime::to_uint32({})) as f64)",
                             l, r
                         ),
                         BinOp::UShr => format!(
-                            "(({} as i64 as u32).wrapping_shr({} as i64 as u32) as f64)",
+                            "(tishlang_runtime::to_uint32({}).wrapping_shr(tishlang_runtime::to_uint32({})) as f64)",
                             l, r
                         ),
                         _ => unreachable!("result_type_of_binop covers all handled ops"),
@@ -7175,9 +7179,9 @@ impl Codegen {
             BinOp::BitAnd => Self::emit_bitwise_binop(l, r, "&"),
             BinOp::BitOr => Self::emit_bitwise_binop(l, r, "|"),
             BinOp::BitXor => Self::emit_bitwise_binop(l, r, "^"),
-            BinOp::Shl => Self::emit_shift_binop(l, r, "i64 as i32", "wrapping_shl"),
-            BinOp::Shr => Self::emit_shift_binop(l, r, "i64 as i32", "wrapping_shr"),
-            BinOp::UShr => Self::emit_shift_binop(l, r, "i64 as u32", "wrapping_shr"),
+            BinOp::Shl => Self::emit_shift_binop(l, r, "to_int32", "wrapping_shl"),
+            BinOp::Shr => Self::emit_shift_binop(l, r, "to_int32", "wrapping_shr"),
+            BinOp::UShr => Self::emit_shift_binop(l, r, "to_uint32", "wrapping_shr"),
             BinOp::In => format!("tish_in_operator(&{}, &{})", l, r),
             BinOp::Eq | BinOp::Ne => {
                 return Err(CompileError::new(

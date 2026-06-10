@@ -16,8 +16,8 @@ use tishlang_builtins::number as num_builtins;
 use tishlang_builtins::string as str_builtins;
 use tishlang_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
 use tishlang_core::{
-    merge_object_data, object_get, object_has, object_set, NativeFn, ObjectData, ObjectMap,
-    PropMap, Value,
+    merge_object_data, object_get, object_has, object_set, to_int32, to_uint32, NativeFn,
+    ObjectData, ObjectMap, PropMap, Value,
 };
 
 /// Wrap a closure in the right shared pointer for the current build.
@@ -2508,16 +2508,16 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
         Ge => Ok(Bool(ln >= rn)),
         And => Ok(Bool(l.is_truthy() && r.is_truthy())),
         Or => Ok(Bool(l.is_truthy() || r.is_truthy())),
-        // `as i64 as i32` = JS ToInt32 (modulo 2³², not a saturating cast), so
-        // out-of-range operands wrap exactly like JS instead of clamping.
-        BitAnd => Ok(Number((ln as i64 as i32 & rn as i64 as i32) as f64)),
-        BitOr => Ok(Number((ln as i64 as i32 | rn as i64 as i32) as f64)),
-        BitXor => Ok(Number((ln as i64 as i32 ^ rn as i64 as i32) as f64)),
+        // `to_int32`/`to_uint32` = JS ToInt32/ToUint32 (modulo 2³², NaN/±Infinity → 0); not a
+        // saturating cast, so out-of-range operands wrap exactly like JS instead of clamping.
+        BitAnd => Ok(Number((to_int32(ln) & to_int32(rn)) as f64)),
+        BitOr => Ok(Number((to_int32(ln) | to_int32(rn)) as f64)),
+        BitXor => Ok(Number((to_int32(ln) ^ to_int32(rn)) as f64)),
         // JS shifts mask the count to 5 bits; `wrapping_sh*` matches that and avoids
         // the debug-mode panic that plain `<<`/`>>` raise for a count of 32+.
-        Shl => Ok(Number((ln as i64 as i32).wrapping_shl(rn as i64 as u32) as f64)),
-        Shr => Ok(Number((ln as i64 as i32).wrapping_shr(rn as i64 as u32) as f64)),
-        UShr => Ok(Number((ln as i64 as u32).wrapping_shr(rn as i64 as u32) as f64)),
+        Shl => Ok(Number(to_int32(ln).wrapping_shl(to_uint32(rn)) as f64)),
+        Shr => Ok(Number(to_int32(ln).wrapping_shr(to_uint32(rn)) as f64)),
+        UShr => Ok(Number(to_uint32(ln).wrapping_shr(to_uint32(rn)) as f64)),
         In => Ok(Bool(match r {
             Value::Object(_) => object_has(r, l),
             Value::Array(a) => {
@@ -2560,7 +2560,7 @@ fn eval_unary(op: UnaryOp, o: &Value) -> Result<Value, String> {
         Not => Ok(Bool(!o.is_truthy())),
         Neg => Ok(Number(-o.as_number().unwrap_or(f64::NAN))),
         Pos => Ok(Number(o.as_number().unwrap_or(f64::NAN))),
-        BitNot => Ok(Number(!(o.as_number().unwrap_or(0.0) as i64 as i32) as f64)),
+        BitNot => Ok(Number(!to_int32(o.as_number().unwrap_or(0.0)) as f64)),
         Void => Ok(Null),
     }
 }

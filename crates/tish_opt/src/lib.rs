@@ -763,6 +763,26 @@ fn try_algebraic_simplify(
     None
 }
 
+// JS ToInt32/ToUint32 for the constant folder. NaN/±Infinity → 0 (`f64 as i64` saturates, so a
+// folded `(1e308 * 10) | 0` would otherwise give -1 while the runtime gives 0). `tish_opt` has no
+// `tish_core` dep, so these mirror `tishlang_core::to_int32`/`to_uint32` (kept in sync, pure spec).
+#[inline]
+fn fold_to_int32(x: f64) -> i32 {
+    if x.is_finite() {
+        x as i64 as i32
+    } else {
+        0
+    }
+}
+#[inline]
+fn fold_to_uint32(x: f64) -> u32 {
+    if x.is_finite() {
+        x as i64 as u32
+    } else {
+        0
+    }
+}
+
 fn try_fold_binop(left: &Literal, op: BinOp, right: &Literal) -> Option<Literal> {
     use BinOp::*;
     let ln = literal_as_number(left);
@@ -801,13 +821,13 @@ fn try_fold_binop(left: &Literal, op: BinOp, right: &Literal) -> Option<Literal>
         Ge => Literal::Bool(ln >= rn),
         And => Literal::Bool(literal_is_truthy(left) && literal_is_truthy(right)),
         Or => Literal::Bool(literal_is_truthy(left) || literal_is_truthy(right)),
-        // `as i64 as i32` = JS ToInt32 (modulo 2³²), matching the VM/interp exactly.
-        BitAnd => Literal::Number((ln as i64 as i32 & rn as i64 as i32) as f64),
-        BitOr => Literal::Number((ln as i64 as i32 | rn as i64 as i32) as f64),
-        BitXor => Literal::Number((ln as i64 as i32 ^ rn as i64 as i32) as f64),
-        Shl => Literal::Number((ln as i64 as i32).wrapping_shl(rn as i64 as u32) as f64),
-        Shr => Literal::Number((ln as i64 as i32).wrapping_shr(rn as i64 as u32) as f64),
-        UShr => Literal::Number((ln as i64 as u32).wrapping_shr(rn as i64 as u32) as f64),
+        // ToInt32/ToUint32 (modulo 2³², NaN/±Infinity → 0), matching the VM/interp exactly.
+        BitAnd => Literal::Number((fold_to_int32(ln) & fold_to_int32(rn)) as f64),
+        BitOr => Literal::Number((fold_to_int32(ln) | fold_to_int32(rn)) as f64),
+        BitXor => Literal::Number((fold_to_int32(ln) ^ fold_to_int32(rn)) as f64),
+        Shl => Literal::Number(fold_to_int32(ln).wrapping_shl(fold_to_uint32(rn)) as f64),
+        Shr => Literal::Number(fold_to_int32(ln).wrapping_shr(fold_to_uint32(rn)) as f64),
+        UShr => Literal::Number(fold_to_uint32(ln).wrapping_shr(fold_to_uint32(rn)) as f64),
         In => return None, // Requires object/array on right
     };
     Some(result)
@@ -997,7 +1017,7 @@ fn try_fold_unary(op: UnaryOp, operand: &Literal) -> Option<Literal> {
         Not => Literal::Bool(!literal_is_truthy(operand)),
         Neg => Literal::Number(-literal_as_number(operand)),
         Pos => Literal::Number(literal_as_number(operand)),
-        BitNot => Literal::Number(!(literal_as_number(operand) as i64 as i32) as f64),
+        BitNot => Literal::Number(!fold_to_int32(literal_as_number(operand)) as f64),
         Void => Literal::Null,
     };
     Some(result)

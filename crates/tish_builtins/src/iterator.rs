@@ -23,6 +23,26 @@ pub fn array_iterator(items: Vec<Value>) -> Value {
 
     let mut m = ObjectMap::default();
     {
+        // Bulk-drain fast path for `for…of` / spread: return all REMAINING items (from the current
+        // position) as one array and exhaust the iterator — equivalent to calling `next()` until
+        // `done`, but with no per-element `{ value, done }` allocation. `drain_iterator` prefers this
+        // when present; manual `.next()` and partial consumption still work (it respects `pos`).
+        let items = items.clone();
+        let pos = pos.clone();
+        m.insert(
+            Arc::from("__drain__"),
+            Value::native(move |_args: &[Value]| {
+                let i = *pos.borrow();
+                let b = items.borrow();
+                let rest: Vec<Value> = if i < b.len() { b[i..].to_vec() } else { Vec::new() };
+                let len = b.len();
+                drop(b);
+                *pos.borrow_mut() = len;
+                Value::Array(VmRef::new(rest))
+            }),
+        );
+    }
+    {
         let items = items.clone();
         let pos = pos.clone();
         m.insert(
@@ -50,4 +70,60 @@ pub fn array_iterator(items: Vec<Value>) -> Value {
         );
     }
     Value::object(m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(obj: &Value, name: &str) -> Value {
+        let Value::Object(o) = obj else { panic!("not an object") };
+        let m = o.borrow().strings.get(name).cloned().expect("method missing");
+        let Value::Function(f) = m else { panic!("{name} is not callable") };
+        f.call(&[])
+    }
+    fn get(obj: &Value, key: &str) -> Value {
+        let Value::Object(o) = obj else { return Value::Null };
+        o.borrow().strings.get(key).cloned().unwrap_or(Value::Null)
+    }
+    fn num(v: &Value) -> f64 {
+        match v {
+            Value::Number(n) => *n,
+            _ => f64::NAN,
+        }
+    }
+    fn nums(v: &Value) -> Vec<f64> {
+        match v {
+            Value::Array(a) => a.borrow().iter().map(num).collect(),
+            _ => vec![],
+        }
+    }
+
+    #[test]
+    fn next_yields_each_then_done() {
+        let it = array_iterator(vec![Value::Number(1.0), Value::Number(2.0)]);
+        let r1 = call(&it, "next");
+        assert_eq!(num(&get(&r1, "value")), 1.0);
+        assert!(!get(&r1, "done").is_truthy());
+        assert_eq!(num(&get(&call(&it, "next"), "value")), 2.0);
+        // exhausted — and it keeps reporting done.
+        assert!(get(&call(&it, "next"), "done").is_truthy());
+        assert!(get(&call(&it, "next"), "done").is_truthy());
+    }
+
+    #[test]
+    fn drain_returns_all_and_exhausts() {
+        let it = array_iterator(vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)]);
+        assert_eq!(nums(&call(&it, "__drain__")), vec![1.0, 2.0, 3.0]);
+        // draining exhausts the iterator (matches calling next() until done).
+        assert!(get(&call(&it, "next"), "done").is_truthy());
+    }
+
+    #[test]
+    fn drain_respects_current_position() {
+        let it = array_iterator(vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)]);
+        call(&it, "next"); // consume the first
+        assert_eq!(nums(&call(&it, "__drain__")), vec![2.0, 3.0]);
+        assert_eq!(nums(&call(&it, "__drain__")), Vec::<f64>::new()); // already drained
+    }
 }
