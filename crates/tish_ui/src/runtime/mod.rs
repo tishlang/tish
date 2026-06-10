@@ -46,7 +46,7 @@ pub fn ui_text(args: &[Value]) -> Value {
 
 /// Vnode factory: `h(tag, props, children)` (Lattish-compatible shape).
 pub fn ui_h(args: &[Value]) -> Value {
-    let tag = args.get(0).cloned().unwrap_or(Value::Null);
+    let tag = args.first().cloned().unwrap_or(Value::Null);
     let props = args.get(1).cloned().unwrap_or(Value::Null);
     let children_arg = args.get(2).cloned().unwrap_or(Value::Null);
 
@@ -150,15 +150,11 @@ pub trait Host {
 }
 
 /// No-op / test host that only stores the last committed tree.
+#[derive(Default)]
 pub struct HeadlessHost {
     pub last: Option<Value>,
 }
 
-impl Default for HeadlessHost {
-    fn default() -> Self {
-        Self { last: None }
-    }
-}
 
 impl Host for HeadlessHost {
     fn commit_root(&mut self, vnode: &Value) {

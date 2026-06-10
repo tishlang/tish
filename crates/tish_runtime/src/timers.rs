@@ -106,7 +106,7 @@ fn re_register_interval(id: u64, callback: Value, args: Vec<Value>, interval_ms:
 /// Callbacks run when run_due_timers() is invoked (e.g. from ws.receiveTimeout poll loop).
 pub fn set_timeout(args: &[Value]) -> Value {
     let callback = args.first().cloned().unwrap_or(Value::Null);
-    let delay_ms = extract_num(args.get(1)).min(3600_000);
+    let delay_ms = extract_num(args.get(1)).min(3_600_000);
     let extra_args: Vec<Value> = args.iter().skip(2).cloned().collect();
     if matches!(callback, Value::Null) {
         return Value::Number(next_id() as f64);
@@ -130,7 +130,7 @@ pub fn set_timeout(args: &[Value]) -> Value {
 /// setInterval(callback, intervalMs, ...args) — first run after `intervalMs`, then repeats.
 pub fn set_interval(args: &[Value]) -> Value {
     let callback = args.first().cloned().unwrap_or(Value::Null);
-    let interval_ms = extract_num(args.get(1)).min(3600_000);
+    let interval_ms = extract_num(args.get(1)).min(3_600_000);
     let extra_args: Vec<Value> = args.iter().skip(2).cloned().collect();
     if matches!(callback, Value::Null) {
         return Value::Number(next_id() as f64);

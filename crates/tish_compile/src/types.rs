@@ -286,11 +286,11 @@ impl RustType {
                         ))
                     })
                     .collect();
-                return format!(
+                format!(
                     "match &{} {{ Value::Array(_a) => {{ let _t = _a.borrow(); {} }}, _ => panic!(\"expected tuple\") }}",
                     value_expr,
                     tuple_text(&parts)
-                );
+                )
             }
             RustType::Value => value_expr.to_string(),
             RustType::F64 => format!(
@@ -350,7 +350,7 @@ impl RustType {
                     .enumerate()
                     .map(|(i, e)| e.to_value_expr(&format!("{}.{}", native_expr, i)))
                     .collect();
-                return format!("Value::Array(VmRef::new(vec![{}]))", parts.join(", "));
+                format!("Value::Array(VmRef::new(vec![{}]))", parts.join(", "))
             }
             RustType::Value => native_expr.to_string(),
             RustType::F64 => format!("Value::Number({})", native_expr),

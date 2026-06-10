@@ -255,7 +255,7 @@ fn collect_numeric_locals(s: &Statement, out: &mut HashSet<String>) {
         VarDecl {
             name, type_ann, ..
         } => {
-            if type_ann.as_ref().map_or(false, is_number) {
+            if type_ann.as_ref().is_some_and(is_number) {
                 out.insert(name.to_string());
             }
         }
@@ -329,7 +329,7 @@ fn nus_stmt(s: &Statement, name: &str, nums: &HashSet<String>) -> bool {
     use Statement::*;
     match s {
         Block { statements, .. } => statements.iter().all(|x| nus_stmt(x, name, nums)),
-        Return { value, .. } => value.as_ref().map_or(true, |e| nus_num_operand(e, name, nums)),
+        Return { value, .. } => value.as_ref().is_none_or(|e| nus_num_operand(e, name, nums)),
         If {
             cond,
             then_branch,
@@ -338,7 +338,7 @@ fn nus_stmt(s: &Statement, name: &str, nums: &HashSet<String>) -> bool {
         } => {
             nus_expr(cond, name, nums)
                 && nus_stmt(then_branch, name, nums)
-                && else_branch.as_ref().map_or(true, |e| nus_stmt(e, name, nums))
+                && else_branch.as_ref().is_none_or(|e| nus_stmt(e, name, nums))
         }
         ExprStmt { expr, .. } => nus_expr(expr, name, nums),
         While { cond, body, .. } => nus_expr(cond, name, nums) && nus_stmt(body, name, nums),
@@ -349,14 +349,14 @@ fn nus_stmt(s: &Statement, name: &str, nums: &HashSet<String>) -> bool {
             body,
             ..
         } => {
-            init.as_ref().map_or(true, |x| nus_stmt(x, name, nums))
-                && cond.as_ref().map_or(true, |e| nus_expr(e, name, nums))
-                && update.as_ref().map_or(true, |e| nus_expr(e, name, nums))
+            init.as_ref().is_none_or(|x| nus_stmt(x, name, nums))
+                && cond.as_ref().is_none_or(|e| nus_expr(e, name, nums))
+                && update.as_ref().is_none_or(|e| nus_expr(e, name, nums))
                 && nus_stmt(body, name, nums)
         }
         VarDecl {
             name: vn, init, ..
-        } => vn.as_ref() != name && init.as_ref().map_or(true, |e| nus_expr(e, name, nums)),
+        } => vn.as_ref() != name && init.as_ref().is_none_or(|e| nus_expr(e, name, nums)),
         Break { .. } | Continue { .. } => true,
         // Any other statement (switch/throw/try/nested fn/...) -> bail (don't infer this param).
         _ => false,

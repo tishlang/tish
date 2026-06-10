@@ -76,15 +76,13 @@ impl FunParam {
     fn collect_pattern_binding_names(pattern: &DestructPattern, out: &mut Vec<Arc<str>>) {
         match pattern {
             DestructPattern::Array(elements) => {
-                for el in elements {
-                    if let Some(el) = el {
-                        match el {
-                            DestructElement::Ident(n, _) => out.push(Arc::clone(n)),
-                            DestructElement::Pattern(p) => {
-                                Self::collect_pattern_binding_names(p, out);
-                            }
-                            DestructElement::Rest(n, _) => out.push(Arc::clone(n)),
+                for el in elements.iter().flatten() {
+                    match el {
+                        DestructElement::Ident(n, _) => out.push(Arc::clone(n)),
+                        DestructElement::Pattern(p) => {
+                            Self::collect_pattern_binding_names(p, out);
                         }
+                        DestructElement::Rest(n, _) => out.push(Arc::clone(n)),
                     }
                 }
             }

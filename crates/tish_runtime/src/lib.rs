@@ -26,6 +26,7 @@ pub use tishlang_builtins::construct::{
 pub use tishlang_builtins::typedarrays::{
     float32_array_constructor_value as tish_float32_array_constructor,
     float64_array_constructor_value as tish_float64_array_constructor,
+    float64_array_packed,
     int16_array_constructor_value as tish_int16_array_constructor,
     int32_array_constructor_value as tish_int32_array_constructor,
     int8_array_constructor_value as tish_int8_array_constructor,
@@ -709,6 +710,17 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
                 Value::Null
             }
         }
+        // Packed `Float64Array` (`TISH_PACKED_ARRAYS`): `.length` and numeric-key reads, mirroring
+        // the boxed `Array` arm. Methods (`reduce`/`map`/…) materialise via `as_boxed_array`.
+        Value::NumberArray(arr) => {
+            if key == "length" {
+                Value::Number(arr.borrow().len() as f64)
+            } else if let Ok(idx) = key.parse::<usize>() {
+                arr.borrow().get(idx).copied().map(Value::Number).unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            }
+        }
         Value::String(s) => {
             if key == "length" {
                 Value::Number(s.chars().count() as f64)
@@ -778,6 +790,14 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
             };
             arr.borrow().get(idx).cloned().unwrap_or(Value::Null)
         }
+        // Packed `Float64Array` indexing (`TISH_PACKED_ARRAYS`); mirrors the boxed `Array` arm.
+        Value::NumberArray(arr) => {
+            let idx = match index {
+                Value::Number(n) => *n as usize,
+                _ => return Value::Null,
+            };
+            arr.borrow().get(idx).copied().map(Value::Number).unwrap_or(Value::Null)
+        }
         Value::Object(_) => tishlang_core::object_get(obj, index).unwrap_or(Value::Null),
         // `promise["then"|"catch"]` — string-keyed access mirrors `get_prop` (bracket form
         // is required for `catch`, a reserved word). Keeps the rust backend on par with the VM.
@@ -824,6 +844,22 @@ pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
             arr_mut[index] = val.clone();
             val
         }
+        // Packed `Float64Array` write (`TISH_PACKED_ARRAYS`). On the native path a `NumberArray` is
+        // always a `Float64Array`, so storing the f64 (non-numeric → `NaN`) is the correct view
+        // semantics — and unlike the boxed v1 backing, it actually coerces the write to the element
+        // type. Out-of-range index zero-fills, matching the boxed grow-with-Null behaviour.
+        Value::NumberArray(arr) => {
+            let index = match idx {
+                Value::Number(n) => *n as usize,
+                _ => panic!("Array index must be number"),
+            };
+            let mut arr_mut = arr.borrow_mut();
+            while arr_mut.len() <= index {
+                arr_mut.push(0.0);
+            }
+            arr_mut[index] = val.as_number().unwrap_or(f64::NAN);
+            val
+        }
         Value::Object(_) => {
             tishlang_core::object_set(obj, idx, val.clone()).expect("object set");
             val
@@ -836,6 +872,21 @@ pub fn in_operator(key: &Value, obj: &Value) -> Value {
     match obj {
         Value::Object(_) => Value::Bool(tishlang_core::object_has(obj, key)),
         Value::Array(arr) => {
+            let key_str: Arc<str> = match key {
+                Value::String(s) => Arc::from(s.as_str()),
+                Value::Number(n) => n.to_string().into(),
+                _ => return Value::Bool(false),
+            };
+            let result = key_str.as_ref() == "length"
+                || key_str
+                    .parse::<usize>()
+                    .ok()
+                    .map(|i| i < arr.borrow().len())
+                    .unwrap_or(false);
+            Value::Bool(result)
+        }
+        // Packed `Float64Array` (`TISH_PACKED_ARRAYS`); same key set as the boxed `Array` arm.
+        Value::NumberArray(arr) => {
             let key_str: Arc<str> = match key {
                 Value::String(s) => Arc::from(s.as_str()),
                 Value::Number(n) => n.to_string().into(),

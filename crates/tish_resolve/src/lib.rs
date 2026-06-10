@@ -306,18 +306,16 @@ fn collect_destruct_pattern(
 ) {
     match p {
         DestructPattern::Array(elements) => {
-            for el in elements {
-                if let Some(el) = el {
-                    match el {
-                        DestructElement::Ident(n, sp) => {
-                            consider(source, lsp_line, lsp_char, sp, n.clone(), best);
-                        }
-                        DestructElement::Pattern(inner) => {
-                            collect_destruct_pattern(inner, source, lsp_line, lsp_char, best);
-                        }
-                        DestructElement::Rest(n, sp) => {
-                            consider(source, lsp_line, lsp_char, sp, n.clone(), best);
-                        }
+            for el in elements.iter().flatten() {
+                match el {
+                    DestructElement::Ident(n, sp) => {
+                        consider(source, lsp_line, lsp_char, sp, n.clone(), best);
+                    }
+                    DestructElement::Pattern(inner) => {
+                        collect_destruct_pattern(inner, source, lsp_line, lsp_char, best);
+                    }
+                    DestructElement::Rest(n, sp) => {
+                        consider(source, lsp_line, lsp_char, sp, n.clone(), best);
                     }
                 }
             }
@@ -484,11 +482,8 @@ fn collect_expr(
         } => {
             for p in props {
                 match p {
-                    tishlang_ast::JsxProp::Attr { value, .. } => match value {
-                        tishlang_ast::JsxAttrValue::Expr(e) => {
-                            collect_expr(e, source, lsp_line, lsp_char, best)
-                        }
-                        _ => {}
+                    tishlang_ast::JsxProp::Attr { value, .. } => if let tishlang_ast::JsxAttrValue::Expr(e) = value {
+                        collect_expr(e, source, lsp_line, lsp_char, best)
                     },
                     tishlang_ast::JsxProp::Spread(e) => {
                         collect_expr(e, source, lsp_line, lsp_char, best)
@@ -793,15 +788,13 @@ fn member_chain_collect_destruct_pattern(
 ) {
     match pattern {
         DestructPattern::Array(elements) => {
-            for el in elements {
-                if let Some(el) = el {
-                    match el {
-                        DestructElement::Ident(_, _) => {}
-                        DestructElement::Pattern(inner) => member_chain_collect_destruct_pattern(
-                            inner, source, lsp_line, lsp_char, best,
-                        ),
-                        DestructElement::Rest(_, _) => {}
-                    }
+            for el in elements.iter().flatten() {
+                match el {
+                    DestructElement::Ident(_, _) => {}
+                    DestructElement::Pattern(inner) => member_chain_collect_destruct_pattern(
+                        inner, source, lsp_line, lsp_char, best,
+                    ),
+                    DestructElement::Rest(_, _) => {}
                 }
             }
         }
@@ -993,13 +986,11 @@ fn define_fun_param_stack(p: &FunParam, scopes: &mut ScopeStack) {
 fn define_pattern_stack(pattern: &DestructPattern, scopes: &mut ScopeStack) {
     match pattern {
         DestructPattern::Array(elements) => {
-            for el in elements {
-                if let Some(el) = el {
-                    match el {
-                        DestructElement::Ident(n, sp) => scopes.define(n.as_ref(), *sp),
-                        DestructElement::Pattern(inner) => define_pattern_stack(inner, scopes),
-                        DestructElement::Rest(n, sp) => scopes.define(n.as_ref(), *sp),
-                    }
+            for el in elements.iter().flatten() {
+                match el {
+                    DestructElement::Ident(n, sp) => scopes.define(n.as_ref(), *sp),
+                    DestructElement::Pattern(inner) => define_pattern_stack(inner, scopes),
+                    DestructElement::Rest(n, sp) => scopes.define(n.as_ref(), *sp),
                 }
             }
         }
@@ -1975,25 +1966,23 @@ fn enumerate_pattern_bindings(
 ) {
     match pattern {
         DestructPattern::Array(elements) => {
-            for el in elements {
-                if let Some(el) = el {
-                    match el {
-                        DestructElement::Ident(n, sp) => out.push(BindingSite {
-                            name: n.clone(),
-                            span: *sp,
-                            kind,
-                            exported,
-                        }),
-                        DestructElement::Pattern(inner) => {
-                            enumerate_pattern_bindings(inner, kind, exported, out);
-                        }
-                        DestructElement::Rest(n, sp) => out.push(BindingSite {
-                            name: n.clone(),
-                            span: *sp,
-                            kind,
-                            exported,
-                        }),
+            for el in elements.iter().flatten() {
+                match el {
+                    DestructElement::Ident(n, sp) => out.push(BindingSite {
+                        name: n.clone(),
+                        span: *sp,
+                        kind,
+                        exported,
+                    }),
+                    DestructElement::Pattern(inner) => {
+                        enumerate_pattern_bindings(inner, kind, exported, out);
                     }
+                    DestructElement::Rest(n, sp) => out.push(BindingSite {
+                        name: n.clone(),
+                        span: *sp,
+                        kind,
+                        exported,
+                    }),
                 }
             }
         }
@@ -2627,15 +2616,13 @@ fn param_layer_names(params: &[FunParam], rest_param: &Option<TypedParam>) -> Ve
 fn collect_pattern_binding_names(pattern: &DestructPattern, out: &mut Vec<Arc<str>>) {
     match pattern {
         DestructPattern::Array(elements) => {
-            for el in elements {
-                if let Some(el) = el {
-                    match el {
-                        DestructElement::Ident(n, _) => out.push(n.clone()),
-                        DestructElement::Pattern(inner) => {
-                            collect_pattern_binding_names(inner, out)
-                        }
-                        DestructElement::Rest(n, _) => out.push(n.clone()),
+            for el in elements.iter().flatten() {
+                match el {
+                    DestructElement::Ident(n, _) => out.push(n.clone()),
+                    DestructElement::Pattern(inner) => {
+                        collect_pattern_binding_names(inner, out)
                     }
+                    DestructElement::Rest(n, _) => out.push(n.clone()),
                 }
             }
         }

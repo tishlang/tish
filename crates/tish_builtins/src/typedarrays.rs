@@ -121,6 +121,38 @@ fn construct(kind: Kind, args: &[Value]) -> Value {
     }
 }
 
+/// Native-codegen-only packed constructor for `new Float64Array(...)`.
+///
+/// `Float64Array` is the one view whose element type *is* `f64`, so it needs no coercion and maps
+/// exactly onto the packed [`Value::NumberArray`] (`Vec<f64>`) representation — eliminating the
+/// per-element `Value` boxing the generic boxed `Value::Array` backing pays. When
+/// [`Value::packed_arrays_enabled`] is **off** (the default), this returns the *identical* boxed
+/// value the generic constructor would, so default builds stay byte-for-byte unchanged; the packed
+/// form is only ever produced under `TISH_PACKED_ARRAYS=1`.
+///
+/// This lives behind the native codegen (interp/VM keep the boxed `Value::Array` — their value
+/// bridges have no `NumberArray` variant), so on the native path a `NumberArray` is *always* a
+/// `Float64Array`. That makes storing writes as `f64` the correct view semantics (and closes the
+/// construction-only-coercion gap for this one view). Any op without a packed fast path materialises
+/// it back to a boxed array, so every array method keeps working.
+pub fn float64_array_packed(args: &[Value]) -> Value {
+    if !Value::packed_arrays_enabled() {
+        // Byte-identical fallback to the generic boxed `Value::Array` backing.
+        return construct(Kind::F64, args);
+    }
+    let nums: Vec<f64> = match args.first() {
+        None => Vec::new(),
+        // Length form: `new Float64Array(n)` → `n` zeros (0.0 is the F64 coercion of 0).
+        Some(Value::Number(n)) => vec![0.0; n.max(0.0) as usize],
+        // Array-like copy: mirror `from_values(F64, …)` — non-numeric elements become `NaN`.
+        Some(v) => elements(v)
+            .iter()
+            .map(|e| e.as_number().unwrap_or(f64::NAN))
+            .collect(),
+    };
+    Value::number_array(nums)
+}
+
 /// The constructor object for one view kind: `__construct` + `from` / `of` / `BYTES_PER_ELEMENT`.
 fn make_constructor(kind: Kind) -> Value {
     let mut m = ObjectMap::default();
@@ -227,5 +259,40 @@ mod tests {
     fn uint32_wraps_large() {
         let v = from_values(Kind::U32, &[Value::Number(4294967296.0), Value::Number(4294967297.0)]);
         assert_eq!(nums(&v), vec![0.0, 1.0]);
+    }
+
+    // `float64_array_packed` toggles on a process-global env var. No other test in this crate reads
+    // `packed_arrays_enabled`, so the set/remove here can't perturb a concurrent test; we restore the
+    // default (off) on exit regardless.
+    #[test]
+    fn float64_packed_respects_flag() {
+        // Flag off (default): byte-identical boxed `Value::Array` fallback, no packed value produced.
+        std::env::remove_var("TISH_PACKED_ARRAYS");
+        let boxed = float64_array_packed(&[Value::Number(3.0)]);
+        assert!(matches!(boxed, Value::Array(_)), "packed-off must return boxed Array");
+        assert_eq!(nums(&boxed), vec![0.0, 0.0, 0.0]);
+
+        // Flag on: packed `Value::NumberArray`. F64 needs no coercion (exact), non-numeric → NaN
+        // (matching the boxed `from_values(F64, …)`), and the length form zero-fills.
+        std::env::set_var("TISH_PACKED_ARRAYS", "1");
+        let packed = float64_array_packed(&[Value::Array(VmRef::new(vec![
+            Value::Number(1.1),
+            Value::Number(2.2),
+            Value::Null,
+        ]))]);
+        match &packed {
+            Value::NumberArray(a) => {
+                let v = a.borrow();
+                assert_eq!(v[0], 1.1);
+                assert_eq!(v[1], 2.2);
+                assert!(v[2].is_nan());
+            }
+            _ => panic!("packed-on must return NumberArray"),
+        }
+        assert!(matches!(
+            float64_array_packed(&[Value::Number(2.0)]),
+            Value::NumberArray(_)
+        ));
+        std::env::remove_var("TISH_PACKED_ARRAYS");
     }
 }

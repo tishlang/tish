@@ -412,7 +412,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        if let Some(ref file_path) = uri.to_file_path().ok() {
+        if let Ok(ref file_path) = uri.to_file_path() {
             let roots = self.roots.read().unwrap().clone();
             if let Some(loc) = import_goto::definition_for_import(
                 &program,
@@ -802,13 +802,10 @@ pub(crate) fn find_export(
                     range: span_to_range(name_span, text),
                 });
             }
-            tishlang_ast::Statement::Export { declaration, .. } => match declaration.as_ref() {
-                tishlang_ast::ExportDeclaration::Named(inner) => {
-                    if let Some(loc) = find_decl_in_stmt(inner, name, uri, text) {
-                        return Some(loc);
-                    }
+            tishlang_ast::Statement::Export { declaration, .. } => if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
+                if let Some(loc) = find_decl_in_stmt(inner, name, uri, text) {
+                    return Some(loc);
                 }
-                _ => {}
             },
             _ => {}
         }

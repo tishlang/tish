@@ -166,7 +166,7 @@ pub fn build_via_cargo_with_config(
         .collect();
 
     let mut more_deps = String::new();
-    more_deps.push_str(&tokio_dep);
+    more_deps.push_str(tokio_dep);
     if !native_deps.is_empty() {
         more_deps.push_str(&format!("\n{}", native_deps));
     }

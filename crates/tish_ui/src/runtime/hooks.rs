@@ -19,11 +19,11 @@ pub const LEGACY_ROOT_ID: RootId = 1;
 
 thread_local! {
     static HOOKS: RefCell<HashMap<RootId, HookState>> = RefCell::new(HashMap::new());
-    static CURRENT_ROOT: Cell<Option<RootId>> = Cell::new(None);
+    static CURRENT_ROOT: Cell<Option<RootId>> = const { Cell::new(None) };
     static HOSTS: RefCell<HashMap<RootId, Rc<RefCell<Box<dyn Host>>>>> = RefCell::new(HashMap::new());
-    static NEXT_DYNAMIC_ROOT_ID: Cell<RootId> = Cell::new(2);
-    static IN_FLUSH: Cell<bool> = Cell::new(false);
-    static IN_EFFECT_FLUSH: Cell<bool> = Cell::new(false);
+    static NEXT_DYNAMIC_ROOT_ID: Cell<RootId> = const { Cell::new(2) };
+    static IN_FLUSH: Cell<bool> = const { Cell::new(false) };
+    static IN_EFFECT_FLUSH: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Allocate an id for an additional in-process window (starts at 2; 1 is legacy primary).
@@ -165,10 +165,8 @@ impl Default for HookState {
 
 fn run_all_effect_cleanups(cells: &RefCell<Vec<EffectCell>>) {
     for cell in cells.borrow_mut().iter_mut() {
-        if let Some(c) = cell.cleanup.take() {
-            if let Value::Function(f) = c {
-                let _ = f.call(&[]);
-            }
+        if let Some(Value::Function(f)) = cell.cleanup.take() {
+            let _ = f.call(&[]);
         }
     }
 }
@@ -252,7 +250,7 @@ pub fn native_use_state(args: &[Value]) -> Value {
                     }
                     let prev = st.state_slots.borrow()[idx].clone();
                     let new_v = match &arg {
-                        Value::Function(f) => f.call(&[prev.clone()]),
+                        Value::Function(f) => f.call(std::slice::from_ref(&prev)),
                         _ => arg.clone(),
                     };
                     if memo_dep_eq(&prev, &new_v) {

@@ -857,7 +857,7 @@ impl Evaluator {
                     exports.insert("isDir".into(), Value::Native(natives::is_dir));
                     exports.insert("readDir".into(), Value::Native(natives::read_dir));
                     exports.insert("mkdir".into(), Value::Native(natives::mkdir));
-                    return Ok(Value::object(exports));
+                    Ok(Value::object(exports))
                 }
                 #[cfg(not(feature = "fs"))]
                 {
@@ -874,7 +874,7 @@ impl Evaluator {
                     exports.insert("fetchAll".into(), Value::Native(Self::fetch_all_native));
                     exports.insert("serve".into(), Value::Serve);
                     exports.insert("Promise".into(), Value::PromiseConstructor);
-                    return Ok(Value::object(exports));
+                    Ok(Value::object(exports))
                 }
                 #[cfg(not(feature = "http"))]
                 {
@@ -903,7 +903,7 @@ impl Evaluator {
                         "clearInterval".into(),
                         Value::Native(Self::clear_interval_native),
                     );
-                    return Ok(Value::object(exports));
+                    Ok(Value::object(exports))
                 }
                 #[cfg(not(feature = "timers"))]
                 {
@@ -926,7 +926,7 @@ impl Evaluator {
                         "wsBroadcast".into(),
                         Value::Native(Self::ws_broadcast_native),
                     );
-                    return Ok(Value::object(exports));
+                    Ok(Value::object(exports))
                 }
                 #[cfg(not(feature = "ws"))]
                 {
@@ -965,7 +965,7 @@ impl Evaluator {
                         "process".into(),
                         Value::object(process_obj),
                     );
-                    return Ok(Value::object(exports));
+                    Ok(Value::object(exports))
                 }
                 #[cfg(not(feature = "process"))]
                 {
@@ -975,10 +975,10 @@ impl Evaluator {
                 }
             }
             _ => {
-                return Err(EvalError::Error(format!(
+                Err(EvalError::Error(format!(
                     "Unknown built-in module: {}. Supported: tish:fs, tish:http, tish:timers, tish:process, tish:ws (plus any registered by native modules)",
                     spec
-                )));
+                )))
             }
         }
     }
@@ -2978,7 +2978,6 @@ impl Evaluator {
         println!("Server listening on http://0.0.0.0:{}", port);
 
         if max_requests == Some(1) {
-            let port = port;
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 if let Ok(mut stream) = std::net::TcpStream::connect(format!("127.0.0.1:{}", port))
@@ -2991,8 +2990,7 @@ impl Evaluator {
             });
         }
 
-        let mut count = 0usize;
-        for mut request in server.incoming_requests() {
+        for (count, mut request) in server.incoming_requests().enumerate() {
             let req_value = crate::http::request_to_value(&mut request);
 
             let response_value = match self.call_func(&handler, &[req_value]) {
@@ -3019,8 +3017,7 @@ impl Evaluator {
                 let (status, headers, body) = crate::http::value_to_response(&response_value);
                 crate::http::send_response(request, status, headers, body);
             }
-            count += 1;
-            if max_requests.map(|m| count >= m).unwrap_or(false) {
+            if max_requests.map(|m| count + 1 >= m).unwrap_or(false) {
                 break;
             }
         }

@@ -524,7 +524,7 @@ pub fn send_response(
     mut headers: Vec<(String, String)>,
     body: String,
 ) {
-    send_response_arc(request, status, headers.drain(..).collect(), Arc::from(body));
+    send_response_arc(request, status, std::mem::take(&mut headers), Arc::from(body));
 }
 
 pub fn send_response_arc(

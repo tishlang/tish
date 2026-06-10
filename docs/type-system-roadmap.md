@@ -120,7 +120,13 @@ typed (base typed codegen — explicit annotations like `let x: number` / `let a
 emit `f64` / `Vec<f64>`; M3 iterates that `Vec` **index-based**, since `.iter().cloned()` failed to
 optimize inside the monolithic generated `run()`).
 
-**Verified speedups** (Apple Silicon, `--native-backend rust`, identical output):
+**Verified speedups** (Apple Silicon, `--native-backend rust`, identical output). These are now a
+**committed, reproducible A/B** — `just perf-gauntlet` builds every `tests/perf` fixture boxed
+(flags-off) vs typed (flags-on) vs node and prints the `typing-speedup` column, with a `TYPED≠BOXED`
+guard that fails if the typed path ever changes a result. Snapshot + methodology:
+[`perf-typed-vs-untyped-baseline.md`](perf-typed-vs-untyped-baseline.md) (object_sum 45×, array_hof
+20×, matmul 15.6×, fib/untyped-fib ~14.6×, typed-array-HOF 2.68×; neutral on already-native/memory-
+bound loops; 8/9 beat V8). The hand-measured table below predates the harness:
 
 | Program | slow | fast | speedup | path |
 |---|---|---|---|---|

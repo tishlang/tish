@@ -121,7 +121,7 @@ fn generate_from_resolved(
 impl BindgenConfig {
     /// Write using [`generate_from_registry_dependency`].
     pub fn write_files(&self) -> io::Result<()> {
-        generate_from_registry_dependency(self).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        generate_from_registry_dependency(self).map_err(io::Error::other)
     }
 }
 

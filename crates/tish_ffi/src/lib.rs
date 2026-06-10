@@ -110,7 +110,8 @@ pub unsafe extern "C" fn tish_value_new_string(s: *const c_char) -> TishValueRef
 }
 
 // ── tag + scalar readers ─────────────────────────────────────────────────────
-/// # Safety: `r` must be null or a live handle.
+/// # Safety
+/// `r` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn tish_value_tag(r: TishValueRef) -> i32 {
     match as_value(r) {
@@ -125,7 +126,8 @@ pub unsafe extern "C" fn tish_value_tag(r: TishValueRef) -> i32 {
 }
 
 /// Number value, or `NaN` if the handle isn't a number.
-/// # Safety: `r` must be null or a live handle.
+/// # Safety
+/// `r` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn tish_value_as_number(r: TishValueRef) -> f64 {
     match as_value(r) {
@@ -135,7 +137,8 @@ pub unsafe extern "C" fn tish_value_as_number(r: TishValueRef) -> f64 {
 }
 
 /// Bool value, or `false` if the handle isn't a bool.
-/// # Safety: `r` must be null or a live handle.
+/// # Safety
+/// `r` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn tish_value_as_bool(r: TishValueRef) -> bool {
     matches!(as_value(r), Some(Value::Bool(true)))
@@ -143,7 +146,8 @@ pub unsafe extern "C" fn tish_value_as_bool(r: TishValueRef) -> bool {
 
 /// Newly-allocated NUL-terminated copy of a string value (caller frees with
 /// [`tish_string_free`]); null pointer if the handle isn't a string (or contains an interior NUL).
-/// # Safety: `r` must be null or a live handle.
+/// # Safety
+/// `r` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn tish_value_as_string(r: TishValueRef) -> *mut c_char {
     match as_value(r) {
@@ -156,7 +160,8 @@ pub unsafe extern "C" fn tish_value_as_string(r: TishValueRef) -> *mut c_char {
 }
 
 /// Free a string returned by [`tish_value_as_string`].
-/// # Safety: `s` must be null or a pointer from `tish_value_as_string`, freed once.
+/// # Safety
+/// `s` must be null or a pointer from `tish_value_as_string`, freed once.
 #[no_mangle]
 pub unsafe extern "C" fn tish_string_free(s: *mut c_char) {
     if !s.is_null() {
@@ -172,7 +177,8 @@ pub extern "C" fn tish_value_array_new() -> TishValueRef {
 
 /// Append a **clone** of `elem` to array `arr` (the caller keeps owning `elem`). No-op if `arr`
 /// isn't an array.
-/// # Safety: both must be null or live handles.
+/// # Safety
+/// both must be null or live handles.
 #[no_mangle]
 pub unsafe extern "C" fn tish_value_array_push(arr: TishValueRef, elem: TishValueRef) {
     if let Some(Value::Array(a)) = as_value(arr) {
@@ -182,7 +188,8 @@ pub unsafe extern "C" fn tish_value_array_push(arr: TishValueRef, elem: TishValu
 }
 
 /// Length of `arr`, or 0 if it isn't an array.
-/// # Safety: `arr` must be null or a live handle.
+/// # Safety
+/// `arr` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn tish_value_array_len(arr: TishValueRef) -> usize {
     match as_value(arr) {
@@ -193,7 +200,8 @@ pub unsafe extern "C" fn tish_value_array_len(arr: TishValueRef) -> usize {
 
 /// A newly-owned handle to a **clone** of element `i` (caller drops it); a null value handle if
 /// out of range or not an array.
-/// # Safety: `arr` must be null or a live handle.
+/// # Safety
+/// `arr` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn tish_value_array_get(arr: TishValueRef, i: usize) -> TishValueRef {
     match as_value(arr) {
@@ -209,7 +217,8 @@ pub extern "C" fn tish_value_object_new() -> TishValueRef {
 }
 
 /// Set `obj[key]` to a **clone** of `val`. No-op if `obj` isn't an object or `key` is invalid.
-/// # Safety: handles live; `key` a valid C string.
+/// # Safety
+/// handles live; `key` a valid C string.
 #[no_mangle]
 pub unsafe extern "C" fn tish_value_object_set(
     obj: TishValueRef,
@@ -226,7 +235,8 @@ pub unsafe extern "C" fn tish_value_object_set(
 }
 
 /// Newly-owned handle to a **clone** of `obj[key]`; a null value handle if missing / not an object.
-/// # Safety: `obj` live; `key` a valid C string.
+/// # Safety
+/// `obj` live; `key` a valid C string.
 #[no_mangle]
 pub unsafe extern "C" fn tish_value_object_get(
     obj: TishValueRef,
@@ -242,14 +252,16 @@ pub unsafe extern "C" fn tish_value_object_get(
 
 // ── lifetime ─────────────────────────────────────────────────────────────────
 /// Deep-share clone (`Value::clone` shares `Arc`/`Rc` containers, like the interpreter).
-/// # Safety: `r` null or live.
+/// # Safety
+/// `r` null or live.
 #[no_mangle]
 pub unsafe extern "C" fn tish_value_clone(r: TishValueRef) -> TishValueRef {
     box_value(as_value(r).cloned().unwrap_or(Value::Null))
 }
 
 /// Release a handle obtained from any `_new_*` / `_get` / `_clone` accessor.
-/// # Safety: `r` null or a live handle, dropped exactly once.
+/// # Safety
+/// `r` null or a live handle, dropped exactly once.
 #[no_mangle]
 pub unsafe extern "C" fn tish_value_drop(r: TishValueRef) {
     if !r.is_null() {

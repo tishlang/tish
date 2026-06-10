@@ -72,7 +72,7 @@ fn argv_with_implicit_run(mut argv: Vec<String>) -> Vec<String> {
     if argv.len() >= 2 {
         let first = argv[1].as_str();
         const SUBCOMMANDS: &[&str] = &["run", "repl", "build", "dump-ast"];
-        let looks_like_file = !first.starts_with('-') && !SUBCOMMANDS.iter().any(|&s| s == first);
+        let looks_like_file = !first.starts_with('-') && !SUBCOMMANDS.contains(&first);
         if looks_like_file {
             argv.insert(1, "run".to_string());
         }

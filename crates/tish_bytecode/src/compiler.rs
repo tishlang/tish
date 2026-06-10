@@ -179,7 +179,7 @@ fn stmt_is_param_only(s: &Statement, params: &HashSet<&str>) -> bool {
         }
         Statement::ExprStmt { expr, .. } => expr_is_param_only(expr, params),
         Statement::Return { value, .. } => {
-            value.as_ref().map_or(true, |e| expr_is_param_only(e, params))
+            value.as_ref().is_none_or(|e| expr_is_param_only(e, params))
         }
         Statement::If {
             cond,
@@ -191,7 +191,7 @@ fn stmt_is_param_only(s: &Statement, params: &HashSet<&str>) -> bool {
                 && stmt_is_param_only(then_branch, params)
                 && else_branch
                     .as_ref()
-                    .map_or(true, |b| stmt_is_param_only(b, params))
+                    .is_none_or(|b| stmt_is_param_only(b, params))
         }
         _ => false,
     }
@@ -364,26 +364,26 @@ impl SlotScan {
     fn stmt(&mut self, s: &Statement, in_closure: bool) -> bool {
         match s {
             Statement::Block { statements, .. } => statements.iter().all(|s| self.stmt(s, in_closure)),
-            Statement::VarDecl { init, .. } => init.as_ref().map_or(true, |e| self.expr(e, in_closure)),
+            Statement::VarDecl { init, .. } => init.as_ref().is_none_or(|e| self.expr(e, in_closure)),
             Statement::VarDeclDestructure { init, .. } => self.expr(init, in_closure),
             Statement::ExprStmt { expr, .. } => self.expr(expr, in_closure),
             Statement::If { cond, then_branch, else_branch, .. } => {
                 self.expr(cond, in_closure)
                     && self.stmt(then_branch, in_closure)
-                    && else_branch.as_ref().map_or(true, |s| self.stmt(s, in_closure))
+                    && else_branch.as_ref().is_none_or(|s| self.stmt(s, in_closure))
             }
             Statement::While { cond, body, .. } => self.expr(cond, in_closure) && self.stmt(body, in_closure),
             Statement::DoWhile { body, cond, .. } => self.stmt(body, in_closure) && self.expr(cond, in_closure),
             Statement::For { init, cond, update, body, .. } => {
-                init.as_ref().map_or(true, |i| self.stmt(i, in_closure))
-                    && cond.as_ref().map_or(true, |e| self.expr(e, in_closure))
-                    && update.as_ref().map_or(true, |e| self.expr(e, in_closure))
+                init.as_ref().is_none_or(|i| self.stmt(i, in_closure))
+                    && cond.as_ref().is_none_or(|e| self.expr(e, in_closure))
+                    && update.as_ref().is_none_or(|e| self.expr(e, in_closure))
                     && self.stmt(body, in_closure)
             }
             Statement::ForOf { iterable, body, .. } => {
                 self.expr(iterable, in_closure) && self.stmt(body, in_closure)
             }
-            Statement::Return { value, .. } => value.as_ref().map_or(true, |e| self.expr(e, in_closure)),
+            Statement::Return { value, .. } => value.as_ref().is_none_or(|e| self.expr(e, in_closure)),
             Statement::Throw { value, .. } => self.expr(value, in_closure),
             Statement::Break { .. } | Statement::Continue { .. } => true,
             Statement::Switch { expr, cases, default_body, .. } => {
@@ -402,12 +402,12 @@ impl SlotScan {
                 }
                 default_body
                     .as_ref()
-                    .map_or(true, |b| b.iter().all(|s| self.stmt(s, in_closure)))
+                    .is_none_or(|b| b.iter().all(|s| self.stmt(s, in_closure)))
             }
             Statement::Try { body, catch_body, finally_body, .. } => {
                 self.stmt(body, in_closure)
-                    && catch_body.as_ref().map_or(true, |s| self.stmt(s, in_closure))
-                    && finally_body.as_ref().map_or(true, |s| self.stmt(s, in_closure))
+                    && catch_body.as_ref().is_none_or(|s| self.stmt(s, in_closure))
+                    && finally_body.as_ref().is_none_or(|s| self.stmt(s, in_closure))
             }
             // A nested named function: its param defaults (enclosing-scope) + whole body capture.
             Statement::FunDecl { params, body, .. } => {

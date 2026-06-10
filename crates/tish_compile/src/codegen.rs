@@ -941,7 +941,7 @@ impl Codegen {
                 = &ty
             {
                 let struct_name = crate::types::named_struct_ident(&name);
-                self.write(&format!("#[derive(Clone, Debug, Default)]\n"));
+                self.write("#[derive(Clone, Debug, Default)]\n");
                 self.write("#[allow(non_snake_case, non_camel_case_types)]\n");
                 self.write(&format!("pub struct {} {{\n", struct_name));
                 for (k, t) in fields {
@@ -2499,12 +2499,12 @@ impl Codegen {
                 Self::collect_assigned_idents_in_stmt(body, &mut assigned_in_body);
                 let mutable_outer_vars: Vec<String> = outer_vars
                     .iter()
-                    .filter(|v| assigned_in_body.contains(*v) || self.rc_cell_storage_contains(*v))
+                    .filter(|v| assigned_in_body.contains(*v) || self.rc_cell_storage_contains(v))
                     .cloned()
                     .collect();
                 let read_only_outer_vars: Vec<String> = outer_vars
                     .iter()
-                    .filter(|v| !assigned_in_body.contains(*v) && !self.rc_cell_storage_contains(*v))
+                    .filter(|v| !assigned_in_body.contains(*v) && !self.rc_cell_storage_contains(v))
                     .cloned()
                     .collect();
 
@@ -3129,8 +3129,7 @@ impl Codegen {
                 {
                     if method_name.as_ref() == "stringify"
                         && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "JSON")
-                    {
-                        if args.len() == 1 {
+                        && args.len() == 1 {
                             if let CallArg::Expr(arg) = &args[0] {
                                 let (arg_code, arg_ty) = self.emit_typed_expr(arg)?;
                                 match &arg_ty {
@@ -3155,7 +3154,6 @@ impl Codegen {
                                 }
                             }
                         }
-                    }
                 }
 
                 // Compile-time embed: Polars.read_csv("<literal path>") when file exists
@@ -4253,6 +4251,37 @@ impl Codegen {
                 .map_err(|m| CompileError::new(m, None))?
             }
             Expr::New { callee, args, .. } => {
+                // Packed-native fast path: `new Float64Array(...)` lowers to a packed
+                // `Value::NumberArray` (`Vec<f64>`) instead of the boxed `Value::Array` the generic
+                // `tish_construct` builds — `Float64Array` is the one view whose element type *is*
+                // f64, so it needs no coercion and avoids the per-element `Value` boxing. The helper
+                // falls back to the identical boxed value when `TISH_PACKED_ARRAYS` is off, so default
+                // builds stay byte-for-byte unchanged. The other typed-array views have no packed
+                // `Value` variant (would need `Vec<f32>`/`Vec<i32>`/… + the 24-byte size assertion and
+                // every exhaustive match), so they keep the generic path. Native-only: interp/VM value
+                // bridges carry no `NumberArray`, so only the native runtime grew the support. Keyed on
+                // the callee ident like the existing `JSON.`/`Polars.` special-cases.
+                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Float64Array")
+                {
+                    if args.iter().any(|a| matches!(a, CallArg::Spread(_))) {
+                        let args_code = self.emit_call_args(args)?;
+                        return Ok(format!(
+                            "{{ let _spread_args = {}; tishlang_runtime::float64_array_packed(&_spread_args[..]) }}",
+                            args_code
+                        ));
+                    }
+                    let arg_exprs: Result<Vec<_>, _> =
+                        args.iter().map(|a| self.emit_call_arg(a)).collect();
+                    let args_vec = arg_exprs?
+                        .iter()
+                        .map(|a| format!("{}.clone()", a))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Ok(format!(
+                        "tishlang_runtime::float64_array_packed(&[{}])",
+                        args_vec
+                    ));
+                }
                 let callee_expr = self.emit_expr(callee)?;
                 let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
                 if has_spread {
@@ -5317,12 +5346,12 @@ impl Codegen {
         // (cleanups may only read `timer2` but must see updates from nested callbacks).
         let cell_capture_outer_vars: Vec<String> = outer_vars
             .iter()
-            .filter(|v| assigned_in_body.contains(*v) || self.rc_cell_storage_contains(*v))
+            .filter(|v| assigned_in_body.contains(*v) || self.rc_cell_storage_contains(v))
             .cloned()
             .collect();
         let read_only_outer_vars: Vec<String> = outer_vars
             .iter()
-            .filter(|v| !assigned_in_body.contains(*v) && !self.rc_cell_storage_contains(*v))
+            .filter(|v| !assigned_in_body.contains(*v) && !self.rc_cell_storage_contains(v))
             .cloned()
             .collect();
 
@@ -6290,12 +6319,12 @@ impl Codegen {
                 statements.iter().all(|s| Self::native_safe_stmt(s, params, cand))
             }
             Statement::Return { value, .. } => {
-                value.as_ref().map_or(false, |e| Self::native_safe_expr(e, params, cand))
+                value.as_ref().is_some_and(|e| Self::native_safe_expr(e, params, cand))
             }
             Statement::If { cond, then_branch, else_branch, .. } => {
                 Self::native_safe_expr(cond, params, cand)
                     && Self::native_safe_stmt(then_branch, params, cand)
-                    && else_branch.as_ref().map_or(true, |e| Self::native_safe_stmt(e, params, cand))
+                    && else_branch.as_ref().is_none_or(|e| Self::native_safe_stmt(e, params, cand))
             }
             Statement::ExprStmt { expr, .. } => Self::native_safe_expr(expr, params, cand),
             _ => false,
@@ -6361,11 +6390,11 @@ impl Codegen {
                 statements.iter().all(|x| Self::returns_numeric(x, params, cand))
             }
             Statement::Return { value, .. } => {
-                value.as_ref().map_or(false, |e| Self::numeric_shaped(e, params, cand))
+                value.as_ref().is_some_and(|e| Self::numeric_shaped(e, params, cand))
             }
             Statement::If { then_branch, else_branch, .. } => {
                 Self::returns_numeric(then_branch, params, cand)
-                    && else_branch.as_ref().map_or(true, |e| Self::returns_numeric(e, params, cand))
+                    && else_branch.as_ref().is_none_or(|e| Self::returns_numeric(e, params, cand))
             }
             Statement::While { body, .. } | Statement::For { body, .. } => {
                 Self::returns_numeric(body, params, cand)

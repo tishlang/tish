@@ -1145,10 +1145,10 @@ impl Printer {
             }
             Expr::Unary { op, operand, .. } => {
                 match op {
-                    UnaryOp::Not => self.buf.push_str("!"),
-                    UnaryOp::Neg => self.buf.push_str("-"),
-                    UnaryOp::Pos => self.buf.push_str("+"),
-                    UnaryOp::BitNot => self.buf.push_str("~"),
+                    UnaryOp::Not => self.buf.push('!'),
+                    UnaryOp::Neg => self.buf.push('-'),
+                    UnaryOp::Pos => self.buf.push('+'),
+                    UnaryOp::BitNot => self.buf.push('~'),
                     UnaryOp::Void => self.buf.push_str("void "),
                 }
                 self.child(operand, PREC_POSTFIX);
