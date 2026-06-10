@@ -277,6 +277,13 @@ size assertion + every exhaustive match — a separate, larger effort) and keep 
   some/every. Snapshot (not a held borrow) matches the boxed copy semantics and can't deadlock on a
   re-entrant callback. Identical results to the boxed path (unit tests: array::packed_hof_tests).
 
+  PACKED RESULTS — map/filter STAY packed (2nd follow-up): `filter` keeps a subset of the input f64s, so
+  it builds the result `Vec<f64>` directly → NumberArray. `map` speculatively builds a `Vec<f64>` and
+  deopts to a boxed `Vec<Value>` on the FIRST non-numeric callback result (each element's callback still
+  runs once, in order). So a numeric `map`/`filter` returns a NumberArray and chains stay packed end-to-end
+  (empty results stay boxed, per convention). A NumberArray is observably identical to a boxed array of the
+  same numbers (verified: display / JSON.stringify / index / for-of byte-identical across interp/vm-on/vm-off).
+
   BENCHMARK (/tmp/f64_bench.tish: N=1,000,000, 30 rounds; one binary, flag toggles at runtime; M-series):
     op                       boxed (flag=0)   packed (flag=1)   ratio
     construct(N) zero-fill        ~90 ms           ~1.5 ms       ~60×    ★ headline: memset vs N boxed Values
@@ -285,16 +292,16 @@ size assertion + every exhaustive match — a separate, larger effort) and keep 
     forof-sum  (for x of big)     ~188 ms          ~173 ms       ~1.09×
     reduce     (a,b)=>a+b         ~378 ms          ~327 ms       ~1.16×  WAS ~0.86× regression; HOF fast path flips it
     filter     (x>500)            ~323 ms          ~300 ms       ~1.08×  no input materialisation
-    map(x*2).reduce               ~577 ms          ~576 ms       ~1.0×   map RESULT is still a boxed array → its
-                                                                          reduce is boxed; only map's input is packed
+    map(x*2).reduce               ~593 ms          ~541 ms       ~1.10×  map builds Vec<f64> direct, result stays packed
+    filter(>500).map(+1).reduce   ~638 ms          ~515 ms       ~1.24×  whole chain stays packed end-to-end
   Output (sums/lengths) byte-identical between modes. Memory: 8 B/elem vs 24 B/elem = 3× denser.
 
   TAKEAWAY: the win is CONSTRUCTION (no per-element boxing, ~60×) + 3× footprint; scans gain cache density
-  ~8-9% (the loop body re-boxes each elem to `Value::Number`). With the HOF fast path, reduce/filter/etc.
-  on a packed array now BEAT boxed (no materialisation deopt) instead of regressing. Remaining: a `map`/
-  `filter` that RETURNS an all-numeric result still boxes it (could re-pack → would chain packed); and the
-  per-element rebox in scans is the next ceiling (a fully-unboxed numeric loop would need typed codegen,
-  the M-series/typed-native path). So: enable for Float64-heavy compute/memory-bound code.
+  ~8-9% (the loop body re-boxes each elem to `Value::Number`). With the HOF fast paths, reduce/filter/map
+  on a packed array BEAT boxed (no materialisation deopt), and map/filter now RETURN packed so chains stay
+  packed end-to-end (1.10–1.24× on chains). Remaining ceiling: the per-element rebox in scans — a fully-
+  unboxed numeric loop needs typed codegen (the M-series/typed-native path). Enable for Float64-heavy
+  compute/memory-bound code.
 
 ################################################################################
 ##  WIN — parking_lot::Mutex on the send-values path (2026-06-06). 2nd profile lever.

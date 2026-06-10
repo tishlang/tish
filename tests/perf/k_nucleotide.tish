@@ -1,0 +1,37 @@
+// GAUNTLET: k-nucleotide (Computer Language Benchmarks Game). Counts k-mer frequencies in a generated
+// DNA sequence using a Map — stresses hash-map insert/lookup throughput at scale (the canonical hashing
+// benchmark). k-mers are encoded as base-4 integers (no string slicing) so the workload is purely Map +
+// integer arithmetic. Valid in both tish and node; integer check (sum of squared frequencies + size).
+let seed = 7
+function nextBase() {
+  seed = (seed * 3877 + 29573) % 139968
+  // 4-way split of [0,139968) into the 4 bases.
+  if (seed < 34992) { return 0 }
+  if (seed < 69984) { return 1 }
+  if (seed < 104976) { return 2 }
+  return 3
+}
+
+function kNucleotide(seq, k) {
+  let m = new Map()
+  let n = seq.length - k + 1
+  for (let i = 0; i < n; i++) {
+    let key = 0
+    for (let j = 0; j < k; j++) { key = key * 4 + seq[i + j] }
+    if (m.has(key)) { m.set(key, m.get(key) + 1) } else { m.set(key, 1) }
+  }
+  return m
+}
+
+let len = 200000
+let seq = []
+for (let i = 0; i < len; i++) { seq.push(nextBase()) }
+
+let t0 = Date.now()
+let m = kNucleotide(seq, 8)
+let sum = 0
+// `for…of m.values()` is the portable idiom — tish returns an array, node an iterator, but both
+// iterate identically (indexing `.values()[i]` would diverge: node iterators have no `.length`).
+for (let v of m.values()) { sum = (sum + v * v) % 2147483647 }
+let check = sum + m.size
+console.log("GAUNTLET k_nucleotide " + (Date.now() - t0) + " " + check)

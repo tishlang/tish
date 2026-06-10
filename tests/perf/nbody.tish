@@ -1,0 +1,100 @@
+// GAUNTLET: N-body gravity simulation (Computer Language Benchmarks Game). Float arithmetic in a
+// hot loop over an array of body objects — stresses f64 math + object field access. Canonical
+// cross-language compute benchmark. Valid in both tish and node; integer check (energy * 1e9).
+// NOTE: constants are written as plain decimals — tish's lexer does not support `e`-exponent
+// notation (e.g. `1.66e-3`); both tish and node parse these same literals, so the check still agrees.
+let PI = 3.141592653589793
+let SOLAR_MASS = 4 * PI * PI
+let DAYS_PER_YEAR = 365.24
+
+function body(x, y, z, vx, vy, vz, mass) {
+  return { x: x, y: y, z: z, vx: vx, vy: vy, vz: vz, mass: mass }
+}
+
+function makeBodies() {
+  let sun = body(0, 0, 0, 0, 0, 0, SOLAR_MASS)
+  let jupiter = body(
+    4.84143144246472090, -1.16032004402742839, -0.103622044471123109,
+    0.00166007664274403694 * DAYS_PER_YEAR, 0.00769901118419740425 * DAYS_PER_YEAR,
+    -0.0000690460016972063023 * DAYS_PER_YEAR, 0.000954791938424326609 * SOLAR_MASS)
+  let saturn = body(
+    8.34336671824457987, 4.12479856412430479, -0.403523417114321381,
+    -0.00276742510726862411 * DAYS_PER_YEAR, 0.00499852801234917238 * DAYS_PER_YEAR,
+    0.0000230417297573763929 * DAYS_PER_YEAR, 0.000285885980666130812 * SOLAR_MASS)
+  let uranus = body(
+    12.8943695621391310, -15.1111514016986312, -0.223307578892655734,
+    0.00296460137564761618 * DAYS_PER_YEAR, 0.00237847173959480950 * DAYS_PER_YEAR,
+    -0.0000296589568540237556 * DAYS_PER_YEAR, 0.0000436624404335156298 * SOLAR_MASS)
+  let neptune = body(
+    15.3796971148509165, -25.9193146099879641, 0.179258772950371181,
+    0.00268067772490389322 * DAYS_PER_YEAR, 0.00162824170038242295 * DAYS_PER_YEAR,
+    -0.0000951592254519715870 * DAYS_PER_YEAR, 0.0000515138902046611451 * SOLAR_MASS)
+  return [sun, jupiter, saturn, uranus, neptune]
+}
+
+function offsetMomentum(bodies) {
+  let px = 0
+  let py = 0
+  let pz = 0
+  for (let i = 0; i < bodies.length; i++) {
+    let b = bodies[i]
+    px = px + b.vx * b.mass
+    py = py + b.vy * b.mass
+    pz = pz + b.vz * b.mass
+  }
+  bodies[0].vx = -px / SOLAR_MASS
+  bodies[0].vy = -py / SOLAR_MASS
+  bodies[0].vz = -pz / SOLAR_MASS
+}
+
+function advance(bodies, dt) {
+  let n = bodies.length
+  for (let i = 0; i < n; i++) {
+    let bi = bodies[i]
+    for (let j = i + 1; j < n; j++) {
+      let bj = bodies[j]
+      let dx = bi.x - bj.x
+      let dy = bi.y - bj.y
+      let dz = bi.z - bj.z
+      let d2 = dx * dx + dy * dy + dz * dz
+      let mag = dt / (d2 * Math.sqrt(d2))
+      bi.vx = bi.vx - dx * bj.mass * mag
+      bi.vy = bi.vy - dy * bj.mass * mag
+      bi.vz = bi.vz - dz * bj.mass * mag
+      bj.vx = bj.vx + dx * bi.mass * mag
+      bj.vy = bj.vy + dy * bi.mass * mag
+      bj.vz = bj.vz + dz * bi.mass * mag
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    let b = bodies[i]
+    b.x = b.x + dt * b.vx
+    b.y = b.y + dt * b.vy
+    b.z = b.z + dt * b.vz
+  }
+}
+
+function energy(bodies) {
+  let e = 0
+  let n = bodies.length
+  for (let i = 0; i < n; i++) {
+    let bi = bodies[i]
+    e = e + 0.5 * bi.mass * (bi.vx * bi.vx + bi.vy * bi.vy + bi.vz * bi.vz)
+    for (let j = i + 1; j < n; j++) {
+      let bj = bodies[j]
+      let dx = bi.x - bj.x
+      let dy = bi.y - bj.y
+      let dz = bi.z - bj.z
+      e = e - (bi.mass * bj.mass) / Math.sqrt(dx * dx + dy * dy + dz * dz)
+    }
+  }
+  return e
+}
+
+let bodies = makeBodies()
+offsetMomentum(bodies)
+let steps = 200000
+let t0 = Date.now()
+for (let s = 0; s < steps; s++) { advance(bodies, 0.01) }
+let check = Math.round(energy(bodies) * 1000000000)
+console.log("GAUNTLET nbody " + (Date.now() - t0) + " " + check)

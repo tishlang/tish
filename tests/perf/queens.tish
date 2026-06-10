@@ -1,0 +1,35 @@
+// GAUNTLET: N-Queens (Are We Fast Yet "Queens"). Backtracking recursion with boolean occupancy
+// arrays — stresses recursion/call overhead, array reads/writes, and branchy control flow. Valid in
+// both tish and node; integer check (total solution count across the repeats).
+function place(n, row, cols, diag1, diag2) {
+  if (row === n) { return 1 }
+  let count = 0
+  for (let col = 0; col < n; col++) {
+    let d1 = row + col
+    let d2 = row - col + n
+    if (!cols[col] && !diag1[d1] && !diag2[d2]) {
+      cols[col] = true
+      diag1[d1] = true
+      diag2[d2] = true
+      count = count + place(n, row + 1, cols, diag1, diag2)
+      cols[col] = false
+      diag1[d1] = false
+      diag2[d2] = false
+    }
+  }
+  return count
+}
+
+function queens(n) {
+  let cols = []
+  let diag1 = []
+  let diag2 = []
+  for (let i = 0; i < n; i++) { cols.push(false) }
+  for (let i = 0; i < 2 * n; i++) { diag1.push(false); diag2.push(false) }
+  return place(n, 0, cols, diag1, diag2)
+}
+
+let t0 = Date.now()
+let total = 0
+for (let r = 0; r < 3; r++) { total = total + queens(12) }
+console.log("GAUNTLET queens " + (Date.now() - t0) + " " + total)

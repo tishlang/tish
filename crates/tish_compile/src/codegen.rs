@@ -735,7 +735,6 @@ struct Codegen {
     indent: usize,
     loop_label_index: usize,
     is_async: bool,
-    project_root: Option<std::path::PathBuf>,
     /// Requested features (http, process, fs, regex, polars). When non-empty, used instead of #[cfg].
     features: std::collections::HashSet<String>,
     /// spec -> native init strategy (legacy adapter object vs generated `generated_native` wrapper)
@@ -806,7 +805,9 @@ struct Codegen {
 
 impl Codegen {
     fn new_with_native_modules(
-        project_root: Option<&Path>,
+        // `project_root` is no longer needed by codegen (the only consumer, a Polars-specific
+        // `read_csv` compile-time embed, was removed — crate-specific codegen belongs in that crate).
+        _project_root: Option<&Path>,
         features: &[String],
         native_module_init: std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
     ) -> Self {
@@ -816,7 +817,6 @@ impl Codegen {
             indent: 0,
             loop_label_index: 0,
             is_async: false,
-            project_root: project_root.map(|p| p.to_path_buf()),
             features,
             native_module_init,
             async_context_stack: Vec::new(),
@@ -3169,51 +3169,6 @@ impl Codegen {
                                 }
                             }
                         }
-                }
-
-                // Compile-time embed: Polars.read_csv("<literal path>") when file exists
-                if let Some(init) = self.native_module_init.get("tish:polars") {
-                    let crate_name = match init {
-                        crate::resolve::NativeModuleInit::Legacy { crate_name, .. } => {
-                            crate_name.as_str()
-                        }
-                        crate::resolve::NativeModuleInit::Generated { shim_crate, .. } => {
-                            shim_crate.as_str()
-                        }
-                    };
-                    if let (Some(root), Some(CallArg::Expr(first_arg))) =
-                        (self.project_root.as_ref(), args.first())
-                    {
-                        if let Expr::Member {
-                            object,
-                            prop: MemberProp::Name { name: ref method_name, .. },
-                            ..
-                        } = callee.as_ref()
-                        {
-                            if method_name.as_ref() == "read_csv"
-                                && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Polars")
-                            {
-                                if let Expr::Literal {
-                                    value: Literal::String(ref path),
-                                    ..
-                                } = first_arg
-                                {
-                                    let path_str = path.as_ref();
-                                    let normalized = path_str.trim_start_matches("./");
-                                    let full_path = root.join(normalized);
-                                    if full_path.exists() {
-                                        if let Ok(content) = std::fs::read_to_string(&full_path) {
-                                            let escaped = format!("{:?}", content);
-                                            return Ok(format!(
-                                                "{}::polars_read_csv_from_string_runtime({})",
-                                                crate_name, escaped
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
 
                 // Check for built-in method calls on arrays/strings

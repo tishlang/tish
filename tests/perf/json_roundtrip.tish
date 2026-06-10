@@ -1,0 +1,25 @@
+// GAUNTLET: JSON round-trip. Repeatedly JSON.stringify + JSON.parse a large nested document — stresses
+// the serializer + parser and the object/array construction on parse (a standard runtime headline). The
+// check reads values back out of the re-parsed document, so it's robust to serializer formatting
+// differences while still requiring a correct round-trip. Valid in both tish and node; integer check.
+function buildDoc(n) {
+  let items = []
+  for (let i = 0; i < n; i++) {
+    items.push({ id: i, name: "item" + i, value: i * 1.5, active: (i % 2) === 0, tags: [i, i + 1, i + 2] })
+  }
+  return { count: n, items: items, meta: { version: 1, ok: true } }
+}
+
+let doc = buildDoc(20000)
+let t0 = Date.now()
+let acc = 0
+for (let r = 0; r < 20; r++) {
+  let s = JSON.stringify(doc)
+  let parsed = JSON.parse(s)
+  acc = acc + parsed.count
+  for (let i = 0; i < 200; i++) {
+    let it = parsed.items[i]
+    acc = acc + it.id + it.value + it.tags[2]
+  }
+}
+console.log("GAUNTLET json_roundtrip " + (Date.now() - t0) + " " + Math.round(acc))
