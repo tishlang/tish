@@ -2458,19 +2458,10 @@ fn estimate_string_concat_len(v: &Value) -> usize {
 /// Append JS-style string conversion without an intermediate `String` per operand (unlike
 /// `format!("{}{}", a.to_display_string(), b.to_display_string())`, which triple-allocates).
 fn append_value_for_string_concat(out: &mut String, v: &Value) {
-    use std::fmt::Write;
     match v {
-        Value::Number(n) => {
-            if n.is_nan() {
-                out.push_str("NaN");
-            } else if *n == f64::INFINITY {
-                out.push_str("Infinity");
-            } else if *n == f64::NEG_INFINITY {
-                out.push_str("-Infinity");
-            } else {
-                let _ = write!(out, "{n}");
-            }
-        }
+        // JS `Number.prototype.toString` (exponential past digit 21 / before −6), shared
+        // with `console.log` so `"" + n` and `` `${n}` `` match Node exactly.
+        Value::Number(n) => out.push_str(&tishlang_core::js_number_to_string(*n)),
         Value::String(s) => out.push_str(s.as_ref()),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Null => out.push_str("null"),

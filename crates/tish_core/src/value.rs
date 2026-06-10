@@ -870,21 +870,81 @@ impl std::fmt::Debug for Value {
     }
 }
 
+/// Format an `f64` exactly like JavaScript's `Number.prototype.toString` (radix 10) — the
+/// algorithm behind `console.log(n)` and `String(n)`. Rust's default `{}` never uses
+/// exponential form and so prints `6.022e23` as `602200000000000000000000`; JS switches to
+/// exponential when the decimal point lands past digit 21 or before digit −6.
+///
+/// We take the shortest round-tripping digits from Rust's `{:e}` (a Ryū/Grisu-class shortest
+/// formatter, matching V8's digit choice) and lay them out per the ECMAScript rule: plain
+/// decimal when the point position `n` is in `(-6, 21]`, otherwise `d[.ddd]e±E` with `E = n-1`
+/// (sign always shown, no leading zeros in the exponent). `-0` renders as `"-0"` (matching
+/// `console.log` and tish's existing behavior).
+pub fn js_number_to_string(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value == f64::INFINITY {
+        return "Infinity".to_string();
+    }
+    if value == f64::NEG_INFINITY {
+        return "-Infinity".to_string();
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() { "-0" } else { "0" }.to_string();
+    }
+
+    let negative = value < 0.0;
+    // Shortest round-trip digits + base-10 exponent, e.g. "6.022e23" → ("6022", 23).
+    let sci = format!("{:e}", value.abs());
+    let (mantissa, exp_str) = sci
+        .split_once('e')
+        .expect("LowerExp formatting always contains 'e'");
+    let exp: i32 = exp_str
+        .parse()
+        .expect("LowerExp exponent is a valid integer");
+    let digits: String = mantissa.chars().filter(|&c| c != '.').collect();
+    let k = digits.len() as i32; // significant digit count (≤ 17 for an f64)
+    let point = exp + 1; // ECMAScript's `n`: value = digits × 10^(point − k)
+
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    if k <= point && point <= 21 {
+        // Integer, zero-padded: digits then (point − k) trailing zeros.
+        out.push_str(&digits);
+        out.push_str(&"0".repeat((point - k) as usize));
+    } else if 0 < point && point <= 21 {
+        // Decimal point inside the digit string.
+        out.push_str(&digits[..point as usize]);
+        out.push('.');
+        out.push_str(&digits[point as usize..]);
+    } else if -6 < point && point <= 0 {
+        // Leading-zero fraction: "0." then (−point) zeros then the digits.
+        out.push_str("0.");
+        out.push_str(&"0".repeat((-point) as usize));
+        out.push_str(&digits);
+    } else {
+        // Exponential: first digit, optional `.rest`, then `e±E`.
+        let e = point - 1;
+        out.push_str(&digits[..1]);
+        if k > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('e');
+        out.push(if e >= 0 { '+' } else { '-' });
+        out.push_str(&e.abs().to_string());
+    }
+    out
+}
+
 impl Value {
     /// Convert value to display string (for console output).
     pub fn to_display_string(&self) -> String {
         match self {
-            Value::Number(n) => {
-                if n.is_nan() {
-                    "NaN".to_string()
-                } else if *n == f64::INFINITY {
-                    "Infinity".to_string()
-                } else if *n == f64::NEG_INFINITY {
-                    "-Infinity".to_string()
-                } else {
-                    n.to_string()
-                }
-            }
+            Value::Number(n) => js_number_to_string(*n),
             Value::String(s) => s.to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
@@ -1207,6 +1267,51 @@ impl Value {
                 "toPrecision".into(),
             ],
             _ => vec![],
+        }
+    }
+}
+
+#[cfg(test)]
+mod number_to_string_tests {
+    use super::js_number_to_string;
+
+    #[test]
+    fn matches_javascript_number_tostring() {
+        // (value, expected) — every `expected` is what Node's `String(value)` produces.
+        let cases: &[(f64, &str)] = &[
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (123.0, "123"),
+            (123.456, "123.456"),
+            (0.5, "0.5"),
+            (-123.456, "-123.456"),
+            (100000.0, "100000"),
+            // Decimal/exponential boundary on the large side: 1e21 flips to exponential.
+            (1e20, "100000000000000000000"),
+            (1e21, "1e+21"),
+            (21e18, "21000000000000000000"),
+            // Small side: 1e-6 is decimal, 1e-7 is exponential.
+            (1e-6, "0.000001"),
+            (1e-7, "1e-7"),
+            (9.5e-7, "9.5e-7"),
+            // Exponential with a multi-digit mantissa.
+            (6.022e23, "6.022e+23"),
+            (1.2345678901234568e21, "1.2345678901234568e+21"),
+            (1e100, "1e+100"),
+            (-1e21, "-1e+21"),
+            // Subnormal min and normal max.
+            (5e-324, "5e-324"),
+            (1.7976931348623157e308, "1.7976931348623157e+308"),
+            // Shortest round-trip mantissa (not full precision).
+            (0.1, "0.1"),
+            (0.1 + 0.2, "0.30000000000000004"),
+            // Non-finite.
+            (f64::INFINITY, "Infinity"),
+            (f64::NEG_INFINITY, "-Infinity"),
+            (f64::NAN, "NaN"),
+        ];
+        for &(value, expected) in cases {
+            assert_eq!(js_number_to_string(value), expected, "for {value:?}");
         }
     }
 }

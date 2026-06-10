@@ -197,17 +197,9 @@ impl std::fmt::Debug for Value {
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Number(n) => {
-                if n.is_nan() {
-                    write!(f, "NaN")
-                } else if *n == f64::INFINITY {
-                    write!(f, "Infinity")
-                } else if *n == f64::NEG_INFINITY {
-                    write!(f, "-Infinity")
-                } else {
-                    write!(f, "{}", n)
-                }
-            }
+            // Match JS `Number.prototype.toString` (exponential past digit 21 / before −6),
+            // shared with the VM/native path via `tishlang_core`.
+            Value::Number(n) => write!(f, "{}", tishlang_core::js_number_to_string(*n)),
             Value::String(s) => write!(f, "{}", s),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Null => write!(f, "null"),

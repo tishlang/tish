@@ -558,19 +558,70 @@ fn literal_strict_eq(a: &Literal, b: &Literal) -> bool {
     }
 }
 
+/// JS `Number.prototype.toString` (radix 10). **Kept byte-for-byte in sync with
+/// `tishlang_core::js_number_to_string`** so a constant-folded `"" + n` here matches the
+/// runtime conversion there; `tish_opt` deliberately does not depend on `tish_core` (it is a
+/// lean AST pass), hence the small duplication of this fixed-spec algorithm. See that function
+/// for the full commentary.
+fn js_number_to_string(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value == f64::INFINITY {
+        return "Infinity".to_string();
+    }
+    if value == f64::NEG_INFINITY {
+        return "-Infinity".to_string();
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() { "-0" } else { "0" }.to_string();
+    }
+    let negative = value < 0.0;
+    let sci = format!("{:e}", value.abs());
+    let (mantissa, exp_str) = sci
+        .split_once('e')
+        .expect("LowerExp formatting always contains 'e'");
+    let exp: i32 = exp_str
+        .parse()
+        .expect("LowerExp exponent is a valid integer");
+    let digits: String = mantissa.chars().filter(|&c| c != '.').collect();
+    let k = digits.len() as i32;
+    let point = exp + 1;
+
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    if k <= point && point <= 21 {
+        out.push_str(&digits);
+        out.push_str(&"0".repeat((point - k) as usize));
+    } else if 0 < point && point <= 21 {
+        out.push_str(&digits[..point as usize]);
+        out.push('.');
+        out.push_str(&digits[point as usize..]);
+    } else if -6 < point && point <= 0 {
+        out.push_str("0.");
+        out.push_str(&"0".repeat((-point) as usize));
+        out.push_str(&digits);
+    } else {
+        let e = point - 1;
+        out.push_str(&digits[..1]);
+        if k > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('e');
+        out.push(if e >= 0 { '+' } else { '-' });
+        out.push_str(&e.abs().to_string());
+    }
+    out
+}
+
 fn literal_to_display_string(lit: &Literal) -> String {
     match lit {
-        Literal::Number(n) => {
-            if n.is_nan() {
-                "NaN".to_string()
-            } else if *n == f64::INFINITY {
-                "Infinity".to_string()
-            } else if *n == f64::NEG_INFINITY {
-                "-Infinity".to_string()
-            } else {
-                n.to_string()
-            }
-        }
+        // Must match the runtime exactly so constant-folded `"" + n` agrees with the
+        // unfolded path (see `js_number_to_string` below).
+        Literal::Number(n) => js_number_to_string(*n),
         Literal::String(s) => s.to_string(),
         Literal::Bool(b) => b.to_string(),
         Literal::Null => "null".to_string(),

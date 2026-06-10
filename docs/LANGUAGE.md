@@ -12,7 +12,7 @@ Tish is a minimal JS/TS-like language: same source runs in a **tree-walking inte
 
 **Keywords:** `fn` / `function`, `let`, `const`, `if` `else`, `while`, `do` `while`, `for`, `switch` `case` `default`, `return` `break` `continue`, `try` `catch` `throw`, `async` `await`, `import` `export`, `new`, `typeof`, `void`, `true` `false` `null`.
 
-**Literals:** numbers (decimal + scientific notation, e.g. `1.5e-3`, `2E+3`); strings `"`/`'` (escapes `\n` `\r` `\t` `\\` `\"` `\'`); arrays `[]`; objects `{ k: v }` (fixed keys at parse time); template literals `` `x ${e} y` ``; JSX supported in lexer.
+**Literals:** numbers (decimal, scientific `1.5e-3`/`2E+3`, and radix `0xff`/`0o17`/`0b1010` with optional `_` separators); strings `"`/`'` (escapes `\n` `\r` `\t` `\\` `\"` `\'`); arrays `[]`; objects `{ k: v }` (fixed keys at parse time); template literals `` `x ${e} y` ``; JSX supported in lexer.
 
 **Operators:** `+` (add/concat), `-` `*` `/` `%` `**`; bitwise `&` `|` `^` `~` `<<` `>>` `>>>` (JS 32-bit int semantics — `ToInt32`/`ToUint32` modulo 2³², not saturating); compare `<` `<=` `>` `>=`; logical `&&` `||` `!`; ternary `? :`; `??`; `?.`; compound assign `+=` `-=` …; postfix `++` `--` on identifiers.
 
