@@ -22,7 +22,70 @@ The flag set lives in `scripts/run_perf_gauntlet.sh` (`TYPED_FLAGS`) and must st
 (M5), `TISH_STRUCT_INFER` (struct/array), `TISH_FUSED_HOF` (fused reduce), `TISH_NATIVE_HOF` (native
 `number[]` HOFs).
 
-## Baseline (Apple Silicon, release, min of 3 runs — 2026-06-10)
+## Update 2026-06-10 — phase 1: M4 inference widening (idiomatic numeric code goes native)
+
+The gauntlet grew to 21 compute benchmarks (the canonical Benchmarks-Game / Are-We-Fast-Yet set).
+Profiling them surfaced that the **codegen was already V8-competitive** for scalar numeric code, but
+the *inference* wasn't reaching idiomatic functions. Three small, fully-flag-gated changes to
+`tish_compile/src/infer.rs` (dark-ship intact — flags-off byte-identical):
+
+1. **`collect_numeric_locals` now counts base-inferred `let i = 0`** (number-literal initializers), not
+   just annotated `let i: number`. This is what lets `i < n` prove the *param* `n` numeric.
+2. **`nus_expr` recurses through logical `&&`/`||`** (a param used numerically *inside* a condition,
+   `iter < maxIter && x*x+y*y <= 4`, is a numeric use) and treats the **bitwise/shift family** as
+   unambiguously numeric.
+3. **M4 (`param_infer_program`) now runs BEFORE local/struct inference** — so derived numeric locals
+   (`let x0 = (px/w)*3`) get typed off the now-known param types instead of falling back to boxed
+   `Value` and dragging the whole hot loop boxed with them. (This ordering was the keystone: with it,
+   an *unannotated* numeric function lowers exactly like an annotated one.)
+
+**Result — `mandelbrot` 872 ms → 70 ms (12.46× typing-speedup), from 13.9× *off* V8 to 1.21× off.**
+`fnv_hash` also fully nativizes (was un-runnable before `>>>`); its remaining 4× gap vs V8 is an
+*integer-representation* issue (it round-trips `f64↔i32` every bitwise op via `to_int32`, where V8
+keeps the value an int32) — a separate future lever, not boxing. **Soundness held: 0 `TYPED≠BOXED`,
+0 `≠NODE` across all 21.** Also landed: **OOB-safe typed array reads** (`vec.get(i).unwrap_or(NaN/false)`
+for numeric/bool `Vec`s — JS `arr[oob]` is `undefined`, not a panic), hardening the rest-param path
+and the foundation for inferring index reads.
+
+| benchmark | boxed (off) | typed (on) | typing-speedup | node (ratio) | status |
+|-----------|------------:|-----------:|---------------:|-------------:|--------|
+| `object_sum` | 88 ms | 1 ms | **87.91×** | 3 ms (0.33×) | PASS ✓ |
+| `array_hof` | 315 ms | 15 ms | **21.00×** | 42 ms (0.36×) | PASS ✓ |
+| `matmul` | 231 ms | 14 ms | **16.50×** | 17 ms (0.82×) | PASS ✓ |
+| `recursion_fib` | 459 ms | 29 ms | **15.83×** | 54 ms (0.54×) | PASS ✓ |
+| `recursion_untyped` | 453 ms | 32 ms | **14.16×** | 51 ms (0.63×) | PASS ✓ |
+| **`mandelbrot`** | 872 ms | **70 ms** | **12.46×** | 58 ms (1.21×) | FAIL (was 13.9× off → now near V8) |
+| `typed_array_hof` | 264 ms | 96 ms | 2.75× | 33 ms (2.91×) | FAIL (evolve) |
+| `nsieve` | 306 ms | 308 ms | 0.99× | 61 ms (5.05×) | FAIL — needs mutable typed arrays |
+| `fnv_hash` | 494 ms | 512 ms | 0.96× | 122 ms (4.20×) | FAIL — native; needs i32-local repr |
+| `spectral_norm` | 1842 ms | 1709 ms | 1.08× | 39 ms (43.8×) | FAIL — needs typed array params |
+| `fannkuch` | 3673 ms | 3995 ms | 0.92× | 146 ms (27.4×) | FAIL — mutable int arrays |
+| `queens` | 1051 ms | 1070 ms | 0.98× | 119 ms (8.99×) | FAIL — mutable int arrays |
+| `nbody` | 848 ms | 865 ms | 0.98× | 11 ms (78.6×) | FAIL — array of structs |
+| `binary_trees` | 1023 ms | 1033 ms | 0.99× | 43 ms (24.0×) | FAIL — recursive struct alloc |
+| `megamorphic` | 686 ms | 685 ms | 1.00× | 55 ms (12.5×) | FAIL — polymorphic dispatch (VM IC) |
+| `mandel/matmul/recursion/object_sum/array_hof` are the PASS wins above. `numeric_loop`/`math_trig`/`string_concat` are neutral-by-design (already native / memory-bound). |
+
+### Remaining levers (sequenced; each leverages typed, all gated by the gauntlet `TYPED≠BOXED` guard)
+
+- **#2 Mutable typed arrays (`Vec<f64>`/`Vec<i32>`/`Vec<bool>`).** Targets `nsieve`/`fannkuch`/`queens`
+  (local arrays) and, with typed array params, `spectral_norm`. Needs: (a) ✅ OOB-safe **read** (done);
+  (b) OOB-safe **index-assign** — `{ let _i = i as usize; if _i >= v.len() { v.resize(_i+1, <NaN/false>); } v[_i] = x; }`
+  (JS sparse-grow); (c) **element-type inference from `push`** (`let a = []; a.push(1.0)` → `number[]`),
+  not just array literals; (d) a **mutable-array-safe** use analysis (allow index read/write/push/length,
+  bail on escape/foreign methods); (e) typed **array params** (`fn f(v: number[])` → `&mut Vec<f64>` for
+  mutation — the spectral_norm case). Code sites: `infer.rs` `si_block`/`uses_are_array_safe`/`infer_array_elem`;
+  `codegen.rs` typed `Index` (~6651) + `IndexAssign` emit + `.push`/`.length`.
+- **#3 Tighter native HOF/fold.** `typed_array_hof` 2.91× off — inline the reducer to cut per-element
+  closure dispatch; pair with packed `Float64Array`.
+- **#4 Arrays of structs (`Vec<Struct>`).** `nbody` (78× off) — extend `TISH_STRUCT_INFER` to
+  arrays-of-objects with native field access in loops.
+- **#5 Native recursive struct allocation.** `binary_trees` (24× off) — `Box`/`Rc` node structs vs boxed
+  `PropMap`; the hardest (recursive nullable `{left,right}`).
+- **(orthogonal) i32-local representation** for pure-int hash loops (`fnv_hash`), and feeding M4's
+  inference into the **VM JIT** (the default `tish run` path).
+
+## Baseline (Apple Silicon, release, min of 3 runs — pre-phase-1 reference, 9-benchmark set)
 
 | benchmark | boxed (off) | typed (on) | typing-speedup | node (ratio) | status | validates |
 |-----------|------------:|-----------:|---------------:|-------------:|--------|-----------|

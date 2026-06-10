@@ -6676,7 +6676,22 @@ impl Codegen {
                                     )
                                 };
                                 let elem_ty = *elem_type.clone();
-                                return Ok((format!("{}[{}]", esc_obj, idx_usize), elem_ty));
+                                // OOB-safe read for numeric/bool Vecs: JS `arr[oob]` is `undefined`
+                                // (→ NaN / false in those contexts), NOT a panic. In-bounds is the
+                                // same bounds-checked access, so this is purely a correctness gain
+                                // (and what lets index reads be *inferred* as native — phase 2).
+                                let access = match &elem_ty {
+                                    RustType::F64 => format!(
+                                        "{}.get({}).copied().unwrap_or(f64::NAN)",
+                                        esc_obj, idx_usize
+                                    ),
+                                    RustType::Bool => {
+                                        format!("{}.get({}).copied().unwrap_or(false)", esc_obj, idx_usize)
+                                    }
+                                    // Other element types keep the direct index (unchanged).
+                                    _ => format!("{}[{}]", esc_obj, idx_usize),
+                                };
+                                return Ok((access, elem_ty));
                             }
                             // Native tuple access: `tuple[const]` -> `tuple.const` (Rust tuples
                             // require a literal index; a variable index falls through to boxed).
