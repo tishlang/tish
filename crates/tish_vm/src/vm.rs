@@ -667,11 +667,16 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     );
     g.insert("Object".into(), value_object_from_map(object_methods));
 
-    // Array.isArray
+    // Array.isArray + the `Array(n)` / `new Array(n)` constructor (issue #72). `__call`
+    // serves both forms — `construct()` falls back to `__call` when there's no `__construct`.
     let mut array_static = ObjectMap::default();
     array_static.insert(
         "isArray".into(),
         Value::native(|args: &[Value]| globals_builtins::array_is_array(args)),
+    );
+    array_static.insert(
+        Arc::from("__call"),
+        Value::native(|args: &[Value]| construct_builtin::array_construct(args)),
     );
     g.insert("Array".into(), value_object_from_map(array_static));
 

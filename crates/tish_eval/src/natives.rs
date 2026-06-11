@@ -303,6 +303,19 @@ pub fn syntax_error_construct(args: &[Value]) -> Result<Value, String> {
     Ok(make_error_obj("SyntaxError", args))
 }
 
+/// `Array(...)` / `new Array(...)` (issue #72) — mirrors `tishlang_builtins::construct::
+/// array_construct` for the interpreter's `Value`. A single non-negative integer is a length
+/// (null holes); other args become the array's elements.
+pub fn array_construct(args: &[Value]) -> Result<Value, String> {
+    if let [Value::Number(n)] = args {
+        let n = *n;
+        if n >= 0.0 && n.fract() == 0.0 && n <= 4_294_967_295.0 {
+            return Ok(Value::array(vec![Value::Null; n as usize]));
+        }
+    }
+    Ok(Value::array(args.to_vec()))
+}
+
 /// `String(value)` as a function: JS `ToString` coercion (arrays comma-join recursively,
 /// objects → "[object Object]", null → "null"), matching the VM/native `string_convert`.
 pub fn string_convert(args: &[Value]) -> Result<Value, String> {
