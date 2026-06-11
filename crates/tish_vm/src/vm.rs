@@ -713,6 +713,14 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     string_static.insert(Arc::from("__call"), string_convert_fn);
     g.insert("String".into(), value_object_from_map(string_static));
 
+    // Number(value) coercion as a callable global (issue #36).
+    let mut number_static = ObjectMap::default();
+    number_static.insert(
+        Arc::from("__call"),
+        Value::native(|args: &[Value]| globals_builtins::number_convert(args)),
+    );
+    g.insert("Number".into(), value_object_from_map(number_static));
+
     // JSX / Lattish: stubs for bytecode VM when no DOM (e.g. console). Override via set_global in browser.
     g.insert("h".into(), Value::native(|_args: &[Value]| Value::Null));
     g.insert(

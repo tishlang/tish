@@ -232,6 +232,11 @@ impl Evaluator {
                 true,
             );
 
+            // `Number(value)` coercion as a callable global (issue #36).
+            let mut number_obj = PropMap::with_capacity(1);
+            number_obj.insert("__call".into(), Value::Native(natives::number_convert));
+            s.set("Number".into(), Value::object(number_obj), true);
+
             s.set(
                 "Date".into(),
                 crate::value_convert::core_to_eval(

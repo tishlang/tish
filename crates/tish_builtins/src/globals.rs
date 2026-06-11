@@ -59,6 +59,53 @@ pub fn string_convert(args: &[Value]) -> Value {
     Value::String(v.to_js_string().into())
 }
 
+/// JS `Number(value)` coercion (ToNumber), issue #36. Numbers pass through; booleans →
+/// 1/0; null → 0; strings parse (trimmed, with `0x`/`0b`/`0o` and `Infinity`, `""` → 0,
+/// otherwise NaN); arrays/objects go via their string form (so `Number([5])` → 5,
+/// `Number([])` → 0, objects → NaN).
+pub fn number_convert(args: &[Value]) -> Value {
+    let v = args.first().unwrap_or(&Value::Null);
+    let n = match v {
+        Value::Number(n) => *n,
+        Value::Bool(b) => {
+            if *b {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Value::Null => 0.0,
+        Value::String(s) => parse_numeric_string(s),
+        other => parse_numeric_string(&other.to_js_string()),
+    };
+    Value::Number(n)
+}
+
+/// Parse a string as JS `Number` does: trimmed; `""` → 0; `0x`/`0o`/`0b` radix prefixes;
+/// `Infinity`/`-Infinity`; plain decimal/float; anything else → NaN. Public so the
+/// tree-walk interpreter (distinct `Value` type) shares the exact coercion.
+pub fn parse_numeric_string(s: &str) -> f64 {
+    let t = s.trim();
+    if t.is_empty() {
+        return 0.0;
+    }
+    let radix = |rest: &str, r: u32| i64::from_str_radix(rest, r).map(|x| x as f64).unwrap_or(f64::NAN);
+    if let Some(rest) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return radix(rest, 16);
+    }
+    if let Some(rest) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+        return radix(rest, 8);
+    }
+    if let Some(rest) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        return radix(rest, 2);
+    }
+    match t {
+        "Infinity" | "+Infinity" => f64::INFINITY,
+        "-Infinity" => f64::NEG_INFINITY,
+        _ => t.parse::<f64>().unwrap_or(f64::NAN),
+    }
+}
+
 /// String.fromCharCode(...codes)
 pub fn string_from_char_code(args: &[Value]) -> Value {
     let s: String = args
@@ -186,7 +233,38 @@ pub fn parse_float(args: &[Value]) -> Value {
         .first()
         .map(Value::to_display_string)
         .unwrap_or_default();
-    Value::Number(s.trim().parse().unwrap_or(f64::NAN))
+    Value::Number(js_parse_float(&s))
+}
+
+/// JS `parseFloat`: skips leading whitespace, then parses the **longest leading prefix**
+/// that's a valid float (so `parseFloat("3.14abc")` → 3.14, `parseFloat("12.3.4")` → 12.3).
+/// Handles `Infinity`/`-Infinity`; returns NaN when no numeric prefix is present. Issue #36.
+/// Public so the tree-walk interpreter (distinct `Value`) shares the exact behavior.
+pub fn js_parse_float(s: &str) -> f64 {
+    let t = s.trim_start();
+    if t.starts_with("Infinity") || t.starts_with("+Infinity") {
+        return f64::INFINITY;
+    }
+    if t.starts_with("-Infinity") {
+        return f64::NEG_INFINITY;
+    }
+    // Take a generous run of float-shaped chars, then shrink from the right until it parses.
+    let mut end = 0;
+    for (i, c) in t.char_indices() {
+        if c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | 'e' | 'E') {
+            end = i + c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let mut slice = &t[..end];
+    while !slice.is_empty() {
+        if let Ok(n) = slice.parse::<f64>() {
+            return n;
+        }
+        slice = &slice[..slice.len() - 1];
+    }
+    f64::NAN
 }
 
 /// Object.fromEntries(entries)
