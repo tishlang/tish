@@ -37,9 +37,18 @@ pub enum TtyEvent {
 
 // ── Value-agnostic core (shared by every backend) ───────────────────────────────────────
 
-/// Terminal `(cols, rows)`, or `None` if not connected to a terminal.
+/// Terminal `(cols, rows)`, or `None` if stdout is not connected to a terminal.
+///
+/// Gated on `stdout().is_terminal()` to match Node (`process.stdout.columns` is
+/// `undefined` when stdout is not a TTY). Without the gate, `crossterm::terminal::size()`
+/// can still succeed via the controlling terminal even when stdout is redirected — so a
+/// piped run (e.g. CI, `tish run x.tish | cat`) would report a bogus size instead of null.
 pub fn size() -> Option<(u16, u16)> {
-    terminal::size().ok()
+    if std::io::stdout().is_terminal() {
+        terminal::size().ok()
+    } else {
+        None
+    }
 }
 
 /// Whether stdin **and** stdout are connected to a terminal.
