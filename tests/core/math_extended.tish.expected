@@ -18,3 +18,12 @@ Math.sign(0): 0
 Math.trunc(4.7): 4
 Math.trunc(-4.7): -4
 Math.trunc(0.5): 0
+Math.sinh(0): 0
+Math.cosh(0): 1
+Math.tanh(0): 0
+Math.asinh(0): 0
+Math.acosh(1): 0
+Math.atanh(0): 0
+Math.cbrt(27): 3
+Math.log2(8): 3
+Math.log10(1000): 3

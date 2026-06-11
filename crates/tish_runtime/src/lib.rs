@@ -565,6 +565,26 @@ pub fn math_log(args: &[Value]) -> Value {
     Value::Number(n.ln())
 }
 
+// Hyperbolic / inverse-hyperbolic / cbrt / base-2/10 logs (issue #61). Compiled backends
+// (native/cranelift/wasi) share this runtime, so wiring them here resolves all of them.
+macro_rules! runtime_math_unary {
+    ($name:ident, $method:ident) => {
+        pub fn $name(args: &[Value]) -> Value {
+            let n = extract_num(args.first()).unwrap_or(f64::NAN);
+            Value::Number(n.$method())
+        }
+    };
+}
+runtime_math_unary!(math_sinh, sinh);
+runtime_math_unary!(math_cosh, cosh);
+runtime_math_unary!(math_tanh, tanh);
+runtime_math_unary!(math_asinh, asinh);
+runtime_math_unary!(math_acosh, acosh);
+runtime_math_unary!(math_atanh, atanh);
+runtime_math_unary!(math_cbrt, cbrt);
+runtime_math_unary!(math_log2, log2);
+runtime_math_unary!(math_log10, log10);
+
 pub fn json_stringify(args: &[Value]) -> Value {
     let v = args.first().cloned().unwrap_or(Value::Null);
     Value::String(core_json_stringify(&v).into())

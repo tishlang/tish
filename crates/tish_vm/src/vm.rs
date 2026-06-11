@@ -532,6 +532,29 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             Value::Number(sum_sq.sqrt())
         }),
     );
+    // Hyperbolic, inverse-hyperbolic, cbrt and base-2/10 logs. Like the trig block above
+    // these aren't in `math_builtins`, and on the wasm/native VM there is no host `Math`
+    // to fall through to, so they previously returned `undefined` (issue #61).
+    macro_rules! math_unary {
+        ($name:literal, $method:ident) => {
+            math.insert(
+                $name.into(),
+                Value::native(|args: &[Value]| {
+                    let n = args.first().and_then(|v| v.as_number()).unwrap_or(f64::NAN);
+                    Value::Number(n.$method())
+                }),
+            );
+        };
+    }
+    math_unary!("sinh", sinh);
+    math_unary!("cosh", cosh);
+    math_unary!("tanh", tanh);
+    math_unary!("asinh", asinh);
+    math_unary!("acosh", acosh);
+    math_unary!("atanh", atanh);
+    math_unary!("cbrt", cbrt);
+    math_unary!("log2", log2);
+    math_unary!("log10", log10);
     math.insert("PI".into(), Value::Number(std::f64::consts::PI));
     math.insert("E".into(), Value::Number(std::f64::consts::E));
     g.insert("Math".into(), value_object_from_map(math));
