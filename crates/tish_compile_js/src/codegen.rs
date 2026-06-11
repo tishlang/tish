@@ -88,6 +88,25 @@ impl Codegen {
         }
     }
 
+    /// Parenthesize the object of a `.name` member access when it's a numeric literal.
+    /// `123.toString()` is a syntax error in JS — the `.` is lexed as the start of a
+    /// fraction — so emit `(123).toString()`. Every other primary is already safe (string /
+    /// bool / null literals, identifiers) or self-parenthesizing (Binary, Unary, Call, …).
+    /// Only the dot form is affected; bracket access (`123["x"]`, `123[0]`) lexes fine.
+    fn paren_member_object(object: &Expr, emitted: String) -> String {
+        if matches!(
+            object,
+            Expr::Literal {
+                value: Literal::Number(_),
+                ..
+            }
+        ) {
+            format!("({})", emitted)
+        } else {
+            emitted
+        }
+    }
+
     fn emit_program(
         &mut self,
         program: &Program,
@@ -571,6 +590,7 @@ impl Codegen {
                             format!("{}[{:?}]", obj, name.as_ref())
                         } else {
                             let sep = if *optional { "?." } else { "." };
+                            let obj = Self::paren_member_object(object, obj);
                             format!("{}{}{}", obj, sep, name.as_ref())
                         }
                     }
@@ -696,7 +716,7 @@ impl Codegen {
                 value,
                 ..
             } => {
-                let obj = self.emit_expr(object)?;
+                let obj = Self::paren_member_object(object, self.emit_expr(object)?);
                 let val = self.emit_expr(value)?;
                 format!("({}.{} = {})", obj, prop.as_ref(), val)
             }
