@@ -1,0 +1,21 @@
+// new Array(n) / Array(n) construct a real, indexable array (issue #72).
+let a = new Array(3)
+a[0] = 5
+a[1] = 6
+console.log(a.length, a[0], a[1])
+let b = Array(2)
+console.log(b.length)
+let c = new Array(1, 2, 3)
+console.log(c.length, c[0], c[2])
+let d = Array()
+console.log(d.length)
+let e = new Array(0)
+console.log(e.length)
+// the holes are writable
+let f = new Array(3)
+let i = 0
+while (i < f.length) {
+  f[i] = i * 10
+  i = i + 1
+}
+console.log(f.join(","))

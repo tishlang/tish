@@ -62,6 +62,22 @@ pub fn error_constructor_value(name: &'static str) -> Value {
     Value::object(m)
 }
 
+/// `Array(...)` / `new Array(...)` (issue #72). A single non-negative integer argument is a
+/// length — the array is filled with `null` holes (so `arr[i] = v` works and `Array(n).fill(v)`
+/// can overwrite them, issue #76). Zero args → `[]`; any other args → an array of exactly those
+/// elements (`new Array(1, 2, 3)` → `[1, 2, 3]`). A single non-integer / negative number is a
+/// RangeError in JS; native builtins can't throw here, so it falls back to a one-element array —
+/// the integer-length and element-list forms (the real uses) match JS exactly.
+pub fn array_construct(args: &[Value]) -> Value {
+    if let [Value::Number(n)] = args {
+        let n = *n;
+        if n >= 0.0 && n.fract() == 0.0 && n <= 4_294_967_295.0 {
+            return Value::Array(VmRef::new(vec![Value::Null; n as usize]));
+        }
+    }
+    Value::Array(VmRef::new(args.to_vec()))
+}
+
 fn param(initial: f64) -> Value {
     let mut m = ObjectMap::default();
     m.insert(Arc::from("value"), Value::Number(initial));

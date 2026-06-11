@@ -186,8 +186,11 @@ impl Evaluator {
                 true,
             );
 
-            let mut array_obj = PropMap::with_capacity(1);
+            let mut array_obj = PropMap::with_capacity(3);
             array_obj.insert("isArray".into(), Value::Native(natives::array_is_array));
+            // `Array(n)` and `new Array(n)` constructor (issue #72).
+            array_obj.insert("__call".into(), Value::Native(natives::array_construct));
+            array_obj.insert("__construct".into(), Value::Native(natives::array_construct));
             s.set(
                 "Array".into(),
                 Value::object(array_obj),
