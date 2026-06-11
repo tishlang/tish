@@ -205,6 +205,9 @@ impl<'a> Parser<'a> {
             Some(TokenKind::Of) => self.expect(TokenKind::Of),
             Some(TokenKind::As) => self.expect(TokenKind::As),
             Some(TokenKind::In) => self.expect(TokenKind::In),
+            // `delete` is a keyword (the operator) but also a valid property name —
+            // `Set`/`Map` expose `.delete(...)`. Issue #40.
+            Some(TokenKind::Delete) => self.expect(TokenKind::Delete),
             other => Err(format!(
                 "Expected property name after `.` or `?.`, got {:?}",
                 other
@@ -1827,6 +1830,19 @@ impl<'a> Parser<'a> {
                     },
                 });
             }
+            Some(TokenKind::Delete) => {
+                let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
+                self.advance();
+                let target = self.parse_unary()?;
+                let end = target.span().end;
+                return Ok(Expr::Delete {
+                    target: Box::new(target),
+                    span: Span {
+                        start: span_start,
+                        end,
+                    },
+                });
+            }
             Some(TokenKind::Await) => {
                 let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
                 self.advance();
@@ -2677,6 +2693,7 @@ impl ExprSpan for Expr {
             Expr::Object { span, .. } => *span,
             Expr::Assign { span, .. } => *span,
             Expr::TypeOf { span, .. } => *span,
+            Expr::Delete { span, .. } => *span,
             Expr::PostfixInc { span, .. } => *span,
             Expr::PostfixDec { span, .. } => *span,
             Expr::PrefixInc { span, .. } => *span,

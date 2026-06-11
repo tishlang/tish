@@ -448,6 +448,10 @@ fn optimize_expr(expr: &Expr) -> Expr {
             operand: Box::new(optimize_expr(operand)),
             span: *span,
         },
+        Expr::Delete { target, span } => Expr::Delete {
+            target: Box::new(optimize_expr(target)),
+            span: *span,
+        },
         Expr::PostfixInc { .. }
         | Expr::PostfixDec { .. }
         | Expr::PrefixInc { .. }

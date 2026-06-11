@@ -2182,6 +2182,19 @@ impl Vm {
                     catchable!(set_index(&obj, &idx_val, val.clone()));
                     self.stack.push(dup_val); // assignment yields the assigned value
                 }
+                Opcode::DeleteIndex => {
+                    // `delete obj[key]` / `delete obj.prop`: pop [obj, key], remove, push true.
+                    let key = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    let obj = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    delete_index(&obj, &key);
+                    self.stack.push(Value::Bool(true));
+                }
                 Opcode::NewArray => {
                     let n = Self::read_u16(code, &mut ip) as usize;
                     let mut elems = Vec::with_capacity(n);
@@ -3353,6 +3366,34 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
             idx.to_display_string(),
             obj.type_name()
         )),
+    }
+}
+
+/// `delete obj[key]` semantics (issue #40). Objects drop the string key; arrays clear the
+/// element at a numeric index to a `null` hole (length is preserved, JS-style). Anything else
+/// is a no-op. The operator always evaluates to `true` (handled by the caller).
+fn delete_index(obj: &Value, key: &Value) {
+    match obj {
+        Value::Object(m) => {
+            let key_s: Arc<str> = match key {
+                Value::String(s) => Arc::from(s.as_str()),
+                other => Arc::from(other.to_display_string().as_str()),
+            };
+            m.borrow_mut().strings.remove(key_s.as_ref());
+        }
+        Value::Array(a) => {
+            if let Value::Number(n) = key {
+                let n = *n;
+                if n >= 0.0 && n.fract() == 0.0 {
+                    let i = n as usize;
+                    let mut arr = a.borrow_mut();
+                    if i < arr.len() {
+                        arr[i] = Value::Null;
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 

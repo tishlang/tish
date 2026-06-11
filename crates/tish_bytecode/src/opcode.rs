@@ -130,13 +130,16 @@ pub enum Opcode {
     /// is drained into an array; arrays/strings/anything else pass through unchanged. Emitted
     /// right after the iterable expression so the existing index-based loop can iterate it.
     IterNormalize = 52,
+    /// `delete obj[key]` / `delete obj.prop`. Pops `[obj, key]`, removes the property
+    /// (objects: drop the key; arrays: set the index to a null hole), pushes `true`.
+    DeleteIndex = 53,
 }
 
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=52 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=53 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 52 {
+        if b <= 53 {
             Some(unsafe { std::mem::transmute::<u8, Opcode>(b) })
         } else {
             None
@@ -163,6 +166,7 @@ impl Opcode {
             | Opcode::ExitBlock
             | Opcode::LoopVarsEnd
             | Opcode::IterNormalize
+            | Opcode::DeleteIndex
             | Opcode::AwaitPromise => 1,
             Opcode::ArraySortByProperty
             | Opcode::ArrayMapBinOp

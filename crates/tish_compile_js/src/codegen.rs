@@ -672,6 +672,37 @@ impl Codegen {
                 let o = self.emit_expr(operand)?;
                 format!("(typeof {})", o)
             }
+            Expr::Delete { target, .. } => {
+                // Emit the raw property *reference*, not a value: `emit_expr` wraps Index /
+                // optional reads in `(… ?? null)`, and `delete (x ?? null)` is a no-op. So
+                // reconstruct `obj.name` / `obj[key]` directly here.
+                match target.as_ref() {
+                    Expr::Member { object, prop: MemberProp::Name { name, .. }, .. } => {
+                        let obj = self.emit_expr(object)?;
+                        if name.parse::<u32>().is_ok()
+                            || !name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        {
+                            format!("(delete {}[{:?}])", obj, name.as_ref())
+                        } else {
+                            format!("(delete {}.{})", obj, name.as_ref())
+                        }
+                    }
+                    Expr::Member { object, prop: MemberProp::Expr(key), .. } => {
+                        let obj = self.emit_expr(object)?;
+                        let k = self.emit_expr(key)?;
+                        format!("(delete {}[{}])", obj, k)
+                    }
+                    Expr::Index { object, index, .. } => {
+                        let obj = self.emit_expr(object)?;
+                        let idx = self.emit_expr(index)?;
+                        format!("(delete {}[{}])", obj, idx)
+                    }
+                    _ => {
+                        let t = self.emit_expr(target)?;
+                        format!("(delete {})", t)
+                    }
+                }
+            }
             Expr::PostfixInc { name, .. } => {
                 format!("{}++", Self::escape_ident(name.as_ref()))
             }

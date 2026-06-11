@@ -1380,6 +1380,7 @@ fn expr_name_safe(e: &Expr, name: &str, keys: &std::collections::HashSet<&str>) 
     use Expr::*;
     match e {
         Literal { .. } => true,
+        Delete { target, .. } => expr_name_safe(target, name, keys),
         Ident { name: n, .. } => n.as_ref() != name, // bare use of `name` is unsafe
         Member { object, prop, optional, .. } => {
             if let Ident { name: n, .. } = object.as_ref() {
