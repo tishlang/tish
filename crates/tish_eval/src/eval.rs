@@ -2087,6 +2087,19 @@ impl Evaluator {
                             .insert(Arc::clone(prop), val.clone());
                         Ok(val)
                     }
+                    // `arr.length = k` truncates / grows the array (holes read back as Null),
+                    // matching JS and the bytecode VM (issue #62).
+                    Value::Array(arr) if prop.as_ref() == "length" => {
+                        let n = match &val {
+                            Value::Number(n) => *n,
+                            _ => f64::NAN,
+                        };
+                        if n.is_nan() || n < 0.0 || n.fract() != 0.0 || n > 4_294_967_295.0 {
+                            return Err(EvalError::Error("Invalid array length".to_string()));
+                        }
+                        arr.borrow_mut().resize(n as usize, Value::Null);
+                        Ok(val)
+                    }
                     _ => Err(EvalError::Error(format!(
                         "Cannot assign property '{}' on non-object: {:?}",
                         prop, obj_val

@@ -3106,6 +3106,13 @@ fn set_member(obj: &Value, key: &Arc<str>, val: Value) -> Result<(), String> {
             Ok(())
         }
         Value::Array(a) => {
+            if key.as_ref() == "length" {
+                // `arr.length = k` truncates or grows (holes read back as Null), JS-style.
+                let new_len = array_length_arg(&val)?;
+                let mut arr = a.borrow_mut();
+                arr.resize(new_len, Value::Null);
+                return Ok(());
+            }
             let idx: usize = key.as_ref().parse().unwrap_or(0);
             let mut arr = a.borrow_mut();
             if idx < arr.len() {
@@ -3116,8 +3123,27 @@ fn set_member(obj: &Value, key: &Arc<str>, val: Value) -> Result<(), String> {
             }
             Ok(())
         }
+        Value::NumberArray(a) => {
+            if key.as_ref() == "length" {
+                let new_len = array_length_arg(&val)?;
+                // NaN is the packed-array hole marker (read back as Null), matching get_index.
+                a.borrow_mut().resize(new_len, f64::NAN);
+                return Ok(());
+            }
+            Err(format!("Cannot set property of {}", obj.type_name()))
+        }
         _ => Err(format!("Cannot set property of {}", obj.type_name())),
     }
+}
+
+/// JS `arr.length = v`: `v` is coerced to a number and must be a valid array length —
+/// a non-negative integer below 2³². Anything else is a RangeError ("Invalid array length").
+fn array_length_arg(val: &Value) -> Result<usize, String> {
+    let n = val.as_number().unwrap_or(f64::NAN);
+    if n.is_nan() || n < 0.0 || n.fract() != 0.0 || n > 4_294_967_295.0 {
+        return Err("Invalid array length".to_string());
+    }
+    Ok(n as usize)
 }
 
 fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {

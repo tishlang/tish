@@ -837,6 +837,16 @@ pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
             }
             val
         }
+        // `arr.length = k` truncates / grows the array (holes read back as Null), matching
+        // JS and the VM/interpreter (issue #62).
+        Value::Array(arr) if key == "length" => {
+            let n = extract_num(Some(&val)).unwrap_or(f64::NAN);
+            if n.is_nan() || n < 0.0 || n.fract() != 0.0 || n > 4_294_967_295.0 {
+                panic!("Invalid array length");
+            }
+            arr.borrow_mut().resize(n as usize, Value::Null);
+            val
+        }
         _ => panic!("Cannot assign property on non-object"),
     }
 }

@@ -1,0 +1,17 @@
+// arr.length = k truncates / grows the array (issue #62)
+let a = [1, 2, 3, 4, 5]
+a.length = 3
+console.log("trunc len:", a.length)
+console.log("trunc:", a.join(","))
+a.length = 5
+console.log("grow len:", a.length)
+a.length = 0
+console.log("clear len:", a.length)
+console.log("clear:", a.join(","))
+
+let b = []
+b.push(10)
+b.push(20)
+b.push(30)
+b.length = 2
+console.log("b:", b.length, b.join(","))
