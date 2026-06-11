@@ -1,0 +1,14 @@
+// Reading a missing own property returns a nullish value instead of throwing (issue #66).
+// (Asserted via falsy context so it's identical on every backend — tish has no `undefined`,
+// and the JS target prints `undefined` for a raw missing read, so we don't print it raw.)
+let o = { a: 1 }
+console.log(o.a)
+console.log(!o.b)
+let r = o.b ? "has" : "missing"
+console.log(r)
+let o2 = { x: { y: 5 } }
+console.log(o2.x.y)
+console.log(!o2.x.z)
+// merely reading a missing property must not throw — reaching this line proves it
+let probe = o.nope
+console.log("done")

@@ -2650,10 +2650,9 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 }
             }
             let map = m.borrow();
-            map.strings
-                .get(key.as_ref())
-                .cloned()
-                .ok_or_else(|| format!("Property '{}' not found", key))
+            // Reading a missing own property returns `null` (tish's nullish value), matching
+            // JS object semantics and the tree-walk interpreter — not a thrown error (#66).
+            Ok(map.strings.get(key.as_ref()).cloned().unwrap_or(Value::Null))
         }
         Value::NumberArray(a) => {
             let key_s = key.as_ref();
