@@ -3460,6 +3460,13 @@ impl Codegen {
                                 obj_expr, digits
                             ));
                         }
+                        "toString" => {
+                            let radix = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::number_to_string(&{}, &{})",
+                                obj_expr, radix
+                            ));
+                        }
                         // Higher-order array methods
                         "map" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());

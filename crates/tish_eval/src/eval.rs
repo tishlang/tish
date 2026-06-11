@@ -1773,6 +1773,24 @@ impl Evaluator {
                             let formatted = format!("{:.*}", digits as usize, n);
                             return Ok(Value::String(formatted.into()));
                         }
+                        if method_name.as_ref() == "toString" {
+                            // Shares the VM/native formatting via the backend-agnostic helper
+                            // (issue #59). Radix defaults to 10; 2–36 supported, else RangeError.
+                            let radix = arg_vals
+                                .first()
+                                .and_then(|v| match v {
+                                    Value::Number(d) => Some(*d as i64),
+                                    _ => None,
+                                })
+                                .unwrap_or(10);
+                            return match tishlang_builtins::number::number_to_string_radix(*n, radix)
+                            {
+                                Some(s) => Ok(Value::String(s.into())),
+                                None => Err(EvalError::Error(
+                                    "toString() radix must be between 2 and 36".to_string(),
+                                )),
+                            };
+                        }
                     }
 
                     // RegExp methods
