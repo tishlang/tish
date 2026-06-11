@@ -1,0 +1,6 @@
+trunc len: 3
+trunc: 1,2,3
+grow len: 5
+clear len: 0
+clear: 
+b: 2 10,20
