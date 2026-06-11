@@ -337,8 +337,8 @@ jobs:
       - name: Build (native / rustup target)
         if: ${{ !matrix.use_cross }}
         run: |
-          ./scripts/ci_build_retry.sh cargo build --release -p tishlang --target ${{ matrix.target }} --features full
-          ./scripts/ci_build_retry.sh cargo build --release -p tishlang_cargo_bindgen --target ${{ matrix.target }}
+          cargo build --release -p tishlang --target ${{ matrix.target }} --features full
+          cargo build --release -p tishlang_cargo_bindgen --target ${{ matrix.target }}
 
       - name: Install cross and build (Linux ARM64)
         if: ${{ matrix.use_cross }}
