@@ -113,11 +113,12 @@ jobs:
           TISH_SEMANTIC_RELEASE_CI: "1"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Require incremental release
+      - name: Report release status
         run: |
           if [ "${{ steps.semantic.outputs.new_release_published }}" != "true" ]; then
-            echo "No incremental release would be triggered. Push commits that trigger a release (feat/fix/perf/BREAKING CHANGE per conventional commits)."
-            exit 1
+            echo "::notice::No version bump in these commits — skipping the release check (no feat/fix/perf/BREAKING CHANGE per conventional commits)."
+            echo "No incremental release would be triggered; skipping rather than failing (#86)."
+            exit 0
           fi
           echo "Release would be triggered - check passed."
 
