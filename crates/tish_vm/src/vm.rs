@@ -2668,10 +2668,25 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
         Ne => Ok(Bool(!l.strict_eq(r))),
         StrictEq => Ok(Bool(l.strict_eq(r))),
         StrictNe => Ok(Bool(!l.strict_eq(r))),
-        Lt => Ok(Bool(ln < rn)),
-        Le => Ok(Bool(ln <= rn)),
-        Gt => Ok(Bool(ln > rn)),
-        Ge => Ok(Bool(ln >= rn)),
+        // Relational operators: when BOTH operands are strings, compare them
+        // lexicographically (JS semantics). Otherwise coerce to numbers — a string
+        // mixed with a number still falls through to numeric coercion (NaN → false).
+        Lt => Ok(Bool(match (l, r) {
+            (String(a), String(b)) => a.as_str() < b.as_str(),
+            _ => ln < rn,
+        })),
+        Le => Ok(Bool(match (l, r) {
+            (String(a), String(b)) => a.as_str() <= b.as_str(),
+            _ => ln <= rn,
+        })),
+        Gt => Ok(Bool(match (l, r) {
+            (String(a), String(b)) => a.as_str() > b.as_str(),
+            _ => ln > rn,
+        })),
+        Ge => Ok(Bool(match (l, r) {
+            (String(a), String(b)) => a.as_str() >= b.as_str(),
+            _ => ln >= rn,
+        })),
         And => Ok(Bool(l.is_truthy() && r.is_truthy())),
         Or => Ok(Bool(l.is_truthy() || r.is_truthy())),
         // `to_int32`/`to_uint32` = JS ToInt32/ToUint32 (modulo 2³², NaN/±Infinity → 0); not a
