@@ -188,7 +188,7 @@ fn run_stdin_source(
     } else {
         tishlang_opt::optimize(&prog)
     };
-    run_program(&program, &cwd, backend, no_optimize, features)
+    run_program(&program, &cwd, backend, no_optimize, features, None)
 }
 
 fn run_file(
@@ -237,7 +237,7 @@ fn run_file(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    run_program(&program, &ffi_base, backend, no_optimize, features)
+    run_program(&program, &ffi_base, backend, no_optimize, features, Some(path))
 }
 
 /// Load every `ffi:<path>` cdylib the program imports, resolving each path relative to `base_dir`
@@ -266,6 +266,7 @@ fn run_program(
     backend: &str,
     no_optimize: bool,
     features: &[String],
+    source_name: Option<&str>,
 ) -> Result<(), String> {
     // FFI: load each `ffi:<path>` cdylib (resolved relative to the importing file) into a
     // name→export map the backends register as a native module. Built once, shared across backends.
@@ -299,10 +300,15 @@ fn run_program(
         return Ok(());
     }
 
+    let source_arc: Option<std::sync::Arc<str>> = source_name.map(std::sync::Arc::from);
     let chunk = if no_optimize {
-        tishlang_bytecode::compile_unoptimized(program).map_err(|e| e.to_string())?
+        // `--no-optimize` keeps the simpler path; line info is most useful with optimization on.
+        let mut c = tishlang_bytecode::compile_unoptimized(program).map_err(|e| e.to_string())?;
+        c.source = source_arc.clone();
+        c
     } else {
-        tishlang_bytecode::compile(program).map_err(|e| e.to_string())?
+        tishlang_bytecode::compile_with_source(program, source_arc.clone())
+            .map_err(|e| e.to_string())?
     };
     let caps = vm_capabilities_for_cli_run(features);
     let mut vm = tishlang_vm::Vm::with_capabilities(caps);

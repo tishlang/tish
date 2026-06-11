@@ -73,6 +73,12 @@ pub struct Chunk {
     /// Inline caches for object property access, one cell per entry in `names` (so indexed by the
     /// same name index `GetMember`/`SetMember` carry). Runtime-only; not part of the serialized program.
     pub inline_caches: InlineCaches,
+    /// Source line table: `(code_offset, line)` pairs, sorted by offset, one entry per line change
+    /// (issue #74). Consulted only when formatting a runtime error, so it adds zero execution
+    /// overhead. Debug-only / runtime-only — not serialized (persisted bytecode loses line info).
+    pub lines: Vec<(u32, u32)>,
+    /// Source file path for error messages (`file:line`); propagated to nested chunks. Runtime-only.
+    pub source: Option<Arc<str>>,
 }
 
 impl Chunk {
@@ -87,6 +93,36 @@ impl Chunk {
             num_slots: 0,
             slot_based: false,
             inline_caches: InlineCaches::default(),
+            lines: Vec::new(),
+            source: None,
+        }
+    }
+
+    /// Record that the instruction starting at `offset` originates from source `line` (1-based).
+    /// Only stored when the line changes, keeping the table compact. Issue #74.
+    pub fn mark_line(&mut self, offset: usize, line: u32) {
+        if line == 0 {
+            return;
+        }
+        match self.lines.last() {
+            Some(&(_, last_line)) if last_line == line => {}
+            _ => self.lines.push((offset as u32, line)),
+        }
+    }
+
+    /// Source line for a bytecode `offset` (the line of the nearest preceding `mark_line`), or
+    /// `None` if no line info is available (e.g. deserialized bytecode). Issue #74.
+    pub fn line_at(&self, offset: usize) -> Option<u32> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        let off = offset as u32;
+        // Largest recorded offset <= `off`.
+        let idx = self.lines.partition_point(|&(o, _)| o <= off);
+        if idx == 0 {
+            Some(self.lines[0].1)
+        } else {
+            Some(self.lines[idx - 1].1)
         }
     }
 

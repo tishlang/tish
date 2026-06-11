@@ -12,7 +12,8 @@ pub const NO_REST_PARAM: u16 = 0xFFFF;
 
 pub use chunk::{Chunk, Constant};
 pub use compiler::{
-    compile, compile_for_repl, compile_for_repl_unoptimized, compile_unoptimized, CompileError,
+    compile, compile_for_repl, compile_for_repl_unoptimized, compile_unoptimized,
+    compile_with_source, CompileError,
 };
 pub use encoding::{binop_to_u8, compound_op_to_u8, u8_to_binop, u8_to_unaryop, unaryop_to_u8};
 pub use opcode::Opcode;
