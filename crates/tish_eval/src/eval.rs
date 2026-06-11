@@ -3322,6 +3322,20 @@ impl Evaluator {
                 };
                 Ok(arr.borrow().get(idx).cloned().unwrap_or(Value::Null))
             }
+            // `str[i]` returns the character at index `i` (issue #17). The VM already does
+            // this; the interpreter previously fell through to `null`, a silent divergence.
+            // Out-of-bounds / negative / non-integer indices yield tish's nullish value.
+            Value::String(s) => {
+                let idx = match index {
+                    Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => *n as usize,
+                    _ => return Ok(Value::Null),
+                };
+                Ok(s
+                    .chars()
+                    .nth(idx)
+                    .map(|c| Value::String(c.to_string().into()))
+                    .unwrap_or(Value::Null))
+            }
             Value::Object(_) => Ok(eval_object_get(obj, index).unwrap_or(Value::Null)),
             #[cfg(feature = "http")]
             Value::Promise(_) | Value::CorePromise(_) => {

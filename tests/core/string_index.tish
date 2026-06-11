@@ -1,0 +1,9 @@
+let s = "asd"
+console.log(s[0])
+console.log(s[1])
+console.log(s[2])
+let t = "hello"
+let out = ""
+let i = 0
+while (i < t.length) { out = out + t[i] + "-"; i = i + 1 }
+console.log(out)
