@@ -60,11 +60,7 @@ emit_main_tish() {
     {
       echo "fn __perf_run_${key}() {"
       while IFS= read -r line || [[ -n "$line" ]]; do
-        if [[ -n "$line" ]]; then
-          printf '\t%s\n' "$line"
-        else
-          printf '\n'
-        fi
+        printf '%s\n' "$line"
       done <"$tish"
       echo "}"
       echo "__perf_run_${key}()"
@@ -83,11 +79,7 @@ emit_main_js() {
     [[ -n "${js:-}" ]] || continue
     echo "{" >>"$out"
     while IFS= read -r line || [[ -n "$line" ]]; do
-      if [[ -n "$line" ]]; then
-        printf '  %s\n' "$line" >>"$out"
-      else
-        printf '\n' >>"$out"
-      fi
+      printf '%s\n' "$line" >>"$out"
     done <"$js"
     echo "}" >>"$out"
     echo "" >>"$out"

@@ -11,6 +11,6 @@ some (> 100): false
 every (> 0): true
 every (> 3): false
 forEach total: 15
-flat(1): 1,2,3,4,5,6
+flat(1): 1,2,3,4,[5, 6]
 flat(2): 1,2,3,4,5,6
 chained: 4,8,12
