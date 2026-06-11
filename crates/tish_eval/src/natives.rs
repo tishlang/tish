@@ -281,6 +281,28 @@ pub fn array_is_array(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Bool(matches!(args.first(), Some(Value::Array(_)))))
 }
 
+/// Build a JS-style error object `{ name, message }` for the interpreter (issue #60).
+fn make_error_obj(name: &str, args: &[Value]) -> Value {
+    let message = args.first().map(|v| v.to_string()).unwrap_or_default();
+    let mut m = crate::value::PropMap::with_capacity(2);
+    m.insert("name".into(), Value::String(name.into()));
+    m.insert("message".into(), Value::String(message.into()));
+    Value::object(m)
+}
+
+pub fn error_construct(args: &[Value]) -> Result<Value, String> {
+    Ok(make_error_obj("Error", args))
+}
+pub fn type_error_construct(args: &[Value]) -> Result<Value, String> {
+    Ok(make_error_obj("TypeError", args))
+}
+pub fn range_error_construct(args: &[Value]) -> Result<Value, String> {
+    Ok(make_error_obj("RangeError", args))
+}
+pub fn syntax_error_construct(args: &[Value]) -> Result<Value, String> {
+    Ok(make_error_obj("SyntaxError", args))
+}
+
 /// `String(value)` as a function: JS `ToString` coercion (arrays comma-join recursively,
 /// objects → "[object Object]", null → "null"), matching the VM/native `string_convert`.
 pub fn string_convert(args: &[Value]) -> Result<Value, String> {

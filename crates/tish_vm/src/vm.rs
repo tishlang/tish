@@ -20,6 +20,28 @@ use tishlang_core::{
     ObjectData, ObjectMap, PropMap, Value,
 };
 
+/// Error string returned by `run_chunk`/`run_framed` to mean "a thrown value is parked in
+/// [`VM_PENDING_THROW`]; keep unwinding toward an enclosing `catch`" (issue #60). The leading
+/// control char makes it unmistakable for a real diagnostic. `Callable::call` returns a bare
+/// `Value`, so the thrown *value* can't ride the `Result`; it travels in this thread-local
+/// instead and is picked up at the next call site (or the top-level boundary).
+const PENDING_THROW_SENTINEL: &str = "\u{1}__tish_pending_throw__";
+
+thread_local! {
+    static VM_PENDING_THROW: std::cell::RefCell<Option<Value>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn set_pending_throw(v: Value) {
+    VM_PENDING_THROW.with(|c| *c.borrow_mut() = Some(v));
+}
+fn take_pending_throw() -> Option<Value> {
+    VM_PENDING_THROW.with(|c| c.borrow_mut().take())
+}
+fn pending_throw_is_set() -> bool {
+    VM_PENDING_THROW.with(|c| c.borrow().is_some())
+}
+
 /// Wrap a closure in the right shared pointer for the current build.
 /// Under `send-values` that's `Arc<dyn Fn + Send + Sync>`; otherwise it's
 /// plain `Rc<dyn Fn>`. Call sites can stay ignorant of the distinction.
@@ -603,6 +625,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         "AudioContext".into(),
         construct_builtin::audio_context_constructor_value(),
     );
+    // Error constructors (issue #60): `new Error(msg)` / `Error(msg)` → `{ name, message }`.
+    for name in ["Error", "TypeError", "RangeError", "SyntaxError"] {
+        g.insert(name.into(), construct_builtin::error_constructor_value(name));
+    }
 
     // Object methods - delegate to tishlang_builtins::globals
     let mut object_methods = ObjectMap::default();
@@ -1075,7 +1101,16 @@ impl Vm {
 
     /// Run a chunk using this VM's capability set. `repl_mode` persists top-level `let` across REPL lines.
     pub fn run_with_options(&mut self, chunk: &Chunk, repl_mode: bool) -> Result<Value, String> {
-        self.run_chunk(chunk, &chunk.nested, &[], repl_mode)
+        let result = self.run_chunk(chunk, &chunk.nested, &[], repl_mode);
+        // A throw that escaped every `catch` reaches here as the pending-throw sentinel; turn the
+        // parked value into the conventional uncaught-error message (issue #60).
+        if let Err(e) = &result {
+            if e == PENDING_THROW_SENTINEL {
+                let v = take_pending_throw().unwrap_or(Value::Null);
+                return Err(format!("Uncaught {}", v.to_display_string()));
+            }
+        }
+        result
     }
 
     /// Whether the experimental frame-VM path is on (`TISH_FRAME_VM=1`). Flag-off (default) is
@@ -1349,6 +1384,11 @@ impl Vm {
                                 }
                             } else {
                                 let r = f.call(&call_args);
+                                // A throw escaping the callee can't be caught here (frameable
+                                // chunks have no `try`); bubble it to an enclosing frame (#60).
+                                if pending_throw_is_set() {
+                                    return Some(Err(PENDING_THROW_SENTINEL.to_string()));
+                                }
                                 self.stack.push(r);
                             }
                         }
@@ -1357,7 +1397,11 @@ impl Vm {
                                 Some(Value::Function(cf)) => cf.clone(),
                                 _ => ferr!("Call of non-function: {}", callee.type_name()),
                             };
-                            self.stack.push(cf.call(&call_args));
+                            let r = cf.call(&call_args);
+                            if pending_throw_is_set() {
+                                return Some(Err(PENDING_THROW_SENTINEL.to_string()));
+                            }
+                            self.stack.push(r);
                         }
                         _ => ferr!("Call of non-function: {}", callee.type_name()),
                     }
@@ -1453,6 +1497,35 @@ impl Vm {
         // A closure created while this is non-empty snapshots these into a fresh overlay so it
         // captures the loop variable's value for THIS iteration. Pushed/popped by LoopVarsBegin/End.
         let mut active_loop_vars: Vec<Arc<str>> = Vec::new();
+
+        // Throw `$v` to the nearest enclosing handler (issue #60): if this frame has a live
+        // `try`, jump to its `catch` with `$v` on the stack; otherwise park `$v` in the
+        // thread-local and bubble the sentinel so an enclosing frame's catch can take it.
+        macro_rules! raise {
+            ($v:expr) => {{
+                let __thrown = $v;
+                if let Some((catch_ip, stack_len)) = try_handlers.pop() {
+                    self.stack.truncate(stack_len);
+                    self.stack.push(__thrown);
+                    ip = catch_ip;
+                    continue;
+                } else {
+                    set_pending_throw(__thrown);
+                    return Err(PENDING_THROW_SENTINEL.to_string());
+                }
+            }};
+        }
+        // Evaluate a fallible, JS-throwable opcode helper: on `Err(msg)` the message becomes a
+        // catchable `TypeError` (`x.foo()` on null, calling a non-function, …) routed through
+        // `raise!` instead of aborting the whole VM.
+        macro_rules! catchable {
+            ($expr:expr) => {
+                match $expr {
+                    Ok(v) => v,
+                    Err(msg) => raise!(construct_builtin::error_object("TypeError", &msg)),
+                }
+            };
+        }
 
         loop {
             if ip >= code.len() {
@@ -1789,7 +1862,13 @@ impl Vm {
                                 match f.as_any().downcast_ref::<VmClosure>() {
                                     Some(vc) if Self::vmclosure_frameable(vc) => {
                                         match self.run_framed(vc, &args) {
-                                            Some(res) => res?,
+                                            // A pending throw is handled by the post-call check
+                                            // below (issue #60); a real fatal error propagates.
+                                            Some(Ok(v)) => v,
+                                            Some(Err(e)) if e == PENDING_THROW_SENTINEL => {
+                                                Value::Null
+                                            }
+                                            Some(Err(e)) => return Err(e),
                                             None => f.call(&args),
                                         }
                                     }
@@ -1802,19 +1881,23 @@ impl Vm {
                         Value::Object(o) => {
                             let call_fn = match o.borrow().strings.get("__call") {
                                 Some(Value::Function(cf)) => cf.clone(),
-                                _ => {
-                                    return Err(format!(
-                                        "Call of non-function: {}",
-                                        callee.type_name()
-                                    ))
-                                }
+                                _ => raise!(construct_builtin::error_object(
+                                    "TypeError",
+                                    &format!("Call of non-function: {}", callee.type_name())
+                                )),
                             };
                             call_fn.call(&args)
                         }
-                        _ => {
-                            return Err(format!("Call of non-function: {}", callee.type_name()));
-                        }
+                        _ => raise!(construct_builtin::error_object(
+                            "TypeError",
+                            &format!("Call of non-function: {}", callee.type_name())
+                        )),
                     };
+                    // A throw that escaped the callee's own `catch` is parked in the thread-local;
+                    // surface it here so this frame's `try` (if any) can catch it (issue #60).
+                    if let Some(v) = take_pending_throw() {
+                        raise!(v);
+                    }
                     self.stack.push(result);
                 }
                 Opcode::SelfCall => {
@@ -1848,6 +1931,9 @@ impl Vm {
                     });
                     #[cfg(target_arch = "wasm32")]
                     let result = vm.run_chunk(chunk, nested, &args, false).unwrap_or(Value::Null);
+                    if let Some(v) = take_pending_throw() {
+                        raise!(v);
+                    }
                     self.stack.push(result);
                 }
                 Opcode::CallSpread => {
@@ -1892,6 +1978,9 @@ impl Vm {
                         }
                     };
                     let result = f.call(&args);
+                    if let Some(v) = take_pending_throw() {
+                        raise!(v);
+                    }
                     self.stack.push(result);
                 }
                 Opcode::Construct => {
@@ -1910,6 +1999,9 @@ impl Vm {
                         .pop()
                         .ok_or_else(|| "Stack underflow: no callee for construct".to_string())?;
                     let result = construct_builtin::construct(&callee, &args);
+                    if let Some(v) = take_pending_throw() {
+                        raise!(v);
+                    }
                     self.stack.push(result);
                 }
                 Opcode::ConstructSpread => {
@@ -1936,6 +2028,9 @@ impl Vm {
                         }
                     };
                     let result = construct_builtin::construct(&callee, &args);
+                    if let Some(v) = take_pending_throw() {
+                        raise!(v);
+                    }
                     self.stack.push(result);
                 }
                 Opcode::Return => {
@@ -1995,7 +2090,7 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    let v = ic_get_member(chunk, idx, &obj, key)?;
+                    let v = catchable!(ic_get_member(chunk, idx, &obj, key));
                     self.stack.push(v);
                 }
                 Opcode::GetMemberOptional => {
@@ -2023,7 +2118,7 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    ic_set_member(chunk, idx, &obj, key, val.clone())?;
+                    catchable!(ic_set_member(chunk, idx, &obj, key, val.clone()));
                     self.stack.push(val); // assignment yields value
                 }
                 Opcode::GetIndex => {
@@ -2035,7 +2130,7 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    let v = get_index(&obj, &idx_val)?;
+                    let v = catchable!(get_index(&obj, &idx_val));
                     self.stack.push(v);
                 }
                 Opcode::SetIndex => {
@@ -2057,7 +2152,7 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    set_index(&obj, &idx_val, val.clone())?;
+                    catchable!(set_index(&obj, &idx_val, val.clone()));
                     self.stack.push(dup_val); // assignment yields the assigned value
                 }
                 Opcode::NewArray => {
@@ -2341,7 +2436,7 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
-                    Self::unwind_throw(&mut try_handlers, &mut self.stack, &mut ip, v)?;
+                    raise!(v);
                 }
                 Opcode::AwaitPromise => {
                     let v = self

@@ -32,6 +32,7 @@ pub fn normalize_for_of(v: Value) -> Value {
     }
 }
 
+pub use tishlang_builtins::construct::error_constructor_value as tish_error_constructor;
 pub use tishlang_builtins::construct::{
     audio_context_constructor_value as tish_audio_context_constructor, construct as tish_construct,
 };
