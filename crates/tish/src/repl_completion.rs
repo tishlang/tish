@@ -13,7 +13,6 @@ use rustyline::Context;
 use rustyline::Helper;
 
 use tishlang_bytecode::{compile_for_repl, compile_for_repl_unoptimized};
-use tishlang_parser;
 use tishlang_vm::Vm;
 
 /// Tish keywords for bare-word completion (Python-style).

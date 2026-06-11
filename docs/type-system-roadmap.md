@@ -22,10 +22,10 @@ machine-AOT), targeting a **full TS-like** surface (generics, unions, interfaces
 
 | Capability | State | Where |
 |---|---|---|
-| Type-annotation **syntax** (lex/AST/parse) | ✅ ~70% of a pragmatic TS subset | `tish_lexer`, `tish_ast/src/ast.rs:11`, `tish_parser/src/parser.rs:484` |
+| Type-annotation **syntax** (lex/AST/parse) | ✅ ~95% of a pragmatic TS subset — primitives, arrays, `T?`, tuples, literal types, unions, intersections, fn types, generics (`<T>`/`Array<T>`/`Box<number>`/nested), `as`, `interface`(+`extends`) | `tish_lexer`, `tish_ast/src/ast.rs:11`, `tish_parser/src/parser.rs` |
 | Internal **type representation** | ✅ Solid for scalars/arrays/structs; ❌ no generics/real-unions | `tish_compile/src/types.rs:11` (`RustType`) |
 | Type **inference** | ⚠️ ~15% — forward, literal + numeric-arithmetic only | `tish_compile/src/infer.rs` |
-| Type **checking / soundness** | ❌ 0% — nothing validates annotations | (no checker crate exists) |
+| Type **checking / soundness** | 🟡 gradual checker (Phase 2 core) — flags provable annotation violations behind `TISH_CHECK`; zero corpus false positives | `tish_compile/src/check.rs` |
 | **Type-driven native codegen** (Rust backend) | ✅ Real but trapped *inside* one function body | `tish_compile/src/codegen.rs:1721,5009,5127` |
 | **Cross-function** native typing | ⚠️ M1 params: native scalar params get a native shadow (`TISH_PARAM_NATIVE`; matmul 301→15ms, 3x node). M5 calls: native monomorphic top-level fns + direct-call routing (`TISH_NATIVE_FN`; fib(35) 512→31ms, beats node). Both dark-shipped, corpus-correct. TODO: native returns to other contexts, closures, M4 inference | `codegen.rs` param-bind, `collect_native_fns`/`emit_native_fns` |
 | **Machine-code AOT** (Cranelift/LLVM) | ❌ ~5% — stubs that embed bytecode + run the VM | `tish_cranelift/src/lower.rs:3` |
@@ -37,12 +37,25 @@ foundation exists and demonstrably accelerates annotated numeric/struct code (se
 
 ### What parses today (frontend)
 
-Supported: primitives (`number/string/boolean/void/null/any`), `T[]`, `{k:T}`, `A | B` unions,
-`(T) => R` function types, `type X = …`, `declare let/const/function`.
+Supported: primitives (`number/string/boolean/void/null/any`), `T[]`, **`T?`** (→ `T | null`),
+`{k:T}`, **`[T, U]` tuples** (native Rust tuples), **literal types** (`"a" | "b"`, `42`, `true`),
+**`A | B`** unions, **`A & B`** intersections, `(T) => R` function types, `type X = …`, **generics**
+`fn f<T>(…)` / `type Box<T> = …` / `Array<T>` / `Box<number>` / nested `Array<Array<T>>`,
+**`expr as T`** casts, **`interface X { … }`** + **`interface X extends Y`** (→ structural check +
+native struct), `declare let/const/function`. — **~95% of a pragmatic TS surface.**
 
-**Missing:** generics `<T>`, optional `T?`, intersection `A & B`, literal types, `as` casts,
-`interface`, tuples. (`parser.rs:484` `parse_type_annotation`; AST enum `ast.rs:11`
-`TypeAnnotation`.)
+**Generic monomorphization — structs done, functions remain.** Generic *structs* now specialize
+natively: a reference `Box<number>` is desugared **in the parser** to a synthetic concrete alias
+`type Box__number = { value: number }` (the parser tracks `type Box<T> = …` decls, substitutes the
+args, dedups, and prepends the specializations), which lowers via the normal struct path to a
+`TishStruct_Box__number { value: f64 }` — a real `f64` field, not a boxed `Value` (verified by
+`monomorphization_tests::generic_struct_is_native`). `Array<T>`→native `T[]` likewise. **Still
+boxed:** generic *functions* (`identity<T>`) — their type params erase, so they run correctly but
+boxed; native fn specialization needs cloning the fn body per call-site instantiation (a larger
+codegen pass), the one remaining generic optimization.
+
+**Truly missing:** `keyof`/mapped/conditional types, declaration merging, full ECMAScript type
+compatibility — explicitly out of scope per `LANGUAGE.md`.
 
 ### How types lower today (`RustType`, `types.rs:11`)
 
@@ -50,8 +63,9 @@ Supported: primitives (`number/string/boolean/void/null/any`), `T[]`, `{k:T}`, `
 `T|null→Option<T>`, `{..}`→emitted `TishStruct_*`, `(T)=>R→Rc<dyn Fn>`. **Everything else →
 `RustType::Value`** (the dynamic tagged enum, `tish_core/src/value.rs:284`). Codegen gates on
 `RustType::is_native()` to pick native vs boxed emission; `f64`/`bool` arithmetic, `Vec<f64>`,
-and struct field access all emit natively. `result_type_of_binop` (`types.rs:142`) only handles
-`f64×f64` and `bool×bool` — **not even string `+`**.
+and struct field access all emit natively. `result_type_of_binop` (`types.rs:142`) handles
+`f64×f64`, `bool×bool`, and — since M2 — `String×String` for `+` / `===` / `!==`; relational
+string comparison and mixed-type ops still fall back to the boxed runtime.
 
 ### Three architecture facts that dominate the roadmap
 
@@ -83,6 +97,77 @@ can't cross a function call, parameter, return, array element, or member access*
 to `Value`. This is why only ~5–15% of typical code currently goes native. **Unlocking
 cross-function typing is the single highest-leverage change** and is Phase 1's centerpiece.
 
+### Implemented today: typed native codegen (dark-shipped behind flags)
+
+Phase-1 milestones **M1, M4, M5 are implemented** and **M2 landed** (string concat/equality),
+all gated by opt-in env flags so the default build stays byte-identical (dark-ship discipline).
+Set them at `tish build` time, always with `--native-backend rust` (the only backend that
+consumes type info):
+
+| Flag | Milestone | What it does |
+|---|---|---|
+| `TISH_PARAM_NATIVE=1` | M1 | Annotated scalar params (`a: number/boolean/string`) get a native shadow (`f64`/`bool`/`String`) so the body lowers natively instead of boxing. |
+| `TISH_PARAM_INFER=1` | M4 | Unannotated params used *purely numerically* are inferred `number` (conservative, sound), feeding M1/M5. |
+| `TISH_NATIVE_FN=1` | M5 | Top-level numeric-only functions (numeric params+returns; bodies calling only other such fns or whitelisted `Math.*`) are emitted as a parallel native `fn f_native(a: f64,…) -> f64`; direct calls route to it, bypassing the boxed `value_call` ABI. |
+| `TISH_STRUCT_INFER=1` | struct / array | Unannotated `let o = {…}` / `let xs = […]` are inferred to a native struct / `T[]` when every later use is safe (`uses_are_struct_safe` / `uses_are_array_safe`). Array inference allows only `for-of` + `.length` reads — a native index would panic out-of-bounds where the boxed array yields `undefined`. |
+| `TISH_NATIVE_HOF=1` | M3 (HOFs) | Higher-order methods on a native `number[]` (`Vec<f64>`) — `reduce`/`map`/`filter`/`some`/`every` with a simple arrow callback — lower to a direct Rust iterator chain (`fold`/`map`/`filter`/`any`/`all`), eliminating the per-element `value_call` and all `Value` boxing. Bails to the boxed `array_*` path (correctness over coverage) unless the element is `f64`, the callback is a no-default-param **expression** arrow whose body type-checks native, and the body does **not** mention the receiver (`pi_mentions` guard against aliasing the `.iter()` borrow). |
+| `TISH_CHECK=warn` / `=error` | Phase 2 | Runs the gradual type checker (`check.rs`): `warn` prints provable annotation violations to stderr (`line:col: …`), `error` also **blocks the build**. Catches wrong-typed initializers, returns, reassignments, call args, and struct fields at compile time — instead of a runtime `panic!`. Off by default. |
+
+`number×number`, `bool×bool`, (M2) `string` concat/equality, (M3) `for (let x of xs)` over a typed
+array, typed **rest-params** (`...args: number[]`→`Vec<f64>`), and **member access on indexed
+structs** (`pts[i].x`) lower natively **regardless of flags** when operands/iterables are already
+typed (base typed codegen — explicit annotations like `let x: number` / `let a: number[]` always
+emit `f64` / `Vec<f64>`; M3 iterates that `Vec` **index-based**, since `.iter().cloned()` failed to
+optimize inside the monolithic generated `run()`).
+
+**Verified speedups** (Apple Silicon, `--native-backend rust`, identical output). These are now a
+**committed, reproducible A/B** — `just perf-gauntlet` builds every `tests/perf` fixture boxed
+(flags-off) vs typed (flags-on) vs node and prints the `typing-speedup` column, with a `TYPED≠BOXED`
+guard that fails if the typed path ever changes a result. Snapshot + methodology:
+[`perf-typed-vs-untyped-baseline.md`](perf-typed-vs-untyped-baseline.md) (object_sum 45×, array_hof
+20×, matmul 15.6×, fib/untyped-fib ~14.6×, typed-array-HOF 2.68×; neutral on already-native/memory-
+bound loops; 8/9 beat V8). The hand-measured table below predates the harness:
+
+| Program | slow | fast | speedup | path |
+|---|---|---|---|---|
+| `fib(35)`, `fn fib(n: number): number` | 475 ms | 41 ms | **11.6×** | M1 + M5 (flags) |
+| `fib(35)`, untyped `function fib(n)` | 487 ms | 46 ms | **10.6×** | M4 + M5 (flags) |
+| matmul 256, `fn bench(N: number)` | 230 ms | 14 ms | **16×** | M1 (flags) |
+| matmul 256, fully-untyped → annotated locals | 497 ms | 230 ms | 2.2× | base typed codegen |
+| 3M-elem `for (x of xs)` reduction, compute-heavy body | 53 ms *(untyped, boxed)* | 4 ms *(typed `number[]`)* | **~13×** | M3 (base codegen) |
+| 32M-elem `number[].reduce((a,b)=>…)`, non-foldable hash body | 1.09 s *(boxed `array_reduce`)* | 0.38 s *(native `fold`)* | **~2.9×** | M3 HOFs (`TISH_NATIVE_HOF`) |
+
+*(M3 note: a trivial sum is memory-bandwidth-bound, so the win shows on compute-heavy bodies where
+boxing each intermediate dominated; correctness/no-boxing holds either way.)*
+
+**Correctness:** the whole `tests/core` corpus is byte-identical across interpreter / VM / native
+/ cranelift / wasi / js with flags **off**, and the native corpus + cross-runtime parity (incl.
+node) stay correct with flags **on**. Fixtures under `tests/core/`: `typed_strings` (M2),
+`typed_param_loopbound` (M4), `typed_array_forof` (M3 ForOf), `typed_rest_params` (M3 rest-params),
+`typed_array_of_structs` (M3 member access), `typed_array_literal_infer` (array inference),
+`typed_array_hof` (M3 native `reduce`/`map`/`filter`/`some`/`every` over `number[]`), plus
+`infer::param_infer_tests`. Bugs fixed this work: the default-param-references-native-param compile
+error (`fn dependent(a, b = a + 1)` — now kept boxed); and an unsound array-inference OOB (a native
+`Vec` index panics where the boxed array returns `undefined`, so index reads bail). A *separate*
+pre-existing interp/VM bug — an empty rest-param call (`f()` for `fn f(...a)`) returns `NaN` instead
+of `0` — is tracked outside this typing work (the native backend is already correct).
+
+**Known limitations / next coverage wins:**
+- **M4 now infers loop-bound params:** a param compared to a numeric *local* (`for (let i = 0;
+  i < n; i++)`) is inferred `number` — `numeric_provable` consults a per-function set of
+  known-numeric locals (`infer.rs` `collect_numeric_locals`), so `i < n` proves `n` numeric.
+  **Still bails on string-coercion uses:** matmul's `fn bench(N)` interpolates `${N}` in a
+  `console.log` template — a stringify use that conservatively bails — so `bench(N)` still needs an
+  explicit `N: number`. A "compatible-but-not-proving" use model (permit stringify/template uses
+  when another use already proves numeric) would close this.
+- **M3 (collections) is done:** native `for (let x of xs)` over a typed `Vec` (index-based, loop var
+  + demotion pass bind the element type); typed **rest-params** `...args: number[]`→`Vec<f64>` so
+  `sum(...args)` is fully native; **member access on indexed structs** `pts[i].x` lowers to native
+  field access; and **array-literal inference** (`let xs = [1,2,3]`→`number[]`, behind
+  `TISH_STRUCT_INFER`, read-only uses only). The one remaining Phase-1 gap is the **M4
+  template/stringify** inference model noted above; after that, Phase 1 coverage is complete.
+- **No type checker yet** (Phase 2): mismatches still surface as runtime panics, not compile errors.
+
 ---
 
 ## Part 2 — Roadmap (sequenced)
@@ -112,16 +197,19 @@ calls to it, bypassing `value_call` entirely.
 | # | Milestone | Core change | Files |
 |---|---|---|---|
 | **M0** | Function **signature table** (no-op pre-pass) | `FnSig{params,rest,returns,native_safe}` + `FnSigTable`, built after `collect_type_aliases`; unused at first so it can't regress | `types.rs` (new), `codegen.rs:~1348` |
-| **M2** | **String** concat + native string methods | add `String+String→String` (+ comparisons) to `result_type_of_binop` (`types.rs:142`) and mirror in `infer.rs`; whitelist UTF-safe `str` methods | `types.rs:142`, `infer.rs:80`, `codegen.rs:~3060/5170` |
-| **M3** | **Collections**: arrays-of-structs + nested element typing | much may be free (`Vec<Named>` composes); generalize the typed Member fast path to any `object` whose type is `Named` (not just `Ident`) so `xs[i].field`/`a.b.c` lower native | `codegen.rs:3124`, `infer.rs` (Array arm) |
+| **M2 ✅** | **String** concat + value equality *(DONE)* | `String×String`: `+` emits a `format!`, `===`/`!==` compare by value; added to `result_type_of_binop` + `infer.rs`. Relational `< <= > >=` deliberately stay boxed (JS UTF-16 vs Rust UTF-8 order). Native string *methods* deferred. | `types.rs` (String arm), `infer.rs` (`is_string`), `codegen.rs` `emit_typed_expr` Add |
+| **M3** ✅ | **Collections** | ✅ native `for (let x of xs)` over a typed `Vec` (index-based); ✅ typed rest-params `...args: number[]`→`Vec<f64>`; ✅ member access on indexed structs (`pts[i].x`); ✅ array-literal inference (`let xs=[…]`→`T[]`, behind `TISH_STRUCT_INFER`, read-only); ✅ native HOFs `reduce`/`map`/`filter`/`some`/`every` over a `number[]`→Rust `fold`/`map`/`filter`/`any`/`all` (behind `TISH_NATIVE_HOF`; `try_native_vec_hof`). ◻ Only `a.b.c` deep-nested member chains still box. | `codegen.rs` ForOf/rest-param/Member/`try_native_vec_hof` + `collect_annotated_types`; `infer.rs` `infer_array_elem`/`uses_are_array_safe`/`pi_mentions` |
 | **M1** | **Cross-function param + return typing** (keystone) | type annotated params via `from_value_expr` native shadow; thread return type; add a `Call` arm to `emit_typed_expr` that reports the signature's `returns` (wrapping `value_call` result with `from_value_expr`) | `types.rs:384`, `codegen.rs:2303,1906,5127,5258` |
 | **M4** | **Inference upgrade** (bidirectional, dark-shipped) | extend `infer.rs` to propagate through call returns (via table), member access on structs, array elements, string concat, loop/closure vars; **param inference** from use-sites ∩ call-sites behind `TISH_PARAM_INFER` (mirrors `TISH_STRUCT_INFER`) | `infer.rs:71,123,656` |
 | **M5** | **Native monomorphic `fn`** (stretch, Strategy B) | emit parallel `fn f_native` for eligible (`native_safe`) functions; route direct calls; keep closure wrapper as safety net | `codegen.rs:2069,5127` |
 
-**Ship order:** **M0 → M2 → M3 → M1 → M4 → M5** (build confidence on low-risk surface before
-touching the param ABI). Highest-risk audit point before M1: `emit_expr`'s `Expr::Ident` arm
-(`codegen.rs:2593`) must auto-box a native-typed ident used in a `Value` position via
-`to_value_expr`.
+**Status: Phase 1 is essentially complete.** M1, M2, M3, M4, M5 are all implemented (see
+*Implemented today*). **M0** was never built as a standalone table — M5 rolled its own
+`collect_native_fns` fixpoint analysis instead. The only remaining Phase-1 polish is the M4
+"compatible-but-not-proving" use model (so templates/`${x}`-stringify uses don't bail) and
+deep-nested `a.b.c` member chains. Original planned order was M0 → M2 → M3 → M1 → M4 → M5; the
+param/native-fn work (M1/M4/M5) landed first in practice, then M2/M3. **Next up is Phase 2 (the
+type checker)** for the soundness/hardening axis, which is still at 0%.
 
 **Reuse, don't reinvent:** `from_value_expr`/`to_value_expr` (`types.rs:227/278`) for every
 boundary; `is_native`/`result_type_of_binop`/`from_annotation_with_aliases`; the
@@ -135,6 +223,19 @@ generated Rust for `examples/matmul` — `bench`'s `i < N` and `i*N+k` should be
 `ops::lt`/`ops::mul`; benchmark the ms drop; `just parity` to catch semantic drift.
 
 ### Phase 2 — Soundness: a real type checker
+
+> **🟡 Core landed (`crates/tish_compile/src/check.rs`).** A **gradual** checker now flags provable
+> annotation violations — wrong-typed `let x: T = e` initializers, `return`s vs the declared return,
+> reassignments to a typed var, call arguments vs parameter types, and object-literal fields vs a
+> declared shape — with `line:col` diagnostics. It runs over `TypeAnnotation` (not yet a dedicated
+> `Ty` IR), is **bidirectional-ish** (`synth`/`assignable` with alias resolution + width-subtyping for
+> object shapes), and is deliberately **gradual**: anything it can't prove (calls to unsignatured
+> functions, dynamic values, `any`, unannotated locals) yields no diagnostic — **zero false positives
+> on the whole corpus** (enforced by `checker_no_false_positives_on_corpus`). Surfaced three ways:
+> `tish build --check warn|error` (or `TISH_CHECK`), where `error` blocks the build; and **`tish-lsp`**
+> publishes the diagnostics as editor warnings (alongside lint/resolve). Off by default for builds.
+> **Remaining Phase-2 work:** the dedicated `Ty` IR below (for real unions/narrowing) and turning the
+> codegen `from_value_expr` `panic!`s into statically-unreachable-for-checked-code.
 
 **Architectural decision: introduce a dedicated `Ty` IR — do *not* overload `RustType`.** Keep
 `TypeAnnotation` (syntax) and `RustType` (Rust emission) as the two ends; insert `Ty` as the
@@ -180,11 +281,11 @@ falls back to `Value` — never a miscompile.
 
 | # | Milestone | Core change |
 |---|---|---|
-| **M3.1** | Generics parse + represent | `<T>` in `parse_type_annotation` (disambiguate `<`/`>` by type-position only); `TypeAnnotation::Generic`, `Ty::Param/Named{args}`; checker infers type args via the `Ty::Var` unification engine |
-| **M3.2** | **Monomorphization** | new `mono.rs` (after check, before lower): collect concrete instantiations, clone-and-specialize per arg-set; `Array<number>`→`Vec<f64>` (no `Value`); dedup identical instantiations by canonical key |
-| **M3.3** | Optional `T?`, literal types, tuples, `as` | parser + `Ty` + native lowering; add `RustType::Tuple(Vec<RustType>)`→Rust tuples; `T?`→`Option<T>`; literals power discriminants |
+| **M3.1** ✅ | Generics parse + run | `<T>` on `fn`/`type`/refs parsed; nested `Array<Array<T>>` works (`gt_debt` splits the `>>` token). The `<`/`>`-vs-JSX ambiguity is resolved in the lexer (a `<` after a *value* position is `Lt`, never JSX — also fixed no-space `a<b`). |
+| **M3.2** ◑ | **Monomorphization** | ✅ generic **structs**: parser desugars `Box<number>` → a synthetic concrete alias `type Box__number = { value: number }` (tracks decls, substitutes args, dedups, prepends), lowering to a native `TishStruct_Box__number { value: f64 }`. `Array<T>`→native `T[]`. ◻ generic **functions** (`identity<T>`) still erase to `Value` (boxed but correct) — native fn specialization needs per-call-site body cloning. |
+| **M3.3** ✅ | Optional `T?`, literal types, tuples, `as`, intersections | `T?`→`T|null`→`Option<T>` (native); literal types (`"a"`/`42`/`true`) check as their base primitive (power discriminated unions); **tuples `[T,U]` lower to native Rust tuples `(f64, String)`** (`RustType::Tuple`; literal `[a,b]`→`(a,b)`, `t[const]`→`t.const`); `expr as T` is a parse-time-erased gradual assertion; `A & B` intersections merge object members into one native struct (`interface extends` desugars to this). |
 | **M3.4** | **Discriminated unions + narrowing** | stop collapsing non-null unions to `Value`: lower `A|B` to a generated Rust `enum`; flow-sensitive narrowing in checker (`typeof`/discriminant/`!== null`) so narrowed branches lower native (reuse typed-member fast path); conservative bail to `Value` on escape |
-| **M3.5** | Interfaces | `interface` keyword + `Statement::Interface`; structural match reuses M2.3 `is_assignable`; lowers to the same `TishStruct_*` path as object aliases; `extends`=field-set intersection |
+| **M3.5** ✅ | Interfaces *(DONE, ahead of Phase 3)* | `interface` lexer keyword + parser rule that **desugars to a `type` alias** (`parse_interface` → `Statement::TypeAlias`), so structural checking (`check.rs` alias resolution + object width-subtyping) and native `TishStruct_*` codegen come for free. Exposed a latent struct→`Value` boxing bug (`Value::object` vs `Value::Object(VmRef::new(ObjectMap))`) — fixed. ◻ `extends` not yet. |
 | **M3.6** | *(optional)* typed-IR Cranelift AOT | only if removing rustc-in-the-loop is required; generalize `tish_vm/src/jit.rs` (already lowers f64 slot-based code via `JITModule`) to the monomorphized typed IR, behind `--native-backend cranelift-aot`; Rust backend stays the default + correctness oracle |
 
 **True-AOT recommendation.** Make the **typed Rust backend the canonical machine-AOT path.** Once

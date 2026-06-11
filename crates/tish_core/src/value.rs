@@ -344,11 +344,12 @@ impl TishRegExp {
 /// **Thread safety**: `Value: Send + Sync`. Mutable payloads live inside
 /// [`VmRef`], a `Send + Sync` `Arc<Mutex<T>>` wrapper that preserves the
 /// `RefCell`-style borrow API. Functions are `Arc<dyn Fn + Send + Sync>`.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum Value {
     Number(f64),
     String(arcstr::ArcStr),
     Bool(bool),
+    #[default]
     Null,
     Array(VmRef<Vec<Value>>),
     /// Packed f64 array — `TISH_PACKED_ARRAYS` mode only. All elements are f64; a non-numeric
@@ -670,6 +671,7 @@ impl<'a> Iterator for PropMapValues<'a> {
 }
 
 /// Owning iterator over [`PropMap`] entries (insertion order).
+#[allow(clippy::large_enum_variant)] // `Inline` is intentionally unboxed to keep PropMap iteration allocation-free
 pub enum PropMapIntoIter {
     Inline(smallvec::IntoIter<[(Arc<str>, Value); PROPMAP_INLINE]>),
     Map(indexmap::map::IntoIter<Arc<str>, Value>),
@@ -770,6 +772,68 @@ pub fn object_has(obj: &Value, key: &Value) -> bool {
     }
 }
 
+/// Drain a JS-style iterator object — one with a callable `next()` that returns
+/// `{ value, done }` — into a `Vec`, calling `next()` until `done` is truthy. Returns
+/// `None` when `obj` is not such an object (no callable `next`), so callers fall back
+/// to their array/string handling. This is what makes a `Map`/`Set` iterator (the result
+/// of `.values()`/`.keys()`/`.entries()`) usable in `for…of`, spread, and `Array.from`.
+/// A missing/absent `done` is treated as truthy so a malformed object can't spin forever;
+/// the native iterators always set `done`, so well-formed iteration is exact.
+pub fn drain_iterator(obj: &Value) -> Option<Vec<Value>> {
+    if !matches!(obj, Value::Object(_)) {
+        return None;
+    }
+    // Fast path: tish's own `Map`/`Set` iterators expose `__drain__`, which returns the remaining
+    // items as one array (respecting the current position) and exhausts the iterator — so `for…of`
+    // and spread don't pay the per-element `{ value, done }` allocation of the generic `next()` loop.
+    if let Some(Value::Function(drain)) = object_get(obj, &Value::String("__drain__".into())) {
+        if let Value::Array(arr) = drain.call(&[]) {
+            return Some(arr.borrow().clone());
+        }
+    }
+    let Value::Function(next) = object_get(obj, &Value::String("next".into()))? else {
+        return None;
+    };
+    let done_key = Value::String("done".into());
+    let value_key = Value::String("value".into());
+    let mut out = Vec::new();
+    loop {
+        let res = next.call(&[]);
+        let done = object_get(&res, &done_key)
+            .map(|v| v.is_truthy())
+            .unwrap_or(true);
+        if done {
+            break;
+        }
+        out.push(object_get(&res, &value_key).unwrap_or(Value::Null));
+    }
+    Some(out)
+}
+
+/// JS `ToInt32`: NaN and ±Infinity map to `0`; every other value is truncated toward zero and
+/// reduced modulo 2³². `f64 as i64` is exact for the finite `< 2⁶³` magnitudes real bitwise code
+/// produces (then `as i32` truncates the low 32 bits = the modulo); the `is_finite` guard is what
+/// makes `Infinity`/`-Infinity` correct — `f64 as i64` *saturates* (`+∞ → i64::MAX → -1`), which is
+/// NOT the JS result. One always-predicted branch, so the hot path (finite hash values) is unaffected.
+#[inline]
+pub fn to_int32(x: f64) -> i32 {
+    if x.is_finite() {
+        x as i64 as i32
+    } else {
+        0
+    }
+}
+
+/// JS `ToUint32`: as [`to_int32`] but reinterpreted unsigned (NaN/±Infinity → `0`).
+#[inline]
+pub fn to_uint32(x: f64) -> u32 {
+    if x.is_finite() {
+        x as i64 as u32
+    } else {
+        0
+    }
+}
+
 /// Invoke a callable [`Value`]: [`Value::Function`], or an object exposing `__call` (e.g. `Symbol`).
 pub fn value_call(callee: &Value, args: &[Value]) -> Value {
     match callee {
@@ -838,21 +902,81 @@ impl std::fmt::Debug for Value {
     }
 }
 
+/// Format an `f64` exactly like JavaScript's `Number.prototype.toString` (radix 10) — the
+/// algorithm behind `console.log(n)` and `String(n)`. Rust's default `{}` never uses
+/// exponential form and so prints `6.022e23` as `602200000000000000000000`; JS switches to
+/// exponential when the decimal point lands past digit 21 or before digit −6.
+///
+/// We take the shortest round-tripping digits from Rust's `{:e}` (a Ryū/Grisu-class shortest
+/// formatter, matching V8's digit choice) and lay them out per the ECMAScript rule: plain
+/// decimal when the point position `n` is in `(-6, 21]`, otherwise `d[.ddd]e±E` with `E = n-1`
+/// (sign always shown, no leading zeros in the exponent). `-0` renders as `"-0"` (matching
+/// `console.log` and tish's existing behavior).
+pub fn js_number_to_string(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value == f64::INFINITY {
+        return "Infinity".to_string();
+    }
+    if value == f64::NEG_INFINITY {
+        return "-Infinity".to_string();
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() { "-0" } else { "0" }.to_string();
+    }
+
+    let negative = value < 0.0;
+    // Shortest round-trip digits + base-10 exponent, e.g. "6.022e23" → ("6022", 23).
+    let sci = format!("{:e}", value.abs());
+    let (mantissa, exp_str) = sci
+        .split_once('e')
+        .expect("LowerExp formatting always contains 'e'");
+    let exp: i32 = exp_str
+        .parse()
+        .expect("LowerExp exponent is a valid integer");
+    let digits: String = mantissa.chars().filter(|&c| c != '.').collect();
+    let k = digits.len() as i32; // significant digit count (≤ 17 for an f64)
+    let point = exp + 1; // ECMAScript's `n`: value = digits × 10^(point − k)
+
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    if k <= point && point <= 21 {
+        // Integer, zero-padded: digits then (point − k) trailing zeros.
+        out.push_str(&digits);
+        out.push_str(&"0".repeat((point - k) as usize));
+    } else if 0 < point && point <= 21 {
+        // Decimal point inside the digit string.
+        out.push_str(&digits[..point as usize]);
+        out.push('.');
+        out.push_str(&digits[point as usize..]);
+    } else if -6 < point && point <= 0 {
+        // Leading-zero fraction: "0." then (−point) zeros then the digits.
+        out.push_str("0.");
+        out.push_str(&"0".repeat((-point) as usize));
+        out.push_str(&digits);
+    } else {
+        // Exponential: first digit, optional `.rest`, then `e±E`.
+        let e = point - 1;
+        out.push_str(&digits[..1]);
+        if k > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('e');
+        out.push(if e >= 0 { '+' } else { '-' });
+        out.push_str(&e.abs().to_string());
+    }
+    out
+}
+
 impl Value {
     /// Convert value to display string (for console output).
     pub fn to_display_string(&self) -> String {
         match self {
-            Value::Number(n) => {
-                if n.is_nan() {
-                    "NaN".to_string()
-                } else if *n == f64::INFINITY {
-                    "Infinity".to_string()
-                } else if *n == f64::NEG_INFINITY {
-                    "-Infinity".to_string()
-                } else {
-                    n.to_string()
-                }
-            }
+            Value::Number(n) => js_number_to_string(*n),
             Value::String(s) => s.to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
@@ -1175,6 +1299,51 @@ impl Value {
                 "toPrecision".into(),
             ],
             _ => vec![],
+        }
+    }
+}
+
+#[cfg(test)]
+mod number_to_string_tests {
+    use super::js_number_to_string;
+
+    #[test]
+    fn matches_javascript_number_tostring() {
+        // (value, expected) — every `expected` is what Node's `String(value)` produces.
+        let cases: &[(f64, &str)] = &[
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (123.0, "123"),
+            (123.456, "123.456"),
+            (0.5, "0.5"),
+            (-123.456, "-123.456"),
+            (100000.0, "100000"),
+            // Decimal/exponential boundary on the large side: 1e21 flips to exponential.
+            (1e20, "100000000000000000000"),
+            (1e21, "1e+21"),
+            (21e18, "21000000000000000000"),
+            // Small side: 1e-6 is decimal, 1e-7 is exponential.
+            (1e-6, "0.000001"),
+            (1e-7, "1e-7"),
+            (9.5e-7, "9.5e-7"),
+            // Exponential with a multi-digit mantissa.
+            (6.022e23, "6.022e+23"),
+            (1.2345678901234568e21, "1.2345678901234568e+21"),
+            (1e100, "1e+100"),
+            (-1e21, "-1e+21"),
+            // Subnormal min and normal max.
+            (5e-324, "5e-324"),
+            (1.7976931348623157e308, "1.7976931348623157e+308"),
+            // Shortest round-trip mantissa (not full precision).
+            (0.1, "0.1"),
+            (0.1 + 0.2, "0.30000000000000004"),
+            // Non-finite.
+            (f64::INFINITY, "Infinity"),
+            (f64::NEG_INFINITY, "-Infinity"),
+            (f64::NAN, "NaN"),
+        ];
+        for &(value, expected) in cases {
+            assert_eq!(js_number_to_string(value), expected, "for {value:?}");
         }
     }
 }

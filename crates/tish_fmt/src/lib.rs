@@ -508,6 +508,16 @@ impl Printer {
         self.depth = level;
         match s {
             Statement::Block { statements, span } => self.block(statements, *span, level, true),
+            // Comma-declarators: render each as its own statement line. The caller
+            // (print_seq) emits the trailing newline, so only separate internally.
+            Statement::Multi { statements, .. } => {
+                for (i, st) in statements.iter().enumerate() {
+                    if i > 0 {
+                        self.buf.push('\n');
+                    }
+                    self.stmt(st, level);
+                }
+            }
             Statement::VarDecl {
                 name,
                 mutable,
@@ -1072,6 +1082,33 @@ impl Printer {
                     self.type_ann(x);
                 }
             }
+            TypeAnnotation::Tuple(elems) => {
+                self.buf.push('[');
+                for (i, x) in elems.iter().enumerate() {
+                    if i > 0 {
+                        self.buf.push_str(", ");
+                    }
+                    self.type_ann(x);
+                }
+                self.buf.push(']');
+            }
+            TypeAnnotation::Literal(lit) => match lit {
+                tishlang_ast::TypeLiteral::Str(s) => {
+                    self.buf.push('"');
+                    self.buf.push_str(s.as_ref());
+                    self.buf.push('"');
+                }
+                tishlang_ast::TypeLiteral::Num(n) => self.buf.push_str(&n.to_string()),
+                tishlang_ast::TypeLiteral::Bool(b) => self.buf.push_str(&b.to_string()),
+            },
+            TypeAnnotation::Intersection(parts) => {
+                for (i, x) in parts.iter().enumerate() {
+                    if i > 0 {
+                        self.buf.push_str(" & ");
+                    }
+                    self.type_ann(x);
+                }
+            }
         }
     }
 
@@ -1118,10 +1155,10 @@ impl Printer {
             }
             Expr::Unary { op, operand, .. } => {
                 match op {
-                    UnaryOp::Not => self.buf.push_str("!"),
-                    UnaryOp::Neg => self.buf.push_str("-"),
-                    UnaryOp::Pos => self.buf.push_str("+"),
-                    UnaryOp::BitNot => self.buf.push_str("~"),
+                    UnaryOp::Not => self.buf.push('!'),
+                    UnaryOp::Neg => self.buf.push('-'),
+                    UnaryOp::Pos => self.buf.push('+'),
+                    UnaryOp::BitNot => self.buf.push('~'),
                     UnaryOp::Void => self.buf.push_str("void "),
                 }
                 self.child(operand, PREC_POSTFIX);
@@ -1460,7 +1497,7 @@ fn binop_prec(op: BinOp) -> u8 {
         BinOp::BitOr => 5,
         BinOp::BitXor => 6,
         BinOp::BitAnd => 7,
-        BinOp::Shl | BinOp::Shr => 8,
+        BinOp::Shl | BinOp::Shr | BinOp::UShr => 8,
         BinOp::Eq | BinOp::Ne | BinOp::StrictEq | BinOp::StrictNe => 9,
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::In => 10,
         BinOp::Add | BinOp::Sub => 11,
@@ -1519,6 +1556,7 @@ fn binop(op: BinOp) -> &'static str {
         BinOp::BitXor => "^",
         BinOp::Shl => "<<",
         BinOp::Shr => ">>",
+        BinOp::UShr => ">>>",
         BinOp::In => "in",
     }
 }

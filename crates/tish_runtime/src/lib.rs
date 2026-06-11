@@ -15,14 +15,42 @@ pub use tishlang_core::Value;
 pub use tishlang_core::ArcStr;
 /// Used by native codegen for `f()` / `obj()` dispatch (`Value::Function` or `__call` on objects).
 pub use tishlang_core::value_call;
+/// JS ToInt32/ToUint32 for the emitted bitwise/shift code (modulo 2³², NaN/±Infinity → 0).
+pub use tishlang_core::{to_int32, to_uint32};
 // Re-export the shared-mutable wrapper so the Rust code emitted by
 // `tishlang_compile::codegen` can write `VmRef::new(...)` without needing
 // a direct dependency on `tishlang_core` from the generated crate.
 pub use tishlang_core::{VmReadGuard, VmRef, VmWriteGuard};
 
+/// `for…of` iterable normalization for the native backend: a JS iterator object (one with a
+/// callable `next()` returning `{ value, done }`, e.g. a `Map`/`Set` `.values()` result) is
+/// drained into a `Value::Array`; arrays, strings, and everything else pass through unchanged.
+pub fn normalize_for_of(v: Value) -> Value {
+    match tishlang_core::drain_iterator(&v) {
+        Some(items) => Value::Array(VmRef::new(items)),
+        None => v,
+    }
+}
+
 pub use tishlang_builtins::construct::{
     audio_context_constructor_value as tish_audio_context_constructor, construct as tish_construct,
+};
+pub use tishlang_builtins::typedarrays::{
+    float32_array_constructor_value as tish_float32_array_constructor,
+    float64_array_constructor_value as tish_float64_array_constructor,
+    float64_array_packed,
+    int16_array_constructor_value as tish_int16_array_constructor,
+    int32_array_constructor_value as tish_int32_array_constructor,
+    int8_array_constructor_value as tish_int8_array_constructor,
+    uint16_array_constructor_value as tish_uint16_array_constructor,
+    uint32_array_constructor_value as tish_uint32_array_constructor,
     uint8_array_constructor_value as tish_uint8_array_constructor,
+    uint8_clamped_array_constructor_value as tish_uint8_clamped_array_constructor,
+};
+pub use tishlang_builtins::date::date_constructor_value as tish_date_constructor;
+pub use tishlang_builtins::collections::{
+    collection_size, map_constructor_value as tish_map_constructor,
+    set_constructor_value as tish_set_constructor,
 };
 
 // Re-export array methods from tishlang_builtins
@@ -537,14 +565,6 @@ pub fn json_parse(args: &[Value]) -> Value {
     core_json_parse(&s).unwrap_or(Value::Null)
 }
 
-pub fn date_now(_args: &[Value]) -> Value {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as f64)
-        .unwrap_or(0.0);
-    Value::Number(now)
-}
 
 pub fn array_is_array(args: &[Value]) -> Value {
     builtins_array_is_array(args)
@@ -679,6 +699,13 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
     let key = key.as_ref();
     match obj {
         Value::Object(map) => {
+            // `Set`/`Map` instances expose a computed `.size` (the backing store has no real
+            // `size` key); `collection_size` returns `None` for any other object.
+            if key == "size" {
+                if let Some(n) = collection_size(obj) {
+                    return Value::Number(n);
+                }
+            }
             // The map's key type is `Arc<str>`, which implements
             // `Borrow<str>` — so we can look up with a borrowed `&str`
             // directly. Previously we allocated a fresh `Arc<str>` on
@@ -691,6 +718,17 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
                 Value::Number(arr.borrow().len() as f64)
             } else if let Ok(idx) = key.parse::<usize>() {
                 arr.borrow().get(idx).cloned().unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            }
+        }
+        // Packed `Float64Array` (`TISH_PACKED_ARRAYS`): `.length` and numeric-key reads, mirroring
+        // the boxed `Array` arm. Methods (`reduce`/`map`/…) materialise via `as_boxed_array`.
+        Value::NumberArray(arr) => {
+            if key == "length" {
+                Value::Number(arr.borrow().len() as f64)
+            } else if let Ok(idx) = key.parse::<usize>() {
+                arr.borrow().get(idx).copied().map(Value::Number).unwrap_or(Value::Null)
             } else {
                 Value::Null
             }
@@ -764,6 +802,14 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
             };
             arr.borrow().get(idx).cloned().unwrap_or(Value::Null)
         }
+        // Packed `Float64Array` indexing (`TISH_PACKED_ARRAYS`); mirrors the boxed `Array` arm.
+        Value::NumberArray(arr) => {
+            let idx = match index {
+                Value::Number(n) => *n as usize,
+                _ => return Value::Null,
+            };
+            arr.borrow().get(idx).copied().map(Value::Number).unwrap_or(Value::Null)
+        }
         Value::Object(_) => tishlang_core::object_get(obj, index).unwrap_or(Value::Null),
         // `promise["then"|"catch"]` — string-keyed access mirrors `get_prop` (bracket form
         // is required for `catch`, a reserved word). Keeps the rust backend on par with the VM.
@@ -810,6 +856,22 @@ pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
             arr_mut[index] = val.clone();
             val
         }
+        // Packed `Float64Array` write (`TISH_PACKED_ARRAYS`). On the native path a `NumberArray` is
+        // always a `Float64Array`, so storing the f64 (non-numeric → `NaN`) is the correct view
+        // semantics — and unlike the boxed v1 backing, it actually coerces the write to the element
+        // type. Out-of-range index zero-fills, matching the boxed grow-with-Null behaviour.
+        Value::NumberArray(arr) => {
+            let index = match idx {
+                Value::Number(n) => *n as usize,
+                _ => panic!("Array index must be number"),
+            };
+            let mut arr_mut = arr.borrow_mut();
+            while arr_mut.len() <= index {
+                arr_mut.push(0.0);
+            }
+            arr_mut[index] = val.as_number().unwrap_or(f64::NAN);
+            val
+        }
         Value::Object(_) => {
             tishlang_core::object_set(obj, idx, val.clone()).expect("object set");
             val
@@ -822,6 +884,21 @@ pub fn in_operator(key: &Value, obj: &Value) -> Value {
     match obj {
         Value::Object(_) => Value::Bool(tishlang_core::object_has(obj, key)),
         Value::Array(arr) => {
+            let key_str: Arc<str> = match key {
+                Value::String(s) => Arc::from(s.as_str()),
+                Value::Number(n) => n.to_string().into(),
+                _ => return Value::Bool(false),
+            };
+            let result = key_str.as_ref() == "length"
+                || key_str
+                    .parse::<usize>()
+                    .ok()
+                    .map(|i| i < arr.borrow().len())
+                    .unwrap_or(false);
+            Value::Bool(result)
+        }
+        // Packed `Float64Array` (`TISH_PACKED_ARRAYS`); same key set as the boxed `Array` arm.
+        Value::NumberArray(arr) => {
             let key_str: Arc<str> = match key {
                 Value::String(s) => Arc::from(s.as_str()),
                 Value::Number(n) => n.to_string().into(),

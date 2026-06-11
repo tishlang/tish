@@ -9,13 +9,13 @@
 //!   - Comparison of two `number` expressions → `boolean`
 //!   - Already-annotated vars are left unchanged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tishlang_ast::{
     ArrowBody, BinOp, CallArg, Expr, FunParam, Literal, Program, Statement, TypeAnnotation,
 };
 
 /// Scoped type environment used during inference.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct InferCtx {
     scopes: Vec<HashMap<String, TypeAnnotation>>,
 }
@@ -55,6 +55,41 @@ fn is_number(ann: &TypeAnnotation) -> bool {
     matches!(ann, TypeAnnotation::Simple(s) if s.as_ref() == "number")
 }
 
+fn is_string(ann: &TypeAnnotation) -> bool {
+    matches!(ann, TypeAnnotation::Simple(s) if s.as_ref() == "string")
+}
+
+fn is_bool(ann: &TypeAnnotation) -> bool {
+    matches!(ann, TypeAnnotation::Simple(s) if s.as_ref() == "boolean")
+}
+
+/// Element type of an array literal of uniform native scalars (number/string/boolean), for
+/// `let xs = [1, 2, 3]` -> `number[]`. Bails (None) on empty, spread, mixed, or non-scalar
+/// elements so the binding stays a boxed array.
+fn infer_array_elem(elements: &[tishlang_ast::ArrayElement], ctx: &InferCtx) -> Option<TypeAnnotation> {
+    use tishlang_ast::ArrayElement;
+    if elements.is_empty() {
+        return None;
+    }
+    let mut elem: Option<TypeAnnotation> = None;
+    for el in elements {
+        let e = match el {
+            ArrayElement::Expr(e) => e,
+            ArrayElement::Spread(_) => return None,
+        };
+        let t = infer_expr_type(e, ctx)?;
+        if !(is_number(&t) || is_string(&t) || is_bool(&t)) {
+            return None;
+        }
+        match &elem {
+            None => elem = Some(t),
+            Some(prev) if prev != &t => return None,
+            _ => {}
+        }
+    }
+    elem
+}
+
 fn number_ann() -> TypeAnnotation {
     TypeAnnotation::Simple("number".into())
 }
@@ -84,15 +119,24 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
             let rt = infer_expr_type(right, ctx)?;
             if is_number(&lt) && is_number(&rt) {
                 match op {
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow => {
-                        Some(number_ann())
-                    }
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
+                    // Bitwise/shift coerce to int32 and yield a Number.
+                    | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                    | BinOp::Shl | BinOp::Shr | BinOp::UShr => Some(number_ann()),
                     BinOp::Lt
                     | BinOp::Le
                     | BinOp::Gt
                     | BinOp::Ge
                     | BinOp::StrictEq
                     | BinOp::StrictNe => Some(bool_ann()),
+                    _ => None,
+                }
+            } else if is_string(&lt) && is_string(&rt) {
+                // M2: `string + string` concatenates → string; `===`/`!==` → boolean. Relational
+                // comparisons stay boxed (UTF-16 vs UTF-8 ordering differs outside the BMP).
+                match op {
+                    BinOp::Add => Some(string_ann()),
+                    BinOp::StrictEq | BinOp::StrictNe => Some(bool_ann()),
                     _ => None,
                 }
             } else {
@@ -111,9 +155,19 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
                     }
                 }
                 UnaryOp::Not => Some(bool_ann()),
+                // `~x` is a Number.
+                UnaryOp::BitNot => {
+                    let t = infer_expr_type(operand, ctx)?;
+                    is_number(&t).then(number_ann)
+                }
                 _ => None,
             }
         }
+        // Index of a typed array yields its element type (`a[i]` where `a: T[]` → `T`).
+        Expr::Index { object, .. } => match infer_expr_type(object, ctx) {
+            Some(TypeAnnotation::Array(elem)) => Some(*elem),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -121,25 +175,29 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
 /// Run inference over a program, returning a modified Program with additional
 /// type annotations filled in on `VarDecl` nodes.
 pub fn infer_program(program: &Program) -> Program {
+    // M4 (opt-in via TISH_PARAM_INFER) runs FIRST: give unannotated params used PURELY
+    // numerically a synthetic `: number`. Doing this *before* local/struct inference is what
+    // lets derived numeric locals (`let x0 = (px / w) * 3`) be proven numeric off the now-known
+    // param types — otherwise they fall back to boxed `Value` and the whole hot loop boxes with
+    // them (the difference between an idiomatic numeric fn going native vs staying boxed).
+    // Conservative — any non-numeric / write / escape use bails (param stays boxed Value).
+    let p = if std::env::var("TISH_PARAM_INFER").map(|v| v != "0").unwrap_or(false) {
+        param_infer_program(program.clone())
+    } else {
+        program.clone()
+    };
+    // Base + local-numeric inference (annotates `let` nodes), now seeing M4's param types.
     let mut ctx = InferCtx::new();
     let p = Program {
-        statements: infer_statements(&program.statements, &mut ctx),
+        statements: infer_statements(&p.statements, &mut ctx),
     };
     // Automatic struct inference (opt-in via TISH_STRUCT_INFER until proven):
     // give unannotated object literals a concrete struct type so the Rust
     // backend emits unboxed structs with direct field access. Conservative —
     // only applies when every use of the binding is a literal-key field read,
     // so it can never miscompile (any uncertainty falls back to boxed Value).
-    let p = if std::env::var("TISH_STRUCT_INFER").map(|v| v != "0").unwrap_or(false) {
+    if std::env::var("TISH_STRUCT_INFER").map(|v| v != "0").unwrap_or(false) {
         struct_infer_program(p)
-    } else {
-        p
-    };
-    // M4 (opt-in via TISH_PARAM_INFER): give unannotated params used PURELY numerically a
-    // synthetic `: number` so M1 (native shadow) + M5 (native fn) lower them. Conservative —
-    // any non-numeric / write / escape use bails (param stays boxed Value), so it can't miscompile.
-    if std::env::var("TISH_PARAM_INFER").map(|v| v != "0").unwrap_or(false) {
-        param_infer_program(p)
     } else {
         p
     }
@@ -167,13 +225,17 @@ fn pi_stmt(s: Statement) -> Statement {
         span,
     } = s
     {
+        // Locals provably numeric in this body (annotated, incl. base-inferred `let i = 0`), so a
+        // bare loop counter `i` counts as a numeric operand and `i < n` can prove the param `n`.
+        let mut nums = HashSet::new();
+        collect_numeric_locals(&body, &mut nums);
         let new_params = params
             .into_iter()
             .map(|p| match p {
                 FunParam::Simple(mut tp) => {
                     if tp.type_ann.is_none()
                         && tp.default.is_none()
-                        && nus_stmt(&body, tp.name.as_ref())
+                        && nus_stmt(&body, tp.name.as_ref(), &nums)
                     {
                         tp.type_ann = Some(TypeAnnotation::Simple(std::sync::Arc::from("number")));
                     }
@@ -197,36 +259,99 @@ fn pi_stmt(s: Statement) -> Statement {
     }
 }
 
+/// Names of locals in `s` annotated (or base-inferred) `: number`. Consulted by `numeric_provable`
+/// so a bare numeric local (e.g. a `let i: number` loop counter) counts as a numeric operand —
+/// letting `i < n` / `i * n + k` prove the *param* `n` numeric. Flat across nested scopes; at worst
+/// it over-includes a shadowed name, which only widens inference (still bounded by the same
+/// caller-passes-a-number assumption M4 already makes).
+fn collect_numeric_locals(s: &Statement, out: &mut HashSet<String>) {
+    use Statement::*;
+    match s {
+        VarDecl {
+            name,
+            type_ann,
+            init,
+            ..
+        } => {
+            // Annotated `: number`, OR **base-inferred** from a numeric-literal initializer
+            // (`let i = 0`, `let x = 0.0`) — the common loop-counter / accumulator pattern. A
+            // numeric literal is unambiguously a number at init; this is what lets `i < n` prove
+            // the *param* `n` numeric. Over-inclusion (if the local is later reassigned to a
+            // non-number) only *widens* param inference, still bounded by M4's
+            // caller-passes-a-number / NaN-coercion soundness and the corpus/gauntlet guards.
+            let numeric = type_ann.as_ref().is_some_and(is_number)
+                || matches!(
+                    init,
+                    Some(tishlang_ast::Expr::Literal {
+                        value: tishlang_ast::Literal::Number(_),
+                        ..
+                    })
+                );
+            if numeric {
+                out.insert(name.to_string());
+            }
+        }
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().for_each(|x| collect_numeric_locals(x, out))
+        }
+        If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_numeric_locals(then_branch, out);
+            if let Some(e) = else_branch {
+                collect_numeric_locals(e, out);
+            }
+        }
+        For { init, body, .. } => {
+            if let Some(i) = init {
+                collect_numeric_locals(i, out);
+            }
+            collect_numeric_locals(body, out);
+        }
+        While { body, .. } => collect_numeric_locals(body, out),
+        _ => {}
+    }
+}
+
 /// One side of an OVERLOADED binop (`+`, comparisons). If `operand` is bare `name`, the `other`
 /// side must be PROVABLY numeric (else `name + x` / `name < x` could be string ops, and `name`
 /// a string). If `operand` is a sub-expr, recurse (its own context decides).
-fn nus_overloaded(operand: &Expr, other: &Expr, name: &str) -> bool {
+fn nus_overloaded(operand: &Expr, other: &Expr, name: &str, nums: &HashSet<String>) -> bool {
     if matches!(operand, Expr::Ident { name: n, .. } if n.as_ref() == name) {
-        return numeric_provable(other);
+        return numeric_provable(other, nums);
     }
-    nus_expr(operand, name)
+    nus_expr(operand, name, nums)
 }
 
 /// `e` is PROVABLY a number: a number literal, arithmetic (`-`/`*`/`/`/`%`/`**`), numeric unary,
 /// or a Math intrinsic. Bare variables and `+`/comparisons are NOT provable (could be strings).
-fn numeric_provable(e: &Expr) -> bool {
+fn numeric_provable(e: &Expr, nums: &HashSet<String>) -> bool {
     use Expr::*;
     match e {
         Literal {
             value: tishlang_ast::Literal::Number(_),
             ..
         } => true,
+        // A local proven numeric in this function (annotated `: number`, incl. base-inferred
+        // `let i = 0`) — so `i` as the OTHER operand of `i < n` / `i * n` proves `n` numeric.
+        Ident { name: n, .. } => nums.contains(n.as_ref()),
         Binary {
             left, op, right, ..
         } => {
             use tishlang_ast::BinOp::*;
-            matches!(op, Sub | Mul | Div | Mod | Pow)
-                && numeric_provable(left)
-                && numeric_provable(right)
+            matches!(
+                op,
+                Sub | Mul | Div | Mod | Pow | BitAnd | BitOr | BitXor | Shl | Shr | UShr
+            ) && numeric_provable(left, nums)
+                && numeric_provable(right, nums)
         }
         Unary { op, operand, .. } => {
-            matches!(op, tishlang_ast::UnaryOp::Neg | tishlang_ast::UnaryOp::Pos)
-                && numeric_provable(operand)
+            matches!(
+                op,
+                tishlang_ast::UnaryOp::Neg | tishlang_ast::UnaryOp::Pos | tishlang_ast::UnaryOp::BitNot
+            ) && numeric_provable(operand, nums)
         }
         Call { callee, .. } => matches!(callee.as_ref(),
             Expr::Member { object, prop: tishlang_ast::MemberProp::Name { name: m, .. }, .. }
@@ -238,23 +363,23 @@ fn numeric_provable(e: &Expr) -> bool {
 }
 
 /// Every use of `name` within `s` is a numeric-operand use (so `name` can lower to `f64`).
-fn nus_stmt(s: &Statement, name: &str) -> bool {
+fn nus_stmt(s: &Statement, name: &str, nums: &HashSet<String>) -> bool {
     use Statement::*;
     match s {
-        Block { statements, .. } => statements.iter().all(|x| nus_stmt(x, name)),
-        Return { value, .. } => value.as_ref().map_or(true, |e| nus_num_operand(e, name)),
+        Block { statements, .. } => statements.iter().all(|x| nus_stmt(x, name, nums)),
+        Return { value, .. } => value.as_ref().is_none_or(|e| nus_num_operand(e, name, nums)),
         If {
             cond,
             then_branch,
             else_branch,
             ..
         } => {
-            nus_expr(cond, name)
-                && nus_stmt(then_branch, name)
-                && else_branch.as_ref().map_or(true, |e| nus_stmt(e, name))
+            nus_expr(cond, name, nums)
+                && nus_stmt(then_branch, name, nums)
+                && else_branch.as_ref().is_none_or(|e| nus_stmt(e, name, nums))
         }
-        ExprStmt { expr, .. } => nus_expr(expr, name),
-        While { cond, body, .. } => nus_expr(cond, name) && nus_stmt(body, name),
+        ExprStmt { expr, .. } => nus_expr(expr, name, nums),
+        While { cond, body, .. } => nus_expr(cond, name, nums) && nus_stmt(body, name, nums),
         For {
             init,
             cond,
@@ -262,14 +387,14 @@ fn nus_stmt(s: &Statement, name: &str) -> bool {
             body,
             ..
         } => {
-            init.as_ref().map_or(true, |x| nus_stmt(x, name))
-                && cond.as_ref().map_or(true, |e| nus_expr(e, name))
-                && update.as_ref().map_or(true, |e| nus_expr(e, name))
-                && nus_stmt(body, name)
+            init.as_ref().is_none_or(|x| nus_stmt(x, name, nums))
+                && cond.as_ref().is_none_or(|e| nus_expr(e, name, nums))
+                && update.as_ref().is_none_or(|e| nus_expr(e, name, nums))
+                && nus_stmt(body, name, nums)
         }
         VarDecl {
             name: vn, init, ..
-        } => vn.as_ref() != name && init.as_ref().map_or(true, |e| nus_expr(e, name)),
+        } => vn.as_ref() != name && init.as_ref().is_none_or(|e| nus_expr(e, name, nums)),
         Break { .. } | Continue { .. } => true,
         // Any other statement (switch/throw/try/nested fn/...) -> bail (don't infer this param).
         _ => false,
@@ -278,7 +403,7 @@ fn nus_stmt(s: &Statement, name: &str) -> bool {
 
 /// `e` with `name` used only as a numeric operand. A bare `Ident(name)` at THIS level is not a
 /// numeric operand (only valid inside a numeric parent), so it returns false here.
-fn nus_expr(e: &Expr, name: &str) -> bool {
+fn nus_expr(e: &Expr, name: &str, nums: &HashSet<String>) -> bool {
     use Expr::*;
     match e {
         Literal { .. } => true,
@@ -289,16 +414,23 @@ fn nus_expr(e: &Expr, name: &str) -> bool {
             use tishlang_ast::BinOp::*;
             match op {
                 // Unambiguously numeric — `name` as either operand is definitely a number.
-                Sub | Mul | Div | Mod | Pow => {
-                    nus_num_operand(left, name) && nus_num_operand(right, name)
+                // Includes the bitwise/shift family: JS coerces both sides to int32, so
+                // `name & x` / `name >>> x` proves `name` numeric just like `name * x`.
+                Sub | Mul | Div | Mod | Pow | BitAnd | BitOr | BitXor | Shl | Shr | UShr => {
+                    nus_num_operand(left, name, nums) && nus_num_operand(right, name, nums)
                 }
                 // OVERLOADED: `+` is also string concat, `<`/`===` also compare strings. If
                 // `name` is a DIRECT operand here, the OTHER side must be PROVABLY numeric to
                 // conclude `name` is a number — this is what stops `first + ":"` typing `first`.
                 Add | Lt | Le | Gt | Ge | StrictEq | StrictNe => {
-                    nus_overloaded(left, right, name) && nus_overloaded(right, left, name)
+                    nus_overloaded(left, right, name, nums)
+                        && nus_overloaded(right, left, name, nums)
                 }
-                // Logical (&&, ||, ??) etc.: `name` must be absent.
+                // Logical `&&`/`||`: recurse — a param used numerically *inside* a condition
+                // operand (e.g. `iter < maxIter && x*x + y*y <= 4`) is a numeric use; a bare
+                // `name && x` is not (the recursion's `Ident(name)` case returns false).
+                And | Or => nus_expr(left, name, nums) && nus_expr(right, name, nums),
+                // Anything else (`Eq`/`Ne`/`In`): `name` must be absent.
                 _ => !pi_mentions(left, name) && !pi_mentions(right, name),
             }
         }
@@ -307,16 +439,18 @@ fn nus_expr(e: &Expr, name: &str) -> bool {
                 op,
                 tishlang_ast::UnaryOp::Neg | tishlang_ast::UnaryOp::Pos | tishlang_ast::UnaryOp::BitNot
             ) {
-                nus_num_operand(operand, name)
+                nus_num_operand(operand, name, nums)
             } else {
                 !pi_mentions(operand, name)
             }
         }
-        Index { object, index, .. } => !pi_mentions(object, name) && nus_num_operand(index, name),
+        Index { object, index, .. } => {
+            !pi_mentions(object, name) && nus_num_operand(index, name, nums)
+        }
         Call { callee, args, .. } => {
             !pi_mentions(callee, name)
                 && args.iter().all(|a| match a {
-                    tishlang_ast::CallArg::Expr(x) => nus_arg(x, name),
+                    tishlang_ast::CallArg::Expr(x) => nus_arg(x, name, nums),
                     tishlang_ast::CallArg::Spread(_) => false,
                 })
         }
@@ -326,16 +460,16 @@ fn nus_expr(e: &Expr, name: &str) -> bool {
             else_branch,
             ..
         } => {
-            nus_expr(cond, name)
-                && nus_num_operand(then_branch, name)
-                && nus_num_operand(else_branch, name)
+            nus_expr(cond, name, nums)
+                && nus_num_operand(then_branch, name, nums)
+                && nus_num_operand(else_branch, name, nums)
         }
         // Assignment to a DIFFERENT var, where the RHS may use `name` numerically (e.g.
         // `sum = sum + a[i*N+k]`). Writing to `name` itself bails (its type could change).
         Assign { name: an, value, .. }
         | CompoundAssign { name: an, value, .. }
         | LogicalAssign { name: an, value, .. } => {
-            an.as_ref() != name && nus_expr(value, name)
+            an.as_ref() != name && nus_expr(value, name, nums)
         }
         PostfixInc { name: n, .. }
         | PostfixDec { name: n, .. }
@@ -349,11 +483,11 @@ fn nus_expr(e: &Expr, name: &str) -> bool {
             ..
         } => {
             !pi_mentions(object, name)
-                && nus_num_operand(index, name)
-                && nus_expr(value, name)
+                && nus_num_operand(index, name, nums)
+                && nus_expr(value, name, nums)
         }
         MemberAssign { object, value, .. } => {
-            !pi_mentions(object, name) && nus_expr(value, name)
+            !pi_mentions(object, name) && nus_expr(value, name, nums)
         }
         // any other context where `name` could appear non-numerically -> require it absent.
         _ => !pi_mentions(e, name),
@@ -361,23 +495,23 @@ fn nus_expr(e: &Expr, name: &str) -> bool {
 }
 
 /// A numeric-operand position: `name` may appear directly, or as a numeric sub-expr.
-fn nus_num_operand(e: &Expr, name: &str) -> bool {
+fn nus_num_operand(e: &Expr, name: &str, nums: &HashSet<String>) -> bool {
     if matches!(e, Expr::Ident { name: n, .. } if n.as_ref() == name) {
         return true;
     }
-    nus_expr(e, name)
+    nus_expr(e, name, nums)
 }
 
 /// A call argument: passing `name` BARE bails (callee param type unknown); a numeric sub-expr ok.
-fn nus_arg(e: &Expr, name: &str) -> bool {
+fn nus_arg(e: &Expr, name: &str, nums: &HashSet<String>) -> bool {
     if matches!(e, Expr::Ident { name: n, .. } if n.as_ref() == name) {
         return false;
     }
-    nus_expr(e, name)
+    nus_expr(e, name, nums)
 }
 
 /// Does `name` appear anywhere in `e`? Conservative: unhandled forms -> true (assume present).
-fn pi_mentions(e: &Expr, name: &str) -> bool {
+pub(crate) fn pi_mentions(e: &Expr, name: &str) -> bool {
     use Expr::*;
     match e {
         Literal { .. } => false,
@@ -446,6 +580,9 @@ fn pi_mentions(e: &Expr, name: &str) -> bool {
 // Automatic struct inference (conservative, sound, opt-in)
 // ---------------------------------------------------------------------------
 
+/// One emitted `type` decl: alias name plus its field list.
+type StructDecl = (String, Vec<(std::sync::Arc<str>, TypeAnnotation)>);
+
 /// Registry of distinct inferred object shapes → synthetic alias name, so
 /// identical shapes share one generated struct.
 #[derive(Default)]
@@ -453,7 +590,7 @@ struct StructRegistry {
     /// canonical "k1:ty1;k2:ty2;…" → alias name
     by_shape: HashMap<String, String>,
     /// alias name → field list (for emitting the `type` decls)
-    decls: Vec<(String, Vec<(std::sync::Arc<str>, TypeAnnotation)>)>,
+    decls: Vec<StructDecl>,
 }
 
 impl StructRegistry {
@@ -562,9 +699,67 @@ fn zero_span() -> tishlang_ast::Span {
 /// into nested blocks. `ctx` provides field-type inference for initializers.
 fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx) -> Vec<Statement> {
     ctx.push_scope();
+    // Co-infer mutable `number[]` locals across the whole block (cross-referencing arrays) up front.
+    // Co-infer mutable native arrays (number[] and boolean[]) across the block; an array of the
+    // wrong element type simply fails its run and stays boxed.
+    let native_num_arrays = block_native_arrays(&stmts, ctx, &number_ann());
+    let native_bool_arrays = block_native_arrays(&stmts, ctx, &bool_ann());
     let n = stmts.len();
     let mut out: Vec<Statement> = Vec::with_capacity(n);
     for (i, stmt) in stmts.iter().enumerate() {
+        // Candidate: `let xs = [ ...uniform native scalars... ]` with no annotation -> native `T[]`,
+        // but only when every later use is read-only (`uses_are_array_safe`), so a `Vec<f64>`
+        // assumption can't be violated by a later `push`/`xs[i] = …`.
+        if let Statement::VarDecl {
+            name,
+            name_span,
+            mutable,
+            type_ann: None,
+            init: Some(Expr::Array { elements, .. }),
+            span,
+        } = stmt
+        {
+            // (a) Read-only typed array: uniform scalar literals, every later use read-only.
+            if let Some(elem) = infer_array_elem(elements, ctx) {
+                if uses_are_array_safe(name.as_ref(), &stmts[i + 1..]) {
+                    let arr_ann = TypeAnnotation::Array(Box::new(elem));
+                    ctx.define(name.as_ref(), arr_ann.clone());
+                    out.push(Statement::VarDecl {
+                        name: name.clone(),
+                        name_span: *name_span,
+                        mutable: *mutable,
+                        type_ann: Some(arr_ann),
+                        init: stmt_init_clone(stmt),
+                        span: *span,
+                    });
+                    continue;
+                }
+            }
+            // (b) Mutable native `number[]` / `boolean[]`: `let a = []` / `[lits]` driven by push +
+            // index read/write (`fannkuch`/`queens`/`nsieve`, incl. cross-referencing siblings).
+            // Sound via the block-level fixpoint above (every accepted array's elements are provably
+            // of the chosen element type). `number[]` wins over `boolean[]` if somehow in both.
+            let native_elem = if native_num_arrays.contains(name.as_ref()) {
+                Some(number_ann())
+            } else if native_bool_arrays.contains(name.as_ref()) {
+                Some(bool_ann())
+            } else {
+                None
+            };
+            if let Some(elem) = native_elem {
+                let arr_ann = TypeAnnotation::Array(Box::new(elem));
+                ctx.define(name.as_ref(), arr_ann.clone());
+                out.push(Statement::VarDecl {
+                    name: name.clone(),
+                    name_span: *name_span,
+                    mutable: *mutable,
+                    type_ann: Some(arr_ann),
+                    init: stmt_init_clone(stmt),
+                    span: *span,
+                });
+                continue;
+            }
+        }
         // Candidate: `let o = { ...object literal... }` with no annotation.
         if let Statement::VarDecl {
             name,
@@ -691,16 +886,30 @@ fn si_recurse(stmt: &Statement, reg: &mut StructRegistry, ctx: &mut InferCtx) ->
             return_type,
             body,
             span,
-        } => Statement::FunDecl {
-            async_: *async_,
-            name: name.clone(),
-            name_span: *name_span,
-            params: params.clone(),
-            rest_param: rest_param.clone(),
-            return_type: return_type.clone(),
-            body: Box::new(si_recurse(body, reg, ctx)),
-            span: *span,
-        },
+        } => {
+            // Define the (annotated or M4-inferred) scalar params in a body scope so the body's
+            // local-type + mutable-array inference can use them (`let r = n` ⇒ `r: number`).
+            ctx.push_scope();
+            for p in params {
+                if let FunParam::Simple(tp) = p {
+                    if let Some(ann) = &tp.type_ann {
+                        ctx.define(tp.name.as_ref(), ann.clone());
+                    }
+                }
+            }
+            let new_body = Box::new(si_recurse(body, reg, ctx));
+            ctx.pop_scope();
+            Statement::FunDecl {
+                async_: *async_,
+                name: name.clone(),
+                name_span: *name_span,
+                params: params.clone(),
+                rest_param: rest_param.clone(),
+                return_type: return_type.clone(),
+                body: new_body,
+                span: *span,
+            }
+        }
         other => other.clone(),
     }
 }
@@ -712,6 +921,394 @@ fn si_recurse(stmt: &Statement, reg: &mut StructRegistry, ctx: &mut InferCtx) ->
 /// shapes also return false, so this can never wrongly green-light.
 fn uses_are_struct_safe(name: &str, keys: &std::collections::HashSet<&str>, tail: &[Statement]) -> bool {
     tail.iter().all(|s| stmt_name_safe(s, name, keys))
+}
+
+/// Define every provably-numeric block-local into `hyp` (flat across nested scopes): annotated
+/// `: number`, a number-literal init, or any init `infer_expr_type` proves `number` *under the
+/// current hypothesis* — so `let temp = perm[i]` becomes `number` once `perm` is hypothesized
+/// `number[]`. Run a few times to resolve derived chains (`let b = temp + 1`).
+fn seed_numeric_locals(s: &Statement, hyp: &mut InferCtx) {
+    use Statement::*;
+    match s {
+        VarDecl { name, type_ann, init, .. } => {
+            let numeric = type_ann.as_ref().is_some_and(is_number)
+                || init
+                    .as_ref()
+                    .and_then(|e| infer_expr_type(e, hyp))
+                    .as_ref()
+                    .is_some_and(is_number);
+            if numeric {
+                hyp.define(name, number_ann());
+            }
+        }
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().for_each(|x| seed_numeric_locals(x, hyp))
+        }
+        If { then_branch, else_branch, .. } => {
+            seed_numeric_locals(then_branch, hyp);
+            if let Some(e) = else_branch {
+                seed_numeric_locals(e, hyp);
+            }
+        }
+        For { init, body, .. } => {
+            if let Some(i) = init {
+                seed_numeric_locals(i, hyp);
+            }
+            seed_numeric_locals(body, hyp);
+        }
+        While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+            seed_numeric_locals(body, hyp)
+        }
+        _ => {}
+    }
+}
+
+/// Block-level co-inference of mutable native arrays of element type `elem` (`number[]` or
+/// `boolean[]`) — handles cross-referencing arrays (`perm[i] = perm1[i]`) that a per-array pass can't.
+/// Collects every top-level `let X = []` / `[elem literals]` candidate, then runs a monotone
+/// **fixpoint**: hypothesize ALL candidates are `elem[]`, verify each (a candidate fails if any
+/// value written/pushed isn't provably `elem` under the hypothesis, or it escapes), drop the
+/// failures, repeat until stable. The stable set is self-consistent, so it's sound. Run once per
+/// element type; an array of the wrong type simply fails this run (its pushes aren't `elem`).
+fn block_native_arrays(
+    stmts: &[Statement],
+    outer_ctx: &InferCtx,
+    elem: &TypeAnnotation,
+) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let mut cands: Vec<(usize, String)> = Vec::new();
+    for (i, s) in stmts.iter().enumerate() {
+        if let Statement::VarDecl {
+            name,
+            type_ann: None,
+            init: Some(Expr::Array { elements, .. }),
+            ..
+        } = s
+        {
+            // Empty `[]` is a candidate for either element type; literal elements must match `elem`.
+            let lit_ok = elements.is_empty()
+                || matches!(infer_array_elem(elements, outer_ctx), Some(t) if &t == elem);
+            if lit_ok {
+                cands.push((i, name.to_string()));
+            }
+        }
+    }
+    if cands.is_empty() {
+        return HashSet::new();
+    }
+    let mut accepted: HashSet<String> = cands.iter().map(|c| c.1.clone()).collect();
+    loop {
+        let mut hyp = outer_ctx.clone();
+        for n in &accepted {
+            hyp.define(n, TypeAnnotation::Array(Box::new(elem.clone())));
+        }
+        // Seed numeric block-locals under the array hypothesis so values like `temp` in
+        // `let temp = perm[i]; perm[k-i] = temp` are known (`perm[i]` is `elem` because `perm` is
+        // hypothesized `elem[]`). A few passes resolve derived chains (`let b = temp + 1`).
+        for _ in 0..4 {
+            for s in stmts {
+                seed_numeric_locals(s, &mut hyp);
+            }
+        }
+        let mut removed = false;
+        for (idx, name) in &cands {
+            if accepted.contains(name)
+                && !stmts[idx + 1..].iter().all(|s| mut_arr_stmt_ok(s, name, elem, &hyp))
+            {
+                accepted.remove(name);
+                removed = true;
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+    accepted
+}
+
+/// A value written into / pushed onto `name` must have the array's element type `elem`: a `name[_]`
+/// self-read (already `elem` by hypothesis) or any expression `infer_expr_type` proves is `elem`.
+fn mut_arr_value_ok(v: &Expr, name: &str, elem: &TypeAnnotation, hyp: &InferCtx) -> bool {
+    if let Expr::Index { object, .. } = v {
+        if matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == name) {
+            return true;
+        }
+    }
+    infer_expr_type(v, hyp).as_ref() == Some(elem)
+}
+
+fn mut_arr_stmt_ok(s: &Statement, name: &str, elem: &TypeAnnotation, hyp: &InferCtx) -> bool {
+    use Statement::*;
+    match s {
+        VarDecl { name: n, init, .. } => {
+            n.as_ref() != name && init.as_ref().is_none_or(|e| mut_arr_expr_ok(e, name, elem, hyp))
+        }
+        ExprStmt { expr, .. } => mut_arr_expr_ok(expr, name, elem, hyp),
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().all(|s| mut_arr_stmt_ok(s, name, elem, hyp))
+        }
+        If { cond, then_branch, else_branch, .. } => {
+            mut_arr_expr_ok(cond, name, elem, hyp)
+                && mut_arr_stmt_ok(then_branch, name, elem, hyp)
+                && else_branch.as_ref().is_none_or(|e| mut_arr_stmt_ok(e, name, elem, hyp))
+        }
+        While { cond, body, .. } => {
+            mut_arr_expr_ok(cond, name, elem, hyp) && mut_arr_stmt_ok(body, name, elem, hyp)
+        }
+        DoWhile { body, cond, .. } => {
+            mut_arr_stmt_ok(body, name, elem, hyp) && mut_arr_expr_ok(cond, name, elem, hyp)
+        }
+        For { init, cond, update, body, .. } => {
+            init.as_ref().is_none_or(|i| mut_arr_stmt_ok(i, name, elem, hyp))
+                && cond.as_ref().is_none_or(|c| mut_arr_expr_ok(c, name, elem, hyp))
+                && update.as_ref().is_none_or(|u| mut_arr_expr_ok(u, name, elem, hyp))
+                && mut_arr_stmt_ok(body, name, elem, hyp)
+        }
+        ForOf { name: n, iterable, body, .. } => {
+            if n.as_ref() == name {
+                return false;
+            }
+            let iter_ok = matches!(iterable, Expr::Ident { name: it, .. } if it.as_ref() == name)
+                || mut_arr_expr_ok(iterable, name, elem, hyp);
+            iter_ok && mut_arr_stmt_ok(body, name, elem, hyp)
+        }
+        Return { value, .. } => value.as_ref().is_none_or(|e| mut_arr_expr_ok(e, name, elem, hyp)),
+        Throw { value, .. } => mut_arr_expr_ok(value, name, elem, hyp),
+        Break { .. } | Continue { .. } | TypeAlias { .. } => true,
+        _ => false, // switch / try / nested fn / etc: bail
+    }
+}
+
+fn mut_arr_expr_ok(e: &Expr, name: &str, elem: &TypeAnnotation, hyp: &InferCtx) -> bool {
+    use Expr::*;
+    let is_name = |x: &Expr| matches!(x, Expr::Ident { name: n, .. } if n.as_ref() == name);
+    match e {
+        Literal { .. } => true,
+        Ident { name: n, .. } => n.as_ref() != name, // bare escape is unsafe
+        Index { object, index, .. } => {
+            (is_name(object) || mut_arr_expr_ok(object, name, elem, hyp))
+                && mut_arr_expr_ok(index, name, elem, hyp)
+        }
+        // `name[i] = v`: OK iff `v` has type `elem`; else recurse (writing to a DIFFERENT array).
+        IndexAssign { object, index, value, .. } => {
+            if is_name(object) {
+                mut_arr_expr_ok(index, name, elem, hyp)
+                    && mut_arr_value_ok(value, name, elem, hyp)
+                    && mut_arr_expr_ok(value, name, elem, hyp)
+            } else {
+                mut_arr_expr_ok(object, name, elem, hyp)
+                    && mut_arr_expr_ok(index, name, elem, hyp)
+                    && mut_arr_expr_ok(value, name, elem, hyp)
+            }
+        }
+        // `name.push(v…)`: OK iff each `v` has type `elem`. Any other method on `name`: bail.
+        Call { callee, args, .. } => {
+            if let Member { object, prop: tishlang_ast::MemberProp::Name { name: m, .. }, .. } =
+                callee.as_ref()
+            {
+                if is_name(object) {
+                    return m.as_ref() == "push"
+                        && args.iter().all(|a| match a {
+                            tishlang_ast::CallArg::Expr(v) => {
+                                mut_arr_value_ok(v, name, elem, hyp) && mut_arr_expr_ok(v, name, elem, hyp)
+                            }
+                            tishlang_ast::CallArg::Spread(_) => false,
+                        });
+                }
+            }
+            mut_arr_expr_ok(callee, name, elem, hyp)
+                && args.iter().all(|a| match a {
+                    tishlang_ast::CallArg::Expr(v) => mut_arr_expr_ok(v, name, elem, hyp),
+                    tishlang_ast::CallArg::Spread(_) => false,
+                })
+        }
+        Member { object, prop, .. } => {
+            if is_name(object) {
+                matches!(prop, tishlang_ast::MemberProp::Name { name: p, .. } if p.as_ref() == "length")
+            } else {
+                mut_arr_expr_ok(object, name, elem, hyp)
+            }
+        }
+        Binary { left, right, .. } => {
+            mut_arr_expr_ok(left, name, elem, hyp) && mut_arr_expr_ok(right, name, elem, hyp)
+        }
+        Unary { operand, .. } => mut_arr_expr_ok(operand, name, elem, hyp),
+        Conditional { cond, then_branch, else_branch, .. } => {
+            mut_arr_expr_ok(cond, name, elem, hyp)
+                && mut_arr_expr_ok(then_branch, name, elem, hyp)
+                && mut_arr_expr_ok(else_branch, name, elem, hyp)
+        }
+        Assign { name: an, value, .. }
+        | CompoundAssign { name: an, value, .. }
+        | LogicalAssign { name: an, value, .. } => {
+            an.as_ref() != name && mut_arr_expr_ok(value, name, elem, hyp)
+        }
+        PostfixInc { name: n, .. }
+        | PostfixDec { name: n, .. }
+        | PrefixInc { name: n, .. }
+        | PrefixDec { name: n, .. } => n.as_ref() != name,
+        MemberAssign { object, value, .. } => {
+            mut_arr_expr_ok(object, name, elem, hyp) && mut_arr_expr_ok(value, name, elem, hyp)
+        }
+        // Anything else: `name` must be absent (would alias the Vec into a boxed context).
+        _ => !pi_mentions(e, name),
+    }
+}
+
+fn uses_are_array_safe(name: &str, tail: &[Statement]) -> bool {
+    tail.iter().all(|s| arr_stmt_safe(s, name))
+}
+
+fn arr_opt_expr_safe(e: &Option<Expr>, name: &str) -> bool {
+    e.as_ref().map(|e| arr_expr_safe(e, name)).unwrap_or(true)
+}
+
+fn arr_stmt_safe(s: &Statement, name: &str) -> bool {
+    use Statement::*;
+    match s {
+        VarDecl { name: n, init, .. } => n.as_ref() != name && arr_opt_expr_safe(init, name),
+        ExprStmt { expr, .. } => arr_expr_safe(expr, name),
+        Block { statements, .. } => statements.iter().all(|s| arr_stmt_safe(s, name)),
+        If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            arr_expr_safe(cond, name)
+                && arr_stmt_safe(then_branch, name)
+                && else_branch.as_ref().map(|e| arr_stmt_safe(e, name)).unwrap_or(true)
+        }
+        While { cond, body, .. } => arr_expr_safe(cond, name) && arr_stmt_safe(body, name),
+        DoWhile { body, cond, .. } => arr_stmt_safe(body, name) && arr_expr_safe(cond, name),
+        For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
+            init.as_ref().map(|i| arr_stmt_safe(i, name)).unwrap_or(true)
+                && cond.as_ref().map(|c| arr_expr_safe(c, name)).unwrap_or(true)
+                && update.as_ref().map(|u| arr_expr_safe(u, name)).unwrap_or(true)
+                && arr_stmt_safe(body, name)
+        }
+        // `for (_ of name)` is the key read-only use; rebinding `name` bails.
+        ForOf {
+            name: n,
+            iterable,
+            body,
+            ..
+        } => {
+            if n.as_ref() == name {
+                return false;
+            }
+            let iter_ok = matches!(iterable, Expr::Ident { name: it, .. } if it.as_ref() == name)
+                || arr_expr_safe(iterable, name);
+            iter_ok && arr_stmt_safe(body, name)
+        }
+        Return { value, .. } => arr_opt_expr_safe(value, name),
+        Throw { value, .. } => arr_expr_safe(value, name),
+        Break { .. } | Continue { .. } | TypeAlias { .. } => true,
+        // Nested fn could capture+mutate; switch/try and anything else: be safe, bail.
+        _ => false,
+    }
+}
+
+fn arr_expr_safe(e: &Expr, name: &str) -> bool {
+    use Expr::*;
+    match e {
+        Literal { .. } => true,
+        Ident { name: n, .. } => n.as_ref() != name, // bare escape is unsafe
+        // `name[i]` lowers to a native `Vec` index that PANICS out-of-bounds, whereas the boxed
+        // array yields `undefined` — so an index read of `name` is unsound for inference. (Only
+        // `for (_ of name)` and `name.length` are safe reads.) Indexing a DIFFERENT array is fine.
+        Index { object, index, .. } => {
+            !matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == name)
+                && arr_expr_safe(object, name)
+                && arr_expr_safe(index, name)
+        }
+        // `name.length` READ is safe; any other `name.<prop>` (incl. a method receiver) bails.
+        Member {
+            object,
+            prop,
+            optional,
+            ..
+        } => {
+            if let Ident { name: n, .. } = object.as_ref() {
+                if n.as_ref() == name {
+                    return !optional
+                        && matches!(prop, tishlang_ast::MemberProp::Name { name: k, .. } if k.as_ref() == "length");
+                }
+            }
+            arr_expr_safe(object, name)
+                && match prop {
+                    tishlang_ast::MemberProp::Expr(p) => arr_expr_safe(p, name),
+                    tishlang_ast::MemberProp::Name { .. } => true,
+                }
+        }
+        Binary { left, right, .. } | NullishCoalesce { left, right, .. } => {
+            arr_expr_safe(left, name) && arr_expr_safe(right, name)
+        }
+        Unary { operand, .. } | TypeOf { operand, .. } | Await { operand, .. } => {
+            arr_expr_safe(operand, name)
+        }
+        Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            arr_expr_safe(cond, name)
+                && arr_expr_safe(then_branch, name)
+                && arr_expr_safe(else_branch, name)
+        }
+        Call { callee, args, .. } | New { callee, args, .. } => {
+            arr_expr_safe(callee, name)
+                && args.iter().all(|a| match a {
+                    tishlang_ast::CallArg::Expr(x) | tishlang_ast::CallArg::Spread(x) => {
+                        arr_expr_safe(x, name)
+                    }
+                })
+        }
+        Assign { name: an, value, .. }
+        | CompoundAssign { name: an, value, .. }
+        | LogicalAssign { name: an, value, .. } => {
+            an.as_ref() != name && arr_expr_safe(value, name) // reassigning `name` bails
+        }
+        // Mutating `name` via index/member assignment bails; otherwise recurse.
+        IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => {
+            !matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == name)
+                && arr_expr_safe(object, name)
+                && arr_expr_safe(index, name)
+                && arr_expr_safe(value, name)
+        }
+        MemberAssign { object, value, .. } => {
+            !matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == name)
+                && arr_expr_safe(object, name)
+                && arr_expr_safe(value, name)
+        }
+        PostfixInc { name: n, .. }
+        | PostfixDec { name: n, .. }
+        | PrefixInc { name: n, .. }
+        | PrefixDec { name: n, .. } => n.as_ref() != name,
+        Array { elements, .. } => elements.iter().all(|el| match el {
+            tishlang_ast::ArrayElement::Expr(x) | tishlang_ast::ArrayElement::Spread(x) => {
+                arr_expr_safe(x, name)
+            }
+        }),
+        Object { props, .. } => props.iter().all(|p| match p {
+            tishlang_ast::ObjectProp::KeyValue(_, v) => arr_expr_safe(v, name),
+            tishlang_ast::ObjectProp::Spread(v) => arr_expr_safe(v, name),
+        }),
+        // Anything else that mentions `name`: be safe, bail.
+        _ => !pi_mentions(e, name),
+    }
 }
 
 fn opt_expr_safe(e: &Option<Expr>, name: &str, keys: &std::collections::HashSet<&str>) -> bool {
@@ -1023,3 +1620,61 @@ fn infer_statement(stmt: &Statement, ctx: &mut InferCtx) -> Statement {
 fn _uses_call_arg(_: &CallArg) {}
 #[allow(dead_code)]
 fn _uses_arrow_body(_: &ArrowBody) {}
+
+#[cfg(test)]
+mod param_infer_tests {
+    use super::*;
+    use tishlang_parser::parse;
+
+    /// Run base inference, then M4 param inference, and return the inferred annotation name (if
+    /// any) for parameter `param` of `fn <fn_name>`.
+    fn inferred_param(src: &str, fn_name: &str, param: &str) -> Option<String> {
+        let parsed = parse(src).unwrap();
+        let base = Program {
+            statements: infer_statements(&parsed.statements, &mut InferCtx::new()),
+        };
+        let prog = param_infer_program(base);
+        for s in &prog.statements {
+            if let Statement::FunDecl { name, params, .. } = s {
+                if name.as_ref() == fn_name {
+                    for p in params {
+                        if let FunParam::Simple(tp) = p {
+                            if tp.name.as_ref() == param {
+                                return tp.type_ann.as_ref().map(|a| match a {
+                                    TypeAnnotation::Simple(s) => s.to_string(),
+                                    _ => "<complex>".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn infers_loop_bound_param_via_numeric_local() {
+        // `n` is the bare operand of `i < n`; `i` (`let i = 0`, base-inferred numeric) makes the
+        // OTHER operand provably numeric, so `n` is inferred `number` (the numeric-locals fix).
+        let src = "fn countUp(n) { let total = 0; for (let i = 0; i < n; i = i + 1) { total = total + i } return total }";
+        assert_eq!(inferred_param(src, "countUp", "n").as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn does_not_infer_string_concat_param() {
+        // `x` is the bare operand of `+` against a string literal — NOT provably numeric, so `x`
+        // must stay dynamic (else `label("hi")` would mistype to f64 and panic at runtime).
+        let src = "fn label(x) { return \"v=\" + x }";
+        assert_eq!(inferred_param(src, "label", "x"), None);
+    }
+
+    #[test]
+    fn does_not_treat_other_param_as_numeric_local() {
+        // `a < b`: neither operand is a known numeric *local* (both are params), so neither is
+        // provable and neither param is inferred — the relaxation is locals-only.
+        let src = "fn cmp(a, b) { if (a < b) { return 1 } return 0 }";
+        assert_eq!(inferred_param(src, "cmp", "a"), None);
+        assert_eq!(inferred_param(src, "cmp", "b"), None);
+    }
+}

@@ -1,0 +1,4 @@
+// Dependency module for import_alias.tish.
+export const ssrH = 42
+export fn greet(n) { return "hi " + n }
+export const VERSION = "1.0"

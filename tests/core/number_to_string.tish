@@ -1,0 +1,26 @@
+// JS `Number.prototype.toString` (radix 10): exponential notation once the decimal point
+// lands past digit 21 or before digit −6, plain decimal otherwise — identical across
+// interp / VM / native / node, for `console.log`, `String()`, and `+` coercion.
+console.log(6.022e23)
+console.log(1e-7)
+console.log(1e21)
+console.log(1e-6)
+console.log(1234567890123456789012)
+console.log(0.0000001)
+console.log(123.456)
+console.log(-0)
+console.log(Infinity)
+console.log(-Infinity)
+console.log(NaN)
+console.log(1e100)
+console.log(1.7976931348623157e308)
+console.log(5e-324)
+console.log(0.1 + 0.2)
+console.log(-1e21)
+console.log(100000)
+console.log(21000000000000000000)
+// string coercion + templates must agree (these are constant-folded too)
+console.log("" + 6.022e23)
+console.log(`val=${1e-7}`)
+let x = 9.5e-7
+console.log("x is " + x)

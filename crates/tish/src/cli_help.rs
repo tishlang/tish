@@ -72,8 +72,7 @@ fn write_tish_banner_frame(out: &mut impl Write, reveal_t: f32, color_frame: usi
         let visible = ((len as f32) * reveal_t).round() as usize;
         let visible = visible.min(len);
 
-        for col in 0..len {
-            let ch = chars[col];
+        for (col, &ch) in chars.iter().enumerate() {
             if col >= visible || ch == ' ' {
                 let _ = write!(out, " ");
             } else {
@@ -545,6 +544,9 @@ pub(crate) struct BuildArgs {
     /// For `--target js` project builds: emit `OUTPUT.js.map` and `//# sourceMappingURL=…` so JS/TS tools can jump to original `.tish` (implies `--no-optimize` for that build).
     #[arg(long, help_heading = "Options")]
     pub source_map: bool,
+    /// Run the gradual type checker: `warn` prints `line:col` type diagnostics; `error` also fails the build on them. (Equivalent to setting `TISH_CHECK`.)
+    #[arg(long, value_name = "MODE", help_heading = "Options")]
+    pub check: Option<String>,
     /// Entry `.tish` file (or `.js` where supported).
     #[arg(required = true, value_name = "FILE", help_heading = "Arguments")]
     pub file: String,

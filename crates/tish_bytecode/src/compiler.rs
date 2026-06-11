@@ -103,7 +103,7 @@ struct Compiler<'a> {
     /// `return` that escapes these trys must run each one on the way out (the bytecode VM jumps
     /// straight to the function return otherwise). Reset per function — nested fns get a fresh
     /// `Compiler`. The exception-unwind path is handled separately in the `Try` emitter.
-    finally_stack: Vec<Box<Statement>>,
+    finally_stack: Vec<Statement>,
     /// When `Some(name)`, this chunk is the body of `fn name(...)` and `name`'s binding is provably
     /// stable (no param shadows it, no reassignment/redeclaration in the body — see [`stmt_rebinds`]).
     /// A direct call `name(args)` then compiles to `SelfCall` (no name lookup / closure dispatch; the
@@ -177,9 +177,12 @@ fn stmt_is_param_only(s: &Statement, params: &HashSet<&str>) -> bool {
         Statement::Block { statements, .. } => {
             statements.iter().all(|st| stmt_is_param_only(st, params))
         }
+        Statement::Multi { statements, .. } => {
+            statements.iter().all(|st| stmt_is_param_only(st, params))
+        }
         Statement::ExprStmt { expr, .. } => expr_is_param_only(expr, params),
         Statement::Return { value, .. } => {
-            value.as_ref().map_or(true, |e| expr_is_param_only(e, params))
+            value.as_ref().is_none_or(|e| expr_is_param_only(e, params))
         }
         Statement::If {
             cond,
@@ -191,7 +194,7 @@ fn stmt_is_param_only(s: &Statement, params: &HashSet<&str>) -> bool {
                 && stmt_is_param_only(then_branch, params)
                 && else_branch
                     .as_ref()
-                    .map_or(true, |b| stmt_is_param_only(b, params))
+                    .is_none_or(|b| stmt_is_param_only(b, params))
         }
         _ => false,
     }
@@ -252,6 +255,7 @@ fn params_bind_name(params: &[FunParam], name: &str) -> bool {
 fn stmt_rebinds(s: &Statement, name: &str) -> bool {
     match s {
         Statement::Block { statements, .. } => statements.iter().any(|s| stmt_rebinds(s, name)),
+        Statement::Multi { statements, .. } => statements.iter().any(|s| stmt_rebinds(s, name)),
         Statement::VarDecl { name: n, init, .. } => {
             n.as_ref() == name || init.as_ref().is_some_and(|e| expr_rebinds(e, name))
         }
@@ -364,26 +368,27 @@ impl SlotScan {
     fn stmt(&mut self, s: &Statement, in_closure: bool) -> bool {
         match s {
             Statement::Block { statements, .. } => statements.iter().all(|s| self.stmt(s, in_closure)),
-            Statement::VarDecl { init, .. } => init.as_ref().map_or(true, |e| self.expr(e, in_closure)),
+            Statement::Multi { statements, .. } => statements.iter().all(|s| self.stmt(s, in_closure)),
+            Statement::VarDecl { init, .. } => init.as_ref().is_none_or(|e| self.expr(e, in_closure)),
             Statement::VarDeclDestructure { init, .. } => self.expr(init, in_closure),
             Statement::ExprStmt { expr, .. } => self.expr(expr, in_closure),
             Statement::If { cond, then_branch, else_branch, .. } => {
                 self.expr(cond, in_closure)
                     && self.stmt(then_branch, in_closure)
-                    && else_branch.as_ref().map_or(true, |s| self.stmt(s, in_closure))
+                    && else_branch.as_ref().is_none_or(|s| self.stmt(s, in_closure))
             }
             Statement::While { cond, body, .. } => self.expr(cond, in_closure) && self.stmt(body, in_closure),
             Statement::DoWhile { body, cond, .. } => self.stmt(body, in_closure) && self.expr(cond, in_closure),
             Statement::For { init, cond, update, body, .. } => {
-                init.as_ref().map_or(true, |i| self.stmt(i, in_closure))
-                    && cond.as_ref().map_or(true, |e| self.expr(e, in_closure))
-                    && update.as_ref().map_or(true, |e| self.expr(e, in_closure))
+                init.as_ref().is_none_or(|i| self.stmt(i, in_closure))
+                    && cond.as_ref().is_none_or(|e| self.expr(e, in_closure))
+                    && update.as_ref().is_none_or(|e| self.expr(e, in_closure))
                     && self.stmt(body, in_closure)
             }
             Statement::ForOf { iterable, body, .. } => {
                 self.expr(iterable, in_closure) && self.stmt(body, in_closure)
             }
-            Statement::Return { value, .. } => value.as_ref().map_or(true, |e| self.expr(e, in_closure)),
+            Statement::Return { value, .. } => value.as_ref().is_none_or(|e| self.expr(e, in_closure)),
             Statement::Throw { value, .. } => self.expr(value, in_closure),
             Statement::Break { .. } | Statement::Continue { .. } => true,
             Statement::Switch { expr, cases, default_body, .. } => {
@@ -402,12 +407,12 @@ impl SlotScan {
                 }
                 default_body
                     .as_ref()
-                    .map_or(true, |b| b.iter().all(|s| self.stmt(s, in_closure)))
+                    .is_none_or(|b| b.iter().all(|s| self.stmt(s, in_closure)))
             }
             Statement::Try { body, catch_body, finally_body, .. } => {
                 self.stmt(body, in_closure)
-                    && catch_body.as_ref().map_or(true, |s| self.stmt(s, in_closure))
-                    && finally_body.as_ref().map_or(true, |s| self.stmt(s, in_closure))
+                    && catch_body.as_ref().is_none_or(|s| self.stmt(s, in_closure))
+                    && finally_body.as_ref().is_none_or(|s| self.stmt(s, in_closure))
             }
             // A nested named function: its param defaults (enclosing-scope) + whole body capture.
             Statement::FunDecl { params, body, .. } => {
@@ -645,6 +650,7 @@ impl<'a> Compiler<'a> {
 
     /// C-style `for` init: bindings are not inside the `{ ... }` body for block-undo purposes.
     /// Formal parameters as VM slot names plus optional destructure patterns (one per formal).
+    #[allow(clippy::type_complexity)] // (slot names, optional destructure patterns) — single-use return
     fn plan_function_params(
         params: &[FunParam],
     ) -> Result<(Vec<Arc<str>>, Vec<Option<DestructPattern>>), CompileError> {
@@ -1133,6 +1139,13 @@ impl<'a> Compiler<'a> {
                 self.emit(Opcode::ExitBlock);
                 self.block_depth -= 1;
             }
+            // Comma-declarators: a transparent group — compile each declarator in
+            // the *current* block scope (no EnterBlock/ExitBlock).
+            Statement::Multi { statements, .. } => {
+                for s in statements {
+                    self.compile_statement(s)?;
+                }
+            }
             Statement::VarDecl {
                 name,
                 init,
@@ -1293,6 +1306,9 @@ impl<'a> Compiler<'a> {
                 ..
             } => {
                 self.compile_expr(iterable)?;
+                // Normalize a JS iterator object (Map/Set `.values()` etc.) to an array so the
+                // index-based loop below can iterate it; arrays/strings pass through untouched.
+                self.emit(Opcode::IterNormalize);
                 self.enter_block_scope();
                 let arr_name = Arc::from("__forof_arr__");
                 let i_name = Arc::from("__forof_i__");
@@ -1322,11 +1338,18 @@ impl<'a> Compiler<'a> {
                 // ES per-iteration `let` for `for (let v of …)`: register the loop var so a closure
                 // in the body captures this iteration's element (emitted once, before loop_start).
                 self.emit_u16(Opcode::LoopVarsBegin, name_idx);
-                let loop_start = self.chunk.code.len();
+                // Pre-tested loop, like the C-style `for` above: test `i < len` at the TOP, before
+                // reading `arr[i]`. A bottom-tested loop ran the body once on an empty array (reading
+                // `arr[0]` → null) and spun forever on `continue` (which skipped the increment).
+                let cond_start = self.chunk.code.len();
+                self.emit_u16(Opcode::LoadVar, i_idx);
+                self.emit_u16(Opcode::LoadVar, len_idx);
+                self.emit_u8(Opcode::BinOp, 10);
+                let jump_out = self.emit_jump(Opcode::JumpIfFalse);
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
                     continue_patches: Vec::new(),
-                    continue_is_forward_jump: false,
+                    continue_is_forward_jump: true,
                 });
                 self.breakable_stack.push(Breakable::Loop {
                     unwind_depth: self.block_depth,
@@ -1340,25 +1363,23 @@ impl<'a> Compiler<'a> {
                     .unwrap()
                     .insert(Arc::clone(name), false);
                 self.compile_statement(body)?;
+                // `continue` lands here: increment `i`, then fall through to the JumpBack → re-test.
+                let update_start = self.chunk.code.len();
                 self.emit_u16(Opcode::LoadVar, i_idx);
                 let one_idx = self.constant_idx(Constant::Number(1.0));
                 self.emit(Opcode::LoadConst);
                 self.chunk.write_u16(one_idx);
                 self.emit_u8(Opcode::BinOp, 0);
                 self.emit_u16(Opcode::StoreVar, i_idx);
-                self.emit_u16(Opcode::LoadVar, i_idx);
-                self.emit_u16(Opcode::LoadVar, len_idx);
-                self.emit_u8(Opcode::BinOp, 10);
-                let jump_out = self.emit_jump(Opcode::JumpIfFalse);
-                let jump_back_dist = (self.chunk.code.len() + 3).saturating_sub(loop_start);
-                self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
-                let end = self.chunk.code.len();
-                self.patch_jump(jump_out, end);
                 let info = self.loop_stack.pop().unwrap();
                 self.breakable_stack.pop();
                 for p in info.continue_patches {
-                    self.patch_jump_back(p, loop_start);
+                    self.patch_jump(p, update_start);
                 }
+                let jump_back_dist = (self.chunk.code.len() + 3).saturating_sub(cond_start);
+                self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
+                let end = self.chunk.code.len();
+                self.patch_jump(jump_out, end);
                 for p in info.break_patches {
                     self.patch_jump(p, end);
                 }
@@ -1637,7 +1658,7 @@ impl<'a> Compiler<'a> {
                 self.chunk.write_u16(0);
                 // A `return` inside the body/catch must run this finally on the way out.
                 if let Some(f) = finally_body {
-                    self.finally_stack.push(f.clone());
+                    self.finally_stack.push((**f).clone());
                 }
                 self.compile_statement(body)?;
                 self.emit(Opcode::ExitTry);

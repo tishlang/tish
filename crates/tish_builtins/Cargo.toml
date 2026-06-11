@@ -8,6 +8,8 @@ description = "Shared builtin implementations for Tish (array, string, object, m
 license-file = { workspace = true }
 repository = { workspace = true }
 [dependencies]
+ahash = "0.8.11"
+indexmap = "2"
 rand = "0.10.1"
 tishlang_core = { path = "../tish_core", version = ">=0.1" }
 

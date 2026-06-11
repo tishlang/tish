@@ -1,0 +1,35 @@
+// GAUNTLET: binary-trees (Computer Language Benchmarks Game; the GCBench allocation stress). Builds
+// and walks many short-lived complete trees — the canonical allocation/GC-throughput + recursion
+// benchmark (lots of tiny, quickly-dead node objects). Valid in both tish and node; integer check.
+function bottomUpTree(depth) {
+  if (depth > 0) {
+    return { left: bottomUpTree(depth - 1), right: bottomUpTree(depth - 1) }
+  }
+  return { left: null, right: null }
+}
+
+function itemCheck(node) {
+  if (node.left === null) { return 1 }
+  return 1 + itemCheck(node.left) + itemCheck(node.right)
+}
+
+function binaryTrees(maxDepth) {
+  let minDepth = 4
+  let stretchDepth = maxDepth + 1
+  let total = itemCheck(bottomUpTree(stretchDepth))
+  let longLived = bottomUpTree(maxDepth)
+  let depth = minDepth
+  while (depth <= maxDepth) {
+    let iterations = 1 << (maxDepth - depth + minDepth)
+    let sum = 0
+    for (let i = 0; i < iterations; i++) { sum = sum + itemCheck(bottomUpTree(depth)) }
+    total = total + sum
+    depth = depth + 2
+  }
+  total = total + itemCheck(longLived)
+  return total
+}
+
+let t0 = Date.now()
+let check = binaryTrees(15)
+console.log("GAUNTLET binary_trees " + (Date.now() - t0) + " " + check)

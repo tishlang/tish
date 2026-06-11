@@ -1,0 +1,13 @@
+// M3 member-on-non-ident: `pts[i].x` (indexing a typed array of structs) lowers to native struct
+// field access, not a dynamic `get_prop`; iterating `Point[]` binds the loop var to the struct
+// type so `p.x` is native too. Output identical across backends.
+
+type Point = { x: number, y: number }
+
+let pts: Point[] = [{ x: 1, y: 2 }, { x: 3, y: 4 }, { x: 5, y: 6 }]
+console.log(pts[0].x)
+console.log(pts[2].y)
+
+let sum: number = 0
+for (let p of pts) { sum = sum + p.x + p.y }
+console.log(sum)

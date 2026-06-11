@@ -1,0 +1,27 @@
+// GAUNTLET: Mandelbrot set (Are We Fast Yet / Benchmarks Game). A tight inner loop of pure f64
+// arithmetic with an escape test and ZERO heap allocation in the hot path — the canonical numeric-JIT
+// canary (scalar float codegen + branch). Valid in both tish and node; integer check (in-set count).
+function mandel(w, h, maxIter) {
+  let count = 0
+  for (let py = 0; py < h; py++) {
+    let y0 = (py / h) * 3.0 - 1.5
+    for (let px = 0; px < w; px++) {
+      let x0 = (px / w) * 3.0 - 2.0
+      let x = 0.0
+      let y = 0.0
+      let iter = 0
+      while (iter < maxIter && x * x + y * y <= 4.0) {
+        let xt = x * x - y * y + x0
+        y = 2.0 * x * y + y0
+        x = xt
+        iter = iter + 1
+      }
+      if (iter === maxIter) { count = count + 1 }
+    }
+  }
+  return count
+}
+
+let t0 = Date.now()
+let check = mandel(1200, 1200, 100)
+console.log("GAUNTLET mandelbrot " + (Date.now() - t0) + " " + check)

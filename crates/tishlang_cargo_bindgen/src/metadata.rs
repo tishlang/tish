@@ -79,7 +79,7 @@ edition = "2021"
         && !pkg
             .targets
             .iter()
-            .any(|t| t.kind.iter().any(|k| *k == TargetKind::Lib))
+            .any(|t| t.kind.contains(&TargetKind::Lib))
     {
         return Err(format!(
             "package `{}` has no src/ or lib target at {}",

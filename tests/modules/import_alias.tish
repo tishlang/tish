@@ -1,0 +1,10 @@
+// Import aliasing regression test: `{ x as y }` rename and `* as M` namespace.
+// `as` is a dedicated keyword token (also used by casts); the parser must accept it in
+// import-specifier position. Output must be identical across interp / VM / native / node.
+import { ssrH as h, greet as g } from "./import_alias_dep.tish"
+import * as M from "./import_alias_dep.tish"
+
+console.log(h)
+console.log(g("there"))
+console.log(M.ssrH)
+console.log(M.VERSION)

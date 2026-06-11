@@ -1,5 +1,6 @@
 //! Recursive descent parser for Tish.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Macro to generate single-operator binary parsing functions.
@@ -55,18 +56,112 @@ use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
     DestructProp, ExportDeclaration, Expr, FunParam, ImportSpecifier, JsxAttrValue, JsxChild,
     JsxProp, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement,
-    TypeAnnotation, TypedParam, UnaryOp,
+    TypeAnnotation, TypeLiteral, TypedParam, UnaryOp,
 };
 use tishlang_lexer::{Token, TokenKind};
+
+/// Mangle a generic instantiation `base<args>` into a Rust-ident-safe alias name (`Box__number`).
+fn mangle_generic(base: &str, args: &[TypeAnnotation]) -> String {
+    let parts: Vec<String> = args.iter().map(mangle_type).collect();
+    format!("{}__{}", base, parts.join("_"))
+}
+
+fn mangle_type(t: &TypeAnnotation) -> String {
+    match t {
+        TypeAnnotation::Simple(s) => s.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect(),
+        TypeAnnotation::Array(inner) => format!("{}Arr", mangle_type(inner)),
+        TypeAnnotation::Tuple(es) => {
+            format!("Tup{}", es.iter().map(mangle_type).collect::<Vec<_>>().join(""))
+        }
+        TypeAnnotation::Object(_) => "Obj".to_string(),
+        TypeAnnotation::Union(_) => "Un".to_string(),
+        TypeAnnotation::Intersection(_) => "Is".to_string(),
+        TypeAnnotation::Function { .. } => "Fn".to_string(),
+        TypeAnnotation::Literal(_) => "Lit".to_string(),
+    }
+}
+
+/// Substitute generic type parameters with their concrete arguments throughout a type body.
+fn subst_type(t: &TypeAnnotation, map: &HashMap<&str, &TypeAnnotation>) -> TypeAnnotation {
+    match t {
+        TypeAnnotation::Simple(s) => map
+            .get(s.as_ref())
+            .map(|rep| (*rep).clone())
+            .unwrap_or_else(|| t.clone()),
+        TypeAnnotation::Array(inner) => TypeAnnotation::Array(Box::new(subst_type(inner, map))),
+        TypeAnnotation::Object(fields) => TypeAnnotation::Object(
+            fields.iter().map(|(k, v)| (k.clone(), subst_type(v, map))).collect(),
+        ),
+        TypeAnnotation::Tuple(es) => {
+            TypeAnnotation::Tuple(es.iter().map(|e| subst_type(e, map)).collect())
+        }
+        TypeAnnotation::Union(es) => {
+            TypeAnnotation::Union(es.iter().map(|e| subst_type(e, map)).collect())
+        }
+        TypeAnnotation::Intersection(es) => {
+            TypeAnnotation::Intersection(es.iter().map(|e| subst_type(e, map)).collect())
+        }
+        TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+            params: params.iter().map(|p| subst_type(p, map)).collect(),
+            returns: Box::new(subst_type(returns, map)),
+        },
+        TypeAnnotation::Literal(_) => t.clone(),
+    }
+}
 
 pub struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    /// Outstanding `>` owed to enclosing generic-arg lists after a `>>` (`Shr`) token was split,
+    /// so nested `Array<Array<T>>` closes correctly (tish lexes `>>` as one token).
+    gt_debt: u32,
+    /// Generic `type`/`interface` decls (`type Box<T> = …`) → (type-param names, body), for
+    /// monomorphizing a reference `Box<number>` into a concrete native struct.
+    generic_aliases: HashMap<String, (Vec<Arc<str>>, TypeAnnotation)>,
+    /// Synthetic specialized aliases (e.g. `type Box__number = { value: number }`) generated for
+    /// each distinct `Generic<Args>` reference; appended to the program at the end.
+    generic_specializations: Vec<Statement>,
+    /// Names of specializations already generated (dedup).
+    generic_done: HashSet<String>,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            gt_debt: 0,
+            generic_aliases: HashMap::new(),
+            generic_specializations: Vec::new(),
+            generic_done: HashSet::new(),
+        }
+    }
+
+    /// Close one generic-arg `>`: use a previously-split `>>` debt, consume a `>`, or split a
+    /// `>>` (consuming it and owing one `>` to the parent). Returns false if there's no closer.
+    fn try_close_angle(&mut self) -> bool {
+        if self.gt_debt > 0 {
+            self.gt_debt -= 1;
+            return true;
+        }
+        match self.peek_kind() {
+            Some(TokenKind::Gt) => {
+                self.advance();
+                true
+            }
+            Some(TokenKind::Shr) => {
+                self.advance();
+                self.gt_debt += 1;
+                true
+            }
+            Some(TokenKind::UShr) => {
+                // `>>>` closing three generic args, e.g. `Foo<Bar<Baz<T>>>`.
+                self.advance();
+                self.gt_debt += 2;
+                true
+            }
+            _ => false,
+        }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -99,11 +194,17 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// After `.` / `?.`, allow `type` as a member name (`TokenKind::Type`); see `docs/js-emit-philosophy.md`.
+    /// After `.` / `?.`, allow contextual keywords as member names. In JS any `IdentifierName`
+    /// (including reserved words) is a valid property name — `arr.of`, `x.as`, `o.in`, `o.type` —
+    /// but the lexer emits dedicated keyword tokens for these, so they must be accepted explicitly
+    /// here. (`TypedArray.of` is the motivating case.) See `docs/js-emit-philosophy.md`.
     fn expect_ident_or_type_member_name(&mut self) -> Result<&Token, String> {
         match self.peek_kind() {
             Some(TokenKind::Ident) => self.expect(TokenKind::Ident),
             Some(TokenKind::Type) => self.expect(TokenKind::Type),
+            Some(TokenKind::Of) => self.expect(TokenKind::Of),
+            Some(TokenKind::As) => self.expect(TokenKind::As),
+            Some(TokenKind::In) => self.expect(TokenKind::In),
             other => Err(format!(
                 "Expected property name after `.` or `?.`, got {:?}",
                 other
@@ -124,6 +225,13 @@ impl<'a> Parser<'a> {
                 continue;
             }
             statements.push(self.parse_statement()?);
+        }
+        // Prepend the synthetic monomorphized aliases (`type Box__number = …`) so they're declared
+        // before any use, for alias resolution + native struct emission.
+        if !self.generic_specializations.is_empty() {
+            let mut out = std::mem::take(&mut self.generic_specializations);
+            out.append(&mut statements);
+            statements = out;
         }
         Ok(Program { statements })
     }
@@ -173,6 +281,7 @@ impl<'a> Parser<'a> {
             TokenKind::Export => self.parse_export()?,
             TokenKind::Type => self.parse_type_alias()?,
             TokenKind::Declare => self.parse_declare()?,
+            TokenKind::Interface => self.parse_interface()?,
             _ => {
                 let expr = self.parse_expr()?;
                 let span_end = expr.span().end;
@@ -270,7 +379,37 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::Const)?.span.start
         };
 
-        // Check for destructuring pattern
+        // First declarator keeps the `let`/`const`-anchored span (single-decl is
+        // the overwhelmingly common case and stays byte-identical to before).
+        let first = self.parse_one_declarator(mutable, span_start)?;
+        if !matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+            return Ok(first);
+        }
+
+        // Comma-separated declarators: `let a = 1, b = 2, c`. Each lowers to its
+        // own VarDecl inside a transparent `Multi` group (no new scope), so it
+        // composes anywhere a single statement is expected (incl. `for` init).
+        let mut statements = vec![first];
+        while matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+            self.advance(); // consume ','
+            let decl_start = self.peek().map(|t| t.span.start).unwrap_or(span_start);
+            statements.push(self.parse_one_declarator(mutable, decl_start)?);
+        }
+        Ok(Statement::Multi {
+            statements,
+            span: self.span_end(span_start),
+        })
+    }
+
+    /// Parse one declarator — `ident[: Type] [= init]` or `pattern = init` — into
+    /// its own statement. The leading `let`/`const` keyword is consumed by the
+    /// caller; `span_start` anchors this declarator's span.
+    fn parse_one_declarator(
+        &mut self,
+        mutable: bool,
+        span_start: (usize, usize),
+    ) -> Result<Statement, String> {
+        // Destructuring pattern declarator.
         if matches!(
             self.peek_kind(),
             Some(TokenKind::LBracket) | Some(TokenKind::LBrace)
@@ -480,28 +619,128 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse a type annotation (number, string, T[], {a: T}, etc.)
-    fn parse_type_annotation(&mut self) -> Result<TypeAnnotation, String> {
-        let base = self.parse_type_primary()?;
-
-        // Check for array suffix: T[]
-        if matches!(self.peek_kind(), Some(TokenKind::LBracket)) {
-            self.advance(); // [
-            self.expect(TokenKind::RBracket)?; // ]
-            return Ok(TypeAnnotation::Array(Box::new(base)));
+    /// Parse a generic type-parameter list `<T, U, …>` on a `fn` / `type` declaration, returning the
+    /// parameter names. On functions the names are ignored (generic fns run gradually/boxed); on
+    /// `type`/`interface` they drive struct monomorphization (`Box<number>` → a native struct).
+    fn parse_type_params(&mut self) -> Result<Vec<Arc<str>>, String> {
+        let mut params = Vec::new();
+        if matches!(self.peek_kind(), Some(TokenKind::Lt)) {
+            self.advance(); // <
+            while !matches!(self.peek_kind(), Some(TokenKind::Gt)) {
+                let tok = self.expect(TokenKind::Ident)?;
+                if let Some(n) = &tok.literal {
+                    params.push(Arc::from(n.as_ref()));
+                }
+                if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.expect(TokenKind::Gt)?; // >
         }
+        Ok(params)
+    }
 
-        // Check for union: T | U
+    /// Specialize a generic struct reference `base<args>` into a concrete synthetic alias name
+    /// (e.g. `Box__number`), emitting `type Box__number = { value: number }` once per instantiation
+    /// so it lowers to a native struct. Returns `None` if `base` isn't a known generic alias or the
+    /// arity mismatches (caller then falls back to erasing the args).
+    fn monomorphize_generic(&mut self, base: &str, args: &[TypeAnnotation]) -> Option<String> {
+        let (params, body) = self.generic_aliases.get(base)?.clone();
+        if params.len() != args.len() {
+            return None;
+        }
+        let spec_name = mangle_generic(base, args);
+        if self.generic_done.insert(spec_name.clone()) {
+            let subst: HashMap<&str, &TypeAnnotation> =
+                params.iter().map(|p| p.as_ref()).zip(args.iter()).collect();
+            let concrete = subst_type(&body, &subst);
+            let z = Span {
+                start: (0, 0),
+                end: (0, 0),
+            };
+            self.generic_specializations.push(Statement::TypeAlias {
+                name: Arc::from(spec_name.as_str()),
+                name_span: z,
+                ty: concrete,
+                span: z,
+            });
+        }
+        Some(spec_name)
+    }
+
+    /// Parse a generic type-argument list `<T, U, …>` on a type reference (`Array<number>`,
+    /// `Map<string, number>`). Nested `Array<Array<T>>` works because tish has no `>>` token.
+    fn parse_type_args(&mut self) -> Result<Vec<TypeAnnotation>, String> {
+        self.expect(TokenKind::Lt)?; // <
+        let mut args = Vec::new();
+        if !self.try_close_angle() {
+            loop {
+                args.push(self.parse_type_annotation()?);
+                if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+            if !self.try_close_angle() {
+                return Err("expected `>` to close type arguments".to_string());
+            }
+        }
+        Ok(args)
+    }
+
+    /// Parse a type annotation (number, string, T[], T?, {a: T}, A | B, A & B, Array<T>, etc.)
+    fn parse_type_annotation(&mut self) -> Result<TypeAnnotation, String> {
+        let base = self.parse_type_intersection()?;
+
+        // Union: T | U | ... (binds looser than `&`)
         if matches!(self.peek_kind(), Some(TokenKind::BitOr)) {
             let mut types = vec![base];
             while matches!(self.peek_kind(), Some(TokenKind::BitOr)) {
                 self.advance(); // |
-                types.push(self.parse_type_primary()?);
+                types.push(self.parse_type_intersection()?);
             }
             return Ok(TypeAnnotation::Union(types));
         }
 
         Ok(base)
+    }
+
+    /// `A & B & …` intersection (binds tighter than `|`).
+    fn parse_type_intersection(&mut self) -> Result<TypeAnnotation, String> {
+        let base = self.parse_type_postfix()?;
+        if matches!(self.peek_kind(), Some(TokenKind::BitAnd)) {
+            let mut types = vec![base];
+            while matches!(self.peek_kind(), Some(TokenKind::BitAnd)) {
+                self.advance(); // &
+                types.push(self.parse_type_postfix()?);
+            }
+            return Ok(TypeAnnotation::Intersection(types));
+        }
+        Ok(base)
+    }
+
+    /// A primary type plus any postfix `[]` (array) and `?` (optional, `T? === T | null`),
+    /// chained: `T[]`, `T[][]`, `T?`, `T?[]`, …
+    fn parse_type_postfix(&mut self) -> Result<TypeAnnotation, String> {
+        let mut t = self.parse_type_primary()?;
+        loop {
+            match self.peek_kind() {
+                Some(TokenKind::LBracket) => {
+                    self.advance(); // [
+                    self.expect(TokenKind::RBracket)?; // ]
+                    t = TypeAnnotation::Array(Box::new(t));
+                }
+                Some(TokenKind::Question) => {
+                    self.advance(); // ?
+                    t = TypeAnnotation::Union(vec![t, TypeAnnotation::Simple("null".into())]);
+                }
+                _ => break,
+            }
+        }
+        Ok(t)
     }
 
     /// Parse a primary type (identifier, object, or function type)
@@ -510,6 +749,24 @@ impl<'a> Parser<'a> {
             Some(TokenKind::Ident) => {
                 let tok = self.advance().ok_or("Expected type name")?;
                 let name = tok.literal.clone().ok_or("Expected type name")?;
+                // Generic reference `Name<Args>`: `Array<T>` desugars to the native `T[]`; other
+                // generic refs erase their args (the base name resolves to its alias, whose type
+                // params already act as unknown -> `Value`).
+                if matches!(self.peek_kind(), Some(TokenKind::Lt)) {
+                    let args = self.parse_type_args()?;
+                    if name.as_ref() == "Array" && args.len() == 1 {
+                        return Ok(TypeAnnotation::Array(Box::new(
+                            args.into_iter().next().unwrap(),
+                        )));
+                    }
+                    // Monomorphize a generic struct ref `Box<number>` into a synthetic concrete
+                    // alias `Box__number` (a native struct). Falls back to erasing the args when
+                    // `name` isn't a known generic alias (e.g. forward reference) or arity mismatches.
+                    if let Some(spec) = self.monomorphize_generic(name.as_ref(), &args) {
+                        return Ok(TypeAnnotation::Simple(Arc::from(spec.as_str())));
+                    }
+                    return Ok(TypeAnnotation::Simple(name));
+                }
                 Ok(TypeAnnotation::Simple(name))
             }
             Some(TokenKind::Type | TokenKind::Declare) => {
@@ -588,6 +845,39 @@ impl<'a> Parser<'a> {
                     returns: Box::new(returns),
                 })
             }
+            // Tuple type: [T1, T2, ...]
+            Some(TokenKind::LBracket) => {
+                self.advance(); // [
+                let mut elems = Vec::new();
+                while !matches!(self.peek_kind(), Some(TokenKind::RBracket)) {
+                    elems.push(self.parse_type_annotation()?);
+                    if !matches!(self.peek_kind(), Some(TokenKind::RBracket)) {
+                        self.expect(TokenKind::Comma)?;
+                    }
+                }
+                self.expect(TokenKind::RBracket)?;
+                Ok(TypeAnnotation::Tuple(elems))
+            }
+            // Literal types: "foo", 42, true, false
+            Some(TokenKind::String) => {
+                let tok = self.advance().ok_or("Expected string literal type")?;
+                let s = tok.literal.clone().ok_or("Expected string literal")?;
+                Ok(TypeAnnotation::Literal(TypeLiteral::Str(s)))
+            }
+            Some(TokenKind::Number) => {
+                let tok = self.advance().ok_or("Expected number literal type")?;
+                let s = tok.literal.as_ref().ok_or("Expected number literal")?;
+                let n: f64 = s.parse().map_err(|_| format!("Invalid number: {}", s))?;
+                Ok(TypeAnnotation::Literal(TypeLiteral::Num(n)))
+            }
+            Some(TokenKind::True) => {
+                self.advance();
+                Ok(TypeAnnotation::Literal(TypeLiteral::Bool(true)))
+            }
+            Some(TokenKind::False) => {
+                self.advance();
+                Ok(TypeAnnotation::Literal(TypeLiteral::Bool(false)))
+            }
             _ => Err("Expected type annotation".to_string()),
         }
     }
@@ -600,6 +890,7 @@ impl<'a> Parser<'a> {
             end: name_tok.span.end,
         };
         let name = name_tok.literal.clone().ok_or("Expected function name")?;
+        self.parse_type_params()?; // generic `fn f<T, U>(…)` — fn type params run gradually (boxed)
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::with_capacity(4);
         let mut rest_param = None;
@@ -695,8 +986,62 @@ impl<'a> Parser<'a> {
             end: name_tok.span.end,
         };
         let name = name_tok.literal.clone().ok_or("Expected type alias name")?;
+        let type_params = self.parse_type_params()?;
         self.expect(TokenKind::Assign)?;
         let ty = self.parse_type_annotation()?;
+        if !type_params.is_empty() {
+            self.generic_aliases
+                .insert(name.to_string(), (type_params, ty.clone()));
+        }
+        Ok(Statement::TypeAlias {
+            name,
+            name_span,
+            ty,
+            span: self.span_end(span_start),
+        })
+    }
+
+    /// `interface Name { k: T, ... }` — desugared to `type Name = { ... }` so the checker
+    /// (structural matching) and codegen (native `TishStruct_*`) treat it exactly like an
+    /// object-type alias. (`extends` is not yet supported.)
+    fn parse_interface(&mut self) -> Result<Statement, String> {
+        let span_start = self.expect(TokenKind::Interface)?.span.start;
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let name_span = Span {
+            start: name_tok.span.start,
+            end: name_tok.span.end,
+        };
+        let name = name_tok.literal.clone().ok_or("Expected interface name")?;
+        let type_params = self.parse_type_params()?;
+
+        // `extends Parent1, Parent2` — desugar to an intersection of the parents with the body, so
+        // the inherited fields participate in structural checking + native struct emission.
+        let mut parents: Vec<TypeAnnotation> = Vec::new();
+        if matches!(self.peek_kind(), Some(TokenKind::Ident))
+            && self.peek().and_then(|t| t.literal.as_deref()) == Some("extends")
+        {
+            self.advance(); // extends
+            loop {
+                parents.push(self.parse_type_postfix()?);
+                if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+        }
+
+        let body = self.parse_type_annotation()?;
+        let ty = if parents.is_empty() {
+            body
+        } else {
+            parents.push(body);
+            TypeAnnotation::Intersection(parents)
+        };
+        if !type_params.is_empty() {
+            self.generic_aliases
+                .insert(name.to_string(), (type_params, ty.clone()));
+        }
         Ok(Statement::TypeAlias {
             name,
             name_span,
@@ -767,6 +1112,7 @@ impl<'a> Parser<'a> {
             end: name_tok.span.end,
         };
         let name = name_tok.literal.clone().ok_or("Expected function name")?;
+        self.parse_type_params()?; // generic `fn f<T, U>(…)` — fn type params run gradually (boxed)
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::with_capacity(4);
         let mut rest_param = None;
@@ -899,17 +1245,33 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
-                self.advance();
-            }
-            Some(Box::new(Statement::VarDecl {
+            let first = Statement::VarDecl {
                 name,
                 name_span,
                 mutable,
                 type_ann,
                 init: init_expr,
                 span: self.span_end(var_span_start),
-            }))
+            };
+            // Comma-separated for-init declarators: `for (let i = 0, n = len; ...)`.
+            let decl = if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                let mut statements = vec![first];
+                while matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                    self.advance();
+                    let decl_start = self.peek().map(|t| t.span.start).unwrap_or(var_span_start);
+                    statements.push(self.parse_one_declarator(mutable, decl_start)?);
+                }
+                Statement::Multi {
+                    statements,
+                    span: self.span_end(var_span_start),
+                }
+            } else {
+                first
+            };
+            if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
+                self.advance();
+            }
+            Some(Box::new(decl))
         } else if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
             None
         } else {
@@ -1103,9 +1465,9 @@ impl<'a> Parser<'a> {
                     .literal
                     .clone()
                     .ok_or("Expected identifier in import")?;
-                let (alias, alias_span) = if matches!(self.peek_kind(), Some(TokenKind::Ident))
-                    && self.peek().and_then(|t| t.literal.as_deref()) == Some("as")
-                {
+                // `as` is a dedicated keyword token (also used for casts); in import-specifier
+                // position it introduces a rename: `{ foo as bar }`.
+                let (alias, alias_span) = if matches!(self.peek_kind(), Some(TokenKind::As)) {
                     self.advance(); // consume 'as'
                     let alias_tok = self.expect(TokenKind::Ident)?;
                     let asp = Span {
@@ -1139,10 +1501,7 @@ impl<'a> Parser<'a> {
         } else if matches!(self.peek_kind(), Some(TokenKind::Star)) {
             // Namespace: import * as M from "..."
             self.advance();
-            let as_tok = self.expect(TokenKind::Ident)?;
-            if as_tok.literal.as_deref() != Some("as") {
-                return Err("Expected 'as' after '*' in namespace import".to_string());
-            }
+            self.expect(TokenKind::As)?;
             let alias_tok = self.expect(TokenKind::Ident)?;
             let name_span = Span {
                 start: alias_tok.span.start,
@@ -1376,7 +1735,7 @@ impl<'a> Parser<'a> {
     binary_single_op!(parse_bit_xor, parse_bit_and, BitXor, BinOp::BitXor);
     binary_single_op!(parse_bit_and, parse_shift, BitAnd, BinOp::BitAnd);
 
-    binary_multi_op!(parse_shift, parse_equality, Shl => BinOp::Shl, Shr => BinOp::Shr);
+    binary_multi_op!(parse_shift, parse_equality, Shl => BinOp::Shl, Shr => BinOp::Shr, UShr => BinOp::UShr);
     binary_multi_op!(parse_equality, parse_comparison,
         StrictEq => BinOp::StrictEq, StrictNe => BinOp::StrictNe,
         Eq => BinOp::Eq, Ne => BinOp::Ne);
@@ -1574,6 +1933,13 @@ impl<'a> Parser<'a> {
         };
         while let Some(kind) = self.peek_kind() {
             match kind {
+                // `expr as Type` — a type assertion. Gradual + erased: consume the type and keep the
+                // expression unchanged (no runtime effect; the checker is already lenient on what it
+                // can't prove, so the assertion's only job — silencing a strict error — is moot).
+                TokenKind::As => {
+                    self.advance(); // as
+                    self.parse_type_annotation()?;
+                }
                 TokenKind::LParen => {
                     self.advance();
                     let mut args = Vec::new();

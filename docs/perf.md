@@ -1,4 +1,19 @@
 ################################################################################
+##  ★ WIN — Map/Set O(n)→O(1) per op (hash-backed), ~350× at scale (2026-06-10). DEFAULT ON.
+################################################################################
+`Map`/`Set` were backed by parallel `Vec<Value>` with a `iter().position(same_value_zero)` LINEAR SCAN
+on every get/set/has/add/delete ⇒ O(n) per op ⇒ O(n²) for a program doing n ops. Surfaced by the new
+`k_nucleotide` benchmark (**1773× slower than V8**, ratio growing with input) — see
+docs/perf-benchmark-suite.md. FIX (crates/tish_builtins/src/collections.rs): both back a single
+`indexmap::IndexMap<Key, Value>` (insertion-ordered hash). `Key(Value)` impls Hash+Eq = SameValueZero
+(number canonical-bits so +0/-0 and NaN unify; string/bool/null by value → true O(1); reference types by
+per-variant tag + `ptr_eq`). `delete` = `shift_remove` (preserves order). MEASURED (Map insert+lookup of
+N, release): n=80k **8166ms → 23ms (~350×)**; scaling went from 4×/doubling (O(n)/op) to ~2.2×/doubling
+(O(1)/op); k_nucleotide **1773× → 5.6× vs V8**. The `.size` hook + constructor signatures were kept
+identical, so ZERO interp/VM/native edits — `tests/core/set_map_types.*` byte-identical on all backends,
+`cargo test -p tishlang_builtins` green. (Object-keyed maps stay bucket-by-variant — rare, no regression.)
+
+################################################################################
 ##  ★ FLAGSHIP WIN — array-element JIT (`arr[i]` in JIT'd loops), 38× (2026-06-06). DEFAULT ON.
 ################################################################################
 The numeric JIT can now read array elements inside compiled loops, so numeric-array-REDUCTION
@@ -246,6 +261,62 @@ The infrastructure is CORRECT and benefits code with explicit numeric literals (
 that use `[1,2,...,N]` syntax) and sort/HOF chains starting from those. For the `array_stress`
 benchmarks to benefit: need to upgrade push-accumulated arrays to NumberArray (not done — requires
 a different mechanism than &Value mutation, e.g. a "tagging" approach on the VmRef).
+
+--------------------------------------------------------------------------------
+  PHASE 2b — packed-native `Float64Array` (rust-AOT codegen only) (2026-06-10)
+--------------------------------------------------------------------------------
+Extends packed arrays to the typed-array constructor on the NATIVE rust-AOT path: `new Float64Array(...)`
+lowers in codegen.rs (the real `Expr::New` emit site) to `tishlang_runtime::float64_array_packed(&[...])`
+instead of the generic `tish_construct` → boxed `Value::Array`. The helper builds a `Value::NumberArray`
+(`Vec<f64>`) directly when `TISH_PACKED_ARRAYS=1`, and returns the BYTE-IDENTICAL boxed value when the
+flag is off (default), so stock builds are unchanged. `Float64Array` is the only view whose element type
+IS `f64` — no coercion — so it maps onto the existing `NumberArray` with zero element work. The integer /
+`Float32Array` views have no packed `Value` variant (would need `Vec<i32>`/`Vec<f32>`/… + the 24-byte
+size assertion + every exhaustive match — a separate, larger effort) and keep the boxed path.
+
+  WHY NATIVE-ONLY: the interp (`tishlang_eval::Value`) has no `NumberArray` variant and the core↔eval
+  value bridge can't carry one, so the runtime constructor still returns boxed `Value::Array` for all
+  backends; only codegen special-cases it. Consequence: on the native path a `NumberArray` is ALWAYS a
+  `Float64Array` (codegen never packs array literals here), so the native runtime additions are sound.
+
+  NATIVE RUNTIME ADDITIONS (tish_runtime/src/lib.rs — the VM had these, the rust runtime did NOT):
+    get_prop (`.length` + numeric key), get_index, set_index, in_operator → NumberArray arms; plus the
+    emitted for-of `match &_fof` grew a `Value::NumberArray` arm (codegen.rs). set_index stores the f64
+    (`val.as_number().unwrap_or(NaN)`) — because NumberArray≡Float64Array here, this is the CORRECT view
+    semantics and incidentally closes the v1 "no write-coercion" gap for this one view.
+
+  PACKED HOF FAST PATH (follow-up, same session): the array HOFs in tish_builtins/src/array.rs no longer
+  `as_boxed_array`-materialise a NumberArray before iterating. `packed_snapshot(arr, cb)` takes a cheap
+  `Vec<f64>` snapshot (8 B/elem memcpy, no per-element Value construction) and the method folds/scans it,
+  boxing one `Value::Number` at a time for the callback. Covers reduce/map/filter/for_each/find/find_index/
+  some/every. Snapshot (not a held borrow) matches the boxed copy semantics and can't deadlock on a
+  re-entrant callback. Identical results to the boxed path (unit tests: array::packed_hof_tests).
+
+  PACKED RESULTS — map/filter STAY packed (2nd follow-up): `filter` keeps a subset of the input f64s, so
+  it builds the result `Vec<f64>` directly → NumberArray. `map` speculatively builds a `Vec<f64>` and
+  deopts to a boxed `Vec<Value>` on the FIRST non-numeric callback result (each element's callback still
+  runs once, in order). So a numeric `map`/`filter` returns a NumberArray and chains stay packed end-to-end
+  (empty results stay boxed, per convention). A NumberArray is observably identical to a boxed array of the
+  same numbers (verified: display / JSON.stringify / index / for-of byte-identical across interp/vm-on/vm-off).
+
+  BENCHMARK (/tmp/f64_bench.tish: N=1,000,000, 30 rounds; one binary, flag toggles at runtime; M-series):
+    op                       boxed (flag=0)   packed (flag=1)   ratio
+    construct(N) zero-fill        ~90 ms           ~1.5 ms       ~60×    ★ headline: memset vs N boxed Values
+    construct(from 1M src)        ~7 ms            ~5 ms         ~1.3×
+    index-sum  (big[i])           ~540 ms          ~499 ms       ~1.08×  denser scan; per-elem rebox dominates
+    forof-sum  (for x of big)     ~188 ms          ~173 ms       ~1.09×
+    reduce     (a,b)=>a+b         ~378 ms          ~327 ms       ~1.16×  WAS ~0.86× regression; HOF fast path flips it
+    filter     (x>500)            ~323 ms          ~300 ms       ~1.08×  no input materialisation
+    map(x*2).reduce               ~593 ms          ~541 ms       ~1.10×  map builds Vec<f64> direct, result stays packed
+    filter(>500).map(+1).reduce   ~638 ms          ~515 ms       ~1.24×  whole chain stays packed end-to-end
+  Output (sums/lengths) byte-identical between modes. Memory: 8 B/elem vs 24 B/elem = 3× denser.
+
+  TAKEAWAY: the win is CONSTRUCTION (no per-element boxing, ~60×) + 3× footprint; scans gain cache density
+  ~8-9% (the loop body re-boxes each elem to `Value::Number`). With the HOF fast paths, reduce/filter/map
+  on a packed array BEAT boxed (no materialisation deopt), and map/filter now RETURN packed so chains stay
+  packed end-to-end (1.10–1.24× on chains). Remaining ceiling: the per-element rebox in scans — a fully-
+  unboxed numeric loop needs typed codegen (the M-series/typed-native path). Enable for Float64-heavy
+  compute/memory-bound code.
 
 ################################################################################
 ##  WIN — parking_lot::Mutex on the send-values path (2026-06-06). 2nd profile lever.

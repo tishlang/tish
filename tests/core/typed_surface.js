@@ -1,0 +1,11 @@
+let x = 5;
+console.log(x);
+let y = null;
+console.log(y);
+let s = "on";
+console.log(s);
+let pair = [7, "z"];
+console.log(pair[0]);
+console.log(pair[1]);
+let n = 42 + 8;
+console.log(n);

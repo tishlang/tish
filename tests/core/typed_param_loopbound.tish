@@ -1,0 +1,22 @@
+// M4 (TISH_PARAM_INFER): a param used as a loop bound (compared to a numeric local `i`) is
+// inferred `: number`, so it lowers to a native f64 param. A param used as a STRING (concat) is
+// NOT inferred — it stays dynamic. Output is identical with or without inference, every backend.
+
+fn countUp(n) {
+  let total = 0
+  for (let i = 0; i < n; i = i + 1) {
+    total = total + i
+  }
+  return total
+}
+console.log(countUp(10))
+console.log(countUp(100))
+console.log(countUp(0))
+
+// Soundness guard: `x` is the bare operand of `+` against a string literal, so it is NOT provably
+// numeric and must stay dynamic — otherwise `label("hi")` would mistype.
+fn label(x) {
+  return "v=" + x
+}
+console.log(label(5))
+console.log(label("hi"))

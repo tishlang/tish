@@ -1,0 +1,13 @@
+// Optional `T?`, literal types, tuple types, and `as` casts.
+let x: number? = 5
+console.log(x)
+let y: string? = null
+console.log(y)
+type Status = "on" | "off"
+let s: Status = "on"
+console.log(s)
+let pair: [number, string] = [7, "z"]
+console.log(pair[0])
+console.log(pair[1])
+let n = (42 as number) + 8
+console.log(n)

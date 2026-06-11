@@ -1,0 +1,14 @@
+// Generics: `<T>` on functions / type aliases / refs. Type params are erased (gradual): generic
+// code type-checks leniently and runs correctly; `Array<T>` desugars to the native `T[]`.
+fn identity<T>(x: T): T { return x }
+console.log(identity(5))
+console.log(identity("hi"))
+fn first<T>(xs: T[]): T { return xs[0] }
+let a: number[] = [10, 20, 30]
+console.log(first(a))
+type Box<T> = { value: T }
+let b: Box<number> = { value: 42 }
+console.log(b.value)
+let arr: Array<number> = [1, 2, 3]
+console.log(arr[1])
+console.log(arr.length)

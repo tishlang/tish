@@ -477,6 +477,7 @@ fn convert_bin_op(op: &oxc::ast::ast::BinaryOperator) -> Result<BinOp, ConvertEr
         oxc::ast::ast::BinaryOperator::BitwiseXOR => BinOp::BitXor,
         oxc::ast::ast::BinaryOperator::ShiftLeft => BinOp::Shl,
         oxc::ast::ast::BinaryOperator::ShiftRight => BinOp::Shr,
+        oxc::ast::ast::BinaryOperator::ShiftRightZeroFill => BinOp::UShr,
         _ => {
             return Err(ConvertError::new(ConvertErrorKind::Unsupported {
                 what: format!("binary operator: {op:?}"),

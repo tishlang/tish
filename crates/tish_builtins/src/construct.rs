@@ -145,21 +145,6 @@ fn audio_context_instance() -> Value {
     Value::object(ctx)
 }
 
-/// Global `Uint8Array` for native/VM: `new Uint8Array(n)` → numeric array of zeros (not real bytes).
-pub fn uint8_array_constructor_value() -> Value {
-    let ctor = Value::native(|args: &[Value]| {
-        let len = args
-            .first()
-            .and_then(Value::as_number)
-            .unwrap_or(0.0)
-            .clamp(0.0, 1_000_000_000.0) as usize;
-        Value::Array(VmRef::new(vec![Value::Number(0.0); len]))
-    });
-    let mut m = ObjectMap::default();
-    m.insert(Arc::from(CONSTRUCT), ctor);
-    Value::object(m)
-}
-
 /// Global `AudioContext` for native/VM: stub graph (no real audio).
 pub fn audio_context_constructor_value() -> Value {
     let ctor = Value::native(|_args: &[Value]| audio_context_instance());

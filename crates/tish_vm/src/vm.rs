@@ -16,8 +16,8 @@ use tishlang_builtins::number as num_builtins;
 use tishlang_builtins::string as str_builtins;
 use tishlang_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
 use tishlang_core::{
-    merge_object_data, object_get, object_has, object_set, NativeFn, ObjectData, ObjectMap,
-    PropMap, Value,
+    merge_object_data, object_get, object_has, object_set, to_int32, to_uint32, NativeFn,
+    ObjectData, ObjectMap, PropMap, Value,
 };
 
 /// Wrap a closure in the right shared pointer for the current build.
@@ -569,24 +569,36 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         tishlang_builtins::symbol::symbol_object(),
     );
 
-    // Date - at minimum Date.now() for timing
-    let mut date = ObjectMap::default();
-    date.insert(
-        "now".into(),
-        Value::native(|_args: &[Value]| {
-            let ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as f64;
-            Value::Number(ms)
-        }),
-    );
-    g.insert("Date".into(), value_object_from_map(date));
-
+    // Date - full constructor (new Date(...)) plus statics now()/parse()/UTC().
     g.insert(
-        "Uint8Array".into(),
-        construct_builtin::uint8_array_constructor_value(),
+        "Date".into(),
+        tishlang_builtins::date::date_constructor_value(),
     );
+    g.insert(
+        "Set".into(),
+        tishlang_builtins::collections::set_constructor_value(),
+    );
+    g.insert(
+        "Map".into(),
+        tishlang_builtins::collections::map_constructor_value(),
+    );
+
+    for (name, ctor) in [
+        (
+            "Float64Array",
+            tishlang_builtins::typedarrays::float64_array_constructor_value as fn() -> Value,
+        ),
+        ("Float32Array", tishlang_builtins::typedarrays::float32_array_constructor_value),
+        ("Int8Array", tishlang_builtins::typedarrays::int8_array_constructor_value),
+        ("Uint8Array", tishlang_builtins::typedarrays::uint8_array_constructor_value),
+        ("Uint8ClampedArray", tishlang_builtins::typedarrays::uint8_clamped_array_constructor_value),
+        ("Int16Array", tishlang_builtins::typedarrays::int16_array_constructor_value),
+        ("Uint16Array", tishlang_builtins::typedarrays::uint16_array_constructor_value),
+        ("Int32Array", tishlang_builtins::typedarrays::int32_array_constructor_value),
+        ("Uint32Array", tishlang_builtins::typedarrays::uint32_array_constructor_value),
+    ] {
+        g.insert(name.into(), ctor());
+    }
     g.insert(
         "AudioContext".into(),
         construct_builtin::audio_context_constructor_value(),
@@ -864,6 +876,7 @@ fn try_call_array_jit(
     // `scratch` OWNS the extracted f64 data; handles point into it. Build handles only AFTER scratch is
     // fully populated so its backing buffers never reallocate out from under a live pointer.
     let mut scratch: Vec<Vec<f64>> = Vec::new();
+    #[allow(clippy::needless_range_loop)] // `i` drives bit-mask math (`mask >> i`), not just indexing
     for i in 0..arity {
         if (mask >> i) & 1 == 1 {
             match &args[i] {
@@ -1738,6 +1751,19 @@ impl Vm {
                         .clone();
                     self.stack.push(v);
                 }
+                Opcode::IterNormalize => {
+                    // `for…of`: turn a JS iterator object (callable `next()` → `{ value, done }`,
+                    // e.g. a Map/Set `.values()` result) into an array so the index loop iterates
+                    // it. Arrays/strings/everything else pass through unchanged.
+                    let v = self
+                        .stack
+                        .last()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    if let Some(items) = tishlang_core::drain_iterator(v) {
+                        self.stack.pop();
+                        self.stack.push(Value::Array(VmRef::new(items)));
+                    }
+                }
                 Opcode::Call => {
                     let argc = Self::read_u16(code, &mut ip) as usize;
                     let mut args = Vec::with_capacity(argc);
@@ -1833,6 +1859,11 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow in CallSpread".to_string())?;
+                    // A lone iterator spread (`f(...m.values())`) — drain to an array.
+                    let args_array = match tishlang_core::drain_iterator(&args_array) {
+                        Some(items) => Value::Array(VmRef::new(items)),
+                        None => args_array,
+                    };
                     let args: Vec<Value> = match &args_array {
                         Value::Array(a) => a.borrow().clone(),
                         _ => {
@@ -1890,6 +1921,11 @@ impl Vm {
                         .stack
                         .pop()
                         .ok_or_else(|| "Stack underflow in ConstructSpread".to_string())?;
+                    // A lone iterator spread (`new X(...m.values())`) — drain to an array.
+                    let args_array = match tishlang_core::drain_iterator(&args_array) {
+                        Some(items) => Value::Array(VmRef::new(items)),
+                        None => args_array,
+                    };
                     let args: Vec<Value> = match &args_array {
                         Value::Array(a) => a.borrow().clone(),
                         _ => {
@@ -2100,6 +2136,15 @@ impl Vm {
                     // Materialise NumberArray on either side before concatenation.
                     let left = left.coerce_number_array();
                     let right = right.coerce_number_array();
+                    // Spread of a Map/Set iterator (`[...m.values()]`): drain to an array.
+                    let left = match tishlang_core::drain_iterator(&left) {
+                        Some(items) => Value::Array(VmRef::new(items)),
+                        None => left,
+                    };
+                    let right = match tishlang_core::drain_iterator(&right) {
+                        Some(items) => Value::Array(VmRef::new(items)),
+                        None => right,
+                    };
                     let (mut a, b) = (
                         match &left {
                             Value::Array(arr) => arr.borrow().clone(),
@@ -2413,19 +2458,10 @@ fn estimate_string_concat_len(v: &Value) -> usize {
 /// Append JS-style string conversion without an intermediate `String` per operand (unlike
 /// `format!("{}{}", a.to_display_string(), b.to_display_string())`, which triple-allocates).
 fn append_value_for_string_concat(out: &mut String, v: &Value) {
-    use std::fmt::Write;
     match v {
-        Value::Number(n) => {
-            if n.is_nan() {
-                out.push_str("NaN");
-            } else if *n == f64::INFINITY {
-                out.push_str("Infinity");
-            } else if *n == f64::NEG_INFINITY {
-                out.push_str("-Infinity");
-            } else {
-                let _ = write!(out, "{n}");
-            }
-        }
+        // JS `Number.prototype.toString` (exponential past digit 21 / before −6), shared
+        // with `console.log` so `"" + n` and `` `${n}` `` match Node exactly.
+        Value::Number(n) => out.push_str(&tishlang_core::js_number_to_string(*n)),
         Value::String(s) => out.push_str(s.as_ref()),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Null => out.push_str("null"),
@@ -2472,11 +2508,16 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
         Ge => Ok(Bool(ln >= rn)),
         And => Ok(Bool(l.is_truthy() && r.is_truthy())),
         Or => Ok(Bool(l.is_truthy() || r.is_truthy())),
-        BitAnd => Ok(Number((ln as i32 & rn as i32) as f64)),
-        BitOr => Ok(Number((ln as i32 | rn as i32) as f64)),
-        BitXor => Ok(Number((ln as i32 ^ rn as i32) as f64)),
-        Shl => Ok(Number(((ln as i32) << (rn as i32)) as f64)),
-        Shr => Ok(Number(((ln as i32) >> (rn as i32)) as f64)),
+        // `to_int32`/`to_uint32` = JS ToInt32/ToUint32 (modulo 2³², NaN/±Infinity → 0); not a
+        // saturating cast, so out-of-range operands wrap exactly like JS instead of clamping.
+        BitAnd => Ok(Number((to_int32(ln) & to_int32(rn)) as f64)),
+        BitOr => Ok(Number((to_int32(ln) | to_int32(rn)) as f64)),
+        BitXor => Ok(Number((to_int32(ln) ^ to_int32(rn)) as f64)),
+        // JS shifts mask the count to 5 bits; `wrapping_sh*` matches that and avoids
+        // the debug-mode panic that plain `<<`/`>>` raise for a count of 32+.
+        Shl => Ok(Number(to_int32(ln).wrapping_shl(to_uint32(rn)) as f64)),
+        Shr => Ok(Number(to_int32(ln).wrapping_shr(to_uint32(rn)) as f64)),
+        UShr => Ok(Number(to_uint32(ln).wrapping_shr(to_uint32(rn)) as f64)),
         In => Ok(Bool(match r {
             Value::Object(_) => object_has(r, l),
             Value::Array(a) => {
@@ -2519,7 +2560,7 @@ fn eval_unary(op: UnaryOp, o: &Value) -> Result<Value, String> {
         Not => Ok(Bool(!o.is_truthy())),
         Neg => Ok(Number(-o.as_number().unwrap_or(f64::NAN))),
         Pos => Ok(Number(o.as_number().unwrap_or(f64::NAN))),
-        BitNot => Ok(Number(!(o.as_number().unwrap_or(0.0) as i32) as f64)),
+        BitNot => Ok(Number(!to_int32(o.as_number().unwrap_or(0.0)) as f64)),
         Void => Ok(Null),
     }
 }
@@ -2602,6 +2643,12 @@ fn ic_set_member(
 fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
     match obj {
         Value::Object(m) => {
+            // `Set`/`Map` instances expose a computed `.size` (via a hidden `SizeProbe` opaque).
+            if key.as_ref() == "size" {
+                if let Some(n) = tishlang_builtins::collections::collection_size(obj) {
+                    return Ok(Value::Number(n));
+                }
+            }
             let map = m.borrow();
             map.strings
                 .get(key.as_ref())

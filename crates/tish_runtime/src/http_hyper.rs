@@ -186,7 +186,9 @@ where
     let mut count = 0usize;
     while let Ok((req_prim, resp_tx)) = rx.recv() {
         let req_value = req_prim.into_value_pub();
-        let response_value = handler.call(&[req_value]);
+        // `handler` is the generic `F: Fn(&[Value]) -> Value` — call it directly. (`.call(..)` here
+        // would bind the *unstable* `Fn::call` trait method, which takes a tuple, not `&[Value]`.)
+        let response_value = handler(&[req_value]);
         let resp_prim = ResponsePrimitive::from_value_pub(&response_value);
         let _ = resp_tx.send(resp_prim);
 
@@ -259,6 +261,9 @@ fn worker_thread(
                 });
                 if let Err(e) = http1::Builder::new()
                     .keep_alive(true)
+                    // A `Timer` MUST be installed whenever a timeout is set, or hyper 1.x panics
+                    // ("header_read_timeout set, but no timer set") on the first connection.
+                    .timer(hyper_util::rt::TokioTimer::new())
                     // Slowloris guard: drop a connection that dribbles its request
                     // headers slower than this instead of pinning the worker task.
                     .header_read_timeout(std::time::Duration::from_secs(30))

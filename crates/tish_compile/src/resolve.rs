@@ -206,10 +206,10 @@ pub fn program_uses_document(program: &Program) -> bool {
 
     fn stmt_uses_document(s: &Statement) -> bool {
         match s {
-            Statement::VarDecl { init, .. } => init.as_ref().is_some_and(|e| expr_uses_document(e)),
+            Statement::VarDecl { init, .. } => init.as_ref().is_some_and(expr_uses_document),
             Statement::VarDeclDestructure { init, .. } => expr_uses_document(init),
             Statement::ExprStmt { expr, .. } => expr_uses_document(expr),
-            Statement::Return { value, .. } => value.as_ref().is_some_and(|e| expr_uses_document(e)),
+            Statement::Return { value, .. } => value.as_ref().is_some_and(expr_uses_document),
             Statement::Throw { value, .. } => expr_uses_document(value),
             Statement::If {
                 cond,
@@ -229,8 +229,8 @@ pub fn program_uses_document(program: &Program) -> bool {
             }
             Statement::For { init, cond, update, body, .. } => {
                 init.as_ref().is_some_and(|s| stmt_uses_document(s.as_ref()))
-                    || cond.as_ref().is_some_and(|e| expr_uses_document(e))
-                    || update.as_ref().is_some_and(|e| expr_uses_document(e))
+                    || cond.as_ref().is_some_and(expr_uses_document)
+                    || update.as_ref().is_some_and(expr_uses_document)
                     || stmt_uses_document(body)
             }
             Statement::ForOf { iterable, body, .. } => {
@@ -244,14 +244,16 @@ pub fn program_uses_document(program: &Program) -> bool {
             } => {
                 expr_uses_document(expr)
                     || cases.iter().any(|(e, stmts)| {
-                        e.as_ref().is_some_and(|e| expr_uses_document(e))
+                        e.as_ref().is_some_and(expr_uses_document)
                             || stmts.iter().any(stmt_uses_document)
                     })
                     || default_body
                         .as_ref()
                         .is_some_and(|stmts| stmts.iter().any(stmt_uses_document))
             }
-            Statement::Block { statements, .. } => statements.iter().any(stmt_uses_document),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().any(stmt_uses_document)
+            }
             Statement::FunDecl { body, .. } => stmt_uses_document(body),
             Statement::Try {
                 body,
@@ -603,7 +605,10 @@ pub fn generate_native_wrapper_rs(
                 key_lit, shim_crate, rust_fn
             ));
         }
-        file.push_str("    Value::Object(VmRef::new(m))\n}\n\n");
+        // `Value::object(m)` wraps the `ObjectMap` into the `ObjectData` that `Value::Object`
+        // now holds; `Value::Object(VmRef::new(m))` (raw map) stopped type-checking after the
+        // PropMap/ObjectData refactor (#78).
+        file.push_str("    Value::object(m)\n}\n\n");
     }
     if !any {
         return String::new();

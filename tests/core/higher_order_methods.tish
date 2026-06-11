@@ -61,7 +61,7 @@ console.log("forEach total:", total)
 
 // flat
 let nested = [1, [2, 3], [4, [5, 6]]]
-console.log("flat(1):", nested.flat().join(","))
+console.log("flat(1):", nested.flat().map(x => Array.isArray(x) ? "[" + x.join(", ") + "]" : x).join(","))
 console.log("flat(2):", nested.flat(2).join(","))
 
 // Chaining

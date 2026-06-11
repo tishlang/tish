@@ -119,7 +119,7 @@ fn conn_receive(id: u32) -> Option<String> {
 /// Uses try_recv in a loop to avoid holding CONNS lock while blocking (prevents deadlock
 /// when connection closes and tokio task needs to unregister).
 fn conn_receive_timeout(id: u32, timeout_ms: u64) -> Option<String> {
-    let timeout_ms = timeout_ms.min(3600_000);
+    let timeout_ms = timeout_ms.min(3_600_000);
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let poll_interval = Duration::from_millis(50);
     loop {
@@ -163,11 +163,9 @@ fn conn_id_from_value(v: &Value) -> Option<u32> {
         Value::Object(o) => {
             let b = o.borrow();
             // Direct conn: { _id, send, ... }
-            if let Some(idv) = b.strings.get("_id") {
-                if let Value::Number(n) = idv {
-                    if n.is_finite() && *n >= 0.0 {
-                        return Some(*n as u32);
-                    }
+            if let Some(Value::Number(n)) = b.strings.get("_id") {
+                if n.is_finite() && *n >= 0.0 {
+                    return Some(*n as u32);
                 }
             }
             // Wrapper: { ws: conn, ... }
@@ -182,7 +180,7 @@ fn conn_id_from_value(v: &Value) -> Option<u32> {
 
 /// Native broadcast: send data to all conns in array except `except`. Avoids Tish-side method calls.
 pub fn ws_broadcast_native(args: &[Value]) -> Value {
-    let conns = match args.get(0) {
+    let conns = match args.first() {
         Some(Value::Array(a)) => a.borrow().clone(),
         _ => return Value::Null,
     };
@@ -246,7 +244,7 @@ fn conn_object(id: u32) -> Value {
                 .first()
                 .and_then(|v| match v {
                     Value::Number(n) if n.is_finite() && *n >= 0.0 => {
-                        Some((*n as u64).min(3600_000))
+                        Some((*n as u64).min(3_600_000))
                     }
                     _ => None,
                 })
@@ -465,7 +463,7 @@ pub fn web_socket_server_accept_timeout(args: &[Value]) -> Value {
         _ => return Value::Null,
     };
     let timeout_ms = match args.get(1) {
-        Some(Value::Number(n)) if n.is_finite() && *n >= 0.0 => (*n as u64).min(3600_000),
+        Some(Value::Number(n)) if n.is_finite() && *n >= 0.0 => (*n as u64).min(3_600_000),
         _ => 100,
     };
     let mut map = match SERVER_RECV.lock() {

@@ -48,6 +48,7 @@ pub fn format_value_styled(value: &Value, colors: bool) -> String {
 
 /// `quote_strings`: when true (REPL / inspect), strings render as quoted literals. When false
 /// (top-level `console.log` arguments), strings render raw like Node.
+#[allow(clippy::only_used_in_recursion)] // `colors` is always true here; threaded for recursive symmetry
 fn format_value_styled_inner(value: &Value, colors: bool, quote_strings: bool) -> String {
     match value {
         Value::Number(n) => {

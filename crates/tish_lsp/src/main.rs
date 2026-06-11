@@ -172,6 +172,17 @@ async fn publish_parse_and_lint(client: &Client, uri: Url, text: &str) {
                     ..Default::default()
                 });
             }
+            // Gradual type checker (Phase 2): surface provable annotation violations as warnings.
+            for d in tishlang_compile::check_program(&program) {
+                diags.push(Diagnostic {
+                    range: span_to_range(&d.span, text),
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    code: Some(NumberOrString::String("tish-type".into())),
+                    message: d.message,
+                    source: Some("tish".into()),
+                    ..Default::default()
+                });
+            }
         }
         Err(e) => {
             let (l, c) = parse_error_pos(&e);
@@ -401,7 +412,17 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        if let Some(ref file_path) = uri.to_file_path().ok() {
+        // Type reference (`: SomeType`, `extends SomeType`, `as SomeType`) → jump to its
+        // `type`/`interface` declaration. Value bindings are resolved above, so this only
+        // fires for genuine type names.
+        if let Some(sp) = type_decl_span(&program, word.as_str()) {
+            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                uri: uri.clone(),
+                range: span_to_range(&sp, &text),
+            })));
+        }
+
+        if let Ok(ref file_path) = uri.to_file_path() {
             let roots = self.roots.read().unwrap().clone();
             if let Some(loc) = import_goto::definition_for_import(
                 &program,
@@ -458,10 +479,29 @@ impl LanguageServer for Backend {
         let Some(use_site) =
             tishlang_resolve::name_at_cursor(&program, &text, pos.line, pos.character)
         else {
+            // Not a value name at the cursor — it may be a type reference (`: SomeType`,
+            // `extends SomeType`). Type annotations carry no spans, so match by word.
+            let word = word_at_position(&text, pos);
+            if let Some(ty) = type_alias_body(&program, &word) {
+                let value = format!("**`{}`**{}", word, code_hint(&format!("type {} = {}", word, ty)));
+                return Ok(Some(Hover {
+                    range: None,
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value,
+                    }),
+                }));
+            }
             return Ok(None);
         };
         let def = tishlang_resolve::definition_span(&program, &text, pos.line, pos.character);
         let mut md = format!("**`{}`**", use_site.name);
+        // Type-aware hover: show the declared (or simply-inferred) type / fn signature.
+        if let Some(ref dspan) = def {
+            if let Some(hint) = type_hint_at_def(&program, dspan) {
+                md.push_str(&hint);
+            }
+        }
         match def {
             Some(def) if def.start == use_site.span.start && def.end == use_site.span.end => {
                 md.push_str("\n\n_(binding site)_");
@@ -791,13 +831,10 @@ pub(crate) fn find_export(
                     range: span_to_range(name_span, text),
                 });
             }
-            tishlang_ast::Statement::Export { declaration, .. } => match declaration.as_ref() {
-                tishlang_ast::ExportDeclaration::Named(inner) => {
-                    if let Some(loc) = find_decl_in_stmt(inner, name, uri, text) {
-                        return Some(loc);
-                    }
+            tishlang_ast::Statement::Export { declaration, .. } => if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
+                if let Some(loc) = find_decl_in_stmt(inner, name, uri, text) {
+                    return Some(loc);
                 }
-                _ => {}
             },
             _ => {}
         }
@@ -858,25 +895,261 @@ fn span_to_range(span: &tishlang_ast::Span, text: &str) -> Range {
 
 fn word_at_position(text: &str, position: Position) -> String {
     let line = text.lines().nth(position.line as usize).unwrap_or("");
-    let col = position.character as usize;
-    let bytes: Vec<(usize, char)> = line.char_indices().collect();
-    let mut start = col.min(bytes.len().saturating_sub(1));
-    while start > 0 && !is_ident_char(bytes.get(start).map(|(_, c)| *c).unwrap_or(' ')) {
-        start = start.saturating_sub(1);
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let col = (position.character as usize).min(chars.len());
+    // Pick the identifier the cursor is on. If the cursor sits just past a word's end
+    // (on whitespace/punct or EOL), fall back to the identifier immediately to its left.
+    let mut start = col;
+    if start >= chars.len() || !is_ident_char(chars[start].1) {
+        if start == 0 || !is_ident_char(chars[start - 1].1) {
+            return String::new();
+        }
+        start -= 1;
     }
-    let mut i = start;
-    while i < bytes.len() && is_ident_char(bytes[i].1) {
-        i += 1;
+    // Scan left to the word start, then right to the word end (the original missed the prefix
+    // when the cursor landed in the middle of a word).
+    while start > 0 && is_ident_char(chars[start - 1].1) {
+        start -= 1;
     }
-    if start < bytes.len() {
-        line[bytes[start].0..bytes.get(i).map(|(p, _)| *p).unwrap_or(line.len())].to_string()
-    } else {
-        String::new()
+    let mut end = start;
+    while end < chars.len() && is_ident_char(chars[end].1) {
+        end += 1;
     }
+    let s = chars[start].0;
+    let e = chars.get(end).map(|(p, _)| *p).unwrap_or(line.len());
+    line[s..e].to_string()
 }
 
 fn is_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+// ── Type-aware hover ─────────────────────────────────────────────────────────
+
+/// Render a `TypeAnnotation` to a readable, TypeScript-ish string for hover.
+fn render_type(t: &tishlang_ast::TypeAnnotation) -> String {
+    use tishlang_ast::{TypeAnnotation as T, TypeLiteral as L};
+    match t {
+        T::Simple(s) => s.to_string(),
+        T::Array(inner) => {
+            // Parenthesize composite element types so `(A | B)[]` reads unambiguously.
+            if matches!(
+                inner.as_ref(),
+                T::Union(_) | T::Intersection(_) | T::Function { .. }
+            ) {
+                format!("({})[]", render_type(inner))
+            } else {
+                format!("{}[]", render_type(inner))
+            }
+        }
+        T::Object(fields) => format!(
+            "{{ {} }}",
+            fields
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, render_type(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        T::Function { params, returns } => format!(
+            "({}) => {}",
+            params.iter().map(render_type).collect::<Vec<_>>().join(", "),
+            render_type(returns)
+        ),
+        T::Union(ts) => ts.iter().map(render_type).collect::<Vec<_>>().join(" | "),
+        T::Tuple(ts) => format!(
+            "[{}]",
+            ts.iter().map(render_type).collect::<Vec<_>>().join(", ")
+        ),
+        T::Intersection(ts) => ts.iter().map(render_type).collect::<Vec<_>>().join(" & "),
+        T::Literal(L::Str(s)) => format!("\"{}\"", s),
+        T::Literal(L::Num(n)) => {
+            if n.fract() == 0.0 && n.is_finite() {
+                format!("{}", *n as i64)
+            } else {
+                n.to_string()
+            }
+        }
+        T::Literal(L::Bool(b)) => b.to_string(),
+    }
+}
+
+/// Best-effort type of a simple initializer (literals only). Anything non-trivial returns `None`,
+/// so hover omits the type rather than guessing wrong.
+fn shallow_expr_type(e: &tishlang_ast::Expr) -> Option<tishlang_ast::TypeAnnotation> {
+    use tishlang_ast::{Expr, Literal, TypeAnnotation as T};
+    if let Expr::Literal { value, .. } = e {
+        let name = match value {
+            Literal::Number(_) => "number",
+            Literal::String(_) => "string",
+            Literal::Bool(_) => "boolean",
+            Literal::Null => "null",
+        };
+        Some(T::Simple(Arc::from(name)))
+    } else {
+        None
+    }
+}
+
+/// Render a function parameter as `name: T` (or just `name` when unannotated).
+fn render_param(p: &tishlang_ast::FunParam) -> String {
+    use tishlang_ast::FunParam;
+    match p {
+        FunParam::Simple(tp) => match &tp.type_ann {
+            Some(t) => format!("{}: {}", tp.name, render_type(t)),
+            None => tp.name.to_string(),
+        },
+        FunParam::Destructure { type_ann, .. } => match type_ann {
+            Some(t) => format!("{{…}}: {}", render_type(t)),
+            None => "{…}".to_string(),
+        },
+    }
+}
+
+/// `fn name(params): R` signature line for a function declaration.
+fn fn_signature(
+    name: &str,
+    params: &[tishlang_ast::FunParam],
+    rest: &Option<tishlang_ast::TypedParam>,
+    ret: &Option<tishlang_ast::TypeAnnotation>,
+) -> String {
+    let mut ps: Vec<String> = params.iter().map(render_param).collect();
+    if let Some(r) = rest {
+        let t = r
+            .type_ann
+            .as_ref()
+            .map(|t| format!(": {}", render_type(t)))
+            .unwrap_or_default();
+        ps.push(format!("...{}{}", r.name, t));
+    }
+    let ret_s = ret
+        .as_ref()
+        .map(render_type)
+        .unwrap_or_else(|| "void".to_string());
+    format!("fn {}({}): {}", name, ps.join(", "), ret_s)
+}
+
+/// Definition spans are name spans; match on the start position.
+fn same_start(a: &tishlang_ast::Span, b: &tishlang_ast::Span) -> bool {
+    a.start == b.start
+}
+
+/// Wrap a one-line type hint in a tish code fence for hover.
+fn code_hint(line: &str) -> String {
+    format!("\n\n```tish\n{}\n```", line)
+}
+
+/// Find the declaration whose name is at `def` and produce a hover type line (markdown), if any.
+fn type_hint_at_def(program: &tishlang_ast::Program, def: &tishlang_ast::Span) -> Option<String> {
+    program.statements.iter().find_map(|s| hint_in_stmt(s, def))
+}
+
+/// `name_span` of a `type`/`interface` declaration named `name` (both parse to `TypeAlias`).
+/// Used so cmd+click on a `: SomeType` reference jumps to its declaration. Type annotations
+/// carry no spans, so this is a name match — sound because value bindings resolve first.
+fn type_decl_span(program: &tishlang_ast::Program, name: &str) -> Option<tishlang_ast::Span> {
+    program.statements.iter().find_map(|s| match s {
+        tishlang_ast::Statement::TypeAlias {
+            name: n, name_span, ..
+        } if n.as_ref() == name => Some(*name_span),
+        _ => None,
+    })
+}
+
+/// Rendered body of a `type`/`interface` declaration named `name`, for hover.
+fn type_alias_body(program: &tishlang_ast::Program, name: &str) -> Option<String> {
+    program.statements.iter().find_map(|s| match s {
+        tishlang_ast::Statement::TypeAlias { name: n, ty, .. } if n.as_ref() == name => {
+            Some(render_type(ty))
+        }
+        _ => None,
+    })
+}
+
+fn hint_in_stmt(s: &tishlang_ast::Statement, def: &tishlang_ast::Span) -> Option<String> {
+    use tishlang_ast::{FunParam, Statement as St};
+    match s {
+        St::VarDecl {
+            name,
+            name_span,
+            mutable,
+            type_ann,
+            init,
+            ..
+        } => {
+            if same_start(name_span, def) {
+                let ty = type_ann
+                    .clone()
+                    .or_else(|| init.as_ref().and_then(shallow_expr_type))?;
+                let kw = if *mutable { "let" } else { "const" };
+                return Some(code_hint(&format!(
+                    "{} {}: {}",
+                    kw,
+                    name,
+                    render_type(&ty)
+                )));
+            }
+            None
+        }
+        St::FunDecl {
+            name,
+            name_span,
+            params,
+            rest_param,
+            return_type,
+            body,
+            ..
+        } => {
+            if same_start(name_span, def) {
+                return Some(code_hint(&fn_signature(
+                    name,
+                    params,
+                    rest_param,
+                    return_type,
+                )));
+            }
+            for p in params {
+                if let FunParam::Simple(tp) = p {
+                    if same_start(&tp.name_span, def) {
+                        let ty = tp
+                            .type_ann
+                            .as_ref()
+                            .map(render_type)
+                            .unwrap_or_else(|| "any".to_string());
+                        return Some(code_hint(&format!("(parameter) {}: {}", tp.name, ty)));
+                    }
+                }
+            }
+            if let Some(r) = rest_param {
+                if same_start(&r.name_span, def) {
+                    let ty = r
+                        .type_ann
+                        .as_ref()
+                        .map(render_type)
+                        .unwrap_or_else(|| "any[]".to_string());
+                    return Some(code_hint(&format!("(parameter) ...{}: {}", r.name, ty)));
+                }
+            }
+            hint_in_stmt(body, def)
+        }
+        St::Block { statements, .. } | St::Multi { statements, .. } => {
+            statements.iter().find_map(|s| hint_in_stmt(s, def))
+        }
+        St::If {
+            then_branch,
+            else_branch,
+            ..
+        } => hint_in_stmt(then_branch, def)
+            .or_else(|| else_branch.as_ref().and_then(|e| hint_in_stmt(e, def))),
+        St::For { init, body, .. } => init
+            .as_ref()
+            .and_then(|i| hint_in_stmt(i, def))
+            .or_else(|| hint_in_stmt(body, def)),
+        St::While { body, .. } | St::DoWhile { body, .. } | St::ForOf { body, .. } => {
+            hint_in_stmt(body, def)
+        }
+        St::Try { body, .. } => hint_in_stmt(body, def),
+        _ => None,
+    }
 }
 
 fn value_completion_kind(program: &tishlang_ast::Program, name: &str) -> CompletionItemKind {
@@ -1044,5 +1317,143 @@ fn collect_child_syms(
             }
         }
         _ => doc_symbol_stmt(s, text, out),
+    }
+}
+
+#[cfg(test)]
+mod hover_tests {
+    use super::*;
+    use tishlang_ast::{FunParam, Span, Statement};
+
+    fn parse(src: &str) -> tishlang_ast::Program {
+        tishlang_parser::parse(src).expect("parse")
+    }
+
+    /// name_span of the first VarDecl/FunDecl named `name`, searched recursively.
+    fn decl_span(s: &Statement, name: &str) -> Option<Span> {
+        match s {
+            Statement::VarDecl { name: n, name_span, .. } if n.as_ref() == name => Some(*name_span),
+            Statement::FunDecl { name: n, name_span, body, .. } => {
+                if n.as_ref() == name {
+                    Some(*name_span)
+                } else {
+                    decl_span(body, name)
+                }
+            }
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().find_map(|x| decl_span(x, name))
+            }
+            Statement::If { then_branch, else_branch, .. } => decl_span(then_branch, name)
+                .or_else(|| else_branch.as_ref().and_then(|e| decl_span(e, name))),
+            Statement::For { body, .. }
+            | Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::ForOf { body, .. } => decl_span(body, name),
+            _ => None,
+        }
+    }
+
+    fn span_of(p: &tishlang_ast::Program, name: &str) -> Span {
+        p.statements
+            .iter()
+            .find_map(|s| decl_span(s, name))
+            .unwrap_or_else(|| panic!("decl `{name}` not found"))
+    }
+
+    fn param_span(p: &tishlang_ast::Program, fname: &str, pname: &str) -> Span {
+        for s in &p.statements {
+            if let Statement::FunDecl { name, params, .. } = s {
+                if name.as_ref() == fname {
+                    for fp in params {
+                        if let FunParam::Simple(tp) = fp {
+                            if tp.name.as_ref() == pname {
+                                return tp.name_span;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        panic!("param `{fname}.{pname}` not found")
+    }
+
+    fn hint(p: &tishlang_ast::Program, span: &Span) -> String {
+        type_hint_at_def(p, span).expect("expected a type hint")
+    }
+
+    #[test]
+    fn annotated_var() {
+        let p = parse("let count: number = 0\n");
+        assert!(hint(&p, &span_of(&p, "count")).contains("let count: number"));
+    }
+
+    #[test]
+    fn inferred_var_and_const() {
+        let p = parse("let x = 42\nconst label = \"hi\"\nlet ok = true\n");
+        assert!(hint(&p, &span_of(&p, "x")).contains("let x: number"));
+        assert!(hint(&p, &span_of(&p, "label")).contains("const label: string"));
+        assert!(hint(&p, &span_of(&p, "ok")).contains("let ok: boolean"));
+    }
+
+    #[test]
+    fn function_signature() {
+        let p = parse("fn add(a: number, b: number): number { return a + b }\n");
+        assert!(hint(&p, &span_of(&p, "add")).contains("fn add(a: number, b: number): number"));
+    }
+
+    #[test]
+    fn parameter_hover() {
+        let p = parse("fn f(p: string) { return p }\n");
+        assert!(hint(&p, &param_span(&p, "f", "p")).contains("(parameter) p: string"));
+    }
+
+    #[test]
+    fn nested_decl_resolves() {
+        let p = parse("fn g() {\n  let inner: boolean = true\n  return inner\n}\n");
+        assert!(hint(&p, &span_of(&p, "inner")).contains("let inner: boolean"));
+    }
+
+    #[test]
+    fn composite_types_render() {
+        use tishlang_ast::{TypeAnnotation as T, TypeLiteral as L};
+        let arr = T::Array(Box::new(T::Simple("number".into())));
+        assert_eq!(render_type(&arr), "number[]");
+        let tup = T::Tuple(vec![T::Simple("number".into()), T::Simple("string".into())]);
+        assert_eq!(render_type(&tup), "[number, string]");
+        let uni = T::Union(vec![T::Simple("number".into()), T::Simple("null".into())]);
+        assert_eq!(render_type(&uni), "number | null");
+        assert_eq!(render_type(&T::Literal(L::Str("on".into()))), "\"on\"");
+        let arr_of_union = T::Array(Box::new(uni));
+        assert_eq!(render_type(&arr_of_union), "(number | null)[]");
+    }
+}
+
+#[cfg(test)]
+mod type_ref_tests {
+    use super::*;
+
+    const SRC: &str =
+        "interface Point { x: number, y: number }\ntype Status = \"on\" | \"off\"\nlet p: Point = { x: 1, y: 2 }\n";
+
+    #[test]
+    fn type_decl_lookup_and_body() {
+        let p = tishlang_parser::parse(SRC).expect("parse");
+        assert!(type_decl_span(&p, "Point").is_some());
+        assert!(type_decl_span(&p, "Status").is_some());
+        assert_eq!(type_alias_body(&p, "Point").as_deref(), Some("{ x: number, y: number }"));
+        assert_eq!(type_alias_body(&p, "Status").as_deref(), Some("\"on\" | \"off\""));
+        assert!(type_decl_span(&p, "Nope").is_none());
+    }
+
+    #[test]
+    fn word_at_position_finds_whole_word() {
+        // Cursor in the MIDDLE of `Point` (line 2, the `o`) must yield the whole word.
+        assert_eq!(word_at_position(SRC, Position { line: 2, character: 8 }), "Point");
+        // At the word start.
+        assert_eq!(word_at_position(SRC, Position { line: 2, character: 7 }), "Point");
+        // Just past the end (on the space) falls back to the word on the left.
+        assert_eq!(word_at_position(SRC, Position { line: 2, character: 12 }), "Point");
+        // On punctuation between words → empty.
+        assert_eq!(word_at_position("a = b\n", Position { line: 0, character: 2 }), "");
     }
 }

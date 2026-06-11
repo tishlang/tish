@@ -1,0 +1,39 @@
+// GAUNTLET: fasta PRNG kernel (Computer Language Benchmarks Game). The weighted random-sequence
+// generator — a linear-congruential PRNG driving a cumulative-probability linear search per symbol.
+// Stresses tight integer/float arithmetic + array indexing + a data-dependent inner loop. Valid in
+// both tish and node; integer check (accumulated symbol codes).
+let seed = 42
+function genRandom(max) {
+  seed = (seed * 3877 + 29573) % 139968
+  return (max * seed) / 139968
+}
+
+// HomoSapiens ACGT distribution (codes A=65 C=67 G=71 T=84).
+let codes = [65, 67, 71, 84]
+let probs = [0.3029549426680, 0.1979883004921, 0.1975473066391, 0.3015094502008]
+
+function cumulative(p) {
+  let c = 0
+  let out = []
+  for (let i = 0; i < p.length; i++) {
+    c = c + p[i]
+    out.push(c)
+  }
+  return out
+}
+
+function fastaRandom(n) {
+  let cum = cumulative(probs)
+  let sum = 0
+  for (let i = 0; i < n; i++) {
+    let r = genRandom(1.0)
+    let j = 0
+    while (cum[j] < r) { j = j + 1 }
+    sum = (sum + codes[j]) % 2147483647
+  }
+  return sum
+}
+
+let t0 = Date.now()
+let check = fastaRandom(3000000)
+console.log("GAUNTLET fasta " + (Date.now() - t0) + " " + check)

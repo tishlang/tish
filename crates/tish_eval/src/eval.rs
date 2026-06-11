@@ -207,11 +207,25 @@ impl Evaluator {
                 true,
             );
 
-            let mut date = PropMap::with_capacity(1);
-            date.insert("now".into(), Value::Native(natives::date_now));
             s.set(
                 "Date".into(),
-                Value::object(date),
+                crate::value_convert::core_to_eval(
+                    tishlang_builtins::date::date_constructor_value(),
+                ),
+                true,
+            );
+            s.set(
+                "Set".into(),
+                crate::value_convert::core_to_eval(
+                    tishlang_builtins::collections::set_constructor_value(),
+                ),
+                true,
+            );
+            s.set(
+                "Map".into(),
+                crate::value_convert::core_to_eval(
+                    tishlang_builtins::collections::map_constructor_value(),
+                ),
                 true,
             );
 
@@ -220,13 +234,26 @@ impl Evaluator {
                 crate::value_convert::core_to_eval(tishlang_builtins::symbol::symbol_object()),
                 true,
             );
-            s.set(
-                "Uint8Array".into(),
-                crate::value_convert::core_to_eval(
-                    tishlang_builtins::construct::uint8_array_constructor_value(),
+            for (name, ctor) in [
+                (
+                    "Float64Array",
+                    tishlang_builtins::typedarrays::float64_array_constructor_value
+                        as fn() -> tishlang_core::Value,
                 ),
-                true,
-            );
+                ("Float32Array", tishlang_builtins::typedarrays::float32_array_constructor_value),
+                ("Int8Array", tishlang_builtins::typedarrays::int8_array_constructor_value),
+                ("Uint8Array", tishlang_builtins::typedarrays::uint8_array_constructor_value),
+                (
+                    "Uint8ClampedArray",
+                    tishlang_builtins::typedarrays::uint8_clamped_array_constructor_value,
+                ),
+                ("Int16Array", tishlang_builtins::typedarrays::int16_array_constructor_value),
+                ("Uint16Array", tishlang_builtins::typedarrays::uint16_array_constructor_value),
+                ("Int32Array", tishlang_builtins::typedarrays::int32_array_constructor_value),
+                ("Uint32Array", tishlang_builtins::typedarrays::uint32_array_constructor_value),
+            ] {
+                s.set(name.into(), crate::value_convert::core_to_eval(ctor()), true);
+            }
             s.set(
                 "AudioContext".into(),
                 crate::value_convert::core_to_eval(
@@ -334,6 +361,15 @@ impl Evaluator {
                 self.scope = prev;
                 Ok(last)
             }
+            // Comma-declarators: a transparent group — evaluate each declarator in
+            // the *current* scope (no child scope).
+            Statement::Multi { statements, .. } => {
+                let mut last = Value::Null;
+                for s in statements {
+                    last = self.eval_statement(s)?;
+                }
+                Ok(last)
+            }
             Statement::VarDecl {
                 name,
                 mutable,
@@ -405,12 +441,19 @@ impl Evaluator {
                         .chars()
                         .map(|c| crate::value::Value::String(Arc::from(c.to_string())))
                         .collect::<Vec<_>>(),
-                    _ => {
-                        return Err(EvalError::Error(format!(
-                            "for-of requires iterable (array or string), got {}",
-                            iter_val
-                        )));
-                    }
+                    // Iterator protocol: an object with a callable `next()` returning
+                    // `{ value, done }` — e.g. a Map/Set iterator from `.values()` /
+                    // `.keys()` / `.entries()`. Drain it ONCE (draining advances the
+                    // iterator's shared position, so it must not be re-run).
+                    _ => match self.drain_eval_iterator(&iter_val) {
+                        Some(elems) => elems,
+                        None => {
+                            return Err(EvalError::Error(format!(
+                                "for-of requires iterable (array, string, or iterator), got {}",
+                                iter_val
+                            )));
+                        }
+                    },
                 };
                 // Each element gets a FRESH per-iteration binding (ES6 `for (let v of …)`), so a
                 // closure created in the body captures that element, not the last one.
@@ -830,7 +873,7 @@ impl Evaluator {
                     exports.insert("isDir".into(), Value::Native(natives::is_dir));
                     exports.insert("readDir".into(), Value::Native(natives::read_dir));
                     exports.insert("mkdir".into(), Value::Native(natives::mkdir));
-                    return Ok(Value::object(exports));
+                    Ok(Value::object(exports))
                 }
                 #[cfg(not(feature = "fs"))]
                 {
@@ -847,7 +890,7 @@ impl Evaluator {
                     exports.insert("fetchAll".into(), Value::Native(Self::fetch_all_native));
                     exports.insert("serve".into(), Value::Serve);
                     exports.insert("Promise".into(), Value::PromiseConstructor);
-                    return Ok(Value::object(exports));
+                    Ok(Value::object(exports))
                 }
                 #[cfg(not(feature = "http"))]
                 {
@@ -876,7 +919,7 @@ impl Evaluator {
                         "clearInterval".into(),
                         Value::Native(Self::clear_interval_native),
                     );
-                    return Ok(Value::object(exports));
+                    Ok(Value::object(exports))
                 }
                 #[cfg(not(feature = "timers"))]
                 {
@@ -899,7 +942,7 @@ impl Evaluator {
                         "wsBroadcast".into(),
                         Value::Native(Self::ws_broadcast_native),
                     );
-                    return Ok(Value::object(exports));
+                    Ok(Value::object(exports))
                 }
                 #[cfg(not(feature = "ws"))]
                 {
@@ -938,7 +981,7 @@ impl Evaluator {
                         "process".into(),
                         Value::object(process_obj),
                     );
-                    return Ok(Value::object(exports));
+                    Ok(Value::object(exports))
                 }
                 #[cfg(not(feature = "process"))]
                 {
@@ -948,10 +991,10 @@ impl Evaluator {
                 }
             }
             _ => {
-                return Err(EvalError::Error(format!(
+                Err(EvalError::Error(format!(
                     "Unknown built-in module: {}. Supported: tish:fs, tish:http, tish:timers, tish:process, tish:ws (plus any registered by native modules)",
                     spec
-                )));
+                )))
             }
         }
     }
@@ -1837,8 +1880,11 @@ impl Evaluator {
                         }
                         tishlang_ast::ArrayElement::Spread(e) => {
                             let spread_val = self.eval_expr(e)?;
-                            if let Value::Array(arr) = spread_val {
+                            if let Value::Array(arr) = &spread_val {
                                 vals.extend(arr.borrow().iter().cloned());
+                            } else if let Some(items) = self.drain_eval_iterator(&spread_val) {
+                                // Spread a Map/Set iterator (`[...m.values()]`).
+                                vals.extend(items);
                             }
                         }
                     }
@@ -2162,8 +2208,18 @@ impl Evaluator {
             BinOp::BitAnd => self.binop_int32(l, r, |a, b| Value::Number((a & b) as f64)),
             BinOp::BitOr => self.binop_int32(l, r, |a, b| Value::Number((a | b) as f64)),
             BinOp::BitXor => self.binop_int32(l, r, |a, b| Value::Number((a ^ b) as f64)),
-            BinOp::Shl => self.binop_int32(l, r, |a, b| Value::Number((a << b) as f64)),
-            BinOp::Shr => self.binop_int32(l, r, |a, b| Value::Number((a >> b) as f64)),
+            // JS shifts mask the count to the low 5 bits; `wrapping_sh*` does exactly
+            // that and never panics (plain `<<`/`>>` panic in debug for count >= 32).
+            BinOp::Shl => {
+                self.binop_int32(l, r, |a, b| Value::Number(a.wrapping_shl(b as u32) as f64))
+            }
+            BinOp::Shr => {
+                self.binop_int32(l, r, |a, b| Value::Number(a.wrapping_shr(b as u32) as f64))
+            }
+            // `>>>` — unsigned (logical) right shift: ToUint32(a) >>> (b & 31).
+            BinOp::UShr => self.binop_int32(l, r, |a, b| {
+                Value::Number((a as u32).wrapping_shr(b as u32) as f64)
+            }),
             BinOp::In => {
                 let ok = match r {
                     Value::Object(_) => eval_object_has(r, l),
@@ -2260,10 +2316,20 @@ impl Evaluator {
         false
     }
 
-    /// ToInt32 coercion matching the VM (`vm.rs` eval_binop: `as_number().unwrap_or(NaN) as i32`).
-    /// Non-numbers coerce to NaN, and `NaN as i32` saturates to 0 — so `arr[oob] | 0` → 0, like JS.
+    /// JS ToInt32 coercion. Non-numbers coerce to NaN → 0. Going through `i64`
+    /// (not a direct `as i32`) gives modulo-2³² truncation instead of a saturating
+    /// cast, so out-of-i32-range values (e.g. a `0..2³²` hash) wrap exactly like JS:
+    /// `4294967295 | 0 === -1`, not the saturated `i32::MAX`. Realistic values are
+    /// `< 2⁵³` so they fit `i64` exactly; the two casts stay cheap.
     fn to_int32(v: &Value) -> i32 {
-        v.as_number().unwrap_or(f64::NAN) as i32
+        // NaN / ±Infinity → 0 (the `is_finite` guard): `f64 as i64` *saturates* (`+∞ → i64::MAX
+        // → -1`), which is not the JS ToInt32 result. Finite values use the cheap modulo cast.
+        let x = v.as_number().unwrap_or(f64::NAN);
+        if x.is_finite() {
+            x as i64 as i32
+        } else {
+            0
+        }
     }
 
     fn binop_int32<F>(&self, l: &Value, r: &Value, f: F) -> Result<Value, String>
@@ -2951,7 +3017,6 @@ impl Evaluator {
         println!("Server listening on http://0.0.0.0:{}", port);
 
         if max_requests == Some(1) {
-            let port = port;
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 if let Ok(mut stream) = std::net::TcpStream::connect(format!("127.0.0.1:{}", port))
@@ -2964,8 +3029,7 @@ impl Evaluator {
             });
         }
 
-        let mut count = 0usize;
-        for mut request in server.incoming_requests() {
+        for (count, mut request) in server.incoming_requests().enumerate() {
             let req_value = crate::http::request_to_value(&mut request);
 
             let response_value = match self.call_func(&handler, &[req_value]) {
@@ -2992,8 +3056,7 @@ impl Evaluator {
                 let (status, headers, body) = crate::http::value_to_response(&response_value);
                 crate::http::send_response(request, status, headers, body);
             }
-            count += 1;
-            if max_requests.map(|m| count >= m).unwrap_or(false) {
+            if max_requests.map(|m| count + 1 >= m).unwrap_or(false) {
                 break;
             }
         }
@@ -3010,8 +3073,11 @@ impl Evaluator {
                 }
                 tishlang_ast::CallArg::Spread(e) => {
                     let spread_val = self.eval_expr(e)?;
-                    if let Value::Array(arr) = spread_val {
+                    if let Value::Array(arr) = &spread_val {
                         result.extend(arr.borrow().iter().cloned());
+                    } else if let Some(items) = self.drain_eval_iterator(&spread_val) {
+                        // Spread a Map/Set iterator into call args (`f(...m.values())`).
+                        result.extend(items);
                     }
                 }
             }
@@ -3126,14 +3192,55 @@ impl Evaluator {
         }
     }
 
+    /// Drain a JS iterator object — one whose `next()` is a bridged core fn (`CoreFn`)
+    /// returning `{ value, done }`, e.g. a Map/Set iterator from `.values()` / `.keys()` /
+    /// `.entries()` — into a `Vec` by calling `next()` until `done`. Returns `None` when `v`
+    /// is not such an object. Shared by `for…of` and spread so both treat iterators like JS.
+    fn drain_eval_iterator(&self, v: &Value) -> Option<Vec<Value>> {
+        if !matches!(v, Value::Object(_)) {
+            return None;
+        }
+        // Fast path: tish's Map/Set iterators expose `__drain__`, returning all remaining items as
+        // one array — skips the per-element bridge + `{ value, done }` alloc of the generic loop.
+        if let Ok(Value::CoreFn(drain)) = self.get_prop(v, "__drain__") {
+            if let Value::Array(arr) = crate::value_convert::core_to_eval(drain.call(&[])) {
+                return Some(arr.borrow().clone());
+            }
+        }
+        let Ok(Value::CoreFn(next)) = self.get_prop(v, "next") else {
+            return None;
+        };
+        let mut out = Vec::new();
+        loop {
+            let res = crate::value_convert::core_to_eval(next.call(&[]));
+            let done = self
+                .get_prop(&res, "done")
+                .map(|x| x.is_truthy())
+                .unwrap_or(true);
+            if done {
+                break;
+            }
+            out.push(self.get_prop(&res, "value").unwrap_or(Value::Null));
+        }
+        Some(out)
+    }
+
     fn get_prop(&self, obj: &Value, key: &str) -> Result<Value, String> {
         match obj {
-            Value::Object(map) => Ok(map
-                .borrow()
-                .strings
-                .get(key)
-                .cloned()
-                .unwrap_or(Value::Null)),
+            Value::Object(map) => {
+                // `Set`/`Map` instances expose a computed `.size` via a hidden `SizeProbe` opaque
+                // (shared, not copied, across the value bridge — so it reflects the live store).
+                if key == "size" {
+                    if let Some(Value::Opaque(op)) =
+                        map.borrow().strings.get(tishlang_builtins::collections::SIZE_SLOT)
+                    {
+                        if let Some(n) = tishlang_builtins::collections::size_probe_len(op.as_ref()) {
+                            return Ok(Value::Number(n));
+                        }
+                    }
+                }
+                Ok(map.borrow().strings.get(key).cloned().unwrap_or(Value::Null))
+            }
             Value::Array(arr) => {
                 if key == "length" {
                     Ok(Value::Number(arr.borrow().len() as f64))

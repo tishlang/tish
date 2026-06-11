@@ -1,0 +1,30 @@
+// M2: typed native string concatenation + value equality.
+// `: string` annotations lower these to native Rust `String` (no boxed Value) on the
+// `--native-backend rust` path: `+` becomes a `format!`, `===`/`!==` compare by value.
+// Output must be identical across interpreter / VM / native, flags on or off.
+
+let a: string = "foo"
+let b: string = "bar"
+
+// concatenation
+console.log(a + b)
+console.log(a + b + a)
+console.log(a + " " + b)
+
+// value equality
+console.log(a + b === "foobar")
+console.log(a === "foo")
+console.log(a !== b)
+console.log(a === b)
+
+// typed string parameters (native shadows under TISH_PARAM_NATIVE; boxed otherwise — same output)
+fn join(x: string, y: string): string {
+  return x + y
+}
+console.log(join("hello", "world"))
+console.log(join(a, b) === "foobar")
+
+// boundary: string + number must stay correct (boxed JS coercion, not native concat)
+let n: number = 3
+console.log("count=" + n)
+console.log(a + n)

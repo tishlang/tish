@@ -257,6 +257,20 @@ fn fcmp_f64(bcx: &mut FunctionBuilder, cc: FloatCC, a: ClifValue, b: ClifValue) 
     bcx.ins().select(cond, one, zero)
 }
 
+/// f64 → JS `ToInt32` as an `I32` clif value, matching `tishlang_core::to_int32` (so a JIT-compiled
+/// `& | ^ ~` agrees with the VM fallback). Saturating-cast→`ireduce` is the modulo-2³² for finite
+/// values and already gives 0 for NaN / `-∞`; the branchless `select` on `|x| < ∞` maps `+∞` (which
+/// saturates to `i64::MAX` → `-1`, the one wrong case) to 0. Branchless, so the hot path stays fast.
+fn js_to_int32(bcx: &mut FunctionBuilder, x: ClifValue) -> ClifValue {
+    let sat = bcx.ins().fcvt_to_sint_sat(types::I64, x);
+    let red = bcx.ins().ireduce(types::I32, sat);
+    let absx = bcx.ins().fabs(x);
+    let inf = bcx.ins().f64const(f64::INFINITY);
+    let finite = bcx.ins().fcmp(FloatCC::LessThan, absx, inf);
+    let zero = bcx.ins().iconst(types::I32, 0);
+    bcx.ins().select(finite, red, zero)
+}
+
 fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     let arity = chunk.param_count as usize;
 
@@ -452,6 +466,7 @@ fn compile_chunk_arrays(g: &mut JitGlobal, chunk: &Chunk, arity: usize, mask: u8
 /// Outcome of trying to emit one *straight-line* numeric opcode.
 enum SimpleOp {
     /// Handled: bytecode consumed, IR emitted, `bool` flags a comparison/`!` result.
+    #[allow(dead_code)] // reserved: the flag will carry a comparison/`!` result; currently always false
     Handled(bool),
     /// The opcode is control flow / `Return` / non-numeric — NOT consumed; caller decides.
     NotSimple,
@@ -545,12 +560,11 @@ fn emit_simple_op(
                     let p = bcx.ins().fmul(t, r);
                     bcx.ins().fsub(l, p)
                 }
-                // Bitwise AND/OR/XOR. The VM does `((a as i32) OP (b as i32)) as f64`;
-                // Rust's `f64 as i32` is *saturating*, which `fcvt_to_sint_sat` matches
-                // exactly. Shifts / `>>>` stay on the VM (shift-amount edge cases).
+                // Bitwise AND/OR/XOR via JS ToInt32 (modulo 2³², NaN/±∞ → 0) — see [`js_to_int32`].
+                // Shifts / `>>>` stay on the VM (shift-amount edge cases).
                 BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
-                    let li = bcx.ins().fcvt_to_sint_sat(types::I32, l);
-                    let ri = bcx.ins().fcvt_to_sint_sat(types::I32, r);
+                    let li = js_to_int32(bcx, l);
+                    let ri = js_to_int32(bcx, r);
                     let res = match bop {
                         BinOp::BitAnd => bcx.ins().band(li, ri),
                         BinOp::BitOr => bcx.ins().bor(li, ri),
@@ -580,9 +594,10 @@ fn emit_simple_op(
                     let zero = bcx.ins().f64const(0.0);
                     (fcmp_f64(bcx, FloatCC::Equal, o, zero), true)
                 }
-                // `~x` = `!(x as i32) as f64` (matches the VM; saturating cast).
+                // `~x` = `!ToInt32(x) as f64` — JS ToInt32 (modulo, NaN/±∞ → 0) via [`js_to_int32`],
+                // matching the VM so a JIT-compiled `~` can't diverge on large/non-finite values.
                 UnaryOp::BitNot => {
-                    let oi = bcx.ins().fcvt_to_sint_sat(types::I32, o);
+                    let oi = js_to_int32(bcx, o);
                     let res = bcx.ins().bnot(oi);
                     (bcx.ins().fcvt_from_sint(types::F64, res), false)
                 }
@@ -726,6 +741,7 @@ fn build_body_cfg(
         deopt_ptr = Some(*params.get(2)?);
         let mut numeric_i = 0i32;
         let mut array_i = 0i64;
+        #[allow(clippy::needless_range_loop)] // `slot` drives bit-mask math (`array_mask >> slot`) + map keys, not just indexing
         for slot in 0..num_slots {
             let init = if slot < arity && (array_mask >> slot) & 1 == 1 {
                 let base = bcx.ins().iadd_imm(handles_ptr, array_i * 16);

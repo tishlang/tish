@@ -39,9 +39,7 @@ fn classify_tish_abi(item: &ItemFn) -> Option<SignatureClass> {
     if value_args != 1 || sig.inputs.len() != 1 {
         return None;
     }
-    let Some(ret_ty) = return_type_inner(&sig.output) else {
-        return None;
-    };
+    let ret_ty = return_type_inner(&sig.output)?;
     if !is_value_type(ret_ty) {
         return None;
     }

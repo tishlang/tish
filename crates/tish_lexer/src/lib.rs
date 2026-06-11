@@ -73,6 +73,9 @@ pub struct Lexer<'a> {
     jsx_child_brace_depth: i32,
     jsx_in_closing_tag: bool,
     ignore_indent: bool,
+    /// Kind of the last emitted significant token, for `<` disambiguation: after a *value* position
+    /// (ident, `)`, `]`, literal) a `<` is a comparison / generic-args opener (`Lt`), never a JSX tag.
+    last_significant_kind: Option<TokenKind>,
 }
 
 impl<'a> Lexer<'a> {
@@ -100,7 +103,26 @@ impl<'a> Lexer<'a> {
             jsx_child_brace_depth: 0,
             jsx_in_closing_tag: false,
             ignore_indent: options.ignore_indent,
+            last_significant_kind: None,
         }
+    }
+
+    /// True when the previous significant token ends a value, so a following `<` is `Lt`
+    /// (comparison / generic args), not the start of a JSX element.
+    fn last_is_value(&self) -> bool {
+        matches!(
+            self.last_significant_kind,
+            Some(
+                TokenKind::Ident
+                    | TokenKind::RParen
+                    | TokenKind::RBracket
+                    | TokenKind::Number
+                    | TokenKind::String
+                    | TokenKind::True
+                    | TokenKind::False
+                    | TokenKind::Null
+            )
+        )
     }
 
     #[inline]
@@ -211,17 +233,104 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_number(&mut self, first: char) -> String {
+        // Radix-prefixed integer literals: `0x`/`0X` (hex), `0o`/`0O` (octal), `0b`/`0B`
+        // (binary), with optional `_` digit separators. JS semantics — a non-negative
+        // integer. Convert to a decimal string here so every downstream consumer (the
+        // parser's `parse::<f64>()`, the formatter, …) sees a plain number, unchanged.
+        if first == '0' {
+            if let Some(radix) = self.radix_prefix() {
+                self.advance(); // consume the x/o/b marker
+                let mut digits = String::with_capacity(16);
+                while let Some(c) = self.peek() {
+                    if c == '_' {
+                        self.advance(); // digit separator
+                    } else if c.is_digit(radix) {
+                        digits.push(c);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                return Self::radix_digits_to_decimal(&digits, radix);
+            }
+        }
+
         let mut s = String::with_capacity(16);
         s.push(first);
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() || c == '.' {
                 s.push(c);
                 self.advance();
+            } else if (c == 'e' || c == 'E') && self.exponent_follows() {
+                // Scientific notation: `e`/`E` then optional sign then digits.
+                // Guarded by lookahead so `3em` lexes as `3` + `em`, not a bad number.
+                s.push(c);
+                self.advance(); // consume e/E
+                if matches!(self.peek(), Some('+') | Some('-')) {
+                    s.push(self.peek().unwrap());
+                    self.advance();
+                }
+                while let Some(d) = self.peek() {
+                    if d.is_ascii_digit() {
+                        s.push(d);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                break; // the exponent terminates the numeric literal
             } else {
                 break;
             }
         }
         s
+    }
+
+    /// With the current peek positioned at an `e`/`E`, decide (without consuming)
+    /// whether a valid exponent `[+-]?\d` follows. `Chars` is `Clone`, so we look
+    /// ahead on a throwaway clone of the iterator.
+    fn exponent_follows(&self) -> bool {
+        let mut la = self.chars.clone();
+        la.next(); // skip the e/E currently under peek()
+        match la.next() {
+            Some(d) if d.is_ascii_digit() => true,
+            Some('+') | Some('-') => la.next().is_some_and(|d| d.is_ascii_digit()),
+            _ => false,
+        }
+    }
+
+    /// With a leading `0` already consumed and `peek()` at the radix marker, return the
+    /// radix (16 / 8 / 2) iff this is a valid `0x` / `0o` / `0b` prefix followed by at
+    /// least one valid digit. Returns `None` otherwise, so `0`, `0.5`, `0e3`, `0xZ`, and
+    /// `0x_1` all stay on the decimal path. Looks ahead on a clone of the `Chars` iterator
+    /// (`Chars: Clone`) without consuming.
+    fn radix_prefix(&self) -> Option<u32> {
+        let mut la = self.chars.clone();
+        let radix = match la.next()? {
+            'x' | 'X' => 16,
+            'o' | 'O' => 8,
+            'b' | 'B' => 2,
+            _ => return None,
+        };
+        match la.next() {
+            Some(c) if c.is_digit(radix) => Some(radix),
+            _ => None,
+        }
+    }
+
+    /// Convert the (separator-free) digits of a radix-prefixed literal to the decimal
+    /// string the `Number` token carries. `u128` is exact for ≤128-bit literals — far
+    /// beyond any real input; the `f64` fallback only triggers for absurdly long ones and
+    /// loses precision past 2^53, exactly as JS's conversion to a double would.
+    fn radix_digits_to_decimal(digits: &str, radix: u32) -> String {
+        if let Ok(v) = u128::from_str_radix(digits, radix) {
+            return v.to_string();
+        }
+        let mut v = 0.0_f64;
+        for c in digits.chars() {
+            v = v * radix as f64 + c.to_digit(radix).unwrap_or(0) as f64;
+        }
+        format!("{v}")
     }
 
     /// Handle escape sequence, returning the unescaped character.
@@ -346,6 +455,14 @@ impl<'a> Lexer<'a> {
     }
 
     pub fn next_token(&mut self) -> Result<Option<Token>, String> {
+        let tok = self.next_token_inner()?;
+        if let Some(t) = &tok {
+            self.last_significant_kind = Some(t.kind);
+        }
+        Ok(tok)
+    }
+
+    fn next_token_inner(&mut self) -> Result<Option<Token>, String> {
         if let Some(tok) = self.pending_dedents.pop_front() {
             return Ok(Some(tok));
         }
@@ -502,12 +619,15 @@ impl<'a> Lexer<'a> {
                 } else if self.peek() == Some('/') {
                     self.jsx_in_closing_tag = true;
                     TokenKind::Lt
-                } else if self.peek() == Some('>')
+                } else if (self.peek() == Some('>')
                     || self
                         .peek()
                         .map(|c| c.is_ascii_alphabetic() || c == '_')
-                        .unwrap_or(false)
+                        .unwrap_or(false))
+                    && !self.last_is_value()
                 {
+                    // JSX open tag — only in expression position. After a value (`ident<`, `)<`,
+                    // `]<`, literal) this is `Lt`: a comparison or generic-args opener.
                     self.jsx_depth += 1;
                     self.jsx_stack.push(JsxEl {
                         in_opener: true,
@@ -525,13 +645,16 @@ impl<'a> Lexer<'a> {
                     TokenKind::Ge
                 } else if self.peek() == Some('>') {
                     self.advance();
-                    TokenKind::Shr
+                    if self.peek() == Some('>') {
+                        self.advance();
+                        TokenKind::UShr // `>>>`
+                    } else {
+                        TokenKind::Shr
+                    }
                 } else {
-                    if self.jsx_in_closing_tag {
-                        self.jsx_depth = (self.jsx_depth - 1).max(0);
-                        self.jsx_stack.pop();
-                        self.jsx_sync_in_opening_tag();
-                    } else if self.jsx_in_opening_tag && self.jsx_saw_slash_before_gt {
+                    if self.jsx_in_closing_tag
+                        || (self.jsx_in_opening_tag && self.jsx_saw_slash_before_gt)
+                    {
                         self.jsx_depth = (self.jsx_depth - 1).max(0);
                         self.jsx_stack.pop();
                         self.jsx_sync_in_opening_tag();
@@ -740,6 +863,56 @@ mod tests {
         let tokens = tokens.unwrap();
         let string_tok = tokens.iter().find(|t| t.kind == TokenKind::String).unwrap();
         assert_eq!(string_tok.literal.as_deref(), Some("H"));
+    }
+
+    #[test]
+    fn radix_integer_literals() {
+        // Hex / octal / binary prefixes (any case) convert to a decimal `Number` literal,
+        // honoring `_` digit separators.
+        let cases = [
+            ("0xff", "255"),
+            ("0xFF", "255"),
+            ("0X1a", "26"),
+            ("0o17", "15"),
+            ("0O7", "7"),
+            ("0b1010", "10"),
+            ("0B0", "0"),
+            ("0xdeadbeef", "3735928559"),
+            ("0xFF_FF", "65535"),
+            ("0b1111_0000", "240"),
+        ];
+        for (src, expected) in cases {
+            let tokens = Lexer::new(src).collect::<Result<Vec<_>, _>>().unwrap();
+            let num = tokens
+                .iter()
+                .find(|t| t.kind == TokenKind::Number)
+                .unwrap_or_else(|| panic!("no Number token for {src}"));
+            assert_eq!(num.literal.as_deref(), Some(expected), "for {src}");
+        }
+    }
+
+    #[test]
+    fn non_radix_zero_prefixed_stays_decimal() {
+        // A leading zero is NOT legacy octal; an invalid prefix is not a radix literal.
+        let num_literal = |src: &str| -> String {
+            Lexer::new(src)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .into_iter()
+                .find(|t| t.kind == TokenKind::Number)
+                .unwrap()
+                .literal
+                .as_deref()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(num_literal("07"), "07"); // decimal, not octal
+        assert_eq!(num_literal("0"), "0");
+        // `0xZ` → the Number token is just `0`, then `xZ` lexes as an identifier.
+        let toks = Lexer::new("0xZ").collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(toks[0].kind, TokenKind::Number);
+        assert_eq!(toks[0].literal.as_deref(), Some("0"));
+        assert_eq!(toks[1].kind, TokenKind::Ident);
     }
 
     #[test]

@@ -1,0 +1,53 @@
+// GAUNTLET: fannkuch-redux (Computer Language Benchmarks Game / SunSpider access-fannkuch). Generates
+// permutations and counts pancake-flips — integer-array index manipulation, in-place reversal and
+// swaps in a tight loop. Valid in both tish and node; integer check (checksum * 100000 + maxFlips).
+function fannkuch(n) {
+  let perm = []
+  let perm1 = []
+  let count = []
+  for (let i = 0; i < n; i++) { perm.push(0); perm1.push(i); count.push(0) }
+  let maxFlips = 0
+  let permCount = 0
+  let checksum = 0
+  let r = n
+  while (true) {
+    while (r !== 1) { count[r - 1] = r; r = r - 1 }
+    for (let i = 0; i < n; i++) { perm[i] = perm1[i] }
+    let flips = 0
+    let k = perm[0]
+    while (k !== 0) {
+      let k2 = (k + 1) >> 1
+      for (let i = 0; i < k2; i++) {
+        let temp = perm[i]
+        perm[i] = perm[k - i]
+        perm[k - i] = temp
+      }
+      flips = flips + 1
+      k = perm[0]
+    }
+    if (flips > maxFlips) { maxFlips = flips }
+    if ((permCount & 1) === 0) { checksum = checksum + flips } else { checksum = checksum - flips }
+    // Generate the next permutation (incremental rotation); return when exhausted.
+    let done = false
+    while (true) {
+      if (r === n) { done = true; break }
+      let perm0 = perm1[0]
+      let i = 0
+      while (i < r) {
+        let j = i + 1
+        perm1[i] = perm1[j]
+        i = j
+      }
+      perm1[r] = perm0
+      count[r] = count[r] - 1
+      if (count[r] > 0) { break }
+      r = r + 1
+    }
+    if (done) { return checksum * 100000 + maxFlips }
+    permCount = permCount + 1
+  }
+}
+
+let t0 = Date.now()
+let check = fannkuch(10)
+console.log("GAUNTLET fannkuch " + (Date.now() - t0) + " " + check)

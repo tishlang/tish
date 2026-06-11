@@ -1,0 +1,13 @@
+// GAUNTLET: native typed-array HOF — `reduce` over a typed `number[]` (Vec<f64>). With
+// TISH_NATIVE_HOF the reduce lowers to a native fold; flags-off it is the boxed `array_reduce`
+// (a value_call per element). Non-foldable hash body, so the typed win reflects real per-element
+// throughput rather than LLVM constant-folding an invariant reduce. (valid in both tish and node)
+let xs: number[] = [3, 10, 17, 24, 31, 38, 45, 52, 59, 66, 73, 80, 87, 94, 1, 8, 15, 22, 29, 36, 43, 50, 57, 64, 71, 78, 85, 92, 99, 6, 13, 20, 27, 34, 41, 48, 55, 62, 69, 76, 83, 90, 97, 4, 11, 18, 25, 32, 39, 46, 53, 60, 67, 74, 81, 88, 95, 2, 9, 16, 23, 30, 37, 44]
+let t0: number = Date.now()
+let acc: number = 0
+let r: number = 0
+while (r < 120000) {
+  acc = (acc * 31 + xs.reduce((a, b) => (a * 31 + b) % 1000003, r % 97)) % 1000000007
+  r = r + 1
+}
+console.log("GAUNTLET typed_array_hof " + (Date.now() - t0) + " " + acc)

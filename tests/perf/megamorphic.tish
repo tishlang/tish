@@ -1,0 +1,26 @@
+// GAUNTLET: megamorphic property access. Reads `.value` at ONE call site across objects of eight
+// different shapes (key sets / field offsets) in a hot loop — the canonical stress for hidden-class /
+// inline-cache behaviour (V8 calls this the megamorphic IC path; it's the #1 object-perf signal). A
+// monomorphic engine specializes the read; a naive one hashes every time. Valid in both tish and node.
+function makeObjs() {
+  let objs = []
+  objs.push({ value: 1, a: 1 })
+  objs.push({ b: 1, value: 2, c: 1 })
+  objs.push({ value: 3 })
+  objs.push({ x: 1, y: 1, value: 4 })
+  objs.push({ value: 5, p: 1, q: 1, r: 1 })
+  objs.push({ m: 1, value: 6 })
+  objs.push({ value: 7, k: 1, j: 1 })
+  objs.push({ d: 1, e: 1, f: 1, value: 8 })
+  return objs
+}
+
+let objs = makeObjs()
+let n = objs.length
+let iters = 20000000
+let t0 = Date.now()
+let sum = 0
+for (let r = 0; r < iters; r++) {
+  sum = sum + objs[r % n].value
+}
+console.log("GAUNTLET megamorphic " + (Date.now() - t0) + " " + sum)

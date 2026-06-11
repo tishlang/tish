@@ -122,6 +122,7 @@ pub fn build_via_cargo(
     )
 }
 
+#[allow(clippy::too_many_arguments)] // orthogonal cargo build inputs; bundling would just relocate the same fields
 pub fn build_via_cargo_with_config(
     rust_code: &str,
     native_modules: Vec<ResolvedNativeModule>,
@@ -166,7 +167,7 @@ pub fn build_via_cargo_with_config(
         .collect();
 
     let mut more_deps = String::new();
-    more_deps.push_str(&tokio_dep);
+    more_deps.push_str(tokio_dep);
     if !native_deps.is_empty() {
         more_deps.push_str(&format!("\n{}", native_deps));
     }
@@ -299,6 +300,7 @@ tishlang_runtime = {{ path = {:?}{} }}
 ///
 /// `bins` order must match `outputs`: each `(stem, rust_code, generated_native_rs)` pairs with
 /// `outputs[i].0` (entry path — used only for validation) and `outputs[i].1` (final binary path).
+#[allow(clippy::too_many_arguments)] // orthogonal batch-build inputs (bins/outputs/modules/flags)
 pub(crate) fn build_many_via_cargo(
     bins: Vec<(String, String, Option<String>)>,
     native_modules: Vec<ResolvedNativeModule>,

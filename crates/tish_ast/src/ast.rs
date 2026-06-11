@@ -24,6 +24,20 @@ pub enum TypeAnnotation {
     },
     /// Union type: T1 | T2
     Union(Vec<TypeAnnotation>),
+    /// Tuple type: [T1, T2, ...]
+    Tuple(Vec<TypeAnnotation>),
+    /// Literal type: "foo" | 42 | true (a value used as a type)
+    Literal(TypeLiteral),
+    /// Intersection type: T1 & T2 (e.g. `interface X extends Y { … }` → `Y & { … }`)
+    Intersection(Vec<TypeAnnotation>),
+}
+
+/// A literal value used in type position (`"a"`, `42`, `true`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeLiteral {
+    Str(Arc<str>),
+    Num(f64),
+    Bool(bool),
 }
 
 /// Function parameter with optional type annotation and default value.
@@ -62,15 +76,13 @@ impl FunParam {
     fn collect_pattern_binding_names(pattern: &DestructPattern, out: &mut Vec<Arc<str>>) {
         match pattern {
             DestructPattern::Array(elements) => {
-                for el in elements {
-                    if let Some(el) = el {
-                        match el {
-                            DestructElement::Ident(n, _) => out.push(Arc::clone(n)),
-                            DestructElement::Pattern(p) => {
-                                Self::collect_pattern_binding_names(p, out);
-                            }
-                            DestructElement::Rest(n, _) => out.push(Arc::clone(n)),
+                for el in elements.iter().flatten() {
+                    match el {
+                        DestructElement::Ident(n, _) => out.push(Arc::clone(n)),
+                        DestructElement::Pattern(p) => {
+                            Self::collect_pattern_binding_names(p, out);
                         }
+                        DestructElement::Rest(n, _) => out.push(Arc::clone(n)),
                     }
                 }
             }
@@ -167,6 +179,14 @@ pub enum Statement {
         pattern: DestructPattern,
         mutable: bool,
         init: Expr,
+        span: Span,
+    },
+    /// A transparent group of statements that execute in the *current* scope
+    /// (no new block scope). Produced for comma-separated declarators
+    /// (`let a = 1, b = 2`) so each declarator lowers to its own VarDecl while
+    /// still occupying a single statement slot (e.g. a `for` initializer).
+    Multi {
+        statements: Vec<Statement>,
         span: Span,
     },
     ExprStmt {
@@ -568,6 +588,8 @@ pub enum BinOp {
     BitXor,
     Shl,
     Shr,
+    /// `>>>` — unsigned (logical) right shift; JS ToUint32 semantics.
+    UShr,
     In,
 }
 
@@ -597,6 +619,7 @@ impl Statement {
             Statement::Block { span, .. }
             | Statement::VarDecl { span, .. }
             | Statement::VarDeclDestructure { span, .. }
+            | Statement::Multi { span, .. }
             | Statement::ExprStmt { span, .. }
             | Statement::If { span, .. }
             | Statement::While { span, .. }

@@ -1,0 +1,49 @@
+// GAUNTLET: spectral-norm (Computer Language Benchmarks Game / SunSpider math-spectral-norm). Power
+// iteration on an implicit matrix — nested float loops with array indexing and a division-heavy inner
+// kernel. Valid in both tish and node; integer check (norm * 1e9).
+function evalA(i, j) {
+  return 1.0 / (((i + j) * (i + j + 1)) / 2 + i + 1)
+}
+
+function multiplyAv(n, v, av) {
+  for (let i = 0; i < n; i++) {
+    let sum = 0.0
+    for (let j = 0; j < n; j++) { sum = sum + evalA(i, j) * v[j] }
+    av[i] = sum
+  }
+}
+
+function multiplyAtv(n, v, atv) {
+  for (let i = 0; i < n; i++) {
+    let sum = 0.0
+    for (let j = 0; j < n; j++) { sum = sum + evalA(j, i) * v[j] }
+    atv[i] = sum
+  }
+}
+
+function multiplyAtAv(n, v, atav, u) {
+  multiplyAv(n, v, u)
+  multiplyAtv(n, u, atav)
+}
+
+function spectralNorm(n) {
+  let u = []
+  let v = []
+  let w = []
+  for (let i = 0; i < n; i++) { u.push(1.0); v.push(0.0); w.push(0.0) }
+  for (let i = 0; i < 10; i++) {
+    multiplyAtAv(n, u, v, w)
+    multiplyAtAv(n, v, u, w)
+  }
+  let vBv = 0.0
+  let vv = 0.0
+  for (let i = 0; i < n; i++) {
+    vBv = vBv + u[i] * v[i]
+    vv = vv + v[i] * v[i]
+  }
+  return Math.sqrt(vBv / vv)
+}
+
+let t0 = Date.now()
+let check = Math.round(spectralNorm(1000) * 1000000000)
+console.log("GAUNTLET spectral_norm " + (Date.now() - t0) + " " + check)

@@ -59,6 +59,8 @@ pub enum TokenKind {
     Export,
     Type,
     Declare,
+    Interface,
+    As,
 
     // Punctuation
     LParen,
@@ -108,6 +110,7 @@ pub enum TokenKind {
     BitNot,
     Shl,
     Shr,
+    UShr,
     OptionalChain,
     NullishCoalesce,
     Question,
@@ -157,6 +160,8 @@ impl TokenKind {
             "export" => TokenKind::Export,
             "type" => TokenKind::Type,
             "declare" => TokenKind::Declare,
+            "interface" => TokenKind::Interface,
+            "as" => TokenKind::As,
             _ => TokenKind::Ident,
         }
     }

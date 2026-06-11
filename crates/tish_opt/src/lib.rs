@@ -23,6 +23,10 @@ fn optimize_statement(stmt: &Statement) -> Statement {
                 span: *span,
             }
         }
+        Statement::Multi { statements, span } => Statement::Multi {
+            statements: statements.iter().map(optimize_statement).collect(),
+            span: *span,
+        },
         Statement::VarDecl {
             name,
             name_span,
@@ -554,19 +558,70 @@ fn literal_strict_eq(a: &Literal, b: &Literal) -> bool {
     }
 }
 
+/// JS `Number.prototype.toString` (radix 10). **Kept byte-for-byte in sync with
+/// `tishlang_core::js_number_to_string`** so a constant-folded `"" + n` here matches the
+/// runtime conversion there; `tish_opt` deliberately does not depend on `tish_core` (it is a
+/// lean AST pass), hence the small duplication of this fixed-spec algorithm. See that function
+/// for the full commentary.
+fn js_number_to_string(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value == f64::INFINITY {
+        return "Infinity".to_string();
+    }
+    if value == f64::NEG_INFINITY {
+        return "-Infinity".to_string();
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() { "-0" } else { "0" }.to_string();
+    }
+    let negative = value < 0.0;
+    let sci = format!("{:e}", value.abs());
+    let (mantissa, exp_str) = sci
+        .split_once('e')
+        .expect("LowerExp formatting always contains 'e'");
+    let exp: i32 = exp_str
+        .parse()
+        .expect("LowerExp exponent is a valid integer");
+    let digits: String = mantissa.chars().filter(|&c| c != '.').collect();
+    let k = digits.len() as i32;
+    let point = exp + 1;
+
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    if k <= point && point <= 21 {
+        out.push_str(&digits);
+        out.push_str(&"0".repeat((point - k) as usize));
+    } else if 0 < point && point <= 21 {
+        out.push_str(&digits[..point as usize]);
+        out.push('.');
+        out.push_str(&digits[point as usize..]);
+    } else if -6 < point && point <= 0 {
+        out.push_str("0.");
+        out.push_str(&"0".repeat((-point) as usize));
+        out.push_str(&digits);
+    } else {
+        let e = point - 1;
+        out.push_str(&digits[..1]);
+        if k > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('e');
+        out.push(if e >= 0 { '+' } else { '-' });
+        out.push_str(&e.abs().to_string());
+    }
+    out
+}
+
 fn literal_to_display_string(lit: &Literal) -> String {
     match lit {
-        Literal::Number(n) => {
-            if n.is_nan() {
-                "NaN".to_string()
-            } else if *n == f64::INFINITY {
-                "Infinity".to_string()
-            } else if *n == f64::NEG_INFINITY {
-                "-Infinity".to_string()
-            } else {
-                n.to_string()
-            }
-        }
+        // Must match the runtime exactly so constant-folded `"" + n` agrees with the
+        // unfolded path (see `js_number_to_string` below).
+        Literal::Number(n) => js_number_to_string(*n),
         Literal::String(s) => s.to_string(),
         Literal::Bool(b) => b.to_string(),
         Literal::Null => "null".to_string(),
@@ -708,6 +763,26 @@ fn try_algebraic_simplify(
     None
 }
 
+// JS ToInt32/ToUint32 for the constant folder. NaN/±Infinity → 0 (`f64 as i64` saturates, so a
+// folded `(1e308 * 10) | 0` would otherwise give -1 while the runtime gives 0). `tish_opt` has no
+// `tish_core` dep, so these mirror `tishlang_core::to_int32`/`to_uint32` (kept in sync, pure spec).
+#[inline]
+fn fold_to_int32(x: f64) -> i32 {
+    if x.is_finite() {
+        x as i64 as i32
+    } else {
+        0
+    }
+}
+#[inline]
+fn fold_to_uint32(x: f64) -> u32 {
+    if x.is_finite() {
+        x as i64 as u32
+    } else {
+        0
+    }
+}
+
 fn try_fold_binop(left: &Literal, op: BinOp, right: &Literal) -> Option<Literal> {
     use BinOp::*;
     let ln = literal_as_number(left);
@@ -746,11 +821,13 @@ fn try_fold_binop(left: &Literal, op: BinOp, right: &Literal) -> Option<Literal>
         Ge => Literal::Bool(ln >= rn),
         And => Literal::Bool(literal_is_truthy(left) && literal_is_truthy(right)),
         Or => Literal::Bool(literal_is_truthy(left) || literal_is_truthy(right)),
-        BitAnd => Literal::Number((ln as i32 & rn as i32) as f64),
-        BitOr => Literal::Number((ln as i32 | rn as i32) as f64),
-        BitXor => Literal::Number((ln as i32 ^ rn as i32) as f64),
-        Shl => Literal::Number(((ln as i32) << (rn as i32)) as f64),
-        Shr => Literal::Number(((ln as i32) >> (rn as i32)) as f64),
+        // ToInt32/ToUint32 (modulo 2³², NaN/±Infinity → 0), matching the VM/interp exactly.
+        BitAnd => Literal::Number((fold_to_int32(ln) & fold_to_int32(rn)) as f64),
+        BitOr => Literal::Number((fold_to_int32(ln) | fold_to_int32(rn)) as f64),
+        BitXor => Literal::Number((fold_to_int32(ln) ^ fold_to_int32(rn)) as f64),
+        Shl => Literal::Number(fold_to_int32(ln).wrapping_shl(fold_to_uint32(rn)) as f64),
+        Shr => Literal::Number(fold_to_int32(ln).wrapping_shr(fold_to_uint32(rn)) as f64),
+        UShr => Literal::Number(fold_to_uint32(ln).wrapping_shr(fold_to_uint32(rn)) as f64),
         In => return None, // Requires object/array on right
     };
     Some(result)
@@ -940,7 +1017,7 @@ fn try_fold_unary(op: UnaryOp, operand: &Literal) -> Option<Literal> {
         Not => Literal::Bool(!literal_is_truthy(operand)),
         Neg => Literal::Number(-literal_as_number(operand)),
         Pos => Literal::Number(literal_as_number(operand)),
-        BitNot => Literal::Number(!(literal_as_number(operand) as i32) as f64),
+        BitNot => Literal::Number(!fold_to_int32(literal_as_number(operand)) as f64),
         Void => Literal::Null,
     };
     Some(result)

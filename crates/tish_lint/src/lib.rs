@@ -109,17 +109,9 @@ fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
             }
         }
         Statement::ExprStmt { expr, .. } => lint_expr(expr, out),
-        Statement::VarDecl { init, .. } => {
-            if let Some(e) = init {
-                lint_expr(e, out);
-            }
-        }
+        Statement::VarDecl { init: Some(e), .. } => lint_expr(e, out),
         Statement::VarDeclDestructure { init, .. } => lint_expr(init, out),
-        Statement::Return { value, .. } => {
-            if let Some(e) = value {
-                lint_expr(e, out);
-            }
-        }
+        Statement::Return { value: Some(e), .. } => lint_expr(e, out),
         Statement::Throw { value, .. } => lint_expr(value, out),
         _ => {}
     }

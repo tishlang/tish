@@ -57,7 +57,9 @@ impl UsageAnalyzer {
                     self.analyze_statement(e);
                 }
             }
-            Statement::Block { statements, .. } => self.analyze_statements(statements),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                self.analyze_statements(statements)
+            }
             Statement::For {
                 init,
                 cond,
@@ -310,7 +312,9 @@ fn program_uses_async(program: &Program) -> bool {
     fn stmt_has_async(s: &Statement) -> bool {
         match s {
             Statement::FunDecl { async_, .. } if *async_ => true,
-            Statement::Block { statements, .. } => statements.iter().any(stmt_has_async),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().any(stmt_has_async)
+            }
             Statement::If {
                 then_branch,
                 else_branch,
@@ -427,7 +431,9 @@ fn program_uses_async(program: &Program) -> bool {
     }
     fn stmt_has_await(s: &Statement) -> bool {
         match s {
-            Statement::Block { statements, .. } => statements.iter().any(stmt_has_await),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().any(stmt_has_await)
+            }
             Statement::VarDecl { init, .. } => init.as_ref().is_some_and(expr_has_await),
             Statement::VarDeclDestructure { init, .. } => expr_has_await(init),
             Statement::ExprStmt { expr, .. } => expr_has_await(expr),
@@ -652,6 +658,34 @@ pub fn compile_with_native_modules(
     )
 }
 
+/// Opt-in gradual type check. `TISH_CHECK=1`/`warn` prints provable annotation violations to stderr
+/// as warnings; `TISH_CHECK=error` also fails the build. Unset/`0` → no-op (default builds are
+/// unaffected). The checker is gradual (see `check.rs`): it never flags code it can't prove wrong.
+fn run_type_check(program: &Program) -> Result<(), CompileError> {
+    let mode = std::env::var("TISH_CHECK").unwrap_or_default();
+    if mode.is_empty() || mode == "0" {
+        return Ok(());
+    }
+    let diags = crate::check::check_program(program);
+    if diags.is_empty() {
+        return Ok(());
+    }
+    let kind = if mode == "error" { "error" } else { "warning" };
+    for d in &diags {
+        eprintln!(
+            "tish type {}: {}:{}: {}",
+            kind, d.span.start.0, d.span.start.1, d.message
+        );
+    }
+    if mode == "error" {
+        return Err(CompileError::new(
+            format!("type checking failed: {} error(s)", diags.len()),
+            Some(diags[0].span),
+        ));
+    }
+    Ok(())
+}
+
 pub fn compile_with_native_modules_emit(
     program: &Program,
     project_root: Option<&Path>,
@@ -666,6 +700,10 @@ pub fn compile_with_native_modules_emit(
     } else {
         program.clone()
     };
+    // Gradual type check (opt-in via `TISH_CHECK`): `=1`/`=warn` prints provable annotation
+    // violations as warnings; `=error` blocks the build. Off by default — never affects the
+    // standard build. Run on the optimized, pre-inference program (real user annotations only).
+    run_type_check(&program)?;
     // Type-inference pass: fills in `type_ann` on unannotated VarDecl nodes where
     // the type is unambiguous (literals, arithmetic of typed vars, etc.).
     let program = crate::infer::infer_program(&program);
@@ -703,7 +741,6 @@ struct Codegen {
     indent: usize,
     loop_label_index: usize,
     is_async: bool,
-    project_root: Option<std::path::PathBuf>,
     /// Requested features (http, process, fs, regex, polars). When non-empty, used instead of #[cfg].
     features: std::collections::HashSet<String>,
     /// spec -> native init strategy (legacy adapter object vs generated `generated_native` wrapper)
@@ -774,7 +811,9 @@ struct Codegen {
 
 impl Codegen {
     fn new_with_native_modules(
-        project_root: Option<&Path>,
+        // `project_root` is no longer needed by codegen (the only consumer, a Polars-specific
+        // `read_csv` compile-time embed, was removed — crate-specific codegen belongs in that crate).
+        _project_root: Option<&Path>,
         features: &[String],
         native_module_init: std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
     ) -> Self {
@@ -784,7 +823,6 @@ impl Codegen {
             indent: 0,
             loop_label_index: 0,
             is_async: false,
-            project_root: project_root.map(|p| p.to_path_buf()),
             features,
             native_module_init,
             async_context_stack: Vec::new(),
@@ -859,7 +897,9 @@ impl Codegen {
                 Statement::TypeAlias { name, ty, .. } => {
                     out.push((name.to_string(), ty));
                 }
-                Statement::Block { statements, .. } => Self::walk_type_aliases(statements, out),
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    Self::walk_type_aliases(statements, out)
+                }
                 Statement::If {
                     then_branch,
                     else_branch,
@@ -909,7 +949,7 @@ impl Codegen {
                 = &ty
             {
                 let struct_name = crate::types::named_struct_ident(&name);
-                self.write(&format!("#[derive(Clone, Debug, Default)]\n"));
+                self.write("#[derive(Clone, Debug, Default)]\n");
                 self.write("#[allow(non_snake_case, non_camel_case_types)]\n");
                 self.write(&format!("pub struct {} {{\n", struct_name));
                 for (k, t) in fields {
@@ -980,9 +1020,14 @@ impl Codegen {
                             self.write("        buf.push(']');\n");
                         }
                         _ => {
-                            // Fallback: convert the field to a Value and
-                            // delegate to the dynamic stringifier.
-                            let v_expr = t.to_value_expr(&access);
+                            // Fallback: convert the field to a Value and delegate to the dynamic
+                            // stringifier. A `Value` field (e.g. a generic struct's `Box<T>` field)
+                            // is behind `&self` and not `Copy`, so clone it.
+                            let v_expr = if matches!(t, crate::types::RustType::Value) {
+                                format!("{}.clone()", access)
+                            } else {
+                                t.to_value_expr(&access)
+                            };
                             self.write(&format!(
                                 "        let _v: Value = {}; tishlang_runtime::json::stringify_into(buf, &_v);\n",
                                 v_expr
@@ -1281,12 +1326,25 @@ impl Codegen {
         }
     }
 
-    /// Generate code for a bitwise binary operation.
+    /// Generate code for a bitwise binary operation (`& | ^`). `to_int32` is JS ToInt32
+    /// (modulo 2³², NaN/±Infinity → 0) — out-of-range operands wrap, not saturate.
     fn emit_bitwise_binop(l: &str, r: &str, op: &str) -> String {
         format!(
             "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
-             let Value::Number(b) = &({}) else {{ panic!() }}; ((*a as i32) {} (*b as i32)) as f64 }})",
+             let Value::Number(b) = &({}) else {{ panic!() }}; (tishlang_runtime::to_int32(*a) {} tishlang_runtime::to_int32(*b)) as f64 }})",
             l, r, op
+        )
+    }
+
+    /// Generate code for a shift (`<< >> >>>`). `a_to` is the left-operand coercion
+    /// (`to_int32` signed, `to_uint32` for the logical `>>>`); `method` is the `wrapping_sh*`
+    /// call. Counts go through `to_uint32` then mask to 5 bits — exact JS semantics, panic-free.
+    fn emit_shift_binop(l: &str, r: &str, a_to: &str, method: &str) -> String {
+        format!(
+            "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
+             let Value::Number(b) = &({}) else {{ panic!() }}; \
+             tishlang_runtime::{}(*a).{}(tishlang_runtime::to_uint32(*b)) as f64 }})",
+            l, r, a_to, method
         )
     }
 
@@ -1362,7 +1420,7 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, date_now as tish_date_now, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_uint8_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, array_is_array as tish_array_is_array, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_date_constructor, tish_set_constructor, tish_map_constructor, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -1548,11 +1606,9 @@ impl Codegen {
         self.indent -= 1;
         self.writeln("]));");
 
-        self.writeln("let Date = Value::object(ObjectMap::from([");
-        self.indent += 1;
-        self.writeln("(Arc::from(\"now\"), Value::native(|args: &[Value]| tish_date_now(args))),");
-        self.indent -= 1;
-        self.writeln("]));");
+        self.writeln("let Date = tish_date_constructor();");
+        self.writeln("let Set = tish_set_constructor();");
+        self.writeln("let Map = tish_map_constructor();");
 
         self.writeln("let Symbol = tish_symbol_object();");
 
@@ -1574,7 +1630,15 @@ impl Codegen {
         self.indent -= 1;
         self.writeln("]));");
 
+        self.writeln("let Float64Array = tish_float64_array_constructor();");
+        self.writeln("let Float32Array = tish_float32_array_constructor();");
+        self.writeln("let Int8Array = tish_int8_array_constructor();");
         self.writeln("let Uint8Array = tish_uint8_array_constructor();");
+        self.writeln("let Uint8ClampedArray = tish_uint8_clamped_array_constructor();");
+        self.writeln("let Int16Array = tish_int16_array_constructor();");
+        self.writeln("let Uint16Array = tish_uint16_array_constructor();");
+        self.writeln("let Int32Array = tish_int32_array_constructor();");
+        self.writeln("let Uint32Array = tish_uint32_array_constructor();");
         self.writeln("let AudioContext = tish_audio_context_constructor();");
         if self.program_uses_document {
             self.writeln("let document = VmRef::new(tish_canvas_document());");
@@ -1896,6 +1960,13 @@ impl Codegen {
                 self.indent -= 1;
                 self.writeln("}");
             }
+            // Comma-declarators: emit each declarator into the *current* Rust scope
+            // (no wrapping `{}`), so the bindings stay visible to later statements.
+            Statement::Multi { statements, .. } => {
+                for s in statements {
+                    self.emit_statement(s)?;
+                }
+            }
             Statement::VarDecl {
                 name,
                 mutable,
@@ -2042,42 +2113,102 @@ impl Codegen {
                 body,
                 ..
             } => {
-                let iter_expr = self.emit_expr(iterable)?;
-                self.writeln(&format!("{{ let _fof = ({}).clone();", iter_expr));
-                self.indent += 1;
-                self.writeln("match &_fof {");
-                self.indent += 1;
-                self.writeln("Value::Array(ref _arr) => {");
-                self.indent += 1;
-                self.writeln("for _v in _arr.borrow().iter() {");
-                self.indent += 1;
-                self.writeln(&format!(
-                    "let {} = _v.clone();",
-                    Self::escape_ident(name.as_ref())
-                ));
-                self.emit_statement(body)?;
-                self.indent -= 1;
-                self.writeln("}");
-                self.indent -= 1;
-                self.writeln("}");
-                self.writeln("Value::String(ref _s) => {");
-                self.indent += 1;
-                self.writeln("for _ch in _s.chars() {");
-                self.indent += 1;
-                self.writeln(&format!(
-                    "let {} = Value::String(tishlang_runtime::ArcStr::from(_ch.to_string()));",
-                    Self::escape_ident(name.as_ref())
-                ));
-                self.emit_statement(body)?;
-                self.indent -= 1;
-                self.writeln("}");
-                self.indent -= 1;
-                self.writeln("}");
-                self.writeln("_ => panic!(\"for-of requires array or string\"),");
-                self.indent -= 1;
-                self.writeln("}");
-                self.indent -= 1;
-                self.writeln("}");
+                // M3 native fast path: the iterable is a `Vec<elem>` local with a native element
+                // type (e.g. `let xs: number[]` -> `Vec<f64>`) and the body never mentions it (so
+                // iterating by reference can't alias a mutation). Bind the loop var as `elem` so the
+                // body lowers natively — no per-element `Value::clone`, and accumulators stay f64.
+                let mut emitted_native = false;
+                if let Expr::Ident { name: it_name, .. } = iterable {
+                    if let RustType::Vec(elem) = self.type_context.get_type(it_name.as_ref()) {
+                        if elem.is_native() {
+                            let mut body_idents = std::collections::HashSet::new();
+                            Self::collect_stmt_idents(body, &mut body_idents);
+                            if !body_idents.contains(it_name.as_ref()) {
+                                let esc_it = Self::escape_ident(it_name.as_ref()).into_owned();
+                                let esc_name = Self::escape_ident(name.as_ref()).into_owned();
+                                // Index-based iteration (not `.iter().cloned()`, which rustc fails to
+                                // tighten here): `0..len` indexing of a `Vec<f64>` matches a hand-
+                                // written C-style loop. Unique counter names keep nested ForOf sound.
+                                let idx = self.loop_label_index;
+                                self.loop_label_index += 1;
+                                let copy_elem = matches!(*elem, RustType::F64 | RustType::Bool);
+                                let bind = if copy_elem {
+                                    format!("let {} = {}[_fof_i{}];", esc_name, esc_it, idx)
+                                } else {
+                                    format!("let {} = {}[_fof_i{}].clone();", esc_name, esc_it, idx)
+                                };
+                                self.writeln(&format!("for _fof_i{} in 0..{}.len() {{", idx, esc_it));
+                                self.indent += 1;
+                                self.writeln(&bind);
+                                self.type_context.push_scope();
+                                self.type_context.define(name.as_ref(), *elem);
+                                self.emit_statement(body)?;
+                                self.type_context.pop_scope();
+                                self.indent -= 1;
+                                self.writeln("}");
+                                emitted_native = true;
+                            }
+                        }
+                    }
+                }
+                if !emitted_native {
+                    let iter_expr = self.emit_expr(iterable)?;
+                    // `normalize_for_of` drains a JS iterator object (Map/Set `.values()` etc.)
+                    // into an array; arrays/strings/everything else pass through unchanged.
+                    self.writeln(&format!(
+                        "{{ let _fof = tishlang_runtime::normalize_for_of(({}).clone());",
+                        iter_expr
+                    ));
+                    self.indent += 1;
+                    self.writeln("match &_fof {");
+                    self.indent += 1;
+                    self.writeln("Value::Array(ref _arr) => {");
+                    self.indent += 1;
+                    self.writeln("for _v in _arr.borrow().iter() {");
+                    self.indent += 1;
+                    self.writeln(&format!(
+                        "let {} = _v.clone();",
+                        Self::escape_ident(name.as_ref())
+                    ));
+                    self.emit_statement(body)?;
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    // Packed `Float64Array` (`TISH_PACKED_ARRAYS`): iterate the `Vec<f64>` directly,
+                    // re-boxing each element to `Value::Number` for the loop body.
+                    self.writeln("Value::NumberArray(ref _arr) => {");
+                    self.indent += 1;
+                    self.writeln("for _v in _arr.borrow().iter() {");
+                    self.indent += 1;
+                    self.writeln(&format!(
+                        "let {} = Value::Number(*_v);",
+                        Self::escape_ident(name.as_ref())
+                    ));
+                    self.emit_statement(body)?;
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.writeln("Value::String(ref _s) => {");
+                    self.indent += 1;
+                    self.writeln("for _ch in _s.chars() {");
+                    self.indent += 1;
+                    self.writeln(&format!(
+                        "let {} = Value::String(tishlang_runtime::ArcStr::from(_ch.to_string()));",
+                        Self::escape_ident(name.as_ref())
+                    ));
+                    self.emit_statement(body)?;
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.writeln("_ => panic!(\"for-of requires array or string\"),");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
             }
             Statement::For {
                 init,
@@ -2389,6 +2520,8 @@ impl Codegen {
                             "Math",
                             "JSON",
                             "Date",
+                            "Set",
+                            "Map",
                             "Object",
                             "process",
                             "setTimeout",
@@ -2414,12 +2547,12 @@ impl Codegen {
                 Self::collect_assigned_idents_in_stmt(body, &mut assigned_in_body);
                 let mutable_outer_vars: Vec<String> = outer_vars
                     .iter()
-                    .filter(|v| assigned_in_body.contains(*v) || self.rc_cell_storage_contains(*v))
+                    .filter(|v| assigned_in_body.contains(*v) || self.rc_cell_storage_contains(v))
                     .cloned()
                     .collect();
                 let read_only_outer_vars: Vec<String> = outer_vars
                     .iter()
-                    .filter(|v| !assigned_in_body.contains(*v) && !self.rc_cell_storage_contains(*v))
+                    .filter(|v| !assigned_in_body.contains(*v) && !self.rc_cell_storage_contains(v))
                     .cloned()
                     .collect();
 
@@ -2492,8 +2625,18 @@ impl Codegen {
                     "Math",
                     "JSON",
                     "Date",
+                    "Set",
+                    "Map",
                     "Object",
+                    "Float64Array",
+                    "Float32Array",
+                    "Int8Array",
                     "Uint8Array",
+                    "Uint8ClampedArray",
+                    "Int16Array",
+                    "Uint16Array",
+                    "Int32Array",
+                    "Uint32Array",
                     "AudioContext",
                     "process",
                     "setTimeout",
@@ -2573,11 +2716,29 @@ impl Codegen {
                 // simple params, native-scalar annotation, no default value.
                 let param_native =
                     std::env::var("TISH_PARAM_NATIVE").map(|v| v != "0").unwrap_or(false);
+                // A param referenced by ANY sibling default expr (e.g. `(a, b = a + 1)`) must NOT
+                // get a native f64 shadow: the default binding is emitted on the boxed Value path
+                // (`ops::add(&a, …)` expects `&Value`), so a native `a: f64` would mistype the
+                // generated Rust. Keep such params boxed — correctness over the M1 optimization;
+                // defaults referencing params are rare in hot code. Also covers the M4 case where
+                // an unannotated param (e.g. `dependent(a, b = a + 1)`) is inferred numeric.
+                let mut default_referenced: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for p in params {
+                    if let FunParam::Simple(tp) = p {
+                        if let Some(d) = &tp.default {
+                            Self::collect_expr_idents(d, &mut default_referenced);
+                        }
+                    }
+                }
                 let mut native_params: Vec<(String, RustType)> = Vec::new();
                 for (i, p) in params.iter().enumerate() {
                     match p {
                         FunParam::Simple(tp) => {
-                            let native_ty = if param_native && tp.default.is_none() {
+                            let native_ty = if param_native
+                                && tp.default.is_none()
+                                && !default_referenced.contains(tp.name.as_ref())
+                            {
                                 tp.type_ann
                                     .as_ref()
                                     .map(RustType::from_annotation)
@@ -2635,12 +2796,34 @@ impl Codegen {
                         }
                     }
                 }
+                // A typed rest-param `...args: number[]` lowers to a native `Vec<elem>` (unbox each
+                // trailing arg) instead of a boxed `Value::Array`, so the body iterates/indexes it
+                // natively (and `for (let x of args)` keeps accumulators `f64`). Non-native element
+                // types fall back to the boxed array.
+                let rest_native: Option<RustType> = rest_param.as_ref().and_then(|rp| {
+                    rp.type_ann.as_ref().and_then(|ann| {
+                        match RustType::from_annotation_with_aliases(ann, &self.type_aliases) {
+                            RustType::Vec(elem) if elem.is_native() => Some(RustType::Vec(elem)),
+                            _ => None,
+                        }
+                    })
+                });
                 if let Some(rest) = rest_param {
-                    self.writeln(&format!(
-                        "let {} = Value::Array(VmRef::new(args[{}..].to_vec()));",
-                        Self::escape_ident(rest.name.as_ref()),
-                        params.len()
-                    ));
+                    if let Some(RustType::Vec(elem)) = &rest_native {
+                        self.writeln(&format!(
+                            "let {}: Vec<{}> = args[{}..].iter().map(|v| {}).collect();",
+                            Self::escape_ident(rest.name.as_ref()),
+                            elem.to_rust_type_str(),
+                            params.len(),
+                            elem.from_value_expr("v")
+                        ));
+                    } else {
+                        self.writeln(&format!(
+                            "let {} = Value::Array(VmRef::new(args[{}..].to_vec()));",
+                            Self::escape_ident(rest.name.as_ref()),
+                            params.len()
+                        ));
+                    }
                 }
 
                 self.type_context
@@ -2649,6 +2832,10 @@ impl Codegen {
                 // body lowers them exactly like native locals (binops, indices, etc.).
                 for (pname, pty) in &native_params {
                     self.type_context.define(pname, pty.clone());
+                }
+                // A native `Vec` rest-param: register so the body iterates/indexes it natively.
+                if let (Some(rest), Some(rt)) = (rest_param.as_ref(), rest_native.as_ref()) {
+                    self.type_context.define(rest.name.as_ref(), rt.clone());
                 }
 
                 let fun_body_res: Result<(), CompileError> = (|| -> Result<(), CompileError> {
@@ -2769,7 +2956,7 @@ impl Codegen {
                     }
                     CallArg::Spread(e) => {
                         let val = self.emit_expr(e)?;
-                        parts.push(format!("if let Value::Array(ref _spread) = {} {{ _args.extend(_spread.borrow().iter().cloned()); }}", val));
+                        parts.push(format!("if let Value::Array(ref _spread) = tishlang_runtime::normalize_for_of(({}).clone()) {{ _args.extend(_spread.borrow().iter().cloned()); }}", val));
                     }
                 }
             }
@@ -2967,7 +3154,7 @@ impl Codegen {
                         o
                     ),
                     UnaryOp::BitNot => format!(
-                        "Value::Number({{ let Value::Number(n) = &({}) else {{ panic!(\"Expected number\") }}; (!(*n as i32)) as f64 }})",
+                        "Value::Number({{ let Value::Number(n) = &({}) else {{ panic!(\"Expected number\") }}; (!tishlang_runtime::to_int32(*n)) as f64 }})",
                         o
                     ),
                     UnaryOp::Void => format!("{{ {}; Value::Null }}", o),
@@ -2990,8 +3177,7 @@ impl Codegen {
                 {
                     if method_name.as_ref() == "stringify"
                         && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "JSON")
-                    {
-                        if args.len() == 1 {
+                        && args.len() == 1 {
                             if let CallArg::Expr(arg) = &args[0] {
                                 let (arg_code, arg_ty) = self.emit_typed_expr(arg)?;
                                 match &arg_ty {
@@ -3016,52 +3202,6 @@ impl Codegen {
                                 }
                             }
                         }
-                    }
-                }
-
-                // Compile-time embed: Polars.read_csv("<literal path>") when file exists
-                if let Some(init) = self.native_module_init.get("tish:polars") {
-                    let crate_name = match init {
-                        crate::resolve::NativeModuleInit::Legacy { crate_name, .. } => {
-                            crate_name.as_str()
-                        }
-                        crate::resolve::NativeModuleInit::Generated { shim_crate, .. } => {
-                            shim_crate.as_str()
-                        }
-                    };
-                    if let (Some(root), Some(CallArg::Expr(first_arg))) =
-                        (self.project_root.as_ref(), args.first())
-                    {
-                        if let Expr::Member {
-                            object,
-                            prop: MemberProp::Name { name: ref method_name, .. },
-                            ..
-                        } = callee.as_ref()
-                        {
-                            if method_name.as_ref() == "read_csv"
-                                && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Polars")
-                            {
-                                if let Expr::Literal {
-                                    value: Literal::String(ref path),
-                                    ..
-                                } = first_arg
-                                {
-                                    let path_str = path.as_ref();
-                                    let normalized = path_str.trim_start_matches("./");
-                                    let full_path = root.join(normalized);
-                                    if full_path.exists() {
-                                        if let Ok(content) = std::fs::read_to_string(&full_path) {
-                                            let escaped = format!("{:?}", content);
-                                            return Ok(format!(
-                                                "{}::polars_read_csv_from_string_runtime({})",
-                                                crate_name, escaped
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
 
                 // Check for built-in method calls on arrays/strings
@@ -3518,6 +3658,27 @@ impl Codegen {
                         }
                     }
                 }
+                // Generalize the typed struct-field fast path to `xs[i].field` (array-of-structs):
+                // when `object` indexes a `Vec<Named>`, do native struct field access.
+                if !optional {
+                    if let (Expr::Index { .. }, MemberProp::Name { name: prop_name, .. }) =
+                        (object.as_ref(), prop)
+                    {
+                        let (obj_code, obj_ty) = self.emit_typed_expr(object)?;
+                        if let RustType::Named { fields, .. } = &obj_ty {
+                            if let Some((_, field_ty)) =
+                                fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                            {
+                                let access = format!(
+                                    "({}).{}",
+                                    obj_code,
+                                    crate::types::field_ident(prop_name.as_ref())
+                                );
+                                return Ok(field_ty.to_value_expr(&access));
+                            }
+                        }
+                    }
+                }
                 let obj = self.emit_expr(object)?;
                 let key = match prop {
                     MemberProp::Name { name, .. } => format!("{:?}", name.as_ref()),
@@ -3590,7 +3751,7 @@ impl Codegen {
                             }
                             ArrayElement::Spread(e) => {
                                 let val = self.emit_expr(e)?;
-                                parts.push(format!("if let Value::Array(ref _spread) = {} {{ _arr.extend(_spread.borrow().iter().cloned()); }}", val));
+                                parts.push(format!("if let Value::Array(ref _spread) = tishlang_runtime::normalize_for_of(({}).clone()) {{ _arr.extend(_spread.borrow().iter().cloned()); }}", val));
                             }
                         }
                     }
@@ -4048,10 +4209,25 @@ impl Codegen {
                                 // both native but different type — best effort
                                 val_code
                             };
-                            return Ok(format!(
-                                "{{ {}[{}] = {}; Value::Null }}",
-                                esc_obj, idx_usize, native_val
-                            ));
+                            // OOB-safe write for numeric/bool Vecs: JS `a[i] = x` past the end
+                            // grows the array (holes read back as `undefined` → NaN/false), it does
+                            // not panic. In-bounds is the same direct store. Other element types keep
+                            // the direct store (their OOB semantics aren't a native-inference target).
+                            let assign = match elem_type.as_ref() {
+                                RustType::F64 | RustType::Bool => {
+                                    let pad = if matches!(elem_type.as_ref(), RustType::F64) {
+                                        "f64::NAN"
+                                    } else {
+                                        "false"
+                                    };
+                                    format!(
+                                        "{{ let _idx = {}; if _idx >= {}.len() {{ {}.resize(_idx + 1, {}); }} {}[_idx] = {}; Value::Null }}",
+                                        idx_usize, esc_obj, esc_obj, pad, esc_obj, native_val
+                                    )
+                                }
+                                _ => format!("{{ {}[{}] = {}; Value::Null }}", esc_obj, idx_usize, native_val),
+                            };
+                            return Ok(assign);
                         }
                     }
                 }
@@ -4093,6 +4269,37 @@ impl Codegen {
                 .map_err(|m| CompileError::new(m, None))?
             }
             Expr::New { callee, args, .. } => {
+                // Packed-native fast path: `new Float64Array(...)` lowers to a packed
+                // `Value::NumberArray` (`Vec<f64>`) instead of the boxed `Value::Array` the generic
+                // `tish_construct` builds — `Float64Array` is the one view whose element type *is*
+                // f64, so it needs no coercion and avoids the per-element `Value` boxing. The helper
+                // falls back to the identical boxed value when `TISH_PACKED_ARRAYS` is off, so default
+                // builds stay byte-for-byte unchanged. The other typed-array views have no packed
+                // `Value` variant (would need `Vec<f32>`/`Vec<i32>`/… + the 24-byte size assertion and
+                // every exhaustive match), so they keep the generic path. Native-only: interp/VM value
+                // bridges carry no `NumberArray`, so only the native runtime grew the support. Keyed on
+                // the callee ident like the existing `JSON.`/`Polars.` special-cases.
+                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Float64Array")
+                {
+                    if args.iter().any(|a| matches!(a, CallArg::Spread(_))) {
+                        let args_code = self.emit_call_args(args)?;
+                        return Ok(format!(
+                            "{{ let _spread_args = {}; tishlang_runtime::float64_array_packed(&_spread_args[..]) }}",
+                            args_code
+                        ));
+                    }
+                    let arg_exprs: Result<Vec<_>, _> =
+                        args.iter().map(|a| self.emit_call_arg(a)).collect();
+                    let args_vec = arg_exprs?
+                        .iter()
+                        .map(|a| format!("{}.clone()", a))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Ok(format!(
+                        "tishlang_runtime::float64_array_packed(&[{}])",
+                        args_vec
+                    ));
+                }
                 let callee_expr = self.emit_expr(callee)?;
                 let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
                 if has_spread {
@@ -4309,7 +4516,7 @@ impl Codegen {
             Statement::VarDeclDestructure { init, .. } => {
                 Self::collect_assigned_idents_in_expr(init, names)
             }
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 for s in statements {
                     Self::collect_assigned_idents_in_stmt(s, names);
                 }
@@ -4735,7 +4942,7 @@ impl Codegen {
             Statement::ExprStmt { expr, .. } => {
                 Self::collect_captured_block_vars_from_expr(expr, block_vars, result);
             }
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 for s in statements {
                     Self::collect_captured_block_vars_from_statements(s, block_vars, result);
                 }
@@ -4887,7 +5094,7 @@ impl Codegen {
             Statement::VarDeclDestructure { pattern, .. } => {
                 Self::collect_destruct_names(pattern, names);
             }
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 for s in statements {
                     Self::collect_local_var_names(s, names);
                 }
@@ -4984,7 +5191,7 @@ impl Codegen {
                 }
             }
             Statement::VarDeclDestructure { init, .. } => Self::collect_expr_idents(init, idents),
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 for s in statements {
                     Self::collect_stmt_idents(s, idents);
                 }
@@ -5130,6 +5337,8 @@ impl Codegen {
                     "Math",
                     "JSON",
                     "Date",
+                    "Set",
+                    "Map",
                     "Object",
                     "process",
                     "setTimeout",
@@ -5155,12 +5364,12 @@ impl Codegen {
         // (cleanups may only read `timer2` but must see updates from nested callbacks).
         let cell_capture_outer_vars: Vec<String> = outer_vars
             .iter()
-            .filter(|v| assigned_in_body.contains(*v) || self.rc_cell_storage_contains(*v))
+            .filter(|v| assigned_in_body.contains(*v) || self.rc_cell_storage_contains(v))
             .cloned()
             .collect();
         let read_only_outer_vars: Vec<String> = outer_vars
             .iter()
-            .filter(|v| !assigned_in_body.contains(*v) && !self.rc_cell_storage_contains(*v))
+            .filter(|v| !assigned_in_body.contains(*v) && !self.rc_cell_storage_contains(v))
             .cloned()
             .collect();
 
@@ -5202,8 +5411,18 @@ impl Codegen {
             "Math",
             "JSON",
             "Date",
+            "Set",
+            "Map",
             "Object",
+            "Float64Array",
+            "Float32Array",
+            "Int8Array",
             "Uint8Array",
+            "Uint8ClampedArray",
+            "Int16Array",
+            "Uint16Array",
+            "Int32Array",
+            "Uint32Array",
             "AudioContext",
             "process",
             "setTimeout",
@@ -5487,6 +5706,28 @@ impl Codegen {
             return Ok(format!("vec![{}]", items.join(", ")));
         }
 
+        // Tuple literal: `[a, b]` against a `[T0, T1]` tuple type -> native Rust tuple `(a, b)`.
+        if let (RustType::Tuple(elem_types), Expr::Array { elements, .. }) = (target_type, expr) {
+            if elements.len() == elem_types.len()
+                && elements.iter().all(|e| matches!(e, ArrayElement::Expr(_)))
+            {
+                let mut items = Vec::new();
+                for (elem, ty) in elements.iter().zip(elem_types) {
+                    if let ArrayElement::Expr(e) = elem {
+                        items.push(self.emit_native_expr(e, ty)?);
+                    }
+                }
+                return Ok(if items.len() == 1 {
+                    format!("({},)", items[0])
+                } else {
+                    format!("({})", items.join(", "))
+                });
+            }
+            // arity/shape mismatch -> boxed fallback
+            let value_expr = self.emit_expr(expr)?;
+            return Ok(target_type.from_value_expr(&value_expr));
+        }
+
         // Try to emit object literals directly as a Rust struct literal
         // when the target is a `RustType::Named` (a user `type Foo = {...}`
         // alias). Each property in source order is matched to a struct
@@ -5544,6 +5785,17 @@ impl Codegen {
                     return Ok(format!("(*{}.borrow()).clone()", esc));
                 }
                 return Ok(esc);
+            }
+        }
+
+        // Native typed-array HOFs (TISH_NATIVE_HOF): `xs.reduce/map/filter/some/every(<arrow>)`
+        // whose native result type matches this binding's target → emit the iterator chain
+        // directly, with NO box/unbox round-trip (the per-element `value_call` is gone too).
+        if let Expr::Call { callee, args, .. } = expr {
+            if let Some((code, ty)) = self.native_vec_hof_for_call(callee, args)? {
+                if &ty == target_type {
+                    return Ok(code);
+                }
             }
         }
 
@@ -5633,7 +5885,7 @@ impl Codegen {
                         RustType::from_annotation_with_aliases(ann, aliases),
                     );
                 }
-                Statement::Block { statements, .. } => {
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                     Self::collect_annotated_types(statements, aliases, env)
                 }
                 Statement::If {
@@ -5646,9 +5898,27 @@ impl Codegen {
                         Self::collect_annotated_types(std::slice::from_ref(e), aliases, env);
                     }
                 }
-                Statement::While { body, .. }
-                | Statement::DoWhile { body, .. }
-                | Statement::ForOf { body, .. } => {
+                Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+                    Self::collect_annotated_types(std::slice::from_ref(body), aliases, env)
+                }
+                Statement::ForOf {
+                    name,
+                    iterable,
+                    body,
+                    ..
+                } => {
+                    // A loop var iterating a `Vec<elem>` local binds `elem` — so `total += n` (n the
+                    // loop var over a `number[]`) is seen as native f64 and `total` is NOT demoted.
+                    // Sound: the Vec's elements are genuinely that native type at runtime.
+                    if let Expr::Ident { name: it_name, .. } = iterable {
+                        let elem_ty = match env.get(it_name.as_ref()) {
+                            Some(RustType::Vec(elem)) => Some((**elem).clone()),
+                            _ => None,
+                        };
+                        if let Some(t) = elem_ty {
+                            env.insert(name.to_string(), t);
+                        }
+                    }
                     Self::collect_annotated_types(std::slice::from_ref(body), aliases, env)
                 }
                 Statement::For { init, body, .. } => {
@@ -5657,7 +5927,12 @@ impl Codegen {
                     }
                     Self::collect_annotated_types(std::slice::from_ref(body), aliases, env);
                 }
-                Statement::FunDecl { params, body, .. } => {
+                Statement::FunDecl {
+                    params,
+                    rest_param,
+                    body,
+                    ..
+                } => {
                     for p in params {
                         if let FunParam::Simple(tp) = p {
                             if let Some(ann) = &tp.type_ann {
@@ -5666,6 +5941,16 @@ impl Codegen {
                                     RustType::from_annotation_with_aliases(ann, aliases),
                                 );
                             }
+                        }
+                    }
+                    // Typed rest-param `...args: number[]` -> `Vec<f64>`, so a ForOf loop var over it
+                    // binds the element type and accumulators stay native.
+                    if let Some(rp) = rest_param {
+                        if let Some(ann) = &rp.type_ann {
+                            env.insert(
+                                rp.name.to_string(),
+                                RustType::from_annotation_with_aliases(ann, aliases),
+                            );
                         }
                     }
                     Self::collect_annotated_types(std::slice::from_ref(body), aliases, env);
@@ -5711,7 +5996,9 @@ impl Codegen {
     /// `s` — descending through nested statements and expressions (including closures).
     fn collect_reassignments_stmt<'a>(s: &'a Statement, out: &mut Vec<(String, &'a Expr)>) {
         match s {
-            Statement::Block { statements, .. } => Self::collect_reassignments_stmts(statements, out),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                Self::collect_reassignments_stmts(statements, out)
+            }
             Statement::VarDecl { init: Some(e), .. } => Self::collect_reassignments_expr(e, out),
             Statement::VarDeclDestructure { init, .. } => {
                 Self::collect_reassignments_expr(init, out)
@@ -6048,16 +6335,16 @@ impl Codegen {
         cand: &std::collections::HashSet<String>,
     ) -> bool {
         match stmt {
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 statements.iter().all(|s| Self::native_safe_stmt(s, params, cand))
             }
             Statement::Return { value, .. } => {
-                value.as_ref().map_or(false, |e| Self::native_safe_expr(e, params, cand))
+                value.as_ref().is_some_and(|e| Self::native_safe_expr(e, params, cand))
             }
             Statement::If { cond, then_branch, else_branch, .. } => {
                 Self::native_safe_expr(cond, params, cand)
                     && Self::native_safe_stmt(then_branch, params, cand)
-                    && else_branch.as_ref().map_or(true, |e| Self::native_safe_stmt(e, params, cand))
+                    && else_branch.as_ref().is_none_or(|e| Self::native_safe_stmt(e, params, cand))
             }
             Statement::ExprStmt { expr, .. } => Self::native_safe_expr(expr, params, cand),
             _ => false,
@@ -6119,15 +6406,15 @@ impl Codegen {
         cand: &std::collections::HashSet<String>,
     ) -> bool {
         match s {
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 statements.iter().all(|x| Self::returns_numeric(x, params, cand))
             }
             Statement::Return { value, .. } => {
-                value.as_ref().map_or(false, |e| Self::numeric_shaped(e, params, cand))
+                value.as_ref().is_some_and(|e| Self::numeric_shaped(e, params, cand))
             }
             Statement::If { then_branch, else_branch, .. } => {
                 Self::returns_numeric(then_branch, params, cand)
-                    && else_branch.as_ref().map_or(true, |e| Self::returns_numeric(e, params, cand))
+                    && else_branch.as_ref().is_none_or(|e| Self::returns_numeric(e, params, cand))
             }
             Statement::While { body, .. } | Statement::For { body, .. } => {
                 Self::returns_numeric(body, params, cand)
@@ -6216,7 +6503,7 @@ impl Codegen {
 
     fn emit_native_fn_body(&mut self, stmt: &Statement) -> Result<(), CompileError> {
         match stmt {
-            Statement::Block { statements, .. } => {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 for s in statements {
                     self.emit_native_fn_body(s)?;
                 }
@@ -6307,6 +6594,12 @@ impl Codegen {
                 if let Some(result_ty) = RustType::result_type_of_binop(*op, &lt, &rt) {
                     // Both sides are compatible native types → emit native op.
                     let code = match op {
+                        BinOp::Add if result_ty == RustType::String => {
+                            // M2: Rust `String + String` is illegal; build a fresh String.
+                            // `format!` borrows both operands, so chained concats (`a + b + c`)
+                            // nest cleanly with no move/clone hazards.
+                            format!("format!(\"{{}}{{}}\", {}, {})", l, r)
+                        }
                         BinOp::Add => format!("({} + {})", l, r),
                         BinOp::Sub => format!("({} - {})", l, r),
                         BinOp::Mul => format!("({} * {})", l, r),
@@ -6321,6 +6614,34 @@ impl Codegen {
                         BinOp::StrictNe => format!("({} != {})", l, r),
                         BinOp::And => format!("({} && {})", l, r),
                         BinOp::Or => format!("({} || {})", l, r),
+                        // Native int32 bitwise/shift (operands are f64 here). `to_int32`/`to_uint32`
+                        // is JS ToInt32/ToUint32 (modulo 2³², NaN/±Infinity → 0; `#[inline]` so the
+                        // `is_finite` guard folds away on the hot finite path); shift counts mask to
+                        // 5 bits via `wrapping_sh*` (JS semantics, no panic).
+                        BinOp::BitAnd => format!(
+                            "((tishlang_runtime::to_int32({}) & tishlang_runtime::to_int32({})) as f64)",
+                            l, r
+                        ),
+                        BinOp::BitOr => format!(
+                            "((tishlang_runtime::to_int32({}) | tishlang_runtime::to_int32({})) as f64)",
+                            l, r
+                        ),
+                        BinOp::BitXor => format!(
+                            "((tishlang_runtime::to_int32({}) ^ tishlang_runtime::to_int32({})) as f64)",
+                            l, r
+                        ),
+                        BinOp::Shl => format!(
+                            "(tishlang_runtime::to_int32({}).wrapping_shl(tishlang_runtime::to_uint32({})) as f64)",
+                            l, r
+                        ),
+                        BinOp::Shr => format!(
+                            "(tishlang_runtime::to_int32({}).wrapping_shr(tishlang_runtime::to_uint32({})) as f64)",
+                            l, r
+                        ),
+                        BinOp::UShr => format!(
+                            "(tishlang_runtime::to_uint32({}).wrapping_shr(tishlang_runtime::to_uint32({})) as f64)",
+                            l, r
+                        ),
                         _ => unreachable!("result_type_of_binop covers all handled ops"),
                     };
                     return Ok((code, result_ty));
@@ -6370,7 +6691,37 @@ impl Codegen {
                                     )
                                 };
                                 let elem_ty = *elem_type.clone();
-                                return Ok((format!("{}[{}]", esc_obj, idx_usize), elem_ty));
+                                // OOB-safe read for numeric/bool Vecs: JS `arr[oob]` is `undefined`
+                                // (→ NaN / false in those contexts), NOT a panic. In-bounds is the
+                                // same bounds-checked access, so this is purely a correctness gain
+                                // (and what lets index reads be *inferred* as native — phase 2).
+                                let access = match &elem_ty {
+                                    RustType::F64 => format!(
+                                        "{}.get({}).copied().unwrap_or(f64::NAN)",
+                                        esc_obj, idx_usize
+                                    ),
+                                    RustType::Bool => {
+                                        format!("{}.get({}).copied().unwrap_or(false)", esc_obj, idx_usize)
+                                    }
+                                    // Other element types keep the direct index (unchanged).
+                                    _ => format!("{}[{}]", esc_obj, idx_usize),
+                                };
+                                return Ok((access, elem_ty));
+                            }
+                            // Native tuple access: `tuple[const]` -> `tuple.const` (Rust tuples
+                            // require a literal index; a variable index falls through to boxed).
+                            if let RustType::Tuple(elems) = &obj_type {
+                                if let Expr::Literal {
+                                    value: Literal::Number(n),
+                                    ..
+                                } = index.as_ref()
+                                {
+                                    let i = *n as usize;
+                                    if n.fract() == 0.0 && i < elems.len() {
+                                        let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
+                                        return Ok((format!("{}.{}", esc_obj, i), elems[i].clone()));
+                                    }
+                                }
                             }
                         }
                     }
@@ -6461,6 +6812,12 @@ impl Codegen {
                             }
                         }
                     }
+                }
+                // Native typed-array HOFs over a `Vec<f64>` receiver (TISH_NATIVE_HOF):
+                // `xs.reduce/map/filter/some/every(<arrow>)` → a direct Rust iterator chain,
+                // eliminating the per-element `value_call` and all `Value` boxing.
+                if let Some(res) = self.native_vec_hof_for_call(callee, args)? {
+                    return Ok(res);
                 }
                 let result = self.emit_expr(expr)?;
                 Ok((result, RustType::Value))
@@ -6625,6 +6982,195 @@ impl Codegen {
         )))
     }
 
+    /// If `callee(args)` is `<Vec<f64>-ident>.reduce/map/filter/some/every(<arrow>)` and the
+    /// `TISH_NATIVE_HOF` flag is set, lower it to a native iterator chain. Shared by
+    /// `emit_typed_expr` (native sub-expressions) and `emit_native_expr` (typed `let` RHS), so a
+    /// typed-array HOF lowers natively whether its result flows into arithmetic or a binding.
+    fn native_vec_hof_for_call(
+        &mut self,
+        callee: &Expr,
+        args: &[CallArg],
+    ) -> Result<Option<(String, RustType)>, CompileError> {
+        if std::env::var("TISH_NATIVE_HOF").is_err() {
+            return Ok(None);
+        }
+        let Expr::Member {
+            object,
+            prop: MemberProp::Name { name: method, .. },
+            optional: false,
+            ..
+        } = callee
+        else {
+            return Ok(None);
+        };
+        let Expr::Ident { name: recv_name, .. } = object.as_ref() else {
+            return Ok(None);
+        };
+        // A RefCell-wrapped receiver would need a borrow to iterate — bail to the boxed path.
+        if self.refcell_wrapped_vars.contains(recv_name.as_ref()) {
+            return Ok(None);
+        }
+        let RustType::Vec(inner) = self.type_context.get_type(recv_name.as_ref()) else {
+            return Ok(None);
+        };
+        if *inner != RustType::F64 {
+            return Ok(None);
+        }
+        let recv_code = Self::escape_ident(recv_name.as_ref()).into_owned();
+        self.try_native_vec_hof(&recv_code, &inner, recv_name.as_ref(), method.as_ref(), args)
+    }
+
+    /// Native typed-array HOFs (`TISH_NATIVE_HOF`): when the receiver is a native `Vec<f64>`
+    /// (a typed `number[]`), lower `reduce`/`map`/`filter`/`some`/`every` to a direct Rust
+    /// iterator chain — no per-element `value_call`, no `Value` boxing.
+    ///
+    /// Preconditions (any failure → `Ok(None)` → boxed `array_*`, correctness over coverage):
+    /// - element type is `f64` (Copy → `.copied()`),
+    /// - the callback is an arrow with simple, no-default params and an **expression** body,
+    /// - the body does **not** mention the receiver — `pi_mentions` is conservative (unknown
+    ///   AST nodes count as "mentions"), so a `&mut`/alias of the array inside the closure can't
+    ///   slip through and break the `.iter()` borrow,
+    /// - the body's emitted native type matches what the method needs (`f64` for `reduce`/`map`
+    ///   element, `bool` for `filter`/`some`/`every`).
+    ///
+    /// The closure params are bound natively (`f64`) only while the body is emitted, then popped.
+    fn try_native_vec_hof(
+        &mut self,
+        recv: &str,
+        elem: &RustType,
+        recv_name: &str,
+        method: &str,
+        args: &[CallArg],
+    ) -> Result<Option<(String, RustType)>, CompileError> {
+        // Only numeric arrays for now: `.copied()` needs a `Copy` element.
+        if *elem != RustType::F64 {
+            return Ok(None);
+        }
+        let Some(CallArg::Expr(Expr::ArrowFunction { params, body, .. })) = args.first() else {
+            return Ok(None);
+        };
+        let tishlang_ast::ArrowBody::Expr(be) = body else {
+            return Ok(None);
+        };
+        // The body must not touch the receiver (aliasing would break the `.iter()` borrow).
+        if crate::infer::pi_mentions(be, recv_name) {
+            return Ok(None);
+        }
+        let simple_name = |p: &FunParam| -> Option<std::sync::Arc<str>> {
+            match p {
+                FunParam::Simple(tp) if tp.default.is_none() => Some(std::sync::Arc::clone(&tp.name)),
+                _ => None,
+            }
+        };
+        // Emit `be` with `binds` (name, type) installed as native locals; restore on the way out.
+        let emit_with = |this: &mut Self,
+                             binds: &[(&std::sync::Arc<str>, RustType)]|
+         -> Result<(String, RustType), CompileError> {
+            this.type_context.push_scope();
+            for (n, t) in binds {
+                this.type_context.define(n.as_ref(), t.clone());
+            }
+            let res = this.emit_typed_expr(be);
+            this.type_context.pop_scope();
+            res
+        };
+        match method {
+            "reduce" => {
+                if args.len() != 2 || params.len() != 2 {
+                    return Ok(None);
+                }
+                let (Some(acc), Some(x)) = (simple_name(&params[0]), simple_name(&params[1])) else {
+                    return Ok(None);
+                };
+                let CallArg::Expr(init_e) = &args[1] else {
+                    return Ok(None);
+                };
+                let (init_code, init_ty) = self.emit_typed_expr(init_e)?;
+                let init_f64 = match init_ty {
+                    RustType::F64 => init_code,
+                    RustType::Value => RustType::F64.from_value_expr(&init_code),
+                    _ => return Ok(None),
+                };
+                let (body_code, body_ty) =
+                    emit_with(self, &[(&acc, RustType::F64), (&x, RustType::F64)])?;
+                if body_ty != RustType::F64 {
+                    return Ok(None);
+                }
+                let acc_esc = Self::escape_ident(acc.as_ref()).into_owned();
+                let x_esc = Self::escape_ident(x.as_ref()).into_owned();
+                Ok(Some((
+                    format!(
+                        "{{ let mut {acc}: f64 = {init}; for {x} in {recv}.iter().copied() {{ {acc} = {body}; }} {acc} }}",
+                        acc = acc_esc, init = init_f64, x = x_esc, recv = recv, body = body_code
+                    ),
+                    RustType::F64,
+                )))
+            }
+            "map" => {
+                if args.len() != 1 || params.len() != 1 {
+                    return Ok(None);
+                }
+                let Some(x) = simple_name(&params[0]) else {
+                    return Ok(None);
+                };
+                let (body_code, body_ty) = emit_with(self, &[(&x, RustType::F64)])?;
+                if !body_ty.is_native() {
+                    return Ok(None);
+                }
+                let x_esc = Self::escape_ident(x.as_ref()).into_owned();
+                Ok(Some((
+                    format!(
+                        "{recv}.iter().copied().map(|{x}| {body}).collect::<Vec<{ety}>>()",
+                        recv = recv, x = x_esc, body = body_code, ety = body_ty.to_rust_type_str()
+                    ),
+                    RustType::Vec(Box::new(body_ty)),
+                )))
+            }
+            "filter" => {
+                if args.len() != 1 || params.len() != 1 {
+                    return Ok(None);
+                }
+                let Some(x) = simple_name(&params[0]) else {
+                    return Ok(None);
+                };
+                let (body_code, body_ty) = emit_with(self, &[(&x, RustType::F64)])?;
+                if body_ty != RustType::Bool {
+                    return Ok(None);
+                }
+                let x_esc = Self::escape_ident(x.as_ref()).into_owned();
+                Ok(Some((
+                    format!(
+                        "{recv}.iter().copied().filter(|&{x}| {body}).collect::<Vec<f64>>()",
+                        recv = recv, x = x_esc, body = body_code
+                    ),
+                    RustType::Vec(Box::new(RustType::F64)),
+                )))
+            }
+            "some" | "every" => {
+                if args.len() != 1 || params.len() != 1 {
+                    return Ok(None);
+                }
+                let Some(x) = simple_name(&params[0]) else {
+                    return Ok(None);
+                };
+                let (body_code, body_ty) = emit_with(self, &[(&x, RustType::F64)])?;
+                if body_ty != RustType::Bool {
+                    return Ok(None);
+                }
+                let x_esc = Self::escape_ident(x.as_ref()).into_owned();
+                let adapter = if method == "some" { "any" } else { "all" };
+                Ok(Some((
+                    format!(
+                        "{recv}.iter().copied().{adapter}(|{x}| {body})",
+                        recv = recv, adapter = adapter, x = x_esc, body = body_code
+                    ),
+                    RustType::Bool,
+                )))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn emit_binop(&self, l: &str, op: BinOp, r: &str, span: Span) -> Result<String, CompileError> {
         Ok(match op {
             BinOp::Add => format!(
@@ -6663,8 +7209,9 @@ impl Codegen {
             BinOp::BitAnd => Self::emit_bitwise_binop(l, r, "&"),
             BinOp::BitOr => Self::emit_bitwise_binop(l, r, "|"),
             BinOp::BitXor => Self::emit_bitwise_binop(l, r, "^"),
-            BinOp::Shl => Self::emit_bitwise_binop(l, r, "<<"),
-            BinOp::Shr => Self::emit_bitwise_binop(l, r, ">>"),
+            BinOp::Shl => Self::emit_shift_binop(l, r, "to_int32", "wrapping_shl"),
+            BinOp::Shr => Self::emit_shift_binop(l, r, "to_int32", "wrapping_shr"),
+            BinOp::UShr => Self::emit_shift_binop(l, r, "to_uint32", "wrapping_shr"),
             BinOp::In => format!("tish_in_operator(&{}, &{})", l, r),
             BinOp::Eq | BinOp::Ne => {
                 return Err(CompileError::new(

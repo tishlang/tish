@@ -4,7 +4,7 @@
 
 Tish is a minimal JS/TS-like language: same source runs in a **tree-walking interpreter**, a **bytecode VM**, or **compiled targets** — Rust transpilation linked to **`tishlang_runtime`**, standalone binaries that **embed bytecode and run the same VM**, **WASM/WASI**, or **JavaScript**. Tish is **not** JavaScript; the JS path is a **compile target** with deliberate limits (wrong scope, invalid emit, and a few keyword collisions with DOM/JSX are fixed; arbitrary ECMAScript surface is not a goal). See **[js-emit-philosophy.md](js-emit-philosophy.md)**. See **Native compile (implementation status)** for what each path does today versus the long-term goal (primitive lowering, true AOT). **Secure-by-default:** network, filesystem, and process APIs are feature-gated.
 
-**No `undefined`** — use `null`. **`typeof null`** is `"null"` (not `"object"`). **`typeof`** for a symbol value is `"symbol"`. **Strict equality only:** `===` / `!==`. **`let` / `const` only** (no `var`). **No `this`**, prototypes, or `class` / `super`. Plain objects and arrays. **`?.` yields `null`**, not undefined. Parser also accepts **`new`** expressions (no class syntax; uncommon in idiomatic Tish).
+**No `undefined`** — use `null`. **`typeof null`** is `"null"` (not `"object"`). **`typeof`** for a symbol value is `"symbol"`. **Strict equality only:** `===` / `!==`. **`let` / `const` only** (no `var`; comma-separated declarators `let a = 1, b = 2`). **No `this`**, prototypes, or `class` / `super`. Plain objects and arrays. **`?.` yields `null`**, not undefined. Parser also accepts **`new`** expressions (no class syntax; uncommon in idiomatic Tish).
 
 ---
 
@@ -12,13 +12,13 @@ Tish is a minimal JS/TS-like language: same source runs in a **tree-walking inte
 
 **Keywords:** `fn` / `function`, `let`, `const`, `if` `else`, `while`, `do` `while`, `for`, `switch` `case` `default`, `return` `break` `continue`, `try` `catch` `throw`, `async` `await`, `import` `export`, `new`, `typeof`, `void`, `true` `false` `null`.
 
-**Literals:** numbers; strings `"`/`'` (escapes `\n` `\r` `\t` `\\` `\"` `\'`); arrays `[]`; objects `{ k: v }` (fixed keys at parse time); template literals `` `x ${e} y` ``; JSX supported in lexer.
+**Literals:** numbers (decimal, scientific `1.5e-3`/`2E+3`, and radix `0xff`/`0o17`/`0b1010` with optional `_` separators); strings `"`/`'` (escapes `\n` `\r` `\t` `\\` `\"` `\'`); arrays `[]`; objects `{ k: v }` (fixed keys at parse time); template literals `` `x ${e} y` ``; JSX supported in lexer.
 
-**Operators:** `+` (add/concat), `-` `*` `/` `%` `**`; bitwise `&` `|` `^` `~` `<<` `>>` (32-bit int semantics); compare `<` `<=` `>` `>=`; logical `&&` `||` `!`; ternary `? :`; `??`; `?.`; compound assign `+=` `-=` …; postfix `++` `--` on identifiers.
+**Operators:** `+` (add/concat), `-` `*` `/` `%` `**`; bitwise `&` `|` `^` `~` `<<` `>>` `>>>` (JS 32-bit int semantics — `ToInt32`/`ToUint32` modulo 2³², not saturating); compare `<` `<=` `>` `>=`; logical `&&` `||` `!`; ternary `? :`; `??`; `?.`; compound assign `+=` `-=` …; postfix `++` `--` on identifiers.
 
 **Functions:** `fn name(a, b) { … }`, single-expr body `fn f(x) = x * 2`, arrows `let g = (a, b) => a + b`, `async fn …` with `await`.
 
-**Control flow:** `if`/`else`, `while`, `do`/`while`, C-style `for`, `for (let|const x of arr)` (arrays/strings), `switch`, `try`/`catch`.
+**Control flow:** `if`/`else`, `while`, `do`/`while`, C-style `for` (comma-separated init declarators: `for (let i = 0, n = len; …)`), `for (let|const x of …)` over arrays, strings, and **iterators** (e.g. `Map`/`Set` `.values()` / `.keys()` / `.entries()`), `switch`, `try`/`catch`.
 
 **Blocks:** `{ … }` **or** indentation (lexer emits `Indent`/`Dedent`). **1 tab = 1 level; 2 spaces = 1 level.** **Debug:** set **`TISH_IGNORE_INDENT=1`** (or `tish dump-ast --ignore-indent`) to ignore indentation and delimit blocks by braces only — handy for isolating whether a nested-block transpilation issue comes from indentation grouping.
 
@@ -26,7 +26,7 @@ Tish is a minimal JS/TS-like language: same source runs in a **tree-walking inte
 
 **`tish:shadertoy`** ([`tish-shadertoy`](https://github.com/tishlang/tish-shadertoy)): `import { … } from 'tish:shadertoy'`. **`run(source)`** opens the viewer and **blocks** until the window closes. For **script-driven** control (native compile path and `tish-shadertoy-run`), use **`openPumpable(source, options?)`** then **`while (pump()) { … }`**: each **`pump()`** returns **`true`** until the user closes the window, so Tish can interleave work (timers, queues, future HTTP hooks) between frames. **`setWindowTitle(title)`** updates the winit title when the window exists. **`reloadShader(source)`** recompiles the fragment shader on the GL thread (for live reload). Optional **`options.onKeyDown`** is a **function** invoked on key down with **`{ key: string, repeat: bool }`**; it works when that function is a **compiled** `Value::Function` (Rust closure from **`tish build`**). The tree-walking runner **`tish-shadertoy-run`** cannot call AST `fn` bodies from winit yet—omit **`onKeyDown`** there or only use **`setWindowTitle` / `reloadShader`** from the **`while (pump())`** body. For **`tish build`**, add the crate as a dependency and set **`package.json` → `tish.module`** (see that repo); the export object is **`shadertoy_object()`** in Rust.
 
-**Optional types (parsed, not enforced):** `let x: number = 1`, `fn f(a: T): R`, `T[]`, `{ k: T }`, `T | U`, rest `...args: T[]`. Function types `(T) => R` parsed for future use.
+**Types (TS-like; gradually checked — see [type-system-roadmap.md](type-system-roadmap.md)):** `let x: number = 1`, `fn f(a: T): R`, `T[]`, **`T?`** (`= T | null`), `{ k: T }`, **`[T, U]`** tuples, **literal types** `"a" | "b"` / `42` / `true`, `T | U`, rest `...args: T[]`, function types `(T) => R`, **generics** `fn f<T>(…)` / `type Box<T> = …` / `Array<T>`, **`expr as T`** casts, and **`interface`**. Run the gradual checker with **`tish build --check warn|error`** (or live in `tish-lsp`). Typed numeric/string/array/struct/rest-param code lowers to native Rust on `--native-backend rust`; generic type params currently erase to `Value` (run correctly, boxed) pending monomorphization.
 
 ---
 
@@ -96,18 +96,18 @@ Build: `cargo build --features full`. CLI artifact output: `tish build … --fea
 
 **Native host packages (`tish:macos`, …):** A package may ship **`lsp-pragmas.d.tish`** beside **`package.json`**. Each line is **`// @tish-source <dotted-symbol> <path-from-package-root> <1-based-line>`** with an optional **`| one-line hover`** suffix. **`tish-lsp`** uses these when **`receiver.member`** comes from a native import but there is no matching **`pub fn`** to jump to (typical for object maps built from closures).
 
-**Type-only syntax:** `type Name = TypeExpr`; `declare let` / `declare const`; `declare function` (no body). Function types use **`=>`**. These forms are erased at runtime in **`tish run`** and bytecode backends.
+**Type-only syntax:** `type Name = TypeExpr`; **`interface Name { k: T, … }`** (desugars to `type Name = { … }` — structural, lowers to a native struct on the Rust backend, checked by the gradual checker; no `extends` yet); `declare let` / `declare const`; `declare function` (no body). Function types use **`=>`**. These forms are erased at runtime in **`tish run`** and bytecode backends. *(The `tree-sitter-tish` editor grammar does not yet parse any type syntax — annotations, `type`, `declare`, `interface` — a separate gap from the compiler/LSP, which do.)*
 
 | Route | What you get |
 |-------|----------------|
-| `tish build --native-backend rust` (default) | Rust source emitted by `tishlang_compile` that calls **`tishlang_runtime`** (`get_index`, `set_index`, arithmetic on `Value`, etc.). `cargo build --release` optimizes the **glue**, not “the Tish program as a flat `f64` kernel.” |
+| `tish build --native-backend rust` (default) | Rust source emitted by `tishlang_compile`. Untyped code calls **`tishlang_runtime`** (`get_index`, arithmetic on `Value`, etc.); **explicitly-typed** numeric code lowers to native `f64` / `Vec<f64>` kernels (no boxing in the hot loop), and the opt-in typed-native flags (`TISH_PARAM_NATIVE` / `TISH_PARAM_INFER` / `TISH_NATIVE_FN`) extend that to params, inferred numerics, and recursive calls — typed `fib(35)` drops ~11× and matmul ~16×. See **[type-system-roadmap.md](type-system-roadmap.md)**. |
 | `tish build --native-backend cranelift` | Native binary that loads **embedded serialized bytecode** and runs **`tishlang_vm`** (`tish_cranelift_runtime`). Cranelift is used only to build a tiny object file holding the blob; **bytecode is not lowered to CLIF**. Throughput is **VM-class** (similar order to `tish run --backend vm`), not “rustc/LLVM on numeric loops.” |
 | `tish build --native-backend llvm` | Same **embedded bytecode + VM** link pattern as Cranelift (see `tishlang_llvm` + `tishlang_cranelift_runtime`). |
 | `tish build --target js` | Emitted JavaScript; the host (V8, etc.) may **JIT** tight loops. |
 
 **Interop:** `tish:*` and npm-style native imports require **`--native-backend rust`**. The Cranelift/LLVM native-binary paths are **pure Tish** only (no external native modules).
 
-**Direction (in progress):** Where semantics allow, lower to **Rust or machine primitives** (e.g. `Vec<f64>`, `f32`/`f64` buffers, fixed layouts) instead of universal `Value`; use optional types and **inference** to choose representations; add **real bytecode → Cranelift IR** (or similar) for AOT hot paths. The syntax resembles JS/TS; **compiled output is not intended to stay a boxed dynamic VM forever.**
+**Direction (in progress):** Where semantics allow, lower to **Rust or machine primitives** (e.g. `Vec<f64>`, `f32`/`f64` buffers, fixed layouts) instead of universal `Value`; use optional types and **inference** to choose representations; add **real bytecode → Cranelift IR** (or similar) for AOT hot paths. The syntax resembles JS/TS; **compiled output is not intended to stay a boxed dynamic VM forever.** **Landed (dark-shipped, opt-in flags):** typed scalar params (M1), numeric param/return inference (M4), native monomorphic numeric functions (M5), and native `string` concat/equality (M2) — details and benchmarks in **[type-system-roadmap.md](type-system-roadmap.md)**.
 
 ---
 
@@ -199,7 +199,7 @@ serve(8080, handleRequest)
 
 ## Roadmap: checked types (Phase 2)
 
-**Today:** `type` / `declare` / optional annotations on `let`/`const`/`fn` are parsed (see **Runtime model today**) but **not** checked against values. **Next:** a unifier/checker in `tish build` and **`tish-lsp`** diagnostics; richer type references with navigation on `: Foo`; possibly `interface` with **structural** matching. Generics, declaration merging, and full ECMAScript type compatibility stay **out of scope** until spelled out here. Keep **`tree-sitter-tish`** in sync when the grammar surface changes.
+**Today:** a **gradual type checker** (`tishlang_compile::check_program`, in `crates/tish_compile/src/check.rs`) runs in `tish build` behind **`TISH_CHECK`** (`=warn` prints `line:col` diagnostics, `=error` blocks the build; off by default). It flags *provable* annotation violations — wrong-typed initializers, returns, reassignments, call arguments, and struct-literal fields — and is gradual, so anything it can't prove (dynamic values, unsignatured calls, `any`, unannotated locals) is never flagged (zero corpus false positives). Also exposed as **`tish build --check warn|error`** and as live **`tish-lsp`** diagnostics in editors. **Next:** a dedicated `Ty` IR for real unions/narrowing; turning the codegen unbox-`panic!`s into compile-time errors for checked code; richer navigation on `: Foo`; possibly `interface` with **structural** matching. Generics, declaration merging, and full ECMAScript type compatibility stay **out of scope** until spelled out here. Keep **`tree-sitter-tish`** in sync when the grammar surface changes. Full status: **[type-system-roadmap.md](type-system-roadmap.md)**.
 
 ---
 

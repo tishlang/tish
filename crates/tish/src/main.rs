@@ -72,7 +72,7 @@ fn argv_with_implicit_run(mut argv: Vec<String>) -> Vec<String> {
     if argv.len() >= 2 {
         let first = argv[1].as_str();
         const SUBCOMMANDS: &[&str] = &["run", "repl", "build", "dump-ast"];
-        let looks_like_file = !first.starts_with('-') && !SUBCOMMANDS.iter().any(|&s| s == first);
+        let looks_like_file = !first.starts_with('-') && !SUBCOMMANDS.contains(&first);
         if looks_like_file {
             argv.insert(1, "run".to_string());
         }
@@ -112,17 +112,24 @@ fn main() {
             a.no_optimize || no_opt_env,
         ),
         Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env, &a.features),
-        Some(Commands::Build(a)) => build_file(
-            &a.file,
-            &a.output,
-            &a.target,
-            &a.native_backend,
-            &a.features,
-            a.no_optimize || no_opt_env,
-            a.source_map,
-            a.ios_triple.as_deref(),
-            &a.crate_type,
-        ),
+        Some(Commands::Build(a)) => {
+            // `--check warn|error` drives the gradual type checker via the same channel as the
+            // `TISH_CHECK` env var that `tishlang_compile::run_type_check` reads.
+            if let Some(mode) = &a.check {
+                std::env::set_var("TISH_CHECK", mode);
+            }
+            build_file(
+                &a.file,
+                &a.output,
+                &a.target,
+                &a.native_backend,
+                &a.features,
+                a.no_optimize || no_opt_env,
+                a.source_map,
+                a.ios_triple.as_deref(),
+                &a.crate_type,
+            )
+        }
         Some(Commands::DumpAst {
             file,
             ignore_indent,
@@ -614,7 +621,7 @@ fn compile_to_js(
     Ok(())
 }
 
-#[allow(clippy::vec_init_then_push)]
+#[allow(clippy::vec_init_then_push, clippy::too_many_arguments)] // build_file maps CLI build flags 1:1
 fn build_file(
     input_path: &str,
     output_path: &str,
