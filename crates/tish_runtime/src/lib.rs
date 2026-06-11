@@ -335,6 +335,7 @@ use tishlang_builtins::globals::{
     object_assign as builtins_object_assign, object_entries as builtins_object_entries,
     object_from_entries as builtins_object_from_entries, object_keys as builtins_object_keys,
     object_values as builtins_object_values,
+    number_convert as builtins_number_convert,
     string_convert as builtins_string_convert,
     string_from_char_code as builtins_string_from_char_code,
 };
@@ -611,6 +612,10 @@ pub fn string_from_char_code(args: &[Value]) -> Value {
 /// global as `__call` so compiled `String(x)` matches the VM/interp.
 pub fn string_convert(args: &[Value]) -> Value {
     builtins_string_convert(args)
+}
+
+pub fn number_convert(args: &[Value]) -> Value {
+    builtins_number_convert(args)
 }
 
 #[cfg(feature = "process")]

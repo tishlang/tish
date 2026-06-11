@@ -80,8 +80,8 @@ pub fn parse_int(args: &[Value]) -> Result<Value, String> {
 
 pub fn parse_float(args: &[Value]) -> Result<Value, String> {
     let s = args.first().map(|v| v.to_string()).unwrap_or_default();
-    let n: f64 = s.trim().parse().unwrap_or(f64::NAN);
-    Ok(Value::Number(n))
+    // JS parseFloat parses the longest leading numeric prefix (issue #36); shared with VM/native.
+    Ok(Value::Number(tishlang_builtins::globals::js_parse_float(&s)))
 }
 
 pub fn is_finite(args: &[Value]) -> Result<Value, String> {
@@ -342,6 +342,26 @@ pub fn array_construct(args: &[Value]) -> Result<Value, String> {
 pub fn string_convert(args: &[Value]) -> Result<Value, String> {
     let v = args.first().unwrap_or(&Value::Null);
     Ok(Value::String(v.to_js_string().into()))
+}
+
+/// `Number(value)` coercion (issue #36) — shares the string parser with the VM/native
+/// backend so the result is byte-identical.
+pub fn number_convert(args: &[Value]) -> Result<Value, String> {
+    let v = args.first().unwrap_or(&Value::Null);
+    let n = match v {
+        Value::Number(n) => *n,
+        Value::Bool(b) => {
+            if *b {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Value::Null => 0.0,
+        Value::String(s) => tishlang_builtins::globals::parse_numeric_string(s),
+        other => tishlang_builtins::globals::parse_numeric_string(&other.to_js_string()),
+    };
+    Ok(Value::Number(n))
 }
 
 pub fn string_from_char_code(args: &[Value]) -> Result<Value, String> {
