@@ -369,6 +369,11 @@ pub enum Expr {
         operand: Box<Expr>,
         span: Span,
     },
+    /// `delete obj.prop` / `delete obj[key]` — removes a property, evaluates to a boolean.
+    Delete {
+        target: Box<Expr>,
+        span: Span,
+    },
     PostfixInc {
         name: Arc<str>,
         span: Span,
@@ -495,6 +500,7 @@ impl Expr {
             Expr::Object { span, .. } => *span,
             Expr::Assign { span, .. } => *span,
             Expr::TypeOf { span, .. } => *span,
+            Expr::Delete { span, .. } => *span,
             Expr::PostfixInc { span, .. } => *span,
             Expr::PostfixDec { span, .. } => *span,
             Expr::PrefixInc { span, .. } => *span,

@@ -2311,6 +2311,35 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(operand)?;
                 self.emit(Opcode::AwaitPromise);
             }
+            Expr::Delete { target, .. } => {
+                // `delete obj.prop` / `delete obj[key]` → push [obj, key], then DeleteIndex
+                // pops both, removes the property, and pushes `true`. Deleting anything that
+                // isn't a property reference is a no-op that still yields `true` (JS).
+                match target.as_ref() {
+                    Expr::Member { object, prop: MemberProp::Name { name, .. }, .. } => {
+                        self.compile_expr(object)?;
+                        let idx = self.constant_idx(Constant::String(Arc::clone(name)));
+                        self.emit(Opcode::LoadConst);
+                        self.chunk.write_u16(idx);
+                        self.emit(Opcode::DeleteIndex);
+                    }
+                    Expr::Member { object, prop: MemberProp::Expr(key), .. } => {
+                        self.compile_expr(object)?;
+                        self.compile_expr(key)?;
+                        self.emit(Opcode::DeleteIndex);
+                    }
+                    Expr::Index { object, index, .. } => {
+                        self.compile_expr(object)?;
+                        self.compile_expr(index)?;
+                        self.emit(Opcode::DeleteIndex);
+                    }
+                    _ => {
+                        let idx = self.constant_idx(Constant::Bool(true));
+                        self.emit(Opcode::LoadConst);
+                        self.chunk.write_u16(idx);
+                    }
+                }
+            }
             Expr::LogicalAssign {
                 name, op, value, ..
             } => {

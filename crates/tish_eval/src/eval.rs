@@ -1971,6 +1971,52 @@ impl Evaluator {
                     Value::OpaqueMethod(_, _) => "function".into(),
                 }))
             }
+            // `delete obj.prop` / `delete obj[key]` (issue #40): remove the property and
+            // evaluate to `true`. Objects drop the key; arrays clear a numeric index to a
+            // null hole (length preserved). Deleting a non-reference is a no-op (still `true`).
+            Expr::Delete { target, .. } => {
+                // Resolve the target to (object value, key value); then remove the key.
+                let resolved = match target.as_ref() {
+                    Expr::Member { object, prop: MemberProp::Name { name, .. }, .. } => {
+                        Some((self.eval_expr(object)?, Value::String(name.as_ref().into())))
+                    }
+                    Expr::Member { object, prop: MemberProp::Expr(key), .. } => {
+                        Some((self.eval_expr(object)?, self.eval_expr(key)?))
+                    }
+                    Expr::Index { object, index, .. } => {
+                        Some((self.eval_expr(object)?, self.eval_expr(index)?))
+                    }
+                    _ => None,
+                };
+                if let Some((obj, key)) = resolved {
+                    match &obj {
+                        Value::Object(map) => {
+                            let key_s = match &key {
+                                Value::String(s) => s.to_string(),
+                                Value::Number(n) => n.to_string(),
+                                other => other.to_string(),
+                            };
+                            // shift_remove preserves the insertion order of the remaining keys
+                            // (JS delete semantics); plain remove() is deprecated on IndexMap.
+                            map.borrow_mut().strings.shift_remove(key_s.as_str());
+                        }
+                        Value::Array(arr) => {
+                            if let Value::Number(n) = &key {
+                                let n = *n;
+                                if n >= 0.0 && n.fract() == 0.0 {
+                                    let i = n as usize;
+                                    let mut a = arr.borrow_mut();
+                                    if i < a.len() {
+                                        a[i] = Value::Null;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
             Expr::PostfixInc { name, .. } => {
                 let v = self.scope.borrow().get(name.as_ref())
                     .ok_or_else(|| EvalError::Error(format!("Undefined variable: {}", name)))?;

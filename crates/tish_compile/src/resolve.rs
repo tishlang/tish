@@ -128,6 +128,7 @@ pub fn program_uses_document(program: &Program) -> bool {
             Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } => {
                 expr_uses_document(operand)
             }
+            Expr::Delete { target, .. } => expr_uses_document(target),
             Expr::Call { callee, args, .. } => {
                 expr_uses_document(callee)
                     || args.iter().any(|a| match a {

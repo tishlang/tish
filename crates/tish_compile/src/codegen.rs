@@ -204,6 +204,7 @@ impl UsageAnalyzer {
                 self.analyze_expr(right);
             }
             Expr::TypeOf { operand, .. } => self.analyze_expr(operand),
+            Expr::Delete { target, .. } => self.analyze_expr(target),
             Expr::TemplateLiteral { exprs, .. } => {
                 for e in exprs {
                     self.analyze_expr(e);
@@ -3923,6 +3924,27 @@ impl Codegen {
                     o
                 )
             }
+            Expr::Delete { target, .. } => match target.as_ref() {
+                Expr::Member { object, prop: MemberProp::Name { name, .. }, .. } => {
+                    let obj = self.emit_expr(object)?;
+                    format!(
+                        "tishlang_runtime::delete_property(&{}, &Value::String({:?}.into()))",
+                        obj,
+                        name.as_ref()
+                    )
+                }
+                Expr::Member { object, prop: MemberProp::Expr(key), .. } => {
+                    let obj = self.emit_expr(object)?;
+                    let k = self.emit_expr(key)?;
+                    format!("tishlang_runtime::delete_property(&{}, &{})", obj, k)
+                }
+                Expr::Index { object, index, .. } => {
+                    let obj = self.emit_expr(object)?;
+                    let idx = self.emit_expr(index)?;
+                    format!("tishlang_runtime::delete_property(&{}, &{})", obj, idx)
+                }
+                _ => "Value::Bool(true)".to_string(),
+            },
             Expr::PostfixInc { name, .. } => self.emit_inc_dec(name.as_ref(), false, "+ 1.0", "++"),
             Expr::PostfixDec { name, .. } => self.emit_inc_dec(name.as_ref(), false, "- 1.0", "--"),
             Expr::PrefixInc { name, .. } => self.emit_inc_dec(name.as_ref(), true, "+ 1.0", "++"),
@@ -4368,6 +4390,7 @@ impl Codegen {
                 Self::collect_expr_idents(right, idents);
             }
             Expr::Unary { operand, .. } => Self::collect_expr_idents(operand, idents),
+            Expr::Delete { target, .. } => Self::collect_expr_idents(target, idents),
             Expr::Call { callee, args, .. } => {
                 Self::collect_expr_idents(callee, idents);
                 for arg in args {
@@ -4650,6 +4673,7 @@ impl Codegen {
                 Self::collect_assigned_idents_in_expr(right, names);
             }
             Expr::Unary { operand, .. } => Self::collect_assigned_idents_in_expr(operand, names),
+            Expr::Delete { target, .. } => Self::collect_assigned_idents_in_expr(target, names),
             Expr::Call { callee, args, .. } => {
                 Self::collect_assigned_idents_in_expr(callee, names);
                 for arg in args {

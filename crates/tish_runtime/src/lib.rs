@@ -822,6 +822,35 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
     }
 }
 
+/// `delete obj[key]` / `delete obj.prop` (issue #40). Objects drop the string key; arrays
+/// clear a numeric index to a `null` hole (length preserved). Always evaluates to `true`.
+#[inline]
+pub fn delete_property(obj: &Value, key: &Value) -> Value {
+    match obj {
+        Value::Object(m) => {
+            let key_s = match key {
+                Value::String(s) => s.to_string(),
+                other => other.to_js_string(),
+            };
+            m.borrow_mut().strings.remove(key_s.as_str());
+        }
+        Value::Array(arr) => {
+            if let Value::Number(n) = key {
+                let n = *n;
+                if n >= 0.0 && n.fract() == 0.0 {
+                    let i = n as usize;
+                    let mut a = arr.borrow_mut();
+                    if i < a.len() {
+                        a[i] = Value::Null;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Value::Bool(true)
+}
+
 #[inline]
 pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
     match obj {

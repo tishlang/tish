@@ -320,6 +320,9 @@ fn collect_fun_decl_names_expr(expr: &Expr, names: &mut HashSet<String>) {
         Expr::Await { operand, .. } | Expr::TypeOf { operand, .. } => {
             collect_fun_decl_names_expr(operand, names);
         }
+        Expr::Delete { target, .. } => {
+            collect_fun_decl_names_expr(target, names);
+        }
         Expr::CompoundAssign { value, .. } | Expr::LogicalAssign { value, .. } => {
             collect_fun_decl_names_expr(value, names);
         }
@@ -659,6 +662,7 @@ fn expr_contains_jsx(expr: &Expr) -> bool {
         Expr::TemplateLiteral { exprs, .. } => exprs.iter().any(expr_contains_jsx),
         Expr::Await { operand, .. } => expr_contains_jsx(operand),
         Expr::TypeOf { operand, .. } => expr_contains_jsx(operand),
+        Expr::Delete { target, .. } => expr_contains_jsx(target),
         Expr::PostfixInc { .. }
         | Expr::PrefixInc { .. }
         | Expr::PostfixDec { .. }
