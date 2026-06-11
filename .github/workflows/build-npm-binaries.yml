@@ -47,7 +47,7 @@ jobs:
       # - tishlang: CLI integration tests (e.g. run_optimize_stdout_parity) need --features full (process, etc.).
       # - tishlang_vm: bytecode peephole regressions (peephole_jump_chain_logical_or).
       - name: Build tests
-        run: cargo nextest run --no-run -p tishlang -p tishlang_vm --features full --profile ci
+        run: ./scripts/ci_build_retry.sh cargo nextest run --no-run -p tishlang -p tishlang_vm --features full --profile ci
 
   version:
     name: Get version
@@ -164,7 +164,7 @@ jobs:
       # Restore cache from compile job, then run tests and coverage.
       - name: Run tests and coverage
         run: |
-          cargo llvm-cov nextest -p tishlang -p tishlang_vm --features full --no-fail-fast --profile ci \
+          ./scripts/ci_build_retry.sh cargo llvm-cov nextest -p tishlang -p tishlang_vm --features full --no-fail-fast --profile ci \
             --lcov --output-path lcov.info
           mkdir -p test-results
           cp target/nextest/ci/junit.xml test-results/junit.xml
@@ -331,8 +331,8 @@ jobs:
       - name: Build (native / rustup target)
         if: ${{ !matrix.use_cross }}
         run: |
-          cargo build --release -p tishlang --target ${{ matrix.target }} --features full
-          cargo build --release -p tishlang_cargo_bindgen --target ${{ matrix.target }}
+          ./scripts/ci_build_retry.sh cargo build --release -p tishlang --target ${{ matrix.target }} --features full
+          ./scripts/ci_build_retry.sh cargo build --release -p tishlang_cargo_bindgen --target ${{ matrix.target }}
 
       - name: Install cross and build (Linux ARM64)
         if: ${{ matrix.use_cross }}
