@@ -1,0 +1,15 @@
+// `fn` and `type` are usable as ordinary identifiers — binding names, parameter names,
+// value references, and arrow heads (issue #55). Statement-leading `fn`/`type` are still
+// function declarations / type aliases.
+let fn = 5
+let type = 6
+console.log(fn, type)
+let g = () => fn + type
+console.log(g())
+function uses(fn, type) { return fn + type }
+console.log(uses(10, 20))
+let h = fn => fn + 1
+console.log(h(41))
+// declarations still work alongside the identifiers
+fn add(a, b) { return a + b }
+console.log(add(fn, type))
