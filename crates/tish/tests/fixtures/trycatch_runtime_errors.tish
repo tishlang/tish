@@ -1,0 +1,15 @@
+// try/catch catches runtime errors (null property/method access, "not a function")
+// AND throws that cross function-call frames, with the thrown value preserved (issue #60).
+try { let x = null; x.foo() } catch (e) { console.log("A caught") }
+function f() { throw new Error("boom") }
+try { f() } catch (e) { console.log("B caught:", e.message) }
+function g() { let y = null; y.baz() }
+try { g() } catch (e) { console.log("C caught") }
+console.log("D done")
+try { try { throw "inner" } catch (e) { throw "rethrown" } } catch (e) { console.log("E caught:", e) }
+try { console.log("F ok") } catch (e) { console.log("F should not happen") }
+let total = 0
+function risky(n) { if (n > 3) { throw n }; return n }
+let i = 0
+while (i < 6) { try { total = total + risky(i) } catch (e) { total = total + 100 }; i = i + 1 }
+console.log("G total:", total)

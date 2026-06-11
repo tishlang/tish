@@ -682,9 +682,22 @@ impl Evaluator {
             } => {
                 let try_result = self.eval_statement(body);
 
-                let result = match try_result {
-                    Ok(v) => Ok(v),
-                    Err(EvalError::Throw(thrown)) => {
+                // Both a user `throw` and a runtime error (`null.foo()`, "not a function", …)
+                // are catchable (issue #60); a runtime error is boxed as a `{ name, message }`
+                // object so `catch (e) { e.message }` works. Break/Continue/Return propagate.
+                let caught: Option<Value> = match &try_result {
+                    Err(EvalError::Throw(v)) => Some(v.clone()),
+                    Err(EvalError::Error(msg)) => {
+                        let mut m = crate::value::PropMap::with_capacity(2);
+                        m.insert("name".into(), Value::String("TypeError".into()));
+                        m.insert("message".into(), Value::String(msg.as_str().into()));
+                        Some(Value::object(m))
+                    }
+                    _ => None,
+                };
+
+                let result = match caught {
+                    Some(thrown) => {
                         if let Some(catch_stmt) = catch_body {
                             if let Some(param) = catch_param {
                                 let scope = Scope::child(Rc::clone(&self.scope));
@@ -697,10 +710,11 @@ impl Evaluator {
                                 self.eval_statement(catch_stmt)
                             }
                         } else {
-                            Err(EvalError::Throw(thrown))
+                            // No catch clause — re-raise the original error after `finally`.
+                            try_result
                         }
                     }
-                    Err(e) => Err(e),
+                    None => try_result,
                 };
 
                 if let Some(finally_stmt) = finally_body {
