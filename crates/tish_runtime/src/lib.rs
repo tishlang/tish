@@ -812,6 +812,16 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
             };
             arr.borrow().get(idx).copied().map(Value::Number).unwrap_or(Value::Null)
         }
+        // `str[i]` returns the character at index `i` (issue #17) — matches the VM /
+        // interpreter; out-of-bounds / negative / non-integer indices yield null.
+        Value::String(s) => match index {
+            Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => s
+                .chars()
+                .nth(*n as usize)
+                .map(|c| Value::String(c.to_string().into()))
+                .unwrap_or(Value::Null),
+            _ => Value::Null,
+        },
         Value::Object(_) => tishlang_core::object_get(obj, index).unwrap_or(Value::Null),
         // `promise["then"|"catch"]` — string-keyed access mirrors `get_prop` (bracket form
         // is required for `catch`, a reserved word). Keeps the rust backend on par with the VM.
