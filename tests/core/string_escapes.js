@@ -1,0 +1,26 @@
+// Hex (`\xNN`), unicode (`\uNNNN`), and braced unicode (`\u{N..}`) string
+// escapes, plus the standard `\0 \b \f \v`. Regression test for #98, where
+// the lexer rejected `\x`/`\u` with "Unknown escape".
+//
+// Astral code points are checked by equality against the literal character
+// (not `.length`) so the test does not depend on UTF-16-vs-scalar semantics.
+
+// -- \xNN (two hex digits) --
+let esc = "\x1b";
+console.log(esc.charCodeAt(0), esc.length); // 27 1
+console.log("\x41\x42\x43"); // ABC
+
+// -- \uNNNN (four hex digits, BMP) --
+console.log("\u0041\u0042"); // AB
+console.log("\u00e9" === "é"); // true (e-acute)
+
+// -- \u{N..} braced (ES6) --
+console.log("\u{48}\u{49}"); // HI
+console.log("\u{1F600}" === "😀"); // true (astral)
+
+// -- standard control escapes --
+console.log("\0".charCodeAt(0), "\b".charCodeAt(0)); // 0 8
+console.log("\f".charCodeAt(0), "\v".charCodeAt(0)); // 12 11
+
+// -- escapes inside template literals --
+console.log(`x=\x58 u=\u0059`); // x=X u=Y
