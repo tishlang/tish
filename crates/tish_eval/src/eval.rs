@@ -151,6 +151,15 @@ impl Evaluator {
             math.insert("exp".into(), Value::Native(natives::math_exp));
             math.insert("sign".into(), Value::Native(natives::math_sign));
             math.insert("trunc".into(), Value::Native(natives::math_trunc));
+            math.insert("sinh".into(), Value::Native(natives::math_sinh));
+            math.insert("cosh".into(), Value::Native(natives::math_cosh));
+            math.insert("tanh".into(), Value::Native(natives::math_tanh));
+            math.insert("asinh".into(), Value::Native(natives::math_asinh));
+            math.insert("acosh".into(), Value::Native(natives::math_acosh));
+            math.insert("atanh".into(), Value::Native(natives::math_atanh));
+            math.insert("cbrt".into(), Value::Native(natives::math_cbrt));
+            math.insert("log2".into(), Value::Native(natives::math_log2));
+            math.insert("log10".into(), Value::Native(natives::math_log10));
             math.insert("PI".into(), Value::Number(std::f64::consts::PI));
             math.insert("E".into(), Value::Number(std::f64::consts::E));
             s.set(

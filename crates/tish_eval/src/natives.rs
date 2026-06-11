@@ -276,6 +276,27 @@ pub fn math_trunc(args: &[Value]) -> Result<Value, String> {
     ))
 }
 
+// Hyperbolic / inverse-hyperbolic / cbrt / base-2/10 logs — these were missing from the
+// interpreter's `Math`, so they returned "Not a function" (issue #61, and an interp↔VM
+// divergence under #67). One macro per unary `f64` method keeps them in lockstep with the VM.
+macro_rules! math_unary {
+    ($name:ident, $method:ident) => {
+        pub fn $name(args: &[Value]) -> Result<Value, String> {
+            Ok(Value::Number(
+                get_num(args.first().unwrap_or(&Value::Null)).$method(),
+            ))
+        }
+    };
+}
+math_unary!(math_sinh, sinh);
+math_unary!(math_cosh, cosh);
+math_unary!(math_tanh, tanh);
+math_unary!(math_asinh, asinh);
+math_unary!(math_acosh, acosh);
+math_unary!(math_atanh, atanh);
+math_unary!(math_cbrt, cbrt);
+math_unary!(math_log2, log2);
+math_unary!(math_log10, log10);
 
 pub fn array_is_array(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Bool(matches!(args.first(), Some(Value::Array(_)))))
