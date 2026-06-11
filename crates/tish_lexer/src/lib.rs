@@ -261,6 +261,8 @@ impl<'a> Lexer<'a> {
             if c.is_ascii_digit() || c == '.' {
                 s.push(c);
                 self.advance();
+            } else if c == '_' && Self::ends_with_digit(&s) && self.underscore_between_digits() {
+                self.advance(); // numeric separator (`15_000`) — drop it, JS-style
             } else if (c == 'e' || c == 'E') && self.exponent_follows() {
                 // Scientific notation: `e`/`E` then optional sign then digits.
                 // Guarded by lookahead so `3em` lexes as `3` + `em`, not a bad number.
@@ -274,6 +276,11 @@ impl<'a> Lexer<'a> {
                     if d.is_ascii_digit() {
                         s.push(d);
                         self.advance();
+                    } else if d == '_'
+                        && Self::ends_with_digit(&s)
+                        && self.underscore_between_digits()
+                    {
+                        self.advance(); // numeric separator inside the exponent (`1e1_0`)
                     } else {
                         break;
                     }
@@ -284,6 +291,21 @@ impl<'a> Lexer<'a> {
             }
         }
         s
+    }
+
+    /// True iff the literal accumulated so far ends in a decimal digit — used to reject a
+    /// `_` separator that isn't preceded by a digit (e.g. leading `_5` or post-`.` `1._5`).
+    fn ends_with_digit(s: &str) -> bool {
+        s.chars().last().is_some_and(|c| c.is_ascii_digit())
+    }
+
+    /// With `peek()` positioned at a `_`, look ahead (without consuming) to confirm the
+    /// next character is a decimal digit, i.e. the `_` sits between two digits and is a
+    /// valid JS numeric separator (rejects trailing `5_` and doubled `1__0`).
+    fn underscore_between_digits(&self) -> bool {
+        let mut la = self.chars.clone();
+        la.next(); // skip the `_` currently under peek()
+        la.next().is_some_and(|c| c.is_ascii_digit())
     }
 
     /// With the current peek positioned at an `e`/`E`, decide (without consuming)
@@ -889,6 +911,30 @@ mod tests {
                 .unwrap_or_else(|| panic!("no Number token for {src}"));
             assert_eq!(num.literal.as_deref(), Some(expected), "for {src}");
         }
+    }
+
+    #[test]
+    fn decimal_numeric_separators() {
+        // `_` between digits is a JS numeric separator: dropped from the literal value.
+        // Issue #57.
+        let only_number = |src: &str| -> String {
+            let tokens = Lexer::new(src).collect::<Result<Vec<_>, _>>().unwrap();
+            let nums: Vec<_> = tokens
+                .iter()
+                .filter(|t| t.kind == TokenKind::Number)
+                .collect();
+            assert_eq!(nums.len(), 1, "expected exactly one Number token for {src}");
+            // No stray identifier should be produced from the separated digits.
+            assert!(
+                !tokens.iter().any(|t| t.kind == TokenKind::Ident),
+                "unexpected Ident token while lexing {src}"
+            );
+            nums[0].literal.as_deref().unwrap().to_string()
+        };
+        assert_eq!(only_number("15_000"), "15000");
+        assert_eq!(only_number("1_000_000"), "1000000");
+        assert_eq!(only_number("3.14_159"), "3.14159");
+        assert_eq!(only_number("1e1_0"), "1e10");
     }
 
     #[test]
