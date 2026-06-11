@@ -42,6 +42,19 @@ fn pending_throw_is_set() -> bool {
     VM_PENDING_THROW.with(|c| c.borrow().is_some())
 }
 
+/// Append the source location of the instruction at `off` to a runtime-error message, e.g.
+/// `Cannot read property 'x' of null (at app.tish:4)` (issue #74). No-ops when the chunk
+/// carries no line table (e.g. deserialized bytecode).
+fn locate_error(chunk: &Chunk, off: usize, msg: &str) -> String {
+    match chunk.line_at(off) {
+        Some(line) => match &chunk.source {
+            Some(src) => format!("{msg} (at {src}:{line})"),
+            None => format!("{msg} (at line {line})"),
+        },
+        None => msg.to_string(),
+    }
+}
+
 /// Wrap a closure in the right shared pointer for the current build.
 /// Under `send-values` that's `Arc<dyn Fn + Send + Sync>`; otherwise it's
 /// plain `Rc<dyn Fn>`. Call sites can stay ignorant of the distinction.
@@ -1497,6 +1510,10 @@ impl Vm {
         // A closure created while this is non-empty snapshots these into a fresh overlay so it
         // captures the loop variable's value for THIS iteration. Pushed/popped by LoopVarsBegin/End.
         let mut active_loop_vars: Vec<Arc<str>> = Vec::new();
+        // Offset of the instruction currently executing — updated each iteration, read by the
+        // error macros to attach a source location (issue #74). Declared here (not in the loop)
+        // so it's in scope where `catchable!` is defined (macro hygiene).
+        let mut instr_off = 0usize;
 
         // Throw `$v` to the nearest enclosing handler (issue #60): if this frame has a live
         // `try`, jump to its `catch` with `$v` on the stack; otherwise park `$v` in the
@@ -1522,7 +1539,10 @@ impl Vm {
             ($expr:expr) => {
                 match $expr {
                     Ok(v) => v,
-                    Err(msg) => raise!(construct_builtin::error_object("TypeError", &msg)),
+                    Err(msg) => raise!(construct_builtin::error_object(
+                        "TypeError",
+                        &locate_error(chunk, instr_off, &msg)
+                    )),
                 }
             };
         }
@@ -1531,6 +1551,8 @@ impl Vm {
             if ip >= code.len() {
                 break;
             }
+            // Offset of the instruction about to execute (read by the error macros, #74).
+            instr_off = ip;
             let op = code[ip];
             ip += 1;
             if op == Opcode::Nop as u8 {

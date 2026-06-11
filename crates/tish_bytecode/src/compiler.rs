@@ -796,6 +796,13 @@ impl<'a> Compiler<'a> {
         self.chunk.write_u8(op as u8);
     }
 
+    /// Record the source line of the code about to be emitted, for runtime error locations
+    /// (issue #74). Cheap and deduped: only a line *change* adds a table entry.
+    fn mark_line(&mut self, span: tishlang_ast::Span) {
+        let offset = self.chunk.code.len();
+        self.chunk.mark_line(offset, span.start.0 as u32);
+    }
+
     fn emit_u8(&mut self, op: Opcode, v: u8) {
         self.chunk.write_u8(op as u8);
         self.chunk.write_u16(v as u16);
@@ -1127,6 +1134,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
+        self.mark_line(stmt.span());
         match stmt {
             Statement::Block { statements, .. } => {
                 self.emit(Opcode::EnterBlock);
@@ -1476,6 +1484,7 @@ impl<'a> Compiler<'a> {
                     None
                 };
                 let mut inner = Chunk::new();
+                inner.source = self.chunk.source.clone(); // propagate file for error locations (#74)
                 if let Some(rp) = rest_param {
                     param_names.push(Arc::clone(&rp.name));
                     inner.rest_param_index = (param_names.len() as u16).saturating_sub(1);
@@ -1828,6 +1837,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_expr(&mut self, expr: &Expr) -> Result<(), CompileError> {
+        self.mark_line(expr.span());
         match expr {
             Expr::Literal { value, .. } => {
                 let c = match value {
@@ -2158,6 +2168,7 @@ impl<'a> Compiler<'a> {
                     ArrowBody::Block(s) => stmt_is_param_only(s, pset),
                 });
                 let mut inner = Chunk::new();
+                inner.source = self.chunk.source.clone(); // propagate file for error locations (#74)
                 for p in &param_names {
                     inner.add_name(Arc::clone(p));
                 }
@@ -2519,30 +2530,42 @@ impl<'a> Compiler<'a> {
 
 /// Compile a Tish program to bytecode (with peephole optimizations).
 pub fn compile(program: &Program) -> Result<Chunk, CompileError> {
-    compile_internal(program, true, false)
+    compile_internal(program, true, false, None)
+}
+
+/// Compile, tagging the chunk with a source file path so runtime errors can report
+/// `file:line` (issue #74). The line table is built during compilation and survives the
+/// in-place peephole pass; it is not serialized.
+pub fn compile_with_source(
+    program: &Program,
+    source: Option<std::sync::Arc<str>>,
+) -> Result<Chunk, CompileError> {
+    compile_internal(program, true, false, source)
 }
 
 /// Compile without peephole optimizations (for --no-optimize).
 pub fn compile_unoptimized(program: &Program) -> Result<Chunk, CompileError> {
-    compile_internal(program, false, false)
+    compile_internal(program, false, false, None)
 }
 
 /// Compile for REPL: last expression statement leaves its value on the stack (no Pop, no trailing Null).
 pub fn compile_for_repl(program: &Program) -> Result<Chunk, CompileError> {
-    compile_internal(program, true, true)
+    compile_internal(program, true, true, None)
 }
 
 /// Compile for REPL without peephole optimizations.
 pub fn compile_for_repl_unoptimized(program: &Program) -> Result<Chunk, CompileError> {
-    compile_internal(program, false, true)
+    compile_internal(program, false, true, None)
 }
 
 fn compile_internal(
     program: &Program,
     peephole: bool,
     retain_last_expr: bool,
+    source: Option<std::sync::Arc<str>>,
 ) -> Result<Chunk, CompileError> {
     let mut chunk = Chunk::new();
+    chunk.source = source; // tag before compiling so nested chunks inherit it (#74)
     let mut compiler = Compiler::new(&mut chunk, retain_last_expr);
     compiler.compile_program(program)?;
     if peephole {

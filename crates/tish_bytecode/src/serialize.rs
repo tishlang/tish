@@ -186,5 +186,8 @@ pub fn deserialize(mut data: &[u8]) -> Result<Chunk, String> {
         num_slots,
         slot_based,
         inline_caches,
+        // Debug-only; not part of the serialized format (issue #74).
+        lines: Vec::new(),
+        source: None,
     })
 }
