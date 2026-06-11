@@ -56,6 +56,8 @@ http-hyper = [
 ]
 fs = []
 process = []
+# Interactive terminal I/O (issue #101): raw mode, key/resize events, size, alt screen.
+tty = ["dep:crossterm"]
 regex = ["tishlang_core/regex"]
 # WebSocket (JS-like API). Modular: import { WebSocket, Server } from 'tish:ws'.
 # Requires `send-values` because the WS server keeps an `Arc<dyn Fn + Send +
@@ -84,6 +86,8 @@ tiny_http = { version = "0.12.0", optional = true }
 socket2 = { version = "0.5", features = ["all"], optional = true }
 libc = { version = "0.2", optional = true }
 arc-swap = { version = "1", optional = true }
+# Interactive terminal I/O (feature = tty): cross-platform raw mode, key/resize events, size.
+crossterm = { version = "0.28", optional = true }
 # hyper backend (feature = http-hyper)
 hyper = { version = "1", default-features = false, features = ["server", "http1", "http2"], optional = true }
 hyper-util = { version = "0.1", features = ["server", "tokio"], optional = true }

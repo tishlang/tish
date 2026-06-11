@@ -995,6 +995,32 @@ impl Evaluator {
                     ));
                 }
             }
+            "tish:tty" => {
+                #[cfg(feature = "tty")]
+                {
+                    let mut exports: PropMap = PropMap::default();
+                    exports.insert("size".into(), Value::Native(natives::tty_size));
+                    exports.insert("isTTY".into(), Value::Native(natives::tty_is_tty));
+                    exports.insert("setRawMode".into(), Value::Native(natives::tty_set_raw_mode));
+                    exports.insert(
+                        "enterAltScreen".into(),
+                        Value::Native(natives::tty_enter_alt_screen),
+                    );
+                    exports.insert(
+                        "leaveAltScreen".into(),
+                        Value::Native(natives::tty_leave_alt_screen),
+                    );
+                    exports.insert("read".into(), Value::Native(natives::tty_read));
+                    exports.insert("readLine".into(), Value::Native(natives::tty_read_line));
+                    Ok(Value::object(exports))
+                }
+                #[cfg(not(feature = "tty"))]
+                {
+                    return Err(EvalError::Error(
+                        "tish:tty requires the tty feature. Rebuild with: cargo build -p tishlang --features tty".into(),
+                    ));
+                }
+            }
             "tish:process" => {
                 #[cfg(feature = "process")]
                 {

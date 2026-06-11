@@ -30,7 +30,7 @@ fn normalize_capability_flags(features: &[String]) -> HashSet<String> {
     for s in features {
         for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
             if part == "full" {
-                for name in ["http", "timers", "fs", "process", "regex", "ws"] {
+                for name in ["http", "timers", "fs", "process", "regex", "ws", "tty"] {
                     out.insert(name.to_string());
                 }
             } else {

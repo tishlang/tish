@@ -471,3 +471,81 @@ pub fn mkdir(args: &[Value]) -> Result<Value, String> {
     };
     Ok(Value::Bool(result.is_ok()))
 }
+
+// ── Interactive terminal I/O (issue #101), behind the `tty` feature ──────────────────────
+// Build the interpreter's `Value` from the shared, Value-agnostic core in
+// `tishlang_runtime::tty`, so the interpreter, VM, and native backends behave identically.
+
+#[cfg(feature = "tty")]
+fn tty_obj(pairs: Vec<(&str, Value)>) -> Value {
+    let mut m = crate::value::PropMap::with_capacity(pairs.len());
+    for (k, v) in pairs {
+        m.insert(k.into(), v);
+    }
+    Value::object(m)
+}
+
+#[cfg(feature = "tty")]
+pub fn tty_size(_args: &[Value]) -> Result<Value, String> {
+    Ok(match tishlang_runtime::tty::size() {
+        Some((cols, rows)) => tty_obj(vec![
+            ("cols", Value::Number(cols as f64)),
+            ("rows", Value::Number(rows as f64)),
+        ]),
+        None => Value::Null,
+    })
+}
+
+#[cfg(feature = "tty")]
+pub fn tty_is_tty(_args: &[Value]) -> Result<Value, String> {
+    Ok(Value::Bool(tishlang_runtime::tty::is_tty()))
+}
+
+#[cfg(feature = "tty")]
+pub fn tty_set_raw_mode(args: &[Value]) -> Result<Value, String> {
+    let on = args.first().map(|v| v.is_truthy()).unwrap_or(false);
+    Ok(Value::Bool(tishlang_runtime::tty::set_raw_mode(on)))
+}
+
+#[cfg(feature = "tty")]
+pub fn tty_enter_alt_screen(_args: &[Value]) -> Result<Value, String> {
+    Ok(Value::Bool(tishlang_runtime::tty::enter_alt_screen()))
+}
+
+#[cfg(feature = "tty")]
+pub fn tty_leave_alt_screen(_args: &[Value]) -> Result<Value, String> {
+    Ok(Value::Bool(tishlang_runtime::tty::leave_alt_screen()))
+}
+
+#[cfg(feature = "tty")]
+pub fn tty_read_line(_args: &[Value]) -> Result<Value, String> {
+    Ok(match tishlang_runtime::tty::read_line() {
+        Some(s) => Value::String(s.into()),
+        None => Value::Null,
+    })
+}
+
+#[cfg(feature = "tty")]
+pub fn tty_read(args: &[Value]) -> Result<Value, String> {
+    use tishlang_runtime::tty::TtyEvent;
+    let timeout = match args.first() {
+        Some(Value::Number(ms)) => Some(ms.max(0.0) as u64),
+        _ => None,
+    };
+    Ok(match tishlang_runtime::tty::read_event(timeout) {
+        Some(TtyEvent::Key { key, ctrl, alt, shift }) => tty_obj(vec![
+            ("type", Value::String("key".into())),
+            ("key", Value::String(key.into())),
+            ("ctrl", Value::Bool(ctrl)),
+            ("alt", Value::Bool(alt)),
+            ("shift", Value::Bool(shift)),
+        ]),
+        Some(TtyEvent::Resize { cols, rows }) => tty_obj(vec![
+            ("type", Value::String("resize".into())),
+            ("cols", Value::Number(cols as f64)),
+            ("rows", Value::Number(rows as f64)),
+        ]),
+        Some(TtyEvent::Other) => tty_obj(vec![("type", Value::String("other".into()))]),
+        None => Value::Null,
+    })
+}

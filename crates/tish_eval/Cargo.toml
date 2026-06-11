@@ -26,6 +26,7 @@ http = [
 ]
 fs = []
 process = []
+tty = ["dep:tishlang_runtime", "tishlang_runtime/tty"]
 regex = ["dep:fancy-regex", "tishlang_core/regex"]
 tokio = ["dep:tokio"]
 ws = ["dep:tishlang_runtime", "tishlang_runtime/ws"]

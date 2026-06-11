@@ -1,0 +1,27 @@
+// Interactive key viewer (issue #101). Run in a real terminal:
+//   tish run --feature tty examples/tty/keys.tish
+// Press keys to see them; resize the window to see resize events; press 'q' or Ctrl+C to quit.
+import { isTTY, size, setRawMode, read } from 'tish:tty'
+
+if (!isTTY()) {
+  console.log("Not a terminal — run this directly in a terminal.")
+} else {
+  let dims = size()
+  console.log("Terminal:", dims.cols, "x", dims.rows, "— press keys ('q' to quit)")
+  setRawMode(true)
+  let running = true
+  while (running) {
+    let ev = read(200)          // poll with a 200ms timeout (non-blocking-ish)
+    if (ev == null) { continue } // nothing this tick
+    if (ev.type == "key") {
+      console.log("key:", ev.key, "ctrl:", ev.ctrl, "alt:", ev.alt, "shift:", ev.shift)
+      if (ev.key == "q") { running = false }
+      if (ev.ctrl && ev.key == "c") { running = false }
+    }
+    if (ev.type == "resize") {
+      console.log("resize:", ev.cols, "x", ev.rows)
+    }
+  }
+  setRawMode(false)
+  console.log("bye")
+}

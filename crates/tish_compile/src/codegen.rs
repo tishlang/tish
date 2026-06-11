@@ -1133,6 +1133,16 @@ impl Codegen {
                     "wsBroadcast" => Some("Value::native(|args: &[Value]| tishlang_runtime::ws_broadcast_native(args))"),
                     _ => None,
                 },
+            "tish:tty" if self.has_feature("tty") => match export_name {
+                    "size" => Some("Value::native(|args: &[Value]| tishlang_runtime::tty_size(args))"),
+                    "isTTY" => Some("Value::native(|args: &[Value]| tishlang_runtime::tty_is_tty(args))"),
+                    "setRawMode" => Some("Value::native(|args: &[Value]| tishlang_runtime::tty_set_raw_mode(args))"),
+                    "enterAltScreen" => Some("Value::native(|args: &[Value]| tishlang_runtime::tty_enter_alt_screen(args))"),
+                    "leaveAltScreen" => Some("Value::native(|args: &[Value]| tishlang_runtime::tty_leave_alt_screen(args))"),
+                    "read" => Some("Value::native(|args: &[Value]| tishlang_runtime::tty_read(args))"),
+                    "readLine" => Some("Value::native(|args: &[Value]| tishlang_runtime::tty_read_line(args))"),
+                    _ => None,
+                },
             _ => return None,
         };
         init.map(String::from)
@@ -1140,7 +1150,10 @@ impl Codegen {
 
     fn has_feature(&self, name: &str) -> bool {
         if self.features.contains("full") {
-            matches!(name, "http" | "timers" | "fs" | "process" | "regex" | "ws")
+            matches!(
+                name,
+                "http" | "timers" | "fs" | "process" | "regex" | "ws" | "tty"
+            )
         } else {
             self.features.contains(name)
         }

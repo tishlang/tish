@@ -1,0 +1,9 @@
+// tish:tty capability (issue #101). Asserts the module loads and degrades gracefully when
+// stdout/stdin is not a terminal (CI), so the output is deterministic without a real TTY.
+import { isTTY, size, setRawMode, enterAltScreen, leaveAltScreen, read, readLine } from 'tish:tty'
+console.log("isTTY:", typeof isTTY())
+console.log("size:", size() ? "object" : "null")
+console.log("setRawMode:", typeof setRawMode)
+console.log("read:", typeof read)
+console.log("readLine:", typeof readLine)
+console.log("alt:", typeof enterAltScreen, typeof leaveAltScreen)

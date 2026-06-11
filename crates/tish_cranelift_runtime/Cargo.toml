@@ -14,6 +14,7 @@ http = ["tishlang_vm/http"]
 promise = ["tishlang_vm/promise"]
 timers = ["tishlang_vm/timers"]
 ws = ["tishlang_vm/ws"]
+tty = ["tishlang_vm/tty"]
 regex = ["tishlang_vm/regex"]
 
 [lib]
