@@ -212,6 +212,26 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Accept a plain identifier, or the contextual keywords `fn` / `type` used as an
+    /// identifier. JS treats `fn` as an ordinary identifier and `type` as only contextually
+    /// reserved, so both are valid binding / parameter names and value references (issue #55).
+    /// All three carry their spelling in `.literal`. Statement-leading `fn` / `type`
+    /// (function declarations / type aliases) are matched earlier in `parse_statement`, so this
+    /// only fires in identifier positions.
+    fn expect_identifier_name(&mut self) -> Result<&Token, String> {
+        let t = self
+            .advance()
+            .ok_or_else(|| "Expected identifier, got EOF".to_string())?;
+        if matches!(
+            t.kind,
+            TokenKind::Ident | TokenKind::Fn | TokenKind::Type
+        ) {
+            Ok(t)
+        } else {
+            Err(format!("Expected Ident, got {:?} at {:?}", t.kind, t.span))
+        }
+    }
+
     fn span_end(&self, start: (usize, usize)) -> Span {
         let end = self.peek().map(|t| t.span.start).unwrap_or(start);
         Span { start, end }
@@ -425,7 +445,7 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let name_tok = self.expect(TokenKind::Ident)?;
+        let name_tok = self.expect_identifier_name()?;
         let name_span = Span {
             start: name_tok.span.start,
             end: name_tok.span.end,
@@ -593,7 +613,7 @@ impl<'a> Parser<'a> {
                 default,
             });
         }
-        let param_tok = self.expect(TokenKind::Ident)?;
+        let param_tok = self.expect_identifier_name()?;
         let name_span = Span {
             start: param_tok.span.start,
             end: param_tok.span.end,
@@ -2065,7 +2085,10 @@ impl<'a> Parser<'a> {
                 value: Literal::Null,
                 span,
             }),
-            TokenKind::Ident => {
+            // `fn` / `type` as a value reference or single-param arrow head (issue #55).
+            // `fn`/`type` function-expressions don't exist and statement-leading decls are
+            // handled in parse_statement, so treating them as identifiers here is additive.
+            TokenKind::Ident | TokenKind::Fn | TokenKind::Type => {
                 let name = t.literal.clone().ok_or("Expected ident")?;
                 // Check if this is a single-param arrow function: x => ...
                 if matches!(self.peek_kind(), Some(TokenKind::Arrow)) {
