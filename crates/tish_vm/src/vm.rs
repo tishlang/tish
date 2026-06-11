@@ -603,6 +603,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         "AudioContext".into(),
         construct_builtin::audio_context_constructor_value(),
     );
+    // Error constructors (issue #60): `new Error(msg)` / `Error(msg)` → `{ name, message }`.
+    for name in ["Error", "TypeError", "RangeError", "SyntaxError"] {
+        g.insert(name.into(), construct_builtin::error_constructor_value(name));
+    }
 
     // Object methods - delegate to tishlang_builtins::globals
     let mut object_methods = ObjectMap::default();

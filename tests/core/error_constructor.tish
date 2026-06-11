@@ -1,0 +1,10 @@
+// Error / TypeError / RangeError constructors with `.message` / `.name` (issue #60).
+// `new Error(x)` and `Error(x)` both produce { name, message }; a thrown Error is catchable.
+let e = new Error("boom")
+console.log(e.message)
+console.log(e.name)
+try { throw new Error("caught one") } catch (err) { console.log("caught:", err.message) }
+let t = new TypeError("bad type")
+console.log(t.name, t.message)
+let e2 = Error("no new")
+console.log(e2.message)

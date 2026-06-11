@@ -194,6 +194,19 @@ impl Evaluator {
                 true,
             );
 
+            // Error constructors (issue #60): callable + constructable via __call/__construct.
+            for (name, ctor) in [
+                ("Error", natives::error_construct as fn(&[Value]) -> Result<Value, String>),
+                ("TypeError", natives::type_error_construct),
+                ("RangeError", natives::range_error_construct),
+                ("SyntaxError", natives::syntax_error_construct),
+            ] {
+                let mut err_obj = PropMap::with_capacity(2);
+                err_obj.insert("__call".into(), Value::Native(ctor));
+                err_obj.insert("__construct".into(), Value::Native(ctor));
+                s.set(name.into(), Value::object(err_obj), true);
+            }
+
             let mut string_obj = PropMap::with_capacity(2);
             string_obj.insert(
                 "fromCharCode".into(),

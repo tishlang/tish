@@ -33,6 +33,35 @@ pub fn construct(callee: &Value, args: &[Value]) -> Value {
     }
 }
 
+/// A JS-style error object `{ name, message }` (issue #60).
+pub fn error_object(name: &str, message: &str) -> Value {
+    let mut e = ObjectMap::default();
+    e.insert(Arc::from("name"), Value::String(name.into()));
+    e.insert(Arc::from("message"), Value::String(message.into()));
+    Value::object(e)
+}
+
+fn make_error_from_args(name: &str, args: &[Value]) -> Value {
+    let message = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+    error_object(name, &message)
+}
+
+/// `Error(msg)` / `new Error(msg)` (and `TypeError` / `RangeError`) → `{ name, message }`
+/// (issue #60). `__call` and `__construct` behave identically, matching JS where `Error(x)`
+/// and `new Error(x)` produce the same object.
+pub fn error_constructor_value(name: &'static str) -> Value {
+    let mut m = ObjectMap::default();
+    m.insert(
+        Arc::from(CONSTRUCT),
+        Value::native(move |args: &[Value]| make_error_from_args(name, args)),
+    );
+    m.insert(
+        Arc::from("__call"),
+        Value::native(move |args: &[Value]| make_error_from_args(name, args)),
+    );
+    Value::object(m)
+}
+
 fn param(initial: f64) -> Value {
     let mut m = ObjectMap::default();
     m.insert(Arc::from("value"), Value::Number(initial));
