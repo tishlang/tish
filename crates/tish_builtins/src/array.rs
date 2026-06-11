@@ -209,6 +209,28 @@ pub fn splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &
     }
 }
 
+/// `Array.prototype.fill(value, start?, end?)` — overwrites elements in `[start, end)` with
+/// `value`, mutating in place and returning the same array. start/end use JS index
+/// normalization (negatives count from the end; defaults 0 and length). Issue #76.
+pub fn fill(arr: &Value, value: &Value, start: &Value, end: &Value) -> Value {
+    let arr = as_boxed_array(arr);
+    let arr = &*arr;
+    if let Value::Array(arr) = arr {
+        let mut arr_mut = arr.borrow_mut();
+        let len = arr_mut.len() as i64;
+        let start_idx = normalize_index(start, len, 0);
+        let end_idx = normalize_index(end, len, len as usize);
+        let mut i = start_idx;
+        while i < end_idx && i < arr_mut.len() {
+            arr_mut[i] = value.clone();
+            i += 1;
+        }
+        Value::Array(arr.clone())
+    } else {
+        Value::Null
+    }
+}
+
 pub fn slice(arr: &Value, start: &Value, end: &Value) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {

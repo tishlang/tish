@@ -1,0 +1,19 @@
+// Array.prototype.fill + bulk init via Array(n).fill(v) (issue #76)
+let a = [1, 2, 3]
+console.log(a.fill(7).join(","))
+let b = Array(4).fill(0)
+console.log(b.length, b.join(","))
+let c = new Array(5).fill(9)
+console.log(c.join(","))
+// start / end range
+let d = [1, 2, 3, 4, 5]
+d.fill(0, 1, 3)
+console.log(d.join(","))
+// negative start counts from the end
+let e = [1, 2, 3, 4, 5]
+e.fill(8, -2)
+console.log(e.join(","))
+// fill returns the same array (in place)
+let f = [0, 0, 0]
+f.fill(1)
+console.log(f.join(","))
