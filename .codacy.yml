@@ -1,0 +1,14 @@
+---
+# Codacy configuration. Exclude test code, fixtures, and generated test bundles from
+# static analysis — they are exercised by CI, not shipped, and shouldn't gate code quality.
+# Patterns are globs relative to the repo root (`**` matches any depth).
+exclude_paths:
+  - 'tests/**'              # top-level suite: core, modules, http, perf, test262, main.{tish,js}
+  - '**/tests/**'           # Rust integration tests (crates/*/tests/**) + any nested tests dir
+  - '**/test/**'            # tree-sitter-tish/test/** and other singular "test" dirs
+  - '**/*_test.rs'          # *_test.rs files
+  - '**/*.test.js'          # *.test.js
+  - '**/*.test.ts'          # *.test.ts
+  - '**/*.spec.js'          # *.spec.js
+  - '**/*.spec.ts'          # *.spec.ts
+  - '**/*.tish.expected'    # expected-output fixtures
