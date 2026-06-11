@@ -548,6 +548,46 @@ Promise tests completed
     }
 }
 
+/// Import aliasing — `{ x as y }` rename and `* as M` namespace. `as` is a dedicated keyword
+/// token (shared with type casts), so the import-specifier parser must accept it in that position.
+/// Regression: previously `import { a as b }` failed with "Expected Comma, got As". vm ≡ interp.
+#[test]
+fn test_import_alias() {
+    let bin = tish_bin();
+    if !bin.exists() {
+        return;
+    }
+    let path = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("import_alias.tish");
+    if !path.exists() {
+        return;
+    }
+    let expected = "42\nhi there\n42\n1.0\n";
+    for backend_args in [vec!["run"], vec!["run", "--backend", "vm"]] {
+        let mut args = backend_args.clone();
+        args.push(path.to_string_lossy().to_string().leak());
+        let out = Command::new(&bin)
+            .args(&args)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish binary");
+        assert!(
+            out.status.success(),
+            "import_alias.tish ({:?}) failed: stderr={}",
+            backend_args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected,
+            "import alias output mismatch on backend {:?}",
+            backend_args
+        );
+    }
+}
+
 /// Combined validation: async/await + Promise + setTimeout + multiple HTTP requests.
 /// Ignored: tishlang_eval::run() does not run the event loop.
 #[test]

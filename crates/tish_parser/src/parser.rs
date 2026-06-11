@@ -1465,9 +1465,9 @@ impl<'a> Parser<'a> {
                     .literal
                     .clone()
                     .ok_or("Expected identifier in import")?;
-                let (alias, alias_span) = if matches!(self.peek_kind(), Some(TokenKind::Ident))
-                    && self.peek().and_then(|t| t.literal.as_deref()) == Some("as")
-                {
+                // `as` is a dedicated keyword token (also used for casts); in import-specifier
+                // position it introduces a rename: `{ foo as bar }`.
+                let (alias, alias_span) = if matches!(self.peek_kind(), Some(TokenKind::As)) {
                     self.advance(); // consume 'as'
                     let alias_tok = self.expect(TokenKind::Ident)?;
                     let asp = Span {
@@ -1501,10 +1501,7 @@ impl<'a> Parser<'a> {
         } else if matches!(self.peek_kind(), Some(TokenKind::Star)) {
             // Namespace: import * as M from "..."
             self.advance();
-            let as_tok = self.expect(TokenKind::Ident)?;
-            if as_tok.literal.as_deref() != Some("as") {
-                return Err("Expected 'as' after '*' in namespace import".to_string());
-            }
+            self.expect(TokenKind::As)?;
             let alias_tok = self.expect(TokenKind::Ident)?;
             let name_span = Span {
                 start: alias_tok.span.start,
