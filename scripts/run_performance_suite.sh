@@ -315,9 +315,17 @@ fi
 
 echo "Building tish ($profile)..."
 # Avoid split target dirs (e.g. CARGO_TARGET_DIR in some IDEs): workspace tish must match freshly built tishlang_compile.
-( unset CARGO_TARGET_DIR; cargo build -p tishlang $rel_flag --features full --target-dir "$target_dir" -q 2>/dev/null ) || true
+# Build the CLI and use the resulting binary directly. Do NOT fall back to a `cargo run` wrapper:
+# every call site invokes "$tish_bin" quoted, so a multi-word command would be exec'd as a single
+# (missing) program — and a silent fallback masks the real build failure (e.g. a transient sccache
+# cache error). Surface the build error and stop instead.
+if ! ( unset CARGO_TARGET_DIR; cargo build -p tishlang $rel_flag --features full --target-dir "$target_dir" -q ); then
+  echo "ERROR: failed to build tish (cargo build -p tishlang $rel_flag --features full)" >&2
+  exit 1
+fi
 if [[ ! -x "$tish_bin" ]]; then
-  tish_bin="cargo run -p tishlang $rel_flag --features full --target-dir $target_dir -q --"
+  echo "ERROR: tish binary not found at '$tish_bin' after a successful build" >&2
+  exit 1
 fi
 
 cache_dir="$target_dir/perf-suite-cache-$profile"

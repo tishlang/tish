@@ -258,6 +258,12 @@ jobs:
           ./scripts/generate_perf_ci_main.sh
           git diff --exit-code tests/main.tish tests/main.js
 
+      # Build the release tish binary up front (with sccache-retry resilience) so the perf suite
+      # always finds it; otherwise a transient sccache failure during the suite's own build leaves
+      # no binary and (in strict mode) fails the run.
+      - name: Build tish (release) for the perf suite
+        run: ./scripts/ci_build_retry.sh cargo build --release -p tishlang --features full
+
       - name: Run bundled perf suite
         run: |
           set -euo pipefail
