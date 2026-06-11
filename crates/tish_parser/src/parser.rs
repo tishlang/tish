@@ -1345,9 +1345,22 @@ impl<'a> Parser<'a> {
 
     fn parse_return(&mut self) -> Result<Statement, String> {
         let span_start = self.expect(TokenKind::Return)?.span.start;
-        let value = if matches!(self.peek_kind(), Some(TokenKind::Semicolon))
-            || matches!(self.peek_kind(), Some(TokenKind::Dedent))
-            || matches!(self.peek_kind(), Some(TokenKind::RBrace))
+        // JS restricted production: `return [no LineTerminator here] Expression`.
+        // A line break between `return` and its argument inserts a semicolon, so
+        // `return` alone is `return null`. The lexer emits no token for a same-indent
+        // line break (only Indent/Dedent on level *changes*), so a braceless
+        // `if (c) return` followed by a statement on the next line would otherwise
+        // swallow that statement as the return value (#96). Detect the line break by
+        // comparing the next token's line to the `return` keyword's line.
+        let next_on_new_line = self
+            .peek()
+            .map(|t| t.span.start.0 > span_start.0)
+            .unwrap_or(true);
+        let value = if next_on_new_line
+            || matches!(
+                self.peek_kind(),
+                Some(TokenKind::Semicolon | TokenKind::Dedent | TokenKind::RBrace)
+            )
             || self.peek_kind().is_none()
         {
             None

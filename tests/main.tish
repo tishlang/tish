@@ -1055,6 +1055,48 @@ console.log("16 >> 2 =", 16 >> 2)
 }
 __perf_run_core_bitwise()
 
+fn __perf_run_core_braceless_return() {
+// A braceless `if (cond) return` must NOT swallow the statement on the next line
+// as the return's argument (JS restricted production: a line break after `return`
+// ends the statement). Regression test for #96.
+
+let log = []
+fn rec(m) { log.push(m) }
+
+// braceless return; `rec("ran")` is an independent statement
+fn f(skip) {
+  if (skip) return
+  rec("ran")
+}
+f(false)
+console.log(JSON.stringify(log))          // ["ran"]
+
+// taking the branch returns early, skipping rec
+let log2 = []
+fn rec2(m) { log2.push(m) }
+fn g(skip) {
+  if (skip) return
+  rec2("ran2")
+}
+g(true)
+console.log(JSON.stringify(log2))         // []
+
+// braceless return WITH a value on the same line still works
+fn h(x) {
+  if (x > 0) return "pos"
+  return "nonpos"
+}
+console.log(h(5), h(-1))                   // pos nonpos
+
+// a multi-line expression whose first token is on the `return` line is one value
+fn sum(a, b) {
+  return a +
+    b
+}
+console.log(sum(3, 4))                      // 7
+}
+__perf_run_core_braceless_return()
+
 fn __perf_run_core_break_continue() {
 // MVP test: break and continue in nested loops
 let found = 0
