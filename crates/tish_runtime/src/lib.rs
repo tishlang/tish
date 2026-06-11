@@ -61,7 +61,7 @@ pub use tishlang_builtins::array::{
     find_index as array_find_index, flat as array_flat_impl, flat_map as array_flat_map,
     for_each as array_for_each, includes as array_includes_impl, index_of as array_index_of_impl,
     join as array_join_impl, map as array_map, pop as array_pop, push as array_push_impl,
-    reduce as array_reduce, reverse as array_reverse, shift as array_shift,
+    fill as array_fill, reduce as array_reduce, reverse as array_reverse, shift as array_shift,
     shuffle as array_shuffle, slice as array_slice_impl, some as array_some,
     sort_default as array_sort_default, sort_numeric_asc as array_sort_numeric_asc,
     sort_numeric_desc as array_sort_numeric_desc,

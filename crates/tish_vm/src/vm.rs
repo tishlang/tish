@@ -2889,6 +2889,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                         "flat"      => make_native_fn(move |args| { let d = args.first().cloned().unwrap_or(Value::Number(1.0)); arr_builtins::flat(&bv, &d) }),
                         "flatMap"   => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::flat_map(&bv, &cb) }),
                         "reverse"   => make_native_fn(move |_| arr_builtins::reverse(&bv)),
+                        "fill"      => make_native_fn(move |args| { let v = args.first().cloned().unwrap_or(Value::Null); let s = args.get(1).cloned().unwrap_or(Value::Null); let e = args.get(2).cloned().unwrap_or(Value::Null); arr_builtins::fill(&bv, &v, &s, &e) }),
                         "slice"     => make_native_fn(move |args| { let s = args.first().cloned().unwrap_or(Value::Null); let e = args.get(1).cloned().unwrap_or(Value::Null); arr_builtins::slice(&bv, &s, &e) }),
                         "concat"    => make_native_fn(move |args| arr_builtins::concat(&bv, args)),
                         "indexOf"   => make_native_fn(move |args| { let s = args.first().cloned().unwrap_or(Value::Null); arr_builtins::index_of(&bv, &s) }),
@@ -2930,6 +2931,12 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 }),
                 "reverse" => make_native_fn(move |_args: &[Value]| {
                     arr_builtins::reverse(&Value::Array(a_clone.clone()))
+                }),
+                "fill" => make_native_fn(move |args: &[Value]| {
+                    let value = args.first().unwrap_or(&Value::Null);
+                    let start = args.get(1).unwrap_or(&Value::Null);
+                    let end = args.get(2).unwrap_or(&Value::Null);
+                    arr_builtins::fill(&Value::Array(a_clone.clone()), value, start, end)
                 }),
                 "shuffle" => make_native_fn(move |_args: &[Value]| {
                     arr_builtins::shuffle(&Value::Array(a_clone.clone()))

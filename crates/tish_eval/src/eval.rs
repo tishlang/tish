@@ -1156,6 +1156,30 @@ impl Evaluator {
                                 arr.borrow_mut().reverse();
                                 return Ok(obj.clone());
                             }
+                            "fill" => {
+                                // Array.prototype.fill(value, start?, end?) — in place (issue #76).
+                                let value = arg_vals.first().cloned().unwrap_or(Value::Null);
+                                let mut arr_mut = arr.borrow_mut();
+                                let len = arr_mut.len() as i64;
+                                let norm = |v: Option<&Value>, dflt: usize| -> usize {
+                                    match v {
+                                        Some(Value::Number(n)) => {
+                                            let n = *n as i64;
+                                            if n < 0 { (len + n).max(0) as usize } else { (n as usize).min(len as usize) }
+                                        }
+                                        _ => dflt,
+                                    }
+                                };
+                                let start = norm(arg_vals.get(1), 0);
+                                let end = norm(arg_vals.get(2), len as usize);
+                                let mut i = start;
+                                while i < end && i < arr_mut.len() {
+                                    arr_mut[i] = value.clone();
+                                    i += 1;
+                                }
+                                drop(arr_mut);
+                                return Ok(obj.clone());
+                            }
                             "shuffle" => {
                                 let mut v = arr.borrow().clone();
                                 use rand::seq::SliceRandom;

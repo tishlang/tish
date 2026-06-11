@@ -3321,6 +3321,15 @@ impl Codegen {
                         "reverse" => {
                             return Ok(format!("tishlang_runtime::array_reverse(&{})", obj_expr));
                         }
+                        "fill" => {
+                            let value = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let start = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let end = arg_exprs.get(2).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::array_fill(&{}, &{}, &{}, &{})",
+                                obj_expr, value, start, end
+                            ));
+                        }
                         "shuffle" => {
                             return Ok(format!("tishlang_runtime::array_shuffle(&{})", obj_expr));
                         }
