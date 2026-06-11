@@ -1088,6 +1088,30 @@
 }
 
 {
+  // Comma-separated declarators: `let a = 1, b = 2`, incl. uninitialized, for-init, and a
+  // destructuring declarator in the list. Each lowers to its own binding in the same scope.
+  let a = 1, b = 2, c = 3
+  console.log(a + b + c)
+  let x, y = 10
+  console.log(y)
+  let p = 1, q
+  q = 5
+  console.log(p + q)
+  let total = 0
+  for (let i = 0, n = 5; i < n; i++) { total = total + i }
+  console.log(total)
+  let [d, e] = [4, 5], f = 6
+  console.log(d + e + f)
+  function go() {
+    let r = 7, s = 100
+    return r + s
+  }
+  console.log(go())
+  const g = 1, h = 2
+  console.log(g + h)
+}
+
+{
   // MVP test: compound assignment operators (+=, -=, *=, /=, %=) - JS equivalent
 
   // Basic compound assignment
@@ -1205,6 +1229,63 @@
 }
 
 {
+  // `new Date(...)` constructor + instance methods + statics, identical across interp / VM / native /
+  // node. All assertions use deterministic UTC / epoch / ISO surface (Tish Dates run in UTC), so the
+  // output never depends on the host timezone.
+
+  // Epoch.
+  let d0 = new Date(0)
+  console.log(d0.getTime())
+  console.log(d0.toISOString())
+  console.log(d0.getUTCFullYear())
+
+  // From epoch millis.
+  let d = new Date(1623242096789)
+  console.log(d.toISOString())
+  console.log(d.getUTCFullYear())
+  console.log(d.getUTCMonth())   // 0-based: June -> 5
+  console.log(d.getUTCDate())
+  console.log(d.getUTCDay())     // 2021-06-09 is a Wednesday -> 3
+  console.log(d.getUTCHours())
+  console.log(d.getUTCMinutes())
+  console.log(d.getUTCSeconds())
+  console.log(d.getUTCMilliseconds())
+  console.log(d.valueOf())
+  // NOTE: getTimezoneOffset() is intentionally 0 (Tish runs Dates in UTC); not asserted here because
+  // Node reports the *host* offset, which is machine-dependent.
+
+  // From ISO string.
+  let s = new Date("2000-01-01T00:00:00.000Z")
+  console.log(s.getTime())
+  console.log(s.getUTCFullYear())
+
+  // Date-only string is parsed as UTC midnight.
+  console.log(new Date("1970-01-02").getTime())
+
+  // Pre-epoch (negative millis).
+  let pre = new Date(-86400000)
+  console.log(pre.toISOString())
+  console.log(pre.getUTCDay())   // 1969-12-31 is a Wednesday -> 3
+
+  // Statics.
+  console.log(Date.UTC(2021, 5, 9, 12, 34, 56, 789))
+  console.log(Date.parse("2021-06-09T12:34:56.789Z"))
+  console.log(Date.parse("1970-01-01T01:00:00+01:00"))  // offset pulls back to epoch
+
+  // setTime mutates in place.
+  let m = new Date(0)
+  m.setTime(1000)
+  console.log(m.getTime())
+  console.log(m.toISOString())
+
+  // Date.now() is a number (value itself is nondeterministic, so only its type is asserted).
+  console.log(typeof Date.now())
+
+  // Leap day.
+  console.log(new Date(Date.UTC(2020, 1, 29)).toISOString())
+}
+
+{
   // MVP test: do-while loop (JS equivalent of do_while.tish)
   let i = 0;
   do {
@@ -1248,6 +1329,47 @@
   const s = "abc";
   for (const c of s)
     console.log("char:", c);
+}
+
+{
+  // Regression: `for-of` over an EMPTY array must run the body zero times. The
+  // bytecode VM used to bottom-test the loop, so an empty array ran the body once
+  // (reading arr[0] -> null) and `continue` skipped the increment (infinite loop).
+
+  // empty array literal: body never runs
+  let total = 0
+  for (let x of []) { total = total + x }
+  console.log(total)
+
+  // empty array via a variable
+  let empty = []
+  let ran = false
+  for (let x of empty) { ran = true }
+  console.log(ran)
+
+  // `continue` reaches the increment (was: infinite loop)
+  let kept = []
+  for (let x of [1, 2, 3, 4]) {
+    if (x === 2) { continue }
+    kept.push(x)
+  }
+  console.log(kept.join(","))
+
+  // `break` still exits
+  let firsts = []
+  for (let x of [5, 6, 7]) {
+    if (x === 7) { break }
+    firsts.push(x)
+  }
+  console.log(firsts.join(","))
+
+  // empty inner loop inside a non-empty outer loop
+  let acc = 0
+  for (let i of [1, 2, 3]) {
+    for (let j of []) { acc = acc + 100 }
+    acc = acc + i
+  }
+  console.log(acc)
 }
 
 {
@@ -1355,6 +1477,26 @@
 }
 
 {
+  // Hand-written JS reference for interface_decl.tish (interface is type-only, erased).
+
+  let p = { x: 3, y: 4 };
+  console.log(p.x);
+  console.log(p.y);
+
+  function manhattan(a) {
+    return a.x + a.y;
+  }
+  console.log(manhattan(p));
+
+  let pts = [{ x: 1, y: 1 }, { x: 2, y: 3 }];
+  let sum = 0;
+  for (let q of pts) {
+    sum = sum + manhattan(q);
+  }
+  console.log(sum);
+}
+
+{
   // MVP perf: JSON.parse and JSON.stringify
   const obj = { x: 1, y: "hi", z: true };
   const s = JSON.stringify(obj);
@@ -1382,6 +1524,55 @@
   console.log("string length:", s.length);
   console.log("empty array:", [].length);
   console.log("empty string:", "".length);
+}
+
+{
+  // `Map`/`Set` `.values()` / `.keys()` / `.entries()` return real iterators: usable via
+  // `.next()` (→ { value, done }) and in `for…of` / spread, identical to node. Outputs are
+  // reduced to scalars so nothing depends on iterator-display formatting.
+  const m = new Map([["a", 1], ["b", 2], ["c", 3]])
+  let vs = 0
+  for (const v of m.values()) { vs = vs + v }
+  console.log(vs)
+  let ks = ""
+  for (const k of m.keys()) { ks = ks + k }
+  console.log(ks)
+  let es = ""
+  for (const e of m.entries()) { es = es + e[0] + e[1] }
+  console.log(es)
+  const it = m.values()
+  console.log(it.next().value, it.next().value)
+  console.log([...m.keys()].join(","))
+  console.log([...m.values()].length)
+  const s = new Set([10, 20, 30])
+  let ss = 0
+  for (const v of s.values()) { ss = ss + v }
+  console.log(ss)
+  console.log([...s.values()].join("-"))
+  console.log(new Map().values().next().done)
+  // Set.keys() / Set.entries() (entries yields [v, v] pairs).
+  console.log([...s.keys()].join("-"))
+  let se = ""
+  for (const e of s.entries()) { se = se + e[0] + ":" + e[1] + " " }
+  console.log(se.trim())
+  // Map.entries() pair via manual .next().
+  const me = m.entries()
+  const r = me.next().value
+  console.log(r[0], r[1])
+  // Iterators are STATEFUL: a partial .next() then for-of resumes from the current position.
+  const it2 = m.values()
+  it2.next()                                  // consume the first (1)
+  let rest = 0
+  for (const v of it2) { rest = rest + v }     // resumes -> 2 + 3
+  console.log(rest)
+  // Independent iterators from the same Map have separate positions.
+  const i1 = m.values()
+  const i2 = m.values()
+  i1.next()
+  console.log(i2.next().value)                 // i2 starts fresh -> 1
+  // next() past the end keeps returning done:true / value undefined.
+  const it3 = new Set([7]).values()
+  console.log(it3.next().value, it3.next().done, it3.next().done)
 }
 
 {
@@ -1853,6 +2044,62 @@
   console.log("Default parameters (with arg): " + (end - start) + "ms");
 
   console.log("=== Performance tests complete ===");
+}
+
+{
+  // Radix-prefixed integer literals: hex `0x`/`0X`, octal `0o`/`0O`, binary `0b`/`0B`,
+  // with optional `_` digit separators. JS semantics — non-negative integers; the value
+  // is backend-agnostic so interp / VM / native / node all agree.
+  console.log(0xff)
+  console.log(0xFF)
+  console.log(0X1a)
+  console.log(0o17)
+  console.log(0O7)
+  console.log(0b1010)
+  console.log(0B0)
+  console.log(0xdeadbeef)
+  console.log(0xFF_FF)
+  console.log(0b1111_0000)
+  console.log(255 & 0xff)
+  console.log(0xf0 | 0x0f)
+  console.log(0xff ^ 0x0f)
+  console.log(1 << 0x4)
+  console.log(0xffffffff >>> 0)
+  console.log(0x10 + 0o10 + 0b10)
+  let mask = 0xcafe
+  console.log(mask)
+  // Leading zero stays decimal (not legacy octal).
+  console.log(07)
+  console.log(0)
+}
+
+{
+  // JS `Number.prototype.toString` (radix 10): exponential notation once the decimal point
+  // lands past digit 21 or before digit −6, plain decimal otherwise — identical across
+  // interp / VM / native / node, for `console.log`, `String()`, and `+` coercion.
+  console.log(6.022e23)
+  console.log(1e-7)
+  console.log(1e21)
+  console.log(1e-6)
+  console.log(1234567890123456789012)
+  console.log(0.0000001)
+  console.log(123.456)
+  console.log(-0)
+  console.log(Infinity)
+  console.log(-Infinity)
+  console.log(NaN)
+  console.log(1e100)
+  console.log(1.7976931348623157e308)
+  console.log(5e-324)
+  console.log(0.1 + 0.2)
+  console.log(-1e21)
+  console.log(100000)
+  console.log(21000000000000000000)
+  // string coercion + templates must agree (these are constant-folded too)
+  console.log("" + 6.022e23)
+  console.log(`val=${1e-7}`)
+  let x = 9.5e-7
+  console.log("x is " + x)
 }
 
 {
@@ -2531,6 +2778,29 @@
 }
 
 {
+  // Regression: a rest parameter called with NO trailing args must bind to an
+  // empty array (`[]`), so `for-of` over it runs zero times. The bytecode VM used
+  // to do one spurious iteration (reading arr[0] -> null) and print NaN.
+  function sum(...a) {
+    let t = 0
+    for (let x of a) { t = t + x }
+    return t
+  }
+  console.log(sum())
+  console.log(sum(1))
+  console.log(sum(1, 2, 3))
+
+  // rest parameter after a fixed parameter
+  function tail(first, ...rest) {
+    let n = 0
+    for (let r of rest) { n = n + r }
+    return first + n
+  }
+  console.log(tail(10))
+  console.log(tail(10, 1, 2, 3))
+}
+
+{
   // MVP test: rest parameters
   function sum(...args) {
     let total = 0;
@@ -2545,6 +2815,25 @@
     return first + ":" + rest.length;
   }
   console.log(greet("a", "b", "c"));
+}
+
+{
+  // Scientific / exponent notation in numeric literals: `e`/`E`, optional sign, digits.
+  // Lexer-level feature; values are plain f64 so every backend + node agree. (Values are
+  // kept inside JS's plain-decimal display range — exponent in [-6, 20] — since matching
+  // V8's exponential `Number.toString` for very large/small numbers is a separate concern.)
+  console.log(1.5e-3)
+  console.log(1e10)
+  console.log(2E+3)
+  console.log(5e-1)
+  console.log(1.5e3 + 1)
+  console.log(3e0)
+  console.log(1.23e6)
+  console.log(1e-4)
+  console.log(10e2)
+  let x = 2.5e2
+  console.log(x * 2)
+  console.log(1.25E2 - 25)
 }
 
 {
@@ -2590,6 +2879,67 @@
     console.log("if block b:", b);
   }
   console.log("outer b after if:", b);
+}
+
+{
+  // `new Set(...)` and `new Map(...)` — constructors, methods, and the computed `.size`, identical
+  // across interp / VM / native / node. Iteration uses `.values()` / `.keys()` (which return arrays);
+  // outputs are reduced to scalars so nothing depends on collection-display formatting.
+
+  // ── Set ──────────────────────────────────────────────────────────────────────
+  let s = new Set([1, 2, 2, 3, 3, 3])
+  console.log(s.size)        // 3 (deduped)
+  console.log(s.has(2))      // true
+  console.log(s.has(9))      // false
+  s.add(4)
+  s.add(2)                   // duplicate — no-op
+  console.log(s.size)        // 4
+  console.log(s.delete(1))   // true
+  console.log(s.delete(1))   // false (already removed)
+  console.log(s.size)        // 3
+
+  let st = 0
+  for (let v of s.values()) { st = st + v }
+  console.log(st)            // 2 + 3 + 4 = 9
+
+  s.clear()
+  console.log(s.size)        // 0
+
+  // NaN collapses to a single member (SameValueZero).
+  let sn = new Set([NaN, NaN])
+  console.log(sn.size)       // 1
+  console.log(sn.has(NaN))   // true
+
+  // ── Map ──────────────────────────────────────────────────────────────────────
+  let m = new Map([["a", 1], ["b", 2]])
+  console.log(m.size)        // 2
+  console.log(m.get("a"))    // 1
+  console.log(m.has("b"))    // true
+  console.log(m.has("z"))    // false
+  m.set("c", 3)
+  m.set("a", 9)              // update existing key
+  console.log(m.size)        // 3
+  console.log(m.get("a"))    // 9
+  console.log(m.delete("b")) // true
+  console.log(m.size)        // 2
+
+  let mt = 0
+  for (let v of m.values()) { mt = mt + v }
+  console.log(mt)            // 9 + 3 = 12
+
+  let mk = ""
+  for (let k of m.keys()) { mk = mk + k }
+  console.log(mk)            // "ac" (insertion order; b removed)
+
+  m.clear()
+  console.log(m.size)        // 0
+
+  // Numeric keys.
+  let mn = new Map()
+  mn.set(1, "one")
+  mn.set(2, "two")
+  console.log(mn.get(1))     // "one"
+  console.log(mn.size)       // 2
 }
 
 {
@@ -3018,6 +3368,287 @@
 }
 
 {
+  // Hand-written JS reference for typed_array_forof.tish (type-erased).
+
+  let xs = [3, 1, 4, 1, 5, 9, 2, 6];
+  let total = 0;
+  for (let x of xs) {
+    total = total + x;
+  }
+  console.log(total);
+
+  let prod = 1;
+  for (let x of xs) {
+    prod = prod * x;
+  }
+  console.log(prod);
+
+  let words = ["a", "b", "c"];
+  let joined = "";
+  for (let w of words) {
+    joined = joined + w;
+  }
+  console.log(joined);
+
+  let ys = [10, 20, 30];
+  let s = 0;
+  for (let y of ys) {
+    s = s + y;
+  }
+  console.log(s);
+}
+
+{
+  // Hand-written JS reference for typed_array_hof.tish (type-erased).
+
+  let xs = [3, 1, 4, 1, 5, 9, 2, 6];
+
+  let sum = xs.reduce((a, b) => a + b, 0);
+  console.log(sum);
+  let prod = xs.reduce((a, b) => a * b, 1);
+  console.log(prod);
+
+  let doubled = xs.map((x) => x * 2);
+  console.log(doubled.reduce((a, b) => a + b, 0));
+
+  let big = xs.filter((x) => x > 3);
+  console.log(big.length);
+  console.log(big.reduce((a, b) => a + b, 0));
+
+  let hasBig = xs.some((x) => x > 8);
+  console.log(hasBig);
+  let allPos = xs.every((x) => x > 0);
+  console.log(allPos);
+  let allBig = xs.every((x) => x > 3);
+  console.log(allBig);
+
+  let ys = [10, 20, 30];
+  console.log(ys.reduce((a, b) => a + b, 0));
+}
+
+{
+  // Hand-written JS reference for typed_array_literal_infer.tish (type-erased).
+
+  let nums = [10, 20, 30, 40];
+  let total = 0;
+  for (let n of nums) {
+    total = total + n;
+  }
+  console.log(total);
+  console.log(nums.length);
+
+  let names = ["a", "b", "c"];
+  let joined = "";
+  for (let s of names) {
+    joined = joined + s;
+  }
+  console.log(joined);
+}
+
+{
+  // Hand-written JS reference for typed_array_of_structs.tish (type-erased).
+
+  let pts = [{ x: 1, y: 2 }, { x: 3, y: 4 }, { x: 5, y: 6 }];
+  console.log(pts[0].x);
+  console.log(pts[2].y);
+
+  let sum = 0;
+  for (let p of pts) {
+    sum = sum + p.x + p.y;
+  }
+  console.log(sum);
+}
+
+{
+  // Typed arrays — constructors, element coercion, statics, indexing, length, and iteration, identical
+  // across interp / VM / native / node. Coercion happens at construction (`new`, `.from`, `.of`); the
+  // backing is a plain array so indexing / `.length` / `for…of` / array methods all work. Outputs are
+  // elements/scalars (never the array object) so nothing depends on typed-array display formatting.
+
+  // Float32: rounds to f32 precision (0.1 is not representable in f32).
+  let f32 = new Float32Array([1.5, 0.1])
+  console.log(f32.length)
+  console.log(f32[0])              // 1.5 (exact)
+  console.log(f32[1] === 0.1)     // false — stored as the f32-rounded double
+  console.log(f32[1] < 0.1001 && f32[1] > 0.0999)  // true
+
+  // Float64: exact.
+  let f64 = new Float64Array([1.1, 2.2])
+  console.log(f64[0], f64[1])
+
+  // Uint8: truncate + wrap mod 256.
+  let u8 = new Uint8Array([300, -1, 256, 7, 3.9])
+  console.log(u8[0], u8[1], u8[2], u8[3], u8[4])   // 44 255 0 7 3
+
+  // Int8: signed wrap.
+  let i8 = new Int8Array([127, 128, -129, 256])
+  console.log(i8[0], i8[1], i8[2], i8[3])          // 127 -128 127 0
+
+  // Uint8Clamped: clamp to 0..255, round half to even.
+  let c = new Uint8ClampedArray([-5, 300, 2.5, 3.5, 0.5])
+  console.log(c[0], c[1], c[2], c[3], c[4])        // 0 255 2 4 0
+
+  // 16/32-bit wraps.
+  console.log(new Int16Array([32768, -32769])[0], new Int16Array([-32769])[0])  // -32768 32767
+  console.log(new Uint16Array([65536, 65537])[0], new Uint16Array([65537])[0])  // 0 1
+  console.log(new Int32Array([2147483648])[0])     // -2147483648
+  console.log(new Uint32Array([4294967296, 4294967297])[1])  // 1
+
+  // Length constructor → zero-filled.
+  let z = new Uint16Array(4)
+  console.log(z.length, z[0], z[3])                // 4 0 0
+
+  // Non-numeric → NaN → 0 for integer views.
+  let n = new Int32Array([null, "x"])
+  console.log(n[0], n[1])                          // 0 0
+
+  // Statics.
+  console.log(Uint8Array.of(1, 2, 300)[2])         // 44
+  console.log(Int32Array.from([1.9, 2.9, 3.9])[1]) // 2
+  console.log(Uint8Array.BYTES_PER_ELEMENT)        // 1
+  console.log(Float64Array.BYTES_PER_ELEMENT)      // 8
+  console.log(Int32Array.BYTES_PER_ELEMENT)        // 4
+
+  // Iteration + array methods (it's a real array underneath).
+  let sum = 0
+  for (let x of new Uint8Array([10, 20, 30])) { sum = sum + x }
+  console.log(sum)                                 // 60
+  console.log(new Float64Array([1, 2, 3, 4]).reduce((a, b) => a + b, 0))  // 10
+}
+
+{
+  let b = { value: 42 };
+  console.log(b.value + 1);
+  let s = { value: "hi" };
+  console.log(s.value);
+  let p = { first: 7, second: "x" };
+  console.log(p.first);
+  console.log(p.second);
+}
+
+{
+  function identity(x) { return x; }
+  console.log(identity(5));
+  console.log(identity("hi"));
+  function first(xs) { return xs[0]; }
+  let a = [10, 20, 30];
+  console.log(first(a));
+  let b = { value: 42 };
+  console.log(b.value);
+  let arr = [1, 2, 3];
+  console.log(arr[1]);
+  console.log(arr.length);
+}
+
+{
+  let m = [[1, 2], [3, 4]];
+  console.log(m[0][1]);
+  let p = { name: "x", age: 30 };
+  console.log(p.name);
+  console.log(p.age);
+  let d = { legs: 4, bark: true };
+  console.log(d.legs);
+  console.log(d.bark);
+}
+
+{
+  // Hand-written JS reference for typed_param_loopbound.tish (type-erased).
+
+  function countUp(n) {
+    let total = 0;
+    for (let i = 0; i < n; i = i + 1) {
+      total = total + i;
+    }
+    return total;
+  }
+  console.log(countUp(10));
+  console.log(countUp(100));
+  console.log(countUp(0));
+
+  function label(x) {
+    return "v=" + x;
+  }
+  console.log(label(5));
+  console.log(label("hi"));
+}
+
+{
+  // Hand-written JS reference for typed_rest_params.tish (type-erased).
+
+  function sum(...args) {
+    let total = 0;
+    for (const n of args) {
+      total = total + n;
+    }
+    return total;
+  }
+  console.log(sum(1, 2, 3, 4, 5));
+  console.log(sum(10, 20));
+
+  function maxOf(...xs) {
+    let m = 0;
+    for (const x of xs) {
+      if (x > m) {
+        m = x;
+      }
+    }
+    return m;
+  }
+  console.log(maxOf(3, 9, 2, 7));
+
+  function scaledSum(k, ...rest) {
+    let acc = 0;
+    for (const r of rest) {
+      acc = acc + r * k;
+    }
+    return acc;
+  }
+  console.log(scaledSum(2, 1, 2, 3));
+}
+
+{
+  // Hand-written JS reference for typed_strings.tish (type annotations stripped).
+  // Used by scripts/run_parity_compare.sh to check node parity. Output must match
+  // tests/core/typed_strings.tish.expected.
+
+  let a = "foo";
+  let b = "bar";
+
+  console.log(a + b);
+  console.log(a + b + a);
+  console.log(a + " " + b);
+
+  console.log(a + b === "foobar");
+  console.log(a === "foo");
+  console.log(a !== b);
+  console.log(a === b);
+
+  function join(x, y) {
+    return x + y;
+  }
+  console.log(join("hello", "world"));
+  console.log(join(a, b) === "foobar");
+
+  let n = 3;
+  console.log("count=" + n);
+  console.log(a + n);
+}
+
+{
+  let x = 5;
+  console.log(x);
+  let y = null;
+  console.log(y);
+  let s = "on";
+  console.log(s);
+  let pair = [7, "z"];
+  console.log(pair[0]);
+  console.log(pair[1]);
+  let n = 42 + 8;
+  console.log(n);
+}
+
+{
   // MVP test: typeof operator (JS equivalent of typeof.tish)
   console.log(typeof 1);
   console.log(typeof "hi");
@@ -3080,6 +3711,54 @@
       return total;
   }
   console.log(sum(1, 2, 3, 4, 5));
+}
+
+{
+  // `>>>` unsigned right shift + the bitwise family with JS ToInt32/ToUint32 (modulo 2^32,
+  // not a saturating cast) — exact across interp / VM / native / node, incl. large hash values.
+  console.log(-1 >>> 0)
+  console.log(-1 >>> 1)
+  console.log(256 >>> 4)
+  console.log(5 >>> 0)
+  console.log(4294967295 >>> 0)
+  console.log(1 << 4)
+  console.log(-8 >> 1)
+  console.log(1 << 35)
+  console.log(255 & 4294967295)
+  console.log(2166136261 ^ 16777619)
+  console.log((2166136261 * 16777619) >>> 0)
+  console.log(~0)
+  console.log(~5)
+  console.log(5 >>> -1)
+  // FNV-1a-style hashing loop: every op stays in the uint32 range via `>>> 0`.
+  function hash(n) {
+    let h = 2166136261
+    for (let i = 0; i < n; i++) {
+      h = h ^ (i & 255)
+      h = (h * 16777619) >>> 0
+      h = (h << 13) | (h >>> 19)
+    }
+    return h >>> 0
+  }
+  console.log(hash(1000))
+  // ToInt32 / ToUint32 are MODULO 2^32 (not a saturating cast) — the whole point of the fix.
+  console.log((4294967296 + 5) | 0)   // 2^32 wraps to 0, +5 -> 5
+  console.log(4294967296 & 1)         // ToInt32(2^32)=0 -> 0
+  console.log(4294967297 & 1)         // ToInt32(2^32+1)=1 -> 1
+  console.log(4294967296 >>> 0)       // ToUint32(2^32)=0
+  console.log(3.9 | 0)                // truncate toward zero -> 3
+  console.log(-3.9 | 0)               // -> -3
+  console.log(2147483648 | 0)         // 2^31 wraps to the negative side -> -2147483648
+  console.log(2147483648 >>> 0)       // ToUint32 keeps it positive -> 2147483648
+  console.log(-2147483648 >>> 0)      // -> 2147483648
+  console.log(4294967295 >> 0)        // ToInt32(2^32-1) = -1
+  console.log(4294967295 >> 1)        // sign-extends -> -1
+  console.log(1 << 32)                // shift count masks to 0 -> 1
+  console.log(1 << 33)                // -> 2
+  console.log(1 << 64)                // 64 & 31 = 0 -> 1
+  console.log(NaN | 0)                // ToInt32(NaN) = 0
+  console.log(Infinity | 0)           // 0
+  console.log((0 - Infinity) >>> 0)   // ToUint32(-Infinity) = 0
 }
 
 {
