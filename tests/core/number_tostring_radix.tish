@@ -1,0 +1,16 @@
+// Number.prototype.toString([radix]) (issue #59)
+let n = 255
+console.log(n.toString())
+console.log(n.toString(10))
+console.log(n.toString(16))
+console.log(n.toString(2))
+let big = 3735928559
+console.log(big.toString(16))
+let ten = 10
+console.log(ten.toString(2))
+let zero = 0
+console.log(zero.toString(16))
+let neg = -26
+console.log(neg.toString(16))
+let frac = 123.456
+console.log(frac.toString())

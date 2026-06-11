@@ -23,3 +23,74 @@ pub fn to_fixed(n: &Value, digits: &Value) -> Value {
     } as usize;
     Value::String(format!("{:.*}", d, num).into())
 }
+
+/// `Number.prototype.toString([radix])` — ECMA-262 §21.1.3.6.
+///
+/// Radix defaults to 10 (canonical JS number formatting). For radix 2–36 the value is
+/// rendered in that base: sign, integer part via repeated division, and a fractional part
+/// (bounded to 52 digits, like V8). NaN / ±Infinity stringify as in base 10 regardless of
+/// radix. An out-of-range radix yields `"RadixError"` so the caller can surface a RangeError.
+pub fn to_string(n: &Value, radix: &Value) -> Value {
+    let num = match n {
+        Value::Number(x) => *x,
+        _ => f64::NAN,
+    };
+    let r = match radix {
+        Value::Number(x) => *x as i64,
+        _ => 10,
+    };
+    match number_to_string_radix(num, r) {
+        Some(s) => Value::String(s.into()),
+        None => Value::String("RadixError".into()),
+    }
+}
+
+/// Backend-agnostic core of `Number.prototype.toString`: works on a plain `f64` so the
+/// tree-walk interpreter (whose `Value` is a distinct type) can share the exact same
+/// formatting. Returns `None` for an out-of-range radix (caller surfaces a RangeError).
+pub fn number_to_string_radix(num: f64, radix: i64) -> Option<String> {
+    if !(2..=36).contains(&radix) {
+        return None;
+    }
+    if radix == 10 || num.is_nan() || num.is_infinite() {
+        return Some(tishlang_core::js_number_to_string(num));
+    }
+    let radix = radix as u32;
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let negative = num < 0.0;
+    let value = num.abs();
+    let int_part = value.trunc();
+    let mut frac = value - int_part;
+
+    // Integer part: collect base-`radix` digits least-significant first, then reverse.
+    let mut int_digits = Vec::new();
+    let mut i = int_part;
+    if i == 0.0 {
+        int_digits.push(b'0');
+    }
+    while i >= 1.0 {
+        let d = (i % radix as f64) as usize;
+        int_digits.push(DIGITS[d]);
+        i = (i / radix as f64).trunc();
+    }
+    int_digits.reverse();
+    let mut out = String::with_capacity(int_digits.len() + 2);
+    if negative {
+        out.push('-');
+    }
+    out.push_str(std::str::from_utf8(&int_digits).unwrap());
+
+    // Fractional part: multiply-by-radix, emitting the integer overflow each step.
+    if frac > 0.0 {
+        out.push('.');
+        let mut count = 0;
+        while frac > 0.0 && count < 52 {
+            frac *= radix as f64;
+            let d = frac.trunc() as usize;
+            out.push(DIGITS[d] as char);
+            frac -= frac.trunc();
+            count += 1;
+        }
+    }
+    Some(out)
+}

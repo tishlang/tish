@@ -3182,6 +3182,10 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     let digits = args.first().unwrap_or(&Value::Null);
                     num_builtins::to_fixed(&Value::Number(n_val), digits)
                 }),
+                "toString" => make_native_fn(move |args: &[Value]| {
+                    let radix = args.first().unwrap_or(&Value::Null);
+                    num_builtins::to_string(&Value::Number(n_val), radix)
+                }),
                 _ => return Err(format!("Property '{}' not found", key)),
             };
             Ok(Value::Function(method))

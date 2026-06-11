@@ -193,6 +193,17 @@ pub fn number_to_fixed(n: &Value, digits: &Value) -> Value {
     tishlang_builtins::number::to_fixed(n, digits)
 }
 
+/// `.toString([radix])` for the compiled backend (issue #59). A number receiver uses the
+/// shared radix formatter so it stays byte-identical with the VM / interpreter; any other
+/// receiver falls back to its normal JS string, so `[1,2].toString()` / `obj.toString()`
+/// keep working.
+pub fn number_to_string(n: &Value, radix: &Value) -> Value {
+    match n {
+        Value::Number(_) => tishlang_builtins::number::to_string(n, radix),
+        other => Value::String(other.to_js_string().into()),
+    }
+}
+
 /// Operators module for compound assignment operations
 pub mod ops {
     use tishlang_core::Value;
