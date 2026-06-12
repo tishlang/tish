@@ -4,20 +4,27 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-fn run(fixture: &str, tmp: &str) -> String {
+fn run_on(backend: &str, fixture: &str, tmp: &str) -> String {
     let tish = PathBuf::from(env!("CARGO_BIN_EXE_tish"));
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
         .join(fixture);
     let out = Command::new(&tish)
-        .args(["run", "--feature", "fs,process", path.to_str().unwrap()])
+        .args([
+            "run",
+            "--backend",
+            backend,
+            "--feature",
+            "fs,process",
+            path.to_str().unwrap(),
+        ])
         .env("FS_TMP", tmp)
         .output()
         .expect("spawn tish run");
     assert!(
         out.status.success(),
-        "tish run {fixture} failed: {}",
+        "tish run --backend {backend} {fixture} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).into_owned()
@@ -33,37 +40,43 @@ fn tmp_dir(tag: &str) -> String {
     d.to_str().unwrap().to_string()
 }
 
+const SYNC_EXPECTED: &str = "read=hi!\n\
+     exists=true,false\n\
+     size=3,file=true,dir=false\n\
+     dir=x.txt\n\
+     renamed=false,true\n\
+     rm=false\n\
+     const=4\n\
+     done\n";
+
+const PROMISES_EXPECTED: &str = "read=async hello\n\
+     size=11\n\
+     dir=x\n\
+     access-missing-rejected=true\n\
+     done\n";
+
 #[test]
-fn node_fs_sync_surface() {
-    let tmp = tmp_dir("sync");
-    let out = run("fs_parity_sync.tish", &tmp);
-    assert_eq!(
-        out,
-        "read=hi!\n\
-         exists=true,false\n\
-         size=3,file=true,dir=false\n\
-         dir=x.txt\n\
-         renamed=false,true\n\
-         rm=false\n\
-         const=4\n\
-         done\n",
-        "sync surface mismatch"
-    );
-    let _ = std::fs::remove_dir_all(&tmp);
+fn node_fs_sync_surface_on_every_backend() {
+    for backend in ["vm", "interp"] {
+        let tmp = tmp_dir(&format!("sync_{backend}"));
+        assert_eq!(
+            run_on(backend, "fs_parity_sync.tish", &tmp),
+            SYNC_EXPECTED,
+            "sync surface mismatch on {backend}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
 
 #[test]
-fn node_fs_promises_surface() {
-    let tmp = tmp_dir("prom");
-    let out = run("fs_parity_promises.tish", &tmp);
-    assert_eq!(
-        out,
-        "read=async hello\n\
-         size=11\n\
-         dir=x\n\
-         access-missing-rejected=true\n\
-         done\n",
-        "promises surface mismatch"
-    );
-    let _ = std::fs::remove_dir_all(&tmp);
+fn node_fs_promises_surface_on_every_backend() {
+    for backend in ["vm", "interp"] {
+        let tmp = tmp_dir(&format!("prom_{backend}"));
+        assert_eq!(
+            run_on(backend, "fs_parity_promises.tish", &tmp),
+            PROMISES_EXPECTED,
+            "promises surface mismatch on {backend}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
