@@ -1239,6 +1239,10 @@ impl Printer {
                 self.buf.push_str("typeof ");
                 self.child(operand, PREC_POSTFIX);
             }
+            Expr::Delete { target, .. } => {
+                self.buf.push_str("delete ");
+                self.child(target, PREC_POSTFIX);
+            }
             Expr::PostfixInc { name, .. } => {
                 self.buf.push_str(name.as_ref());
                 self.buf.push_str("++");
@@ -1519,6 +1523,7 @@ fn expr_prec(e: &Expr) -> u8 {
         Expr::Binary { op, .. } => binop_prec(*op),
         Expr::Unary { .. }
         | Expr::TypeOf { .. }
+        | Expr::Delete { .. }
         | Expr::Await { .. }
         | Expr::PrefixInc { .. }
         | Expr::PrefixDec { .. } => 14,
@@ -2135,5 +2140,18 @@ let x = add(1, 2)
 ";
         let out = format_source(src).unwrap();
         assert_eq!(out, src, "{out:?}");
+    }
+
+    #[test]
+    fn formats_delete_expression() {
+        // Regression: Expr::Delete (the `delete` operator) must be handled by the formatter —
+        // a non-exhaustive `match` here broke the `tish-format` build once the delete feature landed.
+        let src = "fn f(o, k) {\ndelete o.a\ndelete o[\"b\"]\nlet x = delete o[k]\nreturn x\n}\n";
+        let out = format_source(src).unwrap();
+        assert!(out.contains("delete o.a"), "{out}");
+        assert!(out.contains("delete o[\"b\"]"), "{out}");
+        assert!(out.contains("delete o[k]"), "{out}");
+        tishlang_parser::parse(&out).unwrap();
+        assert_eq!(format_source(&out).unwrap(), out, "not idempotent:\n{out}");
     }
 }
