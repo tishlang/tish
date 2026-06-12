@@ -1089,13 +1089,13 @@ impl Codegen {
     fn builtin_native_module_rust_init(&self, spec: &str, export_name: &str) -> Option<String> {
         let init = match spec {
             "tish:fs" if self.has_feature("fs") => match export_name {
-                    // legacy tish names — unchanged contracts
-                    "readFile" => Some("Value::native(|args: &[Value]| tish_read_file(args))"),
-                    "writeFile" => Some("Value::native(|args: &[Value]| tish_write_file(args))"),
+                    // tish names → the dual fs_ext functions (sync, or Node callback if a fn is passed)
+                    "readFile" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::read_file(args))"),
+                    "writeFile" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::write_file(args))"),
                     "fileExists" => Some("Value::native(|args: &[Value]| tish_file_exists(args))"),
                     "isDir" => Some("Value::native(|args: &[Value]| tish_is_dir(args))"),
-                    "readDir" => Some("Value::native(|args: &[Value]| tish_read_dir(args))"),
-                    "readFileBytes" => Some("Value::native(|args: &[Value]| tish_read_file_bytes(args))"),
+                    "readDir" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::readdir(args))"),
+                    "readFileBytes" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::read_file_bytes(args))"),
                     // Node-compatible names + new methods (sync) — issue #122
                     "readFileSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::read_file(args))"),
                     "readFileBytesSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::read_file_bytes(args))"),

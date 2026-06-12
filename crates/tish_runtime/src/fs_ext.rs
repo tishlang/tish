@@ -36,10 +36,28 @@ fn settle(r: Result<Value, Value>) -> Value {
     }
 }
 
-/// Generate `pub fn $sync` and `pub fn $promise` over a `*_core`.
+/// Node callback form: the trailing arg is `(err, result) => …`. Run the op on the remaining
+/// args, invoke the callback with `(null, value)` on success or `(err, null)` on failure, and
+/// return null. The op is synchronous under the hood, so the callback fires synchronously.
+fn run_callback(core: fn(&[Value]) -> Result<Value, Value>, args: &[Value]) -> Value {
+    let cb = args.last().cloned().unwrap_or(Value::Null);
+    let op_args: &[Value] = if args.len() > 1 { &args[..args.len() - 1] } else { &[] };
+    let (err, data) = match core(op_args) {
+        Ok(v) => (Value::Null, v),
+        Err(e) => (e, Value::Null),
+    };
+    tishlang_core::value_call(&cb, &[err, data]);
+    Value::Null
+}
+
+/// Generate the sync export (dual: a trailing function arg switches to the Node callback form)
+/// and the promise export over a `*_core`.
 macro_rules! fs_method {
     ($sync:ident, $promise:ident, $core:ident) => {
         pub fn $sync(args: &[Value]) -> Value {
+            if let Some(Value::Function(_)) = args.last() {
+                return run_callback($core, args);
+            }
             unwrap($core(args))
         }
         pub fn $promise(args: &[Value]) -> Value {
