@@ -471,7 +471,7 @@ jobs:
           chmod +x npm/cargo-bindgen/platform/darwin-x64/tish-bindgen
 
           # dir:artifactPrefix:binary — mirror the tish/cargo-bindgen layout for the two wrapper packages
-          for entry in tish-format:fmt:tish-fmt tish-lint:lint:tish-lint; do
+          for entry in tish-format:fmt:tish-fmt tish-lint:lint:tish-lint tish-lsp:lsp:tish-lsp; do
             dir="${entry%%:*}"; rest="${entry#*:}"; pref="${rest%%:*}"; bin="${rest##*:}"
             for plat in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
               mkdir -p "npm/$dir/platform/$plat"
@@ -548,7 +548,7 @@ jobs:
       - name: Set @tishlang/tish-format + @tishlang/tish-lint package versions for npm pack
         if: steps.next_version.outputs.published == 'true'
         run: |
-          for dir in tish-format tish-lint; do
+          for dir in tish-format tish-lint tish-lsp; do
             node -e "
             const fs = require('fs');
             const f = './npm/$dir/package.json';
@@ -574,7 +574,7 @@ jobs:
         if: steps.next_version.outputs.published == 'true'
         run: |
           # dir:crate — each wrapper bundles the workspace so `postinstall` can cargo-build its bin if no prebuilt platform binary fits
-          for entry in tish-format:tish_fmt tish-lint:tish_lint; do
+          for entry in tish-format:tish_fmt tish-lint:tish_lint tish-lsp:tish_lsp; do
             dir="${entry%%:*}"; crate="${entry##*:}"
             cp Cargo.toml "npm/$dir/"
             cp LICENSE "npm/$dir/"
@@ -602,11 +602,14 @@ jobs:
           cd npm/cargo-bindgen && npm pack && cd ../..
           mv npm/cargo-bindgen/tishlang-cargo-bindgen-*.tgz cargo-bindgen-npm-package.tgz
 
-      - name: Create @tishlang/tish-format + @tishlang/tish-lint npm package tarballs
+      - name: Create @tishlang/tish-format + @tishlang/tish-lint + @tishlang/tish-lsp npm package tarballs
         if: steps.next_version.outputs.published == 'true'
         env:
           TISH_NPM_PACK_REQUIRE: "1"
         run: |
+          node npm/tish-lsp/scripts/install-bin.js
+          cd npm/tish-lsp && npm pack && cd ../..
+          mv npm/tish-lsp/tishlang-tish-lsp-*.tgz tish-lsp-npm-package.tgz
           node npm/tish-format/scripts/install-bin.js
           cd npm/tish-format && npm pack && cd ../..
           mv npm/tish-format/tishlang-tish-format-*.tgz tish-format-npm-package.tgz
@@ -733,3 +736,4 @@ jobs:
           upload_asset cargo-bindgen-npm-package.tgz "cargo-bindgen-npm-package.tgz" "npm @tishlang/cargo-bindgen (publish with: npm publish)" "application/octet-stream"
           upload_asset tish-format-npm-package.tgz "tish-format-npm-package.tgz" "npm @tishlang/tish-format (publish with: npm publish)" "application/octet-stream"
           upload_asset tish-lint-npm-package.tgz "tish-lint-npm-package.tgz" "npm @tishlang/tish-lint (publish with: npm publish)" "application/octet-stream"
+          upload_asset tish-lsp-npm-package.tgz "tish-lsp-npm-package.tgz" "npm @tishlang/tish-lsp (publish with: npm publish)" "application/octet-stream"
