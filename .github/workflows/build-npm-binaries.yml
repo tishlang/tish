@@ -312,11 +312,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set Cargo version for binary
+      - name: Set Cargo version for binaries
         shell: bash
         run: |
-          sed -i.bak "s/^version = .*/version = \"${{ needs.version.outputs.version }}\"/" crates/tish/Cargo.toml
-          rm -f crates/tish/Cargo.toml.bak
+          # Bump EVERY crate's [package] version, not just crates/tish — so the built binaries
+          # (tish, tish-lsp, tish-fmt, tish-lint, ...) report the release version via
+          # env!("CARGO_PKG_VERSION") (e.g. tish-lsp serverInfo.version, used by tish-vscode) instead
+          # of their committed dev version. Each crate Cargo.toml has exactly one top-level `version =`
+          # line, so `^version =` only ever matches the package version. (crates-release.yml does the same.)
+          find crates -name Cargo.toml -exec sed -i.bak "s/^version = .*/version = \"${{ needs.version.outputs.version }}\"/" {} +
+          find crates -name 'Cargo.toml.bak' -delete
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
