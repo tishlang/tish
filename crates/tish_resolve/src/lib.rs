@@ -3283,8 +3283,15 @@ fn refs_stmt(
                 refs_stmt(fb, program, source, name, def_span, out);
             }
         }
+        // Descend into exported declarations so references inside `export fn`/`export let`/
+        // `export default` bodies are counted (otherwise a binding used only there looks unused).
+        Statement::Export { declaration, .. } => match declaration.as_ref() {
+            ExportDeclaration::Named(inner) => {
+                refs_stmt(inner, program, source, name, def_span, out)
+            }
+            ExportDeclaration::Default(e) => refs_expr(e, program, source, name, def_span, out),
+        },
         Statement::Import { .. }
-        | Statement::Export { .. }
         | Statement::Break { .. }
         | Statement::Continue { .. }
         | Statement::TypeAlias { .. }
@@ -3552,6 +3559,58 @@ mod tests {
         assert_eq!(u.len(), 1);
         assert_eq!(u[0].name.as_ref(), "b");
         assert_eq!(u[0].kind, UnusedBindingKind::Import);
+    }
+
+    #[test]
+    fn import_used_in_exported_fn_body_not_unused() {
+        // Regression: a binding used only inside an `export fn` body was wrongly flagged unused
+        // because refs_stmt did not descend into Statement::Export.
+        let src = "import { publicUser } from \"./m\"\nexport fn toUserPublic(store, u) {\n  let pub = publicUser(u)\n  return pub\n}\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert!(u.is_empty(), "publicUser is used in the exported fn; u={u:?}");
+    }
+
+    #[test]
+    fn import_used_in_export_default_not_unused() {
+        let src = "import { p } from \"./m\"\nexport default p(1)\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert!(u.is_empty(), "p is used in export default; u={u:?}");
+    }
+
+    #[test]
+    fn import_used_in_exported_let_init_not_unused() {
+        let src = "import { p } from \"./m\"\nexport let x = p(1)\nx\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert!(u.is_empty(), "p is used in the exported let init; u={u:?}");
+    }
+
+    #[test]
+    fn genuinely_unused_import_still_flagged_with_export_present() {
+        // Guard against the fix over-counting: a truly-unused import is still reported even when an
+        // exported declaration is present in the module.
+        let src = "import { used, dead } from \"./m\"\nexport fn f() {\n  return used()\n}\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert_eq!(u.len(), 1, "only `dead` is unused; u={u:?}");
+        assert_eq!(u[0].name.as_ref(), "dead");
+        assert_eq!(u[0].kind, UnusedBindingKind::Import);
+    }
+
+    #[test]
+    fn reference_spans_include_uses_in_exported_fn_body() {
+        // Directly exercises the fixed walker (also backs find-references / rename).
+        let src = "import { publicUser } from \"./m\"\nexport fn f(u) {\n  return publicUser(u)\n}\n";
+        let program = parse(src).expect("parse");
+        let def = tishlang_ast::Span {
+            start: (1, 10),
+            end: (1, 20),
+        };
+        let refs = reference_spans_for_def(&program, src, "publicUser", def);
+        assert_eq!(refs.len(), 2, "def + one use in exported body; refs={refs:?}");
+        assert!(refs.contains(&def));
     }
 
     #[test]
