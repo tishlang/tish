@@ -363,10 +363,69 @@ impl<'a> Lexer<'a> {
             'n' => Ok('\n'),
             'r' => Ok('\r'),
             't' => Ok('\t'),
+            'b' => Ok('\u{0008}'),
+            'f' => Ok('\u{000C}'),
+            'v' => Ok('\u{000B}'),
+            '0' => Ok('\0'),
             '\\' => Ok('\\'),
+            // `\xNN` — exactly two hex digits → code point 0x00..=0xFF (JS/TS).
+            'x' => {
+                let cp = self.read_hex_digits(2)?;
+                char::from_u32(cp).ok_or_else(|| format!("Invalid \\x escape: \\x{:02X}", cp))
+            }
+            // `\uNNNN` (exactly four hex digits) or `\u{N..}` (1-6 hex digits, ES6).
+            'u' => {
+                let cp = if self.peek() == Some('{') {
+                    self.advance(); // consume '{'
+                    let cp = self.read_hex_until_brace()?;
+                    match self.advance() {
+                        Some('}') => cp,
+                        _ => return Err("Unterminated \\u{...} escape (expected '}')".to_string()),
+                    }
+                } else {
+                    self.read_hex_digits(4)?
+                };
+                // Lone surrogates (0xD800..=0xDFFF) are valid UTF-16 code units in JS but
+                // not Unicode scalar values; tish strings are UTF-8, so reject them.
+                char::from_u32(cp)
+                    .ok_or_else(|| format!("Invalid \\u escape: code point U+{:04X}", cp))
+            }
             c if extra_allowed.contains(&c) => Ok(c),
             _ => Err(format!("Unknown escape: \\{}", escaped)),
         }
+    }
+
+    /// Read exactly `n` hex digits and return the parsed code point.
+    fn read_hex_digits(&mut self, n: usize) -> Result<u32, String> {
+        let mut value: u32 = 0;
+        for _ in 0..n {
+            let c = self.advance().ok_or("Unterminated hex escape")?;
+            let digit = c
+                .to_digit(16)
+                .ok_or_else(|| format!("Invalid hex digit in escape: '{}'", c))?;
+            value = value * 16 + digit;
+        }
+        Ok(value)
+    }
+
+    /// Read 1-6 hex digits for a `\u{...}` escape (stops at `}`); validates the count
+    /// and that the value is within the Unicode range.
+    fn read_hex_until_brace(&mut self) -> Result<u32, String> {
+        let mut value: u32 = 0;
+        let mut count = 0;
+        while let Some(c) = self.peek() {
+            let Some(digit) = c.to_digit(16) else { break };
+            self.advance();
+            value = value * 16 + digit;
+            count += 1;
+            if count > 6 || value > 0x10_FFFF {
+                return Err("Invalid \\u{...} escape: code point out of range".to_string());
+            }
+        }
+        if count == 0 {
+            return Err("Empty \\u{} escape (expected hex digits)".to_string());
+        }
+        Ok(value)
     }
 
     fn read_string(&mut self, quote: char) -> Result<String, String> {
