@@ -435,6 +435,7 @@ fn collect_expr(
             collect_expr(value, source, lsp_line, lsp_char, best);
         }
         Expr::TypeOf { operand, .. } => collect_expr(operand, source, lsp_line, lsp_char, best),
+        Expr::Delete { target: del, .. } => collect_expr(del, source, lsp_line, lsp_char, best),
         Expr::PostfixInc { name, span } | Expr::PostfixDec { name, span } => {
             let sp = synthetic_name_span(span.start, name.as_ref());
             consider(source, lsp_line, lsp_char, &sp, name.clone(), best);
@@ -694,6 +695,9 @@ fn member_chain_collect_expr(
         }
         Expr::TypeOf { operand, .. } => {
             member_chain_collect_expr(operand, source, lsp_line, lsp_char, best)
+        }
+        Expr::Delete { target: del, .. } => {
+            member_chain_collect_expr(del, source, lsp_line, lsp_char, best)
         }
         Expr::PostfixInc { .. }
         | Expr::PostfixDec { .. }
@@ -1127,6 +1131,7 @@ fn walk_expr_resolve(
             None
         }
         Expr::TypeOf { operand, .. } => walk_expr_resolve(operand, scopes, target),
+        Expr::Delete { target: del, .. } => walk_expr_resolve(del, scopes, target),
         Expr::MemberAssign { object, value, .. } => walk_expr_resolve(object, scopes, target)
             .or_else(|| walk_expr_resolve(value, scopes, target)),
         Expr::IndexAssign {
@@ -1669,6 +1674,7 @@ fn check_unresolved_expr(expr: &Expr, scopes: &ScopeStack, out: &mut Vec<Unresol
             }
         }
         Expr::TypeOf { operand, .. } => check_unresolved_expr(operand, scopes, out),
+        Expr::Delete { target: del, .. } => check_unresolved_expr(del, scopes, out),
         Expr::MemberAssign { object, value, .. } => {
             check_unresolved_expr(object, scopes, out);
             check_unresolved_expr(value, scopes, out);
@@ -2142,6 +2148,7 @@ fn enumerate_expr(expr: &Expr, exported: bool, out: &mut Vec<BindingSite>) {
         | Expr::PrefixInc { .. }
         | Expr::PrefixDec { .. } => {}
         Expr::TypeOf { operand, .. } => enumerate_expr(operand, exported, out),
+        Expr::Delete { target: del, .. } => enumerate_expr(del, exported, out),
         Expr::MemberAssign { object, value, .. } => {
             enumerate_expr(object, exported, out);
             enumerate_expr(value, exported, out);
@@ -2801,6 +2808,9 @@ fn walk_expr_completion(
         Expr::TypeOf { operand, .. } => {
             walk_expr_completion(operand, source, lsp_line, lsp_char, stack, best)
         }
+        Expr::Delete { target: del, .. } => {
+            walk_expr_completion(del, source, lsp_line, lsp_char, stack, best)
+        }
         Expr::MemberAssign { object, value, .. } => {
             walk_expr_completion(object, source, lsp_line, lsp_char, stack, best);
             walk_expr_completion(value, source, lsp_line, lsp_char, stack, best);
@@ -3384,6 +3394,7 @@ fn refs_expr(
             refs_expr(value, program, source, name, def_span, out);
         }
         Expr::TypeOf { operand, .. } => refs_expr(operand, program, source, name, def_span, out),
+        Expr::Delete { target: del, .. } => refs_expr(del, program, source, name, def_span, out),
         Expr::PostfixInc { name: n, span } | Expr::PostfixDec { name: n, span } => {
             let sp = synthetic_name_span(span.start, n.as_ref());
             maybe_push(&sp, n, out);
