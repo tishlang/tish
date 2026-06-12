@@ -1094,6 +1094,7 @@ impl Codegen {
                     "fileExists" => Some("Value::native(|args: &[Value]| tish_file_exists(args))"),
                     "isDir" => Some("Value::native(|args: &[Value]| tish_is_dir(args))"),
                     "readDir" => Some("Value::native(|args: &[Value]| tish_read_dir(args))"),
+                    "readFileBytes" => Some("Value::native(|args: &[Value]| tish_read_file_bytes(args))"),
                     "mkdir" => Some("Value::native(|args: &[Value]| tish_mkdir(args))"),
                     _ => None,
                 },
@@ -1455,7 +1456,7 @@ impl Codegen {
             }
         }
         if self.has_feature("fs") {
-            self.write("use tishlang_runtime::{read_file as tish_read_file, write_file as tish_write_file, file_exists as tish_file_exists, is_dir as tish_is_dir, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
+            self.write("use tishlang_runtime::{read_file as tish_read_file, read_file_bytes as tish_read_file_bytes, write_file as tish_write_file, file_exists as tish_file_exists, is_dir as tish_is_dir, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
         }
         if self.has_feature("ws") {
             self.write("use tishlang_runtime::{web_socket_client as tish_ws_client, web_socket_server_construct as tish_ws_server_construct};\n");
