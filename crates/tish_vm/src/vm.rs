@@ -3416,12 +3416,9 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
                 None => Err("Index out of bounds".to_string()),
             }
         }
-        Value::Object(_) => object_get(obj, idx).ok_or_else(|| {
-            format!(
-                "Property '{}' not found",
-                idx.to_display_string()
-            )
-        }),
+        // A missing own property returns `null`, not a thrown error — matching dot reads
+        // (#66) and JS object semantics. Keeps `obj[key]` and `obj.key` in lockstep (#113).
+        Value::Object(_) => Ok(object_get(obj, idx).unwrap_or(Value::Null)),
         #[cfg(any(feature = "http", feature = "promise"))]
         Value::Promise(_) => {
             let key_arc: std::sync::Arc<str> = match idx {

@@ -9,6 +9,16 @@ console.log(r)
 let o2 = { x: { y: 5 } }
 console.log(o2.x.y)
 console.log(!o2.x.z)
+// Computed (bracket) reads of a missing key must behave identically to dot reads (issue #113):
+// a literal computed key, a variable key, and a nested one all return nullish, never throw.
+let k = "b"
+console.log(!o[k])
+console.log(!o["b"])
+console.log(!o2["x"]["z"])
+let m = {}
+let g = m["nope"] ? "has" : "missing"
+console.log(g)
 // merely reading a missing property must not throw — reaching this line proves it
 let probe = o.nope
+let probe2 = o["nope"]
 console.log("done")
