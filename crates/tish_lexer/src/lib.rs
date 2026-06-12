@@ -739,6 +739,21 @@ impl<'a> Lexer<'a> {
                         self.jsx_depth = (self.jsx_depth - 1).max(0);
                         self.jsx_stack.pop();
                         self.jsx_sync_in_opening_tag();
+                        // A child element just closed (`</span>` or `<br/>`). If a parent element
+                        // is still open and past its opening tag, we're back in that parent's
+                        // children region, so the following run is JSX text — re-enter text mode.
+                        // Without this, trailing text after a child element ("… as JSON") is lexed
+                        // as code and a bare keyword (`as`, `in`, `if`, …) breaks the parse (#108).
+                        //
+                        // Guard on `jsx_child_brace_depth == 0`: if the closed element lived inside a
+                        // `{…}` expression container (e.g. `<div>{items.map(x => <span/>)}</div>`),
+                        // we're still in that expression, not the parent's text children — entering
+                        // text mode there would swallow the following `)`/`,` as JsxText.
+                        if self.jsx_child_brace_depth == 0
+                            && self.jsx_stack.last().map(|e| !e.in_opener).unwrap_or(false)
+                        {
+                            self.jsx_after_gt = true;
+                        }
                     } else if let Some(top) = self.jsx_stack.last_mut() {
                         if top.in_opener && top.attr_value_braces > 0 {
                             // `>` is a comparison (or shift) token inside `{ ... }`, not end of opening tag.

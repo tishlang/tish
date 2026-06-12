@@ -28,6 +28,70 @@ mod tests {
     }
 
     #[test]
+    fn jsx_keyword_text_after_child_element() {
+        // #108: a text run *after* a nested child element must be lexed as JSX text, so a bare
+        // reserved keyword (`as`, `in`, `if`, `return`, `let`) in that run is plain text, not a
+        // keyword token. Text-only children already worked; the bug was failing to re-enter
+        // JSX-text mode once a child element had closed.
+        for kw in ["as", "in", "if", "return", "let"] {
+            let src = format!("fn V() {{ return <div><span>x</span> {kw} JSON</div> }}");
+            let program =
+                parse(&src).unwrap_or_else(|e| panic!("parse failed for trailing `{kw}`: {e}"));
+            let js = compile_with_jsx(&program, false).unwrap();
+            let expected = format!("[h(\"span\", null, [\"x\"]), \" {kw} JSON\"]");
+            assert!(
+                js.contains(&expected),
+                "trailing `{kw}` after child element: expected {expected:?} in output, got: {js}"
+            );
+        }
+    }
+
+    #[test]
+    fn jsx_text_between_and_after_multiple_children() {
+        // Text both between and after child elements stays text (incl. a keyword run between).
+        let src = r#"fn V() { return <div><span>x</span> as <b>y</b> in z</div> }"#;
+        let program = parse(src).unwrap();
+        let js = compile_with_jsx(&program, false).unwrap();
+        assert!(
+            js.contains(
+                "[h(\"span\", null, [\"x\"]), \" as \", h(\"b\", null, [\"y\"]), \" in z\"]"
+            ),
+            "{js}"
+        );
+    }
+
+    #[test]
+    fn jsx_self_closing_child_then_keyword_text() {
+        // A self-closing child (`<br/>`) followed by keyword text must also re-enter text mode.
+        let src = r#"fn V() { return <div><br/> as JSON</div> }"#;
+        let program = parse(src).unwrap();
+        let js = compile_with_jsx(&program, false).unwrap();
+        assert!(
+            js.contains("[h(\"br\", null, []), \" as JSON\"]"),
+            "{js}"
+        );
+    }
+
+    #[test]
+    fn jsx_child_element_inside_expr_container_not_text_mode() {
+        // Re-entering JSX text mode after a child closes must NOT happen when that child lived
+        // inside a `{…}` expression container — otherwise the `)`/`,` that follows is swallowed as
+        // JsxText ("Expected RParen, got JsxText"). Regression for the #108 fix itself, caught by
+        // the downstream suite (tish-audio / tish-midi use `{items.map(x => <li>{x}</li>)}`).
+        let src = r#"fn V(items) { return <ul>{items.map(x => <li>{x}</li>)}</ul> }"#;
+        let program = parse(src).expect("map-in-container must parse");
+        let js = compile_with_jsx(&program, false).unwrap();
+        assert!(js.contains("h(\"ul\""), "{js}");
+        assert!(js.contains(".map("), "{js}");
+
+        // And the combined case: a `{…}` container followed by trailing keyword text.
+        let src2 = r#"fn V(items) { return <div>{items.map(x => <span>{x}</span>)} as JSON</div> }"#;
+        let program2 = parse(src2).expect("container-then-text must parse");
+        let js2 = compile_with_jsx(&program2, false).unwrap();
+        assert!(js2.contains("\" as JSON\""), "{js2}");
+    }
+
+    #[test]
     fn jsx_text_whitespace_coalesced() {
         let src = r#"fn X() { return <p>First paragraph</p> }"#;
         let program = parse(src).unwrap();
