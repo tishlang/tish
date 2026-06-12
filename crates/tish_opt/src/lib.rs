@@ -787,6 +787,21 @@ fn fold_to_uint32(x: f64) -> u32 {
     }
 }
 
+/// Constant-fold a relational comparison (`<` `<=` `>` `>=`). Two string literals
+/// compare lexicographically; otherwise the numeric coercions `ln`/`rn` are used.
+/// `pred` maps the `Ordering` to a bool; a NaN-involved numeric comparison has no
+/// ordering and is `false` — matching the VM/interp/native runtime exactly.
+fn fold_relational<F>(left: &Literal, right: &Literal, ln: f64, rn: f64, pred: F) -> bool
+where
+    F: FnOnce(std::cmp::Ordering) -> bool,
+{
+    let ord = match (left, right) {
+        (Literal::String(a), Literal::String(b)) => Some(a.as_ref().cmp(b.as_ref())),
+        _ => ln.partial_cmp(&rn),
+    };
+    ord.map(pred).unwrap_or(false)
+}
+
 fn try_fold_binop(left: &Literal, op: BinOp, right: &Literal) -> Option<Literal> {
     use BinOp::*;
     let ln = literal_as_number(left);
@@ -819,10 +834,13 @@ fn try_fold_binop(left: &Literal, op: BinOp, right: &Literal) -> Option<Literal>
         Ne => Literal::Bool(!literal_strict_eq(left, right)),
         StrictEq => Literal::Bool(literal_strict_eq(left, right)),
         StrictNe => Literal::Bool(!literal_strict_eq(left, right)),
-        Lt => Literal::Bool(ln < rn),
-        Le => Literal::Bool(ln <= rn),
-        Gt => Literal::Bool(ln > rn),
-        Ge => Literal::Bool(ln >= rn),
+        // Relational ops fold lexicographically when BOTH operands are string
+        // literals (JS semantics — must match the VM/interp/native runtime), else
+        // numerically. A NaN-involved numeric comparison is always false.
+        Lt => Literal::Bool(fold_relational(left, right, ln, rn, |o| o.is_lt())),
+        Le => Literal::Bool(fold_relational(left, right, ln, rn, |o| o.is_le())),
+        Gt => Literal::Bool(fold_relational(left, right, ln, rn, |o| o.is_gt())),
+        Ge => Literal::Bool(fold_relational(left, right, ln, rn, |o| o.is_ge())),
         And => Literal::Bool(literal_is_truthy(left) && literal_is_truthy(right)),
         Or => Literal::Bool(literal_is_truthy(left) || literal_is_truthy(right)),
         // ToInt32/ToUint32 (modulo 2³², NaN/±Infinity → 0), matching the VM/interp exactly.

@@ -2370,10 +2370,12 @@ impl Evaluator {
             BinOp::Pow => self.binop_number(l, r, |a, b| Value::Number(a.powf(b))),
             BinOp::StrictEq => Ok(Value::Bool(l.strict_eq(r))),
             BinOp::StrictNe => Ok(Value::Bool(!l.strict_eq(r))),
-            BinOp::Lt => self.binop_number(l, r, |a, b| Value::Bool(a < b)),
-            BinOp::Le => self.binop_number(l, r, |a, b| Value::Bool(a <= b)),
-            BinOp::Gt => self.binop_number(l, r, |a, b| Value::Bool(a > b)),
-            BinOp::Ge => self.binop_number(l, r, |a, b| Value::Bool(a >= b)),
+            // Relational ops compare strings lexicographically when BOTH operands
+            // are strings (JS semantics); otherwise coerce to numbers via binop_number.
+            BinOp::Lt => self.binop_relational(l, r, |o| o.is_lt()),
+            BinOp::Le => self.binop_relational(l, r, |o| o.is_le()),
+            BinOp::Gt => self.binop_relational(l, r, |o| o.is_gt()),
+            BinOp::Ge => self.binop_relational(l, r, |o| o.is_ge()),
             BinOp::And => Ok(Value::Bool(l.is_truthy() && r.is_truthy())),
             BinOp::Or => Ok(Value::Bool(l.is_truthy() || r.is_truthy())),
             BinOp::BitAnd => self.binop_int32(l, r, |a, b| Value::Number((a & b) as f64)),
@@ -2521,6 +2523,25 @@ impl Evaluator {
         let a = l.as_number().unwrap_or(f64::NAN);
         let b = r.as_number().unwrap_or(f64::NAN);
         Ok(f(a, b))
+    }
+
+    /// Relational comparison (`<` `<=` `>` `>=`). When both operands are strings,
+    /// compare lexicographically; otherwise coerce to numbers. `pred` maps the
+    /// resulting `Ordering` to a bool. A NaN-involved numeric comparison yields no
+    /// ordering and is always `false`, matching JS (`NaN < 5` → false).
+    fn binop_relational<F>(&self, l: &Value, r: &Value, pred: F) -> Result<Value, String>
+    where
+        F: FnOnce(std::cmp::Ordering) -> bool,
+    {
+        let ord = match (l, r) {
+            (Value::String(a), Value::String(b)) => Some(a.as_ref().cmp(b.as_ref())),
+            _ => {
+                let a = l.as_number().unwrap_or(f64::NAN);
+                let b = r.as_number().unwrap_or(f64::NAN);
+                a.partial_cmp(&b)
+            }
+        };
+        Ok(Value::Bool(ord.map(pred).unwrap_or(false)))
     }
 
     fn eval_unary(&self, op: UnaryOp, v: &Value) -> Result<Value, String> {
