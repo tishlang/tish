@@ -1,0 +1,37 @@
+{
+  "name": "@tishlang/tish-lsp",
+  "version": "1.0.12",
+  "description": "Tish language server — diagnostics, completion, formatting, hover, go-to-definition (LSP over stdio)",
+  "license": "PIF",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tishlang/tish.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "tish-lsp": "./bin/tish-lsp"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install-bin.js"
+  },
+  "files": [
+    "bin",
+    "scripts/install-bin.js",
+    "platform",
+    "README.md",
+    "LICENSE",
+    "Cargo.toml",
+    "crates",
+    "justfile"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "tish",
+    "lsp",
+    "language-server"
+  ]
+}

@@ -56,6 +56,10 @@ jobs:
             npm: "@tishlang/tish-lint"
             type: tarball
             asset: tish-lint-npm-package.tgz
+          - label: "@tishlang/tish-lsp"
+            npm: "@tishlang/tish-lsp"
+            type: tarball
+            asset: tish-lsp-npm-package.tgz
           # Source packages: publish straight from the npm/<dir> source tree.
           - label: "@tishlang/pg"
             npm: "@tishlang/pg"
