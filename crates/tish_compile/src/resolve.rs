@@ -4,7 +4,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tishlang_ast::{ExportDeclaration, Expr, ImportSpecifier, MemberProp, Program, Statement, CallArg};
+use tishlang_ast::{
+    ArrayElement, ArrowBody, CallArg, DestructElement, DestructPattern, ExportDeclaration, Expr,
+    FunParam, ImportSpecifier, JsxAttrValue, JsxChild, JsxProp, MemberProp, ObjectProp, Program,
+    Statement,
+};
 
 /// Resolved native module: crate path and init expression.
 #[derive(Debug, Clone)]
@@ -1154,10 +1158,525 @@ fn merge_push(
     statement_sources.push(source);
 }
 
+// ── #97: module-private top-level binding isolation ─────────────────────────────────────
+//
+// All modules are concatenated into one flat program, so two modules that declare the same
+// *non-exported* top-level name (`let SHARED`, `fn err`, …) collide: a silent wrong value at
+// runtime, and a duplicate `let` (SyntaxError) in the `--target js` bundle. We give each such
+// private binding a module-unique name and rewrite references within that module. Exported
+// and imported names are never touched, so the import/export resolution below is unaffected —
+// and a name that doesn't collide is left exactly as-is (zero blast radius).
+
+/// Names a module contributes to the merged flat namespace at its top level.
+/// `decls` = names declared (`let`/`const`/`fn`/destructure), `exported` = the subset that is
+/// exported, `imports` = local names bound by `import`. Type-only declarations are erased.
+fn collect_module_top_level_names(
+    stmts: &[Statement],
+    decls: &mut HashSet<String>,
+    exported: &mut HashSet<String>,
+    imports: &mut HashSet<String>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Statement::VarDecl { name, .. } | Statement::FunDecl { name, .. } => {
+                decls.insert(name.to_string());
+            }
+            Statement::VarDeclDestructure { pattern, .. } => {
+                collect_destructure_names(pattern, decls);
+            }
+            Statement::Multi { statements, .. } => {
+                collect_module_top_level_names(statements, decls, exported, imports);
+            }
+            Statement::Export { declaration, .. } => {
+                if let ExportDeclaration::Named(inner) = declaration.as_ref() {
+                    match inner.as_ref() {
+                        Statement::VarDecl { name, .. } | Statement::FunDecl { name, .. } => {
+                            decls.insert(name.to_string());
+                            exported.insert(name.to_string());
+                        }
+                        Statement::VarDeclDestructure { pattern, .. } => {
+                            let mut names = HashSet::new();
+                            collect_destructure_names(pattern, &mut names);
+                            for n in names {
+                                decls.insert(n.clone());
+                                exported.insert(n);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Statement::Import { specifiers, .. } => {
+                for spec in specifiers {
+                    let n = match spec {
+                        ImportSpecifier::Named { name, alias, .. } => {
+                            alias.as_deref().unwrap_or(name).to_string()
+                        }
+                        ImportSpecifier::Namespace { name, .. }
+                        | ImportSpecifier::Default { name, .. } => name.to_string(),
+                    };
+                    imports.insert(n);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_destructure_names(pattern: &DestructPattern, out: &mut HashSet<String>) {
+    let push = |el: &DestructElement, out: &mut HashSet<String>| match el {
+        DestructElement::Ident(n, _) | DestructElement::Rest(n, _) => {
+            out.insert(n.to_string());
+        }
+        DestructElement::Pattern(p) => collect_destructure_names(p, out),
+    };
+    match pattern {
+        DestructPattern::Array(elements) => {
+            for el in elements.iter().flatten() {
+                push(el, out);
+            }
+        }
+        DestructPattern::Object(props) => {
+            for p in props {
+                push(&p.value, out);
+            }
+        }
+    }
+}
+
+/// Rename each module's non-exported top-level bindings whose name also occurs as a top-level
+/// name in another module, isolating module-private declarations (#97).
+fn isolate_private_top_level_bindings(modules: &mut [ResolvedModule]) {
+    let n = modules.len();
+    if n < 2 {
+        return; // a single module cannot collide with another
+    }
+    let mut decls: Vec<HashSet<String>> = vec![HashSet::new(); n];
+    let mut exported: Vec<HashSet<String>> = vec![HashSet::new(); n];
+    // `occupancy[i]` = every top-level name module i contributes (decls ∪ import bindings).
+    let mut occupancy: Vec<HashSet<String>> = vec![HashSet::new(); n];
+    for (i, m) in modules.iter().enumerate() {
+        let mut imports = HashSet::new();
+        collect_module_top_level_names(
+            &m.program.statements,
+            &mut decls[i],
+            &mut exported[i],
+            &mut imports,
+        );
+        occupancy[i] = decls[i].union(&imports).cloned().collect();
+    }
+    // How many modules contribute each top-level name.
+    let mut count: HashMap<&str, usize> = HashMap::new();
+    for occ in &occupancy {
+        for name in occ {
+            *count.entry(name.as_str()).or_insert(0) += 1;
+        }
+    }
+    for (i, m) in modules.iter_mut().enumerate() {
+        let mut renames: HashMap<String, Arc<str>> = HashMap::new();
+        for name in &decls[i] {
+            if exported[i].contains(name) {
+                continue; // exported names stay stable so imports keep resolving
+            }
+            if count.get(name.as_str()).copied().unwrap_or(0) > 1 {
+                renames.insert(name.clone(), Arc::from(format!("{name}__m{i}")));
+            }
+        }
+        if renames.is_empty() {
+            continue;
+        }
+        for stmt in &mut m.program.statements {
+            // Each top-level statement starts from the full rename set (module top level is a
+            // single scope; nested scopes shadow within their own cloned set).
+            let mut active = renames.clone();
+            rewrite_stmt_scope(stmt, &mut active, true);
+        }
+    }
+}
+
+/// Apply the rename for a *declared* name. At module top level the binding is the canonical
+/// private one — rename it. In a nested scope the same name is a shadow — drop it from `active`
+/// so the inner binding and its references keep their own identity.
+fn apply_binding(name: &mut Arc<str>, active: &mut HashMap<String, Arc<str>>, top_level: bool) {
+    if top_level {
+        if let Some(renamed) = active.get(name.as_ref()) {
+            *name = Arc::clone(renamed);
+        }
+    } else {
+        active.remove(name.as_ref());
+    }
+}
+
+/// Rename / shadow the names bound by a destructuring pattern (mirrors [`apply_binding`]).
+fn rewrite_destructure_binding(
+    pattern: &mut DestructPattern,
+    active: &mut HashMap<String, Arc<str>>,
+    top_level: bool,
+) {
+    fn one(el: &mut DestructElement, active: &mut HashMap<String, Arc<str>>, top_level: bool) {
+        match el {
+            DestructElement::Ident(n, _) | DestructElement::Rest(n, _) => {
+                if top_level {
+                    if let Some(renamed) = active.get(n.as_ref()) {
+                        *n = Arc::clone(renamed);
+                    }
+                } else {
+                    active.remove(n.as_ref());
+                }
+            }
+            DestructElement::Pattern(p) => rewrite_destructure_binding(p, active, top_level),
+        }
+    }
+    match pattern {
+        DestructPattern::Array(elements) => {
+            for el in elements.iter_mut().flatten() {
+                one(el, active, top_level);
+            }
+        }
+        DestructPattern::Object(props) => {
+            for p in props.iter_mut() {
+                one(&mut p.value, active, top_level); // p.key is the source property — untouched
+            }
+        }
+    }
+}
+
+/// Remove function/arrow parameter names from a (child-scope) rename set so the body's
+/// references to them are not rewritten, and rewrite any default-value expressions in the
+/// enclosing scope.
+fn shadow_params(
+    params: &mut [FunParam],
+    child: &mut HashMap<String, Arc<str>>,
+    parent: &HashMap<String, Arc<str>>,
+) {
+    for p in params.iter_mut() {
+        match p {
+            FunParam::Simple(tp) => {
+                if let Some(d) = &mut tp.default {
+                    rewrite_expr_scope(d, parent);
+                }
+                child.remove(tp.name.as_ref());
+            }
+            FunParam::Destructure {
+                pattern, default, ..
+            } => {
+                if let Some(d) = default {
+                    rewrite_expr_scope(d, parent);
+                }
+                let mut names = HashSet::new();
+                collect_destructure_names(pattern, &mut names);
+                for n in &names {
+                    child.remove(n);
+                }
+            }
+        }
+    }
+}
+
+/// Scope-aware statement rewriter for [`isolate_private_top_level_bindings`].
+fn rewrite_stmt_scope(
+    stmt: &mut Statement,
+    active: &mut HashMap<String, Arc<str>>,
+    top_level: bool,
+) {
+    match stmt {
+        Statement::VarDecl { name, init, .. } => {
+            if let Some(e) = init {
+                rewrite_expr_scope(e, active);
+            }
+            apply_binding(name, active, top_level);
+        }
+        Statement::VarDeclDestructure { pattern, init, .. } => {
+            rewrite_expr_scope(init, active);
+            rewrite_destructure_binding(pattern, active, top_level);
+        }
+        Statement::Multi { statements, .. } => {
+            // Same-scope group (`let a = 1, b = 2`): thread `active`, keep `top_level`.
+            for s in statements {
+                rewrite_stmt_scope(s, active, top_level);
+            }
+        }
+        Statement::ExprStmt { expr, .. } => rewrite_expr_scope(expr, active),
+        Statement::Block { statements, .. } => {
+            let mut child = active.clone();
+            for s in statements {
+                rewrite_stmt_scope(s, &mut child, false);
+            }
+        }
+        Statement::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            rewrite_expr_scope(cond, active);
+            rewrite_stmt_scope(then_branch, &mut active.clone(), false);
+            if let Some(e) = else_branch {
+                rewrite_stmt_scope(e, &mut active.clone(), false);
+            }
+        }
+        Statement::While { cond, body, .. } => {
+            rewrite_expr_scope(cond, active);
+            rewrite_stmt_scope(body, &mut active.clone(), false);
+        }
+        Statement::DoWhile { body, cond, .. } => {
+            rewrite_stmt_scope(body, &mut active.clone(), false);
+            rewrite_expr_scope(cond, active);
+        }
+        Statement::For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
+            let mut child = active.clone();
+            if let Some(i) = init {
+                rewrite_stmt_scope(i, &mut child, false);
+            }
+            if let Some(e) = cond {
+                rewrite_expr_scope(e, &child);
+            }
+            if let Some(e) = update {
+                rewrite_expr_scope(e, &child);
+            }
+            rewrite_stmt_scope(body, &mut child, false);
+        }
+        Statement::ForOf {
+            name,
+            iterable,
+            body,
+            ..
+        } => {
+            rewrite_expr_scope(iterable, active);
+            let mut child = active.clone();
+            child.remove(name.as_ref()); // loop variable shadows
+            rewrite_stmt_scope(body, &mut child, false);
+        }
+        Statement::Return { value, .. } => {
+            if let Some(e) = value {
+                rewrite_expr_scope(e, active);
+            }
+        }
+        Statement::Throw { value, .. } => rewrite_expr_scope(value, active),
+        Statement::Break { .. } | Statement::Continue { .. } => {}
+        Statement::FunDecl {
+            name,
+            params,
+            rest_param,
+            body,
+            ..
+        } => {
+            apply_binding(name, active, top_level);
+            let mut child = active.clone();
+            shadow_params(params, &mut child, active);
+            if let Some(rp) = rest_param {
+                child.remove(rp.name.as_ref());
+            }
+            rewrite_stmt_scope(body, &mut child, false);
+        }
+        Statement::Switch {
+            expr,
+            cases,
+            default_body,
+            ..
+        } => {
+            rewrite_expr_scope(expr, active);
+            // A switch body shares one block scope across all cases.
+            let mut child = active.clone();
+            for (test, body) in cases.iter_mut() {
+                if let Some(t) = test {
+                    rewrite_expr_scope(t, &child);
+                }
+                for s in body {
+                    rewrite_stmt_scope(s, &mut child, false);
+                }
+            }
+            if let Some(body) = default_body {
+                for s in body {
+                    rewrite_stmt_scope(s, &mut child, false);
+                }
+            }
+        }
+        Statement::Try {
+            body,
+            catch_param,
+            catch_body,
+            finally_body,
+            ..
+        } => {
+            rewrite_stmt_scope(body, &mut active.clone(), false);
+            if let Some(cb) = catch_body {
+                let mut child = active.clone();
+                if let Some(p) = catch_param {
+                    child.remove(p.as_ref()); // catch binding shadows
+                }
+                rewrite_stmt_scope(cb, &mut child, false);
+            }
+            if let Some(fb) = finally_body {
+                rewrite_stmt_scope(fb, &mut active.clone(), false);
+            }
+        }
+        Statement::Export { declaration, .. } => match declaration.as_mut() {
+            // Exported declarations keep their name (not in `active`), but their initializer /
+            // body can still reference module-private names that were renamed.
+            ExportDeclaration::Named(inner) => rewrite_stmt_scope(inner, active, top_level),
+            ExportDeclaration::Default(e) => rewrite_expr_scope(e, active),
+        },
+        Statement::Import { .. }
+        | Statement::TypeAlias { .. }
+        | Statement::DeclareVar { .. }
+        | Statement::DeclareFun { .. } => {}
+    }
+}
+
+/// Scope-aware expression rewriter: rename every free reference to a name in `active`.
+/// Expressions never declare module-level bindings, so `active` is read-only here; arrow
+/// functions clone it for their own (shadowed) parameter scope.
+fn rewrite_expr_scope(expr: &mut Expr, active: &HashMap<String, Arc<str>>) {
+    let rename = |name: &mut Arc<str>| {
+        if let Some(renamed) = active.get(name.as_ref()) {
+            *name = Arc::clone(renamed);
+        }
+    };
+    match expr {
+        Expr::Ident { name, .. } => rename(name),
+        Expr::Assign { name, value, .. }
+        | Expr::CompoundAssign { name, value, .. }
+        | Expr::LogicalAssign { name, value, .. } => {
+            rename(name);
+            rewrite_expr_scope(value, active);
+        }
+        Expr::PostfixInc { name, .. }
+        | Expr::PostfixDec { name, .. }
+        | Expr::PrefixInc { name, .. }
+        | Expr::PrefixDec { name, .. } => rename(name),
+        Expr::Binary { left, right, .. } => {
+            rewrite_expr_scope(left, active);
+            rewrite_expr_scope(right, active);
+        }
+        Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } | Expr::Await { operand, .. } => {
+            rewrite_expr_scope(operand, active)
+        }
+        Expr::Delete { target, .. } => rewrite_expr_scope(target, active),
+        Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+            rewrite_expr_scope(callee, active);
+            for a in args {
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => rewrite_expr_scope(e, active),
+                }
+            }
+        }
+        Expr::Member { object, prop, .. } => {
+            rewrite_expr_scope(object, active);
+            if let MemberProp::Expr(e) = prop {
+                rewrite_expr_scope(e, active); // computed key; `obj.name` is untouched
+            }
+        }
+        Expr::Index { object, index, .. } => {
+            rewrite_expr_scope(object, active);
+            rewrite_expr_scope(index, active);
+        }
+        Expr::Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            rewrite_expr_scope(cond, active);
+            rewrite_expr_scope(then_branch, active);
+            rewrite_expr_scope(else_branch, active);
+        }
+        Expr::NullishCoalesce { left, right, .. } => {
+            rewrite_expr_scope(left, active);
+            rewrite_expr_scope(right, active);
+        }
+        Expr::Array { elements, .. } => {
+            for el in elements {
+                match el {
+                    ArrayElement::Expr(e) | ArrayElement::Spread(e) => rewrite_expr_scope(e, active),
+                }
+            }
+        }
+        Expr::Object { props, .. } => {
+            for p in props {
+                match p {
+                    ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => {
+                        rewrite_expr_scope(e, active) // key is a property name; value recurses
+                    }
+                }
+            }
+        }
+        Expr::MemberAssign { object, value, .. } => {
+            rewrite_expr_scope(object, active);
+            rewrite_expr_scope(value, active);
+        }
+        Expr::IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => {
+            rewrite_expr_scope(object, active);
+            rewrite_expr_scope(index, active);
+            rewrite_expr_scope(value, active);
+        }
+        Expr::ArrowFunction { params, body, .. } => {
+            let mut child = active.clone();
+            shadow_params(params, &mut child, active);
+            match body {
+                ArrowBody::Expr(e) => rewrite_expr_scope(e, &child),
+                ArrowBody::Block(s) => rewrite_stmt_scope(s, &mut child, false),
+            }
+        }
+        Expr::TemplateLiteral { exprs, .. } => {
+            for e in exprs {
+                rewrite_expr_scope(e, active);
+            }
+        }
+        Expr::JsxElement {
+            tag,
+            props,
+            children,
+            ..
+        } => {
+            // `<Component …>` references a binding; lowercase HTML tags aren't in `active`.
+            if let Some(renamed) = active.get(tag.as_ref()) {
+                *tag = Arc::clone(renamed);
+            }
+            for prop in props {
+                match prop {
+                    JsxProp::Attr { value, .. } => match value {
+                        JsxAttrValue::Expr(e) => rewrite_expr_scope(e, active),
+                        JsxAttrValue::String(_) | JsxAttrValue::ImplicitTrue => {}
+                    },
+                    JsxProp::Spread(e) => rewrite_expr_scope(e, active),
+                }
+            }
+            for child in children {
+                if let JsxChild::Expr(e) = child {
+                    rewrite_expr_scope(e, active);
+                }
+            }
+        }
+        Expr::JsxFragment { children, .. } => {
+            for child in children {
+                if let JsxChild::Expr(e) = child {
+                    rewrite_expr_scope(e, active);
+                }
+            }
+        }
+        Expr::Literal { .. } | Expr::NativeModuleLoad { .. } => {}
+    }
+}
+
 /// Merge all resolved modules into a single program. Dependencies are emitted first.
 /// Import statements are rewritten as bindings from already-emitted dep exports.
 /// Export statements are unwrapped (the inner declaration is emitted).
-pub fn merge_modules(modules: Vec<ResolvedModule>) -> Result<MergedProgram, String> {
+pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, String> {
+    // #97: isolate module-private top-level bindings before they are flattened together.
+    isolate_private_top_level_bindings(&mut modules);
+
     let path_to_idx: HashMap<PathBuf, usize> = modules
         .iter()
         .enumerate()

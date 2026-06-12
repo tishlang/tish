@@ -1,0 +1,15 @@
+// Module A: non-exported top-level `SHARED` and `helper` collide by name with
+// module B's. They must stay private to A (#97). Also exercises shadowing.
+let SHARED = "from-a"
+fn helper() { return "helper-a" }
+
+export fn ga() { return SHARED + ":" + helper() }
+
+// A parameter named SHARED must shadow the module-private binding.
+export fn shadowParam(SHARED) { return SHARED }
+
+// An inner `let SHARED` must shadow within the function body.
+export fn innerShadow() {
+  let SHARED = "inner"
+  return SHARED
+}
