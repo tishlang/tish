@@ -10,9 +10,10 @@
 # their rendered DOM asserted.
 #
 # Why this exists: the downstream suite caught a JSX-lexer regression
-# (tishlang/tish#108) where a reserved keyword as bare text after a nested
-# child element fails to parse. A keyword like that hiding in example markup
-# would have shipped silently. Running the examples is the guard.
+# (tishlang/tish#108, fixed in #111) where a reserved keyword as bare text after
+# a nested child element failed to parse. A keyword like that hiding in example
+# markup would have shipped silently. Running the examples is the standing guard
+# against the next one.
 #
 # Usage:
 #   regression/examples/run.sh [all | NAME ...] [options]

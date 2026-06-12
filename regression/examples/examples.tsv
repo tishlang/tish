@@ -58,3 +58,9 @@ matmul-gpu	examples/matmul	src/matmul_gpu.tish	run	-	-	gpu	gpu	xfail
 wasmtime	examples/wasmtime-modules	src/main.tish	run	-	-	Hello	wasm	pass
 pg	examples/pg	query_example.tish	run	-	-	rows	db	pass
 mdx-docs	examples/mdx-docs	src/build.tish	run	fs	-	Built	prebuild	pass
+#
+# ── intentionally NOT a row (documented exclusion, so it is not "silently uncovered") ─────────────
+# examples/tty (the `tish:tty` raw-mode key demo shipped with #101/#105) reads live keypresses in
+# raw mode and has no deterministic stdout to assert without a PTY — there is no run/serve/lattish
+# kind that fits it here. Excluded on purpose. If a PTY-driven harness is added later, add the row
+# with a `native` tag so the default run stays deterministic.

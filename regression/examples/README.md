@@ -13,23 +13,26 @@ A transpile smoke only proves "it parses". This suite proves "it **works**":
 ## Why this exists
 
 The downstream suite caught a real **tish JSX-lexer regression** — filed as
-[tishlang/tish#108](https://github.com/tishlang/tish/issues/108). After a nested child element, a
-text run is lexed as code, so a reserved keyword sitting in ordinary markup prose fails to parse:
+[tishlang/tish#108](https://github.com/tishlang/tish/issues/108) and **fixed in #111**. Before that
+fix, after a nested child element a text run was lexed as code, so a reserved keyword sitting in
+ordinary markup prose failed to parse:
 
 ```jsx
-<div><span>x</span> as JSON</div>   // ✗ Parse error: Unexpected token in JSX children: As
+<div><span>x</span> as JSON</div>   // ✗ (pre-#111) Parse error: Unexpected token in JSX children: As
 <div>download as JSON</div>          // ✓ builds fine (no preceding element)
 ```
 
 Affected after a child element: `as` `in` `if` `return` `let` (… any reserved word); fine for
 non-keywords and in text-only children. It bit `tish-audio` (real prose: *"…download as JSON."*
-after inline `<span>`s) and would have shipped silently. **Running the examples is the guard** that
-turns a class of frontend regressions into a red build.
+after inline `<span>`s) and would have shipped silently. #111 closed that specific hole; **running
+the examples is the standing guard** that turns the next such frontend regression into a red build.
 
-## Findings from the first sweep (tish HEAD around `a3d8747`)
+## Findings (re-verified on `main` after #105–#111 landed)
 
-Every example was exercised the right way for its kind. Result: **no frontend regressions** — all
-50 example `.tish` files parse + transpile clean. Concretely:
+Every example was exercised the right way for its kind. Result: **no frontend regressions** — every
+example `.tish` file parses + transpiles clean and the run/serve/lattish assertions hold
+(`PASS 19 · FAIL 0 · SKIP 11`; the three `:3000` rows SKIP on a dev box already running a server on
+that port, and the eight env-gated rows SKIP without `--full`). Concretely:
 
 - **All `run` / `serve` / `lattish` examples behave correctly** when their port is free / deps present.
 - The 9 **lattish** examples render correctly against the **workspace lattish** (wired in like
