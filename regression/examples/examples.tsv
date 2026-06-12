@@ -1,0 +1,60 @@
+# Example-app regression manifest — RUN (not just build) the in-repo examples against tish HEAD.
+# Companion to regression/downstream (which tests external CONSUMERS). This suite catches breakage
+# in the examples we ship, and — unlike a transpile smoke — actually EXECUTES each app and asserts
+# observable behavior (stdout / HTTP response / rendered DOM).
+#
+# Columns (TAB-separated): name  dir  entry  kind  features  check  expect  tags  expected
+#   dir       path under the tish repo (examples/foo), or `@lattish:PATH` for a path under ../lattish
+#   entry     the .tish to run/build, relative to dir
+#   kind      run     = executes and EXITS; assert `expect` appears in stdout
+#             serve   = long-running HTTP server; runner starts it, probes `check`, asserts `expect`, kills it
+#             lattish = builds to JS with the LOCAL workspace lattish wired in, mounts it in jsdom,
+#                       asserts `expect` appears in #root's rendered text  (real runtime test, not a build)
+#   features  comma list for `--feature` (or `-`)
+#   check     for serve: METHOD:PORT:PATH (e.g. GET:3000:/users). `-` otherwise.
+#   expect    substring that MUST appear (stdout | HTTP body | rendered DOM text)
+#   tags      env requirements; any tag in the skip-set makes the row SKIP unless --full is passed.
+#             skip-set: net db gpu wasm npm prebuild native slow vite   (mutates is informational only)
+#   expected  pass = must be green (a failure is a regression) · xfail = known-broken pending env/migration
+#
+# Run:  regression/examples/run.sh            # deterministic core (run/serve/lattish); env-gated rows SKIP
+#       regression/examples/run.sh --full     # also run net/db/gpu/wasm/npm/prebuild/slow rows
+#       regression/examples/run.sh hello-world json-api lat-01-counter   # a subset
+#
+# ── run: executes and exits, assert stdout ──────────────────────────────────────────────────────
+hello-world	examples/hello-world	src/main.tish	run	-	-	Hello from Tish!	-	pass
+data-processing	examples/data-processing	src/main.tish	run	-	-	Grand Total	-	pass
+modules-example	examples/modules-example	src/main.tish	run	-	-	Hello, Universe	-	pass
+new-expression	examples/new-expression	src/main.tish	run	-	-	sampleRate =	-	pass
+js-to-tish	examples/js-to-tish-example	src/main.tish	run	-	-	Average:	-	pass
+json-file-edit	examples/json-file-edit	src/main.tish	run	fs	-	version = 2	mutates	pass
+#
+# ── serve: HTTP server — start, probe, assert response, shut down ────────────────────────────────
+json-api	examples/json-api	src/main.tish	serve	http	GET:3000:/users	Alice	-	pass
+echo-server	examples/echo-server	src/main.tish	serve	http	GET:3000:/health	OK	-	pass
+counter-api	examples/counter-api	src/main.tish	serve	http	GET:3000:/health	healthy	-	pass
+http-hello	examples/http-hello	src/main.tish	serve	http,process	GET:auto:/	Hello from Tish	-	pass
+http-modules	examples/http-modules-example	src/main.tish	serve	http,process	GET:auto:/	sup, World	-	pass
+http-env-var	examples/http-env-var-example	src/main.tish	serve	http,process	GET:auto:/	tishreg	-	pass
+container	examples/container-example	src/main.tish	serve	http,process	GET:auto:/health	OK	-	pass
+#
+# ── lattish: build to JS (workspace lattish wired) + mount in jsdom + assert rendered DOM ─────────
+lat-01-counter	@lattish:examples/features	01-counter.tish	lattish	-	-	Increment	-	pass
+lat-02-list	@lattish:examples/features	02-list.tish	lattish	-	-	Build app	-	pass
+lat-03-greeting	@lattish:examples/features	03-greeting.tish	lattish	-	-	Hello,	-	pass
+lat-04-ref	@lattish:examples/features	04-ref.tish	lattish	-	-	Name:	-	pass
+lat-05-memo	@lattish:examples/features	05-memo.tish	lattish	-	-	Doubled:	-	pass
+lat-06-effects	@lattish:examples/features	06-effects.tish	lattish	-	-	Loading	-	pass
+lat-07-batched	@lattish:examples/features	07-batched.tish	lattish	-	-	Batch update	-	pass
+lat-08-fragment	@lattish:examples/features	08-fragment.tish	lattish	-	-	Second paragraph	-	pass
+lat-app	examples/lattish	src/App.tish	lattish	-	-	Sign up	-	pass
+#
+# ── env-gated: real apps, but need network / db / gpu / a prebuild step — SKIP unless --full ──────
+async-await	examples/async-await	src/main.tish	run	http,process	-	All fetches ok: true	net	pass
+npm-usage	examples/npm-usage	src/main.tish	run	-	-	Hello from @tishlang/tish	npm	pass
+ffi	examples/ffi	demo.tish	run	-	-	hypot(3, 4) = 5	native,prebuild	pass
+matmul-cpu	examples/matmul	src/main.tish	run	-	-	cpu 128x128	slow	pass
+matmul-gpu	examples/matmul	src/matmul_gpu.tish	run	-	-	gpu	gpu	xfail
+wasmtime	examples/wasmtime-modules	src/main.tish	run	-	-	Hello	wasm	pass
+pg	examples/pg	query_example.tish	run	-	-	rows	db	pass
+mdx-docs	examples/mdx-docs	src/build.tish	run	fs	-	Built	prebuild	pass
