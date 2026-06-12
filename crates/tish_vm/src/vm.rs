@@ -182,13 +182,13 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
     if spec == "tish:fs" && cap_allows(enabled, "fs") {
         use tishlang_runtime::fs_ext as fx;
         return match export_name {
-            // legacy tish names — unchanged contracts
-            "readFile" => Some(Value::native(|a: &[Value]| tishlang_runtime::read_file(a))),
-            "writeFile" => Some(Value::native(|a: &[Value]| tishlang_runtime::write_file(a))),
+            // tish names → the dual fs_ext functions (sync, or Node callback if a fn is passed)
+            "readFile" => Some(Value::native(|a: &[Value]| fx::read_file(a))),
+            "writeFile" => Some(Value::native(|a: &[Value]| fx::write_file(a))),
             "fileExists" => Some(Value::native(|a: &[Value]| tishlang_runtime::file_exists(a))),
             "isDir" => Some(Value::native(|a: &[Value]| tishlang_runtime::is_dir(a))),
-            "readDir" => Some(Value::native(|a: &[Value]| tishlang_runtime::read_dir(a))),
-            "readFileBytes" => Some(Value::native(|a: &[Value]| tishlang_runtime::read_file_bytes(a))),
+            "readDir" => Some(Value::native(|a: &[Value]| fx::readdir(a))),
+            "readFileBytes" => Some(Value::native(|a: &[Value]| fx::read_file_bytes(a))),
             // Node-compatible names + new methods (sync) — issue #122
             "readFileSync" => Some(Value::native(|a: &[Value]| fx::read_file(a))),
             "readFileBytesSync" => Some(Value::native(|a: &[Value]| fx::read_file_bytes(a))),
