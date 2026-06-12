@@ -548,6 +548,72 @@ pub fn read_file_bytes(args: &[Value]) -> Result<Value, String> {
     }
 }
 
+// ── Node-compatible fs surface (#122) — bridged to tishlang_runtime::fs_ext so the interpreter
+// shares one implementation with the VM/native backends. eval args -> core, call, core -> eval.
+#[cfg(feature = "fs")]
+macro_rules! fs_bridge {
+    ($name:ident => $core:path) => {
+        pub fn $name(args: &[Value]) -> Result<Value, String> {
+            let core_args = args
+                .iter()
+                .map(crate::value_convert::eval_to_core)
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(crate::value_convert::core_to_eval($core(&core_args)))
+        }
+    };
+}
+
+#[cfg(feature = "fs")]
+pub mod fsx {
+    use super::Value;
+    use tishlang_runtime::fs_ext as fx;
+    // sync
+    fs_bridge!(read_file => fx::read_file);
+    fs_bridge!(read_file_bytes => fx::read_file_bytes);
+    fs_bridge!(write_file => fx::write_file);
+    fs_bridge!(append_file => fx::append_file);
+    fs_bridge!(exists => fx::exists);
+    fs_bridge!(mkdir => fx::mkdir);
+    fs_bridge!(readdir => fx::readdir);
+    fs_bridge!(stat => fx::stat);
+    fs_bridge!(lstat => fx::lstat);
+    fs_bridge!(rm => fx::rm);
+    fs_bridge!(rmdir => fx::rmdir);
+    fs_bridge!(unlink => fx::unlink);
+    fs_bridge!(rename => fx::rename);
+    fs_bridge!(copy_file => fx::copy_file);
+    fs_bridge!(realpath => fx::realpath);
+    fs_bridge!(readlink => fx::readlink);
+    fs_bridge!(truncate => fx::truncate);
+    fs_bridge!(mkdtemp => fx::mkdtemp);
+    fs_bridge!(cp => fx::cp);
+    fs_bridge!(access => fx::access);
+    // promises
+    fs_bridge!(read_file_p => fx::read_file_promise);
+    fs_bridge!(read_file_bytes_p => fx::read_file_bytes_promise);
+    fs_bridge!(write_file_p => fx::write_file_promise);
+    fs_bridge!(append_file_p => fx::append_file_promise);
+    fs_bridge!(exists_p => fx::exists_promise);
+    fs_bridge!(mkdir_p => fx::mkdir_promise);
+    fs_bridge!(readdir_p => fx::readdir_promise);
+    fs_bridge!(stat_p => fx::stat_promise);
+    fs_bridge!(lstat_p => fx::lstat_promise);
+    fs_bridge!(rm_p => fx::rm_promise);
+    fs_bridge!(rmdir_p => fx::rmdir_promise);
+    fs_bridge!(unlink_p => fx::unlink_promise);
+    fs_bridge!(rename_p => fx::rename_promise);
+    fs_bridge!(copy_file_p => fx::copy_file_promise);
+    fs_bridge!(realpath_p => fx::realpath_promise);
+    fs_bridge!(readlink_p => fx::readlink_promise);
+    fs_bridge!(truncate_p => fx::truncate_promise);
+    fs_bridge!(mkdtemp_p => fx::mkdtemp_promise);
+    fs_bridge!(cp_p => fx::cp_promise);
+    fs_bridge!(access_p => fx::access_promise);
+    pub fn constants() -> Value {
+        crate::value_convert::core_to_eval(fx::constants())
+    }
+}
+
 #[cfg(feature = "fs")]
 pub fn write_file(args: &[Value]) -> Result<Value, String> {
     let path = args.first().map(|v| v.to_string()).unwrap_or_default();
