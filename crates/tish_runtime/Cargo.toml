@@ -54,7 +54,8 @@ http-hyper = [
     "tokio/rt",
     "tokio/io-util",
 ]
-fs = []
+# `fs/promises` returns settled promises, so fs pulls in the promise machinery.
+fs = ["promise"]
 process = []
 # Interactive terminal I/O (issue #101): raw mode, key/resize events, size, alt screen.
 tty = ["dep:crossterm"]
