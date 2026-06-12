@@ -69,8 +69,8 @@ pub fn normalize_builtin_spec(spec: &str) -> Option<String> {
 pub fn is_builtin_native_spec(spec: &str) -> bool {
     matches!(
         spec,
-        "tish:fs" | "tish:http" | "tish:timers" | "tish:process" | "tish:ws"
-    ) || matches!(spec, "fs" | "http" | "timers" | "process" | "ws")
+        "tish:fs" | "tish:http" | "tish:timers" | "tish:process" | "tish:ws" | "tish:tty"
+    ) || matches!(spec, "fs" | "http" | "timers" | "process" | "ws" | "tty")
 }
 
 /// Resolve all native imports in a merged program via package.json lookup.

@@ -19,7 +19,7 @@ path = "src/main.rs"
 default = ["full", "fast-alloc"]
 # Alias: same dependency edges as `default` (kept for `--features full` in CI and docs).
 # Includes `pg` so `tish run` can resolve `import … from '@tishlang/pg'` (`cargo:tish_pg`) on the bytecode VM.
-full = ["http", "fs", "process", "regex", "ws", "timers", "pg"]
+full = ["http", "fs", "process", "regex", "ws", "timers", "tty", "pg"]
 # Fast allocator (mimalloc) as the process `#[global_allocator]`. tish's object/array/string workloads
 # are allocation-bound (a sampling profile of object-heavy code spends ~14%+ in system malloc/free);
 # mimalloc is markedly faster for the many-small-allocations pattern — the same reason JSC ships bmalloc.
@@ -34,6 +34,7 @@ fs      = ["tishlang_eval/fs",      "tishlang_runtime/fs",      "tishlang_compil
 process = ["tishlang_eval/process", "tishlang_runtime/process", "tishlang_compile/process", "tishlang_vm/process"]
 regex   = ["tishlang_eval/regex",   "tishlang_runtime/regex",   "tishlang_compile/regex",   "tishlang_vm/regex"]
 ws      = ["tishlang_eval/ws",      "tishlang_runtime/ws",      "tishlang_compile/ws",      "tishlang_vm/ws"]
+tty     = ["tishlang_eval/tty",     "tishlang_runtime/tty",     "tishlang_compile/tty",     "tishlang_vm/tty"]
 # GPU compute — Apple Silicon only
 [dependencies]
 rustyline = { version = "17", features = ["with-file-history"] }

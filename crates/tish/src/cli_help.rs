@@ -349,8 +349,10 @@ fn capabilities_section(oh: &str, t: &str, r: &str) -> String {
           RegExp
   {t}ws{r}
           WebSocket client / server
+  {t}tty{r}
+          Interactive terminal: raw mode, key/resize events, size, alt screen (`import from \"tish:tty\"`)
   {t}full{r}
-          All of the above (http, timers, fs, process, regex, ws)
+          All of the above (http, timers, fs, process, regex, ws, tty)
 
 Omit --feature to allow every capability compiled into this `tish` binary; pass flags to restrict what scripts may use. The CLI is normally built with all of them (Cargo default on `tishlang`)."
     )
@@ -430,8 +432,10 @@ pub fn build_after_help() -> String {
           RegExp
   {t}ws{r}
           WebSocket client / server
+  {t}tty{r}
+          Interactive terminal: raw mode, key/resize events, size, alt screen (`import from \"tish:tty\"`)
   {t}full{r}
-          All of the above (http, timers, fs, process, regex, ws)
+          All of the above (http, timers, fs, process, regex, ws, tty)
 
 For `--target native`, these choose what is linked into the **output** executable (omit = same set as this `tish` binary was built with). Minimal native outputs still use a full `tish` CLI unless you built it with `cargo build -p tishlang --no-default-features`."
     )

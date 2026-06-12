@@ -23,6 +23,7 @@ wasm = ["dep:wasm-bindgen"]
 # (some Cargo/cache combinations only saw `tishlang_runtime/http` and built VM stubs without http).
 fs = ["dep:tishlang_runtime", "tishlang_runtime/fs"]
 process = ["dep:tishlang_runtime", "tishlang_runtime/process"]
+tty = ["dep:tishlang_runtime", "tishlang_runtime/tty"]
 # Timer globals + `tish:timers` LoadNativeExport (uses tishlang_runtime TLS timer registry).
 timers = ["dep:tishlang_runtime"]
 # Any HTTP build needs Send-safe values so handlers can be dispatched

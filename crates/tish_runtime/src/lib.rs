@@ -1054,6 +1054,13 @@ mod native_promise;
 #[cfg(feature = "ws")]
 mod ws;
 
+#[cfg(feature = "tty")]
+pub mod tty;
+#[cfg(feature = "tty")]
+pub use tty::{
+    tty_enter_alt_screen, tty_is_tty, tty_leave_alt_screen, tty_read, tty_read_line, tty_set_raw_mode, tty_size,
+};
+
 #[cfg(feature = "ws")]
 pub use ws::{
     web_socket_client, web_socket_server_accept, web_socket_server_construct,
