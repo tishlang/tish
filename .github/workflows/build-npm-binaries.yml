@@ -342,6 +342,7 @@ jobs:
           cargo build --release -p tishlang_cargo_bindgen --target ${{ matrix.target }}
           cargo build --release -p tishlang_fmt --target ${{ matrix.target }}
           cargo build --release -p tishlang_lint --target ${{ matrix.target }}
+          cargo build --release -p tishlang_lsp --target ${{ matrix.target }}
 
       - name: Install cross and build (Linux ARM64)
         if: ${{ matrix.use_cross }}
@@ -351,6 +352,7 @@ jobs:
           cross build --target ${{ matrix.target }} -p tishlang_cargo_bindgen --release
           cross build --target ${{ matrix.target }} -p tishlang_fmt --release
           cross build --target ${{ matrix.target }} -p tishlang_lint --release
+          cross build --target ${{ matrix.target }} -p tishlang_lsp --release
 
       - name: Stage binary for upload
         shell: bash
@@ -368,16 +370,18 @@ jobs:
             cp "target/${{ matrix.target }}/release/tishlang-cargo-bindgen" "staging/tish-bindgen"
           fi
 
-      - name: Stage tish-fmt / tish-lint binaries for upload
+      - name: Stage tish-fmt / tish-lint / tish-lsp binaries for upload
         shell: bash
         run: |
           mkdir -p staging
           if [ "${{ matrix.platform }}" = "win32-x64" ]; then
             cp "target/${{ matrix.target }}/release/tish-fmt.exe"  "staging/tish-fmt.exe"
             cp "target/${{ matrix.target }}/release/tish-lint.exe" "staging/tish-lint.exe"
+            cp "target/${{ matrix.target }}/release/tish-lsp.exe"  "staging/tish-lsp.exe"
           else
             cp "target/${{ matrix.target }}/release/tish-fmt"  "staging/tish-fmt"
             cp "target/${{ matrix.target }}/release/tish-lint" "staging/tish-lint"
+            cp "target/${{ matrix.target }}/release/tish-lsp"  "staging/tish-lsp"
           fi
 
       - name: Upload binary
@@ -403,6 +407,12 @@ jobs:
         with:
           name: lint-${{ matrix.platform }}
           path: staging/tish-lint*
+
+      - name: Upload tish-lsp binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsp-${{ matrix.platform }}
+          path: staging/tish-lsp*
 
   release:
     name: Release (prerelease branch + GitHub API)
@@ -713,6 +723,12 @@ jobs:
           upload_asset npm/cargo-bindgen/platform/darwin-x64/tish-bindgen "tish-bindgen-darwin-x64" "tish-bindgen macOS (Intel)" "application/octet-stream"
           upload_asset npm/cargo-bindgen/platform/win32-x64/tish-bindgen.exe "tish-bindgen-win32-x64.exe" "tish-bindgen Windows (x64)" "application/octet-stream"
           upload_asset npm/tish/tish-platform-binaries.zip "tish-platform-binaries.zip" "Platform binaries (all OS)" "application/zip"
+          # tish-lsp raw binaries — the tish-vscode extension downloads tish-lsp-<platform> from the release.
+          upload_asset artifacts/lsp-linux-x64/tish-lsp        "tish-lsp-linux-x64"      "tish-lsp Linux (x64)"           "application/octet-stream"
+          upload_asset artifacts/lsp-linux-arm64/tish-lsp      "tish-lsp-linux-arm64"    "tish-lsp Linux (ARM64)"         "application/octet-stream"
+          upload_asset artifacts/lsp-darwin-arm64/tish-lsp     "tish-lsp-darwin-arm64"   "tish-lsp macOS (Apple Silicon)" "application/octet-stream"
+          upload_asset artifacts/lsp-darwin-x64/tish-lsp       "tish-lsp-darwin-x64"     "tish-lsp macOS (Intel)"         "application/octet-stream"
+          upload_asset artifacts/lsp-win32-x64/tish-lsp.exe    "tish-lsp-win32-x64.exe"  "tish-lsp Windows (x64)"         "application/octet-stream"
           upload_asset tish-npm-package.tgz "tish-npm-package.tgz" "npm package (publish with: npm publish)" "application/octet-stream"
           upload_asset cargo-bindgen-npm-package.tgz "cargo-bindgen-npm-package.tgz" "npm @tishlang/cargo-bindgen (publish with: npm publish)" "application/octet-stream"
           upload_asset tish-format-npm-package.tgz "tish-format-npm-package.tgz" "npm @tishlang/tish-format (publish with: npm publish)" "application/octet-stream"
