@@ -41,6 +41,7 @@ jobs:
           CRATES=(
             tishlang_build_utils
             tishlang_core
+            tishlang_ffi
             tishlang_ast
             tishlang_resolve
             tishlang_ui
@@ -70,6 +71,17 @@ jobs:
             tishlang_lsp
             tishlang
           )
+          # Drift guard: every publishable workspace crate MUST be listed above. A crate that's added
+          # to the workspace but forgotten here (as tishlang_ffi was) otherwise only surfaces as a
+          # mid-publish "no matching package named '<crate>' found" failure on a dependent. Fail early
+          # and loudly instead. (publish=false crates — e.g. the mathext FFI example — are excluded.)
+          missing=0
+          while IFS= read -r c; do
+            printf '%s\n' "${CRATES[@]}" | grep -qx "$c" \
+              || { echo "::error::publishable crate '$c' is missing from the CRATES list in crates-release.yml"; missing=1; }
+          done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.publish == null or (.publish | length > 0)) | .name')
+          [ "$missing" -eq 0 ] || { echo "Add the crate(s) above to CRATES in dependency order, then re-run."; exit 1; }
+
           for crate in "${CRATES[@]}"; do
             if curl -sSf -o /dev/null -A "tishlang-release/1.0 (https://github.com/tishlang/tish)" "https://crates.io/api/v1/crates/${crate}/${VERSION}"; then
               echo "Skipping $crate v${VERSION} (already published)"
