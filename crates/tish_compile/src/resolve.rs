@@ -49,17 +49,23 @@ pub struct NativeBuildArtifacts {
     pub native_init: std::collections::HashMap<String, NativeModuleInit>,
 }
 
-/// Node-compatible aliases for built-in modules (fs -> tish:fs, etc.).
+/// Node-compatible aliases for built-in modules (fs -> tish:fs, etc.). The `node:` prefix
+/// (e.g. `node:fs`, `node:fs/promises`) is stripped before lookup.
 const BUILTIN_ALIASES: &[(&str, &str)] = &[
     ("fs", "tish:fs"),
+    ("fs/promises", "tish:fs/promises"),
     ("http", "tish:http"),
     ("timers", "tish:timers"),
     ("process", "tish:process"),
     ("ws", "tish:ws"),
+    ("tty", "tish:tty"),
 ];
 
-/// Normalize built-in spec to canonical form. E.g. "fs" -> "tish:fs".
+/// Normalize built-in spec to canonical form. Handles the Node `node:` prefix
+/// (`node:fs` -> `tish:fs`, `node:fs/promises` -> `tish:fs/promises`) and bare aliases.
 pub fn normalize_builtin_spec(spec: &str) -> Option<String> {
+    // Strip a leading `node:` so `node:fs` resolves the same as `fs`.
+    let spec = spec.strip_prefix("node:").unwrap_or(spec);
     if spec.starts_with("tish:") {
         return Some(spec.to_string());
     }
@@ -71,10 +77,20 @@ pub fn normalize_builtin_spec(spec: &str) -> Option<String> {
 
 /// Built-in modules that come from tishlang_runtime, not from package.json.
 pub fn is_builtin_native_spec(spec: &str) -> bool {
+    let spec = spec.strip_prefix("node:").unwrap_or(spec);
     matches!(
         spec,
-        "tish:fs" | "tish:http" | "tish:timers" | "tish:process" | "tish:ws" | "tish:tty"
-    ) || matches!(spec, "fs" | "http" | "timers" | "process" | "ws" | "tty")
+        "tish:fs"
+            | "tish:fs/promises"
+            | "tish:http"
+            | "tish:timers"
+            | "tish:process"
+            | "tish:ws"
+            | "tish:tty"
+    ) || matches!(
+        spec,
+        "fs" | "fs/promises" | "http" | "timers" | "process" | "ws" | "tty"
+    )
 }
 
 /// Resolve all native imports in a merged program via package.json lookup.
@@ -955,10 +971,15 @@ fn load_module_recursive(
 ///
 /// Scoped npm packages (`@scope/pkg`) are merged as Tish source unless imported via `tish:…`.
 pub fn is_native_import(spec: &str) -> bool {
+    // A leading `node:` (node:fs, node:fs/promises) resolves the same as the bare form.
+    let spec = spec.strip_prefix("node:").unwrap_or(spec);
     spec.starts_with("tish:")
         || spec.starts_with("cargo:")
         || spec.starts_with("ffi:")
-        || matches!(spec, "fs" | "http" | "timers" | "process" | "ws")
+        || matches!(
+            spec,
+            "fs" | "fs/promises" | "http" | "timers" | "process" | "ws" | "tty"
+        )
 }
 
 /// True for `ffi:…` specs (portable C-ABI cdylib extensions, loadable on every backend). The
