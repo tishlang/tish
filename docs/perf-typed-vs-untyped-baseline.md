@@ -146,6 +146,52 @@ analysis provably can't store a string into a `number[]`.
   `binary_trees` (24× off, hardest). Both extend `TISH_STRUCT_INFER`. `megamorphic` (12× off) is
   polymorphic dispatch → a VM inline-cache concern, not typed codegen.
 
+## Update 2026-06-11 — regression check: perf flat across the 23 commits since `71c874d0` (#79)
+
+Not a new typing lever — a **before/after guard** confirming the feature/fix work that landed on `main`
+since the phase-2 baseline (the six merged PRs #105–#111 plus the rest of the range) did **not** move the
+compute-perf needle. Methodology: the **same** `run_perf_gauntlet.sh` (byte-identical at both commits)
+and the identical 21-fixture `tests/perf/` corpus, built and run on the real checkout at each commit (no
+worktrees) — **baseline `71c874d0`** vs **`main` `c69cf32f`**, min of 5, with the Node/V8 column as a
+machine-noise control (same V8 binary both runs).
+
+**Verdict: no measurable change.** Every per-benchmark delta sits inside run-to-run noise — the Node
+control column drifts by as much or more with zero code change (`fnv_hash` node 104→109 ms,
+`json_roundtrip` 133→125 ms, `queens` 129→124 ms). Status counts are identical (**8 / 21 beat V8**),
+**no benchmark flipped** PASS↔FAIL, and soundness held on both builds (**0 `TYPED≠BOXED`, 0 `≠NODE`**).
+
+`main` (`c69cf32f`) snapshot — full 21-benchmark gauntlet, min of 5 (Δ = `typed (on)` vs `71c874d0`):
+
+| benchmark | boxed (off) | typed (on) | typing-speedup | node (ratio) | Δ typed vs `71c874d0` | status |
+|-----------|------------:|-----------:|---------------:|-------------:|----------------------:|--------|
+| `object_sum` | 82 ms | 1 ms | **81.92×** | 3 ms (0.33×) | 0 | PASS ✓ |
+| `array_hof` | 235 ms | 11 ms | **21.36×** | 29 ms (0.38×) | −1 ms | PASS ✓ |
+| `matmul` | 228 ms | 14 ms | **16.28×** | 17 ms (0.82×) | 0 | PASS ✓ |
+| `recursion_untyped` | 460 ms | 31 ms | **14.84×** | 55 ms (0.56×) | −1 ms | PASS ✓ |
+| `recursion_fib` | 454 ms | 31 ms | **14.64×** | 50 ms (0.62×) | 0 | PASS ✓ |
+| `mandelbrot` | 856 ms | 67 ms | **12.78×** | 56 ms (1.20×) | −1 ms | FAIL (≈V8) |
+| `typed_array_hof` | 266 ms | 99 ms | 2.69× | 33 ms (3.00×) | +6 ms | FAIL (evolve) |
+| `nsieve` | 473 ms | 102 ms | 4.64× | 72 ms (1.42×) | −1 ms | FAIL |
+| `fannkuch` | 3481 ms | 1399 ms | 2.49× | 140 ms (9.99×) | +6 ms | FAIL |
+| `fnv_hash` | 445 ms | 439 ms | 1.01× | 109 ms (4.03×) | +18 ms\* | FAIL |
+| `spectral_norm` | 1826 ms | 1762 ms | 1.04× | 39 ms (45.18×) | +30 ms | FAIL |
+| `queens` | 1079 ms | 1083 ms | 1.00× | 124 ms (8.73×) | +1 ms | FAIL |
+| `nbody` | 889 ms | 860 ms | 1.03× | 11 ms (78.17×) | −21 ms | FAIL |
+| `binary_trees` | 885 ms | 878 ms | 1.01× | 37 ms (23.73×) | −1 ms | FAIL |
+| `megamorphic` | 671 ms | 678 ms | 0.99× | 54 ms (12.56×) | −3 ms | FAIL |
+| `fasta` | 217 ms | 207 ms | 1.05× | 37 ms (5.59×) | +6 ms | FAIL |
+| `json_roundtrip` | 296 ms | 295 ms | 1.00× | 125 ms (2.36×) | −10 ms | FAIL |
+| `k_nucleotide` | 23 ms | 22 ms | 1.05× | 5 ms (4.40×) | 0 | FAIL |
+| `numeric_loop` | 47 ms | 46 ms | 1.02× | 50 ms (0.92×) | −1 ms | PASS ✓ |
+| `math_trig` | 11 ms | 10 ms | 1.10× | 81 ms (0.12×) | 0 | PASS ✓ |
+| `string_concat` | 0 ms | 0 ms | — | 3 ms | 0 | PASS ✓ |
+
+\* `fnv_hash`'s +18 ms (+4.3%) is the largest single mover, but the Node control on that same row drifted
++5 ms (104→109) between runs — i.e. inside the machine's own variance, not a code regression. The "+"
+rows (`fnv_hash`, `spectral_norm` +1.7%, `typed_array_hof` +6.5%, `fasta` +3%) are matched by equal "−"
+rows (`nbody` −2.4%, `json_roundtrip` −3.3%, `recursion_untyped` −3.1%); `boxed (off)` shows the same
+symmetric scatter. No trend, no regression to chase — the recent range was correctness/feature work.
+
 ## Baseline (Apple Silicon, release, min of 3 runs — pre-phase-1 reference, 9-benchmark set)
 
 | benchmark | boxed (off) | typed (on) | typing-speedup | node (ratio) | status | validates |
