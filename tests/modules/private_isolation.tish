@@ -1,0 +1,9 @@
+// #97: a non-exported top-level binding in one module must not be overwritten by a
+// same-named binding in another. Before the fix, `ga()` returned "from-b..." and the
+// `--target js` bundle had two `let SHARED` (SyntaxError).
+import { ga, shadowParam, innerShadow } from "./private_isolation_a.tish"
+import { gb, useHelper } from "./private_isolation_b.tish"
+
+console.log(ga(), gb())
+console.log(shadowParam("arg"), innerShadow())
+console.log(useHelper())

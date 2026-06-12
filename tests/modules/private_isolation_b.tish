@@ -1,0 +1,6 @@
+// Module B declares the SAME private names as module A; each module keeps its own.
+let SHARED = "from-b"
+fn helper() { return "helper-b" }
+
+export fn gb() { return SHARED + ":" + helper() }
+export fn useHelper() { return helper() }

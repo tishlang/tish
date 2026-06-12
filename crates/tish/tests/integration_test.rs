@@ -589,6 +589,90 @@ fn test_import_alias() {
 }
 
 /// Combined validation: async/await + Promise + setTimeout + multiple HTTP requests.
+/// #97: a module's non-exported top-level bindings stay private — a same-named binding in
+/// another module must not overwrite them (runtime), and the `--target js` bundle must not
+/// emit duplicate `let` declarations (SyntaxError). Verified identical across interp / VM /
+/// native / node, including parameter and inner-`let` shadowing.
+#[test]
+fn test_module_private_binding_isolation() {
+    let bin = tish_bin();
+    if !bin.exists() {
+        return;
+    }
+    let path = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("private_isolation.tish");
+    if !path.exists() {
+        return;
+    }
+    let expected = "from-a:helper-a from-b:helper-b\narg inner\nhelper-b\n";
+
+    // Interpreter + VM via `tish run`.
+    for backend in ["interp", "vm"] {
+        let out = Command::new(&bin)
+            .args(["run", "--backend", backend])
+            .arg(&path)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish binary");
+        assert!(
+            out.status.success(),
+            "private_isolation.tish ({backend}) failed: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected,
+            "module private-binding isolation mismatch on backend {backend}"
+        );
+    }
+
+    // Native: compile + run.
+    let native_bin = compile_cached(&bin, &path, "native");
+    let out = Command::new(&native_bin)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run native binary");
+    let _ = std::fs::remove_file(&native_bin);
+    assert!(
+        out.status.success(),
+        "private_isolation native run failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        expected,
+        "module private-binding isolation mismatch on native backend"
+    );
+
+    // JS target: compile + run through Node (also asserts no duplicate-`let` SyntaxError).
+    let node_available = Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if node_available {
+        let out_js = compile_cached(&bin, &path, "js");
+        let out = Command::new("node")
+            .arg(&out_js)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run node");
+        let _ = std::fs::remove_file(&out_js);
+        assert!(
+            out.status.success(),
+            "private_isolation JS run failed: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected,
+            "module private-binding isolation mismatch on JS target"
+        );
+    }
+}
+
 /// Ignored: tishlang_eval::run() does not run the event loop.
 #[test]
 #[cfg(feature = "http")]
