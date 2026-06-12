@@ -1,0 +1,10 @@
+// Fixture for issue #120: read a binary file as a byte array via tish:fs.readFileBytes.
+// The test points RFB_FIXTURE at a file containing non-UTF-8 bytes (NUL, 0xFF, …).
+import { readFileBytes } from "tish:fs"
+import { process } from "tish:process"
+
+let path = process.env.RFB_FIXTURE
+let b = readFileBytes(path)
+console.log("isArray:" + String(Array.isArray(b)))
+console.log("len:" + String(b.length))
+console.log("bytes:" + b.join(","))

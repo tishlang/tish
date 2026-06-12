@@ -666,6 +666,23 @@ pub fn read_file(args: &[Value]) -> Value {
     }
 }
 
+/// Read a file as raw bytes — an array of numbers 0–255 — for binary data that `read_file`
+/// (UTF-8 only) can't handle (images, fonts, archives). Lets pure-Tish decoders work on local
+/// files. See issue #120.
+#[cfg(feature = "fs")]
+pub fn read_file_bytes(args: &[Value]) -> Value {
+    let path = args
+        .first()
+        .map(|v| v.to_display_string())
+        .unwrap_or_default();
+    match std::fs::read(&path) {
+        Ok(bytes) => Value::Array(VmRef::new(
+            bytes.into_iter().map(|b| Value::Number(b as f64)).collect(),
+        )),
+        Err(e) => make_error_value(e),
+    }
+}
+
 #[cfg(feature = "fs")]
 pub fn write_file(args: &[Value]) -> Value {
     let path = args

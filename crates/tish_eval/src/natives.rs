@@ -420,6 +420,22 @@ pub fn read_file(args: &[Value]) -> Result<Value, String> {
     }
 }
 
+/// Read a file as raw bytes (array of numbers 0–255) for binary data that `read_file`
+/// (UTF-8 only) can't handle. See issue #120.
+#[cfg(feature = "fs")]
+pub fn read_file_bytes(args: &[Value]) -> Result<Value, String> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let items: Vec<Value> = bytes.into_iter().map(|b| Value::Number(b as f64)).collect();
+            Ok(Value::Array(Rc::new(RefCell::new(items))))
+        }
+        Err(e) => Ok(Value::String(format!("Error: {}", e).into())),
+    }
+}
+
 #[cfg(feature = "fs")]
 pub fn write_file(args: &[Value]) -> Result<Value, String> {
     let path = args.first().map(|v| v.to_string()).unwrap_or_default();

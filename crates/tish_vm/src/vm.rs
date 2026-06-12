@@ -169,6 +169,9 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             "mkdir" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::mkdir(args)
             })),
+            "readFileBytes" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::read_file_bytes(args)
+            })),
             _ => None,
         };
     }

@@ -916,6 +916,10 @@ impl Evaluator {
                     exports.insert("fileExists".into(), Value::Native(natives::file_exists));
                     exports.insert("isDir".into(), Value::Native(natives::is_dir));
                     exports.insert("readDir".into(), Value::Native(natives::read_dir));
+                    exports.insert(
+                        "readFileBytes".into(),
+                        Value::Native(natives::read_file_bytes),
+                    );
                     exports.insert("mkdir".into(), Value::Native(natives::mkdir));
                     Ok(Value::object(exports))
                 }
