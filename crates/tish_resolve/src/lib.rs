@@ -160,12 +160,16 @@ fn collect_stmt(
             name,
             name_span,
             params,
+            rest_param,
             body,
             ..
         } => {
             consider(source, lsp_line, lsp_char, name_span, name.clone(), best);
             for p in params {
                 collect_fun_param(p, source, lsp_line, lsp_char, best);
+            }
+            if let Some(rp) = rest_param {
+                consider(source, lsp_line, lsp_char, &rp.name_span, rp.name.clone(), best);
             }
             collect_stmt(body, source, lsp_line, lsp_char, best);
         }
@@ -256,11 +260,15 @@ fn collect_stmt(
             name,
             name_span,
             params,
+            rest_param,
             ..
         } => {
             consider(source, lsp_line, lsp_char, name_span, name.clone(), best);
             for p in params {
                 collect_fun_param(p, source, lsp_line, lsp_char, best);
+            }
+            if let Some(rp) = rest_param {
+                consider(source, lsp_line, lsp_char, &rp.name_span, rp.name.clone(), best);
             }
         }
         Statement::Break { .. } | Statement::Continue { .. } => {}
@@ -1021,6 +1029,15 @@ fn define_pattern_stack(pattern: &DestructPattern, scopes: &mut ScopeStack) {
     }
 }
 
+/// The default-value expression of a parameter, if any (`fn f(a = EXPR)`). Both simple and
+/// destructuring parameters can carry a default; rest parameters never do (no default syntax).
+fn param_default(p: &FunParam) -> Option<&Expr> {
+    match p {
+        FunParam::Simple(tp) => tp.default.as_ref(),
+        FunParam::Destructure { default, .. } => default.as_ref(),
+    }
+}
+
 fn walk_expr_resolve(
     expr: &Expr,
     scopes: &ScopeStack,
@@ -1147,6 +1164,13 @@ fn walk_expr_resolve(
             inner.push();
             for p in params {
                 define_fun_param_stack(p, &mut inner);
+            }
+            for p in params {
+                if let Some(e) = param_default(p) {
+                    if let Some(s) = walk_expr_resolve(e, &inner, target) {
+                        return Some(s);
+                    }
+                }
             }
             match body {
                 ArrowBody::Expr(e) => walk_expr_resolve(e, &inner, target),
@@ -1332,6 +1356,7 @@ fn walk_stmt_resolve(
             name,
             name_span,
             params,
+            rest_param,
             body,
             ..
         } => {
@@ -1343,7 +1368,21 @@ fn walk_stmt_resolve(
             for p in params {
                 define_fun_param_stack(p, scopes);
             }
-            let r = walk_stmt_resolve(body, scopes, target);
+            if let Some(rp) = rest_param {
+                scopes.define(rp.name.as_ref(), rp.name_span);
+            }
+            let mut r = None;
+            for p in params {
+                if let Some(e) = param_default(p) {
+                    if let Some(s) = walk_expr_resolve(e, scopes, target) {
+                        r = Some(s);
+                        break;
+                    }
+                }
+            }
+            if r.is_none() {
+                r = walk_stmt_resolve(body, scopes, target);
+            }
             scopes.pop();
             if r.is_some() {
                 return r;
@@ -1482,6 +1521,7 @@ fn walk_stmt_resolve(
             name,
             name_span,
             params,
+            rest_param,
             ..
         } => {
             if *name_span == tgt_span && name.as_ref() == target.name.as_ref() {
@@ -1492,8 +1532,20 @@ fn walk_stmt_resolve(
             for p in params {
                 define_fun_param_stack(p, scopes);
             }
+            if let Some(rp) = rest_param {
+                scopes.define(rp.name.as_ref(), rp.name_span);
+            }
+            let mut r = None;
+            for p in params {
+                if let Some(e) = param_default(p) {
+                    if let Some(s) = walk_expr_resolve(e, scopes, target) {
+                        r = Some(s);
+                        break;
+                    }
+                }
+            }
             scopes.pop();
-            None
+            r
         }
         Statement::Break { .. } | Statement::Continue { .. } => None,
     }
@@ -1695,6 +1747,11 @@ fn check_unresolved_expr(expr: &Expr, scopes: &ScopeStack, out: &mut Vec<Unresol
             for p in params {
                 define_fun_param_stack(p, &mut inner);
             }
+            for p in params {
+                if let Some(e) = param_default(p) {
+                    check_unresolved_expr(e, &inner, out);
+                }
+            }
             match body {
                 ArrowBody::Expr(e) => check_unresolved_expr(e, &inner, out),
                 ArrowBody::Block(b) => check_unresolved_stmt(b, &mut inner, out),
@@ -1843,6 +1900,7 @@ fn check_unresolved_stmt(
             name,
             name_span,
             params,
+            rest_param,
             body,
             ..
         } => {
@@ -1850,6 +1908,14 @@ fn check_unresolved_stmt(
             scopes.define(name.as_ref(), *name_span);
             for p in params {
                 define_fun_param_stack(p, scopes);
+            }
+            if let Some(rp) = rest_param {
+                scopes.define(rp.name.as_ref(), rp.name_span);
+            }
+            for p in params {
+                if let Some(e) = param_default(p) {
+                    check_unresolved_expr(e, scopes, out);
+                }
             }
             check_unresolved_stmt(body, scopes, out);
             scopes.pop();
@@ -1944,12 +2010,21 @@ fn check_unresolved_stmt(
             name,
             name_span,
             params,
+            rest_param,
             ..
         } => {
             scopes.push();
             scopes.define(name.as_ref(), *name_span);
             for p in params {
                 define_fun_param_stack(p, scopes);
+            }
+            if let Some(rp) = rest_param {
+                scopes.define(rp.name.as_ref(), rp.name_span);
+            }
+            for p in params {
+                if let Some(e) = param_default(p) {
+                    check_unresolved_expr(e, scopes, out);
+                }
             }
             scopes.pop();
             scopes.define(name.as_ref(), *name_span);
@@ -3233,18 +3308,19 @@ fn refs_stmt(
         }
         Statement::FunDecl { params, body, .. } => {
             for p in params {
-                if let FunParam::Simple(tp) = p {
-                    if let Some(e) = &tp.default {
-                        refs_expr(e, program, source, name, def_span, out);
-                    }
-                } else if let FunParam::Destructure {
-                    default: Some(e), ..
-                } = p
-                {
+                if let Some(e) = param_default(p) {
                     refs_expr(e, program, source, name, def_span, out);
                 }
             }
             refs_stmt(body, program, source, name, def_span, out);
+        }
+        // Ambient `declare fn` params can carry value-level defaults too.
+        Statement::DeclareFun { params, .. } => {
+            for p in params {
+                if let Some(e) = param_default(p) {
+                    refs_expr(e, program, source, name, def_span, out);
+                }
+            }
         }
         Statement::Switch {
             expr,
@@ -3295,8 +3371,7 @@ fn refs_stmt(
         | Statement::Break { .. }
         | Statement::Continue { .. }
         | Statement::TypeAlias { .. }
-        | Statement::DeclareVar { .. }
-        | Statement::DeclareFun { .. } => {}
+        | Statement::DeclareVar { .. } => {}
     }
 }
 
@@ -3611,6 +3686,94 @@ mod tests {
         let refs = reference_spans_for_def(&program, src, "publicUser", def);
         assert_eq!(refs.len(), 2, "def + one use in exported body; refs={refs:?}");
         assert!(refs.contains(&def));
+    }
+
+    #[test]
+    fn import_used_only_in_fn_param_default_not_unused() {
+        // A name referenced only inside a parameter default was wrongly flagged unused because the
+        // resolve walkers never descended into `default` expressions.
+        let src = "import { base } from \"./m\"\nexport fn f(a = base(1)) {\n  return a\n}\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert!(u.is_empty(), "base is used in the param default; u={u:?}");
+    }
+
+    #[test]
+    fn import_used_only_in_arrow_param_default_not_unused() {
+        let src = "import { fallback } from \"./m\"\nlet make = (x = fallback) => x\nmake()\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert!(u.is_empty(), "fallback is used in the arrow param default; u={u:?}");
+    }
+
+    #[test]
+    fn gotodef_resolves_name_used_in_param_default() {
+        let src = "import { base } from \"./m\"\nfn f(a = base(1)) {\n  return a\n}\n";
+        let program = parse(src).expect("parse");
+        // cursor on `base` inside the default (0-indexed line 1, char 9)
+        let def = definition_span(&program, src, 1, 9);
+        assert_eq!(def, Some(tishlang_ast::Span { start: (1, 10), end: (1, 14) }), "def={def:?}");
+    }
+
+    #[test]
+    fn gotodef_resolves_rest_param_body_use() {
+        let src = "fn f(...rest) {\n  return rest\n}\n";
+        let program = parse(src).expect("parse");
+        // cursor on `rest` in the body (0-indexed line 1, char 9) -> the rest-param binding
+        let def = definition_span(&program, src, 1, 9);
+        assert_eq!(def, Some(tishlang_ast::Span { start: (1, 9), end: (1, 13) }), "def={def:?}");
+    }
+
+    #[test]
+    fn name_at_cursor_finds_rest_param_decl() {
+        let src = "fn f(...rest) {\n  return rest\n}\n";
+        let program = parse(src).expect("parse");
+        // cursor on the `...rest` declaration name (0-indexed line 0, char 8)
+        let nu = name_at_cursor(&program, src, 0, 8).expect("name under cursor");
+        assert_eq!(nu.name.as_ref(), "rest");
+    }
+
+    #[test]
+    fn param_default_referencing_sibling_param_resolves_to_param_not_outer() {
+        // `a` exists both as an outer binding (line 0) and a param (line 1). The default `b = a`
+        // must resolve to the PARAM, not the outer — i.e. defaults are checked with params in scope.
+        let src = "let a = 1\nfn f(a, b = a) {\n  return b\n}\nf(2)\n";
+        let program = parse(src).expect("parse");
+        // cursor on `a` inside `b = a` (0-indexed line 1, char 12)
+        let def = definition_span(&program, src, 1, 12).expect("resolved");
+        assert_eq!(def.start.0, 2, "should resolve to the param on line 2 (1-indexed); def={def:?}");
+    }
+
+    #[test]
+    fn references_include_both_param_default_and_body_uses() {
+        let src = "fn helper() { 1 }\nfn f(b = helper()) {\n  return helper()\n}\nf()\n";
+        let program = parse(src).expect("parse");
+        let def = tishlang_ast::Span { start: (1, 4), end: (1, 10) };
+        let refs = reference_spans_for_def(&program, src, "helper", def);
+        // def + use in param default + use in body
+        assert_eq!(refs.len(), 3, "decl + default-use + body-use; refs={refs:?}");
+    }
+
+    #[test]
+    fn unresolved_name_in_param_default_reported() {
+        let src = "fn f(a = mispelt) {\n  return a\n}\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unresolved_identifiers(&program);
+        assert_eq!(u.len(), 1, "u={u:?}");
+        assert_eq!(u[0].name.as_ref(), "mispelt");
+    }
+
+    #[test]
+    fn import_used_only_in_declare_fn_default_not_unused() {
+        let src = "import { DEF } from \"./m\"\ndeclare fn connect(port = DEF): void\nconnect()\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        // The import used in the declare-fn param default must not be reported unused.
+        // (Unrelated pre-existing declare-fn quirks may flag `connect`/`port`; not asserted here.)
+        assert!(
+            !u.iter().any(|b| b.name.as_ref() == "DEF"),
+            "DEF is used in the declare-fn param default; u={u:?}"
+        );
     }
 
     #[test]
