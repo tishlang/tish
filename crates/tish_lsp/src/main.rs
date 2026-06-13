@@ -618,8 +618,12 @@ impl LanguageServer for Backend {
         };
         let spans =
             tishlang_resolve::reference_spans_for_def(&program, &text, nu.name.as_ref(), def);
+        // Honor the client's includeDeclaration flag: reference_spans_for_def returns the definition
+        // span plus the use spans, so drop the definition when only uses were requested.
+        let include_decl = params.context.include_declaration;
         let locs: Vec<Location> = spans
             .into_iter()
+            .filter(|sp| include_decl || *sp != def)
             .map(|sp| Location {
                 uri: uri.clone(),
                 range: span_to_range(&sp, &text),
@@ -810,7 +814,61 @@ fn collect_workspace_syms(
                 ));
             }
         }
-        tishlang_ast::Statement::Block { statements, .. } => {
+        tishlang_ast::Statement::TypeAlias {
+            name, name_span, ..
+        } => {
+            if name.to_lowercase().contains(query) {
+                out.push(symbol_information(
+                    name.to_string(),
+                    SymbolKind::INTERFACE,
+                    None,
+                    Location {
+                        uri: uri.clone(),
+                        range: span_to_range(name_span, text),
+                    },
+                    None,
+                ));
+            }
+        }
+        tishlang_ast::Statement::DeclareFun {
+            name, name_span, ..
+        } => {
+            if name.to_lowercase().contains(query) {
+                out.push(symbol_information(
+                    name.to_string(),
+                    SymbolKind::FUNCTION,
+                    None,
+                    Location {
+                        uri: uri.clone(),
+                        range: span_to_range(name_span, text),
+                    },
+                    None,
+                ));
+            }
+        }
+        tishlang_ast::Statement::DeclareVar {
+            name, name_span, ..
+        } => {
+            if name.to_lowercase().contains(query) {
+                out.push(symbol_information(
+                    name.to_string(),
+                    SymbolKind::VARIABLE,
+                    None,
+                    Location {
+                        uri: uri.clone(),
+                        range: span_to_range(name_span, text),
+                    },
+                    None,
+                ));
+            }
+        }
+        tishlang_ast::Statement::Export { declaration, .. } => {
+            if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
+                collect_workspace_syms(inner, text, uri, query, out);
+            }
+        }
+        tishlang_ast::Statement::Block { statements, .. }
+        | tishlang_ast::Statement::Multi { statements, .. } => {
             for x in statements {
                 collect_workspace_syms(x, text, uri, query, out);
             }
@@ -1308,7 +1366,64 @@ fn doc_symbol_stmt(
                 None,
             ));
         }
-        tishlang_ast::Statement::Block { statements, .. } => {
+        tishlang_ast::Statement::TypeAlias {
+            name,
+            name_span,
+            span,
+            ..
+        } => {
+            out.push(document_symbol(
+                name.to_string(),
+                None,
+                SymbolKind::INTERFACE,
+                None,
+                span_to_range(span, text),
+                span_to_range(name_span, text),
+                None,
+            ));
+        }
+        tishlang_ast::Statement::DeclareFun {
+            name,
+            name_span,
+            span,
+            ..
+        } => {
+            out.push(document_symbol(
+                name.to_string(),
+                None,
+                SymbolKind::FUNCTION,
+                None,
+                span_to_range(span, text),
+                span_to_range(name_span, text),
+                None,
+            ));
+        }
+        tishlang_ast::Statement::DeclareVar {
+            name,
+            name_span,
+            span,
+            ..
+        } => {
+            out.push(document_symbol(
+                name.to_string(),
+                None,
+                SymbolKind::VARIABLE,
+                None,
+                span_to_range(span, text),
+                span_to_range(name_span, text),
+                None,
+            ));
+        }
+        // `export fn` / `export let` / `export type` wrap the declaration — descend into it so
+        // exported symbols appear in the outline.
+        tishlang_ast::Statement::Export { declaration, .. } => {
+            if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
+                doc_symbol_stmt(inner, text, out);
+            }
+        }
+        // Block and the transparent comma-declarator group (`let a = 1, b = 2`).
+        tishlang_ast::Statement::Block { statements, .. }
+        | tishlang_ast::Statement::Multi { statements, .. } => {
             for x in statements {
                 doc_symbol_stmt(x, text, out);
             }
@@ -1391,6 +1506,20 @@ mod hover_tests {
 
     fn hint(p: &tishlang_ast::Program, span: &Span) -> String {
         type_hint_at_def(p, span).expect("expected a type hint")
+    }
+
+    #[test]
+    fn document_symbols_include_exported_type_and_comma_decls() {
+        let src = "export fn foo() {}\ntype Status = number\nlet a = 1, b = 2\ndeclare fn ext(): void\nlet plain = 3\n";
+        let program = tishlang_parser::parse(src).unwrap();
+        let mut syms = Vec::new();
+        for s in &program.statements {
+            doc_symbol_stmt(s, src, &mut syms);
+        }
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        for expected in ["foo", "Status", "a", "b", "ext", "plain"] {
+            assert!(names.contains(&expected), "outline missing `{expected}`: {names:?}");
+        }
     }
 
     #[test]
