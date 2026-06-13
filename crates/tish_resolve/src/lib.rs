@@ -72,6 +72,35 @@ fn synthetic_name_span(start: (usize, usize), name: &str) -> tishlang_ast::Span 
     }
 }
 
+thread_local! {
+    /// When active, accumulates the definition spans that identifier uses resolve to during one
+    /// `collect_unresolved_identifiers` scope-aware walk (`record_unresolved` already resolves every
+    /// use). `collect_unused_bindings` activates it to learn which declarations are referenced in a
+    /// single O(N) pass, instead of re-scanning the whole program per binding (which was ~O(N³) and
+    /// froze large files). Inactive for normal callers (the unresolved-name diagnostic), which see
+    /// no behavior change.
+    static REFERENCED_DEFS: std::cell::RefCell<Option<std::collections::HashSet<(usize, usize)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// One scope-aware resolution pass: the set of definition span *starts* that at least one identifier
+/// use resolves to (a name's declaration position is unique, so the start identifies it). Reuses the
+/// exact walk and scope rules of [`collect_unresolved_identifiers`], so it stays consistent with the
+/// unresolved-name diagnostic. O(N) (single walk; scope lookups O(1)).
+fn collect_referenced_def_spans(program: &Program) -> std::collections::HashSet<(usize, usize)> {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            REFERENCED_DEFS.with(|r| *r.borrow_mut() = None);
+        }
+    }
+    let _g = Guard;
+    REFERENCED_DEFS.with(|r| *r.borrow_mut() = Some(std::collections::HashSet::new()));
+    // Side effect: record_unresolved inserts each resolved def span into REFERENCED_DEFS.
+    let _ = collect_unresolved_identifiers(program);
+    REFERENCED_DEFS.with(|r| r.borrow_mut().take().unwrap_or_default())
+}
+
 fn collect_stmt(
     stmt: &Statement,
     source: &str,
@@ -1029,6 +1058,39 @@ fn define_pattern_stack(pattern: &DestructPattern, scopes: &mut ScopeStack) {
     }
 }
 
+/// Pre-define hoisted function-declaration names (incl. `export fn` and ambient `declare fn`) for a
+/// statement list, so a reference to a function declared later in the same scope resolves. Function
+/// values capture the live scope, so calling a sibling function declared further down succeeds at
+/// runtime (e.g. mutual recursion, or a helper defined below its caller); the resolver mirrors that
+/// by defining the names before walking any sibling body. Only function names are hoisted — `let`
+/// is not, matching the interpreter.
+fn hoist_fn_names(stmts: &[Statement], scopes: &mut ScopeStack) {
+    for s in stmts {
+        match s {
+            Statement::FunDecl {
+                name, name_span, ..
+            }
+            | Statement::DeclareFun {
+                name, name_span, ..
+            } => {
+                scopes.define(name.as_ref(), *name_span);
+            }
+            Statement::Export { declaration, .. } => {
+                if let ExportDeclaration::Named(inner) = declaration.as_ref() {
+                    if let Statement::FunDecl {
+                        name, name_span, ..
+                    } = inner.as_ref()
+                    {
+                        scopes.define(name.as_ref(), *name_span);
+                    }
+                }
+            }
+            Statement::Multi { statements, .. } => hoist_fn_names(statements, scopes),
+            _ => {}
+        }
+    }
+}
+
 /// The default-value expression of a parameter, if any (`fn f(a = EXPR)`). Both simple and
 /// destructuring parameters can carry a default; rest parameters never do (no default syntax).
 fn param_default(p: &FunParam) -> Option<&Expr> {
@@ -1331,6 +1393,7 @@ fn walk_stmt_resolve(
             .and_then(|e| walk_expr_resolve(e, scopes, target)),
         Statement::Block { statements, .. } => {
             scopes.push();
+            hoist_fn_names(statements, scopes);
             let mut out = None;
             for s in statements {
                 if let Some(x) = walk_stmt_resolve(s, scopes, target) {
@@ -1576,6 +1639,11 @@ pub struct UnresolvedIdentifier {
 /// Names always present on the interpreter root scope (see `tishlang_eval`) and listed in
 /// `stdlib/builtins.d.tish`. They must not produce "unresolved identifier" diagnostics when
 /// used without a `let`/`import`.
+///
+/// NOTE: maintained by hand to track the globals the interpreter registers on its root scope
+/// (`tish_eval`). It is the only suppression the LSP has — the resolver does not load
+/// `builtins.d.tish` — so any global missing here surfaces as a false `tish-unresolved-name`
+/// error in the editor. Keep it in sync (see the `runtime_globals_not_unresolved` test).
 pub fn is_runtime_global_ident(name: &str) -> bool {
     matches!(
         name,
@@ -1585,6 +1653,7 @@ pub fn is_runtime_global_ident(name: &str) -> bool {
             | "decodeURI"
             | "encodeURI"
             | "Boolean"
+            | "Number"
             | "isFinite"
             | "isNaN"
             | "Infinity"
@@ -1594,6 +1663,7 @@ pub fn is_runtime_global_ident(name: &str) -> bool {
             | "Object"
             | "Array"
             | "String"
+            | "Symbol"
             | "Date"
             | "Set"
             | "Map"
@@ -1608,6 +1678,15 @@ pub fn is_runtime_global_ident(name: &str) -> bool {
             | "Uint32Array"
             | "AudioContext"
             | "RegExp"
+            | "Error"
+            | "TypeError"
+            | "RangeError"
+            | "SyntaxError"
+            | "Promise"
+            | "fetch"
+            | "fetchAll"
+            | "serve"
+            | "htmlEscape"
             | "setTimeout"
             | "setInterval"
             | "clearTimeout"
@@ -1621,14 +1700,25 @@ fn record_unresolved(
     span: tishlang_ast::Span,
     out: &mut Vec<UnresolvedIdentifier>,
 ) {
-    if is_runtime_global_ident(name.as_ref()) {
-        return;
-    }
-    if scopes.resolve(name.as_ref()).is_none() {
-        out.push(UnresolvedIdentifier {
-            name: name.clone(),
-            span,
-        });
+    match scopes.resolve(name.as_ref()) {
+        // Resolved to an in-scope declaration. Record it (when collection is active) so
+        // collect_unused_bindings learns this def is referenced — done before the global check so a
+        // local that shadows a global name still counts as a use. Unresolved-name output unchanged.
+        Some(def) => {
+            REFERENCED_DEFS.with(|r| {
+                if let Some(set) = r.borrow_mut().as_mut() {
+                    set.insert(def.start);
+                }
+            });
+        }
+        None => {
+            if !is_runtime_global_ident(name.as_ref()) {
+                out.push(UnresolvedIdentifier {
+                    name: name.clone(),
+                    span,
+                });
+            }
+        }
     }
 }
 
@@ -1885,6 +1975,7 @@ fn check_unresolved_stmt(
         }
         Statement::Block { statements, .. } => {
             scopes.push();
+            hoist_fn_names(statements, scopes);
             for s in statements {
                 check_unresolved_stmt(s, scopes, out);
             }
@@ -2037,6 +2128,7 @@ fn check_unresolved_stmt(
 pub fn collect_unresolved_identifiers(program: &Program) -> Vec<UnresolvedIdentifier> {
     let mut out = Vec::new();
     let mut scopes = ScopeStack::new();
+    hoist_fn_names(&program.statements, &mut scopes);
     for stmt in &program.statements {
         check_unresolved_stmt(stmt, &mut scopes, &mut out);
     }
@@ -2499,59 +2591,291 @@ fn enumerate_stmt(stmt: &Statement, exported: bool, out: &mut Vec<BindingSite>) 
                 exported,
             });
         }
-        Statement::DeclareVar {
-            name, name_span, ..
-        } => {
-            out.push(BindingSite {
-                name: name.clone(),
-                span: *name_span,
-                kind: UnusedBindingKind::Variable,
-                exported,
-            });
+        // Ambient `declare` declarations describe symbols defined elsewhere and have no body, so
+        // nothing here is ever "unused" within this file (params can't be read; the name is API
+        // surface for other modules). They contribute no unused-binding candidates.
+        Statement::DeclareVar { .. } | Statement::DeclareFun { .. } => {}
+        Statement::Break { .. } | Statement::Continue { .. } => {}
+    }
+}
+
+/// Collect PascalCase JSX component tag names used anywhere in `program`. A `<Foo/>` tag lowers to
+/// `h(Foo, …)` — a real reference to the `Foo` binding — but the tag is not a span-validated
+/// identifier use, so the reference walker misses it. Used by [`collect_unused_bindings`] to avoid
+/// flagging a component import/binding used only as a tag. (Lowercase tags lower to string
+/// literals, so they are not references.) Precise rename/find-references for tags still needs a
+/// real tag span in the AST and is handled separately.
+fn collect_jsx_component_tags(program: &Program) -> std::collections::HashSet<Arc<str>> {
+    let mut out = std::collections::HashSet::new();
+    for s in &program.statements {
+        jsx_tags_stmt(s, &mut out);
+    }
+    out
+}
+
+fn jsx_tags_stmt(s: &Statement, out: &mut std::collections::HashSet<Arc<str>>) {
+    match s {
+        Statement::VarDecl { init, .. } => {
+            if let Some(e) = init {
+                jsx_tags_expr(e, out);
+            }
         }
-        Statement::DeclareFun {
-            name,
-            name_span,
-            params,
-            rest_param,
+        Statement::VarDeclDestructure { init, .. } => jsx_tags_expr(init, out),
+        Statement::ExprStmt { expr, .. } => jsx_tags_expr(expr, out),
+        Statement::If {
+            cond,
+            then_branch,
+            else_branch,
             ..
         } => {
-            out.push(BindingSite {
-                name: name.clone(),
-                span: *name_span,
-                kind: UnusedBindingKind::Variable,
-                exported,
-            });
-            for p in params {
-                enumerate_fun_param(p, exported, out);
-            }
-            if let Some(r) = rest_param {
-                out.push(BindingSite {
-                    name: r.name.clone(),
-                    span: r.name_span,
-                    kind: UnusedBindingKind::Parameter,
-                    exported,
-                });
+            jsx_tags_expr(cond, out);
+            jsx_tags_stmt(then_branch, out);
+            if let Some(b) = else_branch {
+                jsx_tags_stmt(b, out);
             }
         }
-        Statement::Break { .. } | Statement::Continue { .. } => {}
+        Statement::While { cond, body, .. } => {
+            jsx_tags_expr(cond, out);
+            jsx_tags_stmt(body, out);
+        }
+        Statement::For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
+            if let Some(i) = init {
+                jsx_tags_stmt(i, out);
+            }
+            if let Some(e) = cond {
+                jsx_tags_expr(e, out);
+            }
+            if let Some(e) = update {
+                jsx_tags_expr(e, out);
+            }
+            jsx_tags_stmt(body, out);
+        }
+        Statement::ForOf { iterable, body, .. } => {
+            jsx_tags_expr(iterable, out);
+            jsx_tags_stmt(body, out);
+        }
+        Statement::Return { value, .. } => {
+            if let Some(e) = value {
+                jsx_tags_expr(e, out);
+            }
+        }
+        Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+            for s in statements {
+                jsx_tags_stmt(s, out);
+            }
+        }
+        Statement::FunDecl { params, body, .. } => {
+            for p in params {
+                if let Some(e) = param_default(p) {
+                    jsx_tags_expr(e, out);
+                }
+            }
+            jsx_tags_stmt(body, out);
+        }
+        Statement::Switch {
+            expr,
+            cases,
+            default_body,
+            ..
+        } => {
+            jsx_tags_expr(expr, out);
+            for (_, stmts) in cases {
+                for s in stmts {
+                    jsx_tags_stmt(s, out);
+                }
+            }
+            if let Some(stmts) = default_body {
+                for s in stmts {
+                    jsx_tags_stmt(s, out);
+                }
+            }
+        }
+        Statement::DoWhile { body, cond, .. } => {
+            jsx_tags_stmt(body, out);
+            jsx_tags_expr(cond, out);
+        }
+        Statement::Throw { value, .. } => jsx_tags_expr(value, out),
+        Statement::Try {
+            body,
+            catch_body,
+            finally_body,
+            ..
+        } => {
+            jsx_tags_stmt(body, out);
+            if let Some(cb) = catch_body {
+                jsx_tags_stmt(cb, out);
+            }
+            if let Some(fb) = finally_body {
+                jsx_tags_stmt(fb, out);
+            }
+        }
+        Statement::Export { declaration, .. } => match declaration.as_ref() {
+            ExportDeclaration::Named(inner) => jsx_tags_stmt(inner, out),
+            ExportDeclaration::Default(e) => jsx_tags_expr(e, out),
+        },
+        Statement::Import { .. }
+        | Statement::Break { .. }
+        | Statement::Continue { .. }
+        | Statement::TypeAlias { .. }
+        | Statement::DeclareVar { .. }
+        | Statement::DeclareFun { .. } => {}
+    }
+}
+
+fn jsx_tags_expr(e: &Expr, out: &mut std::collections::HashSet<Arc<str>>) {
+    match e {
+        Expr::JsxElement {
+            tag,
+            props,
+            children,
+            ..
+        } => {
+            if tag.chars().next().is_some_and(|c| c.is_uppercase()) {
+                out.insert(tag.clone());
+            }
+            for p in props {
+                match p {
+                    tishlang_ast::JsxProp::Attr { value, .. } => {
+                        if let tishlang_ast::JsxAttrValue::Expr(e) = value {
+                            jsx_tags_expr(e, out);
+                        }
+                    }
+                    tishlang_ast::JsxProp::Spread(e) => jsx_tags_expr(e, out),
+                }
+            }
+            for ch in children {
+                if let tishlang_ast::JsxChild::Expr(e) = ch {
+                    jsx_tags_expr(e, out);
+                }
+            }
+        }
+        Expr::JsxFragment { children, .. } => {
+            for ch in children {
+                if let tishlang_ast::JsxChild::Expr(e) = ch {
+                    jsx_tags_expr(e, out);
+                }
+            }
+        }
+        Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+            jsx_tags_expr(left, out);
+            jsx_tags_expr(right, out);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::TypeOf { operand, .. }
+        | Expr::Await { operand, .. } => jsx_tags_expr(operand, out),
+        Expr::Delete { target, .. } => jsx_tags_expr(target, out),
+        Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+            jsx_tags_expr(callee, out);
+            for a in args {
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => jsx_tags_expr(e, out),
+                }
+            }
+        }
+        Expr::Member { object, .. } => jsx_tags_expr(object, out),
+        Expr::Index { object, index, .. } => {
+            jsx_tags_expr(object, out);
+            jsx_tags_expr(index, out);
+        }
+        Expr::Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            jsx_tags_expr(cond, out);
+            jsx_tags_expr(then_branch, out);
+            jsx_tags_expr(else_branch, out);
+        }
+        Expr::Array { elements, .. } => {
+            for el in elements {
+                match el {
+                    tishlang_ast::ArrayElement::Expr(e)
+                    | tishlang_ast::ArrayElement::Spread(e) => jsx_tags_expr(e, out),
+                }
+            }
+        }
+        Expr::Object { props, .. } => {
+            for p in props {
+                match p {
+                    tishlang_ast::ObjectProp::KeyValue(_, e)
+                    | tishlang_ast::ObjectProp::Spread(e) => jsx_tags_expr(e, out),
+                }
+            }
+        }
+        Expr::Assign { value, .. }
+        | Expr::CompoundAssign { value, .. }
+        | Expr::LogicalAssign { value, .. } => jsx_tags_expr(value, out),
+        Expr::MemberAssign { object, value, .. } => {
+            jsx_tags_expr(object, out);
+            jsx_tags_expr(value, out);
+        }
+        Expr::IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => {
+            jsx_tags_expr(object, out);
+            jsx_tags_expr(index, out);
+            jsx_tags_expr(value, out);
+        }
+        Expr::ArrowFunction { params, body, .. } => {
+            for p in params {
+                if let Some(e) = param_default(p) {
+                    jsx_tags_expr(e, out);
+                }
+            }
+            match body {
+                ArrowBody::Expr(e) => jsx_tags_expr(e, out),
+                ArrowBody::Block(b) => jsx_tags_stmt(b, out),
+            }
+        }
+        Expr::TemplateLiteral { exprs, .. } => {
+            for e in exprs {
+                jsx_tags_expr(e, out);
+            }
+        }
+        Expr::Ident { .. }
+        | Expr::Literal { .. }
+        | Expr::NativeModuleLoad { .. }
+        | Expr::PostfixInc { .. }
+        | Expr::PostfixDec { .. }
+        | Expr::PrefixInc { .. }
+        | Expr::PrefixDec { .. } => {}
     }
 }
 
 /// Declarations whose values are never read (imports, locals, parameters). Skips `exported` module
 /// bindings and names starting with `_` (common intentional-unused convention).
-pub fn collect_unused_bindings(program: &Program, source: &str) -> Vec<UnusedBinding> {
+pub fn collect_unused_bindings(program: &Program, _source: &str) -> Vec<UnusedBinding> {
     let mut sites = Vec::new();
     for s in &program.statements {
         enumerate_stmt(s, false, &mut sites);
     }
+    // A binding used only as a PascalCase JSX component tag (`<Foo/>`) is genuinely used — the
+    // resolution walk can't see the tag, so consult the tag set to avoid a false "unused" report
+    // (deleting such an import would break the build).
+    let jsx_tags = collect_jsx_component_tags(program);
+    // Which declarations are referenced, learned in ONE scope-aware pass. The previous approach
+    // re-scanned the whole program per binding (re-resolving each use), which was ~O(N³) and froze
+    // large files; this is O(N). A binding is unused iff nothing resolves to its definition span.
+    let referenced = collect_referenced_def_spans(program);
     let mut out = Vec::new();
     for site in sites {
         if site.exported || site.name.as_ref().starts_with('_') {
             continue;
         }
-        let refs = reference_spans_for_def(program, source, site.name.as_ref(), site.span);
-        if refs.len() == 1 {
+        if jsx_tags.contains(&site.name) {
+            continue;
+        }
+        if !referenced.contains(&site.span.start) {
             out.push(UnusedBinding {
                 name: site.name,
                 span: site.span,
@@ -2571,6 +2895,7 @@ pub fn definition_span(
 ) -> Option<tishlang_ast::Span> {
     let use_site = name_at_cursor(program, source, lsp_line, lsp_character)?;
     let mut scopes = ScopeStack::new();
+    hoist_fn_names(&program.statements, &mut scopes);
     for stmt in &program.statements {
         if let Some(s) = walk_stmt_resolve(stmt, &mut scopes, &use_site) {
             return Some(s);
@@ -3773,6 +4098,123 @@ mod tests {
         assert!(
             !u.iter().any(|b| b.name.as_ref() == "DEF"),
             "DEF is used in the declare-fn param default; u={u:?}"
+        );
+    }
+
+    #[test]
+    fn forward_reference_to_later_fn_not_unresolved() {
+        let src = "fn caller() { return helper() }\nfn helper() { return 42 }\ncaller()\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unresolved_identifiers(&program);
+        assert!(u.is_empty(), "helper is declared later but referenced (hoisted); u={u:?}");
+    }
+
+    #[test]
+    fn mutual_recursion_not_unresolved_or_unused() {
+        let src = "fn even(n) { if (n == 0) { return true } return odd(n - 1) }\nfn odd(n) { if (n == 0) { return false } return even(n - 1) }\neven(10)\n";
+        let program = parse(src).expect("parse");
+        assert!(
+            collect_unresolved_identifiers(&program).is_empty(),
+            "mutual recursion should resolve"
+        );
+        let unused = collect_unused_bindings(&program, src);
+        assert!(unused.is_empty(), "both fns are used; unused={unused:?}");
+    }
+
+    #[test]
+    fn gotodef_resolves_forward_fn_reference() {
+        let src = "fn caller() { return helper() }\nfn helper() { return 42 }\n";
+        let program = parse(src).expect("parse");
+        // cursor on `helper` inside caller's body (0-indexed line 0, char 21)
+        let def = definition_span(&program, src, 0, 21).expect("resolves");
+        assert_eq!(def.start.0, 2, "should resolve to helper decl on line 2; def={def:?}");
+    }
+
+    #[test]
+    fn genuinely_undefined_still_unresolved_with_hoisting() {
+        let src = "fn f() { return nope() }\nf()\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unresolved_identifiers(&program);
+        assert_eq!(u.len(), 1, "nope is undefined; u={u:?}");
+        assert_eq!(u[0].name.as_ref(), "nope");
+    }
+
+    #[test]
+    fn declare_fn_name_and_params_not_unused() {
+        // Ambient declare-fn: the (called) name and its params must not be flagged unused.
+        let src = "declare fn connect(port): void\nconnect()\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert!(u.is_empty(), "declare-fn name + ambient param must not be unused; u={u:?}");
+        // and the call resolves (hoisted declare-fn name)
+        assert!(collect_unresolved_identifiers(&program).is_empty(), "connect() should resolve");
+    }
+
+    #[test]
+    fn runtime_globals_not_unresolved() {
+        // Core interpreter globals must never be flagged as unresolved-name in the editor.
+        let src = "let _ = [Number, Symbol, Error, TypeError, RangeError, SyntaxError, Promise, fetch, fetchAll, serve, htmlEscape, console, Math, JSON, Object, Array, String, Boolean, Date, RegExp, setTimeout]\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unresolved_identifiers(&program);
+        assert!(u.is_empty(), "no runtime global should be unresolved; u={u:?}");
+    }
+
+    #[test]
+    fn jsx_component_import_used_as_tag_not_unused() {
+        let src = "import { Foo } from \"./c\"\nlet el = <Foo/>\nel\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert!(
+            !u.iter().any(|b| b.name.as_ref() == "Foo"),
+            "Foo is used as a component tag; u={u:?}"
+        );
+    }
+
+    #[test]
+    fn jsx_nested_component_tag_counted() {
+        let src = "import { Row } from \"./c\"\nlet el = <div><Row/></div>\nel\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert!(
+            !u.iter().any(|b| b.name.as_ref() == "Row"),
+            "Row is used as a nested component; u={u:?}"
+        );
+    }
+
+    #[test]
+    fn lowercase_jsx_tag_does_not_mark_binding_used() {
+        // Lowercase tags lower to string literals, not references — a same-named binding stays unused.
+        let src = "let div = 1\nlet el = <div></div>\nel\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert!(
+            u.iter().any(|b| b.name.as_ref() == "div"),
+            "lowercase div binding is genuinely unused; u={u:?}"
+        );
+    }
+
+    #[test]
+    fn collect_unused_bindings_handles_large_files() {
+        // A long chain of mutually-referencing functions exercises the per-binding reference scan at
+        // scale. Under the old per-binding/per-identifier definition_span re-resolution this was
+        // ~O(N^3) and froze (~1.4s at 300 lines); with the memo it is fast. Also a correctness check:
+        // every function is reachable, so none is unused.
+        let n = 300;
+        let mut src = String::new();
+        for i in 0..n {
+            if i + 1 < n {
+                src.push_str(&format!("fn f{i}() {{ return f{}() }}\n", i + 1));
+            } else {
+                src.push_str(&format!("fn f{i}() {{ return 0 }}\n"));
+            }
+        }
+        src.push_str("f0()\n");
+        let program = parse(&src).expect("parse");
+        let u = collect_unused_bindings(&program, &src);
+        assert!(
+            u.is_empty(),
+            "all chained fns are reachable; unused={:?}",
+            u.iter().map(|b| b.name.as_ref()).collect::<Vec<_>>()
         );
     }
 
