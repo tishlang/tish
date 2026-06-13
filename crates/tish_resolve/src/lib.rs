@@ -1029,6 +1029,39 @@ fn define_pattern_stack(pattern: &DestructPattern, scopes: &mut ScopeStack) {
     }
 }
 
+/// Pre-define hoisted function-declaration names (incl. `export fn` and ambient `declare fn`) for a
+/// statement list, so a reference to a function declared later in the same scope resolves. Function
+/// values capture the live scope, so calling a sibling function declared further down succeeds at
+/// runtime (e.g. mutual recursion, or a helper defined below its caller); the resolver mirrors that
+/// by defining the names before walking any sibling body. Only function names are hoisted — `let`
+/// is not, matching the interpreter.
+fn hoist_fn_names(stmts: &[Statement], scopes: &mut ScopeStack) {
+    for s in stmts {
+        match s {
+            Statement::FunDecl {
+                name, name_span, ..
+            }
+            | Statement::DeclareFun {
+                name, name_span, ..
+            } => {
+                scopes.define(name.as_ref(), *name_span);
+            }
+            Statement::Export { declaration, .. } => {
+                if let ExportDeclaration::Named(inner) = declaration.as_ref() {
+                    if let Statement::FunDecl {
+                        name, name_span, ..
+                    } = inner.as_ref()
+                    {
+                        scopes.define(name.as_ref(), *name_span);
+                    }
+                }
+            }
+            Statement::Multi { statements, .. } => hoist_fn_names(statements, scopes),
+            _ => {}
+        }
+    }
+}
+
 /// The default-value expression of a parameter, if any (`fn f(a = EXPR)`). Both simple and
 /// destructuring parameters can carry a default; rest parameters never do (no default syntax).
 fn param_default(p: &FunParam) -> Option<&Expr> {
@@ -1331,6 +1364,7 @@ fn walk_stmt_resolve(
             .and_then(|e| walk_expr_resolve(e, scopes, target)),
         Statement::Block { statements, .. } => {
             scopes.push();
+            hoist_fn_names(statements, scopes);
             let mut out = None;
             for s in statements {
                 if let Some(x) = walk_stmt_resolve(s, scopes, target) {
@@ -1901,6 +1935,7 @@ fn check_unresolved_stmt(
         }
         Statement::Block { statements, .. } => {
             scopes.push();
+            hoist_fn_names(statements, scopes);
             for s in statements {
                 check_unresolved_stmt(s, scopes, out);
             }
@@ -2053,6 +2088,7 @@ fn check_unresolved_stmt(
 pub fn collect_unresolved_identifiers(program: &Program) -> Vec<UnresolvedIdentifier> {
     let mut out = Vec::new();
     let mut scopes = ScopeStack::new();
+    hoist_fn_names(&program.statements, &mut scopes);
     for stmt in &program.statements {
         check_unresolved_stmt(stmt, &mut scopes, &mut out);
     }
@@ -2587,6 +2623,7 @@ pub fn definition_span(
 ) -> Option<tishlang_ast::Span> {
     let use_site = name_at_cursor(program, source, lsp_line, lsp_character)?;
     let mut scopes = ScopeStack::new();
+    hoist_fn_names(&program.statements, &mut scopes);
     for stmt in &program.statements {
         if let Some(s) = walk_stmt_resolve(stmt, &mut scopes, &use_site) {
             return Some(s);
@@ -3790,6 +3827,44 @@ mod tests {
             !u.iter().any(|b| b.name.as_ref() == "DEF"),
             "DEF is used in the declare-fn param default; u={u:?}"
         );
+    }
+
+    #[test]
+    fn forward_reference_to_later_fn_not_unresolved() {
+        let src = "fn caller() { return helper() }\nfn helper() { return 42 }\ncaller()\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unresolved_identifiers(&program);
+        assert!(u.is_empty(), "helper is declared later but referenced (hoisted); u={u:?}");
+    }
+
+    #[test]
+    fn mutual_recursion_not_unresolved_or_unused() {
+        let src = "fn even(n) { if (n == 0) { return true } return odd(n - 1) }\nfn odd(n) { if (n == 0) { return false } return even(n - 1) }\neven(10)\n";
+        let program = parse(src).expect("parse");
+        assert!(
+            collect_unresolved_identifiers(&program).is_empty(),
+            "mutual recursion should resolve"
+        );
+        let unused = collect_unused_bindings(&program, src);
+        assert!(unused.is_empty(), "both fns are used; unused={unused:?}");
+    }
+
+    #[test]
+    fn gotodef_resolves_forward_fn_reference() {
+        let src = "fn caller() { return helper() }\nfn helper() { return 42 }\n";
+        let program = parse(src).expect("parse");
+        // cursor on `helper` inside caller's body (0-indexed line 0, char 21)
+        let def = definition_span(&program, src, 0, 21).expect("resolves");
+        assert_eq!(def.start.0, 2, "should resolve to helper decl on line 2; def={def:?}");
+    }
+
+    #[test]
+    fn genuinely_undefined_still_unresolved_with_hoisting() {
+        let src = "fn f() { return nope() }\nf()\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unresolved_identifiers(&program);
+        assert_eq!(u.len(), 1, "nope is undefined; u={u:?}");
+        assert_eq!(u[0].name.as_ref(), "nope");
     }
 
     #[test]
