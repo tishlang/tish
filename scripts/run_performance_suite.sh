@@ -630,8 +630,28 @@ if [ "$no_compile" != true ]; then
   echo "Compiling suite (rust / cranelift / llvm / wasi)..."
   echo -n "  $test_id: "
   _suite_build_log=$(mktemp)
+  # Build one native backend, retrying ONLY on a transient rustc SIGILL (#223). On the virtualized
+  # CI fleet a native build can crash the compiler (signal 4) when host CPUID over-advertises a CPU
+  # feature; it always succeeds on a re-run. A real compile error still fails fast — we retry only
+  # when the build log shows a SIGILL.
+  _perf_native_build() { # $1=out  $2=backend
+    local out="$1" backend="$2" tries="${PERF_NATIVE_BUILD_RETRIES:-2}" i
+    for i in $(seq 1 "$tries"); do
+      if "$tish_bin" build "$entry_tish" -o "$out" --native-backend "$backend" >"$_suite_build_log" 2>&1; then
+        return 0
+      fi
+      if [ "$i" -lt "$tries" ] && grep -qiE 'SIGILL|signal: 4|illegal instruction' "$_suite_build_log"; then
+        echo -n "${backend}-retry "
+        rm -f "$out"
+        sleep $((i * 5))
+      else
+        return 1
+      fi
+    done
+    return 1
+  }
   if want_runtime rust; then
-    if "$tish_bin" build "$entry_tish" -o "$native_bin" --native-backend rust >"$_suite_build_log" 2>&1; then
+    if _perf_native_build "$native_bin" rust; then
       echo -n "rust "
     else
       echo -n "rust-fail "
@@ -647,7 +667,7 @@ if [ "$no_compile" != true ]; then
     fi
   fi
   if want_runtime cranelift; then
-    if "$tish_bin" build "$entry_tish" -o "$cranelift_bin" --native-backend cranelift >"$_suite_build_log" 2>&1; then
+    if _perf_native_build "$cranelift_bin" cranelift; then
       echo -n "cranelift "
     else
       echo -n "cranelift-fail "
@@ -660,7 +680,7 @@ if [ "$no_compile" != true ]; then
     fi
   fi
   if want_runtime llvm; then
-    if "$tish_bin" build "$entry_tish" -o "$llvm_bin" --native-backend llvm >"$_suite_build_log" 2>&1; then
+    if _perf_native_build "$llvm_bin" llvm; then
       echo -n "llvm "
     else
       echo -n "llvm-fail "
