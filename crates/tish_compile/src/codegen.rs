@@ -2674,6 +2674,8 @@ impl Codegen {
                     "Set",
                     "Map",
                     "Object",
+                    "Array",
+                    "Number",
                     "Float64Array",
                     "Float32Array",
                     "Int8Array",
@@ -2712,6 +2714,25 @@ impl Codegen {
                 ] {
                     if referenced.contains(*builtin) {
                         self.writeln(&format!("let {} = {}.clone();", builtin, builtin));
+                    }
+                }
+                // Feature-gated globals also move into the closure when referenced.
+                // Clone them only when their capability is actually linked, so we
+                // never emit `let h = h.clone();` for a binding that was never
+                // emitted (e.g. a fn-local named `h` in a program without JSX).
+                let mut gated: Vec<&str> = Vec::new();
+                if self.has_feature("http") {
+                    gated.extend(["fetch", "fetchAll"]);
+                }
+                if self.has_feature("fs") {
+                    gated.extend(["readFile", "writeFile", "fileExists", "isDir", "readDir", "mkdir"]);
+                }
+                if self.program_has_jsx && !self.has_native_ui_host {
+                    gated.extend(["Fragment", "h", "text", "useState", "createRoot"]);
+                }
+                for name in gated {
+                    if referenced.contains(name) {
+                        self.writeln(&format!("let {} = {}.clone();", name, name));
                     }
                 }
                 self.writeln("Value::native(move |args: &[Value]| {");
