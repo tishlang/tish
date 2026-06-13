@@ -72,6 +72,35 @@ fn synthetic_name_span(start: (usize, usize), name: &str) -> tishlang_ast::Span 
     }
 }
 
+thread_local! {
+    /// When active, accumulates the definition spans that identifier uses resolve to during one
+    /// `collect_unresolved_identifiers` scope-aware walk (`record_unresolved` already resolves every
+    /// use). `collect_unused_bindings` activates it to learn which declarations are referenced in a
+    /// single O(N) pass, instead of re-scanning the whole program per binding (which was ~O(N³) and
+    /// froze large files). Inactive for normal callers (the unresolved-name diagnostic), which see
+    /// no behavior change.
+    static REFERENCED_DEFS: std::cell::RefCell<Option<std::collections::HashSet<(usize, usize)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// One scope-aware resolution pass: the set of definition span *starts* that at least one identifier
+/// use resolves to (a name's declaration position is unique, so the start identifies it). Reuses the
+/// exact walk and scope rules of [`collect_unresolved_identifiers`], so it stays consistent with the
+/// unresolved-name diagnostic. O(N) (single walk; scope lookups O(1)).
+fn collect_referenced_def_spans(program: &Program) -> std::collections::HashSet<(usize, usize)> {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            REFERENCED_DEFS.with(|r| *r.borrow_mut() = None);
+        }
+    }
+    let _g = Guard;
+    REFERENCED_DEFS.with(|r| *r.borrow_mut() = Some(std::collections::HashSet::new()));
+    // Side effect: record_unresolved inserts each resolved def span into REFERENCED_DEFS.
+    let _ = collect_unresolved_identifiers(program);
+    REFERENCED_DEFS.with(|r| r.borrow_mut().take().unwrap_or_default())
+}
+
 fn collect_stmt(
     stmt: &Statement,
     source: &str,
@@ -1671,14 +1700,25 @@ fn record_unresolved(
     span: tishlang_ast::Span,
     out: &mut Vec<UnresolvedIdentifier>,
 ) {
-    if is_runtime_global_ident(name.as_ref()) {
-        return;
-    }
-    if scopes.resolve(name.as_ref()).is_none() {
-        out.push(UnresolvedIdentifier {
-            name: name.clone(),
-            span,
-        });
+    match scopes.resolve(name.as_ref()) {
+        // Resolved to an in-scope declaration. Record it (when collection is active) so
+        // collect_unused_bindings learns this def is referenced — done before the global check so a
+        // local that shadows a global name still counts as a use. Unresolved-name output unchanged.
+        Some(def) => {
+            REFERENCED_DEFS.with(|r| {
+                if let Some(set) = r.borrow_mut().as_mut() {
+                    set.insert(def.start);
+                }
+            });
+        }
+        None => {
+            if !is_runtime_global_ident(name.as_ref()) {
+                out.push(UnresolvedIdentifier {
+                    name: name.clone(),
+                    span,
+                });
+            }
+        }
     }
 }
 
@@ -2814,15 +2854,19 @@ fn jsx_tags_expr(e: &Expr, out: &mut std::collections::HashSet<Arc<str>>) {
 
 /// Declarations whose values are never read (imports, locals, parameters). Skips `exported` module
 /// bindings and names starting with `_` (common intentional-unused convention).
-pub fn collect_unused_bindings(program: &Program, source: &str) -> Vec<UnusedBinding> {
+pub fn collect_unused_bindings(program: &Program, _source: &str) -> Vec<UnusedBinding> {
     let mut sites = Vec::new();
     for s in &program.statements {
         enumerate_stmt(s, false, &mut sites);
     }
     // A binding used only as a PascalCase JSX component tag (`<Foo/>`) is genuinely used — the
-    // span-validated reference walker can't see the tag, so consult the tag set to avoid a false
-    // "unused" report (deleting such an import would break the build).
+    // resolution walk can't see the tag, so consult the tag set to avoid a false "unused" report
+    // (deleting such an import would break the build).
     let jsx_tags = collect_jsx_component_tags(program);
+    // Which declarations are referenced, learned in ONE scope-aware pass. The previous approach
+    // re-scanned the whole program per binding (re-resolving each use), which was ~O(N³) and froze
+    // large files; this is O(N). A binding is unused iff nothing resolves to its definition span.
+    let referenced = collect_referenced_def_spans(program);
     let mut out = Vec::new();
     for site in sites {
         if site.exported || site.name.as_ref().starts_with('_') {
@@ -2831,8 +2875,7 @@ pub fn collect_unused_bindings(program: &Program, source: &str) -> Vec<UnusedBin
         if jsx_tags.contains(&site.name) {
             continue;
         }
-        let refs = reference_spans_for_def(program, source, site.name.as_ref(), site.span);
-        if refs.len() == 1 {
+        if !referenced.contains(&site.span.start) {
             out.push(UnusedBinding {
                 name: site.name,
                 span: site.span,
@@ -4147,6 +4190,31 @@ mod tests {
         assert!(
             u.iter().any(|b| b.name.as_ref() == "div"),
             "lowercase div binding is genuinely unused; u={u:?}"
+        );
+    }
+
+    #[test]
+    fn collect_unused_bindings_handles_large_files() {
+        // A long chain of mutually-referencing functions exercises the per-binding reference scan at
+        // scale. Under the old per-binding/per-identifier definition_span re-resolution this was
+        // ~O(N^3) and froze (~1.4s at 300 lines); with the memo it is fast. Also a correctness check:
+        // every function is reachable, so none is unused.
+        let n = 300;
+        let mut src = String::new();
+        for i in 0..n {
+            if i + 1 < n {
+                src.push_str(&format!("fn f{i}() {{ return f{}() }}\n", i + 1));
+            } else {
+                src.push_str(&format!("fn f{i}() {{ return 0 }}\n"));
+            }
+        }
+        src.push_str("f0()\n");
+        let program = parse(&src).expect("parse");
+        let u = collect_unused_bindings(&program, &src);
+        assert!(
+            u.is_empty(),
+            "all chained fns are reachable; unused={:?}",
+            u.iter().map(|b| b.name.as_ref()).collect::<Vec<_>>()
         );
     }
 
