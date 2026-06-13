@@ -62,7 +62,7 @@ impl RustType {
         aliases: &HashMap<String, RustType>,
     ) -> Self {
         match ann {
-            TypeAnnotation::Simple(name) => match name.as_ref() {
+            TypeAnnotation::Simple(name, _) => match name.as_ref() {
                 "number" => RustType::F64,
                 "string" => RustType::String,
                 "boolean" | "bool" => RustType::Bool,
@@ -111,10 +111,10 @@ impl RustType {
                 if types.len() == 2 {
                     let has_null = types
                         .iter()
-                        .any(|t| matches!(t, TypeAnnotation::Simple(s) if s.as_ref() == "null"));
+                        .any(|t| matches!(t, TypeAnnotation::Simple(s, _) if s.as_ref() == "null"));
                     if has_null {
                         let non_null = types.iter().find(
-                            |t| !matches!(t, TypeAnnotation::Simple(s) if s.as_ref() == "null"),
+                            |t| !matches!(t, TypeAnnotation::Simple(s, _) if s.as_ref() == "null"),
                         );
                         if let Some(inner) = non_null {
                             return RustType::Option(Box::new(Self::from_annotation_with_aliases(
@@ -532,22 +532,22 @@ mod tests {
     #[test]
     fn test_simple_types() {
         assert_eq!(
-            RustType::from_annotation(&TypeAnnotation::Simple("number".into())),
+            RustType::from_annotation(&TypeAnnotation::Simple("number".into(), tishlang_ast::Span::default())),
             RustType::F64
         );
         assert_eq!(
-            RustType::from_annotation(&TypeAnnotation::Simple("string".into())),
+            RustType::from_annotation(&TypeAnnotation::Simple("string".into(), tishlang_ast::Span::default())),
             RustType::String
         );
         assert_eq!(
-            RustType::from_annotation(&TypeAnnotation::Simple("boolean".into())),
+            RustType::from_annotation(&TypeAnnotation::Simple("boolean".into(), tishlang_ast::Span::default())),
             RustType::Bool
         );
     }
 
     #[test]
     fn test_array_type() {
-        let arr_type = TypeAnnotation::Array(Box::new(TypeAnnotation::Simple("number".into())));
+        let arr_type = TypeAnnotation::Array(Box::new(TypeAnnotation::Simple("number".into(), tishlang_ast::Span::default())));
         assert_eq!(
             RustType::from_annotation(&arr_type),
             RustType::Vec(Box::new(RustType::F64))
@@ -557,8 +557,8 @@ mod tests {
     #[test]
     fn test_nullable_type() {
         let nullable = TypeAnnotation::Union(vec![
-            TypeAnnotation::Simple("string".into()),
-            TypeAnnotation::Simple("null".into()),
+            TypeAnnotation::Simple("string".into(), tishlang_ast::Span::default()),
+            TypeAnnotation::Simple("null".into(), tishlang_ast::Span::default()),
         ]);
         assert_eq!(
             RustType::from_annotation(&nullable),

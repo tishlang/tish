@@ -29,6 +29,7 @@ fn lit_base(lit: &TypeLiteral) -> TypeAnnotation {
             TypeLiteral::Bool(_) => "boolean",
         }
         .into(),
+        tishlang_ast::Span::default(),
     )
 }
 
@@ -70,19 +71,19 @@ pub fn check_program(program: &Program) -> Vec<TypeDiagnostic> {
 // ── helpers: type constructors / predicates ─────────────────────────────────────────────────
 
 fn simple(s: &str) -> TypeAnnotation {
-    TypeAnnotation::Simple(s.into())
+    TypeAnnotation::Simple(s.into(), tishlang_ast::Span::default())
 }
 fn is_any(ann: &TypeAnnotation) -> bool {
-    matches!(ann, TypeAnnotation::Simple(s) if s.as_ref() == "any")
+    matches!(ann, TypeAnnotation::Simple(s, _) if s.as_ref() == "any")
 }
 fn is_named(ann: &TypeAnnotation, n: &str) -> bool {
-    matches!(ann, TypeAnnotation::Simple(s) if s.as_ref() == n)
+    matches!(ann, TypeAnnotation::Simple(s, _) if s.as_ref() == n)
 }
 
 /// Display a type for diagnostics (close to the source syntax).
 fn show(ann: &TypeAnnotation) -> String {
     match ann {
-        TypeAnnotation::Simple(s) => s.to_string(),
+        TypeAnnotation::Simple(s, _) => s.to_string(),
         TypeAnnotation::Array(t) => format!("{}[]", show(t)),
         TypeAnnotation::Object(fs) => {
             let inner: Vec<String> = fs.iter().map(|(k, t)| format!("{}: {}", k, show(t))).collect();
@@ -116,7 +117,7 @@ fn resolve<'a>(
     if depth > 8 {
         return ann;
     }
-    if let TypeAnnotation::Simple(s) = ann {
+    if let TypeAnnotation::Simple(s, _) = ann {
         if let Some(t) = aliases.get(s.as_ref()) {
             return resolve(t, aliases, depth + 1);
         }
@@ -138,12 +139,12 @@ fn assignable(
     }
     // `null`/`void`/`undefined` are leniently compatible (tish uses `null` for optionals; checking
     // it strictly would false-positive without real union/optional support).
-    if matches!(a, TypeAnnotation::Simple(s) if matches!(s.as_ref(), "null" | "void" | "undefined")) {
+    if matches!(a, TypeAnnotation::Simple(s, _) if matches!(s.as_ref(), "null" | "void" | "undefined")) {
         return true;
     }
     use TypeAnnotation::*;
     match (a, e) {
-        (Simple(x), Simple(y)) => {
+        (Simple(x, _), Simple(y, _)) => {
             // Strict only among the three scalar primitives; any user-defined / unresolved name is
             // treated as compatible.
             let strict = |s: &str| matches!(s, "number" | "string" | "boolean");
@@ -155,7 +156,7 @@ fn assignable(
         }
         (Array(ax), Array(ey)) => assignable(ax, ey, aliases),
         // array vs non-array (after alias/any resolution) is a clear mismatch
-        (Array(_), Simple(_)) | (Simple(_), Array(_)) => false,
+        (Array(_), Simple(_, _)) | (Simple(_, _), Array(_)) => false,
         (Object(af), Object(ef)) => ef.iter().all(|(k, et)| {
             af.iter()
                 .find(|(ak, _)| ak.as_ref() == k.as_ref())
@@ -510,7 +511,7 @@ impl CheckCtx {
                         TypeAnnotation::Array(_) if name.as_ref() == "length" => {
                             return Some(simple("number"));
                         }
-                        TypeAnnotation::Simple(s)
+                        TypeAnnotation::Simple(s, _)
                             if s.as_ref() == "string" && name.as_ref() == "length" =>
                         {
                             return Some(simple("number"));
