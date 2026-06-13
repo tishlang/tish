@@ -29,6 +29,10 @@ mod import_goto;
 struct Backend {
     client: Client,
     docs: Arc<RwLock<HashMap<Url, String>>>,
+    /// Monotonic per-document edit counter. did_change bumps it and a debounced task only
+    /// publishes diagnostics if its edit is still the latest — so rapid keystrokes coalesce and
+    /// superseded recomputes are dropped (the analysis pipeline is comparatively expensive).
+    edit_seq: Arc<RwLock<HashMap<Url, u64>>>,
     roots: Arc<RwLock<Vec<PathBuf>>>,
     /// `(project_root, cargo:spec)` → resolved dependency source root (for `cargo metadata` / registry).
     cargo_src_cache: Arc<RwLock<HashMap<(PathBuf, String), PathBuf>>>,
@@ -44,6 +48,7 @@ async fn main() {
     let (service, socket) = LspService::new(|client| Backend {
         client,
         docs: Arc::new(RwLock::new(HashMap::new())),
+        edit_seq: Arc::new(RwLock::new(HashMap::new())),
         roots: Arc::new(RwLock::new(Vec::new())),
         cargo_src_cache: Arc::new(RwLock::new(HashMap::new())),
         tishlang_source_root: Arc::new(RwLock::new(None)),
@@ -310,12 +315,35 @@ impl LanguageServer for Backend {
                 .write()
                 .unwrap()
                 .insert(uri.clone(), chg.text.clone());
-            publish_parse_and_lint(&self.client, uri, &chg.text).await;
+            // Bump this document's edit sequence and debounce the (expensive) analysis: only the
+            // task whose sequence is still current after the delay publishes, so a burst of
+            // keystrokes coalesces into one recompute instead of one-per-change.
+            let seq = {
+                let mut g = self.edit_seq.write().unwrap();
+                let n = g.entry(uri.clone()).or_insert(0);
+                *n += 1;
+                *n
+            };
+            let client = self.client.clone();
+            let docs = Arc::clone(&self.docs);
+            let edit_seq = Arc::clone(&self.edit_seq);
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                // Superseded by a newer edit while we waited — drop this stale recompute.
+                if edit_seq.read().unwrap().get(&uri).copied() != Some(seq) {
+                    return;
+                }
+                let text = docs.read().unwrap().get(&uri).cloned();
+                if let Some(text) = text {
+                    publish_parse_and_lint(&client, uri, &text).await;
+                }
+            });
         }
     }
 
     async fn did_close(&self, p: DidCloseTextDocumentParams) {
         self.docs.write().unwrap().remove(&p.text_document.uri);
+        self.edit_seq.write().unwrap().remove(&p.text_document.uri);
         self.client
             .publish_diagnostics(p.text_document.uri, vec![], None)
             .await;
