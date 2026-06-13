@@ -410,6 +410,24 @@ impl LanguageServer for Backend {
         if let Some(def) =
             tishlang_resolve::definition_span(&program, &text, position.line, position.character)
         {
+            // If the use resolves to an import specifier, jump THROUGH the import into the source
+            // module (a relative .tish file) instead of to the local import line. Falls back to the
+            // specifier span when the source module can't be located.
+            if is_import_specifier_span(&program, &def) {
+                if let Ok(ref file_path) = uri.to_file_path() {
+                    let word = word_at_position(&text, position);
+                    let roots = self.roots.read().unwrap().clone();
+                    if let Some(loc) = import_goto::definition_for_import(
+                        &program,
+                        file_path,
+                        word.as_str(),
+                        &roots,
+                        self.cargo_src_cache.as_ref(),
+                    ) {
+                        return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+                    }
+                }
+            }
             let range = span_to_range(&def, &text);
             return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                 uri: uri.clone(),
@@ -912,6 +930,28 @@ pub(crate) fn find_export(
     None
 }
 
+/// Locate the `export default …` statement in a module (the target of a default import).
+pub(crate) fn find_default_export(
+    program: &tishlang_ast::Program,
+    uri: &Url,
+    text: &str,
+) -> Option<Location> {
+    for s in &program.statements {
+        if let tishlang_ast::Statement::Export { declaration, span } = s {
+            if matches!(
+                declaration.as_ref(),
+                tishlang_ast::ExportDeclaration::Default(_)
+            ) {
+                return Some(Location {
+                    uri: uri.clone(),
+                    range: span_to_range(span, text),
+                });
+            }
+        }
+    }
+    None
+}
+
 fn find_decl_in_stmt(
     s: &tishlang_ast::Statement,
     word: &str,
@@ -961,6 +1001,31 @@ fn span_to_range(span: &tishlang_ast::Span, text: &str) -> Range {
             ),
         }
     }
+}
+
+/// Whether `span` is the local-name span of an import specifier — i.e. `definition_span` resolved a
+/// use to an `import { … }` line. Go-to-definition should follow such a result through to the source
+/// module rather than jumping to the import line itself.
+fn is_import_specifier_span(program: &tishlang_ast::Program, span: &tishlang_ast::Span) -> bool {
+    use tishlang_ast::{ImportSpecifier, Statement};
+    program.statements.iter().any(|s| {
+        if let Statement::Import { specifiers, .. } = s {
+            specifiers.iter().any(|sp| {
+                let local = match sp {
+                    ImportSpecifier::Named {
+                        name_span,
+                        alias_span,
+                        ..
+                    } => alias_span.as_ref().unwrap_or(name_span),
+                    ImportSpecifier::Namespace { name_span, .. }
+                    | ImportSpecifier::Default { name_span, .. } => name_span,
+                };
+                local == span
+            })
+        } else {
+            false
+        }
+    })
 }
 
 fn word_at_position(text: &str, position: Position) -> String {
@@ -1520,6 +1585,36 @@ mod hover_tests {
         for expected in ["foo", "Status", "a", "b", "ext", "plain"] {
             assert!(names.contains(&expected), "outline missing `{expected}`: {names:?}");
         }
+    }
+
+    #[test]
+    fn is_import_specifier_span_detects_imports() {
+        let src = "import { foo } from \"./m\"\nfoo()\nlet x = 1\nx\n";
+        let program = tishlang_parser::parse(src).unwrap();
+        // `foo()` (line 1) resolves to the import specifier → go-to-def should follow it cross-file.
+        let foo_def = tishlang_resolve::definition_span(&program, src, 1, 0).expect("foo resolves");
+        assert!(
+            is_import_specifier_span(&program, &foo_def),
+            "foo resolves to an import specifier"
+        );
+        // `x` (line 3) resolves to the local `let` → not an import, jump to the local def as usual.
+        let x_def = tishlang_resolve::definition_span(&program, src, 3, 0).expect("x resolves");
+        assert!(
+            !is_import_specifier_span(&program, &x_def),
+            "x is a local binding, not an import"
+        );
+    }
+
+    #[test]
+    fn find_default_export_locates_export_default() {
+        let src = "export fn foo() {}\nexport default 42\n";
+        let program = tishlang_parser::parse(src).unwrap();
+        let uri = Url::parse("file:///m.tish").unwrap();
+        let loc = find_default_export(&program, &uri, src).expect("default export found");
+        assert_eq!(loc.range.start.line, 1, "export default is on line 1");
+        let none_src = "export fn bar() {}\n";
+        let p2 = tishlang_parser::parse(none_src).unwrap();
+        assert!(find_default_export(&p2, &uri, none_src).is_none());
     }
 
     #[test]

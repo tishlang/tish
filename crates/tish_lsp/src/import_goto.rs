@@ -450,6 +450,21 @@ fn resolve_relative_tish(from_dir: &Path, from_s: &str, imported: &str) -> Optio
     crate::find_export(&prog, imported, &u, &src)
 }
 
+/// Resolve a relative default import (`import X from "./m"`) to the `export default` in the source.
+fn resolve_relative_tish_default(from_dir: &Path, from_s: &str) -> Option<Location> {
+    let target = from_dir.join(from_s.trim_start_matches("./"));
+    let target = if target.extension().is_none() {
+        target.with_extension("tish")
+    } else {
+        target
+    };
+    let can = target.canonicalize().ok()?;
+    let u = Url::from_file_path(&can).ok()?;
+    let src = std::fs::read_to_string(&can).ok()?;
+    let prog = tishlang_parser::parse(&src).ok()?;
+    crate::find_default_export(&prog, &u, &src)
+}
+
 /// After same-file [`tishlang_resolve::definition_span`] misses, resolve import sites (Tish files,
 /// `node_modules` packages, and Rust `pub fn` for native / `cargo:` imports).
 pub fn definition_for_import(
@@ -474,12 +489,13 @@ pub fn definition_for_import(
         };
         let from_s = from.as_ref();
         for sp in specifiers {
-            let (imported, local) = match sp {
+            let (imported, local, is_default) = match sp {
                 ImportSpecifier::Named { name, alias, .. } => (
                     name.as_ref(),
                     alias.as_ref().map(|a| a.as_ref()).unwrap_or(name.as_ref()),
+                    false,
                 ),
-                ImportSpecifier::Default { name, .. } => (name.as_ref(), name.as_ref()),
+                ImportSpecifier::Default { name, .. } => (name.as_ref(), name.as_ref(), true),
                 ImportSpecifier::Namespace { .. } => continue,
             };
             if local != word {
@@ -487,7 +503,13 @@ pub fn definition_for_import(
             }
 
             if from_s.starts_with("./") || from_s.starts_with("../") {
-                return resolve_relative_tish(from_dir, from_s, imported);
+                // A default import binds the source module's `export default`, which has no name to
+                // match; resolve it directly. Named imports resolve by exported name.
+                return if is_default {
+                    resolve_relative_tish_default(from_dir, from_s)
+                } else {
+                    resolve_relative_tish(from_dir, from_s, imported)
+                };
             }
 
             if is_native_import(from_s) {
