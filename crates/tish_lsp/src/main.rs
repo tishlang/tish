@@ -119,6 +119,15 @@ fn document_symbol(
     selection_range: Range,
     children: Option<Vec<DocumentSymbol>>,
 ) -> DocumentSymbol {
+    // LSP spec: selectionRange must be contained in range, or VS Code rejects the whole document
+    // outline ("selectionRange must be contained in fullRange"). Some declaration spans are
+    // unset/degenerate (e.g. a top-level VarDecl's span defaults to an empty range) and so do not
+    // enclose the name span; fall back to the name range to keep the invariant.
+    let contains = (range.start.line, range.start.character)
+        <= (selection_range.start.line, selection_range.start.character)
+        && (selection_range.end.line, selection_range.end.character)
+            <= (range.end.line, range.end.character);
+    let range = if contains { range } else { selection_range };
     DocumentSymbol {
         name,
         detail,
@@ -1670,6 +1679,50 @@ mod hover_tests {
         assert_eq!(full_doc_end("x\n"), (1, 0));
         assert_eq!(full_doc_end(""), (0, 0));
         assert_eq!(full_doc_end("café"), (0, 4)); // UTF-16 units (é = 1), not bytes (5)
+    }
+
+    #[test]
+    fn doc_symbols_satisfy_lsp_selection_containment() {
+        // LSP requires every DocumentSymbol's selectionRange ⊆ range, or VS Code rejects the
+        // whole outline ("selectionRange must be contained in fullRange"). Exercise the
+        // declaration forms the outline emits.
+        use tower_lsp::lsp_types::DocumentSymbol;
+        fn check(syms: &[DocumentSymbol], src: &str) {
+            for s in syms {
+                let (r, sel) = (&s.range, &s.selection_range);
+                let contained = (r.start.line, r.start.character)
+                    <= (sel.start.line, sel.start.character)
+                    && (sel.end.line, sel.end.character) <= (r.end.line, r.end.character);
+                assert!(
+                    contained,
+                    "selectionRange {sel:?} not contained in range {r:?} for `{}` in:\n{src}",
+                    s.name
+                );
+                if let Some(children) = &s.children {
+                    check(children, src);
+                }
+            }
+        }
+        let sources = [
+            "fn f(x) { return x }\n",
+            "let a = 1\n",
+            "let a = 1, b = 2\n",
+            "export fn g() { return 1 }\n",
+            "export let x = 1\n",
+            "type T = number\n",
+            "declare fn h(): void\n",
+            "declare let y: number\n",
+            "fn outer() {\n  fn inner() { return 1 }\n  return inner\n}\n",
+            "export type Opts = { a: number }\n",
+        ];
+        for src in sources {
+            let p = parse(src);
+            let mut syms = Vec::new();
+            for s in &p.statements {
+                doc_symbol_stmt(s, src, &mut syms);
+            }
+            check(&syms, src);
+        }
     }
 }
 
