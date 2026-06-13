@@ -1111,7 +1111,22 @@ fn is_import_specifier_span(program: &tishlang_ast::Program, span: &tishlang_ast
 fn word_at_position(text: &str, position: Position) -> String {
     let line = text.lines().nth(position.line as usize).unwrap_or("");
     let chars: Vec<(usize, char)> = line.char_indices().collect();
-    let col = (position.character as usize).min(chars.len());
+    // `position.character` is a UTF-16 code-unit offset (the LSP position encoding), not a char
+    // index — map it to one so astral chars (2 UTF-16 units each, e.g. emoji) earlier on the line
+    // don't shift the cursor off the intended word (#133).
+    let target_u16 = position.character as usize;
+    let col = {
+        let mut idx = 0usize;
+        let mut acc = 0usize;
+        for (_, c) in &chars {
+            if acc >= target_u16 {
+                break;
+            }
+            acc += c.len_utf16();
+            idx += 1;
+        }
+        idx.min(chars.len())
+    };
     // Pick the identifier the cursor is on. If the cursor sits just past a word's end
     // (on whitespace/punct or EOL), fall back to the identifier immediately to its left.
     let mut start = col;
@@ -1824,6 +1839,13 @@ mod type_ref_tests {
         assert_eq!(word_at_position(SRC, Position { line: 2, character: 12 }), "Point");
         // On punctuation between words → empty.
         assert_eq!(word_at_position("a = b\n", Position { line: 0, character: 2 }), "");
+    }
+
+    #[test]
+    fn word_at_position_handles_astral_chars() {
+        // #133: three emoji (2 UTF-16 units each) precede `w`; the cursor's UTF-16 character offset
+        // (6) must map to the char `w`, not be used directly as a char index (which lands in `foo`).
+        assert_eq!(word_at_position("😀😀😀w foo", Position { line: 0, character: 6 }), "w");
     }
 }
 
