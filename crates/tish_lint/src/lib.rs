@@ -63,35 +63,63 @@ fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
                 lint_stmt(fb, out);
             }
         }
-        Statement::Block { statements, .. } => {
+        // Block and the transparent comma-declarator group (#141: Multi was previously skipped).
+        Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
             for st in statements {
                 lint_stmt(st, out);
             }
         }
+        // #140: control-flow CONDITION expressions are linted too, not just bodies.
         Statement::If {
+            cond,
             then_branch,
             else_branch,
             ..
         } => {
+            lint_expr(cond, out);
             lint_stmt(then_branch, out);
             if let Some(e) = else_branch {
                 lint_stmt(e, out);
             }
         }
-        Statement::While { body, .. } | Statement::ForOf { body, .. } => lint_stmt(body, out),
-        Statement::For { init, body, .. } => {
+        Statement::While { cond, body, .. } => {
+            lint_expr(cond, out);
+            lint_stmt(body, out);
+        }
+        Statement::ForOf { iterable, body, .. } => {
+            lint_expr(iterable, out);
+            lint_stmt(body, out);
+        }
+        Statement::For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 lint_stmt(i, out);
+            }
+            if let Some(c) = cond {
+                lint_expr(c, out);
+            }
+            if let Some(u) = update {
+                lint_expr(u, out);
             }
             lint_stmt(body, out);
         }
         Statement::FunDecl { body, .. } => lint_stmt(body, out),
         Statement::Switch {
+            expr,
             cases,
             default_body,
             ..
         } => {
-            for (_, stmts) in cases {
+            lint_expr(expr, out);
+            for (case_expr, stmts) in cases {
+                if let Some(ce) = case_expr {
+                    lint_expr(ce, out);
+                }
                 for st in stmts {
                     lint_stmt(st, out);
                 }
@@ -102,7 +130,10 @@ fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
                 }
             }
         }
-        Statement::DoWhile { body, .. } => lint_stmt(body, out),
+        Statement::DoWhile { body, cond, .. } => {
+            lint_stmt(body, out);
+            lint_expr(cond, out);
+        }
         Statement::Export { declaration, .. } => {
             if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
                 lint_stmt(inner, out);
@@ -238,6 +269,8 @@ fn lint_expr(e: &Expr, out: &mut Vec<LintDiagnostic>) {
         }
         Expr::Await { operand, .. } => lint_expr(operand, out),
         Expr::TypeOf { operand, .. } => lint_expr(operand, out),
+        // #142: descend into a delete target (`delete obj[expr]` / `delete (expr).prop`).
+        Expr::Delete { target, .. } => lint_expr(target, out),
         Expr::JsxElement {
             props, children, ..
         } => {
@@ -279,3 +312,55 @@ pub const RULES: &[(&str, &str)] = &[
         "Warns when an object literal repeats the same key.",
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Count `tish-duplicate-key` diagnostics the linter emits for `src` — a probe for whether the
+    /// linter actually descends into a given position (the dup-key rule fires on any object literal
+    /// the walk reaches).
+    fn dup_keys(src: &str) -> usize {
+        lint_source(src)
+            .expect("parse")
+            .iter()
+            .filter(|d| d.code == "tish-duplicate-key")
+            .count()
+    }
+
+    #[test]
+    fn baseline_dup_key_in_plain_var_is_linted() {
+        assert_eq!(dup_keys("let x = { a: 1, a: 2 }\n"), 1);
+    }
+
+    // #141: comma-separated declarators lower to Statement::Multi, which the linter skipped.
+    #[test]
+    fn lints_inside_comma_declarators() {
+        assert!(
+            dup_keys("let x = { a: 1, a: 2 }, y = 3\n") >= 1,
+            "dup key in a comma-declarator (Statement::Multi) must be linted"
+        );
+    }
+
+    // #140: control-flow CONDITION expressions were never linted (only bodies were walked).
+    #[test]
+    fn lints_inside_control_flow_conditions() {
+        assert!(dup_keys("if ({ a: 1, a: 2 }) {}\n") >= 1, "if condition");
+        assert!(dup_keys("while ({ a: 1, a: 2 }) { break }\n") >= 1, "while condition");
+        assert!(
+            dup_keys("for (let i = 0; ({ a: 1, a: 2 }); i = i + 1) { break }\n") >= 1,
+            "for condition"
+        );
+        assert!(dup_keys("do { break } while ({ a: 1, a: 2 })\n") >= 1, "do-while condition");
+        assert!(
+            dup_keys("switch ({ a: 1, a: 2 }) { case 1: break }\n") >= 1,
+            "switch discriminant"
+        );
+    }
+
+    // #142: the linter never descended into a delete target.
+    #[test]
+    fn lints_inside_delete_target() {
+        assert!(dup_keys("delete ({ a: 1, a: 2 }).a\n") >= 1, "delete target");
+    }
+}
