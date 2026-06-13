@@ -2559,6 +2559,259 @@ fn enumerate_stmt(stmt: &Statement, exported: bool, out: &mut Vec<BindingSite>) 
     }
 }
 
+/// Collect PascalCase JSX component tag names used anywhere in `program`. A `<Foo/>` tag lowers to
+/// `h(Foo, …)` — a real reference to the `Foo` binding — but the tag is not a span-validated
+/// identifier use, so the reference walker misses it. Used by [`collect_unused_bindings`] to avoid
+/// flagging a component import/binding used only as a tag. (Lowercase tags lower to string
+/// literals, so they are not references.) Precise rename/find-references for tags still needs a
+/// real tag span in the AST and is handled separately.
+fn collect_jsx_component_tags(program: &Program) -> std::collections::HashSet<Arc<str>> {
+    let mut out = std::collections::HashSet::new();
+    for s in &program.statements {
+        jsx_tags_stmt(s, &mut out);
+    }
+    out
+}
+
+fn jsx_tags_stmt(s: &Statement, out: &mut std::collections::HashSet<Arc<str>>) {
+    match s {
+        Statement::VarDecl { init, .. } => {
+            if let Some(e) = init {
+                jsx_tags_expr(e, out);
+            }
+        }
+        Statement::VarDeclDestructure { init, .. } => jsx_tags_expr(init, out),
+        Statement::ExprStmt { expr, .. } => jsx_tags_expr(expr, out),
+        Statement::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            jsx_tags_expr(cond, out);
+            jsx_tags_stmt(then_branch, out);
+            if let Some(b) = else_branch {
+                jsx_tags_stmt(b, out);
+            }
+        }
+        Statement::While { cond, body, .. } => {
+            jsx_tags_expr(cond, out);
+            jsx_tags_stmt(body, out);
+        }
+        Statement::For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
+            if let Some(i) = init {
+                jsx_tags_stmt(i, out);
+            }
+            if let Some(e) = cond {
+                jsx_tags_expr(e, out);
+            }
+            if let Some(e) = update {
+                jsx_tags_expr(e, out);
+            }
+            jsx_tags_stmt(body, out);
+        }
+        Statement::ForOf { iterable, body, .. } => {
+            jsx_tags_expr(iterable, out);
+            jsx_tags_stmt(body, out);
+        }
+        Statement::Return { value, .. } => {
+            if let Some(e) = value {
+                jsx_tags_expr(e, out);
+            }
+        }
+        Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+            for s in statements {
+                jsx_tags_stmt(s, out);
+            }
+        }
+        Statement::FunDecl { params, body, .. } => {
+            for p in params {
+                if let Some(e) = param_default(p) {
+                    jsx_tags_expr(e, out);
+                }
+            }
+            jsx_tags_stmt(body, out);
+        }
+        Statement::Switch {
+            expr,
+            cases,
+            default_body,
+            ..
+        } => {
+            jsx_tags_expr(expr, out);
+            for (_, stmts) in cases {
+                for s in stmts {
+                    jsx_tags_stmt(s, out);
+                }
+            }
+            if let Some(stmts) = default_body {
+                for s in stmts {
+                    jsx_tags_stmt(s, out);
+                }
+            }
+        }
+        Statement::DoWhile { body, cond, .. } => {
+            jsx_tags_stmt(body, out);
+            jsx_tags_expr(cond, out);
+        }
+        Statement::Throw { value, .. } => jsx_tags_expr(value, out),
+        Statement::Try {
+            body,
+            catch_body,
+            finally_body,
+            ..
+        } => {
+            jsx_tags_stmt(body, out);
+            if let Some(cb) = catch_body {
+                jsx_tags_stmt(cb, out);
+            }
+            if let Some(fb) = finally_body {
+                jsx_tags_stmt(fb, out);
+            }
+        }
+        Statement::Export { declaration, .. } => match declaration.as_ref() {
+            ExportDeclaration::Named(inner) => jsx_tags_stmt(inner, out),
+            ExportDeclaration::Default(e) => jsx_tags_expr(e, out),
+        },
+        Statement::Import { .. }
+        | Statement::Break { .. }
+        | Statement::Continue { .. }
+        | Statement::TypeAlias { .. }
+        | Statement::DeclareVar { .. }
+        | Statement::DeclareFun { .. } => {}
+    }
+}
+
+fn jsx_tags_expr(e: &Expr, out: &mut std::collections::HashSet<Arc<str>>) {
+    match e {
+        Expr::JsxElement {
+            tag,
+            props,
+            children,
+            ..
+        } => {
+            if tag.chars().next().is_some_and(|c| c.is_uppercase()) {
+                out.insert(tag.clone());
+            }
+            for p in props {
+                match p {
+                    tishlang_ast::JsxProp::Attr { value, .. } => {
+                        if let tishlang_ast::JsxAttrValue::Expr(e) = value {
+                            jsx_tags_expr(e, out);
+                        }
+                    }
+                    tishlang_ast::JsxProp::Spread(e) => jsx_tags_expr(e, out),
+                }
+            }
+            for ch in children {
+                if let tishlang_ast::JsxChild::Expr(e) = ch {
+                    jsx_tags_expr(e, out);
+                }
+            }
+        }
+        Expr::JsxFragment { children, .. } => {
+            for ch in children {
+                if let tishlang_ast::JsxChild::Expr(e) = ch {
+                    jsx_tags_expr(e, out);
+                }
+            }
+        }
+        Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+            jsx_tags_expr(left, out);
+            jsx_tags_expr(right, out);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::TypeOf { operand, .. }
+        | Expr::Await { operand, .. } => jsx_tags_expr(operand, out),
+        Expr::Delete { target, .. } => jsx_tags_expr(target, out),
+        Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+            jsx_tags_expr(callee, out);
+            for a in args {
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => jsx_tags_expr(e, out),
+                }
+            }
+        }
+        Expr::Member { object, .. } => jsx_tags_expr(object, out),
+        Expr::Index { object, index, .. } => {
+            jsx_tags_expr(object, out);
+            jsx_tags_expr(index, out);
+        }
+        Expr::Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            jsx_tags_expr(cond, out);
+            jsx_tags_expr(then_branch, out);
+            jsx_tags_expr(else_branch, out);
+        }
+        Expr::Array { elements, .. } => {
+            for el in elements {
+                match el {
+                    tishlang_ast::ArrayElement::Expr(e)
+                    | tishlang_ast::ArrayElement::Spread(e) => jsx_tags_expr(e, out),
+                }
+            }
+        }
+        Expr::Object { props, .. } => {
+            for p in props {
+                match p {
+                    tishlang_ast::ObjectProp::KeyValue(_, e)
+                    | tishlang_ast::ObjectProp::Spread(e) => jsx_tags_expr(e, out),
+                }
+            }
+        }
+        Expr::Assign { value, .. }
+        | Expr::CompoundAssign { value, .. }
+        | Expr::LogicalAssign { value, .. } => jsx_tags_expr(value, out),
+        Expr::MemberAssign { object, value, .. } => {
+            jsx_tags_expr(object, out);
+            jsx_tags_expr(value, out);
+        }
+        Expr::IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => {
+            jsx_tags_expr(object, out);
+            jsx_tags_expr(index, out);
+            jsx_tags_expr(value, out);
+        }
+        Expr::ArrowFunction { params, body, .. } => {
+            for p in params {
+                if let Some(e) = param_default(p) {
+                    jsx_tags_expr(e, out);
+                }
+            }
+            match body {
+                ArrowBody::Expr(e) => jsx_tags_expr(e, out),
+                ArrowBody::Block(b) => jsx_tags_stmt(b, out),
+            }
+        }
+        Expr::TemplateLiteral { exprs, .. } => {
+            for e in exprs {
+                jsx_tags_expr(e, out);
+            }
+        }
+        Expr::Ident { .. }
+        | Expr::Literal { .. }
+        | Expr::NativeModuleLoad { .. }
+        | Expr::PostfixInc { .. }
+        | Expr::PostfixDec { .. }
+        | Expr::PrefixInc { .. }
+        | Expr::PrefixDec { .. } => {}
+    }
+}
+
 /// Declarations whose values are never read (imports, locals, parameters). Skips `exported` module
 /// bindings and names starting with `_` (common intentional-unused convention).
 pub fn collect_unused_bindings(program: &Program, source: &str) -> Vec<UnusedBinding> {
@@ -2566,9 +2819,16 @@ pub fn collect_unused_bindings(program: &Program, source: &str) -> Vec<UnusedBin
     for s in &program.statements {
         enumerate_stmt(s, false, &mut sites);
     }
+    // A binding used only as a PascalCase JSX component tag (`<Foo/>`) is genuinely used — the
+    // span-validated reference walker can't see the tag, so consult the tag set to avoid a false
+    // "unused" report (deleting such an import would break the build).
+    let jsx_tags = collect_jsx_component_tags(program);
     let mut out = Vec::new();
     for site in sites {
         if site.exported || site.name.as_ref().starts_with('_') {
+            continue;
+        }
+        if jsx_tags.contains(&site.name) {
             continue;
         }
         let refs = reference_spans_for_def(program, source, site.name.as_ref(), site.span);
@@ -3854,6 +4114,40 @@ mod tests {
         let program = parse(src).expect("parse");
         let u = collect_unresolved_identifiers(&program);
         assert!(u.is_empty(), "no runtime global should be unresolved; u={u:?}");
+    }
+
+    #[test]
+    fn jsx_component_import_used_as_tag_not_unused() {
+        let src = "import { Foo } from \"./c\"\nlet el = <Foo/>\nel\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert!(
+            !u.iter().any(|b| b.name.as_ref() == "Foo"),
+            "Foo is used as a component tag; u={u:?}"
+        );
+    }
+
+    #[test]
+    fn jsx_nested_component_tag_counted() {
+        let src = "import { Row } from \"./c\"\nlet el = <div><Row/></div>\nel\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert!(
+            !u.iter().any(|b| b.name.as_ref() == "Row"),
+            "Row is used as a nested component; u={u:?}"
+        );
+    }
+
+    #[test]
+    fn lowercase_jsx_tag_does_not_mark_binding_used() {
+        // Lowercase tags lower to string literals, not references — a same-named binding stays unused.
+        let src = "let div = 1\nlet el = <div></div>\nel\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert!(
+            u.iter().any(|b| b.name.as_ref() == "div"),
+            "lowercase div binding is genuinely unused; u={u:?}"
+        );
     }
 
     #[test]
