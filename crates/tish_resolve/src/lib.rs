@@ -2551,41 +2551,10 @@ fn enumerate_stmt(stmt: &Statement, exported: bool, out: &mut Vec<BindingSite>) 
                 exported,
             });
         }
-        Statement::DeclareVar {
-            name, name_span, ..
-        } => {
-            out.push(BindingSite {
-                name: name.clone(),
-                span: *name_span,
-                kind: UnusedBindingKind::Variable,
-                exported,
-            });
-        }
-        Statement::DeclareFun {
-            name,
-            name_span,
-            params,
-            rest_param,
-            ..
-        } => {
-            out.push(BindingSite {
-                name: name.clone(),
-                span: *name_span,
-                kind: UnusedBindingKind::Variable,
-                exported,
-            });
-            for p in params {
-                enumerate_fun_param(p, exported, out);
-            }
-            if let Some(r) = rest_param {
-                out.push(BindingSite {
-                    name: r.name.clone(),
-                    span: r.name_span,
-                    kind: UnusedBindingKind::Parameter,
-                    exported,
-                });
-            }
-        }
+        // Ambient `declare` declarations describe symbols defined elsewhere and have no body, so
+        // nothing here is ever "unused" within this file (params can't be read; the name is API
+        // surface for other modules). They contribute no unused-binding candidates.
+        Statement::DeclareVar { .. } | Statement::DeclareFun { .. } => {}
         Statement::Break { .. } | Statement::Continue { .. } => {}
     }
 }
@@ -3865,6 +3834,17 @@ mod tests {
         let u = collect_unresolved_identifiers(&program);
         assert_eq!(u.len(), 1, "nope is undefined; u={u:?}");
         assert_eq!(u[0].name.as_ref(), "nope");
+    }
+
+    #[test]
+    fn declare_fn_name_and_params_not_unused() {
+        // Ambient declare-fn: the (called) name and its params must not be flagged unused.
+        let src = "declare fn connect(port): void\nconnect()\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unused_bindings(&program, src);
+        assert!(u.is_empty(), "declare-fn name + ambient param must not be unused; u={u:?}");
+        // and the call resolves (hoisted declare-fn name)
+        assert!(collect_unresolved_identifiers(&program).is_empty(), "connect() should resolve");
     }
 
     #[test]
