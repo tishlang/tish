@@ -2391,6 +2391,10 @@ impl<'a> Parser<'a> {
     fn parse_jsx_element(&mut self, start: (usize, usize)) -> Result<Expr, String> {
         let tag_tok = self.expect(TokenKind::Ident)?;
         let tag = tag_tok.literal.clone().ok_or("Expected tag name")?;
+        let tag_span = Span {
+            start: tag_tok.span.start,
+            end: tag_tok.span.end,
+        };
 
         let mut props = Vec::new();
         loop {
@@ -2402,6 +2406,8 @@ impl<'a> Parser<'a> {
                     let end = self.previous_span_end();
                     return Ok(Expr::JsxElement {
                         tag,
+                        tag_span,
+                        close_tag_span: None,
                         props,
                         children: vec![],
                         span: Span { start, end },
@@ -2451,10 +2457,12 @@ impl<'a> Parser<'a> {
         }
         self.advance(); // consume >
 
-        let children = self.parse_jsx_children(&tag)?;
+        let (children, close_tag_span) = self.parse_jsx_children(&tag)?;
         let end = self.previous_span_end();
         Ok(Expr::JsxElement {
             tag,
+            tag_span,
+            close_tag_span,
             props,
             children,
             span: Span { start, end },
@@ -2517,7 +2525,10 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse JSX children until </Tag> or </>
-    fn parse_jsx_children(&mut self, close_tag: &str) -> Result<Vec<JsxChild>, String> {
+    fn parse_jsx_children(
+        &mut self,
+        close_tag: &str,
+    ) -> Result<(Vec<JsxChild>, Option<Span>), String> {
         let mut children = Vec::new();
         loop {
             match self.peek_kind() {
@@ -2529,11 +2540,12 @@ impl<'a> Parser<'a> {
                             // </ closing tag
                             self.advance(); // <
                             self.advance(); // /
-                            let name = self
-                                .expect(TokenKind::Ident)?
-                                .literal
-                                .clone()
-                                .ok_or("Expected tag name")?;
+                            let name_tok = self.expect(TokenKind::Ident)?;
+                            let name = name_tok.literal.clone().ok_or("Expected tag name")?;
+                            let close_tag_span = Span {
+                                start: name_tok.span.start,
+                                end: name_tok.span.end,
+                            };
                             if name.as_ref() != close_tag {
                                 return Err(format!(
                                     "Mismatched JSX tag: expected </{}> got </{}>",
@@ -2541,7 +2553,7 @@ impl<'a> Parser<'a> {
                                 ));
                             }
                             self.expect(TokenKind::Gt)?; // >
-                            return Ok(children);
+                            return Ok((children, Some(close_tag_span)));
                         }
                         if t.kind == TokenKind::Gt {
                             return Err("Unexpected <> in JSX children".to_string());

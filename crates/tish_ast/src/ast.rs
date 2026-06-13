@@ -436,6 +436,11 @@ pub enum Expr {
     /// JSX element: <Tag props>children</Tag>
     JsxElement {
         tag: Arc<str>,
+        /// Span of the tag name in the opening tag (`<`**`Foo`**`>`), for go-to-def / rename.
+        tag_span: Span,
+        /// Span of the tag name in the closing tag (`</`**`Foo`**`>`); `None` for self-closing
+        /// (`<Foo/>`). Renaming a component must update both, or `<Bar></Foo>` would be invalid.
+        close_tag_span: Option<Span>,
         props: Vec<JsxProp>,
         children: Vec<JsxChild>,
         span: Span,
