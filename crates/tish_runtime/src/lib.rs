@@ -1065,6 +1065,11 @@ mod timers;
 #[cfg(any(feature = "http", feature = "promise"))]
 mod promise;
 
+/// Node-compatible fs surface (sync + `fs/promises`). Referenced by the backends via
+/// `tishlang_runtime::fs_ext::*`. See issue #122.
+#[cfg(feature = "fs")]
+pub mod fs_ext;
+
 #[cfg(feature = "http")]
 mod native_promise;
 

@@ -150,28 +150,65 @@ pub fn all_compiled_capabilities() -> HashSet<String> {
 fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) -> Option<Value> {
     #[cfg(feature = "fs")]
     if spec == "tish:fs" && cap_allows(enabled, "fs") {
+        use tishlang_runtime::fs_ext as fx;
         return match export_name {
-            "readFile" => Some(Value::native(|args: &[Value]| {
-                tishlang_runtime::read_file(args)
-            })),
-            "writeFile" => Some(Value::native(|args: &[Value]| {
-                tishlang_runtime::write_file(args)
-            })),
-            "fileExists" => Some(Value::native(|args: &[Value]| {
-                tishlang_runtime::file_exists(args)
-            })),
-            "isDir" => Some(Value::native(|args: &[Value]| {
-                tishlang_runtime::is_dir(args)
-            })),
-            "readDir" => Some(Value::native(|args: &[Value]| {
-                tishlang_runtime::read_dir(args)
-            })),
-            "mkdir" => Some(Value::native(|args: &[Value]| {
-                tishlang_runtime::mkdir(args)
-            })),
-            "readFileBytes" => Some(Value::native(|args: &[Value]| {
-                tishlang_runtime::read_file_bytes(args)
-            })),
+            // tish names → the dual fs_ext functions (sync, or Node callback if a fn is passed)
+            "readFile" => Some(Value::native(|a: &[Value]| fx::read_file(a))),
+            "writeFile" => Some(Value::native(|a: &[Value]| fx::write_file(a))),
+            "fileExists" => Some(Value::native(|a: &[Value]| tishlang_runtime::file_exists(a))),
+            "isDir" => Some(Value::native(|a: &[Value]| tishlang_runtime::is_dir(a))),
+            "readDir" => Some(Value::native(|a: &[Value]| fx::readdir(a))),
+            "readFileBytes" => Some(Value::native(|a: &[Value]| fx::read_file_bytes(a))),
+            // Node-compatible names + new methods (sync) — issue #122
+            "readFileSync" => Some(Value::native(|a: &[Value]| fx::read_file(a))),
+            "readFileBytesSync" => Some(Value::native(|a: &[Value]| fx::read_file_bytes(a))),
+            "writeFileSync" => Some(Value::native(|a: &[Value]| fx::write_file(a))),
+            "appendFile" | "appendFileSync" => Some(Value::native(|a: &[Value]| fx::append_file(a))),
+            "existsSync" => Some(Value::native(|a: &[Value]| fx::exists(a))),
+            "mkdir" | "mkdirSync" => Some(Value::native(|a: &[Value]| fx::mkdir(a))),
+            "readdir" | "readdirSync" => Some(Value::native(|a: &[Value]| fx::readdir(a))),
+            "stat" | "statSync" => Some(Value::native(|a: &[Value]| fx::stat(a))),
+            "lstat" | "lstatSync" => Some(Value::native(|a: &[Value]| fx::lstat(a))),
+            "rm" | "rmSync" => Some(Value::native(|a: &[Value]| fx::rm(a))),
+            "rmdir" | "rmdirSync" => Some(Value::native(|a: &[Value]| fx::rmdir(a))),
+            "unlink" | "unlinkSync" => Some(Value::native(|a: &[Value]| fx::unlink(a))),
+            "rename" | "renameSync" => Some(Value::native(|a: &[Value]| fx::rename(a))),
+            "copyFile" | "copyFileSync" => Some(Value::native(|a: &[Value]| fx::copy_file(a))),
+            "realpath" | "realpathSync" => Some(Value::native(|a: &[Value]| fx::realpath(a))),
+            "readlink" | "readlinkSync" => Some(Value::native(|a: &[Value]| fx::readlink(a))),
+            "truncate" | "truncateSync" => Some(Value::native(|a: &[Value]| fx::truncate(a))),
+            "mkdtemp" | "mkdtempSync" => Some(Value::native(|a: &[Value]| fx::mkdtemp(a))),
+            "cp" | "cpSync" => Some(Value::native(|a: &[Value]| fx::cp(a))),
+            "access" | "accessSync" => Some(Value::native(|a: &[Value]| fx::access(a))),
+            "constants" => Some(fx::constants()),
+            _ => None,
+        };
+    }
+    #[cfg(feature = "fs")]
+    if spec == "tish:fs/promises" && cap_allows(enabled, "fs") {
+        use tishlang_runtime::fs_ext as fx;
+        return match export_name {
+            "readFile" => Some(Value::native(|a: &[Value]| fx::read_file_promise(a))),
+            "readFileBytes" => Some(Value::native(|a: &[Value]| fx::read_file_bytes_promise(a))),
+            "writeFile" => Some(Value::native(|a: &[Value]| fx::write_file_promise(a))),
+            "appendFile" => Some(Value::native(|a: &[Value]| fx::append_file_promise(a))),
+            "mkdir" => Some(Value::native(|a: &[Value]| fx::mkdir_promise(a))),
+            "readdir" => Some(Value::native(|a: &[Value]| fx::readdir_promise(a))),
+            "stat" => Some(Value::native(|a: &[Value]| fx::stat_promise(a))),
+            "lstat" => Some(Value::native(|a: &[Value]| fx::lstat_promise(a))),
+            "rm" => Some(Value::native(|a: &[Value]| fx::rm_promise(a))),
+            "rmdir" => Some(Value::native(|a: &[Value]| fx::rmdir_promise(a))),
+            "unlink" => Some(Value::native(|a: &[Value]| fx::unlink_promise(a))),
+            "rename" => Some(Value::native(|a: &[Value]| fx::rename_promise(a))),
+            "copyFile" => Some(Value::native(|a: &[Value]| fx::copy_file_promise(a))),
+            "realpath" => Some(Value::native(|a: &[Value]| fx::realpath_promise(a))),
+            "readlink" => Some(Value::native(|a: &[Value]| fx::readlink_promise(a))),
+            "truncate" => Some(Value::native(|a: &[Value]| fx::truncate_promise(a))),
+            "mkdtemp" => Some(Value::native(|a: &[Value]| fx::mkdtemp_promise(a))),
+            "cp" => Some(Value::native(|a: &[Value]| fx::cp_promise(a))),
+            "access" => Some(Value::native(|a: &[Value]| fx::access_promise(a))),
+            "exists" => Some(Value::native(|a: &[Value]| fx::exists_promise(a))),
+            "constants" => Some(fx::constants()),
             _ => None,
         };
     }
