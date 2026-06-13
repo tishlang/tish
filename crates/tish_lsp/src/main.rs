@@ -703,15 +703,15 @@ impl LanguageServer for Backend {
         let Ok(program) = tishlang_parser::parse(&text) else {
             return Ok(None);
         };
-        let Some(nu) = tishlang_resolve::name_at_cursor(&program, &text, pos.line, pos.character)
-        else {
-            return Ok(None);
-        };
-        let range = span_to_range(&nu.span, &text);
-        Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
-            range,
-            placeholder: nu.name.to_string(),
-        }))
+        // Only offer a rename box for a symbol rename() can actually act on — not a member property
+        // or other non-binding token, which would silently no-op (#145).
+        match rename_target(&program, &text, pos.line, pos.character) {
+            Some((range, placeholder)) => Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+                range,
+                placeholder,
+            })),
+            None => Ok(None),
+        }
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
@@ -1062,6 +1062,25 @@ fn span_to_range(span: &tishlang_ast::Span, text: &str) -> Range {
             ),
         }
     }
+}
+
+/// The (range, placeholder) a rename should offer, or `None` when the symbol under the cursor isn't
+/// renameable — so `prepare_rename` doesn't pop a rename box that `rename()` then silently no-ops
+/// (#145, e.g. a cursor on a member property `obj.foo`). Mirrors exactly what `rename()` can act on:
+/// a value binding (`definition_span` resolves) or a type alias (`type_alias_rename_spans`).
+fn rename_target(
+    program: &tishlang_ast::Program,
+    text: &str,
+    line: u32,
+    character: u32,
+) -> Option<(Range, String)> {
+    let nu = tishlang_resolve::name_at_cursor(program, text, line, character)?;
+    let renameable = tishlang_resolve::definition_span(program, text, line, character).is_some()
+        || tishlang_resolve::type_alias_rename_spans(program, text, line, character).is_some();
+    if !renameable {
+        return None;
+    }
+    Some((span_to_range(&nu.span, text), nu.name.to_string()))
 }
 
 /// Whether `span` is the local-name span of an import specifier — i.e. `definition_span` resolved a
@@ -1805,5 +1824,45 @@ mod type_ref_tests {
         assert_eq!(word_at_position(SRC, Position { line: 2, character: 12 }), "Point");
         // On punctuation between words → empty.
         assert_eq!(word_at_position("a = b\n", Position { line: 0, character: 2 }), "");
+    }
+}
+
+#[cfg(test)]
+mod rename_target_tests {
+    use super::*;
+    fn parse(src: &str) -> tishlang_ast::Program {
+        tishlang_parser::parse(src).expect("parse")
+    }
+
+    // #145: a member property is NOT renameable — prepare_rename must not offer a box rename() no-ops.
+    #[test]
+    fn member_property_not_offered() {
+        let src = "let obj = { foo: 1 }\nlet z = obj.foo\n";
+        let p = parse(src);
+        assert!(
+            rename_target(&p, src, 1, 12).is_none(),
+            "member property `foo` must not be offered for rename"
+        );
+    }
+
+    // a value-binding use IS renameable.
+    #[test]
+    fn value_binding_offered() {
+        let src = "let count = 1\nlet z = count\n";
+        let p = parse(src);
+        let t = rename_target(&p, src, 1, 8); // cursor on the `count` use
+        assert!(t.is_some(), "a value binding use must be renameable");
+        assert_eq!(t.unwrap().1, "count");
+    }
+
+    // a type alias IS renameable (value resolver can't see it, but type_alias_rename_spans can).
+    #[test]
+    fn type_alias_offered() {
+        let src = "type T = number\nfn f(x: T) { return x }\nf(1)\n";
+        let p = parse(src);
+        assert!(
+            rename_target(&p, src, 0, 5).is_some(),
+            "a type alias declaration must be renameable"
+        );
     }
 }
