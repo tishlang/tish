@@ -69,6 +69,16 @@ fn pos(line: u32, col: u32) -> Position {
     }
 }
 
+/// End position of a full-document range. Splits on '\n' (not `str::lines`, which drops a trailing
+/// newline) so the range reaches *past* the document's final newline; the last segment is counted in
+/// UTF-16 code units, as the LSP position encoding requires.
+fn full_doc_end(text: &str) -> (u32, u32) {
+    let line = text.matches('\n').count() as u32;
+    let last_seg = text.rsplit('\n').next().unwrap_or("");
+    let col = last_seg.encode_utf16().count() as u32;
+    (line, col)
+}
+
 fn diag_range(line: u32, col: u32, text: &str) -> Range {
     let line_str = text.lines().nth(line as usize).unwrap_or("");
     let end_char = line_str.len().max(col as usize + 1) as u32;
@@ -703,12 +713,14 @@ impl LanguageServer for Backend {
         };
         match tishlang_fmt::format_source(&text) {
             Ok(formatted) => {
-                let lines = text.lines().count() as u32;
-                let last_line = text.lines().last().map(|l| l.len() as u32).unwrap_or(0);
+                // Replace the WHOLE document. Using a range that stops before the document's final
+                // newline appends the formatter's own trailing newline on top of it, adding a blank
+                // line on every format (see full_doc_end).
+                let (end_line, end_char) = full_doc_end(&text);
                 Ok(Some(vec![tower_lsp::lsp_types::TextEdit {
                     range: Range {
                         start: pos(0, 0),
-                        end: pos(lines.saturating_sub(1), last_line),
+                        end: pos(end_line, end_char),
                     },
                     new_text: formatted,
                 }]))
@@ -1425,6 +1437,15 @@ mod hover_tests {
         assert_eq!(render_type(&T::Literal(L::Str("on".into()))), "\"on\"");
         let arr_of_union = T::Array(Box::new(uni));
         assert_eq!(render_type(&arr_of_union), "(number | null)[]");
+    }
+
+    #[test]
+    fn full_doc_end_reaches_past_trailing_newline_in_utf16() {
+        assert_eq!(full_doc_end("a\nb\n"), (2, 0)); // past the final newline (was the blank-line bug)
+        assert_eq!(full_doc_end("a\nb"), (1, 1)); // no trailing newline
+        assert_eq!(full_doc_end("x\n"), (1, 0));
+        assert_eq!(full_doc_end(""), (0, 0));
+        assert_eq!(full_doc_end("café"), (0, 4)); // UTF-16 units (é = 1), not bytes (5)
     }
 }
 

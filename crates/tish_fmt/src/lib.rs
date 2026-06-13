@@ -1124,11 +1124,41 @@ impl Printer {
         }
     }
 
+    /// Print JSX children inline and verbatim. JSX whitespace is significant in tish, so text is
+    /// emitted exactly as written and there is no reflow/indentation. A nested element/fragment is
+    /// printed bare (as a child element); any other expression child gets `{ }`.
+    fn jsx_children(&mut self, children: &[JsxChild]) {
+        for ch in children {
+            match ch {
+                JsxChild::Text(t) => self.buf.push_str(t.as_ref()),
+                JsxChild::Expr(e) => {
+                    if matches!(e, Expr::JsxElement { .. } | Expr::JsxFragment { .. }) {
+                        self.expr(e);
+                    } else {
+                        self.buf.push('{');
+                        self.expr(e);
+                        self.buf.push('}');
+                    }
+                }
+            }
+        }
+    }
+
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Literal { value, .. } => match value {
                 Literal::Number(n) => {
-                    if n.fract() == 0.0 && n.abs() < 1e15 {
+                    if !n.is_finite() {
+                        // f64 overflow / NaN: emit the tish globals, not Rust's bare `inf`/`-inf`/`NaN`
+                        // (`inf` would re-parse as an undefined identifier).
+                        self.buf.push_str(if n.is_nan() {
+                            "NaN"
+                        } else if *n > 0.0 {
+                            "Infinity"
+                        } else {
+                            "-Infinity"
+                        });
+                    } else if n.fract() == 0.0 && n.abs() < 1e15 {
                         self.buf.push_str(&format!("{}", *n as i64));
                     } else {
                         self.buf.push_str(&format!("{}", n));
@@ -1169,7 +1199,18 @@ impl Printer {
             }
             Expr::New { callee, args, .. } => {
                 self.buf.push_str("new ");
-                self.child(callee, PREC_POSTFIX);
+                // `new` parses its callee as a member expression WITHOUT a trailing call, so any call
+                // in the callee's spine (`new (factory())()`, `new (factory().Cls)()`) must be
+                // parenthesized — otherwise the printed `()` rebinds as the constructor's argument
+                // list. child()'s precedence check can't catch this because a Call/Member already has
+                // postfix precedence.
+                if new_callee_has_call(callee) {
+                    self.buf.push('(');
+                    self.expr(callee);
+                    self.buf.push(')');
+                } else {
+                    self.child(callee, PREC_POSTFIX);
+                }
                 if !args.is_empty() {
                     self.emit_args(args);
                 }
@@ -1370,72 +1411,21 @@ impl Printer {
                 if children.is_empty() {
                     self.buf.push_str(" />");
                 } else {
-                    let compact = children.len() == 1
-                        && matches!(
-                            &children[0],
-                            JsxChild::Text(t) if !t.as_ref().contains('\n')
-                        );
-                    if compact {
-                        self.buf.push('>');
-                        if let JsxChild::Text(t) = &children[0] {
-                            self.buf.push_str(t.as_ref());
-                        }
-                        self.buf.push_str("</");
-                        self.buf.push_str(tag.as_ref());
-                        self.buf.push('>');
-                    } else {
-                        self.buf.push('>');
-                        self.buf.push('\n');
-                        for ch in children {
-                            self.buf.push_str("  ");
-                            match ch {
-                                JsxChild::Text(t) => self.buf.push_str(t.as_ref()),
-                                JsxChild::Expr(e) => {
-                                    self.buf.push('{');
-                                    self.expr(e);
-                                    self.buf.push('}');
-                                }
-                            }
-                            self.buf.push('\n');
-                        }
-                        self.buf.push_str("  </");
-                        self.buf.push_str(tag.as_ref());
-                        self.buf.push('>');
-                    }
+                    // JSX whitespace is significant in tish (the lexer keeps it verbatim and codegen
+                    // emits it as content), so children are printed inline and verbatim. Reflowing
+                    // them onto indented lines injected newlines/spaces as real text nodes, which
+                    // changed the rendered output and was non-idempotent.
+                    self.buf.push('>');
+                    self.jsx_children(children);
+                    self.buf.push_str("</");
+                    self.buf.push_str(tag.as_ref());
+                    self.buf.push('>');
                 }
             }
             Expr::JsxFragment { children, .. } => {
                 self.buf.push_str("<>");
-                if children.is_empty() {
-                    self.buf.push_str("</>");
-                } else {
-                    let compact = children.len() == 1
-                        && matches!(
-                            &children[0],
-                            JsxChild::Text(t) if !t.as_ref().contains('\n')
-                        );
-                    if compact {
-                        if let JsxChild::Text(t) = &children[0] {
-                            self.buf.push_str(t.as_ref());
-                        }
-                        self.buf.push_str("</>");
-                    } else {
-                        self.buf.push('\n');
-                        for ch in children {
-                            self.buf.push_str("  ");
-                            match ch {
-                                JsxChild::Text(t) => self.buf.push_str(t.as_ref()),
-                                JsxChild::Expr(e) => {
-                                    self.buf.push('{');
-                                    self.expr(e);
-                                    self.buf.push('}');
-                                }
-                            }
-                            self.buf.push('\n');
-                        }
-                        self.buf.push_str("</>");
-                    }
-                }
+                self.jsx_children(children);
+                self.buf.push_str("</>");
             }
             Expr::NativeModuleLoad {
                 spec, export_name, ..
@@ -1466,9 +1456,19 @@ impl Printer {
 }
 
 fn escape_template(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('`', "\\`")
-        .replace('$', "\\$")
+    // In a template literal only backslash, backtick, and a `$` that begins an interpolation (`${`)
+    // need escaping. A bare `$` is literal, so escaping every `$` just adds spurious backslashes.
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '`' => out.push_str("\\`"),
+            '$' if chars.peek() == Some(&'{') => out.push_str("\\$"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 // Expression precedence levels (higher binds tighter), mirroring the parser's
@@ -1528,13 +1528,26 @@ fn expr_prec(e: &Expr) -> u8 {
         | Expr::PrefixInc { .. }
         | Expr::PrefixDec { .. } => 14,
         Expr::Call { .. }
-        | Expr::New { .. }
         | Expr::Member { .. }
         | Expr::Index { .. }
         | Expr::PostfixInc { .. }
         | Expr::PostfixDec { .. } => PREC_POSTFIX,
+        // `new X` binds looser than member/call, so a New used as the object of `.`/`[]`/`()`
+        // must be parenthesized (e.g. `(new Foo()).bar()`, not `new Foo().bar()`).
+        Expr::New { .. } => PREC_POSTFIX - 1,
         Expr::ArrowFunction { .. } => PREC_ATOM,
         _ => PREC_ATOM,
+    }
+}
+
+/// True when a `new` callee contains a call in its member/index spine. Such a callee must be
+/// parenthesized, because `new` parses its callee without a trailing call and would otherwise bind
+/// the first `()` as the constructor's argument list (`new (f())()`, `new (f().C)()`).
+fn new_callee_has_call(e: &Expr) -> bool {
+    match e {
+        Expr::Call { .. } => true,
+        Expr::Member { object, .. } | Expr::Index { object, .. } => new_callee_has_call(object),
+        _ => false,
     }
 }
 
@@ -1813,15 +1826,83 @@ mod tests {
         let _ = tishlang_parser::parse(&out).unwrap();
     }
 
+    /// Debug-render the parsed AST with all `Span { … }` contents removed, so two programs compare
+    /// equal iff they are structurally identical (reformatting legitimately changes spans).
+    fn structure(src: &str) -> String {
+        let dbg = format!("{:#?}", tishlang_parser::parse(src).unwrap().statements);
+        let mut out = String::new();
+        let mut rest = dbg.as_str();
+        while let Some(i) = rest.find("Span {") {
+            out.push_str(&rest[..i]);
+            match rest[i..].find('}') {
+                Some(j) => rest = &rest[i + j + 1..],
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
     #[test]
-    fn jsx_multiline_when_mixed_children() {
-        let src = "let x = <div>a{b}</div>\n";
+    fn new_expr_preserves_structure_and_is_idempotent() {
+        // Each input must format to a program with the SAME structure (modulo spans), and a second
+        // format pass must be a no-op. These previously corrupted into structurally different
+        // programs (Call<->New<->Member swaps) on format.
+        for src in [
+            "const d = (new Foo()).bar()\n",
+            "const b = new (factory().Cls)()\n",
+            "const x = new (getClass())(1)\n",
+            "const e = new Foo()\n",
+            "const f = new a.b.c()\n",
+            "const g = new Foo(1, 2).baz\n",
+        ] {
+            let out = format_source(src).unwrap();
+            let out2 = format_source(&out).unwrap();
+            assert_eq!(structure(src), structure(&out), "structure changed: {src:?} -> {out:?}");
+            assert_eq!(out, out2, "not idempotent: {src:?} -> {out:?} -> {out2:?}");
+        }
+    }
+
+    #[test]
+    fn jsx_preserves_structure_and_is_idempotent() {
+        // JSX whitespace is significant; formatting must not inject newlines/indentation as text
+        // (which changed rendered output and was non-idempotent). Structure must be preserved.
+        for src in [
+            "let x = <div>a{b}</div>\n",
+            "const e = <div>Hello {name}!</div>\n",
+            "const e2 = <div><span>a</span><span>b</span></div>\n",
+            "let y = <div>  spaced  text  </div>\n",
+            "let z = <>{a}{b}</>\n",
+            "let s = <div a={1} b=\"x\">{c}</div>\n",
+        ] {
+            let out = format_source(src).unwrap();
+            let out2 = format_source(&out).unwrap();
+            assert_eq!(structure(src), structure(&out), "JSX structure changed: {src:?} -> {out:?}");
+            assert_eq!(out, out2, "JSX not idempotent: {src:?} -> {out:?} -> {out2:?}");
+        }
+    }
+
+    #[test]
+    fn non_finite_number_literal_emits_valid_token() {
+        // 1e400 overflows f64 to infinity; it must format to the `Infinity` global, not Rust's bare
+        // `inf` (which would re-parse as an undefined identifier).
+        let src = "let x = 1e400\n";
         let out = format_source(src).unwrap();
-        assert!(
-            out.contains('\n'),
-            "expected line breaks in formatted JSX: {out:?}"
-        );
-        let _ = tishlang_parser::parse(&out).unwrap();
+        assert!(out.contains("Infinity"), "expected Infinity, got {out:?}");
+        tishlang_parser::parse(&out).expect("formatted output must parse");
+        assert_eq!(format_source(&out).unwrap(), out, "not idempotent: {out:?}");
+    }
+
+    #[test]
+    fn template_literal_escapes_only_interpolation_dollar() {
+        let src = "let p = `cost: $5 and ${x} done`\n";
+        let out = format_source(src).unwrap();
+        assert!(out.contains("cost: $5"), "a bare $ must not be escaped: {out:?}");
+        assert_eq!(structure(src), structure(&out), "structure changed: {src:?} -> {out:?}");
+        assert_eq!(format_source(&out).unwrap(), out, "not idempotent: {out:?}");
     }
 
     #[test]
