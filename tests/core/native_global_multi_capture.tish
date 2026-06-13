@@ -1,0 +1,15 @@
+// Regression for #213: a builtin global used as a method-call receiver (or call
+// target) inside more than one user function moves into the first generated
+// closure's capture list, so the second closure needs `let X = X.clone()` in
+// its preamble or native codegen emits use-of-moved-value (rustc E0382).
+// Array.isArray, Number, and Object.keys each appear in two functions here.
+fn isArr1(x) { return Array.isArray(x) }
+fn isArr2(x) { return Array.isArray(x) }
+fn num1(s) { return Number(s) + 1 }
+fn num2(s) { return Number(s) + 2 }
+fn keys1(o) { return Object.keys(o).length }
+fn keys2(o) { return Object.keys(o).length }
+
+console.log(isArr1([1, 2]), isArr2(42))
+console.log(num1("10"), num2("20"))
+console.log(keys1({ a: 1, b: 2 }), keys2({ z: 9 }))
