@@ -56,15 +56,17 @@ fn vm_capabilities_for_cli_run(cli_features: &[String]) -> HashSet<String> {
 
 /// `--feature` list for `tish build --target native`: same default as `tish run` (all linked-in caps).
 fn native_build_features_from_cli(cli_features: &[String]) -> Vec<String> {
-    if cli_features.is_empty() {
-        let mut v: Vec<String> = tishlang_vm::all_compiled_capabilities()
-            .into_iter()
-            .collect();
-        v.sort();
-        v
+    let mut v: Vec<String> = if cli_features.is_empty() {
+        tishlang_vm::all_compiled_capabilities().into_iter().collect()
     } else {
-        cli_features.to_vec()
-    }
+        // Normalize exactly like `tish run`: split comma-separated values (`--feature http,timers`)
+        // and expand `full`. Without this, a value like "http,timers,process" was treated as one
+        // opaque feature name, so `has_feature("http")` was false and the http runtime imports were
+        // never emitted — async `fetch` then failed to compile (issue #209).
+        normalize_capability_flags(cli_features).into_iter().collect()
+    };
+    v.sort();
+    v
 }
 
 /// `tish script.tish` → insert `run` so it matches `tish run script.tish` (npx / npm UX).
@@ -826,6 +828,22 @@ mod cli_tests {
         match cli.command {
             Some(Commands::Build(a)) => assert_eq!(a.file, "m.tish"),
             _ => panic!("expected Build"),
+        }
+    }
+
+    #[test]
+    fn native_build_features_split_commas_and_expand_full() {
+        use super::native_build_features_from_cli;
+        // Issue #209: a comma-joined value was treated as one opaque feature, so has_feature("http")
+        // was false and the native http imports were skipped (async `fetch` failed to compile).
+        let f = native_build_features_from_cli(&["http,timers,process".to_string()]);
+        for cap in ["http", "timers", "process"] {
+            assert!(f.iter().any(|s| s == cap), "missing `{cap}` in {f:?}");
+        }
+        // `full` expands to every capability, matching `tish run`.
+        let full = native_build_features_from_cli(&["full".to_string()]);
+        for cap in ["http", "timers", "fs", "process", "regex", "ws", "tty"] {
+            assert!(full.iter().any(|s| s == cap), "`full` missing `{cap}` in {full:?}");
         }
     }
 
