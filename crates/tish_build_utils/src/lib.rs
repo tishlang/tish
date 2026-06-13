@@ -490,8 +490,45 @@ pub fn copy_binary_to_output(binary: &Path, output_path: &Path) -> Result<(), St
     }
     fs::copy(binary, output_path)
         .map_err(|e| format!("Cannot copy to {}: {}", output_path.display(), e))?;
+    resign_macos_adhoc(output_path);
     Ok(())
 }
+
+/// Replace the linker-produced ad-hoc signature with a plain ad-hoc one on macOS.
+///
+/// On Apple Silicon, AMFI SIGKILLs a freshly linked binary whose ad-hoc signature carries the
+/// `linker-signed` flag (instant exit 137, no output — looks like a crash/hang), even though
+/// `codesign -v` reports it valid (#219). A standard `codesign --sign - --force` replaces it with a
+/// kernel-acceptable signature. Best-effort: static archives are skipped, and a failure (codesign
+/// absent, or a non-Mach-O output) is non-fatal — the binary is then no worse off than before.
+#[cfg(target_os = "macos")]
+fn resign_macos_adhoc(output_path: &Path) {
+    // Static archives (`.a`) are not code-signed.
+    if output_path.extension().is_some_and(|e| e == "a") {
+        return;
+    }
+    match Command::new("codesign")
+        .args(["--sign", "-", "--force"])
+        .arg(output_path)
+        .output()
+    {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => eprintln!(
+            "warning: codesign --sign - failed for {} ({}); the binary may be SIGKILLed at launch on Apple Silicon — re-sign with `codesign -s - -f {}`",
+            output_path.display(),
+            String::from_utf8_lossy(&out.stderr).trim(),
+            output_path.display()
+        ),
+        Err(e) => eprintln!(
+            "warning: could not run codesign for {} ({e}); if the binary is killed at launch, re-sign with `codesign -s - -f {}`",
+            output_path.display(),
+            output_path.display()
+        ),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resign_macos_adhoc(_output_path: &Path) {}
 
 #[cfg(test)]
 mod tests {
