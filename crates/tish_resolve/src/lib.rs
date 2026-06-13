@@ -2877,6 +2877,19 @@ fn jsx_tags_expr(e: &Expr, out: &mut std::collections::HashSet<Arc<str>>) {
     }
 }
 
+/// Names referenced in a TYPE position — every `Simple(name)` use in a type annotation (param /
+/// var / return types, alias bodies, nested object/array/union/fn types). A binding (a type-only
+/// import or a type alias) used *only* as a type would otherwise be reported unused (#139), since
+/// the value-resolution walk never sees annotations. Name-based and intentionally conservative,
+/// mirroring the JSX-tag set.
+fn type_reference_names(program: &Program) -> std::collections::HashSet<Arc<str>> {
+    let mut occ: Vec<TypeOcc> = Vec::new();
+    for s in &program.statements {
+        tref_stmt(s, &mut occ);
+    }
+    occ.into_iter().filter(|o| !o.is_decl).map(|o| o.name).collect()
+}
+
 /// Declarations whose values are never read (imports, locals, parameters). Skips `exported` module
 /// bindings and names starting with `_` (common intentional-unused convention).
 pub fn collect_unused_bindings(program: &Program, _source: &str) -> Vec<UnusedBinding> {
@@ -2888,6 +2901,9 @@ pub fn collect_unused_bindings(program: &Program, _source: &str) -> Vec<UnusedBi
     // resolution walk can't see the tag, so consult the tag set to avoid a false "unused" report
     // (deleting such an import would break the build).
     let jsx_tags = collect_jsx_component_tags(program);
+    // A binding referenced only in a type annotation (`: Foo`) is used; the value walk can't see
+    // type positions, so consult the type-reference names to avoid a false "unused" report (#139).
+    let type_refs = type_reference_names(program);
     // Which declarations are referenced, learned in ONE scope-aware pass. The previous approach
     // re-scanned the whole program per binding (re-resolving each use), which was ~O(N³) and froze
     // large files; this is O(N). A binding is unused iff nothing resolves to its definition span.
@@ -2898,6 +2914,9 @@ pub fn collect_unused_bindings(program: &Program, _source: &str) -> Vec<UnusedBi
             continue;
         }
         if jsx_tags.contains(&site.name) {
+            continue;
+        }
+        if type_refs.contains(&site.name) {
             continue;
         }
         if !referenced.contains(&site.span.start) {
@@ -4708,5 +4727,29 @@ mod tests {
             type_alias_rename_spans(&program, src, 0, 9).is_none(),
             "builtin `number` has no declaration to rename"
         );
+    }
+}
+
+#[cfg(test)]
+mod type_ref_unused_tests {
+    use super::*;
+    fn unused(src: &str) -> Vec<String> {
+        collect_unused_bindings(&tishlang_parser::parse(src).expect("parse"), src)
+            .iter().map(|b| b.name.to_string()).collect()
+    }
+    // #139: an import used only in a type annotation must not be flagged unused.
+    #[test] fn type_only_import_not_unused() {
+        let u = unused("import { Foo } from \"./m\"\nlet x: Foo = bar()\nx\n");
+        assert!(!u.contains(&"Foo".to_string()), "type-only import Foo wrongly unused; u={u:?}");
+    }
+    // #139: a type alias referenced only in an annotation must not be flagged unused.
+    #[test] fn type_alias_used_in_annotation_not_unused() {
+        let u = unused("type T = number\nfn f(x: T) { return x }\nf(1)\n");
+        assert!(!u.contains(&"T".to_string()), "type alias T wrongly unused; u={u:?}");
+    }
+    // guard: a genuinely-unused import is still reported.
+    #[test] fn genuinely_unused_import_still_flagged() {
+        let u = unused("import { Dead } from \"./m\"\nlet y = 1\ny\n");
+        assert!(u.contains(&"Dead".to_string()), "Dead should be unused; u={u:?}");
     }
 }
