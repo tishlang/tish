@@ -521,8 +521,21 @@ fn collect_expr(
         }
         Expr::Await { operand, .. } => collect_expr(operand, source, lsp_line, lsp_char, best),
         Expr::JsxElement {
-            props, children, ..
+            tag,
+            tag_span,
+            close_tag_span,
+            props,
+            children,
+            ..
         } => {
+            // A PascalCase tag references a component binding (`<Foo/>` lowers to `h(Foo, …)`); let
+            // the cursor land on it (opening or closing tag) for hover / go-to-def / rename.
+            if tag.chars().next().is_some_and(|c| c.is_uppercase()) {
+                consider(source, lsp_line, lsp_char, tag_span, tag.clone(), best);
+                if let Some(cs) = close_tag_span {
+                    consider(source, lsp_line, lsp_char, cs, tag.clone(), best);
+                }
+            }
             for p in props {
                 match p {
                     tishlang_ast::JsxProp::Attr { value, .. } => if let tishlang_ast::JsxAttrValue::Expr(e) = value {
@@ -1249,8 +1262,20 @@ fn walk_expr_resolve(
         }
         Expr::Await { operand, .. } => walk_expr_resolve(operand, scopes, target),
         Expr::JsxElement {
-            props, children, ..
+            tag,
+            tag_span,
+            close_tag_span,
+            props,
+            children,
+            ..
         } => {
+            // Go-to-def on a PascalCase component tag (opening or closing) resolves to its binding.
+            if tag.chars().next().is_some_and(|c| c.is_uppercase())
+                && (*tag_span == tgt || *close_tag_span == Some(tgt))
+                && tag.as_ref() == target.name.as_ref()
+            {
+                return scopes.resolve(tag.as_ref());
+            }
             for p in props {
                 match p {
                     tishlang_ast::JsxProp::Attr { value, .. } => {
@@ -3865,8 +3890,22 @@ fn refs_expr(
         }
         Expr::Await { operand, .. } => refs_expr(operand, program, source, name, def_span, out),
         Expr::JsxElement {
-            props, children, ..
+            tag,
+            tag_span,
+            close_tag_span,
+            props,
+            children,
+            ..
         } => {
+            // A PascalCase tag is a reference to its component binding. Count BOTH the opening and
+            // closing tag so find-references lists them and rename rewrites both (renaming only the
+            // open tag would leave `<Bar></Foo>`). maybe_push validates each via definition_span.
+            if tag.chars().next().is_some_and(|c| c.is_uppercase()) {
+                maybe_push(tag_span, tag, out);
+                if let Some(cs) = close_tag_span {
+                    maybe_push(cs, tag, out);
+                }
+            }
             for p in props {
                 match p {
                     tishlang_ast::JsxProp::Attr { value, .. } => {
@@ -4157,6 +4196,23 @@ mod tests {
         let program = parse(src).expect("parse");
         let u = collect_unresolved_identifiers(&program);
         assert!(u.is_empty(), "no runtime global should be unresolved; u={u:?}");
+    }
+
+    #[test]
+    fn jsx_component_tag_resolves_and_is_referenced() {
+        // `fn Foo` used as a component. go-to-def on the tag, find-references over both tags.
+        let src = "fn Foo() {}\nlet el = <Foo></Foo>\nel\n";
+        let program = parse(src).expect("parse");
+        // go-to-def on the opening `<Foo` (0-idx line 1, char 10) → the `fn Foo` decl (line 2, 1-idx).
+        let open = definition_span(&program, src, 1, 10).expect("open tag resolves");
+        assert_eq!(open.start, (1, 4), "resolves to fn Foo; got {open:?}");
+        // and on the closing `</Foo` (char 16).
+        let close = definition_span(&program, src, 1, 16).expect("close tag resolves");
+        assert_eq!(close.start, (1, 4), "close tag resolves to fn Foo; got {close:?}");
+        // find-references: the def + the opening tag + the closing tag.
+        let def = tishlang_ast::Span { start: (1, 4), end: (1, 7) };
+        let refs = reference_spans_for_def(&program, src, "Foo", def);
+        assert_eq!(refs.len(), 3, "def + open tag + close tag; refs={refs:?}");
     }
 
     #[test]
