@@ -355,35 +355,6 @@ pub fn create_build_dir(prefix: &str, out_name: &str) -> Result<PathBuf, String>
     Ok(build_dir)
 }
 
-/// `PROTOC` for prost-build in transitive crates (e.g. lance-encoding) during nested `cargo build`.
-/// Respects an existing `PROTOC`, then `protoc` on `PATH`, then `protoc-bin-vendored`.
-fn protoc_for_nested_cargo() -> Option<PathBuf> {
-    // Empty or non-file PROTOC must not short-circuit: prost-build treats "" like a missing binary.
-    if let Some(v) = std::env::var_os("PROTOC") {
-        if !v.is_empty() {
-            let p = PathBuf::from(&v);
-            if p.is_file() {
-                return None;
-            }
-        }
-    }
-    // Prefer vendored protoc over PATH: a broken or non-executable `protoc` on PATH still passes `is_file()`.
-    if let Ok(p) = protoc_bin_vendored::protoc_bin_path() {
-        return Some(p);
-    }
-    let ext = if cfg!(windows) { ".exe" } else { "" };
-    let name = format!("protoc{}", ext);
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            let candidate = dir.join(&name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
 /// Run cargo build in the given directory.
 /// If `cross_target` is Some, passes `--target` and skips `-C target-cpu=native`.
 pub fn run_cargo_build(
@@ -433,9 +404,6 @@ pub fn run_cargo_build(
     } else {
         cmd.env_remove("CARGO_INCREMENTAL");
     }
-    if let Some(protoc) = protoc_for_nested_cargo() {
-        cmd.env("PROTOC", protoc);
-    }
     let output = cmd
         .output()
         .map_err(|e| format!("Failed to run cargo: {}", e))?;
@@ -459,15 +427,6 @@ mod protoc_tests {
     fn cargo_target_name_replaces_hyphens() {
         assert_eq!(cargo_target_name("hello-ios"), "hello_ios");
         assert_eq!(cargo_target_name("tish_out"), "tish_out");
-    }
-
-    #[test]
-    fn protoc_for_nested_cargo_without_env_uses_vendored_or_path() {
-        let _lock = std::sync::Mutex::new(());
-        let _guard = _lock.lock().unwrap();
-        std::env::remove_var("PROTOC");
-        let p = protoc_for_nested_cargo().expect("expected vendored or PATH protoc");
-        assert!(p.exists(), "resolved protoc should exist: {}", p.display());
     }
 }
 
