@@ -3570,6 +3570,358 @@ pub fn shallow_module_bindings(program: &Program) -> Vec<(Arc<str>, tishlang_ast
 }
 
 /// All spans (definition + uses) that resolve to `def_span` for `name`.
+// ---- Type-alias rename (#131) ---------------------------------------------------------------
+// Type names live in a namespace separate from value bindings, so the value resolver
+// (`definition_span` / `reference_spans_for_def`) never sees `: T` annotation uses. These walkers
+// gather every type-name occurrence — the alias declaration plus each span-carrying
+// `TypeAnnotation::Simple` reference in any annotation — so renaming a type alias edits the
+// declaration and all its uses together (previously only the declaration was edited, silently
+// breaking the program).
+
+struct TypeOcc {
+    name: Arc<str>,
+    span: tishlang_ast::Span,
+    is_decl: bool,
+}
+
+fn tref_ann(ann: &tishlang_ast::TypeAnnotation, out: &mut Vec<TypeOcc>) {
+    use tishlang_ast::TypeAnnotation as T;
+    match ann {
+        T::Simple(name, span) => out.push(TypeOcc {
+            name: name.clone(),
+            span: *span,
+            is_decl: false,
+        }),
+        T::Array(inner) => tref_ann(inner, out),
+        T::Object(fields) => {
+            for (_, t) in fields {
+                tref_ann(t, out);
+            }
+        }
+        T::Function { params, returns } => {
+            for p in params {
+                tref_ann(p, out);
+            }
+            tref_ann(returns, out);
+        }
+        T::Union(ts) | T::Tuple(ts) | T::Intersection(ts) => {
+            for t in ts {
+                tref_ann(t, out);
+            }
+        }
+        T::Literal(_) => {}
+    }
+}
+
+fn tref_typed_param(tp: &TypedParam, out: &mut Vec<TypeOcc>) {
+    if let Some(t) = &tp.type_ann {
+        tref_ann(t, out);
+    }
+    if let Some(d) = &tp.default {
+        tref_expr(d, out);
+    }
+}
+
+fn tref_param(p: &FunParam, out: &mut Vec<TypeOcc>) {
+    match p {
+        FunParam::Simple(tp) => tref_typed_param(tp, out),
+        FunParam::Destructure {
+            type_ann, default, ..
+        } => {
+            if let Some(t) = type_ann {
+                tref_ann(t, out);
+            }
+            if let Some(d) = default {
+                tref_expr(d, out);
+            }
+        }
+    }
+}
+
+fn tref_arrow_body(body: &ArrowBody, out: &mut Vec<TypeOcc>) {
+    match body {
+        ArrowBody::Expr(e) => tref_expr(e, out),
+        ArrowBody::Block(s) => tref_stmt(s, out),
+    }
+}
+
+fn tref_expr(expr: &Expr, out: &mut Vec<TypeOcc>) {
+    match expr {
+        Expr::ArrowFunction { params, body, .. } => {
+            for p in params {
+                tref_param(p, out);
+            }
+            tref_arrow_body(body, out);
+        }
+        Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+            tref_expr(left, out);
+            tref_expr(right, out);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::TypeOf { operand, .. }
+        | Expr::Await { operand, .. } => tref_expr(operand, out),
+        Expr::Delete { target, .. } => tref_expr(target, out),
+        Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+            tref_expr(callee, out);
+            for a in args {
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => tref_expr(e, out),
+                }
+            }
+        }
+        Expr::Member { object, .. } => tref_expr(object, out),
+        Expr::Index { object, index, .. } => {
+            tref_expr(object, out);
+            tref_expr(index, out);
+        }
+        Expr::Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            tref_expr(cond, out);
+            tref_expr(then_branch, out);
+            tref_expr(else_branch, out);
+        }
+        Expr::Array { elements, .. } => {
+            for el in elements {
+                match el {
+                    tishlang_ast::ArrayElement::Expr(e)
+                    | tishlang_ast::ArrayElement::Spread(e) => tref_expr(e, out),
+                }
+            }
+        }
+        Expr::Object { props, .. } => {
+            for p in props {
+                match p {
+                    tishlang_ast::ObjectProp::KeyValue(_, e)
+                    | tishlang_ast::ObjectProp::Spread(e) => tref_expr(e, out),
+                }
+            }
+        }
+        Expr::Assign { value, .. }
+        | Expr::CompoundAssign { value, .. }
+        | Expr::LogicalAssign { value, .. } => tref_expr(value, out),
+        Expr::MemberAssign { object, value, .. } => {
+            tref_expr(object, out);
+            tref_expr(value, out);
+        }
+        Expr::IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => {
+            tref_expr(object, out);
+            tref_expr(index, out);
+            tref_expr(value, out);
+        }
+        Expr::TemplateLiteral { exprs, .. } => {
+            for e in exprs {
+                tref_expr(e, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn tref_stmt(stmt: &Statement, out: &mut Vec<TypeOcc>) {
+    match stmt {
+        Statement::TypeAlias {
+            name,
+            name_span,
+            ty,
+            ..
+        } => {
+            out.push(TypeOcc {
+                name: name.clone(),
+                span: *name_span,
+                is_decl: true,
+            });
+            tref_ann(ty, out);
+        }
+        Statement::VarDecl { type_ann, init, .. } => {
+            if let Some(t) = type_ann {
+                tref_ann(t, out);
+            }
+            if let Some(e) = init {
+                tref_expr(e, out);
+            }
+        }
+        Statement::VarDeclDestructure { init, .. } => tref_expr(init, out),
+        Statement::DeclareVar { type_ann, .. } => {
+            if let Some(t) = type_ann {
+                tref_ann(t, out);
+            }
+        }
+        Statement::FunDecl {
+            params,
+            rest_param,
+            return_type,
+            body,
+            ..
+        } => {
+            for p in params {
+                tref_param(p, out);
+            }
+            if let Some(rp) = rest_param {
+                tref_typed_param(rp, out);
+            }
+            if let Some(t) = return_type {
+                tref_ann(t, out);
+            }
+            tref_stmt(body, out);
+        }
+        Statement::DeclareFun {
+            params,
+            rest_param,
+            return_type,
+            ..
+        } => {
+            for p in params {
+                tref_param(p, out);
+            }
+            if let Some(rp) = rest_param {
+                tref_typed_param(rp, out);
+            }
+            if let Some(t) = return_type {
+                tref_ann(t, out);
+            }
+        }
+        Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+            for s in statements {
+                tref_stmt(s, out);
+            }
+        }
+        Statement::ExprStmt { expr, .. } => tref_expr(expr, out),
+        Statement::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            tref_expr(cond, out);
+            tref_stmt(then_branch, out);
+            if let Some(e) = else_branch {
+                tref_stmt(e, out);
+            }
+        }
+        Statement::While { cond, body, .. } => {
+            tref_expr(cond, out);
+            tref_stmt(body, out);
+        }
+        Statement::For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
+            if let Some(i) = init {
+                tref_stmt(i, out);
+            }
+            if let Some(c) = cond {
+                tref_expr(c, out);
+            }
+            if let Some(u) = update {
+                tref_expr(u, out);
+            }
+            tref_stmt(body, out);
+        }
+        Statement::ForOf { iterable, body, .. } => {
+            tref_expr(iterable, out);
+            tref_stmt(body, out);
+        }
+        Statement::DoWhile { body, cond, .. } => {
+            tref_stmt(body, out);
+            tref_expr(cond, out);
+        }
+        Statement::Return { value, .. } => {
+            if let Some(e) = value {
+                tref_expr(e, out);
+            }
+        }
+        Statement::Throw { value, .. } => tref_expr(value, out),
+        Statement::Switch {
+            expr,
+            cases,
+            default_body,
+            ..
+        } => {
+            tref_expr(expr, out);
+            for (c, body) in cases {
+                if let Some(c) = c {
+                    tref_expr(c, out);
+                }
+                for s in body {
+                    tref_stmt(s, out);
+                }
+            }
+            if let Some(body) = default_body {
+                for s in body {
+                    tref_stmt(s, out);
+                }
+            }
+        }
+        Statement::Try {
+            body,
+            catch_body,
+            finally_body,
+            ..
+        } => {
+            tref_stmt(body, out);
+            if let Some(c) = catch_body {
+                tref_stmt(c, out);
+            }
+            if let Some(f) = finally_body {
+                tref_stmt(f, out);
+            }
+        }
+        Statement::Export { declaration, .. } => match declaration.as_ref() {
+            ExportDeclaration::Named(inner) => tref_stmt(inner, out),
+            ExportDeclaration::Default(e) => tref_expr(e, out),
+        },
+        _ => {}
+    }
+}
+
+/// If the cursor sits on a type-alias declaration name or on a `: T` type-reference use, returns
+/// every source span that must be renamed together (the declaration plus all annotation uses).
+/// Returns `None` when the cursor is not on a user-declared type alias, so callers fall back to
+/// value-binding rename. Fixes the silent breakage where renaming a `type T` left every `: T`
+/// annotation stale (type names are in a namespace the value resolver does not see).
+pub fn type_alias_rename_spans(
+    program: &Program,
+    source: &str,
+    lsp_line: u32,
+    lsp_character: u32,
+) -> Option<Vec<tishlang_ast::Span>> {
+    let mut occ: Vec<TypeOcc> = Vec::new();
+    for s in &program.statements {
+        tref_stmt(s, &mut occ);
+    }
+    // The type name whose declaration or use span contains the cursor.
+    let target = occ
+        .iter()
+        .find(|o| pos::span_contains_lsp_position(source, &o.span, lsp_line, lsp_character))?
+        .name
+        .clone();
+    // Only rename user-declared aliases — never a builtin (`number`, `string`, …) used in an
+    // annotation, which has no declaration to keep in sync.
+    if !occ.iter().any(|o| o.is_decl && o.name == target) {
+        return None;
+    }
+    let mut spans: Vec<tishlang_ast::Span> = occ
+        .iter()
+        .filter(|o| o.name == target)
+        .map(|o| o.span)
+        .collect();
+    spans.sort_by_key(|s| (s.start.0, s.start.1, s.end.0, s.end.1));
+    spans.dedup();
+    Some(spans)
+}
+
 pub fn reference_spans_for_def(
     program: &Program,
     source: &str,
@@ -4328,5 +4680,33 @@ mod tests {
         assert_eq!(ch.members.len(), 2);
         assert_eq!(ch.members[0].as_ref(), "b");
         assert_eq!(ch.members[1].as_ref(), "c");
+    }
+
+    #[test]
+    fn type_alias_rename_collects_decl_and_all_annotation_uses() {
+        // #131: renaming a type alias must edit the declaration AND every `: T` annotation, or the
+        // program silently breaks. Type names are in a namespace the value resolver doesn't see.
+        let src = "type T = number\nlet a: T = 1\nfn f(x: T): T { return x }\n";
+        let program = parse(src).expect("parse");
+        fn span_text(src: &str, sp: &tishlang_ast::Span) -> String {
+            let lines: Vec<&str> = src.lines().collect();
+            let (sl, sc) = sp.start;
+            let (_el, ec) = sp.end;
+            lines[sl - 1].chars().skip(sc - 1).take(ec - sc).collect()
+        }
+        // Cursor on the declaration name `T` (0-indexed line 0, char 5).
+        let spans = type_alias_rename_spans(&program, src, 0, 5).expect("type rename spans");
+        assert_eq!(spans.len(), 4, "decl + let-ann + param-ann + return-ann; spans={spans:?}");
+        for sp in &spans {
+            assert_eq!(span_text(src, sp), "T", "every rename span covers the `T` token; {sp:?}");
+        }
+        // Initiating from a `: T` use also works (the param annotation, line 2 char 8).
+        let from_use = type_alias_rename_spans(&program, src, 2, 8).expect("rename from use");
+        assert_eq!(from_use.len(), 4, "same set whether initiated from decl or use");
+        // A builtin used in an annotation (`number`, line 0 char 9) is not a user alias -> None.
+        assert!(
+            type_alias_rename_spans(&program, src, 0, 9).is_none(),
+            "builtin `number` has no declaration to rename"
+        );
     }
 }

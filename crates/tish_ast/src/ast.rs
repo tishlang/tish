@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Span {
     pub start: (usize, usize), // line, col
     pub end: (usize, usize),
@@ -11,8 +11,11 @@ pub struct Span {
 /// Type annotation for variables, parameters, and return types.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeAnnotation {
-    /// Primitive types: number, string, boolean, null
-    Simple(Arc<str>),
+    /// Primitive types and type-name references: `number`, `string`, `MyAlias`. The span locates
+    /// the name token in source so type-alias rename / find-references can edit every `: T` use
+    /// (synthesized types — monomorphized generics, builtins, postfix `?` null — use a zero span
+    /// and never match a user alias). Per AST convention, spans participate in PartialEq.
+    Simple(Arc<str>, Span),
     /// Array type: T[]
     Array(Box<TypeAnnotation>),
     /// Object type: { key: Type, ... }

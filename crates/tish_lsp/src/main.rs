@@ -728,6 +728,30 @@ impl LanguageServer for Backend {
         let Ok(program) = tishlang_parser::parse(&text) else {
             return Ok(None);
         };
+        // Type-alias rename: the value resolver can't see `: T` annotation uses (type names live
+        // in a separate namespace), so handle a cursor on a type-alias declaration/use here,
+        // editing the declaration and every annotation site together.
+        if let Some(spans) =
+            tishlang_resolve::type_alias_rename_spans(&program, &text, pos.line, pos.character)
+        {
+            let mut edits: Vec<TextEdit> = spans
+                .into_iter()
+                .map(|sp| TextEdit {
+                    range: span_to_range(&sp, &text),
+                    new_text: new_name.clone(),
+                })
+                .collect();
+            edits.sort_by(|a, b| {
+                (b.range.start.line, b.range.start.character)
+                    .cmp(&(a.range.start.line, a.range.start.character))
+            });
+            let mut m = HashMap::new();
+            m.insert(uri.clone(), edits);
+            return Ok(Some(WorkspaceEdit {
+                changes: Some(m),
+                ..Default::default()
+            }));
+        }
         let Some(def) = tishlang_resolve::definition_span(&program, &text, pos.line, pos.character)
         else {
             return Ok(None);
@@ -1102,7 +1126,7 @@ fn is_ident_char(c: char) -> bool {
 fn render_type(t: &tishlang_ast::TypeAnnotation) -> String {
     use tishlang_ast::{TypeAnnotation as T, TypeLiteral as L};
     match t {
-        T::Simple(s) => s.to_string(),
+        T::Simple(s, _) => s.to_string(),
         T::Array(inner) => {
             // Parenthesize composite element types so `(A | B)[]` reads unambiguously.
             if matches!(
@@ -1156,7 +1180,7 @@ fn shallow_expr_type(e: &tishlang_ast::Expr) -> Option<tishlang_ast::TypeAnnotat
             Literal::Bool(_) => "boolean",
             Literal::Null => "null",
         };
-        Some(T::Simple(Arc::from(name)))
+        Some(T::Simple(Arc::from(name), tishlang_ast::Span::default()))
     } else {
         None
     }
@@ -1689,11 +1713,11 @@ mod hover_tests {
     #[test]
     fn composite_types_render() {
         use tishlang_ast::{TypeAnnotation as T, TypeLiteral as L};
-        let arr = T::Array(Box::new(T::Simple("number".into())));
+        let arr = T::Array(Box::new(T::Simple("number".into(), tishlang_ast::Span::default())));
         assert_eq!(render_type(&arr), "number[]");
-        let tup = T::Tuple(vec![T::Simple("number".into()), T::Simple("string".into())]);
+        let tup = T::Tuple(vec![T::Simple("number".into(), tishlang_ast::Span::default()), T::Simple("string".into(), tishlang_ast::Span::default())]);
         assert_eq!(render_type(&tup), "[number, string]");
-        let uni = T::Union(vec![T::Simple("number".into()), T::Simple("null".into())]);
+        let uni = T::Union(vec![T::Simple("number".into(), tishlang_ast::Span::default()), T::Simple("null".into(), tishlang_ast::Span::default())]);
         assert_eq!(render_type(&uni), "number | null");
         assert_eq!(render_type(&T::Literal(L::Str("on".into()))), "\"on\"");
         let arr_of_union = T::Array(Box::new(uni));

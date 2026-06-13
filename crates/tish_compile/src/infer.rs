@@ -52,15 +52,15 @@ impl InferCtx {
 }
 
 fn is_number(ann: &TypeAnnotation) -> bool {
-    matches!(ann, TypeAnnotation::Simple(s) if s.as_ref() == "number")
+    matches!(ann, TypeAnnotation::Simple(s, _) if s.as_ref() == "number")
 }
 
 fn is_string(ann: &TypeAnnotation) -> bool {
-    matches!(ann, TypeAnnotation::Simple(s) if s.as_ref() == "string")
+    matches!(ann, TypeAnnotation::Simple(s, _) if s.as_ref() == "string")
 }
 
 fn is_bool(ann: &TypeAnnotation) -> bool {
-    matches!(ann, TypeAnnotation::Simple(s) if s.as_ref() == "boolean")
+    matches!(ann, TypeAnnotation::Simple(s, _) if s.as_ref() == "boolean")
 }
 
 /// Element type of an array literal of uniform native scalars (number/string/boolean), for
@@ -91,15 +91,15 @@ fn infer_array_elem(elements: &[tishlang_ast::ArrayElement], ctx: &InferCtx) -> 
 }
 
 fn number_ann() -> TypeAnnotation {
-    TypeAnnotation::Simple("number".into())
+    TypeAnnotation::Simple("number".into(), tishlang_ast::Span::default())
 }
 
 fn string_ann() -> TypeAnnotation {
-    TypeAnnotation::Simple("string".into())
+    TypeAnnotation::Simple("string".into(), tishlang_ast::Span::default())
 }
 
 fn bool_ann() -> TypeAnnotation {
-    TypeAnnotation::Simple("boolean".into())
+    TypeAnnotation::Simple("boolean".into(), tishlang_ast::Span::default())
 }
 
 /// Infer the `TypeAnnotation` for an expression, if unambiguous.
@@ -237,7 +237,7 @@ fn pi_stmt(s: Statement) -> Statement {
                         && tp.default.is_none()
                         && nus_stmt(&body, tp.name.as_ref(), &nums)
                     {
-                        tp.type_ann = Some(TypeAnnotation::Simple(std::sync::Arc::from("number")));
+                        tp.type_ann = Some(TypeAnnotation::Simple(std::sync::Arc::from("number"), tishlang_ast::Span::default()));
                     }
                     FunParam::Simple(tp)
                 }
@@ -612,7 +612,7 @@ impl StructRegistry {
 
 fn type_canon(t: &TypeAnnotation) -> String {
     match t {
-        TypeAnnotation::Simple(s) => s.to_string(),
+        TypeAnnotation::Simple(s, _) => s.to_string(),
         TypeAnnotation::Object(fields) => format!(
             "{{{}}}",
             fields
@@ -637,7 +637,7 @@ fn infer_object_shape(
             tishlang_ast::ObjectProp::KeyValue(k, v) => {
                 let ty = infer_expr_type(v, ctx)?;
                 // Only primitive field types in this conservative version.
-                if !matches!(&ty, TypeAnnotation::Simple(s)
+                if !matches!(&ty, TypeAnnotation::Simple(s, _)
                     if matches!(s.as_ref(), "number" | "string" | "boolean"))
                 {
                     return None;
@@ -776,12 +776,12 @@ fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx)
                 // Sound: every later use in this block must be a literal-key read.
                 if uses_are_struct_safe(name.as_ref(), &keys, &stmts[i + 1..]) {
                     let alias = reg.intern(&fields);
-                    ctx.define(name.as_ref(), TypeAnnotation::Simple(alias.as_str().into()));
+                    ctx.define(name.as_ref(), TypeAnnotation::Simple(alias.as_str().into(), tishlang_ast::Span::default()));
                     out.push(Statement::VarDecl {
                         name: name.clone(),
                         name_span: *name_span,
                         mutable: *mutable,
-                        type_ann: Some(TypeAnnotation::Simple(alias.as_str().into())),
+                        type_ann: Some(TypeAnnotation::Simple(alias.as_str().into(), tishlang_ast::Span::default())),
                         init: stmt_init_clone(stmt),
                         span: *span,
                     });
@@ -1642,7 +1642,7 @@ mod param_infer_tests {
                         if let FunParam::Simple(tp) = p {
                             if tp.name.as_ref() == param {
                                 return tp.type_ann.as_ref().map(|a| match a {
-                                    TypeAnnotation::Simple(s) => s.to_string(),
+                                    TypeAnnotation::Simple(s, _) => s.to_string(),
                                     _ => "<complex>".to_string(),
                                 });
                             }

@@ -1046,7 +1046,7 @@ impl Printer {
 
     fn type_ann(&mut self, t: &TypeAnnotation) {
         match t {
-            TypeAnnotation::Simple(s) => self.buf.push_str(s.as_ref()),
+            TypeAnnotation::Simple(s, _) => self.buf.push_str(s.as_ref()),
             TypeAnnotation::Array(inner) => {
                 self.type_ann(inner);
                 self.buf.push_str("[]");

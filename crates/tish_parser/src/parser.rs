@@ -68,7 +68,7 @@ fn mangle_generic(base: &str, args: &[TypeAnnotation]) -> String {
 
 fn mangle_type(t: &TypeAnnotation) -> String {
     match t {
-        TypeAnnotation::Simple(s) => s.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect(),
+        TypeAnnotation::Simple(s, _) => s.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect(),
         TypeAnnotation::Array(inner) => format!("{}Arr", mangle_type(inner)),
         TypeAnnotation::Tuple(es) => {
             format!("Tup{}", es.iter().map(mangle_type).collect::<Vec<_>>().join(""))
@@ -84,7 +84,7 @@ fn mangle_type(t: &TypeAnnotation) -> String {
 /// Substitute generic type parameters with their concrete arguments throughout a type body.
 fn subst_type(t: &TypeAnnotation, map: &HashMap<&str, &TypeAnnotation>) -> TypeAnnotation {
     match t {
-        TypeAnnotation::Simple(s) => map
+        TypeAnnotation::Simple(s, _) => map
             .get(s.as_ref())
             .map(|rep| (*rep).clone())
             .unwrap_or_else(|| t.clone()),
@@ -758,7 +758,10 @@ impl<'a> Parser<'a> {
                 }
                 Some(TokenKind::Question) => {
                     self.advance(); // ?
-                    t = TypeAnnotation::Union(vec![t, TypeAnnotation::Simple("null".into())]);
+                    t = TypeAnnotation::Union(vec![
+                        t,
+                        TypeAnnotation::Simple("null".into(), Span::default()),
+                    ]);
                 }
                 _ => break,
             }
@@ -772,6 +775,10 @@ impl<'a> Parser<'a> {
             Some(TokenKind::Ident) => {
                 let tok = self.advance().ok_or("Expected type name")?;
                 let name = tok.literal.clone().ok_or("Expected type name")?;
+                let span = Span {
+                    start: tok.span.start,
+                    end: tok.span.end,
+                };
                 // Generic reference `Name<Args>`: `Array<T>` desugars to the native `T[]`; other
                 // generic refs erase their args (the base name resolves to its alias, whose type
                 // params already act as unknown -> `Value`).
@@ -786,25 +793,29 @@ impl<'a> Parser<'a> {
                     // alias `Box__number` (a native struct). Falls back to erasing the args when
                     // `name` isn't a known generic alias (e.g. forward reference) or arity mismatches.
                     if let Some(spec) = self.monomorphize_generic(name.as_ref(), &args) {
-                        return Ok(TypeAnnotation::Simple(Arc::from(spec.as_str())));
+                        return Ok(TypeAnnotation::Simple(Arc::from(spec.as_str()), span));
                     }
-                    return Ok(TypeAnnotation::Simple(name));
+                    return Ok(TypeAnnotation::Simple(name, span));
                 }
-                Ok(TypeAnnotation::Simple(name))
+                Ok(TypeAnnotation::Simple(name, span))
             }
             Some(TokenKind::Type | TokenKind::Declare) => {
                 let tok = self.advance().ok_or("Expected type name")?;
                 let name = tok.literal.clone().ok_or("Expected type name")?;
-                Ok(TypeAnnotation::Simple(name))
+                let span = Span {
+                    start: tok.span.start,
+                    end: tok.span.end,
+                };
+                Ok(TypeAnnotation::Simple(name, span))
             }
             // Handle keywords that can be type names
             Some(TokenKind::Null) => {
                 self.advance();
-                Ok(TypeAnnotation::Simple("null".into()))
+                Ok(TypeAnnotation::Simple("null".into(), Span::default()))
             }
             Some(TokenKind::Void) => {
                 self.advance();
-                Ok(TypeAnnotation::Simple("void".into()))
+                Ok(TypeAnnotation::Simple("void".into(), Span::default()))
             }
             Some(TokenKind::LBrace) => {
                 // Object type: { key: Type, ... }
