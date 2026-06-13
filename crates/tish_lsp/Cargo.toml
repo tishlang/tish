@@ -19,7 +19,7 @@ tishlang_fmt = { path = "../tish_fmt", version = ">=0.1" }
 tishlang_lint = { path = "../tish_lint", version = ">=0.1" }
 tishlang_resolve = { path = "../tish_resolve", version = ">=0.1" }
 tower-lsp = "0.20"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "time"] }
 serde_json = "1"
 regex = "1"
 walkdir = "2"
