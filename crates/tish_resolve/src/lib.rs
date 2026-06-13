@@ -1576,6 +1576,11 @@ pub struct UnresolvedIdentifier {
 /// Names always present on the interpreter root scope (see `tishlang_eval`) and listed in
 /// `stdlib/builtins.d.tish`. They must not produce "unresolved identifier" diagnostics when
 /// used without a `let`/`import`.
+///
+/// NOTE: maintained by hand to track the globals the interpreter registers on its root scope
+/// (`tish_eval`). It is the only suppression the LSP has — the resolver does not load
+/// `builtins.d.tish` — so any global missing here surfaces as a false `tish-unresolved-name`
+/// error in the editor. Keep it in sync (see the `runtime_globals_not_unresolved` test).
 pub fn is_runtime_global_ident(name: &str) -> bool {
     matches!(
         name,
@@ -1585,6 +1590,7 @@ pub fn is_runtime_global_ident(name: &str) -> bool {
             | "decodeURI"
             | "encodeURI"
             | "Boolean"
+            | "Number"
             | "isFinite"
             | "isNaN"
             | "Infinity"
@@ -1594,6 +1600,7 @@ pub fn is_runtime_global_ident(name: &str) -> bool {
             | "Object"
             | "Array"
             | "String"
+            | "Symbol"
             | "Date"
             | "Set"
             | "Map"
@@ -1608,6 +1615,15 @@ pub fn is_runtime_global_ident(name: &str) -> bool {
             | "Uint32Array"
             | "AudioContext"
             | "RegExp"
+            | "Error"
+            | "TypeError"
+            | "RangeError"
+            | "SyntaxError"
+            | "Promise"
+            | "fetch"
+            | "fetchAll"
+            | "serve"
+            | "htmlEscape"
             | "setTimeout"
             | "setInterval"
             | "clearTimeout"
@@ -3774,6 +3790,15 @@ mod tests {
             !u.iter().any(|b| b.name.as_ref() == "DEF"),
             "DEF is used in the declare-fn param default; u={u:?}"
         );
+    }
+
+    #[test]
+    fn runtime_globals_not_unresolved() {
+        // Core interpreter globals must never be flagged as unresolved-name in the editor.
+        let src = "let _ = [Number, Symbol, Error, TypeError, RangeError, SyntaxError, Promise, fetch, fetchAll, serve, htmlEscape, console, Math, JSON, Object, Array, String, Boolean, Date, RegExp, setTimeout]\n";
+        let program = parse(src).expect("parse");
+        let u = collect_unresolved_identifiers(&program);
+        assert!(u.is_empty(), "no runtime global should be unresolved; u={u:?}");
     }
 
     #[test]
