@@ -6,6 +6,14 @@ name: Crates.io release
 on:
   release:
     types: [published, edited]
+  # Manual / programmatic re-dispatch to RESUME a throttled run: the publish loop skips crates whose
+  # version is already on crates.io, so re-running with the tag finishes the tail without re-publishing.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)publish, e.g. v2.2.6"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,7 +21,7 @@ permissions:
 jobs:
   publish:
     name: Publish to crates.io
-    if: github.event.release.prerelease == false
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -21,7 +29,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ github.event.release.tag_name }}
+          ref: refs/tags/${{ github.event.release.tag_name || inputs.tag }}
           fetch-depth: 0
 
       - name: Install Rust
@@ -29,14 +37,14 @@ jobs:
 
       - name: Set version in all Cargo.toml
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
           VERSION="${TAG#v}"
           find crates -name "Cargo.toml" -exec sed -i.bak "s/^version = .*/version = \"$VERSION\"/" {} \;
           find crates -name "Cargo.toml.bak" -delete
 
       - name: Publish crates (dependency order)
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
           VERSION="${TAG#v}"
           CRATES=(
             tishlang_build_utils
@@ -82,20 +90,57 @@ jobs:
           done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.publish == null or (.publish | length > 0)) | .name')
           [ "$missing" -eq 0 ] || { echo "Add the crate(s) above to CRATES in dependency order, then re-run."; exit 1; }
 
+          # Publish one crate, retrying ONLY on a crates.io rate limit (#225). A burst of ~31 publishes
+          # can trip crates.io's publish throttle (HTTP 429 / "You have published too many crates …
+          # try again after <date>"); cargo does not wait on that, so the release used to fail partway
+          # and need a manual re-run. Back off gracefully — honoring the server's "try again after"
+          # timestamp when present, else 60s, capped at 180s/attempt — and retry. Any NON-rate-limit
+          # failure fails fast. If the limit outlasts our attempts, fail with a pointer to re-dispatch
+          # (workflow_dispatch with the tag) — the loop skips already-published crates, so it resumes.
+          publish_with_retry() {
+            local crate="$1" max="${PUBLISH_MAX_ATTEMPTS:-6}" attempt log after tgt now wait
+            log=$(mktemp)
+            for attempt in $(seq 1 "$max"); do
+              if cargo publish -p "$crate" --token "$CARGO_REGISTRY_TOKEN" --no-verify --allow-dirty >"$log" 2>&1; then
+                cat "$log"; rm -f "$log"; return 0
+              fi
+              cat "$log"
+              if ! grep -qiE '429|too many|rate.?limit|try again (later|after)' "$log"; then
+                echo "::error::cargo publish $crate failed (not a rate limit) — see log above"
+                rm -f "$log"; return 1
+              fi
+              after=$(grep -oiE 'try again after [^.]*(GMT|UTC)' "$log" | head -1 | sed -E 's/.*try again after //I' || true)
+              wait=""
+              if [ -n "$after" ]; then
+                now=$(date -u +%s)
+                tgt=$(date -u -d "$after" +%s 2>/dev/null || echo "")
+                [ -n "$tgt" ] && wait=$(( tgt - now + 5 ))
+              fi
+              if [ -z "$wait" ] || [ "$wait" -lt 1 ]; then wait=60; fi
+              if [ "$wait" -gt 180 ]; then wait=180; fi
+              echo "::warning::$crate hit a crates.io rate limit (attempt ${attempt}/${max}); waiting ${wait}s then retrying"
+              sleep "$wait"
+            done
+            echo "::error::$crate still rate-limited after ${max} attempts. Re-dispatch this workflow (Actions → Crates.io release → Run workflow, tag=${TAG}) to resume — already-published crates are skipped."
+            rm -f "$log"; return 1
+          }
+
           for crate in "${CRATES[@]}"; do
             if curl -sSf -o /dev/null -A "tishlang-release/1.0 (https://github.com/tishlang/tish)" "https://crates.io/api/v1/crates/${crate}/${VERSION}"; then
               echo "Skipping $crate v${VERSION} (already published)"
             else
               echo "Publishing $crate v${VERSION}..."
-              cargo publish -p "$crate" --token "$CARGO_REGISTRY_TOKEN" --no-verify --allow-dirty
+              publish_with_retry "$crate"
             fi
           done
 
       - name: Update release description with crates.io URL
+        # Only on the release event — a workflow_dispatch resume has no github.event.release.
+        if: github.event_name == 'release'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
           VERSION="${TAG#v}"
           CRATES_URL="https://crates.io/crates/tishlang/${VERSION}"
           RELEASE_ID="${{ github.event.release.id }}"
