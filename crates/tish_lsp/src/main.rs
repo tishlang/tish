@@ -171,7 +171,23 @@ fn document_symbol(
     }
 }
 
-async fn publish_parse_and_lint(client: &Client, uri: Url, text: &str) {
+async fn publish_parse_and_lint(client: &Client, uri: Url, text: String) {
+    // Parse/lint/resolve/typecheck is CPU-bound and can be O(file size); running it on the async
+    // task lets a slow analysis occupy a runtime worker and head-of-line-block the hover/goto/
+    // completion requests tower-lsp drives on the same runtime. Hand the pure computation to the
+    // blocking pool and only await the (cheap) publish here (#160).
+    let diags = tokio::task::spawn_blocking(move || compute_diagnostics(&text))
+        .await
+        .unwrap_or_default();
+    // MUST be awaited — `publish_diagnostics` is async; a bare `let _ = …` drops the future
+    // unsent, which silently disables ALL LSP diagnostics (parse errors, lints, unused bindings).
+    client.publish_diagnostics(uri, diags, None).await;
+}
+
+/// Run the full diagnostic pipeline — parse → lint → resolve (unresolved names, unused bindings) →
+/// gradual typecheck — over a document's text and return LSP diagnostics. Pure and synchronous so it
+/// can run on the blocking pool off the request driver, and unit-testable on its own (#160).
+fn compute_diagnostics(text: &str) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     match tishlang_parser::parse(text) {
         Ok(program) => {
@@ -244,9 +260,7 @@ async fn publish_parse_and_lint(client: &Client, uri: Url, text: &str) {
             });
         }
     }
-    // MUST be awaited — `publish_diagnostics` is async; a bare `let _ = …` drops the future
-    // unsent, which silently disables ALL LSP diagnostics (parse errors, lints, unused bindings).
-    client.publish_diagnostics(uri, diags, None).await;
+    diags
 }
 
 #[tower_lsp::async_trait]
@@ -331,7 +345,7 @@ impl LanguageServer for Backend {
         let uri = p.text_document.uri;
         let text = p.text_document.text;
         self.docs.write().unwrap().insert(uri.clone(), text.clone());
-        publish_parse_and_lint(&self.client, uri, &text).await;
+        publish_parse_and_lint(&self.client, uri, text).await;
     }
 
     async fn did_change(&self, p: DidChangeTextDocumentParams) {
@@ -361,7 +375,7 @@ impl LanguageServer for Backend {
                 }
                 let text = docs.read().unwrap().get(&uri).cloned();
                 if let Some(text) = text {
-                    publish_parse_and_lint(&client, uri, &text).await;
+                    publish_parse_and_lint(&client, uri, text).await;
                 }
             });
         }
@@ -2128,5 +2142,50 @@ mod workspace_symbol_tests {
         assert!(index.read().unwrap().is_empty(), "index empty after the only file is removed");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    //! The diagnostic pipeline is extracted into the pure `compute_diagnostics` (#160) so it can run
+    //! on the blocking pool off the request driver. These tests pin that it still runs every stage —
+    //! parse, lint, resolve — and stays quiet on clean code.
+    use super::*;
+
+    fn codes(diags: &[Diagnostic]) -> Vec<&str> {
+        diags
+            .iter()
+            .filter_map(|d| match &d.code {
+                Some(NumberOrString::String(s)) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reports_parse_errors() {
+        let d = compute_diagnostics("let x = \n");
+        assert!(
+            d.iter().any(|x| x.severity == Some(DiagnosticSeverity::ERROR)),
+            "a parse error must surface an ERROR diagnostic, got {d:?}"
+        );
+    }
+
+    #[test]
+    fn runs_lint_and_resolve_in_one_pass() {
+        // duplicate object key (lint) + a call to an unbound name (resolve), together.
+        let d = compute_diagnostics("let o = { a: 1, a: 2 }\nbar()\n");
+        let c = codes(&d);
+        assert!(c.contains(&"tish-duplicate-key"), "lint stage ran: {c:?}");
+        assert!(c.contains(&"tish-unresolved-name"), "resolve stage ran: {c:?}");
+    }
+
+    #[test]
+    fn clean_program_has_no_errors() {
+        let d = compute_diagnostics("export fn add(a, b) { return a + b }\n");
+        assert!(
+            d.iter().all(|x| x.severity != Some(DiagnosticSeverity::ERROR)),
+            "a clean, exported, fully-used function must not error, got {d:?}"
+        );
     }
 }
