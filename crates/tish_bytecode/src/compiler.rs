@@ -836,6 +836,53 @@ impl<'a> Compiler<'a> {
         self.chunk.code[patch_pos + 1] = bytes[1];
     }
 
+    /// Compile `cond` in CONDITION position (if / while / for / do-while). The operand stack is EMPTY
+    /// at every emitted `JumpIfFalse` — `&&` / `||` lower to pure control flow rather than the
+    /// value-producing `Dup` + `BinOp` form, so a hot numeric loop whose only disqualifier was the
+    /// condition shape stays eligible for the cranelift JIT (#167). Returns the `JumpIfFalse` patch
+    /// sites the caller must point at its "condition is false" target. The condition value itself is
+    /// never observed here, so truthiness-only lowering is exact; short-circuit order is preserved.
+    fn compile_condition_jump_if_false(
+        &mut self,
+        cond: &Expr,
+    ) -> Result<Vec<usize>, CompileError> {
+        match cond {
+            // `a && b` is false if EITHER operand is false — test each in order; both exit to the
+            // same false-target, so concatenate their patch sites.
+            Expr::Binary {
+                left,
+                op: BinOp::And,
+                right,
+                ..
+            } => {
+                let mut patches = self.compile_condition_jump_if_false(left)?;
+                patches.extend(self.compile_condition_jump_if_false(right)?);
+                Ok(patches)
+            }
+            // `a || b`: a truthy left makes the condition hold (skip the right); only the right's
+            // falsiness exits.
+            Expr::Binary {
+                left,
+                op: BinOp::Or,
+                right,
+                ..
+            } => {
+                self.compile_expr(left)?;
+                let take_right = self.emit_jump(Opcode::JumpIfFalse); // left falsy → evaluate right
+                let done = self.emit_jump(Opcode::Jump); // left truthy → condition holds
+                self.patch_jump(take_right, self.chunk.code.len());
+                let patches = self.compile_condition_jump_if_false(right)?;
+                self.patch_jump(done, self.chunk.code.len());
+                Ok(patches)
+            }
+            // Any other expression: evaluate it; one JumpIfFalse consumes the value.
+            _ => {
+                self.compile_expr(cond)?;
+                Ok(vec![self.emit_jump(Opcode::JumpIfFalse)])
+            }
+        }
+    }
+
     /// Patch a JumpBack operand: distance from the IP after this insn back to `target`.
     /// `patch_pos` is the first byte of the u16 operand (same as [`Self::emit_jump_back`]'s return value).
     fn patch_jump_back(&mut self, patch_pos: usize, target: usize) {
@@ -1194,11 +1241,13 @@ impl<'a> Compiler<'a> {
                 else_branch,
                 ..
             } => {
-                self.compile_expr(cond)?;
-                let jump_else = self.emit_jump(Opcode::JumpIfFalse);
+                let jump_else_sites = self.compile_condition_jump_if_false(cond)?;
                 self.compile_statement(then_branch)?;
                 let jump_end = self.emit_jump(Opcode::Jump);
-                self.patch_jump(jump_else, self.chunk.code.len());
+                let else_target = self.chunk.code.len();
+                for site in &jump_else_sites {
+                    self.patch_jump(*site, else_target);
+                }
                 if let Some(else_s) = else_branch {
                     self.compile_statement(else_s)?;
                 }
@@ -1222,14 +1271,16 @@ impl<'a> Compiler<'a> {
                 self.breakable_stack.push(Breakable::Loop {
                     unwind_depth: self.block_depth,
                 });
-                self.compile_expr(cond)?;
-                let jump_out = self.emit_jump(Opcode::JumpIfFalse);
-                // JumpIfFalse already pops condition when taking body
+                // Condition-position lowering: empty stack at each JumpIfFalse keeps the loop
+                // JIT-eligible (#167). Each returned site exits to `end`.
+                let jump_out_sites = self.compile_condition_jump_if_false(cond)?;
                 self.compile_statement(body)?;
                 let jump_back_dist = (self.chunk.code.len() + 3).saturating_sub(start);
                 self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
                 let end = self.chunk.code.len();
-                self.patch_jump(jump_out, end);
+                for site in &jump_out_sites {
+                    self.patch_jump(*site, end);
+                }
                 let info = self.loop_stack.pop().unwrap();
                 self.breakable_stack.pop();
                 for p in info.continue_patches {
@@ -1266,14 +1317,16 @@ impl<'a> Compiler<'a> {
                     self.emit_u16(Opcode::LoopVarsBegin, idx);
                 }
                 let cond_start = self.chunk.code.len();
-                if let Some(c) = cond {
-                    self.compile_expr(c)?;
+                // Condition-position lowering keeps the loop JIT-eligible (#167). The absent-condition
+                // `for (;;)` keeps its `true` constant + single exit jump.
+                let jump_out_sites = if let Some(c) = cond {
+                    self.compile_condition_jump_if_false(c)?
                 } else {
                     let idx = self.constant_idx(Constant::Bool(true));
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(idx);
-                }
-                let jump_out = self.emit_jump(Opcode::JumpIfFalse);
+                    vec![self.emit_jump(Opcode::JumpIfFalse)]
+                };
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
                     continue_patches: Vec::new(),
@@ -1295,7 +1348,9 @@ impl<'a> Compiler<'a> {
                 let jump_back_dist = (self.chunk.code.len() + 3).saturating_sub(cond_start);
                 self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
                 let end = self.chunk.code.len();
-                self.patch_jump(jump_out, end);
+                for site in &jump_out_sites {
+                    self.patch_jump(*site, end);
+                }
                 for p in info.break_patches {
                     self.patch_jump(p, end);
                 }
@@ -1568,12 +1623,15 @@ impl<'a> Compiler<'a> {
                 });
                 self.compile_statement(body)?;
                 let cond_start = self.chunk.code.len();
-                self.compile_expr(cond)?;
-                let jump_back = self.emit_jump(Opcode::JumpIfFalse);
+                // Condition-position lowering: a false condition exits to `end`, a true one falls
+                // through to the JumpBack — JIT-eligible, no value left on the stack (#167).
+                let exit_sites = self.compile_condition_jump_if_false(cond)?;
                 let jump_back_dist = (self.chunk.code.len() + 3).saturating_sub(start);
                 self.emit_u16(Opcode::JumpBack, jump_back_dist as u16);
                 let end = self.chunk.code.len();
-                self.patch_jump(jump_back, end);
+                for site in &exit_sites {
+                    self.patch_jump(*site, end);
+                }
                 let info = self.loop_stack.pop().unwrap();
                 self.breakable_stack.pop();
                 for p in info.continue_patches {
