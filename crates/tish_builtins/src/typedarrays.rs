@@ -136,7 +136,14 @@ fn construct(kind: Kind, args: &[Value]) -> Value {
 /// construction-only-coercion gap for this one view). Any op without a packed fast path materialises
 /// it back to a boxed array, so every array method keeps working.
 pub fn float64_array_packed(args: &[Value]) -> Value {
-    if !Value::packed_arrays_enabled() {
+    float64_array_with(Value::packed_arrays_enabled(), args)
+}
+
+/// `float64_array_packed` with the packed/boxed choice made explicit, so tests exercise both paths
+/// without toggling the now-cached process env flag (#166). `packed = false` is byte-identical to
+/// the generic boxed `Value::Array` constructor.
+fn float64_array_with(packed: bool, args: &[Value]) -> Value {
+    if !packed {
         // Byte-identical fallback to the generic boxed `Value::Array` backing.
         return construct(Kind::F64, args);
     }
@@ -261,25 +268,26 @@ mod tests {
         assert_eq!(nums(&v), vec![0.0, 1.0]);
     }
 
-    // `float64_array_packed` toggles on a process-global env var. No other test in this crate reads
-    // `packed_arrays_enabled`, so the set/remove here can't perturb a concurrent test; we restore the
-    // default (off) on exit regardless.
+    // The packed/boxed selection is passed explicitly via `float64_array_with`, so this exercises
+    // both paths without touching the now-cached process env flag (#166) — no env mutation, no
+    // mid-test toggle race, parallel-safe.
     #[test]
     fn float64_packed_respects_flag() {
-        // Flag off (default): byte-identical boxed `Value::Array` fallback, no packed value produced.
-        std::env::remove_var("TISH_PACKED_ARRAYS");
-        let boxed = float64_array_packed(&[Value::Number(3.0)]);
+        // Packed off (the default): byte-identical boxed `Value::Array` fallback.
+        let boxed = float64_array_with(false, &[Value::Number(3.0)]);
         assert!(matches!(boxed, Value::Array(_)), "packed-off must return boxed Array");
         assert_eq!(nums(&boxed), vec![0.0, 0.0, 0.0]);
 
-        // Flag on: packed `Value::NumberArray`. F64 needs no coercion (exact), non-numeric → NaN
+        // Packed on: `Value::NumberArray`. F64 needs no coercion (exact), non-numeric → NaN
         // (matching the boxed `from_values(F64, …)`), and the length form zero-fills.
-        std::env::set_var("TISH_PACKED_ARRAYS", "1");
-        let packed = float64_array_packed(&[Value::Array(VmRef::new(vec![
-            Value::Number(1.1),
-            Value::Number(2.2),
-            Value::Null,
-        ]))]);
+        let packed = float64_array_with(
+            true,
+            &[Value::Array(VmRef::new(vec![
+                Value::Number(1.1),
+                Value::Number(2.2),
+                Value::Null,
+            ]))],
+        );
         match &packed {
             Value::NumberArray(a) => {
                 let v = a.borrow();
@@ -290,9 +298,8 @@ mod tests {
             _ => panic!("packed-on must return NumberArray"),
         }
         assert!(matches!(
-            float64_array_packed(&[Value::Number(2.0)]),
+            float64_array_with(true, &[Value::Number(2.0)]),
             Value::NumberArray(_)
         ));
-        std::env::remove_var("TISH_PACKED_ARRAYS");
     }
 }
