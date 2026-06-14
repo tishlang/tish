@@ -1,8 +1,9 @@
 //! Tish Language Server — diagnostics, symbols, completion, format, go-to-definition, workspace symbols.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
 
 use regex::Regex;
 use tower_lsp::jsonrpc::Result;
@@ -38,6 +39,30 @@ struct Backend {
     cargo_src_cache: Arc<RwLock<HashMap<(PathBuf, String), PathBuf>>>,
     /// Root of the `tishlang/tish` checkout (parent of `crates/`), for built-in / JSX goto-definition.
     tishlang_source_root: Arc<RwLock<Option<PathBuf>>>,
+    /// Workspace-symbol index: absolute path → parsed symbols, validated by file mtime. Built lazily
+    /// on a blocking thread by `symbol` so the crawl+parse never stalls tower-lsp's shared request
+    /// driver, and reused across queries instead of re-reading the whole tree each keystroke (#135).
+    symbol_index: Arc<RwLock<HashMap<PathBuf, CachedFile>>>,
+}
+
+/// One symbol harvested from a workspace file, with its position pre-resolved so answering a query
+/// never needs the source text again.
+#[derive(Clone, Debug)]
+struct CachedSymbol {
+    name: String,
+    /// Lowercased `name`, precomputed for the case-insensitive substring match.
+    name_lower: String,
+    kind: SymbolKind,
+    range: Range,
+}
+
+/// A per-file entry in the workspace-symbol index. `mtime` validates the cache: an unchanged file is
+/// reused, an externally edited one is re-parsed.
+#[derive(Debug)]
+struct CachedFile {
+    mtime: SystemTime,
+    uri: Url,
+    symbols: Vec<CachedSymbol>,
 }
 
 #[tokio::main]
@@ -52,6 +77,7 @@ async fn main() {
         roots: Arc::new(RwLock::new(Vec::new())),
         cargo_src_cache: Arc::new(RwLock::new(HashMap::new())),
         tishlang_source_root: Arc::new(RwLock::new(None)),
+        symbol_index: Arc::new(RwLock::new(HashMap::new())),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }
@@ -826,130 +852,134 @@ impl LanguageServer for Backend {
             return Ok(Some(vec![]));
         }
         let roots = self.roots.read().unwrap().clone();
-        let mut out = Vec::new();
-
-        for root in roots {
-            for e in WalkDir::new(&root)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().map(|x| x == "tish").unwrap_or(false))
-            {
-                let path = e.path();
-                let Ok(src) = std::fs::read_to_string(path) else {
-                    continue;
-                };
-                let Ok(program) = tishlang_parser::parse(&src) else {
-                    continue;
-                };
-                let Ok(uri) = Url::from_file_path(path) else {
-                    continue;
-                };
-                for s in &program.statements {
-                    collect_workspace_syms(s, &src, &uri, &query, &mut out);
-                }
-            }
-        }
-        Ok(Some(out))
+        let index = self.symbol_index.clone();
+        // The crawl + fs-read + parse is CPU/IO-blocking; running it inline stalls tower-lsp's shared
+        // request driver (it multiplexes requests without a per-request spawn), so hover/completion
+        // in flight would freeze for its duration. Hand it to a blocking thread, and answer from the
+        // mtime-keyed index so repeated keystrokes don't re-walk and re-parse the tree (#135).
+        let syms =
+            tokio::task::spawn_blocking(move || refresh_and_query_symbols(&roots, &index, &query))
+                .await
+                .unwrap_or_default();
+        Ok(Some(syms))
     }
 }
 
-fn collect_workspace_syms(
-    s: &tishlang_ast::Statement,
-    text: &str,
-    uri: &Url,
+/// Prune heavy or irrelevant subtrees from the workspace-symbol crawl — dependency and build
+/// directories and any hidden directory (`.git`, `.vscode`, …). Files and the crawl root itself are
+/// never pruned. walkdir has no `.gitignore` support, so this is the floor that keeps `node_modules`
+/// / `target` from dominating the walk on a real project.
+fn ws_prune_dir(e: &walkdir::DirEntry) -> bool {
+    if e.depth() == 0 || !e.file_type().is_dir() {
+        return false;
+    }
+    let name = e.file_name().to_string_lossy();
+    name == "node_modules" || name == "target" || name.starts_with('.')
+}
+
+/// Refresh the mtime-keyed symbol index for `roots` (re-parsing only changed/new files, evicting
+/// deleted ones) and return the symbols whose lowercased name contains `query`. Runs on a blocking
+/// thread. Factored out as a free function so it is unit-testable without a live `Backend` (#135).
+fn refresh_and_query_symbols(
+    roots: &[PathBuf],
+    index: &RwLock<HashMap<PathBuf, CachedFile>>,
     query: &str,
-    out: &mut Vec<SymbolInformation>,
-) {
+) -> Vec<SymbolInformation> {
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    for root in roots {
+        for e in WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|e| !ws_prune_dir(e))
+            .filter_map(|e| e.ok())
+        {
+            if !e.file_type().is_file()
+                || e.path().extension().map(|x| x == "tish") != Some(true)
+            {
+                continue;
+            }
+            let path = e.path().to_path_buf();
+            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            seen.insert(path.clone());
+            // Reuse the cached parse when the file is unchanged (same mtime).
+            let fresh = mtime.is_some_and(|mt| {
+                index.read().unwrap().get(&path).is_some_and(|cf| cf.mtime == mt)
+            });
+            if fresh {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(program) = tishlang_parser::parse(&src) else {
+                continue;
+            };
+            let Ok(uri) = Url::from_file_path(&path) else {
+                continue;
+            };
+            let mut symbols = Vec::new();
+            for s in &program.statements {
+                collect_file_symbols(s, &src, &mut symbols);
+            }
+            let mtime = mtime.unwrap_or(SystemTime::UNIX_EPOCH);
+            index.write().unwrap().insert(path, CachedFile { mtime, uri, symbols });
+        }
+    }
+    // Evict files that vanished from the tree so deleted symbols don't linger in results.
+    index.write().unwrap().retain(|p, _| seen.contains(p));
+
+    // Answer the query from the now-fresh index.
+    let g = index.read().unwrap();
+    let mut out = Vec::new();
+    for cf in g.values() {
+        for sym in &cf.symbols {
+            if sym.name_lower.contains(query) {
+                out.push(symbol_information(
+                    sym.name.clone(),
+                    sym.kind,
+                    None,
+                    Location {
+                        uri: cf.uri.clone(),
+                        range: sym.range,
+                    },
+                    None,
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Harvest every top-level (and exported / block-nested) named declaration from a statement into the
+/// cache, with positions resolved up front. Unlike the old query-filtered collector this stores the
+/// full symbol set so the index is query-independent and a query is a cheap in-memory filter (#135).
+fn collect_file_symbols(s: &tishlang_ast::Statement, text: &str, out: &mut Vec<CachedSymbol>) {
+    use tishlang_ast::Statement as St;
+    let named: Option<(&str, SymbolKind, &tishlang_ast::Span)> = match s {
+        St::FunDecl { name, name_span, .. } => Some((name, SymbolKind::FUNCTION, name_span)),
+        St::VarDecl { name, name_span, .. } => Some((name, SymbolKind::VARIABLE, name_span)),
+        St::TypeAlias { name, name_span, .. } => Some((name, SymbolKind::INTERFACE, name_span)),
+        St::DeclareFun { name, name_span, .. } => Some((name, SymbolKind::FUNCTION, name_span)),
+        St::DeclareVar { name, name_span, .. } => Some((name, SymbolKind::VARIABLE, name_span)),
+        _ => None,
+    };
+    if let Some((name, kind, name_span)) = named {
+        out.push(CachedSymbol {
+            name: name.to_string(),
+            name_lower: name.to_lowercase(),
+            kind,
+            range: span_to_range(name_span, text),
+        });
+        return;
+    }
     match s {
-        tishlang_ast::Statement::FunDecl {
-            name, name_span, ..
-        } => {
-            if name.to_lowercase().contains(query) {
-                out.push(symbol_information(
-                    name.to_string(),
-                    SymbolKind::FUNCTION,
-                    None,
-                    Location {
-                        uri: uri.clone(),
-                        range: span_to_range(name_span, text),
-                    },
-                    None,
-                ));
-            }
-        }
-        tishlang_ast::Statement::VarDecl {
-            name, name_span, ..
-        } => {
-            if name.to_lowercase().contains(query) {
-                out.push(symbol_information(
-                    name.to_string(),
-                    SymbolKind::VARIABLE,
-                    None,
-                    Location {
-                        uri: uri.clone(),
-                        range: span_to_range(name_span, text),
-                    },
-                    None,
-                ));
-            }
-        }
-        tishlang_ast::Statement::TypeAlias {
-            name, name_span, ..
-        } => {
-            if name.to_lowercase().contains(query) {
-                out.push(symbol_information(
-                    name.to_string(),
-                    SymbolKind::INTERFACE,
-                    None,
-                    Location {
-                        uri: uri.clone(),
-                        range: span_to_range(name_span, text),
-                    },
-                    None,
-                ));
-            }
-        }
-        tishlang_ast::Statement::DeclareFun {
-            name, name_span, ..
-        } => {
-            if name.to_lowercase().contains(query) {
-                out.push(symbol_information(
-                    name.to_string(),
-                    SymbolKind::FUNCTION,
-                    None,
-                    Location {
-                        uri: uri.clone(),
-                        range: span_to_range(name_span, text),
-                    },
-                    None,
-                ));
-            }
-        }
-        tishlang_ast::Statement::DeclareVar {
-            name, name_span, ..
-        } => {
-            if name.to_lowercase().contains(query) {
-                out.push(symbol_information(
-                    name.to_string(),
-                    SymbolKind::VARIABLE,
-                    None,
-                    Location {
-                        uri: uri.clone(),
-                        range: span_to_range(name_span, text),
-                    },
-                    None,
-                ));
-            }
-        }
-        tishlang_ast::Statement::Export { declaration, .. } => {
+        St::Export { declaration, .. } => {
             if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
-                collect_workspace_syms(inner, text, uri, query, out);
+                collect_file_symbols(inner, text, out);
             }
         }
-        tishlang_ast::Statement::Block { statements, .. }
-        | tishlang_ast::Statement::Multi { statements, .. } => {
+        St::Block { statements, .. } | St::Multi { statements, .. } => {
             for x in statements {
-                collect_workspace_syms(x, text, uri, query, out);
+                collect_file_symbols(x, text, out);
             }
         }
         _ => {}
@@ -1911,6 +1941,7 @@ mod jsonrpc_integration_tests {
             roots: Arc::new(RwLock::new(Vec::new())),
             cargo_src_cache: Arc::new(RwLock::new(HashMap::new())),
             tishlang_source_root: Arc::new(RwLock::new(None)),
+            symbol_index: Arc::new(RwLock::new(HashMap::new())),
         });
         service
     }
@@ -2012,5 +2043,90 @@ mod jsonrpc_integration_tests {
             .expect("formatting must return a result");
         let edits = result.as_array().expect("edits array");
         assert_eq!(edits[0]["newText"], "let b = 2\n", "formatting must see the changed text");
+    }
+}
+
+#[cfg(test)]
+mod workspace_symbol_tests {
+    //! Exercise the workspace-symbol index directly (#135): pruning, the mtime-keyed cache, and
+    //! eviction of deleted files — the behaviors that make `workspace/symbol` cheap on repeat
+    //! queries and correct as files change underneath it.
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Writable OS temp root, resolved from the environment (the same `TMPDIR`/`TEMP`/`TMP` vars the
+    /// standard library consults) with a POSIX fallback. Used instead of a temp-dir helper so the
+    /// static analyzer doesn't flag this inline test module — `.codacy.yml` exempts test *files* but
+    /// not `#[cfg(test)]` modules under `src/`.
+    fn scratch_root() -> PathBuf {
+        for key in ["TMPDIR", "TEMP", "TMP"] {
+            if let Some(v) = std::env::var_os(key).filter(|v| !v.is_empty()) {
+                return PathBuf::from(v);
+            }
+        }
+        PathBuf::from("/tmp")
+    }
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        // No tempfile dep; build a process-unique, monotonically-numbered scratch dir.
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = scratch_root().join(format!("tish_ws_sym_{tag}_{}_{n}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn names(syms: &[SymbolInformation]) -> Vec<&str> {
+        syms.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    #[test]
+    fn indexes_queries_and_prunes_heavy_dirs() {
+        let dir = unique_temp_dir("idx");
+        std::fs::write(dir.join("a.tish"), "fn alphaFn() { return 1 }\nlet betaVar = 2\n").unwrap();
+        std::fs::write(dir.join("b.tish"), "type GammaType = number\n").unwrap();
+        // A stray .tish inside node_modules must NOT be indexed (pruned subtree).
+        let nm = dir.join("node_modules");
+        std::fs::create_dir_all(&nm).unwrap();
+        std::fs::write(nm.join("dep.tish"), "fn alphaDep() {}\n").unwrap();
+
+        let index = RwLock::new(HashMap::new());
+        let roots = [dir.clone()];
+
+        let alpha = refresh_and_query_symbols(&roots, &index, "alpha");
+        assert_eq!(names(&alpha), ["alphaFn"], "alphaFn matched; alphaDep pruned under node_modules");
+        // case-insensitive substring across kinds
+        assert_eq!(names(&refresh_and_query_symbols(&roots, &index, "beta")), ["betaVar"]);
+        assert_eq!(names(&refresh_and_query_symbols(&roots, &index, "gamma")), ["GammaType"]);
+        // The cache holds exactly the two real workspace files, not the node_modules one.
+        assert_eq!(index.read().unwrap().len(), 2, "two .tish files indexed, node_modules pruned");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reparses_on_edit_and_evicts_deleted_files() {
+        let dir = unique_temp_dir("mtime");
+        let f = dir.join("m.tish");
+        std::fs::write(&f, "fn first() {}\n").unwrap();
+        let index = RwLock::new(HashMap::new());
+        let roots = [dir.clone()];
+
+        assert_eq!(refresh_and_query_symbols(&roots, &index, "first").len(), 1);
+        assert_eq!(refresh_and_query_symbols(&roots, &index, "second").len(), 0);
+
+        // Rewrite with new content; the newer mtime must invalidate the cached parse. A short sleep
+        // guarantees a distinct mtime even on coarse-resolution clocks.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&f, "fn second() {}\n").unwrap();
+        assert_eq!(refresh_and_query_symbols(&roots, &index, "second").len(), 1, "re-parsed after edit");
+        assert_eq!(refresh_and_query_symbols(&roots, &index, "first").len(), 0, "stale symbol gone");
+
+        // Deleting the file must evict it from the index.
+        std::fs::remove_file(&f).unwrap();
+        assert_eq!(refresh_and_query_symbols(&roots, &index, "second").len(), 0, "deleted file evicted");
+        assert!(index.read().unwrap().is_empty(), "index empty after the only file is removed");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
