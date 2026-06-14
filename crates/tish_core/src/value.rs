@@ -1148,12 +1148,18 @@ impl Value {
     // -------------------------------------------------------------------------
 
     /// Whether packed f64 arrays are enabled this run. Default: **off** (`TISH_PACKED_ARRAYS=1`
-    /// opts in). Checked at every creation site so flag changes take effect per-process.
+    /// opts in). Read once per process and cached — the VM calls this once per executed array
+    /// literal, and a `std::env::var` there is a libc env lock plus a `String` allocation per
+    /// `NewArray` for a flag that never changes after startup (#166). Set the variable before the
+    /// process starts (as the CI sweep does); mid-process toggling is not observed by design.
     /// The flag is intentionally backwards from the slot/JIT flags (those were default-on) to
     /// keep the default binary behaviour byte-identical while we validate coverage.
     #[inline]
     pub fn packed_arrays_enabled() -> bool {
-        std::env::var("TISH_PACKED_ARRAYS").map(|v| v == "1").unwrap_or(false)
+        static PACKED_ARRAYS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *PACKED_ARRAYS.get_or_init(|| {
+            std::env::var("TISH_PACKED_ARRAYS").map(|v| v == "1").unwrap_or(false)
+        })
     }
 
     /// Wrap a `Vec<f64>` as a `Value::NumberArray`. Only call when `packed_arrays_enabled()`.
