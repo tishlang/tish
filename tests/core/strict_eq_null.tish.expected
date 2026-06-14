@@ -1,0 +1,15 @@
+present-val false
+present-null true
+absent true
+absent-ne false
+nested-absent true
+nested-present false
+in-present true
+in-null-val true
+in-absent false
+num-eq true
+num-ne true
+str-eq true
+bool-ne true
+var-null true
+var-null-ne false

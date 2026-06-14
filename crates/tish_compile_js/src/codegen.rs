@@ -487,6 +487,19 @@ impl Codegen {
         }
     }
 
+    /// Is `expr` the `null` literal? Used to lower `x === null` / `x !== null` to JS `== null` /
+    /// `!= null` so the check catches `undefined` too (tish treats a missing/undefined value as
+    /// null on every other backend) — see the StrictEq/StrictNe arms below.
+    fn is_null_literal(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::Literal {
+                value: Literal::Null,
+                ..
+            }
+        )
+    }
+
     fn emit_expr(&mut self, expr: &Expr) -> Result<String, CompileError> {
         Ok(match expr {
             Expr::Literal { value, .. } => match value {
@@ -510,8 +523,26 @@ impl Codegen {
                     BinOp::Pow => "**",
                     BinOp::Eq => "==",
                     BinOp::Ne => "!=",
-                    BinOp::StrictEq => "===",
-                    BinOp::StrictNe => "!==",
+                    // tish has no `undefined`: a missing/absent value reads back as `null`, so
+                    // `x === null` means "is nullish" — exactly how interp/vm/native behave (a
+                    // missing property is null there). In the JS runtime a missing property is
+                    // `undefined`, so lower `=== null` / `!== null` to loose `== null` / `!= null`,
+                    // which match BOTH null and undefined — keeping `=== null` mean the same thing on
+                    // every target. Strict equality between non-null operands is unaffected.
+                    BinOp::StrictEq => {
+                        if Self::is_null_literal(left) || Self::is_null_literal(right) {
+                            "=="
+                        } else {
+                            "==="
+                        }
+                    }
+                    BinOp::StrictNe => {
+                        if Self::is_null_literal(left) || Self::is_null_literal(right) {
+                            "!="
+                        } else {
+                            "!=="
+                        }
+                    }
                     BinOp::Lt => "<",
                     BinOp::Le => "<=",
                     BinOp::Gt => ">",

@@ -411,4 +411,27 @@ fn factory() {
             );
         }
     }
+
+    // tish `=== null` / `!== null` lower to JS `== null` / `!= null` so the nullish check catches the
+    // JS-runtime `undefined` (missing props / holes) too — matching interp/vm/native, which read a
+    // missing property back as null. Strict equality between non-null operands stays strict.
+    #[test]
+    fn strict_eq_null_lowers_to_loose_null() {
+        let program = parse("let x = 1\nconsole.log(x === null)\nconsole.log(x !== null)\n").unwrap();
+        let js = crate::compile(&program, false).unwrap();
+        assert!(!js.contains("=== null"), "`=== null` must lower to `== null`:\n{js}");
+        assert!(!js.contains("!== null"), "`!== null` must lower to `!= null`:\n{js}");
+        assert!(
+            js.contains("== null") && js.contains("!= null"),
+            "expected loose null checks:\n{js}"
+        );
+    }
+
+    #[test]
+    fn strict_eq_between_non_null_operands_stays_strict() {
+        let program = parse("let a = 1\nlet b = 2\nconsole.log(a === b)\nconsole.log(a !== b)\n").unwrap();
+        let js = crate::compile(&program, false).unwrap();
+        assert!(js.contains("==="), "non-null `===` must stay strict:\n{js}");
+        assert!(js.contains("!=="), "non-null `!==` must stay strict:\n{js}");
+    }
 }
