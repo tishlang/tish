@@ -23,3 +23,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "tim
 serde_json = "1"
 regex = "1"
 walkdir = "2"
+
+[dev-dependencies]
+# Drive `LspService` over JSON-RPC in tests (#163). Must match the `tower` major that tower-lsp 0.20
+# implements `Service` against (0.4), or the trait bound on `.call()` won't be satisfied. `util`
+# brings in `ServiceExt::ready`.
+tower = { version = "0.4", features = ["util"] }
