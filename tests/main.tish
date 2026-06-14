@@ -3158,6 +3158,40 @@ console.log("done")
 }
 __perf_run_core_space_indent()
 
+fn __perf_run_core_strict_eq_null() {
+// `=== null` is tish's "is it nullish / absent" check. tish has no `undefined`: a missing property
+// reads back as null, so `obj.missing === null` is true on interp/vm/native. The JS backend lowers
+// `=== null` / `!== null` to `== null` / `!= null` so it ALSO catches the JS-runtime `undefined`
+// (missing props / array holes), keeping `=== null` identical on every target. Strict equality
+// between non-null operands is unchanged.
+
+let o = { a: 1, b: null }
+console.log("present-val", o.a === null)    // 1 is not null -> false
+console.log("present-null", o.b === null)   // null -> true
+console.log("absent", o.z === null)         // missing prop -> null -> true
+console.log("absent-ne", o.z !== null)      // false
+
+let nested = { f: { x: 1 } }
+console.log("nested-absent", nested.f.y === null)   // true
+console.log("nested-present", nested.f.x === null)  // false
+
+// `in` is the precise key-existence check (true even when the value is null)
+console.log("in-present", "a" in o)          // true
+console.log("in-null-val", "b" in o)         // true (key exists, value null)
+console.log("in-absent", "z" in o)           // false
+
+// strict equality between non-null operands is unaffected by the null-lowering
+console.log("num-eq", (1 + 1) === 2)         // true
+console.log("num-ne", 3 !== 4)               // true
+console.log("str-eq", "ab" === "ab")         // true
+console.log("bool-ne", true !== false)       // true
+
+let n = null
+console.log("var-null", n === null)          // true
+console.log("var-null-ne", n !== null)       // false
+}
+__perf_run_core_strict_eq_null()
+
 fn __perf_run_core_strict_equality() {
 // MVP test: strict equality - no coercion
 console.log(1 === 1)
