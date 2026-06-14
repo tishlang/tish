@@ -541,10 +541,14 @@ pub enum ArrayElement {
     Spread(Expr),
 }
 
-/// Object property: either a regular key-value pair or spread
+/// Object property: either a regular key-value pair or spread.
+///
+/// The `Span` on `KeyValue` is the key token's source span, so diagnostics (e.g. duplicate-key)
+/// can point at the key rather than the enclosing `{` (#143). Synthesized object literals use a
+/// zero span. Per AST convention the span participates in PartialEq.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ObjectProp {
-    KeyValue(Arc<str>, Expr),
+    KeyValue(Arc<str>, Expr, Span),
     Spread(Expr),
 }
 

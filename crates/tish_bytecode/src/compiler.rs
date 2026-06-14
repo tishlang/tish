@@ -157,7 +157,7 @@ fn expr_is_param_only(e: &Expr, params: &HashSet<&str>) -> bool {
             ArrayElement::Spread(_) => false,
         }),
         Expr::Object { props, .. } => props.iter().all(|p| match p {
-            ObjectProp::KeyValue(_, x) => expr_is_param_only(x, params),
+            ObjectProp::KeyValue(_, x, _) => expr_is_param_only(x, params),
             ObjectProp::Spread(_) => false,
         }),
         Expr::TemplateLiteral { exprs, .. } => {
@@ -332,7 +332,7 @@ fn expr_rebinds(e: &Expr, name: &str) -> bool {
             ArrayElement::Expr(e) | ArrayElement::Spread(e) => expr_rebinds(e, name),
         }),
         Expr::Object { props, .. } => props.iter().any(|p| match p {
-            ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => expr_rebinds(e, name),
+            ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => expr_rebinds(e, name),
         }),
         Expr::MemberAssign { object, value, .. } => expr_rebinds(object, name) || expr_rebinds(value, name),
         Expr::IndexAssign { object, index, value, .. } => {
@@ -452,7 +452,7 @@ impl SlotScan {
                 ArrayElement::Expr(e) | ArrayElement::Spread(e) => self.expr(e, in_closure),
             }),
             Expr::Object { props, .. } => props.iter().all(|p| match p {
-                ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => self.expr(e, in_closure),
+                ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => self.expr(e, in_closure),
             }),
             Expr::Assign { name, value, .. }
             | Expr::CompoundAssign { name, value, .. }
@@ -2123,7 +2123,7 @@ impl<'a> Compiler<'a> {
                     self.emit_u16(Opcode::NewObject, 0); // start with {}
                     for prop in props {
                         match prop {
-                            ObjectProp::KeyValue(k, v) => {
+                            ObjectProp::KeyValue(k, v, _) => {
                                 let idx = self.constant_idx(Constant::String(Arc::clone(k)));
                                 self.emit(Opcode::LoadConst);
                                 self.chunk.write_u16(idx);
@@ -2139,7 +2139,7 @@ impl<'a> Compiler<'a> {
                     }
                 } else {
                     for prop in props {
-                        if let ObjectProp::KeyValue(k, v) = prop {
+                        if let ObjectProp::KeyValue(k, v, _) = prop {
                             let idx = self.constant_idx(Constant::String(Arc::clone(k)));
                             self.emit(Opcode::LoadConst);
                             self.chunk.write_u16(idx);

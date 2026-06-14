@@ -2243,7 +2243,7 @@ impl<'a> Parser<'a> {
                                 return Err("String key in object literal requires explicit value (key: value)".to_string());
                             }
                         };
-                        props.push(ObjectProp::KeyValue(key, value));
+                        props.push(ObjectProp::KeyValue(key, value, key_span));
                     }
                     if !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
                         self.expect(TokenKind::Comma)?;

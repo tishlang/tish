@@ -248,7 +248,7 @@ impl Printer {
 
     fn object_prop(&mut self, pr: &ObjectProp) {
         match pr {
-            ObjectProp::KeyValue(k, v) => {
+            ObjectProp::KeyValue(k, v, _) => {
                 self.buf.push_str(k.as_ref());
                 self.buf.push_str(": ");
                 self.expr(v);

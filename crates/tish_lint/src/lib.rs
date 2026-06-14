@@ -170,16 +170,18 @@ fn stmt_span(s: &Statement) -> (u32, u32) {
 
 fn lint_expr(e: &Expr, out: &mut Vec<LintDiagnostic>) {
     match e {
-        Expr::Object { props, span, .. } => {
+        Expr::Object { props, .. } => {
             let mut seen: HashSet<&str> = HashSet::new();
             for p in props {
-                if let ObjectProp::KeyValue(k, v) = p {
+                if let ObjectProp::KeyValue(k, v, kspan) = p {
                     if !seen.insert(k.as_ref()) {
+                        // Point at the duplicated KEY, not the enclosing `{` — so distinct dupes get
+                        // distinct positions (#143).
                         out.push(LintDiagnostic {
                             code: "tish-duplicate-key",
                             message: format!("Duplicate object key `{}`", k),
-                            line: span.start.0 as u32,
-                            col: span.start.1 as u32,
+                            line: kspan.start.0 as u32,
+                            col: kspan.start.1 as u32,
                             severity: Severity::Warning,
                         });
                     }
@@ -362,5 +364,21 @@ mod tests {
     #[test]
     fn lints_inside_delete_target() {
         assert!(dup_keys("delete ({ a: 1, a: 2 }).a\n") >= 1, "delete target");
+    }
+}
+
+#[cfg(test)]
+mod dupkey_position_tests {
+    use super::*;
+    #[test]
+    fn dup_key_points_at_the_duplicated_key() {
+        // `let x = { a: 1, a: 2 }` — the duplicate `a` is at 1-indexed col 17; the object `{` is col 9.
+        let d: Vec<_> = lint_source("let x = { a: 1, a: 2 }\n")
+            .expect("parse")
+            .into_iter()
+            .filter(|d| d.code == "tish-duplicate-key")
+            .collect();
+        assert_eq!(d.len(), 1, "exactly one dup-key");
+        assert_eq!((d[0].line, d[0].col), (1, 17), "#143: must point at the duplicated key, not the `{{`");
     }
 }

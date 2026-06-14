@@ -350,7 +350,11 @@ fn convert_object_prop(
                 }
             });
             let value = convert_expr(&prop.value, ctx)?;
-            Ok(ObjectProp::KeyValue(Arc::from(key.as_str()), value))
+            Ok(ObjectProp::KeyValue(
+                Arc::from(key.as_str()),
+                value,
+                tishlang_ast::Span::default(),
+            ))
         }
     }
 }

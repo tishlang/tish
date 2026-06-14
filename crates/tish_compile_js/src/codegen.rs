@@ -629,7 +629,7 @@ impl Codegen {
                 let parts: Result<Vec<_>, _> = props
                     .iter()
                     .map(|p| match p {
-                        ObjectProp::KeyValue(k, v) => {
+                        ObjectProp::KeyValue(k, v, _) => {
                             let key = k.as_ref();
                             let val = self.emit_expr(v)?;
                             Ok(if key.chars().all(|c| c.is_alphanumeric() || c == '_') {

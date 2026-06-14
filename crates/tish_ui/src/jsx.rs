@@ -302,7 +302,7 @@ fn collect_fun_decl_names_expr(expr: &Expr, names: &mut HashSet<String>) {
         Expr::Object { props, .. } => {
             for p in props {
                 match p {
-                    ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => {
+                    ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => {
                         collect_fun_decl_names_expr(e, names);
                     }
                 }
@@ -650,7 +650,7 @@ fn expr_contains_jsx(expr: &Expr) -> bool {
             ArrayElement::Expr(e) | ArrayElement::Spread(e) => expr_contains_jsx(e),
         }),
         Expr::Object { props, .. } => props.iter().any(|p| match p {
-            ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => expr_contains_jsx(e),
+            ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => expr_contains_jsx(e),
         }),
         Expr::ArrowFunction { body, .. } => match body {
             tishlang_ast::ArrowBody::Expr(e) => expr_contains_jsx(e),

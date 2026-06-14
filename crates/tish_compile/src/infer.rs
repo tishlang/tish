@@ -558,7 +558,7 @@ pub(crate) fn pi_mentions(e: &Expr, name: &str) -> bool {
             }
         }),
         Object { props, .. } => props.iter().any(|p| match p {
-            tishlang_ast::ObjectProp::KeyValue(_, v) => pi_mentions(v, name),
+            tishlang_ast::ObjectProp::KeyValue(_, v, _) => pi_mentions(v, name),
             tishlang_ast::ObjectProp::Spread(x) => pi_mentions(x, name),
         }),
         TemplateLiteral { exprs, .. } => exprs.iter().any(|x| pi_mentions(x, name)),
@@ -634,7 +634,7 @@ fn infer_object_shape(
     let mut fields = Vec::with_capacity(props.len());
     for p in props {
         match p {
-            tishlang_ast::ObjectProp::KeyValue(k, v) => {
+            tishlang_ast::ObjectProp::KeyValue(k, v, _) => {
                 let ty = infer_expr_type(v, ctx)?;
                 // Only primitive field types in this conservative version.
                 if !matches!(&ty, TypeAnnotation::Simple(s, _)
@@ -1303,7 +1303,7 @@ fn arr_expr_safe(e: &Expr, name: &str) -> bool {
             }
         }),
         Object { props, .. } => props.iter().all(|p| match p {
-            tishlang_ast::ObjectProp::KeyValue(_, v) => arr_expr_safe(v, name),
+            tishlang_ast::ObjectProp::KeyValue(_, v, _) => arr_expr_safe(v, name),
             tishlang_ast::ObjectProp::Spread(v) => arr_expr_safe(v, name),
         }),
         // Anything else that mentions `name`: be safe, bail.
@@ -1423,7 +1423,7 @@ fn expr_name_safe(e: &Expr, name: &str, keys: &std::collections::HashSet<&str>) 
             }
         }),
         Object { props, .. } => props.iter().all(|p| match p {
-            tishlang_ast::ObjectProp::KeyValue(_, v) => expr_name_safe(v, name, keys),
+            tishlang_ast::ObjectProp::KeyValue(_, v, _) => expr_name_safe(v, name, keys),
             tishlang_ast::ObjectProp::Spread(e) => expr_name_safe(e, name, keys),
         }),
         TemplateLiteral { exprs, .. } => exprs.iter().all(|e| expr_name_safe(e, name, keys)),
