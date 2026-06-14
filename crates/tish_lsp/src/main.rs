@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use regex::Regex;
@@ -10,14 +10,16 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse,
     CompletionTriggerKind, Diagnostic, DiagnosticSeverity, DiagnosticTag,
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, InitializeParams, InitializeResult, Location, MarkupContent,
-    MarkupKind, MessageType, NumberOrString, OneOf, Position, Range, ReferenceParams,
-    RenameOptions, RenameParams, ServerCapabilities, ServerInfo, SymbolInformation, SymbolKind,
-    SymbolTag, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
-    WorkDoneProgressOptions, WorkspaceEdit, WorkspaceSymbolParams,
+    DidChangeTextDocumentParams, DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams,
+    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, Location,
+    MarkupContent, MarkupKind, MessageType, NumberOrString, OneOf, Position, Range,
+    ReferenceParams, RenameOptions, RenameParams, ServerCapabilities, ServerInfo,
+    SymbolInformation, SymbolKind, SymbolTag, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions, WorkspaceEdit,
+    WorkspaceFoldersChangeEvent, WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
+    WorkspaceSymbolParams,
 };
 use tower_lsp::lsp_types::{PrepareRenameResponse, TextEdit};
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -43,6 +45,12 @@ struct Backend {
     /// on a blocking thread by `symbol` so the crawl+parse never stalls tower-lsp's shared request
     /// driver, and reused across queries instead of re-reading the whole tree each keystroke (#135).
     symbol_index: Arc<RwLock<HashMap<PathBuf, CachedFile>>>,
+    /// Serializes workspace-symbol index refreshes. With roots immutable this was unnecessary, but
+    /// #162 lets folders change mid-session: without serialization two concurrent `symbol` walks
+    /// could interleave and, via the index's global retain, evict each other's still-valid entries
+    /// based on divergent root snapshots. Held only across the (blocking) refresh, off the async
+    /// driver (#162).
+    symbol_refresh: Arc<Mutex<()>>,
 }
 
 /// One symbol harvested from a workspace file, with its position pre-resolved so answering a query
@@ -78,6 +86,7 @@ async fn main() {
         cargo_src_cache: Arc::new(RwLock::new(HashMap::new())),
         tishlang_source_root: Arc::new(RwLock::new(None)),
         symbol_index: Arc::new(RwLock::new(HashMap::new())),
+        symbol_refresh: Arc::new(Mutex::new(())),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }
@@ -263,6 +272,24 @@ fn compute_diagnostics(text: &str) -> Vec<Diagnostic> {
     diags
 }
 
+/// Apply a workspace-folder change event to the root set: drop removed folders, append added ones
+/// (skipping any already present and any whose URI is not a local file path). Pure so the add/remove/
+/// dedup logic is unit-testable without a live `Backend`/`Client` (#162).
+fn apply_workspace_folder_changes(roots: &mut Vec<PathBuf>, event: &WorkspaceFoldersChangeEvent) {
+    for removed in &event.removed {
+        if let Ok(p) = removed.uri.to_file_path() {
+            roots.retain(|r| r != &p);
+        }
+    }
+    for added in &event.added {
+        if let Ok(p) = added.uri.to_file_path() {
+            if !roots.contains(&p) {
+                roots.push(p);
+            }
+        }
+    }
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
@@ -322,6 +349,16 @@ impl LanguageServer for Backend {
                 document_formatting_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
+                // Ask the client to send didChangeWorkspaceFolders so adding/removing a folder in a
+                // multi-root workspace keeps `roots` (and thus the workspace-symbol index) accurate
+                // instead of being frozen at the set captured by `initialize` (#162).
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                        supported: Some(true),
+                        change_notifications: Some(OneOf::Left(true)),
+                    }),
+                    file_operations: None,
+                }),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -334,6 +371,19 @@ impl LanguageServer for Backend {
     async fn initialized(&self, _: tower_lsp::lsp_types::InitializedParams) {
         self.client
             .log_message(MessageType::INFO, "tish-lsp ready")
+            .await;
+    }
+
+    async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        // Keep `roots` in sync as folders are added/removed from a multi-root workspace (#162). The
+        // workspace-symbol index needs no explicit invalidation: its next walk visits any added root
+        // and, by no longer visiting a removed one, evicts that root's files on its own.
+        {
+            let mut roots = self.roots.write().unwrap();
+            apply_workspace_folder_changes(&mut roots, &params.event);
+        }
+        self.client
+            .log_message(MessageType::INFO, "tish-lsp: workspace folders updated")
             .await;
     }
 
@@ -865,16 +915,24 @@ impl LanguageServer for Backend {
         if query.is_empty() {
             return Ok(Some(vec![]));
         }
-        let roots = self.roots.read().unwrap().clone();
+        let roots_handle = Arc::clone(&self.roots);
         let index = self.symbol_index.clone();
+        let refresh = Arc::clone(&self.symbol_refresh);
         // The crawl + fs-read + parse is CPU/IO-blocking; running it inline stalls tower-lsp's shared
         // request driver (it multiplexes requests without a per-request spawn), so hover/completion
         // in flight would freeze for its duration. Hand it to a blocking thread, and answer from the
         // mtime-keyed index so repeated keystrokes don't re-walk and re-parse the tree (#135).
-        let syms =
-            tokio::task::spawn_blocking(move || refresh_and_query_symbols(&roots, &index, &query))
-                .await
-                .unwrap_or_default();
+        let syms = tokio::task::spawn_blocking(move || {
+            // Serialize refreshes and read `roots` fresh under that lock (#162): folders can now
+            // change mid-session, and the index's global retain would otherwise let a query carrying
+            // a stale/smaller root snapshot evict another concurrent query's still-valid entries.
+            // One walk at a time, each over the current roots, makes that impossible.
+            let _refresh_guard = refresh.lock().unwrap_or_else(|e| e.into_inner());
+            let roots = roots_handle.read().unwrap().clone();
+            refresh_and_query_symbols(&roots, &index, &query)
+        })
+        .await
+        .unwrap_or_default();
         Ok(Some(syms))
     }
 }
@@ -1934,6 +1992,35 @@ mod rename_target_tests {
 }
 
 #[cfg(test)]
+mod test_fs {
+    //! Shared filesystem scratch helpers for the inline test modules.
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Writable OS temp root, resolved from the environment (the same `TMPDIR`/`TEMP`/`TMP` vars the
+    /// standard library consults) with a POSIX fallback. Used instead of a temp-dir helper so the
+    /// static analyzer doesn't flag these inline test modules — `.codacy.yml` exempts test *files*
+    /// but not `#[cfg(test)]` modules under `src/`.
+    pub fn scratch_root() -> PathBuf {
+        for key in ["TMPDIR", "TEMP", "TMP"] {
+            if let Some(v) = std::env::var_os(key).filter(|v| !v.is_empty()) {
+                return PathBuf::from(v);
+            }
+        }
+        PathBuf::from("/tmp")
+    }
+
+    /// A freshly-created, process-unique, monotonically-numbered scratch directory (no tempfile dep).
+    pub fn unique_temp_dir(tag: &str) -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = scratch_root().join(format!("tish_lsp_test_{tag}_{}_{n}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+}
+
+#[cfg(test)]
 mod jsonrpc_integration_tests {
     //! End-to-end tests that drive the server the way an editor does — by feeding JSON-RPC requests
     //! through `tower::Service` — rather than calling handler methods directly. This is the layer
@@ -1956,6 +2043,7 @@ mod jsonrpc_integration_tests {
             cargo_src_cache: Arc::new(RwLock::new(HashMap::new())),
             tishlang_source_root: Arc::new(RwLock::new(None)),
             symbol_index: Arc::new(RwLock::new(HashMap::new())),
+            symbol_refresh: Arc::new(Mutex::new(())),
         });
         service
     }
@@ -1993,6 +2081,26 @@ mod jsonrpc_integration_tests {
             .params(serde_json::json!({
                 "textDocument": { "uri": uri },
                 "options": { "tabSize": 2, "insertSpaces": true }
+            }))
+            .finish()
+    }
+
+    fn symbol_request(query: &str) -> Request {
+        Request::build("workspace/symbol")
+            .id(3)
+            .params(serde_json::json!({ "query": query }))
+            .finish()
+    }
+
+    fn did_change_workspace_folders(added: &[&str], removed: &[&str]) -> Request {
+        let folders = |uris: &[&str]| -> Vec<serde_json::Value> {
+            uris.iter()
+                .map(|u| serde_json::json!({ "uri": u, "name": "ws" }))
+                .collect()
+        };
+        Request::build("workspace/didChangeWorkspaceFolders")
+            .params(serde_json::json!({
+                "event": { "added": folders(added), "removed": folders(removed) }
             }))
             .finish()
     }
@@ -2058,6 +2166,171 @@ mod jsonrpc_integration_tests {
         let edits = result.as_array().expect("edits array");
         assert_eq!(edits[0]["newText"], "let b = 2\n", "formatting must see the changed text");
     }
+
+    // #162: the server must ASK the client for workspace-folder change notifications, else VS Code
+    // never sends didChangeWorkspaceFolders and a folder added mid-session is invisible.
+    #[tokio::test]
+    async fn initialize_advertises_workspace_folder_change_notifications() {
+        let mut service = new_service();
+        let init = Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({ "capabilities": {} }))
+            .finish();
+        let result = call(&mut service, init).await.expect("initialize must return a result");
+        let wf = &result["capabilities"]["workspace"]["workspaceFolders"];
+        assert_eq!(wf["supported"], serde_json::json!(true), "advertises workspace-folder support");
+        assert_eq!(
+            wf["changeNotifications"],
+            serde_json::json!(true),
+            "requests change notifications"
+        );
+    }
+
+    // #162 end-to-end: a folder added via didChangeWorkspaceFolders becomes searchable, and removing
+    // it evicts its symbols — proving the handler keeps `roots` accurate and the index follows.
+    #[tokio::test]
+    async fn workspace_folder_add_then_remove_tracks_symbols() {
+        let mut service = new_service();
+        initialize(&mut service).await; // no roots captured at init
+
+        let dir = crate::test_fs::unique_temp_dir("wsfolder");
+        std::fs::write(dir.join("z.tish"), "fn zetaSym() { return 1 }\n").unwrap();
+        let uri = Url::from_file_path(&dir).unwrap().to_string();
+
+        // Before the folder is known, the symbol is invisible.
+        let before = call(&mut service, symbol_request("zeta")).await.expect("symbol result");
+        assert!(
+            before.as_array().expect("symbol result is an array").is_empty(),
+            "no roots yet → no symbols, got {before}"
+        );
+
+        // Add the folder → its symbol is indexed and searchable.
+        let _ = call(&mut service, did_change_workspace_folders(&[&uri], &[])).await;
+        let found = call(&mut service, symbol_request("zeta")).await.expect("symbol result");
+        let arr = found.as_array().expect("array");
+        assert_eq!(arr.len(), 1, "added folder's symbol is indexed, got {found}");
+        assert_eq!(arr[0]["name"], "zetaSym");
+
+        // Remove the folder → its symbol is evicted.
+        let _ = call(&mut service, did_change_workspace_folders(&[], &[&uri])).await;
+        let after = call(&mut service, symbol_request("zeta")).await.expect("symbol result");
+        assert!(
+            after.as_array().expect("symbol result is an array").is_empty(),
+            "removed folder's symbols evicted, got {after}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // #162 protocol edge cases the client is allowed to send: adding the same folder twice must not
+    // change the result, and removing a folder that was never added must not evict a tracked root.
+    #[tokio::test]
+    async fn double_add_is_idempotent_and_untracked_remove_is_a_no_op() {
+        let mut service = new_service();
+        initialize(&mut service).await;
+
+        let dir = crate::test_fs::unique_temp_dir("wsfolder_edge");
+        std::fs::write(dir.join("o.tish"), "fn omegaSym() { return 1 }\n").unwrap();
+        let uri = Url::from_file_path(&dir).unwrap().to_string();
+
+        // Add the same folder twice → still exactly one match.
+        let _ = call(&mut service, did_change_workspace_folders(&[&uri], &[])).await;
+        let _ = call(&mut service, did_change_workspace_folders(&[&uri], &[])).await;
+        let found = call(&mut service, symbol_request("omega")).await.expect("symbol result");
+        assert_eq!(found.as_array().unwrap().len(), 1, "double-add stays one match, got {found}");
+
+        // Removing a folder that was never added must leave the tracked root searchable.
+        let _ = call(
+            &mut service,
+            did_change_workspace_folders(&[], &["file:///definitely/not/added"]),
+        )
+        .await;
+        let still = call(&mut service, symbol_request("omega")).await.expect("symbol result");
+        assert_eq!(
+            still.as_array().unwrap().len(),
+            1,
+            "untracked removal preserved the tracked root, got {still}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod workspace_folder_tests {
+    //! Pure tests for the workspace-folder delta logic (#162): add, remove, dedup, and the
+    //! protocol-allowed remove-and-add-in-one-event ordering.
+    use super::*;
+    use std::path::Path;
+    use tower_lsp::lsp_types::WorkspaceFolder;
+
+    fn folder(path: &Path) -> WorkspaceFolder {
+        WorkspaceFolder {
+            uri: Url::from_file_path(path).expect("absolute path"),
+            name: path.file_name().unwrap().to_string_lossy().into_owned(),
+        }
+    }
+
+    fn ev(added: &[&Path], removed: &[&Path]) -> WorkspaceFoldersChangeEvent {
+        WorkspaceFoldersChangeEvent {
+            added: added.iter().map(|p| folder(p)).collect(),
+            removed: removed.iter().map(|p| folder(p)).collect(),
+        }
+    }
+
+    #[test]
+    fn add_remove_and_dedup_roots() {
+        // current_dir is a real absolute path on every platform — fine for from_file_path; the paths
+        // need not exist for this pure logic.
+        let base = std::env::current_dir().unwrap();
+        let (a, b, c) = (base.join("ws_a"), base.join("ws_b"), base.join("ws_c"));
+
+        let mut roots = vec![a.clone()];
+        // Add b and c; a is already present and must not be duplicated.
+        apply_workspace_folder_changes(&mut roots, &ev(&[&a, &b, &c], &[]));
+        assert_eq!(roots, vec![a.clone(), b.clone(), c.clone()], "added new, deduped existing");
+
+        // Remove b (present) plus a path never tracked (no-op); a and c stay in order.
+        apply_workspace_folder_changes(&mut roots, &ev(&[], &[&b, &base.join("ghost")]));
+        assert_eq!(roots, vec![a, c], "removed b; untracked removal was a no-op");
+    }
+
+    #[test]
+    fn remove_and_readd_in_one_event_nets_to_present_once() {
+        // The protocol permits one event to both remove and add the same folder; removals apply
+        // first, so the folder ends present exactly once (not duplicated, not dropped).
+        let base = std::env::current_dir().unwrap();
+        let a = base.join("ws_a");
+        let mut roots = vec![a.clone()];
+        apply_workspace_folder_changes(&mut roots, &ev(&[&a], &[&a]));
+        assert_eq!(roots, vec![a], "remove-then-add nets to present once");
+    }
+
+    #[test]
+    fn non_file_uris_are_ignored() {
+        // Remote/virtual workspaces (vscode-vfs://, vscode-remote://) hand the server folder URIs
+        // with no local file path; to_file_path() returns Err and the change must skip them rather
+        // than push/remove a bogus root.
+        let base = std::env::current_dir().unwrap();
+        let a = base.join("ws_a");
+        let virt = WorkspaceFolder {
+            uri: Url::parse("vscode-vfs://host/project").unwrap(),
+            name: "virtual".into(),
+        };
+        let mut roots = vec![a.clone()];
+        // A non-file folder in `added` must not be pushed.
+        apply_workspace_folder_changes(
+            &mut roots,
+            &WorkspaceFoldersChangeEvent { added: vec![virt.clone()], removed: vec![] },
+        );
+        assert_eq!(roots, vec![a.clone()], "non-file added URI ignored");
+        // And one in `removed` must not disturb existing roots.
+        apply_workspace_folder_changes(
+            &mut roots,
+            &WorkspaceFoldersChangeEvent { added: vec![], removed: vec![virt] },
+        );
+        assert_eq!(roots, vec![a], "non-file removed URI is a no-op");
+    }
 }
 
 #[cfg(test)]
@@ -2066,29 +2339,7 @@ mod workspace_symbol_tests {
     //! eviction of deleted files — the behaviors that make `workspace/symbol` cheap on repeat
     //! queries and correct as files change underneath it.
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    /// Writable OS temp root, resolved from the environment (the same `TMPDIR`/`TEMP`/`TMP` vars the
-    /// standard library consults) with a POSIX fallback. Used instead of a temp-dir helper so the
-    /// static analyzer doesn't flag this inline test module — `.codacy.yml` exempts test *files* but
-    /// not `#[cfg(test)]` modules under `src/`.
-    fn scratch_root() -> PathBuf {
-        for key in ["TMPDIR", "TEMP", "TMP"] {
-            if let Some(v) = std::env::var_os(key).filter(|v| !v.is_empty()) {
-                return PathBuf::from(v);
-            }
-        }
-        PathBuf::from("/tmp")
-    }
-
-    fn unique_temp_dir(tag: &str) -> PathBuf {
-        // No tempfile dep; build a process-unique, monotonically-numbered scratch dir.
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let d = scratch_root().join(format!("tish_ws_sym_{tag}_{}_{n}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
+    use crate::test_fs::unique_temp_dir;
 
     fn names(syms: &[SymbolInformation]) -> Vec<&str> {
         syms.iter().map(|s| s.name.as_str()).collect()
