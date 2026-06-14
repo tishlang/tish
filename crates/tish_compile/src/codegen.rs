@@ -179,7 +179,7 @@ impl UsageAnalyzer {
             Expr::Object { props, .. } => {
                 for prop in props {
                     match prop {
-                        ObjectProp::KeyValue(_, v) => self.analyze_expr(v),
+                        ObjectProp::KeyValue(_, v, _) => self.analyze_expr(v),
                         ObjectProp::Spread(e) => self.analyze_expr(e),
                     }
                 }
@@ -398,7 +398,7 @@ fn program_uses_async(program: &Program) -> bool {
                 ArrayElement::Expr(e) | ArrayElement::Spread(e) => expr_has_await(e),
             }),
             Expr::Object { props, .. } => props.iter().any(|p| match p {
-                ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => expr_has_await(e),
+                ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => expr_has_await(e),
             }),
             Expr::Assign { value, .. }
             | Expr::CompoundAssign { value, .. }
@@ -3868,7 +3868,7 @@ impl Codegen {
                     let mut parts = Vec::new();
                     for prop in props {
                         match prop {
-                            ObjectProp::KeyValue(k, v) => {
+                            ObjectProp::KeyValue(k, v, _) => {
                                 let val = self.emit_expr(v)?;
                                 if self.should_clone(v) {
                                     parts.push(format!("_obj.insert(Arc::from({:?}), ({}).clone());", k.as_ref(), val));
@@ -3886,7 +3886,7 @@ impl Codegen {
                 } else {
                     let mut parts = Vec::new();
                     for prop in props {
-                        if let ObjectProp::KeyValue(k, v) = prop {
+                        if let ObjectProp::KeyValue(k, v, _) = prop {
                             let val = self.emit_expr(v)?;
                             if self.should_clone(v) {
                                 parts.push(format!("(Arc::from({:?}), ({}).clone())", k.as_ref(), val));
@@ -4553,7 +4553,7 @@ impl Codegen {
             Expr::Object { props, .. } => {
                 for prop in props {
                     match prop {
-                        ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => {
+                        ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => {
                             Self::collect_expr_idents(e, idents)
                         }
                     }
@@ -4812,7 +4812,7 @@ impl Codegen {
             Expr::Object { props, .. } => {
                 for prop in props {
                     match prop {
-                        ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => {
+                        ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => {
                             Self::collect_assigned_idents_in_expr(e, names);
                         }
                     }
@@ -5026,7 +5026,7 @@ impl Codegen {
             Expr::Object { props, .. } => {
                 for prop in props {
                     match prop {
-                        ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => {
+                        ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => {
                             Self::collect_captured_block_vars_from_expr(e, block_vars, result);
                         }
                     }
@@ -5848,7 +5848,7 @@ impl Codegen {
             let mut bail = false;
             for prop in props {
                 match prop {
-                    ObjectProp::KeyValue(key, value) => {
+                    ObjectProp::KeyValue(key, value, _) => {
                         if let Some(field_ty) = field_types.get(key.as_ref()) {
                             let v = self.emit_native_expr(value, field_ty)?;
                             field_inits.insert(crate::types::field_ident(key.as_ref()), v);
@@ -6247,7 +6247,7 @@ impl Codegen {
             Expr::Object { props, .. } => {
                 for p in props {
                     match p {
-                        ObjectProp::KeyValue(_, v) => Self::collect_reassignments_expr(v, out),
+                        ObjectProp::KeyValue(_, v, _) => Self::collect_reassignments_expr(v, out),
                         ObjectProp::Spread(x) => Self::collect_reassignments_expr(x, out),
                     }
                 }

@@ -457,7 +457,7 @@ fn collect_expr(
         Expr::Object { props, .. } => {
             for p in props {
                 match p {
-                    tishlang_ast::ObjectProp::KeyValue(_, e) => {
+                    tishlang_ast::ObjectProp::KeyValue(_, e, _) => {
                         collect_expr(e, source, lsp_line, lsp_char, best)
                     }
                     tishlang_ast::ObjectProp::Spread(e) => {
@@ -729,7 +729,7 @@ fn member_chain_collect_expr(
         Expr::Object { props, .. } => {
             for p in props {
                 match p {
-                    tishlang_ast::ObjectProp::KeyValue(_, e) => {
+                    tishlang_ast::ObjectProp::KeyValue(_, e, _) => {
                         member_chain_collect_expr(e, source, lsp_line, lsp_char, best)
                     }
                     tishlang_ast::ObjectProp::Spread(e) => {
@@ -1213,7 +1213,7 @@ fn walk_expr_resolve(
         Expr::Object { props, .. } => {
             for p in props {
                 let e = match p {
-                    tishlang_ast::ObjectProp::KeyValue(_, e) => e,
+                    tishlang_ast::ObjectProp::KeyValue(_, e, _) => e,
                     tishlang_ast::ObjectProp::Spread(e) => e,
                 };
                 if let Some(s) = walk_expr_resolve(e, scopes, target) {
@@ -1834,7 +1834,7 @@ fn check_unresolved_expr(expr: &Expr, scopes: &ScopeStack, out: &mut Vec<Unresol
         Expr::Object { props, .. } => {
             for p in props {
                 let e = match p {
-                    tishlang_ast::ObjectProp::KeyValue(_, e) => e,
+                    tishlang_ast::ObjectProp::KeyValue(_, e, _) => e,
                     tishlang_ast::ObjectProp::Spread(e) => e,
                 };
                 check_unresolved_expr(e, scopes, out);
@@ -2324,7 +2324,7 @@ fn enumerate_expr(expr: &Expr, exported: bool, out: &mut Vec<BindingSite>) {
         Expr::Object { props, .. } => {
             for p in props {
                 let e = match p {
-                    tishlang_ast::ObjectProp::KeyValue(_, e) => e,
+                    tishlang_ast::ObjectProp::KeyValue(_, e, _) => e,
                     tishlang_ast::ObjectProp::Spread(e) => e,
                 };
                 enumerate_expr(e, exported, out);
@@ -2829,7 +2829,7 @@ fn jsx_tags_expr(e: &Expr, out: &mut std::collections::HashSet<Arc<str>>) {
         Expr::Object { props, .. } => {
             for p in props {
                 match p {
-                    tishlang_ast::ObjectProp::KeyValue(_, e)
+                    tishlang_ast::ObjectProp::KeyValue(_, e, _)
                     | tishlang_ast::ObjectProp::Spread(e) => jsx_tags_expr(e, out),
                 }
             }
@@ -3238,7 +3238,7 @@ fn walk_expr_completion(
         Expr::Object { props, .. } => {
             for p in props {
                 let e = match p {
-                    tishlang_ast::ObjectProp::KeyValue(_, e) => e,
+                    tishlang_ast::ObjectProp::KeyValue(_, e, _) => e,
                     tishlang_ast::ObjectProp::Spread(e) => e,
                 };
                 walk_expr_completion(e, source, lsp_line, lsp_char, stack, best);
@@ -3714,7 +3714,7 @@ fn tref_expr(expr: &Expr, out: &mut Vec<TypeOcc>) {
         Expr::Object { props, .. } => {
             for p in props {
                 match p {
-                    tishlang_ast::ObjectProp::KeyValue(_, e)
+                    tishlang_ast::ObjectProp::KeyValue(_, e, _)
                     | tishlang_ast::ObjectProp::Spread(e) => tref_expr(e, out),
                 }
             }
@@ -4178,7 +4178,7 @@ fn refs_expr(
         Expr::Object { props, .. } => {
             for p in props {
                 match p {
-                    tishlang_ast::ObjectProp::KeyValue(_, e) => {
+                    tishlang_ast::ObjectProp::KeyValue(_, e, _) => {
                         refs_expr(e, program, source, name, def_span, out)
                     }
                     tishlang_ast::ObjectProp::Spread(e) => {

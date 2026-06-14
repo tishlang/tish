@@ -429,8 +429,8 @@ fn optimize_expr(expr: &Expr) -> Expr {
             props: props
                 .iter()
                 .map(|p| match p {
-                    tishlang_ast::ObjectProp::KeyValue(k, v) => {
-                        tishlang_ast::ObjectProp::KeyValue(Arc::clone(k), optimize_expr(v))
+                    tishlang_ast::ObjectProp::KeyValue(k, v, s) => {
+                        tishlang_ast::ObjectProp::KeyValue(Arc::clone(k), optimize_expr(v), *s)
                     }
                     tishlang_ast::ObjectProp::Spread(e) => {
                         tishlang_ast::ObjectProp::Spread(optimize_expr(e))

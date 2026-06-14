@@ -173,7 +173,7 @@ pub fn program_uses_document(program: &Program) -> bool {
                 ArrayElement::Expr(e) | ArrayElement::Spread(e) => expr_uses_document(e),
             }),
             Expr::Object { props, .. } => props.iter().any(|p| match p {
-                ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => expr_uses_document(e),
+                ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => expr_uses_document(e),
             }),
             Expr::Assign { value, .. }
             | Expr::CompoundAssign { value, .. }
@@ -1601,7 +1601,7 @@ fn rewrite_expr_scope(expr: &mut Expr, active: &HashMap<String, Arc<str>>) {
         Expr::Object { props, .. } => {
             for p in props {
                 match p {
-                    ObjectProp::KeyValue(_, e) | ObjectProp::Spread(e) => {
+                    ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => {
                         rewrite_expr_scope(e, active) // key is a property name; value recurses
                     }
                 }
@@ -1819,6 +1819,7 @@ pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, 
                                             name: Arc::from(v.clone()),
                                             span: *span,
                                         },
+                                        *name_span,
                                     ));
                                 }
                                 merge_push(

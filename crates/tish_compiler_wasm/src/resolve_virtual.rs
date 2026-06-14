@@ -394,6 +394,7 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                                             name: Arc::from(v.clone()),
                                             span: *span,
                                         },
+                                        *name_span,
                                     ));
                                 }
                                 statements.push(Statement::VarDecl {

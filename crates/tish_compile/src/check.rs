@@ -590,7 +590,7 @@ impl CheckCtx {
                 let mut fields = Vec::new();
                 for p in props {
                     match p {
-                        ObjectProp::KeyValue(k, v) => {
+                        ObjectProp::KeyValue(k, v, _) => {
                             let t = self.synth(v)?;
                             fields.push((k.clone(), t));
                         }

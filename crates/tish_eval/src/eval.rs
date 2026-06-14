@@ -2011,7 +2011,7 @@ impl Evaluator {
                 let mut data = EvalObjectData::default();
                 for prop in props {
                     match prop {
-                        tishlang_ast::ObjectProp::KeyValue(k, v) => {
+                        tishlang_ast::ObjectProp::KeyValue(k, v, _) => {
                             data
                                 .strings
                                 .insert(Arc::clone(k), self.eval_expr(v)?);

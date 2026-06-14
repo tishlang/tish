@@ -62,7 +62,7 @@ mod tests {
         };
         assert_eq!(props.len(), 1);
         match &props[0] {
-            ObjectProp::KeyValue(k, v) => {
+            ObjectProp::KeyValue(k, v, _) => {
                 assert_eq!(k.as_ref(), "port");
                 if let Expr::Ident { ref name, .. } = v {
                     assert_eq!(name.as_ref(), "port");
@@ -92,11 +92,11 @@ mod tests {
         };
         assert_eq!(props.len(), 2);
         match &props[0] {
-            ObjectProp::KeyValue(k, _) => assert_eq!(k.as_ref(), "ai-a"),
+            ObjectProp::KeyValue(k, _, _) => assert_eq!(k.as_ref(), "ai-a"),
             _ => panic!("expected KeyValue prop"),
         }
         match &props[1] {
-            ObjectProp::KeyValue(k, _) => assert_eq!(k.as_ref(), "human"),
+            ObjectProp::KeyValue(k, _, _) => assert_eq!(k.as_ref(), "human"),
             _ => panic!("expected KeyValue prop"),
         }
     }
@@ -118,7 +118,7 @@ mod tests {
         };
         assert_eq!(props.len(), 2);
         match &props[0] {
-            ObjectProp::KeyValue(k, v) => {
+            ObjectProp::KeyValue(k, v, _) => {
                 assert_eq!(k.as_ref(), "port");
                 if let Expr::Ident { ref name, .. } = v {
                     assert_eq!(name.as_ref(), "port");
@@ -129,7 +129,7 @@ mod tests {
             _ => panic!("expected KeyValue prop"),
         }
         match &props[1] {
-            ObjectProp::KeyValue(k, v) => {
+            ObjectProp::KeyValue(k, v, _) => {
                 assert_eq!(k.as_ref(), "x");
                 if let Expr::Literal { .. } = v {
                     // x: 1
