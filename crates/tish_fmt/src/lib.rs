@@ -2235,4 +2235,48 @@ let x = add(1, 2)
         tishlang_parser::parse(&out).unwrap();
         assert_eq!(format_source(&out).unwrap(), out, "not idempotent:\n{out}");
     }
+
+    /// Broad idempotence guard (#163): the existing tests targeted specific constructs (JSX, new-
+    /// expr) that *had* regressed, leaving structural blind spots. This sweeps a diverse corpus and
+    /// asserts, for every snippet, that (a) the formatted output re-parses and (b) re-formatting is
+    /// a fixed point — so any future construct that formats non-idempotently is caught here.
+    #[test]
+    fn format_is_idempotent_over_a_corpus() {
+        let corpus = [
+            "let a = { x: 1, y: { z: [1, 2, 3] } }\n",
+            "let f = (a, b) => a + b\n",
+            "let g = (x) => { return x * 2 }\n",
+            "const e = <div class=\"x\">{a}<span>b</span></div>\n",
+            "let frag = <><a>1</a><b>2</b></>\n",
+            "let n = new Foo(1).bar().baz\n",
+            "let n2 = new (getCtor())(arg)\n",
+            "let t = `a${b}c${d}e`\n",
+            "let lit = \"has a literal $ and a ${notInterp}\"\n",
+            "if (x) { return 1 } else if (y) { return 2 } else { return 3 }\n",
+            "for (let i = 0; i < n; i = i + 1) { f(i) }\n",
+            "for (const k of items) { use(k) }\n",
+            "while (cond) { step() }\n",
+            "do { once() } while (again)\n",
+            "switch (x) { case 1: f(); break; default: g() }\n",
+            "let u: number | string = 1\n",
+            "type T = { a: number, b: string[] }\n",
+            "export fn h(x: T): T { return x }\n",
+            "let v = a ? b : c\n",
+            "let w = a ?? b\n",
+            "let arr = [{ k: 1 }, { k: 2 }, ...rest]\n",
+            "let obj = { ...base, x: 1, y: 2 }\n",
+            "let chain = a?.b?.c\n",
+            "let big = 1e400\n",
+            "try { risky() } catch (e) { handle(e) } finally { cleanup() }\n",
+            "async fn af() { return await thing() }\n",
+            "import { a, b as c } from \"./m\"\nexport default a\n",
+        ];
+        for src in corpus {
+            let once = format_source(src).expect("format");
+            tishlang_parser::parse(&once)
+                .unwrap_or_else(|e| panic!("formatted output must re-parse for {src:?}: {e}\n{once}"));
+            let twice = format_source(&once).expect("re-format");
+            assert_eq!(once, twice, "non-idempotent for {src:?}:\n{once:?}\n  ->\n{twice:?}");
+        }
+    }
 }

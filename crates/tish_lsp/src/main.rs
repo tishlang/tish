@@ -1888,3 +1888,129 @@ mod rename_target_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod jsonrpc_integration_tests {
+    //! End-to-end tests that drive the server the way an editor does — by feeding JSON-RPC requests
+    //! through `tower::Service` — rather than calling handler methods directly. This is the layer
+    //! #163 flagged as untested: it catches wiring regressions (a `didOpen` that never stored the
+    //! doc, a changed response shape, the whole-document formatting range) that unit tests on the
+    //! pure helpers structurally cannot see.
+    use super::*;
+    use tower::{Service, ServiceExt};
+    use tower_lsp::jsonrpc::Request;
+
+    fn new_service() -> LspService<Backend> {
+        // Mirrors the construction in `main`; the returned socket is the server's outbound channel
+        // (diagnostics, show_message). Tests don't read it, so dropping it is fine — the client
+        // tolerates a closed socket.
+        let (service, _socket) = LspService::new(|client| Backend {
+            client,
+            docs: Arc::new(RwLock::new(HashMap::new())),
+            edit_seq: Arc::new(RwLock::new(HashMap::new())),
+            roots: Arc::new(RwLock::new(Vec::new())),
+            cargo_src_cache: Arc::new(RwLock::new(HashMap::new())),
+            tishlang_source_root: Arc::new(RwLock::new(None)),
+        });
+        service
+    }
+
+    /// Drive one request/notification through the service. Returns the JSON-RPC `result` value, or
+    /// `None` when there is no response (notifications, or requests the router answers with none).
+    async fn call(service: &mut LspService<Backend>, req: Request) -> Option<serde_json::Value> {
+        let resp = service.ready().await.unwrap().call(req).await.unwrap()?;
+        let (_id, result) = resp.into_parts();
+        Some(result.expect("server returned a JSON-RPC error"))
+    }
+
+    async fn initialize(service: &mut LspService<Backend>) {
+        let init = Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({ "capabilities": {} }))
+            .finish();
+        call(service, init).await.expect("initialize must return a result");
+        let initialized = Request::build("initialized").params(serde_json::json!({})).finish();
+        let _ = call(service, initialized).await; // notification: no response
+    }
+
+    async fn did_open(service: &mut LspService<Backend>, uri: &str, text: &str) {
+        let req = Request::build("textDocument/didOpen")
+            .params(serde_json::json!({
+                "textDocument": { "uri": uri, "languageId": "tish", "version": 1, "text": text }
+            }))
+            .finish();
+        let _ = call(service, req).await; // notification: no response
+    }
+
+    fn formatting_request(uri: &str) -> Request {
+        Request::build("textDocument/formatting")
+            .id(2)
+            .params(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "options": { "tabSize": 2, "insertSpaces": true }
+            }))
+            .finish()
+    }
+
+    // The headline guard #163 asks for: a `didOpen` → `formatting` round-trip over the wire must
+    // produce a single edit that replaces the WHOLE document, ending PAST the trailing newline. An
+    // end of (0, N) would leave a stale blank line — the trailing-newline regression — and a missing
+    // stored doc would surface here as `null` instead of an edit.
+    #[tokio::test]
+    async fn formatting_round_trip_replaces_whole_document() {
+        let mut service = new_service();
+        initialize(&mut service).await;
+        let uri = "file:///round_trip.tish";
+        did_open(&mut service, uri, "let  x=1\n").await;
+
+        let result = call(&mut service, formatting_request(uri))
+            .await
+            .expect("formatting must return a result");
+        let edits = result.as_array().expect("formatting result is an array of edits");
+        assert_eq!(edits.len(), 1, "a single whole-document edit");
+        let edit = &edits[0];
+        assert_eq!(edit["newText"], "let x = 1\n", "reformatted source");
+        assert_eq!(edit["range"]["start"], serde_json::json!({ "line": 0, "character": 0 }));
+        assert_eq!(
+            edit["range"]["end"],
+            serde_json::json!({ "line": 1, "character": 0 }),
+            "the edit must reach past the trailing newline, not stop at (0, N)"
+        );
+    }
+
+    // Formatting a document the server never saw must be a clean no-op (`null`), not a panic or a
+    // fabricated edit.
+    #[tokio::test]
+    async fn formatting_unknown_document_yields_no_edit() {
+        let mut service = new_service();
+        initialize(&mut service).await;
+        let result = call(&mut service, formatting_request("file:///never_opened.tish"))
+            .await
+            .expect("formatting must return a result");
+        assert!(result.is_null(), "unknown document must yield no edits, got {result}");
+    }
+
+    // A second `didOpen`/format after an in-place edit (via didChange) must reflect the new text —
+    // proves the doc store is actually keyed and updated, not stuck on first-open contents.
+    #[tokio::test]
+    async fn did_change_updates_the_stored_document() {
+        let mut service = new_service();
+        initialize(&mut service).await;
+        let uri = "file:///mutated.tish";
+        did_open(&mut service, uri, "let a=1\n").await;
+
+        let change = Request::build("textDocument/didChange")
+            .params(serde_json::json!({
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [ { "text": "let b=2\n" } ]
+            }))
+            .finish();
+        let _ = call(&mut service, change).await; // notification
+
+        let result = call(&mut service, formatting_request(uri))
+            .await
+            .expect("formatting must return a result");
+        let edits = result.as_array().expect("edits array");
+        assert_eq!(edits[0]["newText"], "let b = 2\n", "formatting must see the changed text");
+    }
+}
