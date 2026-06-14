@@ -1106,11 +1106,35 @@ impl Evaluator {
                 op,
                 right,
                 ..
-            } => {
-                let l = self.eval_expr(left)?;
-                let r = self.eval_expr(right)?;
-                self.eval_binop(&l, *op, &r).map_err(EvalError::Error)
-            }
+            } => match op {
+                // Short-circuit + value-returning && / || (JS, #240): evaluate the left; if it
+                // already decides the result, return IT without evaluating (and running the side
+                // effects of) the right. The result is always an operand value, never a coerced
+                // boolean. The generic path below eagerly evaluated both operands and `eval_binop`
+                // coerced And/Or to `Bool`, so `five() && 7` was `true` and `false && f()` still
+                // ran `f()`.
+                BinOp::And => {
+                    let l = self.eval_expr(left)?;
+                    if l.is_truthy() {
+                        self.eval_expr(right)
+                    } else {
+                        Ok(l)
+                    }
+                }
+                BinOp::Or => {
+                    let l = self.eval_expr(left)?;
+                    if l.is_truthy() {
+                        Ok(l)
+                    } else {
+                        self.eval_expr(right)
+                    }
+                }
+                _ => {
+                    let l = self.eval_expr(left)?;
+                    let r = self.eval_expr(right)?;
+                    self.eval_binop(&l, *op, &r).map_err(EvalError::Error)
+                }
+            },
             Expr::Unary { op, operand, .. } => {
                 let o = self.eval_expr(operand)?;
                 self.eval_unary(*op, &o).map_err(EvalError::Error)

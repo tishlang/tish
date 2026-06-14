@@ -1,0 +1,23 @@
+vr-and-tt 7
+vr-and-ft 0
+vr-or-ft 9
+vr-or-tt 5
+vr-and-str 
+vr-chain 9
+vr-nested 7
+sc-and false true 1
+sc-or true 7 1
+while-and 3 4 3
+while-or 2 1
+for-and 3
+do-or 2 1
+and-0 falsy
+and-empty falsy
+and-null falsy
+and-1 truthy
+and-obj truthy
+n-TTF yes
+n-TFF no
+n-TFT yes
+n-FxT yes
+n-FxF no

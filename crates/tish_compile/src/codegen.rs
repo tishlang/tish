@@ -7319,8 +7319,12 @@ impl Codegen {
             BinOp::Le => format!("tishlang_runtime::ops::le(&{}, &{})", l, r),
             BinOp::Gt => format!("tishlang_runtime::ops::gt(&{}, &{})", l, r),
             BinOp::Ge => format!("tishlang_runtime::ops::ge(&{}, &{})", l, r),
-            BinOp::And => format!("Value::Bool({}.is_truthy() && {}.is_truthy())", l, r),
-            BinOp::Or => format!("Value::Bool({}.is_truthy() || {}.is_truthy())", l, r),
+            // Short-circuit + value-returning && / || (JS, #240): yield the deciding OPERAND, not a
+            // coerced boolean (`five() && 7` is `7`, not `true`). The right operand sits inside the
+            // branch, so its side effects only run when reached. (Typed `bool && bool` uses Rust's
+            // own `&&`/`||` above, where returning the bool already IS the operand.)
+            BinOp::And => format!("{{ let __l = {}; if __l.is_truthy() {{ {} }} else {{ __l }} }}", l, r),
+            BinOp::Or => format!("{{ let __l = {}; if __l.is_truthy() {{ __l }} else {{ {} }} }}", l, r),
             BinOp::BitAnd => Self::emit_bitwise_binop(l, r, "&"),
             BinOp::BitOr => Self::emit_bitwise_binop(l, r, "|"),
             BinOp::BitXor => Self::emit_bitwise_binop(l, r, "^"),
