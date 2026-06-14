@@ -42,3 +42,22 @@ fn mutation_vm_ast_opt_with_peephole() {
     let chunk = compile(&prog).expect("compile");
     run(&chunk).expect("VM");
 }
+
+// Regression: `continue` inside a `do { } while (cond)` targets the condition test, which is emitted
+// AFTER the body — a FORWARD jump. It used to be lowered as a backward `JumpBack`, which `patch_jump_back`
+// resolved to distance 0 (saturating_sub of a forward target) — a no-op. Execution then fell through into
+// the body block's already-unwound `ExitBlock`, crashing the VM with "ExitBlock without matching
+// EnterBlock". The `continue` here unwinds the body block AND the `if` then-block, so it exercises the
+// multi-ExitBlock unwind path specifically.
+#[test]
+fn do_while_continue_does_not_crash_vm() {
+    let src = "let d = 0\n\
+               do {\n\
+                 d = d + 1\n\
+                 if (d === 2) { continue }\n\
+               } while (d < 5)\n";
+    let prog = tishlang_parser::parse(src).expect("parse");
+    // Both compile paths must run clean (the crash happened regardless of peephole optimization).
+    run(&compile_unoptimized(&prog).expect("compile (unopt)")).expect("VM run unoptimized");
+    run(&compile(&prog).expect("compile (opt)")).expect("VM run optimized");
+}

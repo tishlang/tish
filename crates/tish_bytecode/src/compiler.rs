@@ -1616,7 +1616,12 @@ impl<'a> Compiler<'a> {
                 self.loop_stack.push(LoopInfo {
                     break_patches: Vec::new(),
                     continue_patches: Vec::new(),
-                    continue_is_forward_jump: false,
+                    // `continue` jumps to the condition test, which is emitted AFTER the body — a
+                    // FORWARD jump. (A backward JumpBack would patch to dist = 0 via saturating_sub
+                    // of a forward target, becoming a no-op; execution then fell through and re-ran
+                    // the body's already-unwound ExitBlock on an empty block stack — the
+                    // "ExitBlock without matching EnterBlock" crash.)
+                    continue_is_forward_jump: true,
                 });
                 self.breakable_stack.push(Breakable::Loop {
                     unwind_depth: self.block_depth,
@@ -1635,7 +1640,8 @@ impl<'a> Compiler<'a> {
                 let info = self.loop_stack.pop().unwrap();
                 self.breakable_stack.pop();
                 for p in info.continue_patches {
-                    self.patch_jump_back(p, cond_start);
+                    // Forward jump to the condition (see continue_is_forward_jump above).
+                    self.patch_jump(p, cond_start);
                 }
                 for p in info.break_patches {
                     self.patch_jump(p, end);
