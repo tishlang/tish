@@ -30,9 +30,9 @@ js-to-tish	examples/js-to-tish-example	src/main.tish	run	-	-	Average:	-	pass
 json-file-edit	examples/json-file-edit	src/main.tish	run	fs	-	version = 2	mutates	pass
 #
 # ── serve: HTTP server — start, probe, assert response, shut down ────────────────────────────────
-json-api	examples/json-api	src/main.tish	serve	http	GET:3000:/users	Alice	-	pass
-echo-server	examples/echo-server	src/main.tish	serve	http	GET:3000:/health	OK	-	pass
-counter-api	examples/counter-api	src/main.tish	serve	http	GET:3000:/health	healthy	-	pass
+json-api	examples/json-api	src/main.tish	serve	http,process	GET:auto:/users	Alice	-	pass
+echo-server	examples/echo-server	src/main.tish	serve	http,process	GET:auto:/health	OK	-	pass
+counter-api	examples/counter-api	src/main.tish	serve	http,process	GET:auto:/health	healthy	-	pass
 http-hello	examples/http-hello	src/main.tish	serve	http,process	GET:auto:/	Hello from Tish	-	pass
 http-modules	examples/http-modules-example	src/main.tish	serve	http,process	GET:auto:/	sup, World	-	pass
 http-env-var	examples/http-env-var-example	src/main.tish	serve	http,process	GET:auto:/	tishreg	-	pass

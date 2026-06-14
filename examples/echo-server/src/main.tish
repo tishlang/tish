@@ -50,7 +50,7 @@ fn handleRequest(req) {
     }
 }
 
-let port = 3000
+let port = "PORT" in process.env ? parseInt(process.env.PORT) : 3000
 console.log(`Starting Echo Server on port ${port}...`)
 console.log("Endpoints: /echo, /mirror, /health")
 serve(port, handleRequest)

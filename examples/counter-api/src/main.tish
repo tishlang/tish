@@ -20,7 +20,8 @@ fn errorResponse(status, message) {
 }
 
 fn getCounter(name) {
-    if (counters[name] === undefined) {
+    // Missing object keys read back as `null` in tish (there is no `undefined`).
+    if (counters[name] === null) {
         counters[name] = 0
     }
     return counters[name]
@@ -86,6 +87,6 @@ fn handleRequest(req) {
     return errorResponse(404, "Not found: " + req.path)
 }
 
-let port = 3000
+let port = "PORT" in process.env ? parseInt(process.env.PORT) : 3000
 console.log(`Starting Counter API on port ${port}...`)
 serve(port, handleRequest)
