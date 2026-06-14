@@ -1859,14 +1859,16 @@ impl<'a> Compiler<'a> {
             } => {
                 match op {
                     BinOp::And => {
-                        // Short-circuit: a && b => if !a then a else b
+                        // Short-circuit + value-returning (JS): `a && b` is `a` when `a` is falsy,
+                        // else `b` — NOT a coerced boolean (#240). Mirror the `||` lowering below:
+                        // keep the left operand on a falsy short-circuit, discard it and evaluate the
+                        // right otherwise. (The old `BinOp(And)` here coerced a truthy-left result to
+                        // a Bool, so `five() && 7` yielded `true` instead of `7`.)
                         self.compile_expr(left)?;
                         self.emit(Opcode::Dup);
-                        let jump_shortcut = self.emit_jump(Opcode::JumpIfFalse);
-                        self.compile_expr(right)?; // left still on stack from Dup
-                        self.emit_u8(Opcode::BinOp, binop_to_u8(BinOp::And));
-                        let jump_end = self.emit_jump(Opcode::Jump);
-                        self.patch_jump(jump_shortcut, self.chunk.code.len());
+                        let jump_end = self.emit_jump(Opcode::JumpIfFalse); // a falsy → keep a
+                        self.emit(Opcode::Pop); // a truthy → discard a …
+                        self.compile_expr(right)?; // … and yield b
                         self.patch_jump(jump_end, self.chunk.code.len());
                     }
                     BinOp::Or => {
