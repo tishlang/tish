@@ -14,18 +14,22 @@ ffi-mathext	self:examples/ffi/mathext	.	ffi	cargo build --release	pass
 ffi-statext	self:examples/ffi/statext	.	ffi	cargo build --release	pass
 tish-unity	local:~/Projects/tish/tish-unity/native/tish_unity_bridge	.	ffi	cargo build --release	pass
 #
-# ── cargo: Rust extensions/embedders — broken by NativeFn→Callable / String→ArcStr / PropMap ──
-# (CONFIRMED broken by compiling against feature/perf: tish-pg, tish-callbacks. tish-apple-common
-# is CONFIRMED CLEAN — it is in the tish-program section below as pass; its tish-macos/tish-ios
-# crates are macOS-only + heavy Value-use, likely broken, but not Linux-checkable.)
+# ── cargo: Rust extensions/embedders — the NativeFn→Callable / String→ArcStr / PropMap migration ──
+# These were xfail while that migration was in flight. As of this run they build AND `cargo test`
+# clean against HEAD, so they are flipped to pass (`cargo test`, not `cargo check`, to validate full
+# codegen+link, not just type-check). NOTE: only tish-callbacks ships behavioral tests (3, passing);
+# tish-stripe/cedar/biscuit/webauthn/brainstorm-pg have no test fns, so for them `cargo test` is a
+# build/codegen guard. tish-oidc + tish-polars are still genuinely broken (kept xfail). tish-pg is a
+# local path absent on this machine (skips). tish-apple-common is CONFIRMED CLEAN (pass below); its
+# tish-macos/tish-ios crates are macOS-only + heavy Value-use, not Linux-checkable.
 tish-pg	local:~/Projects/tish-pg	.	rust	cargo test --no-run	xfail
-tish-callbacks	local:~/Projects/tish/tish-callbacks	.	rust	cargo test	xfail
+tish-callbacks	local:~/Projects/tish/tish-callbacks	.	rust	cargo test	pass
 tish-oidc	local:~/Projects/tish/tish-oidc	.	rust	cargo check	xfail
-tish-stripe	local:~/Projects/tish/tish-stripe	.	rust	cargo check	xfail
-tish-cedar	local:~/Projects/tish/tish-cedar	.	rust	cargo check	xfail
-tish-biscuit	local:~/Projects/tish/tish-biscuit	.	rust	cargo check	xfail
-tish-webauthn	local:~/Projects/tish/tish-webauthn	.	rust	cargo check	xfail
-brainstorm-pg	local:~/Projects/brainstorm/crates/brainstorm-pg	.	rust	cargo check	xfail
+tish-stripe	local:~/Projects/tish/tish-stripe	.	rust	cargo test	pass
+tish-cedar	local:~/Projects/tish/tish-cedar	.	rust	cargo test	pass
+tish-biscuit	local:~/Projects/tish/tish-biscuit	.	rust	cargo test	pass
+tish-webauthn	local:~/Projects/tish/tish-webauthn	.	rust	cargo test	pass
+brainstorm-pg	local:~/Projects/brainstorm/crates/brainstorm-pg	.	rust	cargo test	pass
 tish-polars	git:https://github.com/spacedevin/tish-polars.git@main	.	rust	cargo check	xfail
 tish-apple	git:https://github.com/tishlang/tish-apple.git@main	.	rust	cargo check -p tish-apple-common	pass
 #
