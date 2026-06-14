@@ -1,0 +1,79 @@
+# Record a perf-over-time data point on every merge to main and commit it to perf-history/.
+# Companion to scripts/perf_record.sh + scripts/perf_compare.sh and the perf-history/ records.
+#
+# Records the CORE runtimes only (vm, interp, rust native, node control) — fast and stable on a
+# shared runner, and the primary "is tish getting faster" signal. For the full 10-runtime fidelity
+# run scripts/perf_record.sh locally on a quiet machine (e.g. at each release).
+name: Perf history
+
+on:
+  push:
+    branches: [main]
+
+# Serialize so concurrent merges append cleanly; never cancel an in-flight recording.
+concurrency:
+  group: perf-history
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  record:
+    name: Record perf point
+    # The recording commit carries [skip ci]; double-guard so it can never recurse.
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # Pin a fleet-safe target-cpu instead of the default native (#223): on the virtualized fleet,
+      # `native` makes rustc emit instructions the hypervisor advertises but doesn't honor, SIGILL-ing
+      # the native-backend build. x86-64-v3 is supported by every x86 host here and keeps codegen
+      # near-native, so the recorded numbers stay meaningful.
+      RUSTFLAGS: "-C target-cpu=x86-64-v3"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Need history + a writable checkout to commit the record back.
+          fetch-depth: 0
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Record perf point (core runtimes)
+        run: |
+          set -euo pipefail
+          scripts/perf_record.sh --runtimes vm,interp,rust,node --runs 5 --timeout 180
+
+      - name: Commit the record
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet --exit-code -- perf-history/; then
+            echo "no new perf record to commit"; exit 0
+          fi
+          sha=$(git rev-parse --short HEAD)
+          git add perf-history/
+          git commit -m "perf(history): record ${sha} [skip ci]"
+          # Land on top of any merge that raced us, then push.
+          for attempt in 1 2 3; do
+            if git pull --rebase --autostash origin main && git push origin HEAD:main; then
+              echo "recorded"; exit 0
+            fi
+            echo "push race, retrying ($attempt)…"; sleep 3
+          done
+          echo "could not push perf record after retries" >&2; exit 1
