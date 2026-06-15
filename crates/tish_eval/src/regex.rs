@@ -254,46 +254,41 @@ pub fn string_split(input: &str, separator: &Value, limit: Option<usize>) -> Val
         return Value::Array(Rc::new(RefCell::new(Vec::new())));
     }
 
-    match separator {
+    // JS semantics in every branch: split the string fully, then truncate the result to `limit`.
+    // (Rust's `splitn` keeps the unsplit remainder in the last slot — that's Python-style maxsplit,
+    // not JS — so we must split fully and `truncate`. `truncate(usize::MAX)` is a no-op for the
+    // no-limit case.) This mirrors `tish_builtins::string::split_limit` /
+    // `tishlang_runtime::string_split_regex` so interp, vm, and the native backends agree.
+    let mut result: Vec<Value> = match separator {
         Value::RegExp(re) => {
             let re = re.borrow();
-            let mut result = Vec::new();
+            let mut parts = Vec::new();
             let mut last_end = 0;
-
             for mat in re.regex.find_iter(input) {
                 match mat {
                     Ok(m) => {
-                        if result.len() >= max - 1 {
-                            break;
-                        }
-                        result.push(Value::String(input[last_end..m.start()].into()));
+                        parts.push(Value::String(input[last_end..m.start()].into()));
                         last_end = m.end();
                     }
                     Err(_) => break,
                 }
             }
-
-            if result.len() < max {
-                result.push(Value::String(input[last_end..].into()));
-            }
-
-            Value::Array(Rc::new(RefCell::new(result)))
+            parts.push(Value::String(input[last_end..].into()));
+            parts
         }
-        Value::String(sep) => {
-            let parts: Vec<Value> = input
-                .splitn(max, sep.as_ref())
-                .map(|s| Value::String(s.into()))
-                .collect();
-            Value::Array(Rc::new(RefCell::new(parts)))
-        }
-        Value::Null => Value::Array(Rc::new(RefCell::new(vec![Value::String(input.into())]))),
+        Value::String(sep) => input
+            .split(sep.as_ref())
+            .map(|s| Value::String(s.into()))
+            .collect(),
+        Value::Null => vec![Value::String(input.into())],
         _ => {
             let sep_str = separator.to_string();
-            let parts: Vec<Value> = input
-                .splitn(max, &sep_str)
+            input
+                .split(&sep_str)
                 .map(|s| Value::String(s.into()))
-                .collect();
-            Value::Array(Rc::new(RefCell::new(parts)))
+                .collect()
         }
-    }
+    };
+    result.truncate(max);
+    Value::Array(Rc::new(RefCell::new(result)))
 }

@@ -1,0 +1,24 @@
+ty-num number
+ty-str string
+ty-bool boolean
+ty-null null
+ty-obj object
+ty-arr object
+cat-null xnull
+cat-bool xtrue
+cat-num x5
+cat-arr x1,2,3
+tpl n=null b=false a=1,2
+missing-prop true
+oob-index true
+str-of-null null
+float 0.30000000000000004
+bigint-ish 30000000000
+inf Infinity
+ninf -Infinity
+nan-str NaN
+neg-zero-eq true
+nan-eq false
+shift 1073741824
+ushr 4294967295
+bitand 15

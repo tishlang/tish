@@ -3167,15 +3167,14 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 }),
                 "split" => make_native_fn(move |args: &[Value]| {
                     let sep = args.first().unwrap_or(&Value::Null);
-                    #[cfg(feature = "regex")]
-                    if matches!(sep, Value::RegExp(_)) {
-                        return tishlang_runtime::string_split_regex(
-                            &Value::String(s_clone.clone()),
-                            sep,
-                            None,
-                        );
-                    }
-                    str_builtins::split(&Value::String(s_clone.clone()), sep)
+                    let limit = args.get(1).unwrap_or(&Value::Null);
+                    // string_split_limit honors the optional limit and routes a RegExp separator
+                    // internally, so the VM matches the interpreter and rust/cranelift backends.
+                    tishlang_runtime::string_split_limit(
+                        &Value::String(s_clone.clone()),
+                        sep,
+                        limit,
+                    )
                 }),
                 "trim" => make_native_fn(move |_args: &[Value]| {
                     str_builtins::trim(&Value::String(s_clone.clone()))

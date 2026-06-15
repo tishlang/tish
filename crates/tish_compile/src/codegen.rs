@@ -3435,9 +3435,10 @@ impl Codegen {
                         }
                         "split" => {
                             let sep = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let limit = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
-                                "tishlang_runtime::string_split(&{}, &{})",
-                                obj_expr, sep
+                                "tishlang_runtime::string_split_limit(&{}, &{}, &{})",
+                                obj_expr, sep, limit
                             ));
                         }
                         "trim" => {

@@ -503,6 +503,13 @@ impl Codegen {
     fn emit_expr(&mut self, expr: &Expr) -> Result<String, CompileError> {
         Ok(match expr {
             Expr::Literal { value, .. } => match value {
+                // Rust's `{}` prints non-finite f64 as `inf` / `-inf` / `NaN`; only `NaN` is valid JS.
+                // Emit the JS spellings so a folded `1/0` / `-1/0` doesn't become an undefined `inf`
+                // identifier in the output.
+                Literal::Number(n) if n.is_nan() => "NaN".to_string(),
+                Literal::Number(n) if n.is_infinite() => {
+                    if *n < 0.0 { "-Infinity".to_string() } else { "Infinity".to_string() }
+                }
                 Literal::Number(n) => format!("{}", n),
                 Literal::String(s) => format!("{:?}", s.as_ref()),
                 Literal::Bool(b) => format!("{}", b),
@@ -594,6 +601,15 @@ impl Codegen {
                 ..
             } => {
                 let obj = self.emit_expr(object)?;
+                // `255.toString()` is a JS syntax error — the lexer reads `255.` as a float and
+                // then chokes on the method name. Parenthesize a numeric-literal object so member
+                // access / method calls stay valid: `(255).toString()`. (Folded constants reach
+                // codegen as number literals too, so this covers e.g. `(100 * 2).toString()`.)
+                let obj = if matches!(&**object, Expr::Literal { value: Literal::Number(_), .. }) {
+                    format!("({})", obj)
+                } else {
+                    obj
+                };
                 let expr = match prop {
                     MemberProp::Name { name, .. } => {
                         if name.parse::<u32>().is_ok()
@@ -681,7 +697,11 @@ impl Codegen {
             }
             Expr::TypeOf { operand, .. } => {
                 let o = self.emit_expr(operand)?;
-                format!("(typeof {})", o)
+                // tish `typeof null` is "null" (interp/vm/native all agree — null is a first-class
+                // type, not JS's `typeof null === "object"` wart). tish has no `undefined`, so any
+                // nullish operand (incl. a JS-runtime `undefined`) maps to "null". Evaluate the
+                // operand once via the arrow arg so side effects don't run twice.
+                format!("((__v) => __v == null ? \"null\" : typeof __v)({})", o)
             }
             Expr::Delete { target, .. } => {
                 // Emit the raw property *reference*, not a value: `emit_expr` wraps Index /

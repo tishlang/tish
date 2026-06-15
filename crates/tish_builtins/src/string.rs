@@ -215,15 +215,27 @@ pub fn substr(s: &Value, start: &Value, length: &Value) -> Value {
 }
 
 pub fn split(s: &Value, sep: &Value) -> Value {
+    split_limit(s, sep, None)
+}
+
+/// `String.prototype.split(sep, limit)` for a string separator. JS semantics: the string is split
+/// completely on `sep`, then the result is truncated to `limit` elements (it does NOT keep the
+/// unsplit remainder in the last slot, which is what Rust's `splitn` would do). `limit == 0` yields
+/// an empty array. This is the single source of truth shared by the VM and rust/cranelift/wasi
+/// backends; the interpreter mirrors it in `tish_eval::regex::string_split`.
+pub fn split_limit(s: &Value, sep: &Value, limit: Option<usize>) -> Value {
     if let Value::String(s) = s {
         let separator = match sep {
             Value::String(ss) => ss.as_str(),
             _ => return Value::Array(VmRef::new(vec![Value::String(s.clone())])),
         };
-        let parts: Vec<Value> = s
-            .split(separator)
-            .map(|p| Value::String(p.into()))
-            .collect();
+        if limit == Some(0) {
+            return Value::Array(VmRef::new(Vec::new()));
+        }
+        let mut parts: Vec<Value> = s.split(separator).map(|p| Value::String(p.into())).collect();
+        if let Some(max) = limit {
+            parts.truncate(max);
+        }
         Value::Array(VmRef::new(parts))
     } else {
         Value::Null
@@ -557,6 +569,28 @@ mod tests {
         assert_same!(split(&n(1.0), &s(",")), Value::Null);
         assert_same!(trim(&s("  x  ")), s("x"));
         assert_same!(trim(&n(1.0)), Value::Null);
+    }
+
+    #[test]
+    fn split_limit_js_semantics() {
+        let parts = |v: &Value| -> Vec<String> {
+            let Value::Array(a) = v else { panic!("not array") };
+            a.borrow()
+                .iter()
+                .map(|x| match x {
+                    Value::String(s) => s.to_string(),
+                    _ => panic!("not string"),
+                })
+                .collect()
+        };
+        // limit truncates to the first N pieces (does NOT keep the remainder, unlike `splitn`)
+        assert_eq!(parts(&split_limit(&s("a,b,c,d"), &s(","), Some(2))), ["a", "b"]);
+        // limit 0 -> empty; limit beyond piece count -> full split; no limit -> full split
+        assert_eq!(parts(&split_limit(&s("a,b,c,d"), &s(","), Some(0))).len(), 0);
+        assert_eq!(parts(&split_limit(&s("a,b,c,d"), &s(","), Some(10))), ["a", "b", "c", "d"]);
+        assert_eq!(parts(&split_limit(&s("a,b,c,d"), &s(","), None)), ["a", "b", "c", "d"]);
+        // split() delegates with no limit
+        assert_eq!(parts(&split(&s("one two"), &s(" "))), ["one", "two"]);
     }
 
     #[test]
