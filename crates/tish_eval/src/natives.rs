@@ -56,26 +56,14 @@ fn get_log_level() -> u8 {
 
 pub fn parse_int(args: &[Value]) -> Result<Value, String> {
     let s = args.first().map(|v| v.to_string()).unwrap_or_default();
-    let s = s.trim();
-    let radix = args
-        .get(1)
-        .and_then(|v| match v {
-            Value::Number(n) => Some(*n as i32),
-            _ => None,
-        })
-        .unwrap_or(10);
-    let n = if (2..=36).contains(&radix) {
-        let prefix: String = s
-            .chars()
-            .take_while(|c| *c == '-' || *c == '+' || c.is_digit(radix as u32))
-            .collect();
-        i64::from_str_radix(&prefix, radix as u32)
-            .ok()
-            .map(|n| n as f64)
-    } else {
-        None
-    };
-    Ok(Value::Number(n.unwrap_or(f64::NAN)))
+    let radix = args.get(1).and_then(|v| match v {
+        Value::Number(n) => Some(*n as i32),
+        _ => None,
+    });
+    // Shared semantics (0x stripping, sign, auto-radix) — see js_parse_int (#247).
+    Ok(Value::Number(tishlang_builtins::globals::js_parse_int(
+        &s, radix,
+    )))
 }
 
 pub fn parse_float(args: &[Value]) -> Result<Value, String> {
@@ -168,32 +156,44 @@ pub fn math_sqrt(args: &[Value]) -> Result<Value, String> {
     ))
 }
 
+// The JS-specific min/max/round semantics live in the shared `tishlang_builtins::math` f64 helpers
+// (#247) — the interpreter uses a different `Value` type, so it extracts its own args and calls those
+// helpers, keeping interp/vm/native bit-identical without duplicating the rules.
 pub fn math_min(args: &[Value]) -> Result<Value, String> {
-    let nums: Vec<f64> = args
-        .iter()
-        .filter_map(|v| match v {
-            Value::Number(n) => Some(*n),
-            _ => None,
-        })
-        .collect();
-    let n = nums.into_iter().fold(f64::INFINITY, f64::min);
-    Ok(Value::Number(if n == f64::INFINITY { f64::NAN } else { n }))
+    let nums: Vec<f64> = args.iter().map(get_num).collect();
+    Ok(Value::Number(tishlang_builtins::math::min_f64(&nums)))
 }
 
 pub fn math_max(args: &[Value]) -> Result<Value, String> {
-    let nums: Vec<f64> = args
-        .iter()
-        .filter_map(|v| match v {
-            Value::Number(n) => Some(*n),
-            _ => None,
-        })
-        .collect();
-    let n = nums.into_iter().fold(f64::NEG_INFINITY, f64::max);
-    Ok(Value::Number(if n == f64::NEG_INFINITY {
-        f64::NAN
-    } else {
-        n
-    }))
+    let nums: Vec<f64> = args.iter().map(get_num).collect();
+    Ok(Value::Number(tishlang_builtins::math::max_f64(&nums)))
+}
+
+// hypot/asin/acos/atan/atan2 existed on the vm's Math but not the interpreter's — a direct interp≠vm
+// gap (#247). These are 1:1 with Rust f64 methods (same as the builtins), so compute directly; hypot
+// defaults missing args to 0.0 to match `tishlang_builtins::math::hypot`.
+pub fn math_hypot(args: &[Value]) -> Result<Value, String> {
+    let x = args.first().map(get_num).unwrap_or(0.0);
+    let y = args.get(1).map(get_num).unwrap_or(0.0);
+    Ok(Value::Number(x.hypot(y)))
+}
+
+pub fn math_asin(args: &[Value]) -> Result<Value, String> {
+    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).asin()))
+}
+
+pub fn math_acos(args: &[Value]) -> Result<Value, String> {
+    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).acos()))
+}
+
+pub fn math_atan(args: &[Value]) -> Result<Value, String> {
+    Ok(Value::Number(get_num(args.first().unwrap_or(&Value::Null)).atan()))
+}
+
+pub fn math_atan2(args: &[Value]) -> Result<Value, String> {
+    let y = get_num(args.first().unwrap_or(&Value::Null));
+    let x = get_num(args.get(1).unwrap_or(&Value::Null));
+    Ok(Value::Number(y.atan2(x)))
 }
 
 pub fn math_floor(args: &[Value]) -> Result<Value, String> {
@@ -209,9 +209,9 @@ pub fn math_ceil(args: &[Value]) -> Result<Value, String> {
 }
 
 pub fn math_round(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Number(
-        get_num(args.first().unwrap_or(&Value::Null)).round(),
-    ))
+    Ok(Value::Number(tishlang_builtins::math::round_f64(get_num(
+        args.first().unwrap_or(&Value::Null),
+    ))))
 }
 
 pub fn math_random(_args: &[Value]) -> Result<Value, String> {

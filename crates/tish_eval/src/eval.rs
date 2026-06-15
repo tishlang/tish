@@ -144,6 +144,11 @@ impl Evaluator {
             math.insert("round".into(), Value::Native(natives::math_round));
             math.insert("random".into(), Value::Native(natives::math_random));
             math.insert("pow".into(), Value::Native(natives::math_pow));
+            math.insert("hypot".into(), Value::Native(natives::math_hypot));
+            math.insert("asin".into(), Value::Native(natives::math_asin));
+            math.insert("acos".into(), Value::Native(natives::math_acos));
+            math.insert("atan".into(), Value::Native(natives::math_atan));
+            math.insert("atan2".into(), Value::Native(natives::math_atan2));
             math.insert("sin".into(), Value::Native(natives::math_sin));
             math.insert("cos".into(), Value::Native(natives::math_cos));
             math.insert("tan".into(), Value::Native(natives::math_tan));
@@ -1197,7 +1202,11 @@ impl Evaluator {
                                     _ => 0,
                                 };
                                 for v in arr_borrow.iter().skip(start) {
-                                    if v.strict_eq(&search) {
+                                    // SameValueZero: NaN matches NaN (JS Array.includes, unlike
+                                    // indexOf). #247
+                                    if v.strict_eq(&search)
+                                        || matches!((v, &search), (Value::Number(a), Value::Number(b)) if a.is_nan() && b.is_nan())
+                                    {
                                         return Ok(Value::Bool(true));
                                     }
                                 }
@@ -1892,7 +1901,8 @@ impl Evaluator {
                                 })
                                 .unwrap_or(0)
                                 .clamp(0, 20); // ECMA-262: 0–20
-                            let formatted = format!("{:.*}", digits as usize, n);
+                            // Shared half-away-from-zero rounding so interp matches vm/native/node (#247).
+                            let formatted = tishlang_builtins::number::to_fixed_str(*n, digits as usize);
                             return Ok(Value::String(formatted.into()));
                         }
                         if method_name.as_ref() == "toString" {

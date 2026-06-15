@@ -509,6 +509,9 @@ pub use tishlang_builtins::math::{
     round as tish_math_round_impl, sign as tish_math_sign_impl, sin as tish_math_sin_impl,
     imul as tish_math_imul_impl,
     sqrt as tish_math_sqrt_impl, tan as tish_math_tan_impl, trunc as tish_math_trunc_impl,
+    // hypot/atan2/asin/acos/atan were missing on the native Math but present on the vm (#247).
+    hypot as tish_math_hypot_impl, atan2 as tish_math_atan2_impl, asin as tish_math_asin_impl,
+    acos as tish_math_acos_impl, atan as tish_math_atan_impl,
 };
 
 // Wrapper functions to maintain API (existing callers use math_* naming)
@@ -532,6 +535,21 @@ pub fn math_min(args: &[Value]) -> Value {
 }
 pub fn math_max(args: &[Value]) -> Value {
     tish_math_max_impl(args)
+}
+pub fn math_hypot(args: &[Value]) -> Value {
+    tish_math_hypot_impl(args)
+}
+pub fn math_atan2(args: &[Value]) -> Value {
+    tish_math_atan2_impl(args)
+}
+pub fn math_asin(args: &[Value]) -> Value {
+    tish_math_asin_impl(args)
+}
+pub fn math_acos(args: &[Value]) -> Value {
+    tish_math_acos_impl(args)
+}
+pub fn math_atan(args: &[Value]) -> Value {
+    tish_math_atan_impl(args)
 }
 pub fn math_sin(args: &[Value]) -> Value {
     tish_math_sin_impl(args)

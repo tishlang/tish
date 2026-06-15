@@ -135,7 +135,11 @@ pub fn includes(arr: &Value, search: &Value, from: Option<&Value>) -> Value {
             _ => 0,
         };
         for v in arr_borrow.iter().skip(start) {
-            if v.strict_eq(search) {
+            // SameValueZero: like `===` but NaN matches NaN (JS `Array.prototype.includes`, unlike
+            // `indexOf` which stays strict). #247
+            if v.strict_eq(search)
+                || matches!((v, search), (Value::Number(a), Value::Number(b)) if a.is_nan() && b.is_nan())
+            {
                 return Value::Bool(true);
             }
         }
