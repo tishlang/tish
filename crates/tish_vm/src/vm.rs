@@ -462,12 +462,11 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             Value::Number(n.ceil())
         }),
     );
+    // round/min/max delegate to the shared builtins (JS round-half-to-+∞, empty → ±∞, NaN
+    // propagation) so the vm never diverges from interp/native on Math semantics (#247).
     math.insert(
         "round".into(),
-        Value::native(|args: &[Value]| {
-            let n = args.first().and_then(|v| v.as_number()).unwrap_or(f64::NAN);
-            Value::Number(n.round())
-        }),
+        Value::native(|args: &[Value]| math_builtins::round(args)),
     );
     math.insert(
         "random".into(),
@@ -475,17 +474,11 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     );
     math.insert(
         "min".into(),
-        Value::native(|args: &[Value]| {
-            let nums: Vec<f64> = args.iter().filter_map(|v| v.as_number()).collect();
-            Value::Number(nums.into_iter().fold(f64::NAN, |a, b| a.min(b)))
-        }),
+        Value::native(|args: &[Value]| math_builtins::min(args)),
     );
     math.insert(
         "max".into(),
-        Value::native(|args: &[Value]| {
-            let nums: Vec<f64> = args.iter().filter_map(|v| v.as_number()).collect();
-            Value::Number(nums.into_iter().fold(f64::NAN, |a, b| a.max(b)))
-        }),
+        Value::native(|args: &[Value]| math_builtins::max(args)),
     );
     math.insert(
         "pow".into(),
@@ -2969,6 +2962,9 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                         "forEach"   => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::for_each(&bv, &cb) }),
                         "find"      => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::find(&bv, &cb) }),
                         "findIndex" => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::find_index(&bv, &cb) }),
+                        "findLast"      => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::find_last(&bv, &cb) }),
+                        "findLastIndex" => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::find_last_index(&bv, &cb) }),
+                        "at"        => make_native_fn(move |args| { let i = args.first().cloned().unwrap_or(Value::Null); arr_builtins::at(&bv, &i) }),
                         "some"      => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::some(&bv, &cb) }),
                         "every"     => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::every(&bv, &cb) }),
                         "join"      => make_native_fn(move |args| { let sep = args.first().cloned().unwrap_or(Value::Null); arr_builtins::join(&bv, &sep) }),
@@ -3072,6 +3068,18 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "findIndex" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
                     arr_builtins::find_index(&Value::Array(a_clone.clone()), &cb)
+                }),
+                "findLast" => make_native_fn(move |args: &[Value]| {
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
+                    arr_builtins::find_last(&Value::Array(a_clone.clone()), &cb)
+                }),
+                "findLastIndex" => make_native_fn(move |args: &[Value]| {
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
+                    arr_builtins::find_last_index(&Value::Array(a_clone.clone()), &cb)
+                }),
+                "at" => make_native_fn(move |args: &[Value]| {
+                    let i = args.first().cloned().unwrap_or(Value::Null);
+                    arr_builtins::at(&Value::Array(a_clone.clone()), &i)
                 }),
                 "some" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
@@ -3222,6 +3230,10 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "charAt" => make_native_fn(move |args: &[Value]| {
                     let idx = args.first().unwrap_or(&Value::Null);
                     str_builtins::char_at(&Value::String(s_clone.clone()), idx)
+                }),
+                "at" => make_native_fn(move |args: &[Value]| {
+                    let idx = args.first().unwrap_or(&Value::Null);
+                    str_builtins::at(&Value::String(s_clone.clone()), idx)
                 }),
                 "charCodeAt" => make_native_fn(move |args: &[Value]| {
                     let idx = args.first().unwrap_or(&Value::Null);

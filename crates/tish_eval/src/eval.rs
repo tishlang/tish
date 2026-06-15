@@ -144,6 +144,11 @@ impl Evaluator {
             math.insert("round".into(), Value::Native(natives::math_round));
             math.insert("random".into(), Value::Native(natives::math_random));
             math.insert("pow".into(), Value::Native(natives::math_pow));
+            math.insert("hypot".into(), Value::Native(natives::math_hypot));
+            math.insert("asin".into(), Value::Native(natives::math_asin));
+            math.insert("acos".into(), Value::Native(natives::math_acos));
+            math.insert("atan".into(), Value::Native(natives::math_atan));
+            math.insert("atan2".into(), Value::Native(natives::math_atan2));
             math.insert("sin".into(), Value::Native(natives::math_sin));
             math.insert("cos".into(), Value::Native(natives::math_cos));
             math.insert("tan".into(), Value::Native(natives::math_tan));
@@ -1197,7 +1202,11 @@ impl Evaluator {
                                     _ => 0,
                                 };
                                 for v in arr_borrow.iter().skip(start) {
-                                    if v.strict_eq(&search) {
+                                    // SameValueZero: NaN matches NaN (JS Array.includes, unlike
+                                    // indexOf). #247
+                                    if v.strict_eq(&search)
+                                        || matches!((v, &search), (Value::Number(a), Value::Number(b)) if a.is_nan() && b.is_nan())
+                                    {
                                         return Ok(Value::Bool(true));
                                     }
                                 }
@@ -1520,6 +1529,54 @@ impl Evaluator {
                                 }
                                 return Ok(Value::Number(-1.0));
                             }
+                            "findLast" => {
+                                // Like find, from the end (#247). Callback gets (value, original index).
+                                let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                let scoped = self.create_callback_scope(&callback);
+                                for i in (0..arr_borrow.len()).rev() {
+                                    let v = arr_borrow[i].clone();
+                                    let args = [v.clone(), Value::Number(i as f64)];
+                                    let found = match &scoped {
+                                        Some((scope, params, body)) => self.call_with_scope(scope, params, body, &args)?,
+                                        None => self.call_func(&callback, &args)?,
+                                    };
+                                    if found.is_truthy() {
+                                        return Ok(v);
+                                    }
+                                }
+                                return Ok(Value::Null);
+                            }
+                            "findLastIndex" => {
+                                let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                let scoped = self.create_callback_scope(&callback);
+                                for i in (0..arr_borrow.len()).rev() {
+                                    let args = [arr_borrow[i].clone(), Value::Number(i as f64)];
+                                    let found = match &scoped {
+                                        Some((scope, params, body)) => self.call_with_scope(scope, params, body, &args)?,
+                                        None => self.call_func(&callback, &args)?,
+                                    };
+                                    if found.is_truthy() {
+                                        return Ok(Value::Number(i as f64));
+                                    }
+                                }
+                                return Ok(Value::Number(-1.0));
+                            }
+                            "at" => {
+                                // Negative index counts from the end; out of range → null (#247).
+                                let i = match arg_vals.first() {
+                                    Some(Value::Number(n)) => *n as i64,
+                                    _ => 0,
+                                };
+                                let arr_borrow = arr.borrow();
+                                let len = arr_borrow.len() as i64;
+                                let idx = if i < 0 { len + i } else { i };
+                                if idx >= 0 && idx < len {
+                                    return Ok(arr_borrow[idx as usize].clone());
+                                }
+                                return Ok(Value::Null);
+                            }
                             "forEach" => {
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
@@ -1812,6 +1869,20 @@ impl Evaluator {
                                     .map(|c| Value::String(c.to_string().into()))
                                     .unwrap_or(Value::String("".into())));
                             }
+                            "at" => {
+                                // Negative index from end; out of range → null (#247).
+                                let i = match arg_vals.first() {
+                                    Some(Value::Number(n)) => *n as i64,
+                                    _ => 0,
+                                };
+                                let chars: Vec<char> = s.chars().collect();
+                                let len = chars.len() as i64;
+                                let idx = if i < 0 { len + i } else { i };
+                                if idx >= 0 && idx < len {
+                                    return Ok(Value::String(chars[idx as usize].to_string().into()));
+                                }
+                                return Ok(Value::Null);
+                            }
                             "charCodeAt" => {
                                 let idx = match arg_vals.first() {
                                     Some(Value::Number(n)) => *n as usize,
@@ -1892,7 +1963,8 @@ impl Evaluator {
                                 })
                                 .unwrap_or(0)
                                 .clamp(0, 20); // ECMA-262: 0–20
-                            let formatted = format!("{:.*}", digits as usize, n);
+                            // Shared half-away-from-zero rounding so interp matches vm/native/node (#247).
+                            let formatted = tishlang_builtins::number::to_fixed_str(*n, digits as usize);
                             return Ok(Value::String(formatted.into()));
                         }
                         if method_name.as_ref() == "toString" {

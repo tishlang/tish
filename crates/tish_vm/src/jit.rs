@@ -9,11 +9,13 @@
 //!     frame slot and a block per bytecode jump target; handles for/while/nested loops, if/else,
 //!     early return, break, continue. Enabled by slot-based locals making such functions `slot_based`.
 //!
-//! Anything unsupported (member/index, calls, arrays/objects, non-number constants, pow/shift,
+//! Anything unsupported (member/index, calls, arrays/objects, non-number constants, pow,
 //! booleans in slots, a ternary inside a loop) makes compilation return `None`, and any non-number
 //! argument at call time falls back to the interpreter — so this is purely ADDITIVE and can never
 //! change behaviour (a miss runs the VM). Only a logic bug here could, hence the differential
-//! validation (vm-JIT ≡ interp ≡ node) + `tests/core/jit_loops.tish`.
+//! validation (vm-JIT ≡ interp ≡ node) + `tests/core/jit_loops.tish`, `tests/core/jit_shifts.tish`.
+//! Bitwise `& | ^ ~` and shifts `<< >> >>>` are lowered (JS ToInt32/ToUint32 semantics, bit-exact
+//! with the VM's `eval_binop`); only `**` (pow) still falls back.
 //!
 //! Not compiled for wasm targets (cranelift-jit emits host code).
 
@@ -179,9 +181,15 @@ impl NumericFn {
 
 struct JitGlobal {
     module: JITModule,
-    /// Keyed by the address of the (stable, un-cloned) nested `Chunk`. `None`
-    /// caches "this chunk is not JIT-eligible" so we don't re-analyze it.
-    cache: HashMap<usize, Option<NumericFn>>,
+    /// Keyed by the address of the nested `Chunk`, with a content **fingerprint** alongside the
+    /// result. Within one program run a chunk lives for the whole run, so the address is stable and
+    /// unique. But this cache is a process-global that is never cleared, and a `Chunk` is dropped when
+    /// its program is — so a long-lived process that compiles/drops/recompiles programs (the REPL;
+    /// embedders running multiple scripts) can allocate a *different* chunk at a freed address that is
+    /// still cached. We therefore verify the fingerprint on every hit: a mismatch means the address was
+    /// reused by a different chunk, so we recompile (and overwrite) instead of returning stale native
+    /// code. `None` still caches "not JIT-eligible". See [`chunk_fingerprint`].
+    cache: HashMap<usize, (u64, Option<NumericFn>)>,
     counter: usize,
 }
 
@@ -228,6 +236,65 @@ fn read_u16(code: &[u8], ip: &mut usize) -> Option<u16> {
     Some((a << 8) | b)
 }
 
+/// Content fingerprint of everything `compile_chunk` reads, so a cache entry can be validated against
+/// the chunk currently at a (possibly reused) address. FNV-1a over the compile-relevant fields:
+/// shape (`param_count`, `num_slots`, `rest_param_index`, `slot_based`), the full `code` bytes, and
+/// the `constants` (the JIT emits `f64const`/bool from `LoadConst`, so their values matter). The JIT
+/// makes no cross-chunk calls (`op_size` allows only `SelfCall`, which recurses into *this* function),
+/// so nothing outside the chunk affects the result — this fingerprint is complete. Deterministic
+/// within a process (fixed FNV constants, not a randomized hasher), which is all the cache needs.
+fn chunk_fingerprint(chunk: &Chunk) -> u64 {
+    // Mixes a u64 at a time (FNV-prime multiply + an avalanche shift). Eight bytes per round keeps
+    // this cheap on the hot closure-creation path; correctness only needs determinism + good
+    // distinction, not cryptographic strength.
+    #[inline]
+    fn mix(h: &mut u64, v: u64) {
+        *h ^= v;
+        *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        *h ^= *h >> 29;
+    }
+    #[inline]
+    fn mix_bytes(h: &mut u64, bytes: &[u8]) {
+        let mut it = bytes.chunks_exact(8);
+        for w in &mut it {
+            mix(h, u64::from_le_bytes(w.try_into().unwrap()));
+        }
+        let rem = it.remainder();
+        if !rem.is_empty() {
+            let mut buf = [0u8; 8];
+            buf[..rem.len()].copy_from_slice(rem);
+            mix(h, u64::from_le_bytes(buf));
+        }
+        mix(h, bytes.len() as u64);
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    mix(&mut h, chunk.param_count as u64);
+    mix(&mut h, chunk.num_slots as u64);
+    mix(&mut h, chunk.rest_param_index as u64);
+    mix(&mut h, chunk.slot_based as u64);
+    mix_bytes(&mut h, &chunk.code);
+    mix(&mut h, chunk.constants.len() as u64);
+    for c in &chunk.constants {
+        match c {
+            Constant::Number(n) => {
+                mix(&mut h, 1);
+                mix(&mut h, n.to_bits());
+            }
+            Constant::String(s) => {
+                mix(&mut h, 2);
+                mix_bytes(&mut h, s.as_bytes());
+            }
+            Constant::Bool(b) => mix(&mut h, if *b { 4 } else { 3 }),
+            Constant::Null => mix(&mut h, 5),
+            Constant::Closure(idx) => {
+                mix(&mut h, 6);
+                mix(&mut h, *idx as u64);
+            }
+        }
+    }
+    h
+}
+
 /// Get (or compile, then cache) the native numeric function for `chunk`.
 /// Returns `None` if the chunk isn't a straight-line numeric function.
 pub fn try_compile_numeric(chunk: &Chunk) -> Option<NumericFn> {
@@ -239,13 +306,18 @@ pub fn try_compile_numeric(chunk: &Chunk) -> Option<NumericFn> {
         return None;
     }
     let key = chunk as *const Chunk as usize;
+    let fp = chunk_fingerprint(chunk);
     let lock = jit()?;
     let mut g = lock.lock().ok()?;
-    if let Some(cached) = g.cache.get(&key).copied() {
-        return cached;
+    // Hit only counts if the fingerprint matches: otherwise this address was freed and reused by a
+    // *different* chunk, and the cached `NumericFn` is native code for the old one (a miscompile).
+    if let Some(&(cached_fp, cached)) = g.cache.get(&key) {
+        if cached_fp == fp {
+            return cached;
+        }
     }
     let result = compile_chunk(&mut g, chunk);
-    g.cache.insert(key, result);
+    g.cache.insert(key, (fp, result));
     result
 }
 
@@ -561,7 +633,6 @@ fn emit_simple_op(
                     bcx.ins().fsub(l, p)
                 }
                 // Bitwise AND/OR/XOR via JS ToInt32 (modulo 2³², NaN/±∞ → 0) — see [`js_to_int32`].
-                // Shifts / `>>>` stay on the VM (shift-amount edge cases).
                 BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
                     let li = js_to_int32(bcx, l);
                     let ri = js_to_int32(bcx, r);
@@ -573,7 +644,36 @@ fn emit_simple_op(
                     };
                     bcx.ins().fcvt_from_sint(types::F64, res)
                 }
-                // Pow/shifts/`>>>`/In/And/Or: fall back to the VM.
+                // Shifts. JS masks the count to the low 5 bits (`& 31`); the low 5 bits of `ToInt32(r)`
+                // equal `ToUint32(r)`, so `js_to_int32(r)` carries the right amount. We mask explicitly
+                // (`& 31`) so correctness never depends on Cranelift's own amount-masking convention.
+                // `<<`/`>>` are signed-domain (ToInt32 → i32 → signed→f64); `>>>` is logical on the
+                // unsigned bits with an UNSIGNED→f64 convert (result may exceed 2³¹). Bit-for-bit with
+                // vm.rs `eval_binop`: Shl/Shr = `to_int32(l).wrapping_sh*(to_uint32(r))`,
+                // UShr = `to_uint32(l).wrapping_shr(to_uint32(r))`.
+                BinOp::Shl | BinOp::Shr | BinOp::UShr => {
+                    let li = js_to_int32(bcx, l);
+                    let amt = js_to_int32(bcx, r);
+                    let mask = bcx.ins().iconst(types::I32, 31);
+                    let amt = bcx.ins().band(amt, mask);
+                    match bop {
+                        BinOp::Shl => {
+                            let res = bcx.ins().ishl(li, amt);
+                            bcx.ins().fcvt_from_sint(types::F64, res)
+                        }
+                        BinOp::Shr => {
+                            let res = bcx.ins().sshr(li, amt);
+                            bcx.ins().fcvt_from_sint(types::F64, res)
+                        }
+                        // UShr: logical shift on the same 32-bit value bits as ToUint32(l), then
+                        // unsigned→f64 so a result with bit 31 set stays a positive number (JS `>>>`).
+                        _ => {
+                            let res = bcx.ins().ushr(li, amt);
+                            bcx.ins().fcvt_from_uint(types::F64, res)
+                        }
+                    }
+                }
+                // Pow/In/And/Or: fall back to the VM.
                 _ => return SimpleOp::Unsupported,
             };
             stack.push((v, is_cmp));
@@ -1047,4 +1147,106 @@ fn build_body(
 
     bcx.finalize();
     result
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use tishlang_core::{to_int32, to_uint32};
+
+    /// First arity-2 slot-based numeric nested chunk in compiled `src` (cloned, so the caller owns it).
+    fn fn_chunk(src: &str) -> Chunk {
+        let prog = tishlang_parser::parse(src).expect("parse");
+        let opt = tishlang_opt::optimize(&prog);
+        let top = tishlang_bytecode::compile(&opt).expect("compile");
+        fn find(c: &Chunk) -> Option<Chunk> {
+            for n in &c.nested {
+                if n.slot_based && n.param_count == 2 && n.rest_param_index == NO_REST_PARAM {
+                    return Some(n.clone());
+                }
+                if let Some(x) = find(n) {
+                    return Some(x);
+                }
+            }
+            None
+        }
+        find(&top).expect("expected an arity-2 slot-based fn chunk")
+    }
+
+    /// Compile `src`, then return the first arity-2 pure-numeric function the JIT accepts. Panics if
+    /// none compiles — so a change that makes the JIT silently *stop* compiling the target (the exact
+    /// "vacuous fixture" miss that motivated this guard) fails loudly instead of passing emptily.
+    ///
+    /// Bypasses [`try_compile_numeric`]'s cache and calls [`compile_chunk`] directly: the cache is
+    /// keyed by chunk address, unique-and-stable in a real run but reused across this test's transient
+    /// chunks. Compiling fresh is correct here and still exercises the real lowering path.
+    fn jit_arity2(src: &str) -> NumericFn {
+        let prog = tishlang_parser::parse(src).expect("parse");
+        let opt = tishlang_opt::optimize(&prog);
+        let chunk = tishlang_bytecode::compile(&opt).expect("compile");
+        fn compile_uncached(c: &Chunk) -> Option<NumericFn> {
+            if !c.slot_based
+                || c.rest_param_index != NO_REST_PARAM
+                || c.param_count == 0
+                || c.param_count > 8
+            {
+                return None;
+            }
+            let lock = jit()?;
+            let mut g = lock.lock().ok()?;
+            compile_chunk(&mut g, c)
+        }
+        fn find(c: &Chunk) -> Option<NumericFn> {
+            for n in &c.nested {
+                if let Some(f) = compile_uncached(n) {
+                    if f.arity == 2 && f.array_param_mask == 0 {
+                        return Some(f);
+                    }
+                }
+                if let Some(f) = find(n) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        find(&chunk).expect("the JIT must compile this arity-2 numeric fn (did it start bailing?)")
+    }
+
+    /// Regression for the address-reuse stale hit (#247): compile one function, then overwrite the SAME
+    /// heap `Chunk` (same address = the cache key) with a *different* function — what a long-lived
+    /// process (REPL / multi-script embedder) does when a freed chunk address is reused. Before the
+    /// fingerprint check the cache returned the first function's native code for the second.
+    #[test]
+    fn jit_cache_detects_address_reuse() {
+        let mut boxed: Box<Chunk> = Box::new(fn_chunk("const f = (a, b) => a - b\nf(0, 0)\n"));
+        let sub = try_compile_numeric(&boxed).expect("a - b must JIT");
+        assert_eq!(sub.call(&[10.0, 3.0]), 7.0, "sub baseline");
+
+        *boxed = fn_chunk("const f = (a, b) => a * b\nf(0, 0)\n"); // same address, different content
+        let mul = try_compile_numeric(&boxed).expect("a * b must JIT");
+        assert_eq!(
+            mul.call(&[10.0, 3.0]),
+            30.0,
+            "stale cache hit: reused address returned the old (sub) fn instead of mul"
+        );
+    }
+
+    /// Permanent guard for #168: shifts must (a) actually JIT-compile and (b) be bit-exact with the
+    /// VM's `eval_binop` (`to_int32`/`to_uint32` + wrapping shift). Breaking either fails this test.
+    #[test]
+    fn jit_lowers_shifts_bit_exact_to_vm() {
+        let shl = jit_arity2("const f = (a, b) => a << b\nf(0, 0)\n");
+        let shr = jit_arity2("const f = (a, b) => a >> b\nf(0, 0)\n");
+        let ushr = jit_arity2("const f = (a, b) => a >>> b\nf(0, 0)\n");
+        let cases = [
+            (1.0, 4.0), (1.0, 32.0), (1.0, 33.0), (1.0, -1.0), (-8.0, 1.0), (-1.0, 0.0),
+            (-2.0, 1.0), (4294967295.0, 0.0), (3.9, 0.0), (4294967297.0, 0.0),
+            (-123456789.0, 5.0), (65535.0, 16.0),
+        ];
+        for (a, b) in cases {
+            assert_eq!(shl.call(&[a, b]), to_int32(a).wrapping_shl(to_uint32(b)) as f64, "<< {a} {b}");
+            assert_eq!(shr.call(&[a, b]), to_int32(a).wrapping_shr(to_uint32(b)) as f64, ">> {a} {b}");
+            assert_eq!(ushr.call(&[a, b]), to_uint32(a).wrapping_shr(to_uint32(b)) as f64, ">>> {a} {b}");
+        }
+    }
 }

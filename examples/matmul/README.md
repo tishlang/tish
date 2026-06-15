@@ -1,5 +1,14 @@
 # matmul — matrix multiply benchmark
 
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
 Matrix multiply across CPU, Metal GPU, and Apple MLX — with concurrent backend racing
 using `Promise.spawn` + `Promise.any`.
 
@@ -64,7 +73,9 @@ name, its latency, and wall-clock time.
 just race
 ```
 
-Expected output:
+Illustrative output (snapshot — which backend wins and the ms are machine/day-dependent
+and drift; regenerate on your own machine with `just race`, and use
+`scripts/perf_record.sh` + `scripts/perf_compare.sh` for a noise-floored comparison):
 ```
 256x256  winner=mlx   backend_ms=4   wall_ms=5   check=63.51...
 512x512  winner=metal backend_ms=5   wall_ms=6   check=254.0...
@@ -90,7 +101,11 @@ both backends agree on the output (same checksum).
 just race-settled
 ```
 
-Expected output:
+Illustrative output (snapshot — the ms columns are machine/day-dependent and drift;
+regenerate with `just race-settled`). The `match` column is a parity criterion, not a
+recorded verdict: it must read `yes` (MLX and Metal produce the same checksum) every run,
+and cross-backend agreement is gated separately by `scripts/run_parity_compare.sh` — if a
+run shows `no`, that is a real failure to investigate, not a stale number:
 ```
 N       mlx_ms  metal_ms  wall_ms  match
 256     4ms     5ms       5ms      yes
@@ -110,7 +125,10 @@ let winner = await Promise.any([
 
 `Promise.any` only rejects if ALL promises reject. So if both GPU backends
 fail (driver error, kernel timeout, etc.), the CPU result still comes through.
-The CPU backend also wins for small N where GPU dispatch overhead dominates.
+The CPU backend can also win for small N where GPU dispatch overhead dominates —
+but which backend wins at a given N is a machine/day-dependent standing, not a fixed
+fact: confirm on your own hardware with `just fastest`, and use
+`scripts/perf_record.sh` + `scripts/perf_compare.sh` for a noise-floored A/B.
 
 ```sh
 just fastest

@@ -21,7 +21,26 @@ pub fn to_fixed(n: &Value, digits: &Value) -> Value {
         Value::Number(x) => (*x as i32).clamp(0, 20),
         _ => 0,
     } as usize;
-    Value::String(format!("{:.*}", d, num).into())
+    Value::String(to_fixed_str(num, d).into())
+}
+
+/// f64-domain `Number.prototype.toFixed` so the tree-walk interpreter (distinct `Value`) shares the
+/// exact behavior. Rust's `{:.*}` rounds half-to-even (`(2.5).toFixed(0)` → "2"); JS rounds half away
+/// from zero (→ "3"), so pre-round the scaled value with `.round()` (half-away) before formatting. #247
+pub fn to_fixed_str(num: f64, digits: usize) -> String {
+    if num.is_nan() {
+        return "NaN".to_string();
+    }
+    if num.is_infinite() {
+        return if num < 0.0 { "-Infinity" } else { "Infinity" }.to_string();
+    }
+    // JS switches to exponential form for |num| >= 1e21; defer to default formatting there.
+    if num.abs() >= 1e21 {
+        return format!("{}", num);
+    }
+    let factor = 10f64.powi(digits as i32);
+    let rounded = (num * factor).round() / factor;
+    format!("{:.*}", digits, rounded)
 }
 
 /// `Number.prototype.toString([radix])` — ECMA-262 §21.1.3.6.

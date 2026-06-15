@@ -206,25 +206,59 @@ pub fn parse_int(args: &[Value]) -> Value {
         .first()
         .map(Value::to_display_string)
         .unwrap_or_default();
-    let s = s.trim();
-    let radix = args
-        .get(1)
-        .and_then(|v| match v {
-            Value::Number(n) => Some(*n as i32),
-            _ => None,
-        })
-        .unwrap_or(10);
+    let radix = args.get(1).and_then(|v| match v {
+        Value::Number(n) => Some(*n as i32),
+        _ => None,
+    });
+    Value::Number(js_parse_int(&s, radix))
+}
 
-    if (2..=36).contains(&radix) {
-        let prefix: String = s
-            .chars()
-            .take_while(|c| *c == '-' || *c == '+' || c.is_digit(radix as u32))
-            .collect();
-        if let Ok(n) = i64::from_str_radix(&prefix, radix as u32) {
-            return Value::Number(n as f64);
+/// JS `parseInt(string, radix)` semantics — shared so the tree-walk interpreter (distinct `Value`)
+/// matches the vm/native exactly (#247). Skips leading whitespace + an optional sign, then strips a
+/// leading `0x`/`0X` when radix is 16 (or omitted and the string is hex-prefixed); an omitted radix
+/// otherwise defaults to 10. Reads the longest valid digit prefix (`parseInt("12px") === 12`),
+/// accumulating in f64 to avoid the old i64-overflow `NaN`. `parseInt("0x1F", 16) === 31`.
+pub fn js_parse_int(input: &str, radix_arg: Option<i32>) -> f64 {
+    let s = input.trim_start();
+    let (neg, rest) = if let Some(r) = s.strip_prefix('-') {
+        (true, r)
+    } else if let Some(r) = s.strip_prefix('+') {
+        (false, r)
+    } else {
+        (false, s)
+    };
+    let mut radix = radix_arg.unwrap_or(0);
+    let mut digits = rest;
+    if radix == 16 || radix == 0 {
+        if let Some(r) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+            radix = 16;
+            digits = r;
         }
     }
-    Value::Number(f64::NAN)
+    if radix == 0 {
+        radix = 10;
+    }
+    if !(2..=36).contains(&radix) {
+        return f64::NAN;
+    }
+    let mut acc = 0.0_f64;
+    let mut any = false;
+    for c in digits.chars() {
+        match c.to_digit(radix as u32) {
+            Some(d) => {
+                acc = acc * radix as f64 + d as f64;
+                any = true;
+            }
+            None => break,
+        }
+    }
+    if !any {
+        f64::NAN
+    } else if neg {
+        -acc
+    } else {
+        acc
+    }
 }
 
 /// parseFloat(string)

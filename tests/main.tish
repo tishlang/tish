@@ -1597,6 +1597,50 @@ console.log(sum)
 }
 __perf_run_core_interface_decl()
 
+fn __perf_run_core_jit_shifts() {
+// VM-JIT shift coverage (#168). Shifts live inside LOOP functions so the control-flow JIT
+// (build_body_cfg) compiles them — the realistic hot path. Results must be bit-identical to the
+// interpreter, native, and node. Covers JS count-masking (& 31, incl. i>31 in the loop), signed
+// `>>` (sign-extending), and logical `>>>` past 2^31 (unsigned result). Valid in tish and node.
+
+// FNV-1a-ish: a chain of `<<` + `>>>` accumulated in a hot loop.
+function fnv(n) {
+  let h = 2166136261
+  for (let i = 0; i < n; i = i + 1) {
+    h = h ^ i
+    h = (h + ((h << 1) >>> 0) + ((h << 4) >>> 0) + ((h << 7) >>> 0) + ((h << 8) >>> 0) + ((h << 24) >>> 0)) >>> 0
+  }
+  return h >>> 0
+}
+
+// Signed arithmetic shift of a negative value (sign-extends), count masked to & 15 here.
+function shrSum(n) {
+  let s = 0
+  for (let i = 0; i < n; i = i + 1) { s = s + ((-123456789) >> (i & 15)) }
+  return s
+}
+
+// Logical shift; (-1) >>> k spans 2^32-1 down to 1 — exercises the unsigned->f64 convert.
+function ushrSum(n) {
+  let s = 0
+  for (let i = 0; i < n; i = i + 1) { s = s + ((-1) >>> (i & 31)) }
+  return s
+}
+
+// `1 << i` with i ranging past 31 — exercises JS count masking (i & 31) inside the JIT.
+function shlMask(n) {
+  let s = 0
+  for (let i = 0; i < n; i = i + 1) { s = (s + (1 << i)) | 0 }
+  return s
+}
+
+console.log("fnv", fnv(500))
+console.log("shrSum", shrSum(64))
+console.log("ushrSum", ushrSum(40))
+console.log("shlMask", shlMask(40))
+}
+__perf_run_core_jit_shifts()
+
 fn __perf_run_core_json() {
 // MVP test: JSON.parse and JSON.stringify
 let obj = { x: 1, y: "hi", z: true }
@@ -2972,6 +3016,51 @@ console.log(obj?.a)
 console.log(obj?.c ?? "missing")
 }
 __perf_run_core_optional_chaining()
+
+fn __perf_run_core_parity_array_methods() {
+// #247 feature gaps now implemented across interp/vm/native/cranelift/wasi/js: Array.findLast/
+// findLastIndex, Array.at, String.at (negative index from end; out of range -> null). Valid in
+// tish and node (node's `undefined` for OOB normalizes to tish's `null` in the parity harness).
+let a = [5, 12, 8, 20, 3]
+console.log("findLast-even", a.findLast(x => x % 2 === 0))
+console.log("findLastIndex-even", a.findLastIndex(x => x % 2 === 0))
+console.log("findLast-none", a.findLast(x => x > 99))
+console.log("at0", a.at(0))
+console.log("at-neg1", a.at(-1))
+console.log("at-neg2", a.at(-2))
+console.log("at-oob", a.at(99))
+let s = "world"
+console.log("sat2", s.at(2))
+console.log("sat-neg1", s.at(-1))
+console.log("sat-oob", s.at(99))
+}
+__perf_run_core_parity_array_methods()
+
+fn __perf_run_core_parity_builtins() {
+// #247 cross-backend built-in divergences (Math round/min/max/hypot, parseInt radix, includes(NaN),
+// toFixed) — fixed to match the JS target. interp/vm/native/cranelift/node must all agree. Valid in
+// tish and node. (-0 toString and instanceof/at/findLast tracked separately.)
+console.log("round-neg", Math.round(-2.5))
+console.log("round-pos", Math.round(2.5))
+console.log("round-half", Math.round(0.5))
+console.log("min-empty", Math.min())
+console.log("max-empty", Math.max())
+console.log("min-nan", Math.min(1, 0 / 0))
+console.log("min-vals", Math.min(3, 1, 2))
+console.log("max-vals", Math.max(3, 1, 2))
+console.log("hypot", Math.hypot(3, 4))
+console.log("atan2", Math.atan2(1, 1))
+console.log("includes-nan", [1, 0 / 0].includes(0 / 0))
+console.log("includes-no", [1, 2].includes(3))
+console.log("parseint-hex", parseInt("0x1F", 16))
+console.log("parseint-auto", parseInt("0x1F"))
+console.log("parseint-junk", parseInt("12px"))
+console.log("parseint-neg", parseInt("-0x10", 16))
+console.log("tofixed", (2.5).toFixed(0))
+console.log("tofixed-neg", (-2.5).toFixed(0))
+console.log("tofixed-pi", (3.14159).toFixed(2))
+}
+__perf_run_core_parity_builtins()
 
 fn __perf_run_core_parity_coercion() {
 // Cross-backend parity probe for the classic divergence sources between compilation targets:

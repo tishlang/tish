@@ -376,6 +376,24 @@ pub fn char_at(s: &Value, idx: &Value) -> Value {
     }
 }
 
+/// `String.prototype.at(index)` — like `charAt` but negative `index` counts from the end and an
+/// out-of-range index yields `null` (JS `undefined`), not `""`. #247
+pub fn at(s: &Value, index: &Value) -> Value {
+    if let Value::String(s) = s {
+        let i = match index {
+            Value::Number(n) => *n as i64,
+            _ => 0,
+        };
+        let chars: Vec<char> = s.chars().collect();
+        let len = chars.len() as i64;
+        let idx = if i < 0 { len + i } else { i };
+        if idx >= 0 && idx < len {
+            return Value::String(chars[idx as usize].to_string().into());
+        }
+    }
+    Value::Null
+}
+
 pub fn char_code_at(s: &Value, idx: &Value) -> Value {
     if let Value::String(s) = s {
         let idx = match idx {
