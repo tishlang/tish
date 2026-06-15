@@ -91,15 +91,32 @@ jobs:
             if command -v "$r" >/dev/null; then "$r" --version 2>&1 | head -1; else echo "ABSENT"; fi
           done
 
-      - name: Record full suite (all runtimes, 5 runs)
+      - name: Record full suite (all runtimes, 5 runs) + render markdown
         run: |
           set -euo pipefail
           ref="${{ github.event.inputs.ref || github.event.release.tag_name || '' }}"
           scripts/perf_record.sh \
             --runtimes vm,interp,rust,cranelift,llvm,wasi,node,bun,deno,qjs \
             --runs 5 --timeout 180 ${ref:+--ref "$ref"}
+          newest=$(ls -t perf-history/*.tsv | head -1)
+          scripts/perf_render_md.sh "$newest" > "${newest%.tsv}.md"
+          echo "RECORD_TSV=$newest" >> "$GITHUB_ENV"
+          echo "--- recorded bundle rows (all runtimes) ---"
+          grep '^bundle' "$newest"
 
+      # workflow_dispatch = dry run: prove the full matrix records on CI without touching main.
+      - name: Upload record (dispatch dry-run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-record
+          path: |
+            ${{ env.RECORD_TSV }}
+            ${{ env.RECORD_TSV }}.md
+
+      # Real release: commit the record to perf-history/ on main.
       - name: Commit the record
+        if: github.event_name == 'release'
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
