@@ -232,6 +232,18 @@ pub fn split_limit(s: &Value, sep: &Value, limit: Option<usize>) -> Value {
         if limit == Some(0) {
             return Value::Array(VmRef::new(Vec::new()));
         }
+        // JS `split("")` is special: it yields the string's characters with NO surrounding empties
+        // (`"xyz".split("")` → `["x","y","z"]`, `"".split("")` → `[]`), unlike Rust's `str::split("")`
+        // which emits leading/trailing `""`. (tish splits on `char`s; lone-surrogate behavior for
+        // astral code points is out of scope.) #247
+        if separator.is_empty() {
+            let mut parts: Vec<Value> =
+                s.chars().map(|c| Value::String(c.to_string().into())).collect();
+            if let Some(max) = limit {
+                parts.truncate(max);
+            }
+            return Value::Array(VmRef::new(parts));
+        }
         let mut parts: Vec<Value> = s.split(separator).map(|p| Value::String(p.into())).collect();
         if let Some(max) = limit {
             parts.truncate(max);

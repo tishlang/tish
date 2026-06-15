@@ -276,6 +276,12 @@ pub fn string_split(input: &str, separator: &Value, limit: Option<usize>) -> Val
             parts.push(Value::String(input[last_end..].into()));
             parts
         }
+        // JS `split("")` → the string's chars with no surrounding empties (`"".split("")` → `[]`),
+        // unlike Rust's `str::split("")`. Mirrors `tish_builtins::string::split_limit`. #247
+        Value::String(sep) if sep.is_empty() => input
+            .chars()
+            .map(|c| Value::String(c.to_string().into()))
+            .collect(),
         Value::String(sep) => input
             .split(sep.as_ref())
             .map(|s| Value::String(s.into()))
@@ -283,10 +289,17 @@ pub fn string_split(input: &str, separator: &Value, limit: Option<usize>) -> Val
         Value::Null => vec![Value::String(input.into())],
         _ => {
             let sep_str = separator.to_string();
-            input
-                .split(&sep_str)
-                .map(|s| Value::String(s.into()))
-                .collect()
+            if sep_str.is_empty() {
+                input
+                    .chars()
+                    .map(|c| Value::String(c.to_string().into()))
+                    .collect()
+            } else {
+                input
+                    .split(&sep_str)
+                    .map(|s| Value::String(s.into()))
+                    .collect()
+            }
         }
     };
     result.truncate(max);
