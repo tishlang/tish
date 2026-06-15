@@ -1,5 +1,9 @@
 fnv 3295615320
 mix 3465128608
+nested_boxed -808457272
+nested_unary 0
+nested_pow 247
+deep_boxed 135266822
 neg_xor -8
 mask_big 15
 ushr_signbit 1073741824
