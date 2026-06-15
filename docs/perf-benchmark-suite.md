@@ -1,5 +1,14 @@
 # Performance Benchmark Suite — Overview, Industry Survey & Gap Analysis
 
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
 *Last updated 2026-06-10.* This is the map of **what tish benchmarks, what the JavaScript-engine
 world benchmarks, and what we were missing**. It complements [`perf.md`](perf.md) (the optimization
 log) and [`perf-typed-vs-untyped-baseline.md`](perf-typed-vs-untyped-baseline.md) (the typed-native
@@ -68,7 +77,10 @@ Eleven canonical benchmarks added to `tests/perf/` — each a **single file vali
 node** (node runs it directly), self-timed around the kernel, printing
 `GAUNTLET <name> <ms> <integer-check>`. The check is an integer so the gauntlet can assert
 tish-result == node-result on every backend (catches both correctness regressions and typed-vs-boxed
-divergence). Sources: Are We Fast Yet (AWFY) and the Computer Language Benchmarks Game (CLBG).
+divergence). **Correctness gate:** `scripts/run_perf_gauntlet.sh` asserts `<integer-check>` matches
+node for every fixture on every backend — validated on every run, not a recorded state; a green run
+means it passes **now**, not "passed once". Sources: Are We Fast Yet (AWFY) and the Computer Language
+Benchmarks Game (CLBG).
 
 | Benchmark | Source | Gap it fills | Stresses |
 |---|---|---|---|
@@ -118,6 +130,12 @@ Run `TISH_FAST_NATIVE_BUILD=1 just perf-gauntlet <names…>` — boxed(flags-off
 node V8, min of 2 runs (Apple-silicon, 2026-06-10). `node(ratio)` = typed-on ÷ node; lower is better.
 These are **illustrative/machine-specific diagnostics**, not a committed scoreboard — re-run locally.
 
+> **Snapshot — likely stale, regenerate before citing.** The table below is a one-time capture and
+> drifts the moment the codegen or backends change. Regenerate with
+> `TISH_FAST_NATIVE_BUILD=1 just perf-gauntlet` (wraps `scripts/run_perf_gauntlet.sh`) for the
+> typed-vs-node PASS/FAIL and current ratios; absolute ms are machine/day-specific and not comparable
+> across runs — use `scripts/perf_record.sh` + `scripts/perf_compare.sh` for a noise-floored A/B.
+
 | benchmark | boxed(off) | typed(on) | typing-speedup | node | ratio vs node |
 |---|---|---|---|---|---|
 | json_roundtrip | 404ms | 397ms | 1.02× | 133ms | **3.0×** |
@@ -132,8 +150,10 @@ These are **illustrative/machine-specific diagnostics**, not a committed scorebo
 | nbody | 908ms | 943ms | 0.96× | 12ms | 78.6× |
 | **k_nucleotide** | 16094ms | 15957ms | 1.01× | 9ms | **1773× → 5.6× after the Map fix (Finding 1)** |
 
-All 11 are correctness-clean (typed == boxed == node on every check); all are **slower than V8** — a
-field of gaps to evolve past. Two structural facts jump out:
+Correctness gate (`scripts/run_perf_gauntlet.sh`): typed == boxed == node on every integer check —
+validated on every run, not a recorded state. In this snapshot all 11 were **slower than V8** — a
+field of gaps to evolve past; re-derive the current standing with the gauntlet rather than trusting
+these ratios. Two structural facts jumped out of this snapshot:
 
 1. **The typed-native flags barely move any of them (~1.0×).** The typing work (M1/M4/M5 numeric
    inference) targets scalar/`number[]` kernels; these benchmarks are dominated by **objects, Maps,
@@ -148,8 +168,11 @@ field of gaps to evolve past. Two structural facts jump out:
 
 ### ★★ Finding 1 (headline) — FIXED: `Map`/`Set` were O(n) per operation; now O(1)
 
-`k_nucleotide` was **1773× slower than V8** and the ratio *grew with input size*. A direct scaling
-probe (Map insert+lookup of N entries) confirmed the original super-linear cost, and the fix:
+In this snapshot `k_nucleotide` was **1773× slower than V8** and the ratio *grew with input size*. A
+direct scaling probe (Map insert+lookup of N entries) confirmed the original super-linear cost, and the
+fix. The table below is a point-in-time capture (regenerate the current `k_nucleotide` ratio with
+`just perf-gauntlet k_nucleotide`); the *shape* of the result — flat O(1)/op after the fix vs
+quadrupling-per-doubling before — is the durable claim, the absolute ms are stale-able:
 
 | N | node | tish *before* (O(n)/op) | tish *after* (O(1)/op) |
 |---|---|---|---|
@@ -171,19 +194,20 @@ byte-identical on all backends (interp/vm/native verified) and `cargo test -p ti
 Result: at n=80k, **8166ms → 23ms (~350×)**; `k_nucleotide` **1773× → 5.6× vs V8** (now dominated by
 general object/boxing overhead, Finding 2 — not the Map).
 
-### Finding 2: object-field access in float loops is ~80× off (nbody)
+### Finding 2: object-field access in float loops is the largest gap (nbody, ~80× in snapshot)
 
-`nbody` (78.6×) and `megamorphic` (12.2×) isolate object property access: every field read goes
+`nbody` (78.6× in the §5 snapshot) and `megamorphic` (12.2×) isolate object property access: every field read goes
 through an `Arc<Mutex<PropMap>>` with no shape/inline-cache on the native path. Maps to jsc-bun gap #1
 (shapeless objects) — the same root cause as the Map issue (no hashing/shape specialization).
 
 ### Finding 3: the scalar-float inner loop isn't lowered to a native f64 loop
 
-`mandelbrot` (18.8×), `spectral_norm` (49.8×), `fannkuch` (27.7×) are tight numeric loops where typing
+`mandelbrot` (18.8×), `spectral_norm` (49.8×), `fannkuch` (27.7×) — §5 snapshot ratios — are tight
+numeric loops where typing
 gives ~1.0×. The values stay boxed `Value` through the loop; this is the numeric-JIT / OSR ceiling
 (jsc-bun gap #3, region JIT) — already on the roadmap, now measurable.
 
-### Finding 4: allocation/GC throughput is ~27× off (binary_trees)
+### Finding 4: allocation/GC throughput is a major gap (binary_trees, ~27× in snapshot)
 
 Every tree node is a heap `Arc<Mutex<…>>` object; V8 bump-allocates + generational-GCs. Maps to the
 `Value`-size / object-layout work ([`nan-box-value-plan.md`](nan-box-value-plan.md)).
@@ -203,7 +227,8 @@ we overfit. Finding 1 alone justified the exercise.
 3. **~~Fix `>>>` + sci-notation + comma-declarators~~ ✅ DONE** — all landed across backends; `fnv_hash`
    added (32-bit integer/bitwise dimension now measurable). Next in the bitwise/hashing family: SHA-1 /
    base64. **Open perf item it exposed:** the JIT bails on shifts, so hashing loops run on the VM
-   interpreter (`fnv_hash` ~33× V8); teaching the JIT `<<`/`>>`/`>>>` would close most of it.
+   interpreter (`fnv_hash` ~33× V8 in the §5-era snapshot — recheck with `just perf-gauntlet fnv_hash`);
+teaching the JIT `<<`/`>>`/`>>>` would close most of it.
 4. **Port Richards + DeltaBlue** (AWFY versions, prototype-style) → the canonical megamorphic-dispatch
    macro-benchmarks; the single best signal for object/IC work.
 5. **Add a regex gauntlet program** (regex-dna) → wire the existing regex workload into the vs-node A/B.
