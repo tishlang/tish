@@ -1,0 +1,16 @@
+fnv 3295615320
+mix 3465128608
+neg_xor -8
+mask_big 15
+ushr_signbit 1073741824
+ushr_neg1 4294967295
+shl_31 -2147483648
+shl_wrap 2
+shr_neg -2
+or_zero -559038737
+nan_or 0
+inf_or 0
+neginf_ushr 0
+trunc_pos 3
+trunc_neg -3
+rotate 4286578688

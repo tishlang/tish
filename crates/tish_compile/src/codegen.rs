@@ -6684,6 +6684,70 @@ impl Codegen {
         Ok(())
     }
 
+    /// Lower an expression that JS will coerce to **int32** inside a bitwise/shift computation,
+    /// staying in the integer domain instead of round-tripping every intermediate through `f64`.
+    ///
+    /// Returns `Ok(Some(code))` where `code` is an `i32`-typed Rust expression equal to
+    /// `ToInt32(e)`, or `Ok(None)` if a leaf can't be proven `F64` (then the caller keeps the
+    /// existing per-op lowering — purely additive, never a regression).
+    ///
+    /// This is behaviour-identical to the nested `to_int32`/`to_uint32` lowering: an intermediate
+    /// `(i32 as f64)` immediately re-narrowed by `to_int32` is exact (every `i32` is representable
+    /// in `f64`, and `to_int32` of a finite value recovers it), so erasing it changes nothing but
+    /// the round-trips. Crucially, only bitwise/shift nodes recurse — an `f64` `*`/`+`/`-` node is
+    /// a *leaf* here, so e.g. `(h * 16777619) >>> 0` keeps its `f64` multiply (the 2^53 rule: the
+    /// product exceeds 2^53 and must round in `f64` *before* `ToUint32`, exactly as V8 does).
+    fn emit_int32_operand(&mut self, e: &Expr) -> Result<Option<String>, CompileError> {
+        if let Expr::Binary {
+            left, op, right, ..
+        } = e
+        {
+            let bitwise = matches!(
+                op,
+                BinOp::BitAnd
+                    | BinOp::BitOr
+                    | BinOp::BitXor
+                    | BinOp::Shl
+                    | BinOp::Shr
+                    | BinOp::UShr
+            );
+            if bitwise {
+                let li = match self.emit_int32_operand(left)? {
+                    Some(c) => c,
+                    None => return Ok(None),
+                };
+                let ri = match self.emit_int32_operand(right)? {
+                    Some(c) => c,
+                    None => return Ok(None),
+                };
+                // Shift counts: `(ri as u32)` shares its low 5 bits with `to_uint32(rhs)`, and
+                // `wrapping_sh*` masks the count mod 32 — exactly JS's `count & 31`.
+                let code = match op {
+                    BinOp::BitAnd => format!("({} & {})", li, ri),
+                    BinOp::BitOr => format!("({} | {})", li, ri),
+                    BinOp::BitXor => format!("({} ^ {})", li, ri),
+                    BinOp::Shl => format!("({}).wrapping_shl(({}) as u32)", li, ri),
+                    BinOp::Shr => format!("({}).wrapping_shr(({}) as u32)", li, ri),
+                    // `>>>` is a logical shift on the uint32 view; reinterpret back to `i32` to
+                    // stay in the integer domain (the unsigned value is recovered at the f64 edge).
+                    BinOp::UShr => {
+                        format!("((({}) as u32).wrapping_shr(({}) as u32) as i32)", li, ri)
+                    }
+                    _ => unreachable!(),
+                };
+                return Ok(Some(code));
+            }
+        }
+        // Leaf: fold only when it is a plain `f64` (so `to_int32` applies directly). `to_int32`
+        // keeps its `is_finite` guard here — a leaf may legitimately be NaN/±Infinity (→ 0).
+        let (code, ty) = self.emit_typed_expr(e)?;
+        if ty == RustType::F64 {
+            Ok(Some(format!("tishlang_runtime::to_int32({})", code)))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn emit_typed_expr(&mut self, expr: &Expr) -> Result<(String, RustType), CompileError> {
         match expr {
             // ── literals ─────────────────────────────────────────────────────────
@@ -6728,6 +6792,32 @@ impl Codegen {
                 let (r, rt) = self.emit_typed_expr(right)?;
 
                 if let Some(result_ty) = RustType::result_type_of_binop(*op, &lt, &rt) {
+                    // Bitwise/shift over numbers: lower the *whole* chain in the int32 domain so
+                    // intermediate `to_int32`/`to_uint32`↔`f64` round-trips collapse (the win `>>>`
+                    // exists for — crypto/hashing loops). Only fires when every leaf proves `f64`;
+                    // otherwise we fall through to the per-op lowering below. Behaviour-identical
+                    // (see `emit_int32_operand`), and the gauntlet's `typed == boxed == node` check
+                    // gates any divergence.
+                    if matches!(
+                        op,
+                        BinOp::BitAnd
+                            | BinOp::BitOr
+                            | BinOp::BitXor
+                            | BinOp::Shl
+                            | BinOp::Shr
+                            | BinOp::UShr
+                    ) && result_ty == RustType::F64
+                    {
+                        if let Some(int_code) = self.emit_int32_operand(expr)? {
+                            // `>>>` yields a uint32 Number; the others yield a signed int32 Number.
+                            let f64_code = if matches!(op, BinOp::UShr) {
+                                format!("(({}) as u32 as f64)", int_code)
+                            } else {
+                                format!("(({}) as f64)", int_code)
+                            };
+                            return Ok((f64_code, RustType::F64));
+                        }
+                    }
                     // Both sides are compatible native types → emit native op.
                     let code = match op {
                         BinOp::Add if result_ty == RustType::String => {
