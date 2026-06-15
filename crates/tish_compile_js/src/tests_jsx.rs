@@ -434,4 +434,25 @@ fn factory() {
         assert!(js.contains("==="), "non-null `===` must stay strict:\n{js}");
         assert!(js.contains("!=="), "non-null `!==` must stay strict:\n{js}");
     }
+
+    // `typeof null` is "null" in tish (interp/vm/native agree — null is a first-class type), not JS's
+    // `typeof null === "object"` wart. The JS backend must map a nullish operand to "null".
+    #[test]
+    fn typeof_null_emits_null_not_object() {
+        let program = parse("console.log(typeof null)\n").unwrap();
+        let js = crate::compile(&program, false).unwrap();
+        assert!(!js.contains("(typeof null)"), "must not emit raw `typeof null`:\n{js}");
+        assert!(js.contains("\"null\""), "typeof of a nullish value must yield \"null\":\n{js}");
+    }
+
+    // 1/0 and -1/0 fold to Infinity / -Infinity; emit the JS spellings, not Rust's `inf` / `-inf`
+    // (which would be undefined identifiers in the output).
+    #[test]
+    fn non_finite_number_literals_use_js_spellings() {
+        let pos = crate::compile(&parse("console.log(1 / 0)\n").unwrap(), true).unwrap();
+        assert!(pos.contains("Infinity"), "1/0 must emit Infinity:\n{pos}");
+        assert!(!pos.contains("inf"), "must not emit Rust's lowercase `inf`:\n{pos}");
+        let neg = crate::compile(&parse("console.log(-1 / 0)\n").unwrap(), true).unwrap();
+        assert!(neg.contains("-Infinity"), "-1/0 must emit -Infinity:\n{neg}");
+    }
 }
