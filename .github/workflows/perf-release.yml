@@ -17,11 +17,19 @@ on:
         description: "Tag/ref to record (default: latest release tag)"
         required: false
         type: string
+  # Self-test: run the full matrix on PRs that touch the perf tooling itself, so a change to this
+  # workflow or the perf scripts is proven on CI (uploads an artifact, never commits to main).
+  pull_request:
+    paths:
+      - .github/workflows/perf-release.yml
+      - scripts/perf_record.sh
+      - scripts/perf_render_md.sh
+      - scripts/run_performance_suite.sh
 
-# Share perf-history.yml's group so the two recorders serialise on the perf-history/ commit and
-# never race a push. Never cancel an in-flight recording.
+# Release records push to main, so serialise those with perf-history.yml (shared group). PR/dispatch
+# self-tests don't push — give them a per-ref group so they never block a real recording.
 concurrency:
-  group: perf-history
+  group: ${{ github.event_name == 'release' && 'perf-history' || format('perf-release-{0}', github.ref) }}
   cancel-in-progress: false
 
 permissions:
@@ -104,9 +112,10 @@ jobs:
           echo "--- recorded bundle rows (all runtimes) ---"
           grep '^bundle' "$newest"
 
-      # workflow_dispatch = dry run: prove the full matrix records on CI without touching main.
-      - name: Upload record (dispatch dry-run)
-        if: github.event_name == 'workflow_dispatch'
+      # PR self-test / manual dispatch = dry run: prove the full matrix records on CI without
+      # touching main. Only a real `release` event commits the record.
+      - name: Upload record (dry-run)
+        if: github.event_name != 'release'
         uses: actions/upload-artifact@v4
         with:
           name: perf-record
