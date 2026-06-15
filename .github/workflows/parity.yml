@@ -1,0 +1,62 @@
+# Cross-backend differential parity gate. Runs every tests/core fixture on the interpreter, the
+# bytecode VM, and node (via each fixture's `.js` twin) and fails if any of them diverges from the
+# interpreter reference. This catches the two scariest classes of bug directly and in parallel with
+# the rest of CI:
+#   * a pure-backend disagreement (interp != vm) — e.g. the do-while `continue` crash, the
+#     split-with-limit divergence;
+#   * a tish-vs-JS-runtime divergence (node twin != interp) — e.g. `typeof null`, `=== null`,
+#     `(255).toString(16)` emitting invalid JS.
+#
+# The compiled backends (native rust/cranelift, wasi, tish->js) are gated per fixture against the
+# same `.expected` by `cargo test` (test_mvp_programs_{native,cranelift,wasi,js}), so "every compiler
+# agrees with the interpreter" is already covered there; this job adds the fast, no-per-fixture-build
+# differential view. llvm + wasi (extra installs) are exercised by run_parity_compare.sh locally and
+# the bundled perf suite.
+name: Parity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: parity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cross-backend:
+    name: Cross-backend differential parity
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # Fleet-safe target-cpu (#223): avoids the SIGILL the default `native` causes on the
+      # virtualized fleet when building the tish binary.
+      RUSTFLAGS: "-C target-cpu=x86-64-v3"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build tish
+        run: cargo build -p tishlang --bin tish
+
+      - name: Cross-backend parity (interp == vm == node)
+        run: |
+          set -euo pipefail
+          scripts/run_parity_compare.sh \
+            --reference interp \
+            --runtimes interp,vm,node

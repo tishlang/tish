@@ -128,8 +128,8 @@ normalize_timing() {
 # Build tish
 if [[ ! -x "$tish_bin" ]]; then
   echo "Building tish ($profile)..."
-  cargo build -p tishlang--target-dir "$target_dir" -q 2>/dev/null || true
-  [[ ! -x "$tish_bin" ]] && tish_bin="cargo run -p tishlang--target-dir $target_dir -q --"
+  cargo build -p tishlang --target-dir "$target_dir" -q 2>/dev/null || true
+  [[ ! -x "$tish_bin" ]] && tish_bin="cargo run -p tishlang --target-dir $target_dir -q --"
 fi
 
 echo "=== Tish Parity Compare ==="
@@ -143,10 +143,24 @@ fail_count=0
 pass_count=0
 skip_count=0
 
+# Timing/stress/diagnostic fixtures whose stdout is nondeterministic or backend-specific BY DESIGN
+# (self-timed loops, JIT probes, pathological recursion that hits a backend's stack limit). They are
+# not cross-backend parity bugs. Mirrors TIMING_NONDETERMINISTIC in
+# crates/tish/tests/integration_test.rs and the exclusions in generate_perf_ci_main.sh.
+parity_skip=" array_stress array_stress_01_large_array_creation array_stress_02_iteration \
+array_stress_03_map_filter_reduce array_stress_04_chained array_stress_05_sorting \
+array_stress_06_search array_stress_07_splice_slice array_stress_08_concat_spread \
+array_stress_09_flat array_stress_10_objects basic_types benchmark_granular new_features_perf \
+object_stress objects_perf string_methods_perf recursion_stress jit_probe jit_regression "
+
 for f in "$core_dir"/*.tish; do
   [[ -f "$f" ]] || continue
   base=$(basename "$f" .tish)
   [[ -n "$filter_name" && "$base" != *"$filter_name"* ]] && continue
+  if [[ "$parity_skip" == *" $base "* ]]; then
+    skip_count=$((skip_count + 1))
+    continue
+  fi
   js_file="$core_dir/$base.js"
   [[ -f "$js_file" ]] || continue
 

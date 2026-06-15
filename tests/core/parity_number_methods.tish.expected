@@ -1,0 +1,10 @@
+hex ff
+bin 11111111
+dec 10
+fixed 3.14
+fixed1 10.0
+neg -5
+folded-bin 11001000
+folded-hex ff
+big 1000000
+chained FF

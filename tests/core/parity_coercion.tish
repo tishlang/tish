@@ -1,0 +1,38 @@
+// Cross-backend parity probe for the classic divergence sources between compilation targets:
+// typeof, value-to-string coercion, nullish/absent reads, numeric formatting, and equality edges.
+// Every backend (interp/vm/native/cranelift/llvm/wasi) and node must agree. Valid in tish and node.
+
+// --- typeof across types ---
+console.log("ty-num", typeof 1)
+console.log("ty-str", typeof "a")
+console.log("ty-bool", typeof true)
+console.log("ty-null", typeof null)
+console.log("ty-obj", typeof { a: 1 })
+console.log("ty-arr", typeof [1, 2])
+
+// --- value-to-string coercion (concat + template) ---
+console.log("cat-null", "x" + null)
+console.log("cat-bool", "x" + true)
+console.log("cat-num", "x" + 5)
+console.log("cat-arr", "x" + [1, 2, 3])
+console.log("tpl", `n=${null} b=${false} a=${[1, 2]}`)
+
+// --- nullish / absent reads (no undefined in tish) ---
+let o = { a: 1 }
+console.log("missing-prop", o.b === null)
+console.log("oob-index", [10, 20][5] === null)
+console.log("str-of-null", String(null))
+
+// --- numeric formatting + special values ---
+console.log("float", 0.1 + 0.2)
+console.log("bigint-ish", 10000000000 * 3)
+console.log("inf", 1 / 0)
+console.log("ninf", -1 / 0)
+console.log("nan-str", String(0 / 0))
+console.log("neg-zero-eq", (-0) === 0)
+console.log("nan-eq", (0 / 0) === (0 / 0))
+
+// --- integer / bitwise (32-bit semantics) ---
+console.log("shift", 1 << 30)
+console.log("ushr", (-1) >>> 0)
+console.log("bitand", 0xff & 0x0f)

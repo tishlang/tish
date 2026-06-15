@@ -2973,6 +2973,85 @@ console.log(obj?.c ?? "missing")
 }
 __perf_run_core_optional_chaining()
 
+fn __perf_run_core_parity_coercion() {
+// Cross-backend parity probe for the classic divergence sources between compilation targets:
+// typeof, value-to-string coercion, nullish/absent reads, numeric formatting, and equality edges.
+// Every backend (interp/vm/native/cranelift/llvm/wasi) and node must agree. Valid in tish and node.
+
+// --- typeof across types ---
+console.log("ty-num", typeof 1)
+console.log("ty-str", typeof "a")
+console.log("ty-bool", typeof true)
+console.log("ty-null", typeof null)
+console.log("ty-obj", typeof { a: 1 })
+console.log("ty-arr", typeof [1, 2])
+
+// --- value-to-string coercion (concat + template) ---
+console.log("cat-null", "x" + null)
+console.log("cat-bool", "x" + true)
+console.log("cat-num", "x" + 5)
+console.log("cat-arr", "x" + [1, 2, 3])
+console.log("tpl", `n=${null} b=${false} a=${[1, 2]}`)
+
+// --- nullish / absent reads (no undefined in tish) ---
+let o = { a: 1 }
+console.log("missing-prop", o.b === null)
+console.log("oob-index", [10, 20][5] === null)
+console.log("str-of-null", String(null))
+
+// --- numeric formatting + special values ---
+console.log("float", 0.1 + 0.2)
+console.log("bigint-ish", 10000000000 * 3)
+console.log("inf", 1 / 0)
+console.log("ninf", -1 / 0)
+console.log("nan-str", String(0 / 0))
+console.log("neg-zero-eq", (-0) === 0)
+console.log("nan-eq", (0 / 0) === (0 / 0))
+
+// --- integer / bitwise (32-bit semantics) ---
+console.log("shift", 1 << 30)
+console.log("ushr", (-1) >>> 0)
+console.log("bitand", 0xff & 0x0f)
+}
+__perf_run_core_parity_coercion()
+
+fn __perf_run_core_parity_number_methods() {
+// Cross-backend parity: member access / method calls on numeric literals. `(255).toString(16)` must
+// compile to valid JS — emitting `255.toString(16)` is a JS syntax error (the lexer reads `255.` as
+// a float). The parens must be preserved for integer literals (and folded integer constants). Every
+// backend (interp/vm/native/cranelift/wasi/js) must agree with node. Valid in tish and node.
+
+console.log("hex", (255).toString(16))
+console.log("bin", (255).toString(2))
+console.log("dec", (10).toString())
+console.log("fixed", (3.14159).toFixed(2))
+console.log("fixed1", (10).toFixed(1))
+console.log("neg", (-5).toString())
+console.log("folded-bin", (100 * 2).toString(2))
+console.log("folded-hex", (16 * 16 - 1).toString(16))
+console.log("big", (1000000).toString())
+console.log("chained", (255).toString(16).toUpperCase())
+}
+__perf_run_core_parity_number_methods()
+
+fn __perf_run_core_parity_split() {
+// Cross-backend parity: String.prototype.split(sep, limit). The `limit` argument must truncate the
+// result to the first N pieces (JS semantics) — NOT keep the unsplit remainder in the last slot
+// (Rust `splitn`) and NOT be ignored. Previously interp, vm, and the native backends each did this
+// differently; now interp/vm/native/cranelift/wasi/js all agree with node. Valid in tish and node.
+
+console.log("limit2", JSON.stringify("a,b,c,d".split(",", 2)))
+console.log("nolimit", JSON.stringify("a,b,c,d".split(",")))
+console.log("limit0", JSON.stringify("a,b,c,d".split(",", 0)))
+console.log("over", JSON.stringify("a,b,c,d".split(",", 10)))
+console.log("space2", JSON.stringify("one two three".split(" ", 2)))
+console.log("single", JSON.stringify("x".split(",", 1)))
+console.log("empty-parts", JSON.stringify("a,,b".split(",", 2)))
+console.log("multichar", JSON.stringify("a::b::c".split("::", 2)))
+console.log("limit1", JSON.stringify("a,b,c".split(",", 1)))
+}
+__perf_run_core_parity_split()
+
 fn __perf_run_core_rest_param_empty() {
 // Regression: a rest parameter called with NO trailing args must bind to an
 // empty array (`[]`), so `for-of` over it runs zero times. The bytecode VM used
