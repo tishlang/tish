@@ -57,8 +57,9 @@ pub use tishlang_builtins::collections::{
 
 // Re-export array methods from tishlang_builtins
 pub use tishlang_builtins::array::{
-    concat as array_concat_impl, every as array_every, filter as array_filter, find as array_find,
-    find_index as array_find_index, flat as array_flat_impl, flat_map as array_flat_map,
+    at as array_at, concat as array_concat_impl, every as array_every, filter as array_filter,
+    find as array_find, find_index as array_find_index, find_last as array_find_last,
+    find_last_index as array_find_last_index, flat as array_flat_impl, flat_map as array_flat_map,
     for_each as array_for_each, includes as array_includes_impl, index_of as array_index_of_impl,
     join as array_join_impl, map as array_map, pop as array_pop, push as array_push_impl,
     fill as array_fill, reduce as array_reduce, reverse as array_reverse, shift as array_shift,
@@ -71,7 +72,7 @@ pub use tishlang_builtins::array::{
 
 // Re-export string methods from tishlang_builtins
 pub use tishlang_builtins::string::{
-    char_at as string_char_at_impl, char_code_at as string_char_code_at_impl,
+    at as string_at_impl, char_at as string_char_at_impl, char_code_at as string_char_code_at_impl,
     ends_with as string_ends_with_impl, escape_html as string_escape_html_impl,
     includes as string_includes_impl, index_of as string_index_of_impl,
     last_index_of as string_last_index_of_impl, pad_end as string_pad_end_impl,
@@ -167,6 +168,17 @@ pub fn string_replace_all(s: &Value, search: &Value, replacement: &Value) -> Val
 }
 pub fn string_char_at(s: &Value, idx: &Value) -> Value {
     string_char_at_impl(s, idx)
+}
+pub fn string_at(s: &Value, idx: &Value) -> Value {
+    string_at_impl(s, idx)
+}
+/// `.at(i)` dispatched on the runtime value — `at` exists on both String and Array, and the native
+/// method match is by name (not receiver type), so route here at runtime. #247
+pub fn value_at(recv: &Value, idx: &Value) -> Value {
+    match recv {
+        Value::String(_) => string_at_impl(recv, idx),
+        _ => array_at(recv, idx),
+    }
 }
 pub fn string_char_code_at(s: &Value, idx: &Value) -> Value {
     string_char_code_at_impl(s, idx)

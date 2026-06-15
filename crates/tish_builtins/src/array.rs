@@ -466,6 +466,83 @@ pub fn find_index(arr: &Value, callback: &Value) -> Value {
     Value::Number(-1.0)
 }
 
+/// `Array.prototype.findLast` — like [`find`] but iterates from the end; the callback still receives
+/// the original index. Returns `null` (JS `undefined`) when nothing matches. #247
+pub fn find_last(arr: &Value, callback: &Value) -> Value {
+    if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        for i in (0..data.len()).rev() {
+            if cb
+                .call(&[Value::Number(data[i]), Value::Number(i as f64)])
+                .is_truthy()
+            {
+                return Value::Number(data[i]);
+            }
+        }
+        return Value::Null;
+    }
+    let arr = as_boxed_array(arr);
+    let arr = &*arr;
+    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
+        let arr_borrow = arr.borrow();
+        for i in (0..arr_borrow.len()).rev() {
+            let v = &arr_borrow[i];
+            if cb.call(&[v.clone(), Value::Number(i as f64)]).is_truthy() {
+                return v.clone();
+            }
+        }
+    }
+    Value::Null
+}
+
+/// `Array.prototype.findLastIndex` — like [`find_index`] but from the end; `-1` if no match. #247
+pub fn find_last_index(arr: &Value, callback: &Value) -> Value {
+    if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        for i in (0..data.len()).rev() {
+            if cb
+                .call(&[Value::Number(data[i]), Value::Number(i as f64)])
+                .is_truthy()
+            {
+                return Value::Number(i as f64);
+            }
+        }
+        return Value::Number(-1.0);
+    }
+    let arr = as_boxed_array(arr);
+    let arr = &*arr;
+    if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
+        let arr_borrow = arr.borrow();
+        for i in (0..arr_borrow.len()).rev() {
+            if cb
+                .call(&[arr_borrow[i].clone(), Value::Number(i as f64)])
+                .is_truthy()
+            {
+                return Value::Number(i as f64);
+            }
+        }
+    }
+    Value::Number(-1.0)
+}
+
+/// `Array.prototype.at(index)` — negative `index` counts from the end; out of range → `null`
+/// (JS `undefined`). A non-numeric index is `ToInteger`'d to 0, like JS. #247
+pub fn at(arr: &Value, index: &Value) -> Value {
+    let i = match index {
+        Value::Number(n) => *n as i64,
+        _ => 0,
+    };
+    let arr = as_boxed_array(arr);
+    let arr = &*arr;
+    if let Value::Array(arr) = arr {
+        let arr_borrow = arr.borrow();
+        let len = arr_borrow.len() as i64;
+        let idx = if i < 0 { len + i } else { i };
+        if idx >= 0 && idx < len {
+            return arr_borrow[idx as usize].clone();
+        }
+    }
+    Value::Null
+}
+
 pub fn some(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
         for (i, &n) in data.iter().enumerate() {

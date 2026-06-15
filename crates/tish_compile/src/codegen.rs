@@ -3504,6 +3504,15 @@ impl Codegen {
                                 obj_expr, idx
                             ));
                         }
+                        "at" => {
+                            // `at` is on both String and Array; this match is by method name, so
+                            // dispatch on the runtime value type (#247).
+                            let idx = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::value_at(&{}, &{})",
+                                obj_expr, idx
+                            ));
+                        }
                         "charCodeAt" => {
                             let idx = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             return Ok(format!(
@@ -3602,6 +3611,20 @@ impl Codegen {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
                                 "tishlang_runtime::array_find_index(&{}, &{})",
+                                obj_expr, callback
+                            ));
+                        }
+                        "findLast" => {
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::array_find_last(&{}, &{})",
+                                obj_expr, callback
+                            ));
+                        }
+                        "findLastIndex" => {
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::array_find_last_index(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
