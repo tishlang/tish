@@ -1,5 +1,14 @@
 # Plan: make cranelift + wasi full-capability backends (paired via C-ABI FFI; wasi on the WASI ecosystem)
 
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
 **Status:** plan (2026-06). Goal: cranelift, llvm, and wasi run *everything* the vm/rust backends run,
 the only deliberate exception being Rust-crate inclusion (`cargo:`). Native extensions are paired
 across all backends through a C-ABI/`extern "C"` mechanism instead of Rust-crate linking, and wasi
@@ -37,9 +46,13 @@ So the plan is three workstreams, in ROI order:
 The interpreter proves the language semantics; the work is bringing `tish_bytecode` (compiler) +
 `tish_vm` (runtime) up to it. Every fix here auto-applies to vm, cranelift, llvm, and wasi.
 
-> **STATUS — A1 + A2 LANDED (2026-06-05).** Full **interp↔vm parity across all 66 discovered core
-> tests, zero skips** (`VM_PARITY_SKIP` is now empty). Each fix was verified to inherit to **cranelift**
-> by building+running the actual backend (all 7 former reds pass). The 6 gaps closed:
+> **STATUS — A1 + A2 work landed (snapshot 2026-06-05; re-validate, do not trust).**
+> **Parity gate (validated every run, not a recorded state):** `scripts/run_parity_compare.sh`
+> reports interp↔vm matching across all discovered core tests with zero skips (and `cargo test
+> -p tish test_mvp_programs_cranelift` green so the fixes inherit to cranelift). The pass count
+> below ("66 tests, 7 former reds") is a point-in-time snapshot that drifts as tests are added —
+> regenerate with `scripts/run_parity_compare.sh --runtimes interp,vm` rather than trusting the
+> number. The 6 gaps closed:
 > - **number_tofixed** — added `Value::Number` arm to `get_member`; canonical `tishlang_builtins::number::to_fixed`
 >   (runtime `number_to_fixed` + the interp route through it — single source of truth).
 > - **array_sort_splice** — the fused `ArraySortByProperty` getter (`tish_builtins::array::get_prop_number`)
@@ -89,7 +102,11 @@ The interpreter proves the language semantics; the work is bringing `tish_byteco
 - Minor: confirm `console.debug`, `Object.keys/values`, `Array.isArray`, `Math.pow/sin/...` are all on
   the VM (the agent found most already are; the gap-analysis doc is partly stale — verify, don't assume).
 
-**A3 — test harness: cranelift/wasi → file discovery.** — *DONE 2026-06-05 (both pass 66/66 via discovery).*
+**A3 — test harness: cranelift/wasi → file discovery.** — *landed 2026-06-05.* **Acceptance gate
+(validated every run, not a recorded state):** `cargo test -p tish test_mvp_programs_cranelift` and
+`test_mvp_programs_wasi` pass over `discover_core_tests()` (no curated allowlist); cross-check with
+`scripts/run_parity_compare.sh --runtimes interp,cranelift,wasi`. The "both pass 66/66" figure is a
+snapshot that drifts as the corpus grows — regenerate, don't trust it.
 
 Three fixes made it work: (a) **shared target dir** (`tish_cranelift/link.rs`, `tish_wasm/lib.rs`) so deps
 compile once — bounded disk; (b) **unique per-program package name** for cranelift (was the fixed
@@ -103,13 +120,17 @@ binary mtime** (`compile_cached`) so a VM/codegen edit invalidates stale craneli
   hit **134 GB / `ENOSPC`**. Fix: build into a **shared** target dir (`tish_cranelift/src/link.rs` →
   `run_cargo_build(.., Some(temp/tishlang_cranelift_target), ..)`; `tish_wasm/src/lib.rs` → shared
   `tishlang_wasi_target`). The heavy deps now compile ONCE and are reused; only each program's tiny main +
-  object/chunk rebuilds. Measured: full 66-file cranelift sweep = **610 MB** target (was 134 GB) and a 2nd
-  build is **~1 s** (deps cached). cargo's target lock + the nested-cargo mutex serialize concurrent builds
+  object/chunk rebuilds. *Snapshot (regenerate, do not trust — re-measure with `du -sh` on the shared
+  target after `cargo test -p tish test_mvp_programs_cranelift`):* a full cranelift sweep measured
+  ~610 MB target (down from ~134 GB) with a warm 2nd build of ~1 s (deps cached); these are
+  point-in-time, machine-specific, and stale the moment deps or the corpus change. cargo's target lock + the nested-cargo mutex serialize concurrent builds
   safely. (llvm uses clang, not a per-program cargo target — no change needed.)
-- **Correctness: cranelift passes all 66 discovered tests (66/66)** — full VM-parity inheritance confirmed by
-  the disk-safe sweep. So cranelift's skip set is empty; the test moves from the curated `CRANELIFT_TEST_FILES`
-  to `discover_core_tests()`. (wasi: same sweep determines its skip set — e.g. regex if the wasi build omits
-  the feature.)
+- **Correctness gate (validated every run, not a recorded state):** `cargo test -p tish
+  test_mvp_programs_cranelift` (over `discover_core_tests()`, no curated allowlist) must be green, i.e.
+  cranelift inherits VM parity with an empty skip set; cross-check with `scripts/run_parity_compare.sh
+  --reference interp --runtimes cranelift`. The "all 66 / 66/66" figure is a snapshot that drifts as the
+  corpus grows — regenerate, don't trust it. (wasi: same gate via `test_mvp_programs_wasi` determines its
+  skip set — e.g. regex if the wasi build omits the feature.)
 - Timing/perf/probe files (`*_stress`, `*_perf`, `jit_probe`, `benchmark_granular`) stay excluded
   always (nondeterministic ms output), independent of VM correctness.
 
