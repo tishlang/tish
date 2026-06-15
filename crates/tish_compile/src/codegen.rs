@@ -1343,23 +1343,27 @@ impl Codegen {
 
     /// Generate code for a bitwise binary operation (`& | ^`). `to_int32` is JS ToInt32
     /// (modulo 2³², NaN/±Infinity → 0) — out-of-range operands wrap, not saturate.
+    /// Boxed/`Value`-path bitwise op (`& | ^`). Uses the `*_value(&Value)` coercion helpers rather
+    /// than a `let Value::Number(a) = &(..) else { panic!() }` block: the block bound `a`/`b`, so a
+    /// nested bitwise operand (whose block *also* binds `a`/`b`) shadowed the outer binding and the
+    /// generated code failed to compile (`error[E0308]`, `&&f64` vs `Value`). The helpers bind no
+    /// name, so the ops compose at any nesting depth, and they coerce non-numbers to `NaN` (→ `0`)
+    /// exactly like the interpreter/VM instead of panicking.
     fn emit_bitwise_binop(l: &str, r: &str, op: &str) -> String {
         format!(
-            "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
-             let Value::Number(b) = &({}) else {{ panic!() }}; (tishlang_runtime::to_int32(*a) {} tishlang_runtime::to_int32(*b)) as f64 }})",
-            l, r, op
+            "Value::Number((tishlang_runtime::to_int32_value(&({})) {} tishlang_runtime::to_int32_value(&({}))) as f64)",
+            l, op, r
         )
     }
 
-    /// Generate code for a shift (`<< >> >>>`). `a_to` is the left-operand coercion
-    /// (`to_int32` signed, `to_uint32` for the logical `>>>`); `method` is the `wrapping_sh*`
-    /// call. Counts go through `to_uint32` then mask to 5 bits — exact JS semantics, panic-free.
+    /// Boxed/`Value`-path shift (`<< >> >>>`). `a_to` is the left-operand coercion helper
+    /// (`to_int32_value` signed, `to_uint32_value` for the logical `>>>`); `method` is the
+    /// `wrapping_sh*` call. Counts go through `to_uint32_value` then mask to 5 bits — exact JS
+    /// semantics, panic-free, and composable (no name binding — see `emit_bitwise_binop`).
     fn emit_shift_binop(l: &str, r: &str, a_to: &str, method: &str) -> String {
         format!(
-            "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
-             let Value::Number(b) = &({}) else {{ panic!() }}; \
-             tishlang_runtime::{}(*a).{}(tishlang_runtime::to_uint32(*b)) as f64 }})",
-            l, r, a_to, method
+            "Value::Number(tishlang_runtime::{}(&({})).{}(tishlang_runtime::to_uint32_value(&({}))) as f64)",
+            a_to, l, method, r
         )
     }
 
@@ -3218,16 +3222,17 @@ impl Codegen {
                 let o = self.emit_expr(operand)?;
                 match op {
                     UnaryOp::Not => format!("Value::Bool(!{}.is_truthy())", o),
-                    UnaryOp::Neg => format!(
-                        "Value::Number({{ let Value::Number(n) = &({}) else {{ panic!(\"Expected number\") }}; -n }})",
-                        o
-                    ),
-                    UnaryOp::Pos => format!(
-                        "Value::Number({{ let Value::Number(n) = &({}) else {{ panic!(\"Expected number\") }}; *n }})",
-                        o
-                    ),
+                    // `*_value(&Value)` coercion (no name binding) so unary ops compose over nested
+                    // bitwise/unary operands without the `let Value::Number(n) = &(..)` shadowing
+                    // miscompile, and coerce non-numbers to `NaN` like the interpreter/VM.
+                    UnaryOp::Neg => {
+                        format!("Value::Number(-tishlang_runtime::to_number_value(&({})))", o)
+                    }
+                    UnaryOp::Pos => {
+                        format!("Value::Number(tishlang_runtime::to_number_value(&({})))", o)
+                    }
                     UnaryOp::BitNot => format!(
-                        "Value::Number({{ let Value::Number(n) = &({}) else {{ panic!(\"Expected number\") }}; (!tishlang_runtime::to_int32(*n)) as f64 }})",
+                        "Value::Number((!tishlang_runtime::to_int32_value(&({}))) as f64)",
                         o
                     ),
                     UnaryOp::Void => format!("{{ {}; Value::Null }}", o),
@@ -7429,8 +7434,7 @@ impl Codegen {
                 l, r
             ),
             BinOp::Pow => format!(
-                "Value::Number({{ let Value::Number(a) = &({}) else {{ panic!() }}; \
-                 let Value::Number(b) = &({}) else {{ panic!() }}; a.powf(*b) }})",
+                "Value::Number(tishlang_runtime::to_number_value(&({})).powf(tishlang_runtime::to_number_value(&({}))))",
                 l, r
             ),
             BinOp::StrictEq => format!("Value::Bool({}.strict_eq(&{}))", l, r),
@@ -7448,9 +7452,9 @@ impl Codegen {
             BinOp::BitAnd => Self::emit_bitwise_binop(l, r, "&"),
             BinOp::BitOr => Self::emit_bitwise_binop(l, r, "|"),
             BinOp::BitXor => Self::emit_bitwise_binop(l, r, "^"),
-            BinOp::Shl => Self::emit_shift_binop(l, r, "to_int32", "wrapping_shl"),
-            BinOp::Shr => Self::emit_shift_binop(l, r, "to_int32", "wrapping_shr"),
-            BinOp::UShr => Self::emit_shift_binop(l, r, "to_uint32", "wrapping_shr"),
+            BinOp::Shl => Self::emit_shift_binop(l, r, "to_int32_value", "wrapping_shl"),
+            BinOp::Shr => Self::emit_shift_binop(l, r, "to_int32_value", "wrapping_shr"),
+            BinOp::UShr => Self::emit_shift_binop(l, r, "to_uint32_value", "wrapping_shr"),
             BinOp::In => format!("tish_in_operator(&{}, &{})", l, r),
             BinOp::Eq | BinOp::Ne => {
                 return Err(CompileError::new(

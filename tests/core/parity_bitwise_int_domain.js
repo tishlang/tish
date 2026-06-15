@@ -31,8 +31,23 @@ function mix(n) {
   return acc >>> 0
 }
 
+// Untyped-param nested bitwise/unary/pow: these go through the BOXED/Value native path
+// (`emit_bitwise_binop`/`emit_shift_binop`/unary/Pow), which previously generated
+// `let Value::Number(a) = &(..)` blocks that shadowed across nesting and failed to compile
+// (`error[E0308]`). Called with numeric args so every backend (incl. node) agrees.
+function nested_boxed(a, b) { return ((a ^ b) << 3) | ((a & b) >>> 1) }
+function nested_unary(a) { return ~(~a | 0) ^ -(-a) }
+function nested_pow(a, b) { return (a ** b) | (a << 1) }
+function deep_boxed(a, b) {
+  return (((a ^ b) << 2) | ((a & b) >>> 1)) ^ (((a | b) >> 1) & ((a ^ 7) << 1))
+}
+
 console.log("fnv", fnv1a(100000))
 console.log("mix", mix(100000))
+console.log("nested_boxed", nested_boxed(305419896, -1412567295))
+console.log("nested_unary", nested_unary(12345))
+console.log("nested_pow", nested_pow(3, 5))
+console.log("deep_boxed", deep_boxed(305419896, 271733878))
 console.log("neg_xor", (-5) ^ 3)
 console.log("mask_big", (0xFFFFFFFF & 0x0F))
 console.log("ushr_signbit", (0x80000000 >>> 1))

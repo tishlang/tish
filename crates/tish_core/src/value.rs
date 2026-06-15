@@ -834,6 +834,31 @@ pub fn to_uint32(x: f64) -> u32 {
     }
 }
 
+/// `ToNumber` for the native boxed runtime: a `Value::Number` passes through, every other variant
+/// coerces to `NaN`. This is the same `as_number().unwrap_or(NaN)` convention used by the
+/// interpreter (`binop_number` / `to_int32`), the VM (`eval_binop`), and `ops::add`/`sub`/`mul`/`div`
+/// — so the native backend stays bit-for-bit in lock-step with them at runtime (a string/bool/null
+/// operand is `NaN`, hence `0` for bitwise). The compiler constant-folds literal cases like
+/// `"5" | 0 === 5` separately, so this only governs runtime (non-constant) operands.
+#[inline]
+pub fn to_number_value(v: &Value) -> f64 {
+    v.as_number().unwrap_or(f64::NAN)
+}
+
+/// `ToInt32` of an arbitrary [`Value`] (coerce via [`to_number_value`], then [`to_int32`]). Designed
+/// to compose in generated code: unlike a `let Value::Number(a) = &(..) else { panic!() }` block,
+/// it binds no name, so nested bitwise/shift operands can never shadow each other.
+#[inline]
+pub fn to_int32_value(v: &Value) -> i32 {
+    to_int32(to_number_value(v))
+}
+
+/// `ToUint32` companion to [`to_int32_value`].
+#[inline]
+pub fn to_uint32_value(v: &Value) -> u32 {
+    to_uint32(to_number_value(v))
+}
+
 /// Invoke a callable [`Value`]: [`Value::Function`], or an object exposing `__call` (e.g. `Symbol`).
 pub fn value_call(callee: &Value, args: &[Value]) -> Value {
     match callee {
