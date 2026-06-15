@@ -1,11 +1,26 @@
 # Performance guidance from JavaScriptCore / Bun (2026-06-05)
 
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
 We benchmark against Node (V8), but **Bun (JavaScriptCore) is the faster real-world target** and JSC's
 architecture is the better source of *techniques*. This maps JSC/V8's core optimizations onto tish's
 VM, ranks them by leverage × tractability, and sets the roadmap. Companion to `docs/perf.md` and
 `docs/vm-compute-gap-plan.md`.
 
 ## The measured gap (compute only, startup excluded — internal `Date.now` Σms)
+
+> **Historical snapshot — may be stale; regenerate before citing.** The ms/ratios below are a
+> point-in-time capture, not a live standing, and absolute ms are not comparable across machines.
+> Regenerate a same-machine, noise-floored picture with `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time vs JS controls) and confirm the typed-vs-node verdict with
+> `scripts/run_perf_gauntlet.sh` before treating any row as current.
 
 | micro | tish-vm | Node | Bun | tish vs best |
 |---|---|---|---|---|
@@ -14,9 +29,12 @@ VM, ranks them by leverage × tractability, and sets the roadmap. Companion to `
 | new_features_perf | 48ms | 7 | 5 | ~7–10× |
 | array_stress | 42ms | 13 | 15 | ~3× |
 
-After this session's **slot-based locals** + **control-flow JIT**, pure-numeric *loop functions* now
-MATCH Node (sumTo 62 vs 63). The remaining 3–15× is **everything the JIT doesn't cover: objects,
-arrays, top-level loops, and the boxed `Value` itself** — precisely JSC's wheelhouse.
+At the time of this snapshot, after that session's **slot-based locals** + **control-flow JIT**,
+pure-numeric *loop functions* matched Node (sumTo 62 vs 63 — snapshot, regenerate with
+`scripts/run_perf_gauntlet.sh`). The remaining 3–15× is **everything the JIT doesn't cover: objects,
+arrays, top-level loops, and the boxed `Value` itself** — precisely JSC's wheelhouse. Re-measure the
+gap with `scripts/perf_record.sh` + `scripts/perf_compare.sh` rather than trusting the multipliers
+quoted here and throughout the ranking below.
 
 ## tish's architecture vs JSC (the four structural gaps)
 
