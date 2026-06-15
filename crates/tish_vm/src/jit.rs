@@ -9,11 +9,13 @@
 //!     frame slot and a block per bytecode jump target; handles for/while/nested loops, if/else,
 //!     early return, break, continue. Enabled by slot-based locals making such functions `slot_based`.
 //!
-//! Anything unsupported (member/index, calls, arrays/objects, non-number constants, pow/shift,
+//! Anything unsupported (member/index, calls, arrays/objects, non-number constants, pow,
 //! booleans in slots, a ternary inside a loop) makes compilation return `None`, and any non-number
 //! argument at call time falls back to the interpreter — so this is purely ADDITIVE and can never
 //! change behaviour (a miss runs the VM). Only a logic bug here could, hence the differential
-//! validation (vm-JIT ≡ interp ≡ node) + `tests/core/jit_loops.tish`.
+//! validation (vm-JIT ≡ interp ≡ node) + `tests/core/jit_loops.tish`, `tests/core/jit_shifts.tish`.
+//! Bitwise `& | ^ ~` and shifts `<< >> >>>` are lowered (JS ToInt32/ToUint32 semantics, bit-exact
+//! with the VM's `eval_binop`); only `**` (pow) still falls back.
 //!
 //! Not compiled for wasm targets (cranelift-jit emits host code).
 
@@ -561,7 +563,6 @@ fn emit_simple_op(
                     bcx.ins().fsub(l, p)
                 }
                 // Bitwise AND/OR/XOR via JS ToInt32 (modulo 2³², NaN/±∞ → 0) — see [`js_to_int32`].
-                // Shifts / `>>>` stay on the VM (shift-amount edge cases).
                 BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
                     let li = js_to_int32(bcx, l);
                     let ri = js_to_int32(bcx, r);
@@ -573,7 +574,36 @@ fn emit_simple_op(
                     };
                     bcx.ins().fcvt_from_sint(types::F64, res)
                 }
-                // Pow/shifts/`>>>`/In/And/Or: fall back to the VM.
+                // Shifts. JS masks the count to the low 5 bits (`& 31`); the low 5 bits of `ToInt32(r)`
+                // equal `ToUint32(r)`, so `js_to_int32(r)` carries the right amount. We mask explicitly
+                // (`& 31`) so correctness never depends on Cranelift's own amount-masking convention.
+                // `<<`/`>>` are signed-domain (ToInt32 → i32 → signed→f64); `>>>` is logical on the
+                // unsigned bits with an UNSIGNED→f64 convert (result may exceed 2³¹). Bit-for-bit with
+                // vm.rs `eval_binop`: Shl/Shr = `to_int32(l).wrapping_sh*(to_uint32(r))`,
+                // UShr = `to_uint32(l).wrapping_shr(to_uint32(r))`.
+                BinOp::Shl | BinOp::Shr | BinOp::UShr => {
+                    let li = js_to_int32(bcx, l);
+                    let amt = js_to_int32(bcx, r);
+                    let mask = bcx.ins().iconst(types::I32, 31);
+                    let amt = bcx.ins().band(amt, mask);
+                    match bop {
+                        BinOp::Shl => {
+                            let res = bcx.ins().ishl(li, amt);
+                            bcx.ins().fcvt_from_sint(types::F64, res)
+                        }
+                        BinOp::Shr => {
+                            let res = bcx.ins().sshr(li, amt);
+                            bcx.ins().fcvt_from_sint(types::F64, res)
+                        }
+                        // UShr: logical shift on the same 32-bit value bits as ToUint32(l), then
+                        // unsigned→f64 so a result with bit 31 set stays a positive number (JS `>>>`).
+                        _ => {
+                            let res = bcx.ins().ushr(li, amt);
+                            bcx.ins().fcvt_from_uint(types::F64, res)
+                        }
+                    }
+                }
+                // Pow/In/And/Or: fall back to the VM.
                 _ => return SimpleOp::Unsupported,
             };
             stack.push((v, is_cmp));
@@ -1047,4 +1077,70 @@ fn build_body(
 
     bcx.finalize();
     result
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use tishlang_core::{to_int32, to_uint32};
+
+    /// Compile `src`, then return the first arity-2 pure-numeric function the JIT accepts. Panics if
+    /// none compiles — so a change that makes the JIT silently *stop* compiling the target (the exact
+    /// "vacuous fixture" miss that motivated this guard) fails loudly instead of passing emptily.
+    ///
+    /// NB: bypasses [`try_compile_numeric`]'s cache and calls [`compile_chunk`] directly. The cache is
+    /// keyed by the chunk's *address*, which is unique-and-stable in a real run (chunks live for the
+    /// program) but NOT across this test's many transient chunks — a freed address gets reused and
+    /// would return a stale function. Compiling fresh per call is both correct here and exercises the
+    /// real lowering path.
+    fn jit_arity2(src: &str) -> NumericFn {
+        let prog = tishlang_parser::parse(src).expect("parse");
+        let opt = tishlang_opt::optimize(&prog);
+        let chunk = tishlang_bytecode::compile(&opt).expect("compile");
+        fn compile_uncached(c: &Chunk) -> Option<NumericFn> {
+            if !c.slot_based
+                || c.rest_param_index != NO_REST_PARAM
+                || c.param_count == 0
+                || c.param_count > 8
+            {
+                return None;
+            }
+            let lock = jit()?;
+            let mut g = lock.lock().ok()?;
+            compile_chunk(&mut g, c)
+        }
+        fn find(c: &Chunk) -> Option<NumericFn> {
+            for n in &c.nested {
+                if let Some(f) = compile_uncached(n) {
+                    if f.arity == 2 && f.array_param_mask == 0 {
+                        return Some(f);
+                    }
+                }
+                if let Some(f) = find(n) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        find(&chunk).expect("the JIT must compile this arity-2 numeric fn (did it start bailing?)")
+    }
+
+    /// Permanent guard for #168: shifts must (a) actually JIT-compile and (b) be bit-exact with the
+    /// VM's `eval_binop` (`to_int32`/`to_uint32` + wrapping shift). Breaking either fails this test.
+    #[test]
+    fn jit_lowers_shifts_bit_exact_to_vm() {
+        let shl = jit_arity2("const f = (a, b) => a << b\nf(0, 0)\n");
+        let shr = jit_arity2("const f = (a, b) => a >> b\nf(0, 0)\n");
+        let ushr = jit_arity2("const f = (a, b) => a >>> b\nf(0, 0)\n");
+        let cases = [
+            (1.0, 4.0), (1.0, 32.0), (1.0, 33.0), (1.0, -1.0), (-8.0, 1.0), (-1.0, 0.0),
+            (-2.0, 1.0), (4294967295.0, 0.0), (3.9, 0.0), (4294967297.0, 0.0),
+            (-123456789.0, 5.0), (65535.0, 16.0),
+        ];
+        for (a, b) in cases {
+            assert_eq!(shl.call(&[a, b]), to_int32(a).wrapping_shl(to_uint32(b)) as f64, "<< {a} {b}");
+            assert_eq!(shr.call(&[a, b]), to_int32(a).wrapping_shr(to_uint32(b)) as f64, ">> {a} {b}");
+            assert_eq!(ushr.call(&[a, b]), to_uint32(a).wrapping_shr(to_uint32(b)) as f64, ">>> {a} {b}");
+        }
+    }
 }
