@@ -9,11 +9,13 @@
 //!     frame slot and a block per bytecode jump target; handles for/while/nested loops, if/else,
 //!     early return, break, continue. Enabled by slot-based locals making such functions `slot_based`.
 //!
-//! Anything unsupported (member/index, calls, arrays/objects, non-number constants, pow/shift,
+//! Anything unsupported (member/index, calls, arrays/objects, non-number constants, pow,
 //! booleans in slots, a ternary inside a loop) makes compilation return `None`, and any non-number
 //! argument at call time falls back to the interpreter — so this is purely ADDITIVE and can never
 //! change behaviour (a miss runs the VM). Only a logic bug here could, hence the differential
-//! validation (vm-JIT ≡ interp ≡ node) + `tests/core/jit_loops.tish`.
+//! validation (vm-JIT ≡ interp ≡ node) + `tests/core/jit_loops.tish`, `tests/core/jit_shifts.tish`.
+//! Bitwise `& | ^ ~` and shifts `<< >> >>>` are lowered (JS ToInt32/ToUint32 semantics, bit-exact
+//! with the VM's `eval_binop`); only `**` (pow) still falls back.
 //!
 //! Not compiled for wasm targets (cranelift-jit emits host code).
 
@@ -561,7 +563,6 @@ fn emit_simple_op(
                     bcx.ins().fsub(l, p)
                 }
                 // Bitwise AND/OR/XOR via JS ToInt32 (modulo 2³², NaN/±∞ → 0) — see [`js_to_int32`].
-                // Shifts / `>>>` stay on the VM (shift-amount edge cases).
                 BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
                     let li = js_to_int32(bcx, l);
                     let ri = js_to_int32(bcx, r);
@@ -573,7 +574,36 @@ fn emit_simple_op(
                     };
                     bcx.ins().fcvt_from_sint(types::F64, res)
                 }
-                // Pow/shifts/`>>>`/In/And/Or: fall back to the VM.
+                // Shifts. JS masks the count to the low 5 bits (`& 31`); the low 5 bits of `ToInt32(r)`
+                // equal `ToUint32(r)`, so `js_to_int32(r)` carries the right amount. We mask explicitly
+                // (`& 31`) so correctness never depends on Cranelift's own amount-masking convention.
+                // `<<`/`>>` are signed-domain (ToInt32 → i32 → signed→f64); `>>>` is logical on the
+                // unsigned bits with an UNSIGNED→f64 convert (result may exceed 2³¹). Bit-for-bit with
+                // vm.rs `eval_binop`: Shl/Shr = `to_int32(l).wrapping_sh*(to_uint32(r))`,
+                // UShr = `to_uint32(l).wrapping_shr(to_uint32(r))`.
+                BinOp::Shl | BinOp::Shr | BinOp::UShr => {
+                    let li = js_to_int32(bcx, l);
+                    let amt = js_to_int32(bcx, r);
+                    let mask = bcx.ins().iconst(types::I32, 31);
+                    let amt = bcx.ins().band(amt, mask);
+                    match bop {
+                        BinOp::Shl => {
+                            let res = bcx.ins().ishl(li, amt);
+                            bcx.ins().fcvt_from_sint(types::F64, res)
+                        }
+                        BinOp::Shr => {
+                            let res = bcx.ins().sshr(li, amt);
+                            bcx.ins().fcvt_from_sint(types::F64, res)
+                        }
+                        // UShr: logical shift on the same 32-bit value bits as ToUint32(l), then
+                        // unsigned→f64 so a result with bit 31 set stays a positive number (JS `>>>`).
+                        _ => {
+                            let res = bcx.ins().ushr(li, amt);
+                            bcx.ins().fcvt_from_uint(types::F64, res)
+                        }
+                    }
+                }
+                // Pow/In/And/Or: fall back to the VM.
                 _ => return SimpleOp::Unsupported,
             };
             stack.push((v, is_cmp));
