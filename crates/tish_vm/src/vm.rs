@@ -3168,13 +3168,23 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "split" => make_native_fn(move |args: &[Value]| {
                     let sep = args.first().unwrap_or(&Value::Null);
                     let limit = args.get(1).unwrap_or(&Value::Null);
-                    // string_split_limit honors the optional limit and routes a RegExp separator
-                    // internally, so the VM matches the interpreter and rust/cranelift backends.
-                    tishlang_runtime::string_split_limit(
-                        &Value::String(s_clone.clone()),
-                        sep,
-                        limit,
-                    )
+                    let max = match limit {
+                        Value::Number(n) if *n >= 0.0 => Some(*n as usize),
+                        _ => None,
+                    };
+                    // A RegExp separator needs the runtime's regex path — but a `Value::RegExp` can
+                    // only exist with the `regex` feature, which is also what pulls in the optional
+                    // `tishlang_runtime`. String separators use the always-available builtin, so
+                    // `tish_vm` still compiles (and tests) without the optional runtime crate.
+                    #[cfg(feature = "regex")]
+                    if matches!(sep, Value::RegExp(_)) {
+                        return tishlang_runtime::string_split_limit(
+                            &Value::String(s_clone.clone()),
+                            sep,
+                            limit,
+                        );
+                    }
+                    str_builtins::split_limit(&Value::String(s_clone.clone()), sep, max)
                 }),
                 "trim" => make_native_fn(move |_args: &[Value]| {
                     str_builtins::trim(&Value::String(s_clone.clone()))
