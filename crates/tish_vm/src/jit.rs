@@ -1087,13 +1087,31 @@ mod tests {
     /// Compile `src`, then return the first arity-2 pure-numeric function the JIT accepts. Panics if
     /// none compiles — so a change that makes the JIT silently *stop* compiling the target (the exact
     /// "vacuous fixture" miss that motivated this guard) fails loudly instead of passing emptily.
+    ///
+    /// NB: bypasses [`try_compile_numeric`]'s cache and calls [`compile_chunk`] directly. The cache is
+    /// keyed by the chunk's *address*, which is unique-and-stable in a real run (chunks live for the
+    /// program) but NOT across this test's many transient chunks — a freed address gets reused and
+    /// would return a stale function. Compiling fresh per call is both correct here and exercises the
+    /// real lowering path.
     fn jit_arity2(src: &str) -> NumericFn {
         let prog = tishlang_parser::parse(src).expect("parse");
         let opt = tishlang_opt::optimize(&prog);
         let chunk = tishlang_bytecode::compile(&opt).expect("compile");
+        fn compile_uncached(c: &Chunk) -> Option<NumericFn> {
+            if !c.slot_based
+                || c.rest_param_index != NO_REST_PARAM
+                || c.param_count == 0
+                || c.param_count > 8
+            {
+                return None;
+            }
+            let lock = jit()?;
+            let mut g = lock.lock().ok()?;
+            compile_chunk(&mut g, c)
+        }
         fn find(c: &Chunk) -> Option<NumericFn> {
             for n in &c.nested {
-                if let Some(f) = try_compile_numeric(n) {
+                if let Some(f) = compile_uncached(n) {
                     if f.arity == 2 && f.array_param_mask == 0 {
                         return Some(f);
                     }
