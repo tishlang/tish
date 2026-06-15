@@ -77,7 +77,7 @@ pub use tishlang_builtins::string::{
     last_index_of as string_last_index_of_impl, pad_end as string_pad_end_impl,
     pad_start as string_pad_start_impl, repeat as string_repeat_impl,
     replace as string_replace_impl, replace_all as string_replace_all_impl,
-    slice as string_slice_impl, split as string_split_impl,
+    slice as string_slice_impl, split as string_split_impl, split_limit as string_split_limit_impl,
     starts_with as string_starts_with_impl, substr as string_substr_impl,
     substring as string_substring_impl,
     to_lower_case as string_to_lower_case, to_upper_case as string_to_upper_case,
@@ -141,13 +141,23 @@ pub fn string_substr(s: &Value, start: &Value, length: &Value) -> Value {
     string_substr_impl(s, start, length)
 }
 pub fn string_split(s: &Value, sep: &Value) -> Value {
-    // A RegExp separator routes to the regex splitter (matches string_replace's regex handling
-    // and the interpreter/VM), so `"a1b2c".split(RegExp("\\d",""))` works on the rust backend.
+    string_split_limit(s, sep, &Value::Null)
+}
+
+/// `split(sep, limit)` honoring the optional `limit` argument (passed as a `Value` so the VM and
+/// native codegen can forward the raw call argument). A non-numeric / null `limit` means "no limit".
+/// Routes a RegExp separator to the regex splitter (matching string_replace's regex handling and
+/// the interpreter), so `"a1b2c".split(RegExp("\\d",""))` works on the rust backend.
+pub fn string_split_limit(s: &Value, sep: &Value, limit: &Value) -> Value {
+    let max = match limit {
+        Value::Number(n) if *n >= 0.0 => Some(*n as usize),
+        _ => None,
+    };
     #[cfg(feature = "regex")]
     if matches!(sep, Value::RegExp(_)) {
-        return string_split_regex(s, sep, None);
+        return string_split_regex(s, sep, max);
     }
-    string_split_impl(s, sep)
+    string_split_limit_impl(s, sep, max)
 }
 pub fn string_starts_with(s: &Value, search: &Value) -> Value {
     string_starts_with_impl(s, search)
@@ -1288,33 +1298,31 @@ pub fn string_split_regex(s: &Value, separator: &Value, limit: Option<usize>) ->
     match separator {
         Value::RegExp(re) => {
             let re = re.borrow();
+            // JS semantics: split fully, then truncate to `limit` (don't keep the unsplit remainder
+            // in the last slot). `truncate(usize::MAX)` is a no-op, so the no-limit path is unchanged.
             let mut result = Vec::new();
             let mut last_end = 0;
 
             for mat in re.regex.find_iter(input) {
                 match mat {
                     Ok(m) => {
-                        if result.len() >= max - 1 {
-                            break;
-                        }
                         result.push(Value::String(input[last_end..m.start()].into()));
                         last_end = m.end();
                     }
                     Err(_) => break,
                 }
             }
-
-            if result.len() < max {
-                result.push(Value::String(input[last_end..].into()));
-            }
+            result.push(Value::String(input[last_end..].into()));
+            result.truncate(max);
 
             Value::Array(VmRef::new(result))
         }
         Value::String(sep) => {
-            let parts: Vec<Value> = input
-                .splitn(max, sep.as_str())
+            let mut parts: Vec<Value> = input
+                .split(sep.as_str())
                 .map(|s| Value::String(s.into()))
                 .collect();
+            parts.truncate(max);
             Value::Array(VmRef::new(parts))
         }
         _ => Value::Array(VmRef::new(vec![Value::String(input.into())])),
