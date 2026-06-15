@@ -1,5 +1,14 @@
 # Frame-based VM — design & implementation plan (task #39)
 
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
 The bytecode VM's biggest remaining structural cost. This is a multi-session core rewrite; this doc is
 the architecture + sequencing so it can be executed in focused increments behind a flag, flag-off
 byte-identical at every step.
@@ -9,17 +18,23 @@ byte-identical at every step.
 The VM calls user functions through `Value::Function(Arc<dyn Fn(&[Value]) -> Value + Send + Sync>)`
 (`tish_core/value.rs`). The `Closure` opcode builds one capturing the function's `Chunk` + enclosing
 scope; the `Call` opcode does `f(&args)` (`vm.rs:1348`), and that closure **creates a fresh `Vm` and
-recursively re-enters `run_chunk`** (`vm.rs:1383`-style). One model, three measured problems:
+recursively re-enters `run_chunk`** (`vm.rs:1383`-style). One model, three measured problems (the
+numbers below are an **illustrative snapshot — regenerate before citing** with
+`scripts/perf_record.sh` + `scripts/perf_compare.sh` for the call micro and
+`scripts/run_parity_compare.sh` for the wasi recursion trap; absolute ms are machine/day-specific and
+not comparable across runs):
 
-1. **~275ns / call (the call-overhead wall).** `add2(a,b)` loop-called 20M× = 5501ms — identical at
-   arity 2 or 8; the JIT'd body is fast, the call PATH dominates: `Arc<dyn Fn>` indirect dispatch +
-   per-call `Vm` struct + `run_chunk` re-entry + arg `Vec`. Only `SelfCall`→native recursion or no-call
-   inlined JIT loops escape it. This is the single biggest lever for real numeric code (helpers,
-   callbacks, HOFs all pay it).
+1. **The call-overhead wall (~275ns/call in one snapshot).** `add2(a,b)` loop-called 20M× ≈ 5501ms in
+   that snapshot — identical at arity 2 or 8; the JIT'd body is fast, the call PATH dominates:
+   `Arc<dyn Fn>` indirect dispatch + per-call `Vm` struct + `run_chunk` re-entry + arg `Vec`. Only
+   `SelfCall`→native recursion or no-call inlined JIT loops escape it. This is the single biggest lever
+   for real numeric code (helpers, callbacks, HOFs all pay it). Re-measure the per-call cost with a
+   same-machine A/B before treating any figure as current.
 2. **wasi deep-recursion trap.** `run_chunk` re-entry maps each tish recursion level to a native (and on
-   wasi, a *wasm*) call frame. wasmtime exhausts its call stack ~313 levels → `recursion_stress` traps
-   ("call stack exhausted"). stacker is a no-op on wasm32 and there is no JIT, so this is unfixable in
-   the current model. (See `docs/perf.md` CORRECTNESS FIX note.)
+   wasi, a *wasm*) call frame. wasmtime exhausts its call stack (~313 levels in one observed run) →
+   `recursion_stress` traps ("call stack exhausted"). stacker is a no-op on wasm32 and there is no JIT,
+   so this is unfixable in the current model. (See `docs/perf.md` CORRECTNESS FIX note.) The exact
+   depth is environment-specific — confirm the trap still reproduces rather than trusting the number.
 3. **non-numeric recursion overflow + band-aids.** Native-stack recursion forced two band-aids:
    `SelfCall` (JIT native recursion, numeric only) and `stacker::maybe_grow` (VM `vm.rs:1392`, interp
    `eval.rs` `call_func`). Both are mitigations for "recursion lives on the native stack."
@@ -62,11 +77,12 @@ it, keep a shim so the 104 sites migrate incrementally rather than in one flag-d
 ## Flag strategy — `TISH_FRAME_VM`, flag-off byte-identical
 
 Mirror slots/JIT/packed-arrays: gate the new path behind `TISH_FRAME_VM` (default off). Flag-off runs the
-current `run_chunk` unchanged (byte-identical, suite stays 17/0). Flag-on runs the frame loop. This makes
-the rewrite safe to develop + pause across sessions, and lets the differential harness compare
-flag-on ≡ flag-off ≡ interp at every increment.
+current `run_chunk` unchanged (byte-identical; the integration suite must stay green flag-off — verify
+with `cargo test -p tishlang --test integration_test`, don't trust a recorded pass count). Flag-on runs
+the frame loop. This makes the rewrite safe to develop + pause across sessions, and lets the
+differential harness compare flag-on ≡ flag-off ≡ interp at every increment.
 
-## Sequencing (each step: compiles, suite 17/0 flag-off, differential flag-on)
+## Sequencing (each step: compiles, integration suite green flag-off, differential flag-on)
 
 1. **`ClosureData` + `Value::Closure`** alongside `Value::Function` (additive; nothing uses it yet).
 2. **`CallFrame` + frame stack** in `Vm`; a `run_frames()` loop that handles a SINGLE frame identically
@@ -81,13 +97,29 @@ flag-on ≡ flag-off ≡ interp at every increment.
    fast path, drop the VM-recursion variant). Flip `TISH_FRAME_VM` default-on; delete the old path once
    the suite + differential + perf gates pass on all backends (cranelift/wasi/llvm embed the VM → inherit).
 
-## Validation gates (blocking, per increment)
+## Validation gates (blocking, per increment) — criteria + how to check, re-run every time
 
-- `cargo test -p tishlang --test integration_test` 17/0 (flag-off AND flag-on).
-- Differential `flag-on ≡ flag-off ≡ interp` (timing-normalized) on the call/recursion/HOF/async corpus.
-- Perf: `add2` loop-call ≪ 275ns/call (the target); `recursion_stress` completes on **wasi** (the proof
-  problem 2 is gone); no regression on the object/array/bundle micros.
-- `stacker::maybe_grow` removable without reintroducing the interp/VM overflow.
+Each of these is a GATE that must pass **now**, not a state we record once. State the criterion, run the
+command, read the result fresh:
+
+- **Suite parity gate:** `cargo test -p tishlang --test integration_test` is green with `TISH_FRAME_VM`
+  off AND on (flag-on must not regress any case the flag-off path passes). Validated on every increment
+  / in CI, not a frozen count.
+- **Differential equivalence gate:** `flag-on ≡ flag-off ≡ interp` (timing-normalized) on the
+  call/recursion/HOF/async corpus — check with `scripts/run_parity_compare.sh`. Passing means the
+  cross-backend diff is empty on this run, never "it matched once".
+- **Call-overhead perf gate:** `add2` loop-call cost is materially below the current baseline (the goal
+  is to collapse the call wall, not hit a fixed ns figure) — measure with `scripts/perf_record.sh` +
+  `scripts/perf_compare.sh` (same-machine A/B, noise-floored against the JS controls). The typed-vs-node
+  standing is gated by `scripts/run_perf_gauntlet.sh` (PASS = typed ≤ node); re-run it, don't cite a
+  past PASS.
+- **wasi recursion-fix gate:** `recursion_stress` completes (no "call stack exhausted") on the **wasi**
+  backend — the proof problem 2 is gone. Confirm by running the fixture on wasi each time, e.g. via the
+  cross-backend run in `scripts/run_parity_compare.sh`.
+- **No-regression perf gate:** object/array/bundle micros show no regression vs the recorded baseline —
+  compare with `scripts/perf_compare.sh` (noise-floored), not eyeballed absolute ms.
+- **Band-aid-removal gate:** `stacker::maybe_grow` is removable without reintroducing the interp/VM
+  overflow — verify by deleting it and re-running the recursion corpus, not by assumption.
 
 ## Risks
 

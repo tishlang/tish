@@ -1,8 +1,19 @@
 # VM compute gap — diagnosis + plan (2026-06-05)
 
-Default `tish run` (the bytecode VM) is **4.5× Node** on sustained compute (bundle: vm 300ms vs
-Node 67ms; cranelift/llvm mirror it at ~327ms since they embed the VM; wasi 19×). This is the
-headline perf gap. Below is an **evidence-grounded** root-cause ranking (measured this run, not
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
+Default `tish run` (the bytecode VM) was measured at **~4.5× Node** on sustained compute (bundle: vm
+300ms vs Node 67ms; cranelift/llvm mirror it at ~327ms since they embed the VM; wasi 19×) — a
+**snapshot, regenerate with `scripts/run_perf_gauntlet.sh` / `scripts/perf_record.sh`**; these ms and
+ratios may be stale and are not comparable across machines/days. This is the headline perf gap. Below
+is an **evidence-grounded** root-cause ranking (measured at the time of the snapshot above, not
 assumed) and a sequenced, de-risked plan. It supersedes the original plan's RC1-centric view.
 
 ## Measured root causes (ranked by leverage)
@@ -28,8 +39,9 @@ iteration where a real bytecode VM pays a few `Vec` indexes. This is the biggest
 the whole VM family (vm/cranelift/llvm/wasi).
 
 ### 2. `send-values` `Arc<Mutex>` tax — ~15% (smaller than the original plan assumed)
-Measured: object_stress lean(no-send-values) ~84ms vs full ~100ms (~16%); array_stress ~44 vs ~48
-(~9%). `ScopeMap = VmRef<ObjectMap>` ([vm.rs:798](crates/tish_vm/src/vm.rs)) → under the shipped
+Snapshot (regenerate with `scripts/perf_record.sh` + `scripts/perf_compare.sh`; may be stale,
+not cross-machine comparable): object_stress lean(no-send-values) ~84ms vs full ~100ms (~16%);
+array_stress ~44 vs ~48 (~9%). `ScopeMap = VmRef<ObjectMap>` ([vm.rs:798](crates/tish_vm/src/vm.rs)) → under the shipped
 `full`→`http` build, every scope borrow is a mutex lock; container Values likewise. **Load-bearing:**
 a `Value::Function` closure captures `enclosing: Vec<ScopeMap>`, and the HTTP/WS server dispatches
 handler closures across worker threads, so the captured scopes must be `Send` → `Arc<Mutex>`.
@@ -37,13 +49,15 @@ Removing it requires the Phase-1 HTTP per-worker-VM isolation (so closures never
 but modest, and risky — do it AFTER slots.
 
 ### 3. Object representation — the object_stress lever (RC3/#13, still pending)
-Even lean, object_stress is ~2.5× Node. Objects are `ObjectMap` (hashmap) keyed by `Arc<str>`; numeric
+Even lean, object_stress was ~2.5× Node (snapshot, regenerate with `scripts/run_perf_gauntlet.sh`;
+may be stale). Objects are `ObjectMap` (hashmap) keyed by `Arc<str>`; numeric
 keys stringify per access. Node uses hidden classes (shape + slot). #13 (runtime hidden classes) is the
 fix for object-heavy code. Independent of slots; do after slots.
 
 ### 4. Hot-loop / Math JIT — #14 (additive, the only path past the interpreter floor on pure loops)
 `tish_vm/src/jit.rs` JITs numeric leaf functions (bitwise/ternary/arith landed). Bails on loops
-(`JumpBack`) and Math calls. §06 hot-loop JIT (752ms in jit_probe) is the biggest single synthetic sink
+(`JumpBack`) and Math calls. §06 hot-loop JIT (~752ms in jit_probe — snapshot, regenerate with
+`scripts/perf_record.sh`; may be stale) is the biggest single synthetic sink
 but "the hardest" (top-level name-based loop → needs slots first, ironically). §05 Math is bounded
 (cranelift libcalls + a soundness gate for reassignable `Math`).
 
@@ -73,9 +87,14 @@ counters are slots from Step A).
 last.
 
 ## Honest scope
-Fully closing 4.5× is a multi-step compiler project (Steps A–D compound; none alone wins). Step A is
+Fully closing the gap is a multi-step compiler project (Steps A–D compound; none alone wins). Step A is
 the highest-leverage, most-broadly-beneficial start and unblocks §06. The micro "wins" elsewhere in
-the suite are **startup-bound** (tish ~9ms vs Node ~30ms) and must not regress — keep cold start ≤ ~28ms.
+the suite are **startup-bound** (snapshot at the time of writing: tish ~9ms vs Node ~30ms — regenerate
+with `scripts/perf_record.sh`; may be stale, not cross-machine comparable) and must not regress.
+**Cold-start regression gate:** `scripts/perf_record.sh` + `scripts/perf_compare.sh` (noise-floored
+vs the JS control) must show no cold-start regression — validated on every run, not a recorded
+"≤ Nms" verdict. (The historical target was ~28ms; treat that as illustrative, re-derive the bar
+from the current control.)
 
 ## Step A — implementation map + the critical finding (recon done 2026-06-05)
 

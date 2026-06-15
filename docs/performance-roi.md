@@ -1,5 +1,14 @@
 # Tish Performance & ROI: precompile-then-execute vs a JS runtime (V8/Node)
 
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
 > **Status:** technical + marketing synthesis, 2026-06-05. Every speed figure cites
 > [`perf.md`](perf.md) (darwin-arm64, release builds, measured). Binary/artifact sizes are measured
 > locally on darwin-arm64 and are **indicative**, not a published benchmark. The deep dives are
@@ -14,7 +23,12 @@ Tish lets you **precompile** TypeScript/JavaScript-shaped source ahead of time a
 self-contained artifact** — instead of shipping source plus a ~112 MB V8 runtime that re-parses,
 re-compiles, and re-warms its JIT on every cold start.
 
-| Dimension | Tish | Node / V8 | Delta |
+The figures in this table are a **snapshot that may be stale — regenerate the speed rows with
+`scripts/run_perf_gauntlet.sh` (PASS/FAIL gate) and `scripts/perf_record.sh` +
+`scripts/perf_compare.sh` (noise-floored), the HTTP row with `scripts/run_http_perf.sh`.** Absolute
+ms are not comparable across machines/days; treat the deltas as illustrative, not a current verdict.
+
+| Dimension | Tish | Node / V8 | Delta (snapshot) |
 |---|---|---|---|
 | **Cold start** | ~12 ms | ~35 ms | **~3× faster** ([`perf.md:16`](perf.md)) |
 | **Core suite avg (47 tests, total)** | 576 ms (native) | 1412 ms | **~2.45× faster** ([`perf.md:975`](perf.md)) |
@@ -44,9 +58,11 @@ already optimized before the first request.
 
 ### 1.2 Whole-suite average
 
-Across the 47-test core suite (release, [`perf.md:975`](perf.md)):
+Across the 47-test core suite (release, [`perf.md:975`](perf.md)). These standings are a
+**snapshot that may be stale — regenerate with `scripts/perf_record.sh` +
+`scripts/perf_compare.sh`** (noise-floored over time); the ordering is not a settled verdict:
 
-| Engine | Total (47 tests) | vs Node |
+| Engine | Total (47 tests) | vs Node (snapshot) |
 |---|---|---|
 | **tish — native (rust)** | **576 ms** | **2.45× faster** |
 | QuickJS | 579 ms | 2.44× |
@@ -62,9 +78,15 @@ restates §1.1. The numbers that reflect *compute* are in §1.3.
 ### 1.3 Compute kernels — where AOT meets or beats V8
 
 The perf gauntlet ([`perf.md:187`](perf.md)) runs compute-only benchmarks (process startup
-excluded) on the **rust backend** vs Node/V8, each with a correctness check. **6 of 8 beat V8:**
+excluded) on the **rust backend** vs Node/V8, each with a correctness check.
 
-| Kernel | Tish | Node | Result |
+**Acceptance gate, not a recorded score:** `scripts/run_perf_gauntlet.sh` reports per-kernel
+PASS when typed tish <= node and FAIL otherwise; it is validated on every run (CI/release), not a
+state we "hit once". The table below is a **snapshot — regenerate with
+`scripts/run_perf_gauntlet.sh`** (it may be stale; the gate's current verdict is whatever that
+command prints today):
+
+| Kernel | Tish | Node | Result (snapshot) |
 |---|---|---|---|
 | math_trig | 12 ms | 82 ms | ✅ **6.8× faster** (native Math intrinsics → f64) |
 | recursion_untyped | 31 ms | 51 ms | ✅ **1.6×** (param + return type inference → native call) |
@@ -89,15 +111,18 @@ How those wins were won, for the skeptical reader:
 
 ### 1.4 HTTP throughput
 
-Single-worker, native rust server, `oha -c128`, darwin-arm64 ([`perf.md:87`](perf.md)):
+Single-worker, native rust server, `oha -c128`, darwin-arm64 ([`perf.md:87`](perf.md)). These
+numbers are a **snapshot — regenerate with `scripts/run_http_perf.sh`** (same-machine A/B vs node);
+absolute req/s drift with machine and load:
 
 | Engine | /plaintext | /json |
 |---|---|---|
 | **tish** w=1 | **125k req/s · 1.02 ms p50** | **121k · 1.05 ms** |
 | node w=1 | 95k req/s · 1.35 ms p50 | 93k · 1.38 ms |
 
-Apples-to-apples, **tish serves ~33% more requests per worker** (native server + cached `Date`
-header + `Arc<str>` bodies). Multi-core scaling comes from prefork + OS threads (§3), not a single
+In this snapshot, apples-to-apples, **tish served ~33% more requests per worker** (native server +
+cached `Date` header + `Arc<str>` bodies) — re-confirm with `scripts/run_http_perf.sh` before
+quoting it; it is not a standing guarantee. Multi-core scaling comes from prefork + OS threads (§3), not a single
 event loop. *(Honest platform note: macOS `SO_REUSEPORT` doesn't kernel-load-balance, so tish's
 multi-worker row doesn't scale **on macOS** and Node's `cluster` overtakes it there — a platform
 artifact. Prefork scaling is real on the Linux deployment target; [`perf.md:94`](perf.md).)*
@@ -185,8 +210,9 @@ faster autoscale, smaller attack surface. A `FROM scratch` service image is real
 **CLIs & developer tools.** ~3× faster startup multiplied across thousands of invocations is
 felt directly, and you ship one binary — your users don't need Node installed.
 
-**Compute / numeric services.** On the rust backend, 6 of 8 compute kernels meet or beat V8
-(math 6.8×, recursion 1.5–1.6×, numeric loops and matmul at/above parity). There is no tracing GC
+**Compute / numeric services.** On the rust backend, most compute kernels meet or beat V8 in the
+last snapshot (math ~6.8×, recursion ~1.5–1.6×, numeric loops and matmul at/above parity) — the
+current count and per-kernel verdict is whatever `scripts/run_perf_gauntlet.sh` reports now. There is no tracing GC
 in the host toolchain and no stop-the-world pause, which tightens tail latency for steady workloads.
 
 **Multi-core servers.** +33% req/s per worker, and real parallelism across cores via prefork +
@@ -203,8 +229,10 @@ audit or get compromised.
 A credible perf story states its ceilings. These are real and current:
 
 - **Object/dynamic-heavy code stays ~2× Node.** V8's hidden classes compile property access to
-  nearly free; Tish doesn't have that yet (`object_sum` and `array_hof` are the two gauntlet losses,
-  3.7× slower; [`perf.md:28`](perf.md)). If your hot path is property-bag manipulation, V8 still wins.
+  nearly free; Tish doesn't have that yet (in the last snapshot `object_sum` and `array_hof` were
+  the gauntlet's FAIL kernels, ~3.7× slower; [`perf.md:28`](perf.md)). Which kernels currently FAIL
+  is whatever `scripts/run_perf_gauntlet.sh` reports now — verify rather than assume this list. If
+  your hot path is property-bag manipulation, V8 still wins.
 - **Only the rust backend gets the §1.3 wins.** The cranelift/llvm/wasi paths run at **VM speed**,
   and non-JIT inline loops/recursion/array-index on the VM are ~120× slower than Node until a
   baseline/loop JIT lands ([`perf.md:56`](perf.md)). Choose the rust backend for compute-bound work.
@@ -223,7 +251,13 @@ four dominate — which is most serverless, edge, CLI, container, and compute-se
 
 ## 6. Reproduce / further reading
 
-- Speed: `./scripts/run_performance_suite.sh --release`, `just perf-gauntlet`, `just perf-http`.
+- Acceptance gate (typed vs node PASS/FAIL): `scripts/run_perf_gauntlet.sh` — the source of truth
+  for every "beats V8" / PASS claim above; runs in CI/release, validated each run.
+- Speed over time (noise-floored vs JS controls): `scripts/perf_record.sh` then
+  `scripts/perf_compare.sh` — use this for the suite/standings rows, not a frozen number.
+- HTTP throughput (same-machine A/B): `scripts/run_http_perf.sh`.
+- Cross-backend parity: `scripts/run_parity_compare.sh`.
+- Broader suite (informational): `./scripts/run_performance_suite.sh --release`, `just perf-gauntlet`, `just perf-http`.
 - Sizes: `tish build app.tish -o app && ls -lh app` (vs `ls -lhL $(which node)`).
 - Deep dives: [`perf.md`](perf.md) (full tables, methodology), [`concurrency-model.md`](concurrency-model.md)
   (execution model vs V8), [`LANGUAGE.md`](LANGUAGE.md) (backends, compile targets, direction).
