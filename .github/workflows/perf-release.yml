@@ -1,0 +1,120 @@
+# Full-fidelity perf record on EVERY release. Where perf-history.yml records only the core runtimes
+# on each main push (fast/stable on shared runners), this records the COMPLETE runtime matrix —
+# vm, interp, rust (native AOT), cranelift, llvm, wasi, node, bun, deno, qjs — at the released tag and
+# commits the raw TSV to perf-history/. It is the durable, no-interpretation log of where every backend
+# stood at each release, so anyone can read the numbers later instead of taking a summary on faith.
+#
+# Runs independently of the publish jobs (npm/crates/brew): a perf hiccup must never block a release.
+name: Perf history (release, full suite)
+
+on:
+  release:
+    types: [published]
+  # Manual re-record for a given tag (e.g. if a runtime install flaked and we want a clean point).
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag/ref to record (default: latest release tag)"
+        required: false
+        type: string
+
+# Share perf-history.yml's group so the two recorders serialise on the perf-history/ commit and
+# never race a push. Never cancel an in-flight recording.
+concurrency:
+  group: perf-history
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  record-full:
+    name: Record full-suite perf point
+    runs-on: blacksmith-8vcpu-ubuntu-2204
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # Fleet-safe target-cpu (#223): the default `native` SIGILLs the native-backend build on the
+      # virtualized fleet. x86-64-v3 keeps codegen near-native and is honoured by every x86 host here.
+      RUSTFLAGS: "-C target-cpu=x86-64-v3"
+    steps:
+      - name: Checkout (released tag)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.ref || github.event.release.tag_name || github.ref }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Add wasm target (wasi backend)
+        run: rustup target add wasm32-wasip1 || rustup target add wasm32-wasi || true
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # --- Extra runtimes (best-effort: a runtime that won't install is simply skipped and the
+      # recorded TSV honestly shows it absent — the suite auto-detects each by `command -v`). ---
+      - name: Install clang/llvm (llvm backend)
+        run: sudo apt-get update && sudo apt-get install -y clang llvm || true
+
+      - name: Install qjs (quickjs)
+        run: sudo apt-get install -y quickjs || true
+
+      - name: Install bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash || true
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Install deno
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh -s -- -y || true
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+
+      - name: Install wasmtime
+        run: |
+          curl -fsSL https://wasmtime.dev/install.sh | bash || true
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: Runtime availability (logged for transparency)
+        run: |
+          for r in node bun deno qjs wasmtime clang; do
+            printf '%-9s ' "$r"
+            if command -v "$r" >/dev/null; then "$r" --version 2>&1 | head -1; else echo "ABSENT"; fi
+          done
+
+      - name: Record full suite (all runtimes, 5 runs)
+        run: |
+          set -euo pipefail
+          ref="${{ github.event.inputs.ref || github.event.release.tag_name || '' }}"
+          scripts/perf_record.sh \
+            --runtimes vm,interp,rust,cranelift,llvm,wasi,node,bun,deno,qjs \
+            --runs 5 --timeout 180 ${ref:+--ref "$ref"}
+
+      - name: Commit the record
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet --exit-code -- perf-history/; then
+            echo "no new perf record to commit"; exit 0
+          fi
+          tag="${{ github.event.inputs.ref || github.event.release.tag_name || 'release' }}"
+          git add perf-history/
+          git commit -m "perf(history): full-suite record for ${tag} [skip ci]"
+          # Land on top of whatever is on main now, then push.
+          for attempt in 1 2 3; do
+            if git pull --rebase --autostash origin main && git push origin HEAD:main; then
+              echo "recorded"; exit 0
+            fi
+            echo "push race, retrying ($attempt)…"; sleep 3
+          done
+          echo "could not push perf record after retries" >&2; exit 1
