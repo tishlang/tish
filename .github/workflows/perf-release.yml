@@ -74,8 +74,15 @@ jobs:
       - name: Install clang/llvm (llvm backend)
         run: sudo apt-get update && sudo apt-get install -y clang llvm || true
 
-      - name: Install qjs (quickjs)
-        run: sudo apt-get install -y quickjs || true
+      - name: Install qjs (quickjs-ng, pinned)
+        # Hard step (no `|| true`): qjs is a required runtime — if the pinned asset ever moves, fail
+        # loudly here rather than silently dropping qjs from the record. `quickjs` is not in apt.
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/quickjs-ng/quickjs/releases/download/v0.15.1/qjs-linux-x86_64 -o /tmp/qjs
+          chmod +x /tmp/qjs
+          sudo mv /tmp/qjs /usr/local/bin/qjs
+          qjs -e 'console.log("qjs ready")'
 
       - name: Install bun
         run: |
