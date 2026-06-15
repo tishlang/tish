@@ -462,12 +462,11 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             Value::Number(n.ceil())
         }),
     );
+    // round/min/max delegate to the shared builtins (JS round-half-to-+∞, empty → ±∞, NaN
+    // propagation) so the vm never diverges from interp/native on Math semantics (#247).
     math.insert(
         "round".into(),
-        Value::native(|args: &[Value]| {
-            let n = args.first().and_then(|v| v.as_number()).unwrap_or(f64::NAN);
-            Value::Number(n.round())
-        }),
+        Value::native(|args: &[Value]| math_builtins::round(args)),
     );
     math.insert(
         "random".into(),
@@ -475,17 +474,11 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     );
     math.insert(
         "min".into(),
-        Value::native(|args: &[Value]| {
-            let nums: Vec<f64> = args.iter().filter_map(|v| v.as_number()).collect();
-            Value::Number(nums.into_iter().fold(f64::NAN, |a, b| a.min(b)))
-        }),
+        Value::native(|args: &[Value]| math_builtins::min(args)),
     );
     math.insert(
         "max".into(),
-        Value::native(|args: &[Value]| {
-            let nums: Vec<f64> = args.iter().filter_map(|v| v.as_number()).collect();
-            Value::Number(nums.into_iter().fold(f64::NAN, |a, b| a.max(b)))
-        }),
+        Value::native(|args: &[Value]| math_builtins::max(args)),
     );
     math.insert(
         "pow".into(),

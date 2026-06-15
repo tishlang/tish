@@ -16,7 +16,6 @@ math_unary!(abs, abs);
 math_unary!(sqrt, sqrt);
 math_unary!(floor, floor);
 math_unary!(ceil, ceil);
-math_unary!(round, round);
 math_unary!(sin, sin);
 math_unary!(cos, cos);
 math_unary!(tan, tan);
@@ -30,20 +29,75 @@ math_unary!(exp, exp);
 math_unary!(trunc, trunc);
 math_unary!(cbrt, cbrt);
 
+// --- f64-domain semantics (single source of truth) -------------------------------------------------
+// These hold the JS-specific Math rules so every backend agrees: the vm/native paths call the
+// `&[Value]` wrappers below, and the interpreter (which uses a different `Value` type) calls these f64
+// helpers directly after extracting its own args. Keeping the rules here means they can't drift. #247
+
+/// JS `Math.round`: ties round toward +∞ (not Rust's `.round()`, which rounds half away from zero),
+/// and values in `[-0.5, 0)` return `-0`. `floor(n + 0.5)` gives the +∞-tie behavior; the guards keep
+/// NaN/±∞ and the sign-of-zero edges correct (`Math.round(-2.5) === -2`, `Math.round(-0.5) === -0`).
+pub fn round_f64(n: f64) -> f64 {
+    if n.is_nan() || n.is_infinite() || n == 0.0 {
+        n
+    } else if (-0.5..0.5).contains(&n) {
+        if n < 0.0 {
+            -0.0
+        } else {
+            0.0
+        }
+    } else {
+        (n + 0.5).floor()
+    }
+}
+
+/// JS `Math.min` over already-extracted f64s: empty → `+∞`, any `NaN` → `NaN` (unlike `f64::min`,
+/// which ignores NaN), and `-0` is preferred over `+0`.
+pub fn min_f64(nums: &[f64]) -> f64 {
+    let mut acc = f64::INFINITY;
+    for &n in nums {
+        if n.is_nan() {
+            return f64::NAN;
+        }
+        if n < acc || (n == 0.0 && acc == 0.0 && n.is_sign_negative()) {
+            acc = n;
+        }
+    }
+    acc
+}
+
+/// JS `Math.max` over already-extracted f64s: empty → `-∞`, any `NaN` → `NaN`, `+0` preferred over `-0`.
+pub fn max_f64(nums: &[f64]) -> f64 {
+    let mut acc = f64::NEG_INFINITY;
+    for &n in nums {
+        if n.is_nan() {
+            return f64::NAN;
+        }
+        if n > acc || (n == 0.0 && acc == 0.0 && n.is_sign_positive()) {
+            acc = n;
+        }
+    }
+    acc
+}
+
+pub fn round(args: &[Value]) -> Value {
+    Value::Number(round_f64(extract_num(args.first()).unwrap_or(f64::NAN)))
+}
+
 pub fn min(args: &[Value]) -> Value {
-    let n = args
+    let nums: Vec<f64> = args
         .iter()
-        .filter_map(|v| extract_num(Some(v)))
-        .fold(f64::INFINITY, f64::min);
-    Value::Number(if n == f64::INFINITY { f64::NAN } else { n })
+        .map(|v| extract_num(Some(v)).unwrap_or(f64::NAN))
+        .collect();
+    Value::Number(min_f64(&nums))
 }
 
 pub fn max(args: &[Value]) -> Value {
-    let n = args
+    let nums: Vec<f64> = args
         .iter()
-        .filter_map(|v| extract_num(Some(v)))
-        .fold(f64::NEG_INFINITY, f64::max);
-    Value::Number(if n == f64::NEG_INFINITY { f64::NAN } else { n })
+        .map(|v| extract_num(Some(v)).unwrap_or(f64::NAN))
+        .collect();
+    Value::Number(max_f64(&nums))
 }
 
 pub fn pow(args: &[Value]) -> Value {
