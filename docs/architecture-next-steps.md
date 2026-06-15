@@ -1,5 +1,14 @@
 # Tish Architecture: Shared Core Refactor
 
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
 Technical document detailing the shared core refactor and type system consolidation.
 
 **Status: All phases complete** (as of Mar 2026)
@@ -274,9 +283,17 @@ pub fn sub(l: &Value, r: &Value) -> Result<Value, String>
 
 ## Testing Strategy
 
-1. **Existing tests remain unchanged** - All 29 MVP `.tish` files should pass
-2. **Add unit tests for tish_core** - Test each operation in isolation
-3. **Interpreter vs Native parity** - Existing integration test validates identical output
+These are gates, not recorded verdicts — each is re-validated on every run, never "passed once":
+
+1. **Existing tests remain unchanged** — Acceptance gate: the `.tish` fixture suite passes on
+   every CI run (validated now, not a frozen count). The "29 MVP files" figure is a historical
+   snapshot that may be stale; regenerate the current set/result by running the test suite
+   (`cargo test`) rather than trusting the number.
+2. **Add unit tests for tish_core** — Gate: `cargo test -p tish_core` passes, covering each
+   operation in isolation; validated on every run.
+3. **Interpreter vs Native parity** — Acceptance gate: `scripts/run_parity_compare.sh` reports
+   cross-backend agreement (interpreter == native, no divergence); validated on every run in CI,
+   not a recorded "identical output" state.
 
 ---
 
@@ -284,8 +301,8 @@ pub fn sub(l: &Value, r: &Value) -> Result<Value, String>
 
 | Risk | Mitigation |
 |------|------------|
-| Behavioral regression | Run full test suite after each phase |
-| Performance impact | Benchmark before/after (existing `run_performance_manual.sh`) |
+| Behavioral regression | Gate: run the full test suite (`cargo test`) + `scripts/run_parity_compare.sh` after each phase; cross-backend parity must hold on every run, not a one-time check |
+| Performance impact | Gate: re-validate with `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL) and a same-machine A/B via `scripts/perf_record.sh` + `scripts/perf_compare.sh` (noise-floored). Do not trust any single before/after number — absolute ms across machines/days are not comparable |
 | Circular dependencies | tish_core has no dependencies on other tish crates |
 
 ---

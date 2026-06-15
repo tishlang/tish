@@ -1,5 +1,14 @@
 # Tish Docs (in-repo)
 
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
 Internal and contributor-facing docs. User-facing docs live in the **[tishlang.com](https://github.com/tishlang/tishlang.com)** repo.
 
 | File | Purpose |
@@ -9,14 +18,14 @@ Internal and contributor-facing docs. User-facing docs live in the **[tishlang.c
 | `LANGUAGE.md` | Canonical language reference (syntax, semantics, builtins; LLM/tool friendly) |
 | `plan-gap-analysis.md` | Implementation audit, MVP checklist, next steps |
 | `type-system-roadmap.md` | Static type system: status assessment + sequenced roadmap to native, dynamic-free AOT |
-| `perf-typed-vs-untyped-baseline.md` | **Typed-native A/B baseline:** `just perf-gauntlet` builds each `tests/perf` fixture boxed(flags-off) vs typed(flags-on) vs node; the committed validation that the typing work speeds programs up (14–45× on compute) without changing results (`TYPED≠BOXED` guard). The snapshot table + what's covered/not |
+| `perf-typed-vs-untyped-baseline.md` | **Typed-native A/B gate:** `just perf-gauntlet` (canonical: `scripts/run_perf_gauntlet.sh`) builds each `tests/perf` fixture boxed(flags-off) vs typed(flags-on) vs node, validating that typing speeds programs up without changing results (`TYPED≠BOXED` guard). Speedup ratios are validated on every run, not a recorded state; the doc's table is a snapshot that may be stale — regenerate with `scripts/run_perf_gauntlet.sh`. The snapshot table + what's covered/not |
 | `perf-benchmark-suite.md` | **Benchmark-suite map + industry survey:** what tish benchmarks vs what the V8/JSC/SpiderMonkey teams benchmark (SunSpider/Kraken/Octane/JetStream/Are-We-Fast-Yet/Benchmarks-Game), the gap analysis, the 11 canonical algorithmic benchmarks added to `tests/perf` (nbody, mandelbrot, binary_trees, megamorphic, k_nucleotide, …), and the JS-compat gaps porting them surfaced (`>>>`, `1e-3` notation, comma-declarators, `Map.values()` iterators) |
 | `architecture-next-steps.md` | tish_core refactor, crate layout, design decisions |
 | `builtins-gap-analysis.md` | Builtins across Rust vs bytecode VM (Cranelift/WASI) |
 | `code-audit-2026-06.md` | Cleanup/optimize/secure audit: what's fixed + prioritized remaining roadmap (DoS limits, interp/core convergence, hot-path allocs) |
 | `control-flow-audit.md` | Cross-backend control-flow/scope correctness matrix: 7 pre-existing divergences (let-binding, try-in-fn, switch-break, finally, event-loop) + fix priority. Perf work verified clean |
 | `concurrency-model.md` | EXACT task-execution flow (single-thread micro/macrotask + multi-thread HTTP) per backend vs JS/V8: no microtask queue, blocking `await`, prefork+threads+tokio. Why tish deliberately isn't a JS event loop |
-| `http-techempower-status.md` | **HTTP-server health check (2026-06-10):** default `tiny_http` multithreaded server works (VM + native AOT, prefork, concurrent, regression tests pass); the `hyper` backend was broken by `#78` (fn_traits `.call`, missing hyper Timer) and is **fixed here**; DB endpoints blocked by the stale `tish-pg` sibling crate. Verification matrix + reproduce commands |
+| `http-techempower-status.md` | **HTTP-server health check (snapshot, regenerate with `scripts/run_http_perf.sh` + the doc's regression tests):** records that the default `tiny_http` multithreaded server worked (VM + native AOT, prefork, concurrent, regression tests passed), the `hyper` backend (broken by `#78`: fn_traits `.call`, missing hyper Timer) was fixed, and DB endpoints were blocked by the stale `tish-pg` sibling crate. These are point-in-time states that drift — re-run the reproduce commands rather than trusting the recorded verdict. Verification matrix + reproduce commands |
 | `perf.md` | Perf optimization log: slots/JIT/object layout, mimalloc + parking_lot allocator/lock wins, HTTP throughput, run-vs-build. The dated BEFORE/AFTER blocks at the top are the source of truth |
 | `jsc-bun-perf-guidance.md` | JavaScriptCore/Bun techniques as the optimization source: the 4 structural gaps (fat Value, shapeless objects, boxed arrays, one-shot JIT) + ranked roadmap |
 | `nan-box-value-plan.md` | Foundational `Value` shrink (24→16→8B): staged plan (abstraction → thin fat variants [safe, independent −33%] → NaN-box swap [unsafe]); the surface (~600 sites) + gates. Implementation is a dedicated workstream |

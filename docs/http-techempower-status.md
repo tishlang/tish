@@ -1,12 +1,24 @@
 # HTTP server / TechEmpower status (analysis 2026-06-10)
 
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
 **Question:** is the multithreaded, non-blocking HTTP server still working as part of the TechEmpower
 (TFB) requirements, after the typing / stdlib-types work?
 
-**TL;DR — yes, the server works, and the full TFB suite (incl. all DB endpoints) now builds and runs.**
-The default `tiny_http` backend serves correctly and concurrently on both the VM and native-AOT path
-(prefork, 14 processes here); the multithreaded handler-dispatch regression test passes; none of this
-session's typing/stdlib changes regressed it. Three pre-existing breakages from the `#78` perf-branch
+**TL;DR (snapshot — re-validate, do not treat as a standing verdict)** — at the time of this analysis
+the server worked and the full TFB suite (incl. all DB endpoints) built and ran. These are
+point-in-time results, not a settled "it's fine now" state; they must be re-checked on every change via
+the gates listed below (the "Reproduce / verify" commands, plus `scripts/run_http_perf.sh` for the http
+perf gate). The default `tiny_http` backend served correctly and concurrently on both the VM and
+native-AOT path (prefork, 14 processes here); the multithreaded handler-dispatch regression test passed;
+none of this session's typing/stdlib changes regressed it (re-confirm by re-running the gates). Three pre-existing breakages from the `#78` perf-branch
 merge (2026-06-07) — **not** this session — blocked the hyper backend and the DB suite; **all three
 are fixed here**, and all 7 TFB endpoints (`/plaintext`, `/json`, `/db`, `/queries`,
 `/cached-queries`, `/updates`, `/fortunes`) now serve correctly against a real Postgres.
@@ -32,18 +44,23 @@ are fixed here**, and all 7 TFB endpoints (`/plaintext`, `/json`, `/db`, `/queri
   *parallelism* can't be observed on Darwin — it's a Linux/deployment property. Correctness still
   holds; the cross-platform proof is the Rust thread test below.
 
-## Verification performed (this analysis)
+## Verification gates (re-run these — the ✅ below is a recorded snapshot, not a standing verdict)
 
-| Check | Result |
-|-------|--------|
-| `send-values` path compiles (incl. this session's Date/Set/Map/TypedArrays → `Send + Sync`) | ✅ clean |
-| `crates/tish_vm/tests/concurrent_shared_state.rs` (12 threads × 100 calls, ~10 handlers in flight, no deadlock) | ✅ pass |
-| `tiny_http`, **VM path** (`tish run`): `/plaintext` + `/json`, 16 concurrent | ✅ 200, prefork 14 procs |
-| `tiny_http`, **native AOT** (`tish build --native-backend rust`): `/plaintext` + `/json`, 32 concurrent | ✅ 32/32 200 |
-| `scripts/test_http_concurrency.sh` shared-counter regression (PREFORK=0, contended) | ✅ pass, no deadlock |
-| `hyper` backend, native AOT (`--feature http-hyper --feature process`), 32 concurrent | ✅ 32/32 200, 0 panics *(after the fixes below)* |
-| Full TFB app `tish build src/main.tish` (DB endpoints) | ✅ builds *(after the fixes below)* |
-| All 7 endpoints vs local Postgres (`/db`,`/queries`,`/cached-queries`,`/updates`,`/fortunes`) | ✅ correct rows, writes, HTML+XSS-escaped fortunes, no panics |
+The ✅ marks are what was observed during this analysis. They are **not** proof the gate passes today —
+re-run each command and require the criterion to hold **now** before relying on it. The "Reproduce /
+verify" section gives the exact commands.
+
+| Gate (criterion that must hold on re-run) | How / when it runs | Snapshot result (may be stale — regenerate) |
+|-------|-------|-------|
+| `send-values` path compiles clean (incl. Date/Set/Map/TypedArrays → `Send + Sync`): `cargo build … --features send-values` exits 0 | every build / CI | ✅ clean (snapshot) |
+| `crates/tish_vm/tests/concurrent_shared_state.rs` passes (12 threads × 100 calls, ~10 handlers in flight, no deadlock): `cargo test … --test concurrent_shared_state` exits 0 | CI test run | ✅ pass (snapshot) |
+| `tiny_http`, **VM path** (`tish run`): `/plaintext` + `/json` return 200 under 16 concurrent | manual repro below | ✅ 200, prefork 14 procs (snapshot) |
+| `tiny_http`, **native AOT** (`tish build --native-backend rust`): `/plaintext` + `/json`, 32/32 return 200 | manual repro below | ✅ 32/32 200 (snapshot) |
+| `scripts/test_http_concurrency.sh` shared-counter regression passes, no deadlock (PREFORK=0, contended): script exits 0 | `./scripts/test_http_concurrency.sh -n 8` | ✅ pass, no deadlock (snapshot) |
+| `hyper` backend, native AOT (`--feature http-hyper --feature process`): 32/32 return 200, 0 panics | manual repro below | ✅ 32/32 200, 0 panics *(after the fixes below)* (snapshot) |
+| Full TFB app `tish build src/main.tish` (DB endpoints) builds: exits 0 | `tish-techempower` build | ✅ builds *(after the fixes below)* (snapshot) |
+| All 7 endpoints vs local Postgres (`/db`,`/queries`,`/cached-queries`,`/updates`,`/fortunes`): correct rows, writes, HTML+XSS-escaped fortunes, no panics | manual repro below | ✅ correct (snapshot) |
+| **HTTP throughput is within the http perf gate vs the JS control** | `scripts/run_http_perf.sh`; validated on each run, not a recorded number | not measured in this analysis — run `scripts/run_http_perf.sh` to obtain |
 
 ## Fixes applied (all three pre-existing `#78` breakage, none from this session)
 

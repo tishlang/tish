@@ -1,8 +1,19 @@
 # Typed-native perf baseline (typed vs untyped A/B)
 
-**What this is.** The committed validation that the typed-native codegen (the "typing work") actually
-makes programs faster — and never changes their result. Each compute benchmark in `tests/perf/` is
-built **twice on the rust backend** and self-timed (hot loop only; process startup excluded):
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
+**What this is.** The harness that *re-checks*, on demand, whether the typed-native codegen (the
+"typing work") makes programs faster — and never changes their result. It is a validator you run, not a
+standing claim that the win is banked: each compute benchmark in `tests/perf/` is built **twice on the
+rust backend** and self-timed (hot loop only; process startup excluded), and the gauntlet recomputes the
+speedup and the PASS/FAIL + soundness verdicts every run:
 
 | build | flags | path exercised |
 |-------|-------|----------------|
@@ -39,13 +50,19 @@ the *inference* wasn't reaching idiomatic functions. Three small, fully-flag-gat
    `Value` and dragging the whole hot loop boxed with them. (This ordering was the keystone: with it,
    an *unannotated* numeric function lowers exactly like an annotated one.)
 
-**Result — `mandelbrot` 872 ms → 70 ms (12.46× typing-speedup), from 13.9× *off* V8 to 1.21× off.**
-`fnv_hash` also fully nativizes (was un-runnable before `>>>`); its remaining 4× gap vs V8 is an
-*integer-representation* issue (it round-trips `f64↔i32` every bitwise op via `to_int32`, where V8
-keeps the value an int32) — a separate future lever, not boxing. **Soundness held: 0 `TYPED≠BOXED`,
-0 `≠NODE` across all 21.** Also landed: **OOB-safe typed array reads** (`vec.get(i).unwrap_or(NaN/false)`
+**Result (snapshot — regenerate with `scripts/run_perf_gauntlet.sh`) — `mandelbrot` 872 ms → 70 ms
+(12.46× typing-speedup), from 13.9× *off* V8 to 1.21× off.** `fnv_hash` also fully nativizes (was
+un-runnable before `>>>`); its remaining 4× gap vs V8 is an *integer-representation* issue (it
+round-trips `f64↔i32` every bitwise op via `to_int32`, where V8 keeps the value an int32) — a separate
+future lever, not boxing. **Soundness gate:** `run_perf_gauntlet.sh` fails the run if any fixture
+reports `TYPED≠BOXED` or `≠NODE`; validated on every run, not a recorded state (this snapshot saw 0/0
+across all 21). Also landed: **OOB-safe typed array reads** (`vec.get(i).unwrap_or(NaN/false)`
 for numeric/bool `Vec`s — JS `arr[oob]` is `undefined`, not a panic), hardening the rest-param path
 and the foundation for inferring index reads.
+
+Snapshot table below — point-in-time, may be stale; regenerate with `scripts/run_perf_gauntlet.sh`.
+The `status` column is **not** a recorded verdict: `run_perf_gauntlet.sh` recomputes each PASS/FAIL
+(typed ≤ node) on every run.
 
 | benchmark | boxed (off) | typed (on) | typing-speedup | node (ratio) | status |
 |-----------|------------:|-----------:|---------------:|-------------:|--------|
@@ -106,8 +123,9 @@ Three pieces, all still fully flag-gated (dark-ship intact):
    what handles cross-referencing arrays a per-array pass can't — `perm[i] = perm1[i]` (fannkuch) only
    types if *both* `perm` and `perm1` survive together.
 
-**Results (full 21-benchmark gauntlet, min of 3, idle machine). Soundness held: 0 `TYPED≠BOXED`,
-0 `≠NODE`.**
+**Results — snapshot (full 21-benchmark gauntlet, min of 3, idle machine); may be stale, regenerate
+with `scripts/run_perf_gauntlet.sh`. Soundness gate:** the gauntlet fails on any `TYPED≠BOXED` /
+`≠NODE`, checked every run — this snapshot saw 0/0, but that is re-validated, not frozen.
 
 | benchmark | boxed (off) | typed (on) | typing-speedup | node (ratio) | element type | note |
 |-----------|------------:|-----------:|---------------:|-------------:|----|----|
@@ -146,7 +164,12 @@ analysis provably can't store a string into a `number[]`.
   `binary_trees` (24× off, hardest). Both extend `TISH_STRUCT_INFER`. `megamorphic` (12× off) is
   polymorphic dispatch → a VM inline-cache concern, not typed codegen.
 
-## Update 2026-06-11 — regression check: perf flat across the 23 commits since `71c874d0` (#79)
+## Update 2026-06-11 — regression check: perf was flat across the 23 commits since `71c874d0` (#79)
+
+This is a recorded before/after snapshot, not a standing claim — "flat" was true between the two
+commits below and does **not** assert anything about `main` today. Re-establish a current flat/regressed
+verdict with a fresh same-machine A/B (`scripts/perf_record.sh` at each ref, then `scripts/perf_compare.sh`,
+which noise-floors against the JS controls) or by re-running `scripts/run_perf_gauntlet.sh` at both refs.
 
 Not a new typing lever — a **before/after guard** confirming the feature/fix work that landed on `main`
 since the phase-2 baseline (the six merged PRs #105–#111 plus the rest of the range) did **not** move the
@@ -155,12 +178,17 @@ and the identical 21-fixture `tests/perf/` corpus, built and run on the real che
 worktrees) — **baseline `71c874d0`** vs **`main` `c69cf32f`**, min of 5, with the Node/V8 column as a
 machine-noise control (same V8 binary both runs).
 
-**Verdict: no measurable change.** Every per-benchmark delta sits inside run-to-run noise — the Node
-control column drifts by as much or more with zero code change (`fnv_hash` node 104→109 ms,
-`json_roundtrip` 133→125 ms, `queens` 129→124 ms). Status counts are identical (**8 / 21 beat V8**),
-**no benchmark flipped** PASS↔FAIL, and soundness held on both builds (**0 `TYPED≠BOXED`, 0 `≠NODE`**).
+**Verdict at the time (snapshot — re-validate, do not treat as current): no measurable change.** Every
+per-benchmark delta sat inside run-to-run noise — the Node control column drifts by as much or more with
+zero code change (`fnv_hash` node 104→109 ms, `json_roundtrip` 133→125 ms, `queens` 129→124 ms). Status
+counts were identical (**8 / 21 beat V8**), **no benchmark flipped** PASS↔FAIL, and the soundness gate
+passed on both builds (**0 `TYPED≠BOXED`, 0 `≠NODE`**). To confirm this still holds, regenerate via
+`scripts/perf_record.sh` + `scripts/perf_compare.sh` (over-time, noise-floored) — the "inside noise"
+call is only meaningful against that same-machine control, never against the absolute ms below.
 
-`main` (`c69cf32f`) snapshot — full 21-benchmark gauntlet, min of 5 (Δ = `typed (on)` vs `71c874d0`):
+`main` (`c69cf32f`) snapshot — full 21-benchmark gauntlet, min of 5 (Δ = `typed (on)` vs `71c874d0`).
+Point-in-time, may be stale; regenerate with `scripts/run_perf_gauntlet.sh`. The `status` column is
+recomputed by the gauntlet each run, not a stored verdict:
 
 | benchmark | boxed (off) | typed (on) | typing-speedup | node (ratio) | Δ typed vs `71c874d0` | status |
 |-----------|------------:|-----------:|---------------:|-------------:|----------------------:|--------|
@@ -194,6 +222,9 @@ symmetric scatter. No trend, no regression to chase — the recent range was cor
 
 ## Baseline (Apple Silicon, release, min of 3 runs — pre-phase-1 reference, 9-benchmark set)
 
+Historical snapshot — may be stale; regenerate with `scripts/run_perf_gauntlet.sh`. The `status` column
+is recomputed (typed ≤ node PASS/FAIL) by the gauntlet on every run, not a stored verdict.
+
 | benchmark | boxed (off) | typed (on) | typing-speedup | node (ratio) | status | validates |
 |-----------|------------:|-----------:|---------------:|-------------:|--------|-----------|
 | `object_sum` | 90 ms | 2 ms | **44.98×** | 3 ms (0.67×) | PASS | struct inference — unboxed field access |
@@ -206,40 +237,52 @@ symmetric scatter. No trend, no regression to chase — the recent range was cor
 | `math_trig` | 12 ms | 12 ms | 1.00× | 81 ms (0.15×) | PASS | `Math.*` intrinsics already native |
 | `string_concat` | 0 ms | 0 ms | — | 3 ms | PASS | too fast to measure either way |
 
-**8 / 9 typed-native builds beat V8.** Numbers are indicative (single machine, min-of-3); re-run the
-gauntlet for your hardware.
+**In this snapshot, 8 / 9 typed-native builds beat V8** — a point-in-time count, not a standing claim;
+re-run `scripts/run_perf_gauntlet.sh` to get the current count, which recomputes per-benchmark PASS/FAIL
+each run. Numbers are indicative (single machine, min-of-3) and not comparable across machines/days.
 
 ## What the baseline shows
 
-- **The typing work pays off where it should — compute-heavy, dispatch-bound code:** 14–45× on
-  recursion, matmul, struct sums, and HOF reductions. The dominant cost it removes is the boxed
-  `value_call` ABI and per-element `Value` boxing.
+The qualitative observations below held for the snapshots above; the specific multipliers are
+point-in-time and must be regenerated (`scripts/run_perf_gauntlet.sh`) rather than trusted as current.
+
+- **The typing work pays off where it should — compute-heavy, dispatch-bound code:** ~14–45× (snapshot
+  ratios — regenerate) on recursion, matmul, struct sums, and HOF reductions. The dominant cost it
+  removes is the boxed `value_call` ABI and per-element `Value` boxing.
 - **Inference reaches idiomatic code:** `recursion_untyped` (no annotations) gets the *same ~15×* as
   the annotated `recursion_fib`, because M4/M5 infer `n: number` and the numeric return and emit a
   native `fib_native`. You do not have to annotate to get the win on numeric code.
 - **Neutral cases are expected, not regressions:** `numeric_loop` (0.94×) and `math_trig` (1.0×) are
   already native through the base typed codegen, and a trivial loop is memory-bandwidth-bound, so the
   flags add nothing. `0.94×` is run-to-run noise (47 vs 50 ms), not a real slowdown.
-- **Soundness is validated for free:** the gauntlet flags `TYPED≠BOXED` if the typed and boxed builds
-  ever disagree on a result. **No fixture triggered it** — the dark-shipped flags are behavior-
-  preserving across this corpus (consistent with the byte-identical cross-backend corpus).
-- **`typed_array_hof` is an honest open gap.** The native `Vec<f64>` reduce (`TISH_NATIVE_HOF`) gives
-  a real **2.68×** over the boxed `array_reduce`, but the remaining native fold is still ~2.9× slower
-  than V8's JIT on this hash-fold workload — so it's the one `FAIL (evolve)` row. This is the gauntlet
-  working as intended: it tracks red→green. The packed-native `Float64Array` follow-up and better fold
-  codegen are the levers (see `type-system-roadmap.md`).
+- **Soundness is gated, not asserted:** the gauntlet flags `TYPED≠BOXED` (and `≠NODE`) and fails the
+  run if the typed and boxed builds ever disagree on a result — this is checked on **every** run, so it
+  reflects the code as it is now, not a recorded "no fixture triggered it". In the snapshots above none
+  did; re-run `scripts/run_perf_gauntlet.sh` to confirm the dark-shipped flags are still behavior-
+  preserving (and `scripts/run_parity_compare.sh` for the broader cross-backend corpus).
+- **`typed_array_hof` is an honest open gap.** In the snapshot the native `Vec<f64>` reduce
+  (`TISH_NATIVE_HOF`) gave ~**2.68×** over the boxed `array_reduce` while the remaining native fold was
+  still ~2.9× slower than V8's JIT on this hash-fold workload — the one `FAIL (evolve)` row. Whether it
+  is still `FAIL` is recomputed by `scripts/run_perf_gauntlet.sh` each run, which tracks red→green. The
+  packed-native `Float64Array` follow-up and better fold codegen are the levers (see
+  `type-system-roadmap.md`).
 
 ## Scope / what this does NOT cover yet
 
-- **Not a CI gate.** Perf fixtures are timing-nondeterministic (excluded from the parity corpus) and
-  run on demand via `just perf-*`. A typing change that silently *stopped* helping is caught by eye
-  on the next gauntlet run, not automatically.
+- **Not an automatic CI perf gate.** Perf fixtures are timing-nondeterministic (excluded from the
+  parity corpus) and run on demand via `just perf-*` / `scripts/run_perf_gauntlet.sh`. The
+  `TYPED≠BOXED` / `≠NODE` soundness checks *are* a hard gate within each gauntlet run, but a typing
+  change that silently *stopped* helping on the timing axis is caught by re-running the gauntlet (or a
+  `scripts/perf_record.sh` + `scripts/perf_compare.sh` A/B), not automatically per-commit.
 - **The runtime stdlib types** (`Date`/`Set`/`Map`/typed arrays) are correctness features, not
   typed-vs-untyped speedups — they behave identically with flags on or off, so they have no row here.
   Their validation is the cross-backend + Node parity corpus (`tests/core/{date_types,set_map_types,
   typed_arrays}.*`), not this baseline.
-- **One machine, indicative numbers.** Treat the absolute ms as a snapshot; the *ratios* (and the
-  PASS/FAIL/TYPED≠BOXED verdicts) are the durable signal.
+- **One machine, indicative numbers.** Treat the absolute ms as a snapshot (not comparable across
+  machines/days). The *ratios* and the PASS/FAIL/TYPED≠BOXED verdicts are the more portable signal —
+  but still re-validate them each time by re-running the gauntlet (or a noise-floored
+  `scripts/perf_record.sh` + `scripts/perf_compare.sh` A/B); a ratio recorded here is not a guarantee
+  the code still holds it.
 
 ## Adding a fixture
 

@@ -1,5 +1,14 @@
 # `feature/perf` — branch overview & breaking-change audit
 
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
 Scope: **47 commits, 149 files** vs `main` (merge-base `0f4a54eb`). A multi-session performance +
 JS-conformance effort across the VM, the rust-AOT/cranelift/llvm/wasi backends, the JIT, and the
 runtime. This document inventories the **breaking changes in the DEFAULT build** — both the Rust
@@ -40,7 +49,9 @@ native extensions. They are compile-time breaks (the compiler will flag them).
    objects via the raw map type are affected; use `Value::object`/`Value::object_from_pairs`.
 
 (`Value::Promise`/`Value::Opaque` remain `Arc<dyn …>` — a 16-byte→thinning experiment was tried and
-**reverted** after an interleaved A/B showed it regressed dispatch ~8–10%; see docs/perf.md.)
+**reverted** after an interleaved A/B showed a dispatch regression; see docs/perf.md. The "~8–10%"
+figure is a point-in-time snapshot, not a standing fact — re-measure with a same-machine A/B via
+`scripts/perf_record.sh` + `scripts/perf_compare.sh` before relying on it.)
 
 ---
 
@@ -71,7 +82,12 @@ grew (RegExp constructor cases, default-param edges, etc., now pass).
 
 ---
 
-## C. Default configuration (performance — validated behavior-neutral)
+## C. Default configuration (performance — behavior-neutral; re-validate with the parity gate)
+
+> Behavior-neutrality is not a frozen claim: confirm it with `scripts/run_parity_compare.sh`
+> (cross-backend output identical) on every change, and confirm the perf wins still hold with
+> `scripts/perf_record.sh` + `scripts/perf_compare.sh` rather than trusting any number recorded here.
+
 
 - **ON by default:** slot-based locals, numeric JIT (loops + self-recursion), **array-element JIT**
   (`TISH_JIT_ARRAYS`, *new this branch* — `arr[i]` inside JIT'd loops), `mimalloc` global allocator,
@@ -87,13 +103,26 @@ grew (RegExp constructor cases, default-param edges, etc., now pass).
   all backends, vs the rust-AOT-only `cargo:`.
 - Shape registry + per-name inline caches (`tish_core/src/shape.rs`); packed f64 arrays (flag-gated).
 
-## E. Verification status
+## E. Verification gates (re-validate — not a recorded verdict)
 
-- Cross-backend integration suite **17/0** (interp · vm · js · rust-AOT · cranelift · wasi).
-- rust-AOT compute gauntlet **8/8 beats V8**; vm `fib` beats Node; startup 5ms (fastest engine).
+These are *gates*, not stored results. Each names the criterion, the command that checks it, and when
+it runs. A green here means the gate passes **now** — not that a number was hit once.
+
+- **Cross-backend parity gate:** `scripts/run_parity_compare.sh` reports no divergence across interp ·
+  vm · js · rust-AOT · cranelift · wasi; validated on every run (CI `parity.yml` + pre-release), not a
+  recorded state. *(Historical snapshot: integration suite was 17/0 — may be stale; regenerate with
+  `scripts/run_parity_compare.sh`.)*
+- **Compute-vs-node gate:** `scripts/run_perf_gauntlet.sh` reports each gauntlet probe PASS (typed
+  tish ≤ node); validated on every run (CI + release), not a recorded state. For over-time, noise-
+  floored standing vs JS controls use `scripts/perf_record.sh` + `scripts/perf_compare.sh`; for HTTP
+  use `scripts/run_http_perf.sh`. *(Historical snapshot — may be stale, regenerate with the commands
+  above: rust-AOT compute gauntlet 8/8 beat V8; vm `fib` beat Node; startup ~5ms. Absolute ms are not
+  comparable across machines/days — use a same-machine A/B or the noise-floored compare.)*
 - **Known gaps:** (1) the rust-AOT numeric-local-demotion in `bd8a2901` regresses the
   `typed_assign_conversion` unit test (NOT in CI's `-p tishlang -p tishlang_vm` scope) and over-boxes a
   provably-numeric accumulator. (2) `cargo test --workspace` required migration-fallout fixes (Callable
   `f()`→`f.call()`, ArcStr `.as_str()`) in `tish_ui`/`tish_ffi`/`tish_runtime`/`tish_core` *test* code;
   the shipping library code + CI were unaffected. (3) wasm/wasi has no compute story — the cranelift
-  JIT is disabled on wasm targets, so wasi is ~16× Node on the bundle.
+  JIT is disabled on wasm targets, so wasi trails Node substantially on the bundle. *(Historical
+  snapshot: ~16× Node — may be stale; regenerate the standing with `scripts/perf_compare.sh` against a
+  JS control on the same machine.)*

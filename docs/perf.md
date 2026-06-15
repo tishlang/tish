@@ -1,3 +1,14 @@
+# tish performance log
+
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
 ################################################################################
 ##  ★ WIN — Map/Set O(n)→O(1) per op (hash-backed), ~350× at scale (2026-06-10). DEFAULT ON.
 ################################################################################
@@ -433,8 +444,16 @@ to the existing path.
 ##  AFTER this session's slot-based locals + control-flow JIT already landed.
 ################################################################################
 
-darwin-arm64, release. THIS IS "BEFORE". Each phase appends an "AFTER" block above
-and must show its target micro faster than these numbers, suite still 14/0.
+SNAPSHOT — may be stale; these are point-in-time "BEFORE" numbers used as a motivating reference line,
+not a live standing. Do NOT read them as current. Regenerate the comparison line with
+`scripts/run_performance_suite.sh --release`, and for an over-time, noise-floored read use
+`scripts/perf_record.sh` + `scripts/perf_compare.sh`. Absolute ms below are only comparable on the same
+machine/day they were taken. Each phase appends an "AFTER" block above; "must beat" is enforced by
+re-running the suite, not by trusting this table. Suite-green is itself a gate (re-run to confirm 14/0).
+
+darwin-arm64, release. THIS IS "BEFORE" (snapshot, regenerate with `scripts/run_performance_suite.sh
+--release`). Each phase appends an "AFTER" block above and must show its target micro faster than these
+numbers, suite still 14/0.
 
 BUNDLED PERF SUITE (tests/main.tish, sustained, 5-run avg, ms) — run_performance_suite.sh --release:
   backend       ms     vs Node
@@ -547,13 +566,16 @@ own compiler and is unaffected.
 ================================================================================
   FULL SUITE RUN (2026-06-05) — all backends, after rust-AOT async parity fix
 ================================================================================
-Fresh `scripts/run_performance_suite.sh --release`. The headline change: the rust
+Fresh `scripts/run_performance_suite.sh --release`. SNAPSHOT — regenerate with
+`scripts/run_performance_suite.sh --release`; the failure count and standings below are point-in-time,
+not a current verdict. The headline change at the time: the rust
 backend no longer CRASHES on the bundle (was exit 134 on `.then()` chains), so its
-sustained-compute number is now real — and much better than the prior unreliable
-175ms. Suite failures are down to 2/52, **both QuickJS** (a reference runtime), not
-any tish backend; every tish backend passes.
+sustained-compute number became real — and much better than the prior unreliable
+175ms. Suite failures were 2/52 in this run, **both QuickJS** (a reference runtime), not
+any tish backend; every tish backend passed. Re-run the suite to confirm the live count.
 
-BUNDLED PERF SUITE — tests/main.tish, sustained compute, 5-run avg (ms):
+BUNDLED PERF SUITE — tests/main.tish, sustained compute, 5-run avg (ms) (SNAPSHOT, regenerate with
+`scripts/run_performance_suite.sh --release`):
   backend       ms     vs Node   note
   rust (AOT)   106     1.6x      best tish; beats QuickJS (255)
   vm (default) 300     4.5x      <- the real gap (#13/#14 lever territory)
@@ -579,9 +601,11 @@ VM) are the remaining compute reds; wasi at 19x is a separate problem.
 ================================================================================
   GAUNTLET PASS (2026-06-05) — native struct fields + native numeric reduce
 ================================================================================
-Two shared rust-backend codegen changes (no per-test hacks). The compute gauntlet
-(`scripts/run_perf_gauntlet.sh`, compute-only / startup excluded, rust-AOT vs node V8)
-went from **6/8 → 8/8 beating V8**. Both closed reds:
+Two shared rust-backend codegen changes (no per-test hacks). Acceptance gate:
+`scripts/run_perf_gauntlet.sh` (compute-only / startup excluded, rust-AOT vs node V8) reports every
+gauntlet benchmark PASS (tish <= node) — validated on every run, not a recorded state. SNAPSHOT (may be
+stale; regenerate with `scripts/run_perf_gauntlet.sh`): this change moved the reported count from 6/8 to
+**8/8 beating V8** by closing both reds:
 
   benchmark    before        after        change
   object_sum   11ms (3.67x)  1ms (0.33x)   native struct-field arithmetic
@@ -704,14 +728,21 @@ orchestrates both for a quick local comparison. HTTP/WS tests are EXCLUDED from 
 suite (run_performance_manual.sh + the bundle) — opening a port / doing an outbound fetch can't be
 timed in a one-process harness.
 
-darwin-arm64, `oha -c128`, 14 cores, req/s (higher better) / p50 ms:
+SNAPSHOT — regenerate with `scripts/run_http_perf.sh` (`just perf-http`); these req/s and the "beats
+Node" reading are a point-in-time run that drifts with code, OS, and core count, and are not comparable
+across machines. Re-run the script for a live tish-vs-node HTTP comparison rather than trusting the
+table.
+
+darwin-arm64, `oha -c128`, 14 cores, req/s (higher better) / p50 ms (SNAPSHOT, regenerate with
+`scripts/run_http_perf.sh`):
   engine       /plaintext       /json
   tish  w=1    125k / 1.02ms    121k / 1.05ms
   tish  w=14   124k / 1.02ms    119k / 1.07ms    <- no scaling on macOS (see below)
   node  w=1     95k / 1.35ms     93k / 1.38ms
   node  w=14   154k / 0.82ms    153k / 0.83ms
 
-- SINGLE worker: tish beats Node by ~33% (faster per request, 1.02 vs 1.35 ms p50). This is the
+- SINGLE worker (this snapshot): tish beat Node by ~33% (faster per request, 1.02 vs 1.35 ms p50) —
+  re-confirm with `scripts/run_http_perf.sh` before citing. This is the
   apples-to-apples local number — native rust server + cached Date header + Arc<str> bodies pay off.
 - macOS MULTI-worker is a NO-OP: BSD SO_REUSEPORT does not kernel-load-balance, so all connections
   funnel to ONE worker (measured: 1 process at 252% CPU, the other 13 at 0%). So tish w=14 ~ w=1.
@@ -800,23 +831,31 @@ array, needs array-ELEMENT inference; array_hof (native closures); object_sum (h
 ================================================================================
   PERF GAUNTLET (2026-06) — tracked targets we currently LOSE, to evolve past
 ================================================================================
-`scripts/run_perf_gauntlet.sh` (`just perf-gauntlet`): compute-only benchmarks (self-timed, process
-startup excluded) for the rust backend vs node V8, with per-benchmark correctness checks.
-DELIBERATELY includes tests we lose, so each backend change is measured and red turns green over
-time. Fixtures: `tests/perf/<name>.tish` (+ `.js` for the native-param ones; the rest are valid in
-both tish and node). Baseline (darwin-arm64, rust backend + `TISH_PARAM_NATIVE=1`, min of 2):
+ACCEPTANCE GATE — this is not a recorded scoreboard. The acceptance criterion is: each gauntlet
+benchmark's tish (rust backend) compute time is <= node V8, validated by `scripts/run_perf_gauntlet.sh`
+(`just perf-gauntlet`) on every run, not a frozen verdict. It runs compute-only benchmarks (self-timed,
+process startup excluded) for the rust backend vs node V8, with per-benchmark correctness checks, and
+reports PASS/FAIL live. DELIBERATELY includes tests we lose, so each backend change is measured and red
+turns green over time. Fixtures: `tests/perf/<name>.tish` (+ `.js` for the native-param ones; the rest
+are valid in both tish and node).
 
-  benchmark      tish    node   ratio   verdict / lever to flip it green
-  matmul          14ms   16ms   0.87x   PASS  (M1 native params)
-  numeric_loop    44ms   47ms   0.94x   PASS  (statement-position de-boxing)
-  math_trig       12ms   82ms   0.15x   PASS  native Math intrinsics LANDED (sqrt/sin/...->f64 method)
-  string_concat    3ms    3ms   1.00x   PASS  self-append `s=s+x` -> push_str (O(1)); was O(n^2)
-  recursion_fib     31ms   48ms   0.65x  PASS  M5 native monomorphic calls (TISH_NATIVE_FN)
-  recursion_untyped 31ms   51ms   0.61x  PASS  M4 param + M5 return inference -> native, NO annotations
-  array_hof        108ms   29ms   3.7x   FAIL  fused reduce LANDED (8.9x->3.7x); rest = packed f64 arrays
-  object_sum        11ms    3ms   3.7x   FAIL  struct inference LANDED (48x->3.7x); rest = native struct arithmetic
+The PASS/FAIL column below is a HISTORICAL SNAPSHOT (darwin-arm64, rust backend + `TISH_PARAM_NATIVE=1`,
+min of 2) that may be stale — regenerate with `scripts/run_perf_gauntlet.sh`. Re-read it as "the gate
+reported this last time", never "this is where we are". The `verdict` column records the lever that
+flipped each row, not a guarantee it is still green:
 
-6/8 beating V8. TWO big representation wins this pass:
+  benchmark      tish    node   ratio   gate criterion (re-check via run_perf_gauntlet.sh) / lever
+  matmul          14ms   16ms   0.87x   gate: tish<=node  (snapshot PASS; M1 native params)
+  numeric_loop    44ms   47ms   0.94x   gate: tish<=node  (snapshot PASS; statement-position de-boxing)
+  math_trig       12ms   82ms   0.15x   gate: tish<=node  (snapshot PASS; native Math intrinsics, sqrt/sin/...->f64 method)
+  string_concat    3ms    3ms   1.00x   gate: tish<=node  (snapshot PASS; self-append `s=s+x` -> push_str O(1), was O(n^2))
+  recursion_fib     31ms   48ms   0.65x  gate: tish<=node  (snapshot PASS; M5 native monomorphic calls, TISH_NATIVE_FN)
+  recursion_untyped 31ms   51ms   0.61x  gate: tish<=node  (snapshot PASS; M4 param + M5 return inference -> native, NO annotations)
+  array_hof        108ms   29ms   3.7x   gate: tish<=node  (snapshot FAIL; fused reduce LANDED 8.9x->3.7x; rest = packed f64 arrays)
+  object_sum        11ms    3ms   3.7x   gate: tish<=node  (snapshot FAIL; struct inference LANDED 48x->3.7x; rest = native struct arithmetic)
+
+Snapshot stood at 6/8 beating V8 — re-run `scripts/run_perf_gauntlet.sh` for the live count. TWO big
+representation wins this pass:
 
 FUSED REDUCE (TISH_FUSED_HOF): `arr.reduce((acc,x)=>acc OP x, init)` with a plain binop of the two
 params lowers to a native fold using the SAME runtime Value op the closure body would
@@ -841,6 +880,13 @@ struct-field arithmetic (object_sum) and packed f64 arrays (array_hof). Earlier 
 (Math intrinsics), string_concat (`push_str`), recursion_fib (M5), recursion_untyped (M4+M5).
 ================================================================================
 
+
+SNAPSHOT STANDINGS — the PERFORMANCE SUMMARY tables below (every block down to the end of this file)
+are raw, point-in-time runs of `scripts/run_performance_suite.sh` and DRIFT the moment code or machine
+changes. They are a historical record, not a current standing or a verdict. Do not cite a ratio/percent
+here as "where tish is" — regenerate with `scripts/run_performance_suite.sh` (per-backend vs Node/Bun/
+Deno/QuickJS) and, for cross-backend agreement, `scripts/run_parity_compare.sh`. Absolute ms are only
+comparable within a single table (same machine/run); never across blocks or against another machine.
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
                                            PERFORMANCE SUMMARY

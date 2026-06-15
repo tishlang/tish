@@ -1,5 +1,14 @@
 # Type System: Status & Roadmap to Native, Dynamic-Free AOT
 
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
 > **Status assessment + implementation roadmap** for tish's static type system.
 > Last updated: 2026-06-04. Line numbers are snapshots from that date and may drift.
 > Companion to the **"Roadmap: checked types (Phase 2)"** section of [`LANGUAGE.md`](LANGUAGE.md).
@@ -25,9 +34,9 @@ machine-AOT), targeting a **full TS-like** surface (generics, unions, interfaces
 | Type-annotation **syntax** (lex/AST/parse) | ✅ ~95% of a pragmatic TS subset — primitives, arrays, `T?`, tuples, literal types, unions, intersections, fn types, generics (`<T>`/`Array<T>`/`Box<number>`/nested), `as`, `interface`(+`extends`) | `tish_lexer`, `tish_ast/src/ast.rs:11`, `tish_parser/src/parser.rs` |
 | Internal **type representation** | ✅ Solid for scalars/arrays/structs; ❌ no generics/real-unions | `tish_compile/src/types.rs:11` (`RustType`) |
 | Type **inference** | ⚠️ ~15% — forward, literal + numeric-arithmetic only | `tish_compile/src/infer.rs` |
-| Type **checking / soundness** | 🟡 gradual checker (Phase 2 core) — flags provable annotation violations behind `TISH_CHECK`; zero corpus false positives | `tish_compile/src/check.rs` |
+| Type **checking / soundness** | 🟡 gradual checker (Phase 2 core) — flags provable annotation violations behind `TISH_CHECK`; zero-false-positives is a **gate, not a recorded state** (`checker_no_false_positives_on_corpus` must PASS on every run) | `tish_compile/src/check.rs` |
 | **Type-driven native codegen** (Rust backend) | ✅ Real but trapped *inside* one function body | `tish_compile/src/codegen.rs:1721,5009,5127` |
-| **Cross-function** native typing | ⚠️ M1 params: native scalar params get a native shadow (`TISH_PARAM_NATIVE`; matmul 301→15ms, 3x node). M5 calls: native monomorphic top-level fns + direct-call routing (`TISH_NATIVE_FN`; fib(35) 512→31ms, beats node). Both dark-shipped, corpus-correct. TODO: native returns to other contexts, closures, M4 inference | `codegen.rs` param-bind, `collect_native_fns`/`emit_native_fns` |
+| **Cross-function** native typing | ⚠️ M1 params: native scalar params get a native shadow (`TISH_PARAM_NATIVE`; *snapshot, regenerate with `scripts/run_perf_gauntlet.sh`*: matmul ~301→15ms, ~3x node). M5 calls: native monomorphic top-level fns + direct-call routing (`TISH_NATIVE_FN`; *snapshot, regenerate with `scripts/run_perf_gauntlet.sh`*: fib(35) ~512→31ms, beat-node is a gate, validate now). Both dark-shipped, corpus-correct. TODO: native returns to other contexts, closures, M4 inference | `codegen.rs` param-bind, `collect_native_fns`/`emit_native_fns` |
 | **Machine-code AOT** (Cranelift/LLVM) | ❌ ~5% — stubs that embed bytecode + run the VM | `tish_cranelift/src/lower.rs:3` |
 | Optimizations exploiting types | ⚠️ const-fold/DCE/algebraic only (not type-driven) | `tish_opt/src/lib.rs` |
 
@@ -120,13 +129,25 @@ typed (base typed codegen — explicit annotations like `let x: number` / `let a
 emit `f64` / `Vec<f64>`; M3 iterates that `Vec` **index-based**, since `.iter().cloned()` failed to
 optimize inside the monolithic generated `run()`).
 
-**Verified speedups** (Apple Silicon, `--native-backend rust`, identical output). These are now a
-**committed, reproducible A/B** — `just perf-gauntlet` builds every `tests/perf` fixture boxed
-(flags-off) vs typed (flags-on) vs node and prints the `typing-speedup` column, with a `TYPED≠BOXED`
-guard that fails if the typed path ever changes a result. Snapshot + methodology:
-[`perf-typed-vs-untyped-baseline.md`](perf-typed-vs-untyped-baseline.md) (object_sum 45×, array_hof
-20×, matmul 15.6×, fib/untyped-fib ~14.6×, typed-array-HOF 2.68×; neutral on already-native/memory-
-bound loops; 8/9 beat V8). The hand-measured table below predates the harness:
+**Typed-vs-boxed speedups** (Apple Silicon, `--native-backend rust`, identical output). These come
+from a **committed, reproducible A/B** — `just perf-gauntlet` (→ `scripts/run_perf_gauntlet.sh`)
+builds every `tests/perf` fixture boxed (flags-off) vs typed (flags-on) vs node and prints the
+`typing-speedup` column, with a `TYPED≠BOXED` guard that fails if the typed path ever changes a
+result.
+
+**Acceptance gate (not a recorded verdict):** `scripts/run_perf_gauntlet.sh` reports the
+typed-vs-node PASS/FAIL standing — validated on every run, never "we beat V8 once". The
+"8/9 beat V8" / per-fixture ratios are a **point-in-time snapshot that drifts the moment codegen
+changes**; do not cite them as current — regenerate the standing with `scripts/run_perf_gauntlet.sh`
+and the over-time, noise-floored trend with `scripts/perf_record.sh` + `scripts/perf_compare.sh`.
+Snapshot ratios + methodology:
+[`perf-typed-vs-untyped-baseline.md`](perf-typed-vs-untyped-baseline.md) (illustrative figures such
+as object_sum 45×, array_hof 20×, matmul 15.6×, fib/untyped-fib ~14.6×, typed-array-HOF 2.68×;
+neutral on already-native/memory-bound loops) — treat as **stale until regenerated**.
+
+The hand-measured table below is an **older snapshot (may be stale; regenerate with
+`scripts/run_perf_gauntlet.sh`)** that predates the harness — absolute ms are machine/day-specific
+and not comparable across runs:
 
 | Program | slow | fast | speedup | path |
 |---|---|---|---|---|
@@ -140,9 +161,11 @@ bound loops; 8/9 beat V8). The hand-measured table below predates the harness:
 *(M3 note: a trivial sum is memory-bandwidth-bound, so the win shows on compute-heavy bodies where
 boxing each intermediate dominated; correctness/no-boxing holds either way.)*
 
-**Correctness:** the whole `tests/core` corpus is byte-identical across interpreter / VM / native
-/ cranelift / wasi / js with flags **off**, and the native corpus + cross-runtime parity (incl.
-node) stay correct with flags **on**. Fixtures under `tests/core/`: `typed_strings` (M2),
+**Correctness gate (not a recorded verdict):** the cross-backend byte-identity claim is validated,
+not frozen — `scripts/run_parity_compare.sh` checks that the `tests/core` corpus stays
+byte-identical across interpreter / VM / native / cranelift / wasi / js with flags **off**, and that
+the native corpus + cross-runtime parity (incl. node) stay correct with flags **on**; it must PASS
+**now**, on every run, rather than asserting a past pass. Fixtures under `tests/core/`: `typed_strings` (M2),
 `typed_param_loopbound` (M4), `typed_array_forof` (M3 ForOf), `typed_rest_params` (M3 rest-params),
 `typed_array_of_structs` (M3 member access), `typed_array_literal_infer` (array inference),
 `typed_array_hof` (M3 native `reduce`/`map`/`filter`/`some`/`every` over `number[]`), plus
@@ -230,8 +253,10 @@ generated Rust for `examples/matmul` — `bench`'s `i < N` and `i*N+k` should be
 > declared shape — with `line:col` diagnostics. It runs over `TypeAnnotation` (not yet a dedicated
 > `Ty` IR), is **bidirectional-ish** (`synth`/`assignable` with alias resolution + width-subtyping for
 > object shapes), and is deliberately **gradual**: anything it can't prove (calls to unsignatured
-> functions, dynamic values, `any`, unannotated locals) yields no diagnostic — **zero false positives
-> on the whole corpus** (enforced by `checker_no_false_positives_on_corpus`). Surfaced three ways:
+> functions, dynamic values, `any`, unannotated locals) yields no diagnostic. **Zero-false-positives
+> is a gate, not a recorded verdict** — `checker_no_false_positives_on_corpus` must PASS on every run
+> (with corpus parity via `scripts/run_parity_compare.sh`), rather than asserting it held once.
+> Surfaced three ways:
 > `tish build --check warn|error` (or `TISH_CHECK`), where `error` blocks the build; and **`tish-lsp`**
 > publishes the diagnostics as editor warnings (alongside lint/resolve). Off by default for builds.
 > **Remaining Phase-2 work:** the dedicated `Ty` IR below (for real unions/narrowing) and turning the
@@ -328,8 +353,12 @@ M3.6 only if the rustc/cargo dependency and build latency are unacceptable, and 
   boxing is eliminated where types are known (Phase 3).
 - **CLI+LSP parity:** same source → same diagnostics from `tish build --checked` and
   `check_source`.
-- **Cross-runtime parity:** `just parity` (interpreter / VM / native / Node) on each milestone.
-- **Benchmarks:** `examples/matmul` ms before/after M1+M4 as the headline coverage metric.
+- **Cross-runtime parity:** `just parity` / `scripts/run_parity_compare.sh` (interpreter / VM /
+  native / Node) on each milestone — a re-run gate, not a recorded pass.
+- **Benchmarks (gate, re-validate every run — never freeze the number):** typed-vs-node PASS/FAIL
+  via `scripts/run_perf_gauntlet.sh`; over-time, noise-floored trend via `scripts/perf_record.sh` +
+  `scripts/perf_compare.sh`; http via `scripts/run_http_perf.sh`. `examples/matmul` ms before/after
+  M1+M4 is the headline coverage *metric* — measure it same-machine A/B, don't cite a frozen ms.
 
 ## Critical files
 

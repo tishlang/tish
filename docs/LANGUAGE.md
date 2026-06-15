@@ -1,5 +1,14 @@
 # Tish language reference
 
+> **Validate — do not trust these numbers.** Any benchmarks, standings, ratios, or
+> PASS/acceptance claims below are a point-in-time snapshot and drift the moment the code
+> changes — they are illustrative, not ground truth. Re-validate before relying on them:
+> `scripts/run_perf_gauntlet.sh` (typed-vs-node PASS/FAIL gate), `scripts/perf_record.sh` +
+> `scripts/perf_compare.sh` (over-time, noise-floored), `scripts/run_parity_compare.sh`
+> (cross-backend). A verdict means the gate passes **now**, never "we hit X once". Absolute ms
+> across different machines/days are not comparable — use a same-machine A/B or the noise-floored
+> compare.
+
 **Canonical spec** for tools and LLMs. Single source of truth for syntax and semantics; implementation lives in `crates/tish_lexer`, `crates/tish_parser`, `crates/tish_ast`.
 
 Tish is a minimal JS/TS-like language: same source runs in a **tree-walking interpreter**, a **bytecode VM**, or **compiled targets** — Rust transpilation linked to **`tishlang_runtime`**, standalone binaries that **embed bytecode and run the same VM**, **WASM/WASI**, or **JavaScript**. Tish is **not** JavaScript; the JS path is a **compile target** with deliberate limits (wrong scope, invalid emit, and a few keyword collisions with DOM/JSX are fixed; arbitrary ECMAScript surface is not a goal). See **[js-emit-philosophy.md](js-emit-philosophy.md)**. See **Native compile (implementation status)** for what each path does today versus the long-term goal (primitive lowering, true AOT). **Secure-by-default:** network, filesystem, and process APIs are feature-gated.
@@ -100,14 +109,14 @@ Build: `cargo build --features full`. CLI artifact output: `tish build … --fea
 
 | Route | What you get |
 |-------|----------------|
-| `tish build --native-backend rust` (default) | Rust source emitted by `tishlang_compile`. Untyped code calls **`tishlang_runtime`** (`get_index`, arithmetic on `Value`, etc.); **explicitly-typed** numeric code lowers to native `f64` / `Vec<f64>` kernels (no boxing in the hot loop), and the opt-in typed-native flags (`TISH_PARAM_NATIVE` / `TISH_PARAM_INFER` / `TISH_NATIVE_FN`) extend that to params, inferred numerics, and recursive calls — typed `fib(35)` drops ~11× and matmul ~16×. See **[type-system-roadmap.md](type-system-roadmap.md)**. |
+| `tish build --native-backend rust` (default) | Rust source emitted by `tishlang_compile`. Untyped code calls **`tishlang_runtime`** (`get_index`, arithmetic on `Value`, etc.); **explicitly-typed** numeric code lowers to native `f64` / `Vec<f64>` kernels (no boxing in the hot loop), and the opt-in typed-native flags (`TISH_PARAM_NATIVE` / `TISH_PARAM_INFER` / `TISH_NATIVE_FN`) extend that to params, inferred numerics, and recursive calls. *(Historical snapshot — may be stale: typed `fib(35)` once dropped ~11× and matmul ~16×. These are illustrative ratios, not a current verdict; regenerate on your machine with `scripts/perf_record.sh` + `scripts/perf_compare.sh`, or gate typed-vs-node with `scripts/run_perf_gauntlet.sh`.)* See **[type-system-roadmap.md](type-system-roadmap.md)**. |
 | `tish build --native-backend cranelift` | Native binary that loads **embedded serialized bytecode** and runs **`tishlang_vm`** (`tish_cranelift_runtime`). Cranelift is used only to build a tiny object file holding the blob; **bytecode is not lowered to CLIF**. Throughput is **VM-class** (similar order to `tish run --backend vm`), not “rustc/LLVM on numeric loops.” |
 | `tish build --native-backend llvm` | Same **embedded bytecode + VM** link pattern as Cranelift (see `tishlang_llvm` + `tishlang_cranelift_runtime`). |
 | `tish build --target js` | Emitted JavaScript; the host (V8, etc.) may **JIT** tight loops. |
 
 **Interop:** `tish:*` and npm-style native imports require **`--native-backend rust`**. The Cranelift/LLVM native-binary paths are **pure Tish** only (no external native modules).
 
-**Direction (in progress):** Where semantics allow, lower to **Rust or machine primitives** (e.g. `Vec<f64>`, `f32`/`f64` buffers, fixed layouts) instead of universal `Value`; use optional types and **inference** to choose representations; add **real bytecode → Cranelift IR** (or similar) for AOT hot paths. The syntax resembles JS/TS; **compiled output is not intended to stay a boxed dynamic VM forever.** **Landed (dark-shipped, opt-in flags):** typed scalar params (M1), numeric param/return inference (M4), native monomorphic numeric functions (M5), and native `string` concat/equality (M2) — details and benchmarks in **[type-system-roadmap.md](type-system-roadmap.md)**.
+**Direction (in progress):** Where semantics allow, lower to **Rust or machine primitives** (e.g. `Vec<f64>`, `f32`/`f64` buffers, fixed layouts) instead of universal `Value`; use optional types and **inference** to choose representations; add **real bytecode → Cranelift IR** (or similar) for AOT hot paths. The syntax resembles JS/TS; **compiled output is not intended to stay a boxed dynamic VM forever.** **Landed (dark-shipped, opt-in flags):** typed scalar params (M1), numeric param/return inference (M4), native monomorphic numeric functions (M5), and native `string` concat/equality (M2) — details and benchmarks in **[type-system-roadmap.md](type-system-roadmap.md)** (treat any numbers there as a snapshot; re-validate with `scripts/perf_record.sh` + `scripts/perf_compare.sh` and the typed-vs-node gate `scripts/run_perf_gauntlet.sh`).
 
 ---
 

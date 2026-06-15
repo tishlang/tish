@@ -39,10 +39,20 @@ it moves more than that floor. Its exit status is `1` if any tish backend regres
 
 ## How it accrues
 
-`.github/workflows/perf-history.yml` records a point on every push to `main` (core runtimes, for
-speed/stability on shared runners) and commits it here with `[skip ci]`. Run `perf_record.sh` locally
-with the full runtime set on a quiet machine for the highest-fidelity points (e.g. at each release).
+Two automated recorders commit points here with `[skip ci]`:
 
-> Compare like with like: records carry their `os`/runner in the meta header. CI-runner timings are
-> noisier than a quiet local machine — trends within one source are meaningful; absolute ms across
-> different machines are not.
+- **`.github/workflows/perf-history.yml`** — every push to `main`, **core runtimes** (`vm,interp,rust,node`),
+  fast/stable on shared runners. The continuous "is tish getting faster" trend line.
+- **`.github/workflows/perf-release.yml`** — every **release** (`release: published`), the **full
+  runtime matrix** (`vm,interp,rust,cranelift,llvm,wasi,node,bun,deno,qjs`, 5 runs), stamped with the
+  release tag. The complete, no-interpretation log of where every backend stood at each release.
+
+Each full record is committed as **both** a `.tsv` (machine-readable, for `perf_compare`) and a
+`.md` (human-readable — `scripts/perf_render_md.sh` renders the raw ms for every runtime × test, no
+comparison). Run `perf_record.sh` locally with the full runtime set on a quiet machine for the
+highest-fidelity points; render with `perf_render_md.sh RECORD.tsv > RECORD.md`.
+
+> CI-runner timings are noisier than a quiet local machine, and a runtime that won't install on the
+> runner is recorded as absent (the suite auto-detects each by `command -v`). Compare like with like:
+> records carry their `os`/runner in the meta header — trends within one source are meaningful,
+> absolute ms across different machines are not.
