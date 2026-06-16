@@ -1747,12 +1747,32 @@ fn record_unresolved(
     }
 }
 
+/// Like [`record_unresolved`] for an assignment TARGET: still flags an unresolved name (writing to
+/// an undeclared variable is an error), but does NOT mark a resolved def as *referenced*. A pure
+/// write — and, like ESLint's `no-unused-vars`, a read-modify-write (`+=`/`++`/`||=`) — is not a
+/// "use", so a binding that is only ever written gets reported as unused. Reads elsewhere (incl. the
+/// RHS, e.g. `n = n + 1`) still go through `record_unresolved` and keep the binding live. (#149)
+fn record_write(
+    scopes: &ScopeStack,
+    name: &Arc<str>,
+    span: tishlang_ast::Span,
+    out: &mut Vec<UnresolvedIdentifier>,
+) {
+    if scopes.resolve(name.as_ref()).is_none() && !is_runtime_global_ident(name.as_ref()) {
+        out.push(UnresolvedIdentifier {
+            name: name.clone(),
+            span,
+        });
+    }
+}
+
 fn check_unresolved_expr(expr: &Expr, scopes: &ScopeStack, out: &mut Vec<UnresolvedIdentifier>) {
     match expr {
         Expr::Ident { name, span } => record_unresolved(scopes, name, *span, out),
         Expr::Assign { name, span, value } => {
+            // Target is a WRITE (not a read) for unused detection; the RHS is read normally.
             let sp = synthetic_name_span(span.start, name.as_ref());
-            record_unresolved(scopes, name, sp, out);
+            record_write(scopes, name, sp, out);
             check_unresolved_expr(value, scopes, out);
         }
         Expr::CompoundAssign {
@@ -1761,17 +1781,18 @@ fn check_unresolved_expr(expr: &Expr, scopes: &ScopeStack, out: &mut Vec<Unresol
         | Expr::LogicalAssign {
             name, span, value, ..
         } => {
+            // Read-modify-write: ESLint counts the target as a write, not a use. RHS is read.
             let sp = synthetic_name_span(span.start, name.as_ref());
-            record_unresolved(scopes, name, sp, out);
+            record_write(scopes, name, sp, out);
             check_unresolved_expr(value, scopes, out);
         }
         Expr::PostfixInc { name, span } | Expr::PostfixDec { name, span } => {
             let sp = synthetic_name_span(span.start, name.as_ref());
-            record_unresolved(scopes, name, sp, out);
+            record_write(scopes, name, sp, out);
         }
         Expr::PrefixInc { name, span } | Expr::PrefixDec { name, span } => {
             let sp = synthetic_name_span(span.start, name.as_ref());
-            record_unresolved(scopes, name, sp, out);
+            record_write(scopes, name, sp, out);
         }
         Expr::Binary { left, right, .. } => {
             check_unresolved_expr(left, scopes, out);
@@ -4407,6 +4428,50 @@ mod tests {
         assert_eq!(u.len(), 1, "only `dead` is unused; u={u:?}");
         assert_eq!(u[0].name.as_ref(), "dead");
         assert_eq!(u[0].kind, UnusedBindingKind::Import);
+    }
+
+    // #149: a binding that is only ever WRITTEN (never read) is unused (matches ESLint).
+    #[test]
+    fn write_only_variables_are_flagged_unused() {
+        for (src, who) in [
+            ("let n = 0\nn += 5\n", "n"),     // read-modify-write
+            ("let w = 0\nw = 7\n", "w"),       // plain write
+            ("let p = 0\np++\n", "p"),         // postfix inc
+            ("let q = 0\n++q\n", "q"),         // prefix inc
+        ] {
+            let program = parse(src).expect("parse");
+            let u = collect_unused_bindings(&program, src);
+            assert!(
+                u.iter().any(|b| b.name.as_ref() == who
+                    && b.kind == UnusedBindingKind::Variable),
+                "{who} is write-only and should be flagged unused; src={src:?} u={u:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn variables_read_anywhere_are_not_flagged() {
+        // A read on the RHS of its own assignment, or a bare use, keeps the binding live.
+        for src in [
+            "let count = 0\ncount = count + 1\ncount\n", // read in RHS + bare use
+            "let acc = 0\nacc += 1\nacc\n",              // compound write + later read
+            "let x = 1\nx\n",                            // plain read (control)
+        ] {
+            let program = parse(src).expect("parse");
+            let u = collect_unused_bindings(&program, src);
+            assert!(u.is_empty(), "no unused expected; src={src:?} u={u:?}");
+        }
+    }
+
+    #[test]
+    fn write_to_undeclared_still_unresolved() {
+        // record_write must keep flagging a write to an undeclared name (not silently swallow it).
+        let program = parse("undeclared = 5\n").expect("parse");
+        let unresolved = collect_unresolved_identifiers(&program);
+        assert!(
+            unresolved.iter().any(|u| u.name.as_ref() == "undeclared"),
+            "writing to an undeclared variable is still unresolved; got={unresolved:?}"
+        );
     }
 
     #[test]
