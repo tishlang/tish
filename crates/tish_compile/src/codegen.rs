@@ -788,6 +788,15 @@ struct Codegen {
     /// lower e.g. `x % c` to a fast integer remainder instead of `fmod`. Conservative: a name absent
     /// here is treated as unbounded. Populated by `collect_int_range_locals`.
     int_range_locals: std::collections::HashMap<String, (i64, i64)>,
+    /// Integer-range lattice (#174): locals that are always INTEGER-valued (an `f64` with zero
+    /// fractional part), possibly of unbounded magnitude — unlike `int_range_locals`. Loop counters
+    /// (`i = i + 1`) qualify even though their magnitude isn't bounded. Used to prove a modulo
+    /// result like `r % 97` is integral, so it can seed a fold accumulator's bounded range.
+    int_valued_locals: std::collections::HashSet<String>,
+    /// Integer-range lattice (#174): `number[]` locals initialized from an array literal of integer
+    /// literals → the inclusive element range, both inside `(-2^53, 2^53)`. Bounds a native fold's
+    /// element variable so the fold body can lower to native `i64` arithmetic.
+    array_elem_ranges: std::collections::HashMap<String, (i64, i64)>,
     /// Scopes of names whose Rust binding is actually `Rc<RefCell<_>>` (emitted at VarDecl).
     /// `refcell_wrapped_vars` alone is insufficient: it is set by prepasses before decl may run.
     rc_cell_storage_scopes: Vec<std::collections::HashSet<String>>,
@@ -843,6 +852,8 @@ impl Codegen {
             native_fns: std::collections::HashSet::new(),
             demoted_numeric_locals: std::collections::HashSet::new(),
             int_range_locals: std::collections::HashMap::new(),
+            int_valued_locals: std::collections::HashSet::new(),
+            array_elem_ranges: std::collections::HashMap::new(),
             rc_cell_storage_scopes: vec![std::collections::HashSet::new()],
             usage_analyzer: None,
             type_context: TypeContext::new(),
@@ -1530,7 +1541,9 @@ impl Codegen {
         // and panics on a JS string-concat result like `s = s + arr[i]`). See
         // `collect_demoted_numeric_locals` / `demoted_numeric_locals`.
         self.demoted_numeric_locals = self.collect_demoted_numeric_locals(&program.statements);
+        self.int_valued_locals = Self::collect_int_valued_locals(&program.statements);
         self.int_range_locals = self.collect_int_range_locals(&program.statements);
+        self.array_elem_ranges = Self::collect_array_elem_ranges(&program.statements);
         if self.is_async {
             self.writeln("async fn run() -> Result<(), Box<dyn std::error::Error>> {");
         } else if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
@@ -6091,15 +6104,23 @@ impl Codegen {
                 // truncate toward zero), so a non-negative dividend gives `[0, min(c-1, hi)]`.
                 BinOp::Mod => {
                     let c = Self::int_literal_value_of(right).filter(|&c| c > 0)?;
-                    // The dividend must itself be a proven integer (so the result is integral); the
-                    // modulo then caps the magnitude to `< c` REGARDLESS of the dividend's size — a
-                    // fixed (not dividend-dependent) bound, so `% c`-driven recurrences converge in
-                    // one step. Sign follows the dividend (Rust `%` / JS `%` both truncate to zero).
-                    let (lo, _hi) = self.int_range(left, ranges)?;
-                    if lo >= 0 {
-                        clamp(0, c - 1)
-                    } else {
+                    // The dividend must be a proven INTEGER (so the result is integral); the modulo
+                    // then caps the magnitude to `< c` REGARDLESS of the dividend's size — a fixed
+                    // (not dividend-dependent) bound, so `% c`-driven recurrences converge in one
+                    // step. Sign follows the dividend (Rust `%` / JS `%` both truncate to zero).
+                    // The dividend is integral if it is range-bounded OR merely int-VALUED (e.g.
+                    // `r % 97` where `r` is a loop counter — integral but unbounded), the latter
+                    // giving the conservative two-sided `(-(c-1), c-1)`.
+                    if let Some((lo, _hi)) = self.int_range(left, ranges) {
+                        if lo >= 0 {
+                            clamp(0, c - 1)
+                        } else {
+                            clamp(-(c - 1), c - 1)
+                        }
+                    } else if self.expr_is_int_valued(left) {
                         clamp(-(c - 1), c - 1)
+                    } else {
+                        None
                     }
                 }
                 BinOp::Add => {
@@ -6289,6 +6310,283 @@ impl Codegen {
                 Statement::FunDecl { body, .. } => Self::seed_int_ranges(std::slice::from_ref(body), out),
                 _ => {}
             }
+        }
+    }
+
+    /// `e` is provably INTEGER-valued (zero fractional part at runtime), per `set` for locals.
+    /// Closed under `+ - * %` (modulo by a positive integer literal), unary `- ~`, bitwise/shift,
+    /// and integer literals — so a loop counter (`0`, then `i + 1`) stays integral. Magnitude is
+    /// NOT tracked (that is `int_range`'s job); this only certifies integrality.
+    fn is_int_valued(e: &Expr, set: &HashSet<String>) -> bool {
+        match e {
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => n.is_finite() && n.fract() == 0.0,
+            Expr::Ident { name, .. } => set.contains(name.as_ref()),
+            Expr::Unary {
+                op: UnaryOp::Neg | UnaryOp::BitNot,
+                operand,
+                ..
+            } => Self::is_int_valued(operand, set),
+            Expr::Binary {
+                left, op, right, ..
+            } => match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul => {
+                    Self::is_int_valued(left, set) && Self::is_int_valued(right, set)
+                }
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr
+                | BinOp::UShr => true,
+                BinOp::Mod => {
+                    Self::int_literal_value_of(right).is_some_and(|c| c != 0)
+                        && Self::is_int_valued(left, set)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// `self`-bound [`is_int_valued`] against the computed `int_valued_locals`.
+    fn expr_is_int_valued(&self, e: &Expr) -> bool {
+        Self::is_int_valued(e, &self.int_valued_locals)
+    }
+
+    /// Locals that are always integer-valued. Greatest-fixpoint: assume every `let` local is
+    /// integral, then drop any whose initializer or any reassignment RHS is not `is_int_valued`
+    /// under the current set, until stable. Sound: dropping only ever removes names, and `+ - * %`
+    /// preserve integrality even past 2^53 (the f64 result still has zero fractional part).
+    fn collect_int_valued_locals(stmts: &[Statement]) -> HashSet<String> {
+        // All declared local names (candidates).
+        let mut names: HashSet<String> = HashSet::new();
+        Self::collect_local_decl_names(stmts, &mut names);
+        // Init/reassignment expressions per name.
+        let mut defs: Vec<(String, &Expr)> = Vec::new();
+        Self::collect_int_valued_defs(stmts, &mut defs);
+        let mut reassigns: Vec<(String, &Expr)> = Vec::new();
+        Self::collect_reassignments_stmts(stmts, &mut reassigns);
+        loop {
+            let mut changed = false;
+            for (name, e) in defs.iter().chain(reassigns.iter()) {
+                if names.contains(name.as_str()) && !Self::is_int_valued(e, &names) {
+                    names.remove(name.as_str());
+                    changed = true;
+                }
+            }
+            if !changed {
+                return names;
+            }
+        }
+    }
+
+    /// Every `let`-declared local name (recursing through all nested statements).
+    fn collect_local_decl_names(stmts: &[Statement], out: &mut HashSet<String>) {
+        for s in stmts {
+            match s {
+                Statement::VarDecl { name, .. } => {
+                    out.insert(name.to_string());
+                }
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    Self::collect_local_decl_names(statements, out)
+                }
+                Statement::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::collect_local_decl_names(std::slice::from_ref(then_branch), out);
+                    if let Some(e) = else_branch {
+                        Self::collect_local_decl_names(std::slice::from_ref(e), out);
+                    }
+                }
+                Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+                    Self::collect_local_decl_names(std::slice::from_ref(body), out)
+                }
+                Statement::For { init, body, .. } => {
+                    if let Some(i) = init {
+                        Self::collect_local_decl_names(std::slice::from_ref(i), out);
+                    }
+                    Self::collect_local_decl_names(std::slice::from_ref(body), out);
+                }
+                Statement::FunDecl { body, .. } => {
+                    Self::collect_local_decl_names(std::slice::from_ref(body), out)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `(name, init-expr)` for every `let name = <init>` (recursing), for the int-valued fixpoint.
+    fn collect_int_valued_defs<'a>(stmts: &'a [Statement], out: &mut Vec<(String, &'a Expr)>) {
+        for s in stmts {
+            match s {
+                Statement::VarDecl {
+                    name,
+                    init: Some(e),
+                    ..
+                } => out.push((name.to_string(), e)),
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    Self::collect_int_valued_defs(statements, out)
+                }
+                Statement::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::collect_int_valued_defs(std::slice::from_ref(then_branch), out);
+                    if let Some(e) = else_branch {
+                        Self::collect_int_valued_defs(std::slice::from_ref(e), out);
+                    }
+                }
+                Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+                    Self::collect_int_valued_defs(std::slice::from_ref(body), out)
+                }
+                Statement::For { init, body, .. } => {
+                    if let Some(i) = init {
+                        Self::collect_int_valued_defs(std::slice::from_ref(i), out);
+                    }
+                    Self::collect_int_valued_defs(std::slice::from_ref(body), out);
+                }
+                Statement::FunDecl { body, .. } => {
+                    Self::collect_int_valued_defs(std::slice::from_ref(body), out)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Map `number[]` locals initialized from an array literal of integer literals → the inclusive
+    /// element range, both inside `(-2^53, 2^53)`.
+    fn collect_array_elem_ranges(stmts: &[Statement]) -> HashMap<String, (i64, i64)> {
+        let mut out = HashMap::new();
+        Self::array_elem_ranges_walk(stmts, &mut out);
+        out
+    }
+
+    fn array_elem_ranges_walk(stmts: &[Statement], out: &mut HashMap<String, (i64, i64)>) {
+        for s in stmts {
+            match s {
+                Statement::VarDecl {
+                    name,
+                    init: Some(Expr::Array { elements, .. }),
+                    ..
+                } => {
+                    let mut lo = i64::MAX;
+                    let mut hi = i64::MIN;
+                    let mut ok = !elements.is_empty();
+                    for el in elements {
+                        match el {
+                            ArrayElement::Expr(e) => match Self::int_literal_value_of(e) {
+                                Some(v) => {
+                                    lo = lo.min(v);
+                                    hi = hi.max(v);
+                                }
+                                None => {
+                                    ok = false;
+                                    break;
+                                }
+                            },
+                            _ => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok {
+                        out.insert(name.to_string(), (lo, hi));
+                    }
+                }
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    Self::array_elem_ranges_walk(statements, out)
+                }
+                Statement::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::array_elem_ranges_walk(std::slice::from_ref(then_branch), out);
+                    if let Some(e) = else_branch {
+                        Self::array_elem_ranges_walk(std::slice::from_ref(e), out);
+                    }
+                }
+                Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+                    Self::array_elem_ranges_walk(std::slice::from_ref(body), out)
+                }
+                Statement::For { body, .. } => {
+                    Self::array_elem_ranges_walk(std::slice::from_ref(body), out)
+                }
+                Statement::FunDecl { body, .. } => {
+                    Self::array_elem_ranges_walk(std::slice::from_ref(body), out)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Emit `e` as a native `i64` expression, used inside a native fold whose accumulator is `i64`.
+    /// Returns `None` (caller keeps the `f64` fold) unless `e` is provably integer AND magnitude-
+    /// bounded `< 2^53` at every node — so the `i64` arithmetic is bit-identical to the `f64` the
+    /// interpreter/VM produce. `i64vars` are names already bound as `i64` (emitted bare); any other
+    /// operand must be a bounded `f64` (emitted via `emit_typed_expr` then `as i64`, exact for
+    /// integers < 2^53). Handles `+ - *` and `% <pos int literal>`; bails on anything else.
+    fn emit_i64(
+        &mut self,
+        e: &Expr,
+        i64vars: &HashSet<String>,
+        ranges: &HashMap<String, (i64, i64)>,
+    ) -> Result<Option<String>, CompileError> {
+        // Whole-node bound (proves integrality + < 2^53). Without it, i64 could diverge from f64.
+        if self.int_range(e, ranges).is_none() {
+            return Ok(None);
+        }
+        if let Expr::Literal {
+            value: Literal::Number(n),
+            ..
+        } = e
+        {
+            return Ok(Self::int_literal_value(*n).map(|v| format!("{}i64", v)));
+        }
+        if let Expr::Ident { name, .. } = e {
+            if i64vars.contains(name.as_ref()) {
+                return Ok(Some(Self::escape_ident(name.as_ref()).into_owned()));
+            }
+        }
+        if let Expr::Binary {
+            left, op, right, ..
+        } = e
+        {
+            match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul => {
+                    let (Some(l), Some(r)) = (
+                        self.emit_i64(left, i64vars, ranges)?,
+                        self.emit_i64(right, i64vars, ranges)?,
+                    ) else {
+                        return Ok(None);
+                    };
+                    let sym = match op {
+                        BinOp::Add => "+",
+                        BinOp::Sub => "-",
+                        _ => "*",
+                    };
+                    return Ok(Some(format!("({} {} {})", l, sym, r)));
+                }
+                BinOp::Mod => {
+                    if let Some(c) = Self::int_literal_value_of(right).filter(|&c| c > 0) {
+                        if let Some(l) = self.emit_i64(left, i64vars, ranges)? {
+                            return Ok(Some(format!("({} % {}i64)", l, c)));
+                        }
+                    }
+                    return Ok(None);
+                }
+                _ => return Ok(None),
+            }
+        }
+        // Fallback: a bounded non-i64-var leaf (e.g. the f64 element variable) → cast once.
+        let (code, ty) = self.emit_typed_expr(e)?;
+        if ty == RustType::F64 {
+            Ok(Some(format!("(({}) as i64)", code)))
+        } else {
+            Ok(None)
         }
     }
 
@@ -7661,13 +7959,69 @@ impl Codegen {
                     RustType::Value => RustType::F64.from_value_expr(&init_code),
                     _ => return Ok(None),
                 };
+                let acc_esc = Self::escape_ident(acc.as_ref()).into_owned();
+                let x_esc = Self::escape_ident(x.as_ref()).into_owned();
+
+                // ── i64 fast path (#174) ────────────────────────────────────────────────────────
+                // When the receiver is an integer-literal array (element range known) and the body
+                // lowers to native `i64` arithmetic with every node proven integral and < 2^53, run
+                // the fold in `i64` — eliminating `fmod`/f64 round-trips in the hot loop (V8 keeps
+                // these small-integer folds in int registers too). The accumulator's bounded integer
+                // range is found by a small fixpoint seeded from the init's range; bit-identical to
+                // the f64 fold because every intermediate is an exact integer < 2^53.
+                if let Some(elem_r) = self.array_elem_ranges.get(recv_name).copied() {
+                    if let Some(init_r) = self.int_range(init_e, &self.int_range_locals) {
+                        let mut base = self.int_range_locals.clone();
+                        base.insert(x.to_string(), elem_r);
+                        let mut acc_r = init_r;
+                        let mut converged = false;
+                        for _ in 0..6 {
+                            let mut m = base.clone();
+                            m.insert(acc.to_string(), acc_r);
+                            match self.int_range(be, &m) {
+                                Some((blo, bhi)) => {
+                                    let n = (acc_r.0.min(blo), acc_r.1.max(bhi));
+                                    if n == acc_r {
+                                        converged = true;
+                                        break;
+                                    }
+                                    acc_r = n;
+                                }
+                                None => break,
+                            }
+                        }
+                        // Confirm the range is an inductive invariant, then emit the body in i64.
+                        let mut m = base.clone();
+                        m.insert(acc.to_string(), acc_r);
+                        let inductive = converged
+                            && matches!(self.int_range(be, &m),
+                                Some((blo, bhi)) if blo >= acc_r.0 && bhi <= acc_r.1);
+                        if inductive {
+                            let i64vars: HashSet<String> =
+                                std::iter::once(acc.to_string()).collect();
+                            self.type_context.push_scope();
+                            self.type_context.define(acc.as_ref(), RustType::F64);
+                            self.type_context.define(x.as_ref(), RustType::F64);
+                            let body_i64 = self.emit_i64(be, &i64vars, &m)?;
+                            self.type_context.pop_scope();
+                            if let Some(body_i64) = body_i64 {
+                                return Ok(Some((
+                                    format!(
+                                        "{{ let mut {acc}: i64 = (({init}) as i64); for {x} in {recv}.iter().copied() {{ {acc} = {body}; }} {acc} as f64 }}",
+                                        acc = acc_esc, init = init_f64, x = x_esc, recv = recv, body = body_i64
+                                    ),
+                                    RustType::F64,
+                                )));
+                            }
+                        }
+                    }
+                }
+
                 let (body_code, body_ty) =
                     emit_with(self, &[(&acc, RustType::F64), (&x, RustType::F64)])?;
                 if body_ty != RustType::F64 {
                     return Ok(None);
                 }
-                let acc_esc = Self::escape_ident(acc.as_ref()).into_owned();
-                let x_esc = Self::escape_ident(x.as_ref()).into_owned();
                 Ok(Some((
                     format!(
                         "{{ let mut {acc}: f64 = {init}; for {x} in {recv}.iter().copied() {{ {acc} = {body}; }} {acc} }}",
