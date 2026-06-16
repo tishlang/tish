@@ -134,11 +134,12 @@ fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
             lint_stmt(body, out);
             lint_expr(cond, out);
         }
-        Statement::Export { declaration, .. } => {
-            if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
-                lint_stmt(inner, out);
-            }
-        }
+        Statement::Export { declaration, .. } => match declaration.as_ref() {
+            tishlang_ast::ExportDeclaration::Named(inner) => lint_stmt(inner, out),
+            // Walk `export default <expr>` too — its subtree was previously never linted, so e.g.
+            // `export default { a: 1, a: 2 }` produced no tish-duplicate-key warning (#151).
+            tishlang_ast::ExportDeclaration::Default(expr) => lint_expr(expr, out),
+        },
         Statement::ExprStmt { expr, .. } => lint_expr(expr, out),
         Statement::VarDecl { init: Some(e), .. } => lint_expr(e, out),
         Statement::VarDeclDestructure { init, .. } => lint_expr(init, out),
@@ -364,6 +365,15 @@ mod tests {
     #[test]
     fn lints_inside_delete_target() {
         assert!(dup_keys("delete ({ a: 1, a: 2 }).a\n") >= 1, "delete target");
+    }
+
+    // #151: the `export default <expr>` subtree was never walked (only `export <named>` was).
+    #[test]
+    fn lints_inside_export_default() {
+        assert!(
+            dup_keys("export default { a: 1, a: 2 }\n") >= 1,
+            "dup key inside `export default` must be linted"
+        );
     }
 }
 
