@@ -81,6 +81,15 @@ thread_local! {
     /// no behavior change.
     static REFERENCED_DEFS: std::cell::RefCell<Option<std::collections::HashSet<(usize, usize)>>> =
         const { std::cell::RefCell::new(None) };
+
+    /// Stack of definition-span starts of the functions whose bodies we are currently inside. A use
+    /// that resolves to one of these is a SELF-reference (e.g. `fn a() { return a() }`) — recursion,
+    /// not an external use — so it must not mark the binding "referenced" for the unused check, or a
+    /// function reachable only via its own recursion would never be flagged dead (#150). Only
+    /// consulted while `REFERENCED_DEFS` is active; find-references / go-to-definition (which want the
+    /// recursive call) use a different path and are unaffected.
+    static CURRENT_FN_DEFS: std::cell::RefCell<Vec<(usize, usize)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// One scope-aware resolution pass: the set of definition span *starts* that at least one identifier
@@ -92,6 +101,9 @@ fn collect_referenced_def_spans(program: &Program) -> std::collections::HashSet<
     impl Drop for Guard {
         fn drop(&mut self) {
             REFERENCED_DEFS.with(|r| *r.borrow_mut() = None);
+            // Defensive: the FunDecl walk push/pops this in balanced pairs, but clear it here too so
+            // a panic mid-walk can't leave a stale enclosing-fn span for the next collection.
+            CURRENT_FN_DEFS.with(|s| s.borrow_mut().clear());
         }
     }
     let _g = Guard;
@@ -1730,11 +1742,17 @@ fn record_unresolved(
         // collect_unused_bindings learns this def is referenced — done before the global check so a
         // local that shadows a global name still counts as a use. Unresolved-name output unchanged.
         Some(def) => {
-            REFERENCED_DEFS.with(|r| {
-                if let Some(set) = r.borrow_mut().as_mut() {
-                    set.insert(def.start);
-                }
-            });
+            // A use that resolves to a function we're currently inside is a self-recursive call,
+            // not an external use — skip it so a function reachable only via its own recursion is
+            // still reported unused (#150).
+            let is_self_ref = CURRENT_FN_DEFS.with(|s| s.borrow().contains(&def.start));
+            if !is_self_ref {
+                REFERENCED_DEFS.with(|r| {
+                    if let Some(set) = r.borrow_mut().as_mut() {
+                        set.insert(def.start);
+                    }
+                });
+            }
         }
         None => {
             if !is_runtime_global_ident(name.as_ref()) {
@@ -2054,7 +2072,13 @@ fn check_unresolved_stmt(
                     check_unresolved_expr(e, scopes, out);
                 }
             }
+            // Mark this function as "currently inside" so a recursive self-call in the body isn't
+            // counted as an external use for the unused-binding check (#150).
+            CURRENT_FN_DEFS.with(|s| s.borrow_mut().push(name_span.start));
             check_unresolved_stmt(body, scopes, out);
+            CURRENT_FN_DEFS.with(|s| {
+                s.borrow_mut().pop();
+            });
             scopes.pop();
             scopes.define(name.as_ref(), *name_span);
         }
@@ -4456,6 +4480,30 @@ mod tests {
             "let count = 0\ncount = count + 1\ncount\n", // read in RHS + bare use
             "let acc = 0\nacc += 1\nacc\n",              // compound write + later read
             "let x = 1\nx\n",                            // plain read (control)
+        ] {
+            let program = parse(src).expect("parse");
+            let u = collect_unused_bindings(&program, src);
+            assert!(u.is_empty(), "no unused expected; src={src:?} u={u:?}");
+        }
+    }
+
+    // #150: a function reachable only via its own recursion is dead code and should be flagged.
+    #[test]
+    fn self_recursive_only_function_is_flagged_unused() {
+        for src in ["fn a() { return a() }\n", "fn loop_(n) { return loop_(n - 1) }\n"] {
+            let program = parse(src).expect("parse");
+            let u = collect_unused_bindings(&program, src);
+            assert_eq!(u.len(), 1, "self-recursive-only fn is unused; src={src:?} u={u:?}");
+        }
+    }
+
+    #[test]
+    fn externally_called_or_mutually_recursive_functions_not_flagged() {
+        // External call keeps it live; mutual recursion (each refers to the OTHER) keeps both live —
+        // only pure SELF-reference is excluded.
+        for src in [
+            "fn c() { return 1 }\nc()\n",
+            "fn p() { return q() }\nfn q() { return p() }\np()\n",
         ] {
             let program = parse(src).expect("parse");
             let u = collect_unused_bindings(&program, src);
