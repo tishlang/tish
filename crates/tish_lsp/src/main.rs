@@ -720,6 +720,18 @@ impl LanguageServer for Backend {
                     }
                 } else {
                     let word = word_at_position(&text, pos);
+                    // On a member property (`obj.a`) there is no separate lexical binding, so
+                    // "No binding in scope" is misleading and disagrees with go-to-definition's
+                    // silent no-op on the same token. Show a neutral note there instead. (#159)
+                    let on_member_prop = tishlang_resolve::member_access_chain_at_cursor(
+                        &program, &text, pos.line, pos.character,
+                    )
+                    .is_some();
+                    let no_binding_msg = if on_member_prop {
+                        "\n\n_Object property._"
+                    } else {
+                        "\n\n_No binding in scope for this name._"
+                    };
                     if word.is_empty() {
                         md.push_str("\n\n_No binding in scope for this name._");
                     } else if let Ok(fp) = uri.to_file_path() {
@@ -750,10 +762,10 @@ impl LanguageServer for Backend {
                                 "\n\n[Open Rust implementation]({href}#L{line_1})"
                             ));
                         } else {
-                            md.push_str("\n\n_No binding in scope for this name._");
+                            md.push_str(no_binding_msg);
                         }
                     } else {
-                        md.push_str("\n\n_No binding in scope for this name._");
+                        md.push_str(no_binding_msg);
                     }
                 }
             }
