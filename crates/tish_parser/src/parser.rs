@@ -364,27 +364,21 @@ impl<'a> Parser<'a> {
             statements.push(self.parse_statement()?);
         }
 
+        // Block ends at its CLOSING `}`/`Dedent`. Capture that token's end BEFORE advancing past it:
+        // reading `self.peek()` *after* the advance pointed at the NEXT token, overrunning the block
+        // span onto the following statement — so a cursor on the line after `}` was still "inside"
+        // the block and completion offered the body's params/locals there (#158). Fall back to the
+        // last inner statement's end for an unterminated block at EOF, else the block start.
+        let mut closer_end: Option<(usize, usize)> = None;
         if matches!(
             self.peek_kind(),
             Some(TokenKind::RBrace | TokenKind::Dedent)
         ) {
+            closer_end = self.peek().map(|t| t.span.end);
             self.advance();
         }
-
-        let peek_end = self.peek().map(|x| x.span.end);
         let last_end = statements.last().map(|s| s.span().end);
-        let end = match (peek_end, last_end) {
-            (Some(p), Some(l)) => {
-                if p.0 > l.0 || (p.0 == l.0 && p.1 > l.1) {
-                    p
-                } else {
-                    l
-                }
-            }
-            (Some(p), None) => p,
-            (None, Some(l)) => l,
-            (None, None) => span_start,
-        };
+        let end = closer_end.or(last_end).unwrap_or(span_start);
 
         Ok(Statement::Block {
             statements,
