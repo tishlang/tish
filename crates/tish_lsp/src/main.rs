@@ -564,12 +564,14 @@ impl LanguageServer for Backend {
                 if let Ok(ref file_path) = uri.to_file_path() {
                     let word = word_at_position(&text, position);
                     let roots = self.roots.read().unwrap().clone();
+                    let open_docs = self.docs.read().unwrap();
                     if let Some(loc) = import_goto::definition_for_import(
                         &program,
                         file_path,
                         word.as_str(),
                         &roots,
                         self.cargo_src_cache.as_ref(),
+                        &open_docs,
                     ) {
                         return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
                     }
@@ -599,12 +601,14 @@ impl LanguageServer for Backend {
 
         if let Ok(ref file_path) = uri.to_file_path() {
             let roots = self.roots.read().unwrap().clone();
+            let open_docs = self.docs.read().unwrap();
             if let Some(loc) = import_goto::definition_for_import(
                 &program,
                 file_path,
                 word.as_str(),
                 &roots,
                 self.cargo_src_cache.as_ref(),
+                &open_docs,
             ) {
                 return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
             }
@@ -617,6 +621,7 @@ impl LanguageServer for Backend {
                 position.line,
                 position.character,
                 word.as_str(),
+                &open_docs,
             ) {
                 return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
             }
@@ -719,6 +724,7 @@ impl LanguageServer for Backend {
                         md.push_str("\n\n_No binding in scope for this name._");
                     } else if let Ok(fp) = uri.to_file_path() {
                         let roots = self.roots.read().unwrap().clone();
+                        let open_docs = self.docs.read().unwrap();
                         if let Some(nmd) = import_goto::native_member_definition(
                             &program,
                             &fp,
@@ -728,6 +734,7 @@ impl LanguageServer for Backend {
                             pos.line,
                             pos.character,
                             word.as_str(),
+                            &open_docs,
                         ) {
                             md.push_str(
                                 "\n\n_Native host module member (e.g. `tish:macos`); implementation in Rust._",
