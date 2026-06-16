@@ -979,17 +979,12 @@ impl<'a> Parser<'a> {
             Box::new(self.parse_block()?)
         };
 
-        // Span must cover the whole declaration through the body. `peek().start` alone can sit on
-        // the opening `{` (same as `span_start` at EOF) or otherwise truncate before inner spans.
-        let peek_start = self.peek().map(|t| t.span.start).unwrap_or(span_start);
-        let body_end = body.as_ref().span().end;
-        let end = if peek_start.0 > body_end.0
-            || (peek_start.0 == body_end.0 && peek_start.1 > body_end.1)
-        {
-            peek_start
-        } else {
-            body_end
-        };
+        // The declaration spans from `fn`/`async` through the END of its body. `parse_block` now
+        // ends the body block exactly at its closing `}` (#158), so the body's end IS the function's
+        // end. (This previously maxed with `peek().start` — the NEXT token after the function — to
+        // compensate for the old block-span truncation, which instead overran the function span past
+        // `}` and inflated its folding / document-symbol range onto the following line. #158)
+        let end = body.as_ref().span().end;
 
         Ok(Statement::FunDecl {
             async_,
