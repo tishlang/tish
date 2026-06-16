@@ -3900,7 +3900,13 @@ impl Codegen {
                     for elem in elements {
                         if let ArrayElement::Expr(expr) = elem {
                             let v = self.emit_expr(expr)?;
-                            if self.should_clone(expr) {
+                            // A `Value`-typed identifier (object, or a global like `NaN`/`Infinity`)
+                            // is emitted bare here, so moving it into the array breaks any later use
+                            // in the SAME expression — e.g. `[1, o].includes(o)` borrows `o` after the
+                            // array moved it. The scope-local last-use analysis can't see that reuse,
+                            // so clone every identifier element (cheap; these literals are cold, and
+                            // string/number idents already clone inside their `Value::*` conversion).
+                            if matches!(expr, Expr::Ident { .. }) || self.should_clone(expr) {
                                 els.push(format!("({}).clone()", v));
                             } else {
                                 els.push(v);
