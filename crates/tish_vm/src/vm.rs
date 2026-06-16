@@ -264,7 +264,7 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                 tishlang_runtime::process_exec(args)
             })),
             "argv" => Some(Value::Array(VmRef::new(
-                std::env::args().map(|s| Value::String(s.into())).collect(),
+                tishlang_core::process_argv().into_iter().map(|s| Value::String(s.into())).collect(),
             ))),
             "env" => Some(value_object_from_map(
                 std::env::vars()
@@ -288,7 +288,7 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                 m.insert(
                     "argv".into(),
                     Value::Array(VmRef::new(
-                        std::env::args().map(|s| Value::String(s.into())).collect(),
+                        tishlang_core::process_argv().into_iter().map(|s| Value::String(s.into())).collect(),
                     )),
                 );
                 m.insert(
@@ -788,7 +788,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         process_obj.insert(
             "argv".into(),
             Value::Array(VmRef::new(
-                std::env::args().map(|s| Value::String(s.into())).collect(),
+                tishlang_core::process_argv().into_iter().map(|s| Value::String(s.into())).collect(),
             )),
         );
         process_obj.insert(

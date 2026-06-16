@@ -107,12 +107,18 @@ fn main() {
     let matches = cli_help::build_command().get_matches_from(&argv);
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let result = match cli.command {
-        Some(Commands::Run(a)) => run_file(
-            &a.file,
-            &a.backend,
-            &a.features,
-            a.no_optimize || no_opt_env,
-        ),
+        Some(Commands::Run(a)) => {
+            // Expose a node-shaped `process.argv` to the script: `[tish-exe, <file>, args...]`,
+            // so `tish run main.tish a b` gives the script `["…/tish", "main.tish", "a", "b"]`
+            // (not the `run` subcommand). Interp/VM read this via `tishlang_core::process_argv`. #88
+            let exe = std::env::args().next().unwrap_or_else(|| "tish".to_string());
+            let mut argv = Vec::with_capacity(a.script_args.len() + 2);
+            argv.push(exe);
+            argv.push(a.file.clone());
+            argv.extend(a.script_args.iter().cloned());
+            tishlang_core::set_process_argv(argv);
+            run_file(&a.file, &a.backend, &a.features, a.no_optimize || no_opt_env)
+        }
         Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env, &a.features),
         Some(Commands::Build(a)) => {
             // `--check warn|error` drives the gradual type checker via the same channel as the
@@ -810,6 +816,48 @@ mod cli_tests {
         let cli = Cli::try_parse_from(argv).unwrap();
         match cli.command {
             Some(Commands::Run(a)) => assert_eq!(a.file, "hello.tish"),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_collects_trailing_script_args() {
+        // `tish run main.tish a --flag` → file=main.tish, script_args=[a, --flag] (#88).
+        let cli = Cli::try_parse_from(vec![
+            "tish".to_string(),
+            "run".to_string(),
+            "main.tish".to_string(),
+            "a".to_string(),
+            "--flag".to_string(),
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Run(a)) => {
+                assert_eq!(a.file, "main.tish");
+                assert_eq!(a.script_args, vec!["a".to_string(), "--flag".to_string()]);
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_options_before_file_still_parse() {
+        // tish options come BEFORE the file; everything after the file is the script's. (#88)
+        let cli = Cli::try_parse_from(vec![
+            "tish".to_string(),
+            "run".to_string(),
+            "--backend".to_string(),
+            "interp".to_string(),
+            "main.tish".to_string(),
+            "x".to_string(),
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Run(a)) => {
+                assert_eq!(a.backend, "interp");
+                assert_eq!(a.file, "main.tish");
+                assert_eq!(a.script_args, vec!["x".to_string()]);
+            }
             _ => panic!("expected Run"),
         }
     }

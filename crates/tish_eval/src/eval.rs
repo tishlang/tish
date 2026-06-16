@@ -185,6 +185,26 @@ impl Evaluator {
                 true,
             );
 
+            // Bare `process` global (node-compatible), mirroring the VM. `process.argv` reads the
+            // configurable argv so `tish run <file> [args...]` reaches the script. #88
+            #[cfg(feature = "process")]
+            {
+                let mut process_obj = PropMap::default();
+                process_obj.insert("exit".into(), Value::Native(natives::process_exit));
+                process_obj.insert("cwd".into(), Value::Native(natives::process_cwd));
+                process_obj.insert("exec".into(), Value::Native(natives::process_exec));
+                let argv: Vec<Value> = tishlang_core::process_argv()
+                    .into_iter()
+                    .map(|s| Value::String(s.into()))
+                    .collect();
+                process_obj.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv))));
+                let env_obj: PropMap = std::env::vars()
+                    .map(|(k, v)| (Arc::from(k.as_str()), Value::String(v.into())))
+                    .collect();
+                process_obj.insert("env".into(), Value::object(env_obj));
+                s.set("process".into(), Value::object(process_obj), true);
+            }
+
             let mut object = PropMap::with_capacity(5);
             object.insert("keys".into(), Value::Native(Self::object_keys));
             object.insert("values".into(), Value::Native(Self::object_values));
@@ -1037,8 +1057,10 @@ impl Evaluator {
                     exports.insert("exit".into(), Value::Native(natives::process_exit));
                     exports.insert("cwd".into(), Value::Native(natives::process_cwd));
                     exports.insert("exec".into(), Value::Native(natives::process_exec));
-                    let argv: Vec<Value> =
-                        std::env::args().map(|s| Value::String(s.into())).collect();
+                    let argv: Vec<Value> = tishlang_core::process_argv()
+                        .into_iter()
+                        .map(|s| Value::String(s.into()))
+                        .collect();
                     exports.insert(
                         "argv".into(),
                         Value::Array(Rc::new(RefCell::new(argv.clone()))),

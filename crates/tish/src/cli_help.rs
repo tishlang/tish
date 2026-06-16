@@ -479,6 +479,15 @@ pub(crate) struct RunArgs {
     /// Disable AST and bytecode optimizations (for debugging).
     #[arg(long, help_heading = "Options")]
     pub no_optimize: bool,
+    /// Arguments passed through to the script as `process.argv` (after the file). Like
+    /// `node main.js a b`, options for `tish` itself must come BEFORE the file. #88
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "ARGS",
+        help_heading = "Arguments"
+    )]
+    pub script_args: Vec<String>,
 }
 
 #[derive(Parser)]
