@@ -1,0 +1,7 @@
+nan true
+inf true
+obj_same true
+obj_diff false
+str true
+nested 2
+reuse_idx 0
