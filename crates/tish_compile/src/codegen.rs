@@ -782,6 +782,12 @@ struct Codegen {
     /// `RustType::Value`. This is the rust-AOT analogue of the VM array-JIT bailing to the
     /// interpreter on a non-numeric element. See `collect_demoted_numeric_locals`.
     demoted_numeric_locals: std::collections::HashSet<String>,
+    /// Integer-range lattice (#174): names of `f64` locals the analysis proves always hold an
+    /// integer within `[min, max]`, both strictly inside `(-2^53, 2^53)` so `as i64` is exact and
+    /// `i64` arithmetic is bit-identical to the `f64` the interpreter/VM use. Lets the codegen
+    /// lower e.g. `x % c` to a fast integer remainder instead of `fmod`. Conservative: a name absent
+    /// here is treated as unbounded. Populated by `collect_int_range_locals`.
+    int_range_locals: std::collections::HashMap<String, (i64, i64)>,
     /// Scopes of names whose Rust binding is actually `Rc<RefCell<_>>` (emitted at VarDecl).
     /// `refcell_wrapped_vars` alone is insufficient: it is set by prepasses before decl may run.
     rc_cell_storage_scopes: Vec<std::collections::HashSet<String>>,
@@ -836,6 +842,7 @@ impl Codegen {
             refcell_wrapped_vars: std::collections::HashSet::new(),
             native_fns: std::collections::HashSet::new(),
             demoted_numeric_locals: std::collections::HashSet::new(),
+            int_range_locals: std::collections::HashMap::new(),
             rc_cell_storage_scopes: vec![std::collections::HashSet::new()],
             usage_analyzer: None,
             type_context: TypeContext::new(),
@@ -1523,6 +1530,7 @@ impl Codegen {
         // and panics on a JS string-concat result like `s = s + arr[i]`). See
         // `collect_demoted_numeric_locals` / `demoted_numeric_locals`.
         self.demoted_numeric_locals = self.collect_demoted_numeric_locals(&program.statements);
+        self.int_range_locals = self.collect_int_range_locals(&program.statements);
         if self.is_async {
             self.writeln("async fn run() -> Result<(), Box<dyn std::error::Error>> {");
         } else if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
@@ -6020,6 +6028,270 @@ impl Codegen {
         demoted
     }
 
+    // ── Integer-range lattice (#174) ────────────────────────────────────────────────────────────
+    //
+    // Prove an `f64` expression always holds an integer within `(-2^53, 2^53)`, so it can be
+    // computed in `i64` with a result BIT-IDENTICAL to the `f64` the interpreter/VM produce. The
+    // immediate payoff is `x % c` → an integer remainder instead of `fmod` (fmod is ~5-10× slower);
+    // the lattice is sound by construction — every rule preserves "integer-valued AND within the
+    // exact-`f64` range", and any unprovable form yields `None` (treated as unbounded → no rewrite).
+    //
+    // The classic win is a `% c`-bounded recurrence (e.g. an LCG `seed = (seed*A + C) % M`): the
+    // modulo caps the result to `[0, M-1]` regardless of the dividend's size, so the fixpoint
+    // converges and every intermediate stays well under 2^53.
+
+    /// Prove `e` is always an integer in `[min, max]` (inclusive), both inside `(-2^53, 2^53)`.
+    /// `ranges` supplies proven bounds for in-scope locals. `None` = unprovable / unbounded.
+    fn int_range(
+        &self,
+        e: &Expr,
+        ranges: &HashMap<String, (i64, i64)>,
+    ) -> Option<(i64, i64)> {
+        const LIM: i64 = 1 << 53;
+        let clamp = |lo: i64, hi: i64| -> Option<(i64, i64)> {
+            if lo <= hi && lo > -LIM && hi < LIM {
+                Some((lo, hi))
+            } else {
+                None
+            }
+        };
+        match e {
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => Self::int_literal_value(*n).and_then(|v| clamp(v, v)),
+            Expr::Ident { name, .. } => ranges.get(name.as_ref()).copied(),
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                operand,
+                ..
+            } => {
+                let (lo, hi) = self.int_range(operand, ranges)?;
+                clamp(-hi, -lo)
+            }
+            Expr::Binary {
+                left, op, right, ..
+            } => match op {
+                // Bitwise & shift always yield an int32 — exact and far inside 2^53. A positive
+                // literal `&`-mask tightens the upper bound (common: `h & 0xFF` → [0, 255]).
+                BinOp::BitAnd => {
+                    let mask = Self::int_literal_value_of(left)
+                        .or_else(|| Self::int_literal_value_of(right));
+                    match mask {
+                        Some(m) if m >= 0 => clamp(0, m),
+                        _ => clamp(i32::MIN as i64, i32::MAX as i64),
+                    }
+                }
+                BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                    clamp(i32::MIN as i64, i32::MAX as i64)
+                }
+                BinOp::UShr => clamp(0, u32::MAX as i64),
+                // `x % c` (c a positive integer literal) — the result is an integer in (-c, c) when
+                // the dividend is a proven integer; sign follows the dividend (JS `%` / Rust `%` both
+                // truncate toward zero), so a non-negative dividend gives `[0, min(c-1, hi)]`.
+                BinOp::Mod => {
+                    let c = Self::int_literal_value_of(right).filter(|&c| c > 0)?;
+                    // The dividend must itself be a proven integer (so the result is integral); the
+                    // modulo then caps the magnitude to `< c` REGARDLESS of the dividend's size — a
+                    // fixed (not dividend-dependent) bound, so `% c`-driven recurrences converge in
+                    // one step. Sign follows the dividend (Rust `%` / JS `%` both truncate to zero).
+                    let (lo, _hi) = self.int_range(left, ranges)?;
+                    if lo >= 0 {
+                        clamp(0, c - 1)
+                    } else {
+                        clamp(-(c - 1), c - 1)
+                    }
+                }
+                BinOp::Add => {
+                    let (la, ua) = self.int_range(left, ranges)?;
+                    let (lb, ub) = self.int_range(right, ranges)?;
+                    clamp(la + lb, ua + ub)
+                }
+                BinOp::Sub => {
+                    let (la, ua) = self.int_range(left, ranges)?;
+                    let (lb, ub) = self.int_range(right, ranges)?;
+                    clamp(la - ub, ua - lb)
+                }
+                BinOp::Mul => {
+                    let (la, ua) = self.int_range(left, ranges)?;
+                    let (lb, ub) = self.int_range(right, ranges)?;
+                    // Compute in i128 so corner products can't overflow before the 2^53 clamp.
+                    let p = [
+                        (la as i128) * (lb as i128),
+                        (la as i128) * (ub as i128),
+                        (ua as i128) * (lb as i128),
+                        (ua as i128) * (ub as i128),
+                    ];
+                    let lo = *p.iter().min().unwrap();
+                    let hi = *p.iter().max().unwrap();
+                    if lo > -(LIM as i128) && hi < (LIM as i128) {
+                        clamp(lo as i64, hi as i64)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// An integer-valued, exactly-`f64`-representable number from a numeric literal value.
+    fn int_literal_value(n: f64) -> Option<i64> {
+        if n.is_finite() && n.fract() == 0.0 && n.abs() < (1i64 << 53) as f64 {
+            Some(n as i64)
+        } else {
+            None
+        }
+    }
+
+    /// As [`int_literal_value`] but for an `Expr` that is a numeric literal (else `None`).
+    fn int_literal_value_of(e: &Expr) -> Option<i64> {
+        match e {
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => Self::int_literal_value(*n),
+            _ => None,
+        }
+    }
+
+    /// Names of `f64` locals provably integer-bounded within `(-2^53, 2^53)` across the whole
+    /// program. Seeds from integer-literal initializers and literal-bounded `for` counters, then
+    /// runs a join fixpoint over reassignments: a local keeps a bound only if its init and EVERY
+    /// reassignment RHS are `int_range`-provable and the joined range stabilizes within a few
+    /// rounds (else it is dropped = unbounded). Sound: a dropped local simply keeps the `f64` path.
+    fn collect_int_range_locals(&self, stmts: &[Statement]) -> HashMap<String, (i64, i64)> {
+        let mut ranges: HashMap<String, (i64, i64)> = HashMap::new();
+        // Seed: `let x = <int literal>` and `for (let i = <int>; i < <int>; i++/i+=1)` counters.
+        Self::seed_int_ranges(stmts, &mut ranges);
+        if ranges.is_empty() {
+            return ranges;
+        }
+        // All reassignments `(name, rhs)` — a local is bounded only if every one stays provable.
+        let mut reassigns: Vec<(String, &Expr)> = Vec::new();
+        Self::collect_reassignments_stmts(stmts, &mut reassigns);
+
+        // Phase A — join rounds: grow each seeded local's range toward a fixpoint. A reassignment
+        // whose RHS is unprovable drops the local immediately. With the modulo cap fixed, `% c`
+        // recurrences converge in ≤2 rounds; the round cap just bounds non-converging growth (those
+        // are caught by phase B).
+        for _round in 0..8 {
+            let mut changed = false;
+            let snapshot = ranges.clone();
+            for (name, rhs) in &reassigns {
+                let Some(&(clo, chi)) = snapshot.get(name.as_str()) else {
+                    continue;
+                };
+                match self.int_range(rhs, &snapshot) {
+                    Some((rlo, rhi)) => {
+                        let (nlo, nhi) = (clo.min(rlo), chi.max(rhi));
+                        if (nlo, nhi) != (clo, chi) {
+                            ranges.insert(name.clone(), (nlo, nhi));
+                            changed = true;
+                        }
+                    }
+                    None => {
+                        ranges.remove(name.as_str());
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // Phase B — validate the result is an INDUCTIVE INVARIANT: a local keeps its range only if
+        // every reassignment's RHS range (evaluated against the final map) stays within it. A local
+        // that kept growing (e.g. `s = s + 1`, no cap) fails this and is dropped — and dropping it
+        // can make other RHS unprovable, so iterate to a fixpoint. This is what makes the analysis
+        // SOUND regardless of the round cap: only true fixpoints survive.
+        loop {
+            let mut dropped = false;
+            let snapshot = ranges.clone();
+            for (name, rhs) in &reassigns {
+                let Some(&(clo, chi)) = snapshot.get(name.as_str()) else {
+                    continue;
+                };
+                let ok = matches!(self.int_range(rhs, &snapshot), Some((rlo, rhi)) if rlo >= clo && rhi <= chi);
+                if !ok {
+                    ranges.remove(name.as_str());
+                    dropped = true;
+                }
+            }
+            if !dropped {
+                return ranges;
+            }
+        }
+    }
+
+    /// Seed integer ranges: integer-literal `let` initializers and literal-bounded `for` counters.
+    fn seed_int_ranges(stmts: &[Statement], out: &mut HashMap<String, (i64, i64)>) {
+        for s in stmts {
+            match s {
+                Statement::VarDecl {
+                    name,
+                    init: Some(e),
+                    ..
+                } => {
+                    if let Some(v) = Self::int_literal_value_of(e) {
+                        out.insert(name.to_string(), (v, v));
+                    }
+                }
+                Statement::For {
+                    init, cond, body, ..
+                } => {
+                    // `for (let i = <int>; i < <int>; ...)` → counter `i` ∈ [start, end-1].
+                    if let (
+                        Some(Statement::VarDecl {
+                            name,
+                            init: Some(istart),
+                            ..
+                        }),
+                        Some(Expr::Binary {
+                            left,
+                            op: BinOp::Lt,
+                            right,
+                            ..
+                        }),
+                    ) = (init.as_deref(), cond.as_ref())
+                    {
+                        if let (Some(start), Some(end)) = (
+                            Self::int_literal_value_of(istart),
+                            Self::int_literal_value_of(right),
+                        ) {
+                            if matches!(left.as_ref(), Expr::Ident { name: cn, .. } if cn.as_ref() == name.as_ref())
+                                && end > start
+                                && end - 1 < (1i64 << 53)
+                            {
+                                out.insert(name.to_string(), (start, end - 1));
+                            }
+                        }
+                    }
+                    Self::seed_int_ranges(std::slice::from_ref(body), out);
+                }
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    Self::seed_int_ranges(statements, out)
+                }
+                Statement::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::seed_int_ranges(std::slice::from_ref(then_branch), out);
+                    if let Some(e) = else_branch {
+                        Self::seed_int_ranges(std::slice::from_ref(e), out);
+                    }
+                }
+                Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+                    Self::seed_int_ranges(std::slice::from_ref(body), out)
+                }
+                Statement::FunDecl { body, .. } => Self::seed_int_ranges(std::slice::from_ref(body), out),
+                _ => {}
+            }
+        }
+    }
+
     /// Record every annotated `VarDecl`/param name → its native `RustType`, recursing through all
     /// nested statements (loops, ifs, blocks, switch/try, function bodies). Flat; last write wins.
     fn collect_annotated_types(
@@ -6834,6 +7106,20 @@ impl Codegen {
                                 format!("(({}) as f64)", int_code)
                             };
                             return Ok((f64_code, RustType::F64));
+                        }
+                    }
+                    // Integer remainder (#174): `x % c` where the dividend `x` is a proven integer
+                    // in (-2^53, 2^53) and `c` a positive integer literal → `(x as i64) % c` instead
+                    // of `fmod`. Bit-identical (x is exactly an integer in f64; Rust `%` and `fmod`
+                    // both truncate toward zero), and far faster — the fmod in LCG/hash recurrences.
+                    if matches!(op, BinOp::Mod) && result_ty == RustType::F64 {
+                        if let Some(c) = Self::int_literal_value_of(right).filter(|&c| c > 0) {
+                            if self.int_range(left, &self.int_range_locals).is_some() {
+                                return Ok((
+                                    format!("(((({}) as i64) % {}i64) as f64)", l, c),
+                                    RustType::F64,
+                                ));
+                            }
                         }
                     }
                     // Both sides are compatible native types → emit native op.
