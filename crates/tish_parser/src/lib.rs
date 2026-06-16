@@ -45,6 +45,24 @@ mod tests {
         }
     }
 
+    // #158: a block's span — and the enclosing function's span — must end at the closing `}`, not
+    // overrun onto the statement on the following line.
+    #[test]
+    fn block_and_fn_spans_stop_at_closing_brace() {
+        // `}` is on line 3 (1-based); `let after` begins on line 4.
+        let program = parse("fn f(a) {\n  let x = a\n}\nlet after = 1\n").expect("parse");
+        let Statement::FunDecl { span, body, .. } = &program.statements[0] else {
+            panic!("expected FunDecl");
+        };
+        assert_eq!(span.end.0, 3, "fn span must end on the `}}` line, not the next statement: {span:?}");
+        assert_eq!(
+            body.span().end.0,
+            3,
+            "body block span must end on the `}}` line: {:?}",
+            body.span()
+        );
+    }
+
     #[test]
     fn test_object_literal_shorthand_single() {
         let program = parse("const o = { port }").expect("parse object shorthand");
