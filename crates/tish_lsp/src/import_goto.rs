@@ -314,6 +314,7 @@ pub fn native_member_definition(
     lsp_line: u32,
     lsp_character: u32,
     word: &str,
+    open_docs: &HashMap<Url, String>,
 ) -> Option<NativeMemberDefinition> {
     let project_root = infer_project_root(file_path, roots)?;
     let from_dir = file_path.parent()?;
@@ -357,7 +358,8 @@ pub fn native_member_definition(
 
             if from_s.starts_with("./") || from_s.starts_with("../") {
                 if members.len() == 1 {
-                    let loc = resolve_relative_tish(from_dir, from_s, members[0].as_ref())?;
+                    let loc =
+                        resolve_relative_tish(from_dir, from_s, members[0].as_ref(), open_docs)?;
                     return Some(NativeMemberDefinition {
                         location: loc,
                         doc: None,
@@ -422,6 +424,7 @@ pub fn definition_for_native_receiver_member(
     lsp_line: u32,
     lsp_character: u32,
     word: &str,
+    open_docs: &HashMap<Url, String>,
 ) -> Option<Location> {
     native_member_definition(
         program,
@@ -432,11 +435,28 @@ pub fn definition_for_native_receiver_member(
         lsp_line,
         lsp_character,
         word,
+        open_docs,
     )
     .map(|d| d.location)
 }
 
-fn resolve_relative_tish(from_dir: &Path, from_s: &str, imported: &str) -> Option<Location> {
+/// Source text of a target module: the live editor buffer if the file is open with unsaved edits,
+/// otherwise the on-disk contents. Reading the open buffer keeps cross-file goto-definition/hover in
+/// sync with what the user sees — disk would give a stale line/column (or miss a not-yet-saved
+/// export entirely). #148
+fn module_source(can: &Path, u: &Url, open_docs: &HashMap<Url, String>) -> Option<String> {
+    match open_docs.get(u) {
+        Some(buf) => Some(buf.clone()),
+        None => std::fs::read_to_string(can).ok(),
+    }
+}
+
+fn resolve_relative_tish(
+    from_dir: &Path,
+    from_s: &str,
+    imported: &str,
+    open_docs: &HashMap<Url, String>,
+) -> Option<Location> {
     let target = from_dir.join(from_s.trim_start_matches("./"));
     let target = if target.extension().is_none() {
         target.with_extension("tish")
@@ -445,13 +465,17 @@ fn resolve_relative_tish(from_dir: &Path, from_s: &str, imported: &str) -> Optio
     };
     let can = target.canonicalize().ok()?;
     let u = Url::from_file_path(&can).ok()?;
-    let src = std::fs::read_to_string(&can).ok()?;
+    let src = module_source(&can, &u, open_docs)?;
     let prog = tishlang_parser::parse(&src).ok()?;
     crate::find_export(&prog, imported, &u, &src)
 }
 
 /// Resolve a relative default import (`import X from "./m"`) to the `export default` in the source.
-fn resolve_relative_tish_default(from_dir: &Path, from_s: &str) -> Option<Location> {
+fn resolve_relative_tish_default(
+    from_dir: &Path,
+    from_s: &str,
+    open_docs: &HashMap<Url, String>,
+) -> Option<Location> {
     let target = from_dir.join(from_s.trim_start_matches("./"));
     let target = if target.extension().is_none() {
         target.with_extension("tish")
@@ -460,7 +484,7 @@ fn resolve_relative_tish_default(from_dir: &Path, from_s: &str) -> Option<Locati
     };
     let can = target.canonicalize().ok()?;
     let u = Url::from_file_path(&can).ok()?;
-    let src = std::fs::read_to_string(&can).ok()?;
+    let src = module_source(&can, &u, open_docs)?;
     let prog = tishlang_parser::parse(&src).ok()?;
     crate::find_default_export(&prog, &u, &src)
 }
@@ -473,6 +497,7 @@ pub fn definition_for_import(
     word: &str,
     roots: &[PathBuf],
     cargo_src_cache: &RwLock<HashMap<(PathBuf, String), PathBuf>>,
+    open_docs: &HashMap<Url, String>,
 ) -> Option<Location> {
     if word.is_empty() {
         return None;
@@ -506,9 +531,9 @@ pub fn definition_for_import(
                 // A default import binds the source module's `export default`, which has no name to
                 // match; resolve it directly. Named imports resolve by exported name.
                 return if is_default {
-                    resolve_relative_tish_default(from_dir, from_s)
+                    resolve_relative_tish_default(from_dir, from_s, open_docs)
                 } else {
-                    resolve_relative_tish(from_dir, from_s, imported)
+                    resolve_relative_tish(from_dir, from_s, imported, open_docs)
                 };
             }
 
@@ -561,6 +586,26 @@ mod receiver_member_tests {
         let (recv, mem) = super::split_receiver_member(line, col).expect("split");
         assert_eq!(recv, "window");
         assert_eq!(mem, "setTitle");
+    }
+
+    // #148: cross-file goto-def must read the open editor buffer (unsaved edits), not disk.
+    #[test]
+    fn module_source_prefers_open_buffer_over_disk() {
+        use std::collections::HashMap;
+        use tower_lsp::lsp_types::Url;
+        // A path that does NOT exist on disk: the disk branch would fail, so a non-None result
+        // proves the open buffer was used.
+        let path = std::path::Path::new("/nonexistent/tish/module.tish");
+        let url = Url::parse("file:///nonexistent/tish/module.tish").unwrap();
+        let mut docs = HashMap::new();
+        docs.insert(url.clone(), "export fn live() {}".to_string());
+        assert_eq!(
+            super::module_source(path, &url, &docs).as_deref(),
+            Some("export fn live() {}"),
+            "open buffer must win over (here, absent) disk content"
+        );
+        // Not open + nonexistent on disk → None (disk read fails), no panic.
+        assert_eq!(super::module_source(path, &url, &HashMap::new()), None);
     }
 
     #[test]
