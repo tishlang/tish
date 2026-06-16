@@ -4381,6 +4381,20 @@ mod tests {
         assert!(names.iter().any(|n| n.as_ref() == "bar"));
     }
 
+    // #158: on the line AFTER a function's closing brace, completion must not leak the function's
+    // params or inner locals (the body Block span used to overrun onto that line). The top-level
+    // function name is still in scope.
+    #[test]
+    fn completion_does_not_leak_past_function_brace() {
+        let src = "fn f(paramA, paramB) {\n  let secret = 1\n}\nlet after = 0\n";
+        let program = parse(src).expect("parse");
+        let names = completion_value_names_at_cursor(&program, src, 3, 0); // start of `let after`
+        let has = |n: &str| names.iter().any(|x| x.as_ref() == n);
+        assert!(!has("paramA") && !has("paramB"), "params leaked past `}}`: {names:?}");
+        assert!(!has("secret"), "inner local leaked past `}}`: {names:?}");
+        assert!(has("f"), "top-level fn must stay in scope: {names:?}");
+    }
+
     #[test]
     fn unresolved_unknown_ident() {
         let src = "let x = nope\n";
