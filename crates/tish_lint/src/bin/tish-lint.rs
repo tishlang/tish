@@ -20,6 +20,11 @@ struct Cli {
     #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text)]
     output_format: OutputFormat,
 
+    /// Exit non-zero if any WARNING is found (not just errors), so CI can gate on lint findings.
+    /// Without it, lint warnings print but the process exits 0 (only parse errors fail). (#154)
+    #[arg(long = "deny-warnings")]
+    deny_warnings: bool,
+
     #[arg(required = true)]
     paths: Vec<String>,
 }
@@ -36,7 +41,7 @@ struct Issue {
 
 fn main() {
     let cli = Cli::parse();
-    if let Err(e) = run(&cli.paths, cli.output_format) {
+    if let Err(e) = run(&cli.paths, cli.output_format, cli.deny_warnings) {
         eprintln!("{}", e);
         std::process::exit(1);
     }
@@ -67,7 +72,7 @@ fn collect_files(paths: &[String]) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-fn run(paths: &[String], format: OutputFormat) -> Result<(), String> {
+fn run(paths: &[String], format: OutputFormat, deny_warnings: bool) -> Result<(), String> {
     let files = collect_files(paths)?;
     let mut issues: Vec<Issue> = Vec::new();
     for f in files {
@@ -103,6 +108,13 @@ fn run(paths: &[String], format: OutputFormat) -> Result<(), String> {
     }
 
     let error_count = issues.iter().filter(|i| i.level == "error").count();
+    let warning_count = issues.iter().filter(|i| i.level == "warning").count();
+    // Always fail on errors (parse errors); with --deny-warnings, lint warnings fail too.
+    let fail_count = if deny_warnings {
+        error_count + warning_count
+    } else {
+        error_count
+    };
 
     match format {
         OutputFormat::Text => {
@@ -117,18 +129,15 @@ fn run(paths: &[String], format: OutputFormat) -> Result<(), String> {
                     i.message
                 );
             }
-            if error_count > 0 {
-                return Err(format!("{} issue(s)", error_count));
-            }
         }
         OutputFormat::Sarif => {
             print_sarif(&issues)?;
-            if error_count > 0 {
-                return Err(format!("{} issue(s)", error_count));
-            }
         }
     }
 
+    if fail_count > 0 {
+        return Err(format!("{} issue(s)", fail_count));
+    }
     Ok(())
 }
 
