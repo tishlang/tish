@@ -24,10 +24,45 @@ pub struct LintDiagnostic {
 /// Run all default rules on parsed program.
 pub fn lint_program(program: &Program) -> Vec<LintDiagnostic> {
     let mut out = Vec::new();
+    check_unreachable(&program.statements, &mut out);
     for s in &program.statements {
         lint_stmt(s, &mut out);
     }
     out
+}
+
+/// `tish-unreachable-code` (no-unreachable): in a statement sequence, the first statement after an
+/// unconditional `return`/`throw`/`break`/`continue` sibling can never run. Flags only that first
+/// statement (not the whole tail — less noise) and skips hoisted `fn` declarations, which are valid
+/// after a terminator. Only a DIRECT-sibling terminator triggers it, so a conditional
+/// `if (c) return` followed by more statements is correctly NOT flagged.
+fn check_unreachable(stmts: &[Statement], out: &mut Vec<LintDiagnostic>) {
+    let mut terminated = false;
+    for st in stmts {
+        if terminated {
+            if matches!(st, Statement::FunDecl { .. }) {
+                continue; // function declarations hoist — reachable regardless of position
+            }
+            let (line, col) = stmt_span(st);
+            out.push(LintDiagnostic {
+                code: "tish-unreachable-code",
+                message: "Unreachable code after return/throw/break/continue.".into(),
+                line,
+                col,
+                severity: Severity::Warning,
+            });
+            return;
+        }
+        if matches!(
+            st,
+            Statement::Return { .. }
+                | Statement::Throw { .. }
+                | Statement::Break { .. }
+                | Statement::Continue { .. }
+        ) {
+            terminated = true;
+        }
+    }
 }
 
 /// Lint source: parse then lint. Parse errors are not reported here.
@@ -65,6 +100,7 @@ fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
         }
         // Block and the transparent comma-declarator group (#141: Multi was previously skipped).
         Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+            check_unreachable(statements, out);
             for st in statements {
                 lint_stmt(st, out);
             }
@@ -120,11 +156,13 @@ fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
                 if let Some(ce) = case_expr {
                     lint_expr(ce, out);
                 }
+                check_unreachable(stmts, out);
                 for st in stmts {
                     lint_stmt(st, out);
                 }
             }
             if let Some(def) = default_body {
+                check_unreachable(def, out);
                 for st in def {
                     lint_stmt(st, out);
                 }
@@ -158,14 +196,9 @@ fn is_empty_block_or_stmt(s: &Statement) -> bool {
 }
 
 fn stmt_span(s: &Statement) -> (u32, u32) {
-    let sp = match s {
-        Statement::Block { span, .. } => *span,
-        Statement::Try { span, .. } => *span,
-        _ => tishlang_ast::Span {
-            start: (1, 1),
-            end: (1, 1),
-        },
-    };
+    // Use the AST's uniform accessor so every statement kind reports its real position (the old
+    // local match only handled Block/Try and defaulted everything else to (1,1)).
+    let sp = s.span();
     (sp.start.0 as u32, sp.start.1 as u32)
 }
 
@@ -374,6 +407,36 @@ mod tests {
             dup_keys("export default { a: 1, a: 2 }\n") >= 1,
             "dup key inside `export default` must be linted"
         );
+    }
+
+    // #152: no-unreachable.
+    fn unreachable(src: &str) -> usize {
+        lint_source(src)
+            .expect("parse")
+            .iter()
+            .filter(|d| d.code == "tish-unreachable-code")
+            .count()
+    }
+
+    #[test]
+    fn flags_code_after_terminator() {
+        assert_eq!(unreachable("fn f() {\n  return 1\n  let x = 2\n}\n"), 1, "after return");
+        assert_eq!(unreachable("fn g() {\n  throw 1\n  g()\n}\n"), 1, "after throw");
+        assert_eq!(
+            unreachable("fn h() {\n  while (true) {\n    break\n    h()\n  }\n}\n"),
+            1,
+            "after break in loop body"
+        );
+    }
+
+    #[test]
+    fn does_not_flag_reachable_or_hoisted() {
+        // Conditional return is NOT a direct-sibling terminator → following code is reachable.
+        assert_eq!(unreachable("fn f(c) {\n  if (c) { return 1 }\n  let x = 2\n}\n"), 0, "conditional");
+        // Function declarations hoist — valid after a return.
+        assert_eq!(unreachable("fn g() {\n  return 1\n  fn helper() { return 2 }\n}\n"), 0, "hoisted fn");
+        // Switch fall-through (no terminator) is intentional.
+        assert_eq!(unreachable("switch (x) {\n  case 1:\n    a()\n  case 2:\n    b()\n}\n"), 0, "fallthrough");
     }
 }
 
