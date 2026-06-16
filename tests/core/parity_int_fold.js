@@ -1,0 +1,17 @@
+// Integer fold lowering (#174): a native reduce over an integer-literal number[] whose body is
+// integer arithmetic (`(a*31+b) % c`) runs in i64 instead of f64+fmod. Must stay bit-identical to
+// interp/vm/cranelift/wasi/node. Covers a positive hash fold, a fold with NEGATIVE elements, and a
+// negative-bounded modulo, all driven by an outer counter (so the init `r % k` varies).
+let xs = [3, 10, 17, 24, 31, 38, 45, 52, 59, 66, 73, 80, 87, 94, 1, 8, 15]
+let ys = [-5, 12, -33, 7, -1, 99, -100, 4, -8, 60]
+let acc1 = 0
+let acc2 = 0
+let r = 0
+while (r < 5000) {
+  acc1 = (acc1 * 31 + xs.reduce((a, b) => (a * 31 + b) % 1000003, r % 97)) % 1000000007
+  acc2 = (acc2 + ys.reduce((a, b) => (a * 7 - b) % 9973, r % 13)) | 0
+  r = r + 1
+}
+console.log("acc1", acc1)
+console.log("acc2", acc2 | 0)
+console.log("sumfold", xs.reduce((a, b) => (a + b) % 100, 0))
