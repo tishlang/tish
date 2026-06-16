@@ -5940,6 +5940,19 @@ impl Codegen {
             }
         }
 
+        // Fast path: when the native typed emitter already yields the target type, use its code
+        // directly — skipping the `Value::Number(<expr>)` box that `from_value_expr` would
+        // immediately unbox. This round-trip otherwise lands in hot loops: `let xt = x*x - y*y + x0`
+        // (xt inferred f64) emitted `match &Value::Number(<expr>) { Value::Number(n) => *n,
+        // _ => panic!() }` *every iteration*. `emit_typed_expr`'s contract guarantees `code` is a
+        // value of `typed_ty` directly, so when it equals the target the code is exactly what we
+        // want, unboxed. (Any other type falls through to the unchanged box-and-coerce path below.)
+        if let Ok((typed_code, typed_ty)) = self.emit_typed_expr(expr) {
+            if &typed_ty == target_type {
+                return Ok(typed_code);
+            }
+        }
+
         // Fall back to emit_expr + conversion
         let value_expr = self.emit_expr(expr)?;
         Ok(target_type.from_value_expr(&value_expr))
@@ -6876,6 +6889,37 @@ impl Codegen {
                         _ => unreachable!("result_type_of_binop covers all handled ops"),
                     };
                     return Ok((code, result_ty));
+                }
+
+                // Mixed numeric relational: one side is a native `f64`, the other a boxed `Value`
+                // (e.g. nsieve's `while (k < n)` where `k` is f64 and the param `n` stayed boxed).
+                // JS does a numeric comparison here — the f64 side forces ToNumber on the other —
+                // so coerce the Value inline (`as_number().unwrap_or(NaN)`) and compare natively,
+                // instead of boxing the f64 side and paying `ops::{lt,le,gt,ge}` + `Value::Bool` +
+                // `is_truthy` every iteration. Behaviour-identical to that boxed path for every
+                // input: a non-number Value coerces to NaN, so all comparisons are `false`, exactly
+                // as `ops::*` returns `false` outside the (Number,Number)/(String,String) cases —
+                // and (String,String) can't reach here since one side is f64.
+                if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+                    && (lt == RustType::F64 || rt == RustType::F64)
+                {
+                    let coerce = |code: &str, ty: &RustType| match ty {
+                        RustType::F64 => Some(code.to_string()),
+                        RustType::Value => {
+                            Some(format!("({}).as_number().unwrap_or(f64::NAN)", code))
+                        }
+                        _ => None,
+                    };
+                    if let (Some(lc), Some(rc)) = (coerce(&l, &lt), coerce(&r, &rt)) {
+                        let sym = match op {
+                            BinOp::Lt => "<",
+                            BinOp::Le => "<=",
+                            BinOp::Gt => ">",
+                            BinOp::Ge => ">=",
+                            _ => unreachable!(),
+                        };
+                        return Ok((format!("({} {} {})", lc, sym, rc), RustType::Bool));
+                    }
                 }
 
                 // Fall back: convert both sides to Value and use the runtime.
