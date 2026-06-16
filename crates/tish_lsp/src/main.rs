@@ -210,6 +210,7 @@ fn compute_diagnostics(text: &str) -> Vec<Diagnostic> {
                     severity: Some(sev),
                     code: Some(NumberOrString::String(d.code.to_string())),
                     message: d.message,
+                    source: Some("tish".into()),
                     ..Default::default()
                 });
             }
@@ -219,6 +220,7 @@ fn compute_diagnostics(text: &str) -> Vec<Diagnostic> {
                     severity: Some(DiagnosticSeverity::ERROR),
                     code: Some(NumberOrString::String("tish-unresolved-name".into())),
                     message: format!("no binding in scope for `{}`", u.name),
+                    source: Some("tish".into()),
                     ..Default::default()
                 });
             }
@@ -265,6 +267,7 @@ fn compute_diagnostics(text: &str) -> Vec<Diagnostic> {
                 range: diag_range(l, c, text),
                 severity: Some(DiagnosticSeverity::ERROR),
                 message: e,
+                source: Some("tish".into()),
                 ..Default::default()
             });
         }
