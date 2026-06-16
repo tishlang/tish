@@ -5940,6 +5940,19 @@ impl Codegen {
             }
         }
 
+        // Fast path: when the native typed emitter already yields the target type, use its code
+        // directly — skipping the `Value::Number(<expr>)` box that `from_value_expr` would
+        // immediately unbox. This round-trip otherwise lands in hot loops: `let xt = x*x - y*y + x0`
+        // (xt inferred f64) emitted `match &Value::Number(<expr>) { Value::Number(n) => *n,
+        // _ => panic!() }` *every iteration*. `emit_typed_expr`'s contract guarantees `code` is a
+        // value of `typed_ty` directly, so when it equals the target the code is exactly what we
+        // want, unboxed. (Any other type falls through to the unchanged box-and-coerce path below.)
+        if let Ok((typed_code, typed_ty)) = self.emit_typed_expr(expr) {
+            if &typed_ty == target_type {
+                return Ok(typed_code);
+            }
+        }
+
         // Fall back to emit_expr + conversion
         let value_expr = self.emit_expr(expr)?;
         Ok(target_type.from_value_expr(&value_expr))
