@@ -453,6 +453,31 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
+        // Member position: completion was triggered by `.`, or the text right before the cursor
+        // ends in `.` (e.g. `obj.`). We don't do member completion yet, so return NOTHING rather
+        // than the language keyword list / in-scope names, which are never valid after a dot and
+        // were the noise this handler used to emit (#146). This is where member items would go.
+        let dot_trigger = params
+            .context
+            .as_ref()
+            .map(|c| {
+                matches!(c.trigger_kind, CompletionTriggerKind::TRIGGER_CHARACTER)
+                    && c.trigger_character.as_deref() == Some(".")
+            })
+            .unwrap_or(false);
+        let after_dot = dot_trigger
+            || text
+                .lines()
+                .nth(pos.line as usize)
+                .map(|line| {
+                    let upto: String = line.chars().take(pos.character as usize).collect();
+                    upto.trim_end().ends_with('.')
+                })
+                .unwrap_or(false);
+        if after_dot {
+            return Ok(Some(CompletionResponse::Array(vec![])));
+        }
+
         let keywords = [
             "fn", "async", "let", "const", "if", "else", "while", "for", "return", "break",
             "continue", "switch", "case", "default", "try", "catch", "finally", "throw", "import",
@@ -480,14 +505,6 @@ impl LanguageServer for Backend {
                     kind: Some(value_completion_kind(&program, name.as_ref())),
                     ..Default::default()
                 });
-            }
-        }
-
-        if let Some(ctx) = params.context {
-            if matches!(ctx.trigger_kind, CompletionTriggerKind::TRIGGER_CHARACTER)
-                && ctx.trigger_character.as_deref() == Some(".")
-            {
-                // After dot: could add member completion later
             }
         }
 
@@ -2144,6 +2161,50 @@ mod jsonrpc_integration_tests {
             .await
             .expect("formatting must return a result");
         assert!(result.is_null(), "unknown document must yield no edits, got {result}");
+    }
+
+    fn completion_request(uri: &str, line: u32, ch: u32, trigger: Option<&str>) -> Request {
+        let context = match trigger {
+            Some(t) => serde_json::json!({ "triggerKind": 2, "triggerCharacter": t }),
+            None => serde_json::json!({ "triggerKind": 1 }),
+        };
+        Request::build("textDocument/completion")
+            .id(7)
+            .params(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": ch },
+                "context": context,
+            }))
+            .finish()
+    }
+
+    // #146: after a `.` the server must NOT offer language keywords (member position); top-level
+    // completion still offers keywords.
+    #[tokio::test]
+    async fn completion_after_dot_offers_no_keywords() {
+        let mut service = new_service();
+        initialize(&mut service).await;
+        let uri = "file:///complete.tish";
+        did_open(&mut service, uri, "let obj = 1\nobj.\n").await;
+
+        // Member position (dot trigger at the end of `obj.`): empty, not the keyword list.
+        let after_dot = call(&mut service, completion_request(uri, 1, 4, Some(".")))
+            .await
+            .expect("completion result");
+        let items = after_dot.as_array().expect("completion is an array");
+        assert!(items.is_empty(), "no completions after a dot, got {after_dot}");
+
+        // Control: top-level invocation still returns keywords (e.g. `let`).
+        let top = call(&mut service, completion_request(uri, 0, 0, None))
+            .await
+            .expect("completion result");
+        let labels: Vec<&str> = top
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|i| i["label"].as_str())
+            .collect();
+        assert!(labels.contains(&"let"), "top-level completion has keywords, got {top}");
     }
 
     // A second `didOpen`/format after an in-place edit (via didChange) must reflect the new text —
