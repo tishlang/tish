@@ -1,0 +1,6 @@
+countLt 1000
+bounds 5040
+cmp_gt 10
+cmp_eqish 12
+cmp_lt 5
+sieve 1229

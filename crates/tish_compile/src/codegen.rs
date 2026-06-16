@@ -6891,6 +6891,37 @@ impl Codegen {
                     return Ok((code, result_ty));
                 }
 
+                // Mixed numeric relational: one side is a native `f64`, the other a boxed `Value`
+                // (e.g. nsieve's `while (k < n)` where `k` is f64 and the param `n` stayed boxed).
+                // JS does a numeric comparison here — the f64 side forces ToNumber on the other —
+                // so coerce the Value inline (`as_number().unwrap_or(NaN)`) and compare natively,
+                // instead of boxing the f64 side and paying `ops::{lt,le,gt,ge}` + `Value::Bool` +
+                // `is_truthy` every iteration. Behaviour-identical to that boxed path for every
+                // input: a non-number Value coerces to NaN, so all comparisons are `false`, exactly
+                // as `ops::*` returns `false` outside the (Number,Number)/(String,String) cases —
+                // and (String,String) can't reach here since one side is f64.
+                if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+                    && (lt == RustType::F64 || rt == RustType::F64)
+                {
+                    let coerce = |code: &str, ty: &RustType| match ty {
+                        RustType::F64 => Some(code.to_string()),
+                        RustType::Value => {
+                            Some(format!("({}).as_number().unwrap_or(f64::NAN)", code))
+                        }
+                        _ => None,
+                    };
+                    if let (Some(lc), Some(rc)) = (coerce(&l, &lt), coerce(&r, &rt)) {
+                        let sym = match op {
+                            BinOp::Lt => "<",
+                            BinOp::Le => "<=",
+                            BinOp::Gt => ">",
+                            BinOp::Ge => ">=",
+                            _ => unreachable!(),
+                        };
+                        return Ok((format!("({} {} {})", lc, sym, rc), RustType::Bool));
+                    }
+                }
+
                 // Fall back: convert both sides to Value and use the runtime.
                 let lv = if lt.is_native() {
                     lt.to_value_expr(&l)
