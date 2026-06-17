@@ -1,0 +1,8 @@
+flat k1,k2,k3,k4,k5
+desc zzz,yyy,xxx,www
+many a,b,c,d,e,f,g,h,i,j
+record {"id":1,"name":"x","value":2,"active":true,"tags":[1,2,3]}
+brace-in-str {"a":{"s":"}{][ "},"b":2,"c":3}
+bracket-arr {"x":["]","[",","],"y":3}
+nested-order z,a,m
+unicode-esc Aé
