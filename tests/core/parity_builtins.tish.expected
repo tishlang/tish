@@ -17,3 +17,8 @@ parseint-neg -16
 tofixed 3
 tofixed-neg -3
 tofixed-pi 3.14
+negzero-tostring 0
+negzero-string 0
+negzero-concat 0
+negzero-template 0
+negzero-inspect -0

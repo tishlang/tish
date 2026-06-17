@@ -578,7 +578,9 @@ fn js_number_to_string(value: f64) -> String {
         return "-Infinity".to_string();
     }
     if value == 0.0 {
-        return if value.is_sign_negative() { "-0" } else { "0" }.to_string();
+        // ECMAScript `Number::toString`: both `+0` and `-0` → `"0"` (a constant-folded
+        // `"" + (-0)` must match the runtime ToString, not the inspect form). (#247)
+        return "0".to_string();
     }
     let negative = value < 0.0;
     let sci = format!("{:e}", value.abs());

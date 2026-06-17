@@ -3076,8 +3076,8 @@ console.log("rotate", (((255 << 24) | (128 << 16)) >>> 0))
 
 {
 // #247 cross-backend built-in divergences (Math round/min/max/hypot, parseInt radix, includes(NaN),
-// toFixed) — fixed to match the JS target. interp/vm/native/cranelift/node must all agree. Valid in
-// tish and node. (-0 toString and instanceof/at/findLast tracked separately.)
+// toFixed, -0 ToString) — fixed to match the JS target. interp/vm/native/cranelift/node must all
+// agree. Valid in tish and node. (instanceof/at/findLast tracked separately.)
 console.log("round-neg", Math.round(-2.5))
 console.log("round-pos", Math.round(2.5))
 console.log("round-half", Math.round(0.5))
@@ -3097,6 +3097,12 @@ console.log("parseint-neg", parseInt("-0x10", 16))
 console.log("tofixed", (2.5).toFixed(0))
 console.log("tofixed-neg", (-2.5).toFixed(0))
 console.log("tofixed-pi", (3.14159).toFixed(2))
+// -0 ToString drops the sign (`String(-0) === "0"`); the console *inspect* form keeps it.
+console.log("negzero-tostring", (-0).toString())
+console.log("negzero-string", String(-0))
+console.log("negzero-concat", "" + (-0))
+console.log("negzero-template", `${-0}`)
+console.log("negzero-inspect", -0)
 }
 
 {
