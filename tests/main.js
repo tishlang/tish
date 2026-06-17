@@ -3197,6 +3197,18 @@ console.log("negbig", ((-123456789) % 1000))
 }
 
 {
+// #180/#247: JSON.stringify number formatting (integer fast-path + ECMAScript ToString for the
+// rest — `1e+21`/`1e-7`/`-0`→`0`) and JSON.parse key order (insertion order, not hash order) must
+// match the JS target across interp/vm/native/cranelift/node. Valid in both tish and node.
+console.log("nums", JSON.stringify([0, -0, 1, 42, -7, 1.5, 4.5, 0.1, 100000, 1e21, 1e-7, 12345.678]))
+console.log("keyorder", Object.keys(JSON.parse('{"k1":1,"zoo":2,"alpha":3,"m":4,"b":5}')).join(","))
+console.log("roundtrip", JSON.stringify(JSON.parse('{"a":[1,2.5,-0,1e21],"b":"he\\"llo\\n","c":{"d":true,"e":null}}')))
+console.log("negzero-parse", 1 / JSON.parse("-0"))
+console.log("bigint", JSON.stringify(JSON.parse("9007199254740993")))
+console.log("escapes", JSON.stringify("tab\tnl\nq\"bs\\"))
+}
+
+{
 // Mixed numeric relational (native typed path): when one operand lowers to a native f64 and the
 // other is a boxed Value (e.g. an unannotated param only ever compared, like nsieve's `n`), the
 // comparison is lowered to a native `f64 < value.as_number().unwrap_or(NaN)` instead of boxing the

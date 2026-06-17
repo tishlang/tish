@@ -3313,6 +3313,7 @@ dependencies = [
  "fancy-regex",
  "getrandom 0.3.4",
  "indexmap",
+ "itoa",
  "parking_lot",
  "smallvec",
 ]
