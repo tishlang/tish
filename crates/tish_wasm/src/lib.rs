@@ -88,6 +88,7 @@ pub fn compile_program_to_wasm(
     program: &Program,
     output_path: &Path,
     optimize: bool,
+    gpu: bool,
 ) -> Result<(), WasmError> {
     let program = if optimize {
         tishlang_opt::optimize(program)
@@ -103,10 +104,87 @@ pub fn compile_program_to_wasm(
             message: e.to_string(),
         })?
     };
-    emit_wasm_from_chunk(&chunk, output_path)
+    emit_wasm_from_chunk(&chunk, output_path, gpu)
 }
 
-fn emit_wasm_from_chunk(chunk: &Chunk, output_path: &Path) -> Result<(), WasmError> {
+/// The HTML loader emitted next to the wasm + JS glue. `gpu = false` imports `run` and calls
+/// `run(chunk)` (plain VM). `gpu = true` (#277) imports `start`, bootstraps WebGPU into a `host`
+/// env object, and calls `start(chunk, host)`. The GPU loader is a working default — edit
+/// `buildHost()` to add app assets, pick a specific canvas, or change the surface configuration.
+fn loader_html(stem: &str, chunk_b64: &str, gpu: bool) -> String {
+    let js_name = format!("{}.js", stem);
+    if gpu {
+        format!(
+            r#"<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>{title}</title><style>html,body{{margin:0;height:100%}}#tish-canvas{{width:100vw;height:100vh;display:block}}</style></head>
+<body>
+<canvas id="tish-canvas"></canvas>
+<script type="module">
+const CHUNK_B64 = "{chunk}";
+const chunk = Uint8Array.from(atob(CHUNK_B64), c => c.charCodeAt(0));
+import init, {{ start }} from './{js}';
+
+// The `host` global your tish program reads. Customize freely.
+async function buildHost() {{
+  if (!navigator.gpu) throw new Error("WebGPU not available (use a WebGPU-capable browser / context).");
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error("No WebGPU adapter.");
+  const device = await adapter.requestDevice();
+  const canvas = document.getElementById("tish-canvas");
+  const dpr = self.devicePixelRatio || 1;
+  canvas.width = Math.floor(canvas.clientWidth * dpr);
+  canvas.height = Math.floor(canvas.clientHeight * dpr);
+  const context = canvas.getContext("webgpu");
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  context.configure({{ device, format, alphaMode: "opaque" }});
+  return {{ gpu: navigator.gpu, adapter, device, queue: device.queue, context, format, canvas, assets: {{}} }};
+}}
+
+try {{
+  const host = await buildHost();
+  await init();
+  start(chunk, host);
+}} catch (e) {{
+  document.body.innerHTML = "<pre style='color:#c00;padding:1rem;font:14px monospace'>" + (e && e.message || e) + "</pre>";
+  throw e;
+}}
+</script>
+</body>
+</html>
+"#,
+            title = stem,
+            chunk = chunk_b64,
+            js = js_name
+        )
+    } else {
+        format!(
+            r#"<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>{}</title></head>
+<body>
+<script type="module">
+const CHUNK_B64 = "{}";
+const chunk = Uint8Array.from(atob(CHUNK_B64), c => c.charCodeAt(0));
+import init, {{ run }} from './{}';
+await init();
+run(chunk);
+</script>
+</body>
+</html>
+"#,
+            stem, chunk_b64, js_name
+        )
+    }
+}
+
+/// Build the wasm runtime + emit the JS/HTML loader for a serialized `chunk`.
+///
+/// `gpu = false` → `--features browser`, plain `run(chunk)` VM entry (the default `--target wasm`).
+/// `gpu = true`  → `--features gpu`, the reflection WebGPU bridge ([`tishlang_wasm_runtime`]'s
+/// `gpu.rs`) and a `start(chunk, host)` entry; the emitted HTML bootstraps WebGPU (adapter/device/
+/// canvas/context) into the `host` global the tish program reads. (#277, `--target wasm-gpu`.)
+fn emit_wasm_from_chunk(chunk: &Chunk, output_path: &Path, gpu: bool) -> Result<(), WasmError> {
     let chunk_bytes = serialize(chunk);
     let chunk_b64 = BASE64.encode(&chunk_bytes);
     let stem = output_path
@@ -139,7 +217,7 @@ fn emit_wasm_from_chunk(chunk: &Chunk, output_path: &Path) -> Result<(), WasmErr
             "wasm32-unknown-unknown",
             "--release",
             "--features",
-            "browser",
+            if gpu { "gpu" } else { "browser" },
         ])
         .status()
         .map_err(|e| WasmError {
@@ -182,24 +260,7 @@ fn emit_wasm_from_chunk(chunk: &Chunk, output_path: &Path) -> Result<(), WasmErr
             message: "wasm-bindgen failed".to_string(),
         });
     }
-    let js_name = format!("{}.js", stem);
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>{}</title></head>
-<body>
-<script type="module">
-const CHUNK_B64 = "{}";
-const chunk = Uint8Array.from(atob(CHUNK_B64), c => c.charCodeAt(0));
-import init, {{ run }} from './{}';
-await init();
-run(chunk);
-</script>
-</body>
-</html>
-"#,
-        stem, chunk_b64, js_name
-    );
+    let html = loader_html(stem, &chunk_b64, gpu);
     let html_path = out_dir_abs.join(format!("{}.html", stem));
     std::fs::write(&html_path, html).map_err(|e| WasmError {
         message: format!("Cannot write {}: {}", html_path.display(), e),
@@ -221,14 +282,17 @@ run(chunk);
 /// - `{output}.html` — loader (open in browser)
 ///
 /// Requires: `rustup target add wasm32-unknown-unknown`, `wasm-bindgen-cli`
+/// `gpu = true` targets the WebGPU runtime (`--features gpu`, `start(chunk, host)` entry); see
+/// [`emit_wasm_from_chunk`]. (#277, exposed as `--target wasm-gpu`.)
 pub fn compile_to_wasm(
     entry_path: &Path,
     project_root: Option<&Path>,
     output_path: &Path,
     optimize: bool,
+    gpu: bool,
 ) -> Result<(), WasmError> {
     let (chunk, _) = resolve_and_compile_to_chunk(entry_path, project_root, optimize)?;
-    emit_wasm_from_chunk(&chunk, output_path)
+    emit_wasm_from_chunk(&chunk, output_path, gpu)
 }
 
 /// Compile a Tish project to a raw serialized bytecode chunk.
@@ -425,4 +489,34 @@ fn main() {
         final_wasm.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loader_html;
+
+    #[test]
+    fn gpu_loader_uses_start_and_bootstraps_webgpu() {
+        // #277: the wasm-gpu loader must call the `start(chunk, host)` entry (not `run`) and build
+        // the WebGPU `host` env (adapter/device/context) the tish program reads.
+        let html = loader_html("viz", "QkFTRTY0", true);
+        assert!(html.contains("import init, { start }"), "imports start");
+        assert!(html.contains("start(chunk, host)"), "calls start with host");
+        assert!(html.contains("navigator.gpu.requestAdapter()"), "bootstraps adapter");
+        assert!(html.contains("getContext(\"webgpu\")"), "configures the canvas context");
+        assert!(html.contains("device, queue: device.queue, context, format, canvas"), "host shape");
+        assert!(html.contains("from './viz.js'"), "imports the right glue");
+        assert!(!html.contains("run(chunk)"), "must NOT use the plain run() entry");
+        assert!(html.contains("QkFTRTY0"), "embeds the chunk");
+    }
+
+    #[test]
+    fn plain_loader_uses_run() {
+        let html = loader_html("app", "QkFTRTY0", false);
+        assert!(html.contains("import init, { run }"), "imports run");
+        assert!(html.contains("run(chunk)"), "calls run");
+        assert!(!html.contains("start("), "no gpu start entry");
+        assert!(!html.contains("requestAdapter"), "no webgpu bootstrap");
+        assert!(html.contains("from './app.js'"), "imports the right glue");
+    }
 }

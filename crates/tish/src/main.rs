@@ -658,14 +658,23 @@ fn build_file(
         return compile_to_js(&input_path, output_path, optimize, source_map);
     }
 
-    if target == "wasm" && is_js {
+    // `wasm-gpu` (#277): same pipeline as `wasm` but builds the `--features gpu` WebGPU runtime and
+    // emits a `start(chunk, host)` loader that bootstraps WebGPU into the `host` global.
+    let wasm_gpu = target == "wasm-gpu";
+
+    if (target == "wasm" || wasm_gpu) && is_js {
         let source = fs::read_to_string(&input_path).map_err(|e| format!("{}", e))?;
         let program = tishlang_js_to_tish::convert(&source).map_err(|e| format!("{}", e))?;
-        return tishlang_wasm::compile_program_to_wasm(&program, Path::new(output_path), optimize)
-            .map_err(|e| format!("{}", e));
+        return tishlang_wasm::compile_program_to_wasm(
+            &program,
+            Path::new(output_path),
+            optimize,
+            wasm_gpu,
+        )
+        .map_err(|e| format!("{}", e));
     }
 
-    if target == "wasm" {
+    if target == "wasm" || wasm_gpu {
         let project_root = input_path.parent().and_then(|p| {
             if p.file_name().and_then(|n| n.to_str()) == Some("src") {
                 p.parent()
@@ -678,6 +687,7 @@ fn build_file(
             project_root,
             Path::new(output_path),
             optimize,
+            wasm_gpu,
         )
         .map_err(|e| e.to_string());
     }
@@ -720,7 +730,7 @@ fn build_file(
 
     if target != "native" {
         return Err(format!(
-            "Unknown target: {}. Use 'native', 'js', 'wasm', 'wasi', or 'bytecode'.",
+            "Unknown target: {}. Use 'native', 'js', 'wasm', 'wasm-gpu', 'wasi', or 'bytecode'.",
             target
         ));
     }

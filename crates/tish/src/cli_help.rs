@@ -406,6 +406,9 @@ pub fn build_after_help() -> String {
           JavaScript bundle
   {t}wasm{r}
           WebAssembly (.tish project; .js source supported on some paths)
+  {t}wasm-gpu{r}
+          WebAssembly + the WebGPU reflection bridge — emits a start(chunk, host) loader that
+          bootstraps WebGPU (device/queue/context/canvas) into the `host` global your program reads
   {t}wasi{r}
           WASI WebAssembly
   {t}bytecode{r}
