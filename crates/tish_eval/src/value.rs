@@ -197,6 +197,10 @@ impl std::fmt::Debug for Value {
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // Inspect form (`console.log`): keeps the sign of negative zero, unlike the ECMAScript
+            // ToString used by `to_js_string`. Matches Node's console output (`console.log(-0)` →
+            // `-0`). `to_js_string` has an explicit `Number` arm so ToString still drops it. (#247)
+            Value::Number(n) if *n == 0.0 && n.is_sign_negative() => write!(f, "-0"),
             // Match JS `Number.prototype.toString` (exponential past digit 21 / before −6),
             // shared with the VM/native path via `tishlang_core`.
             Value::Number(n) => write!(f, "{}", tishlang_core::js_number_to_string(*n)),
@@ -279,6 +283,10 @@ impl Value {
                 .collect::<Vec<_>>()
                 .join(","),
             Value::Object(_) => "[object Object]".to_string(),
+            // ECMAScript ToString of a number drops `-0`'s sign (`String(-0) === "0"`), distinct
+            // from the inspect `Display` above which keeps it. Explicit arm so the `_` fallback to
+            // `to_string()` (inspect) is not used for numbers. (#247)
+            Value::Number(n) => tishlang_core::js_number_to_string(*n),
             _ => self.to_string(),
         }
     }

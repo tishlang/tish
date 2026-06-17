@@ -935,8 +935,10 @@ impl std::fmt::Debug for Value {
 /// We take the shortest round-tripping digits from Rust's `{:e}` (a Ryū/Grisu-class shortest
 /// formatter, matching V8's digit choice) and lay them out per the ECMAScript rule: plain
 /// decimal when the point position `n` is in `(-6, 21]`, otherwise `d[.ddd]e±E` with `E = n-1`
-/// (sign always shown, no leading zeros in the exponent). `-0` renders as `"-0"` (matching
-/// `console.log` and tish's existing behavior).
+/// (sign always shown, no leading zeros in the exponent). This is the ECMAScript `Number::toString`
+/// used by `.toString()`, `String(n)`, `+` concatenation, and template literals, so `-0` renders as
+/// `"0"` (the sign is dropped — `(-0).toString() === "0"`). The *inspect* form (`console.log` of a
+/// bare number / array element) keeps `"-0"`; that distinction lives in [`Value::to_display_string`].
 pub fn js_number_to_string(value: f64) -> String {
     if value.is_nan() {
         return "NaN".to_string();
@@ -948,7 +950,8 @@ pub fn js_number_to_string(value: f64) -> String {
         return "-Infinity".to_string();
     }
     if value == 0.0 {
-        return if value.is_sign_negative() { "-0" } else { "0" }.to_string();
+        // ECMAScript `Number::toString`: both `+0` and `-0` stringify to `"0"`.
+        return "0".to_string();
     }
 
     let negative = value < 0.0;
@@ -1001,6 +1004,9 @@ impl Value {
     /// Convert value to display string (for console output).
     pub fn to_display_string(&self) -> String {
         match self {
+            // Inspect form keeps the sign of negative zero (`console.log(-0)` → `-0`), unlike the
+            // ECMAScript ToString used by `to_js_string`. See `js_number_to_string`. (#247)
+            Value::Number(n) if *n == 0.0 && n.is_sign_negative() => "-0".to_string(),
             Value::Number(n) => js_number_to_string(*n),
             Value::String(s) => s.to_string(),
             Value::Bool(b) => b.to_string(),
@@ -1071,6 +1077,9 @@ impl Value {
                 .collect::<Vec<_>>()
                 .join(","),
             Value::Object(_) => "[object Object]".to_string(),
+            // ECMAScript ToString of a number (drops `-0`'s sign), distinct from the inspect form
+            // that `to_display_string` would give for `-0`. (#247)
+            Value::Number(n) => js_number_to_string(*n),
             // Primitives (and the remaining cases) coincide with the display form.
             _ => self.to_display_string(),
         }
@@ -1341,9 +1350,11 @@ mod number_to_string_tests {
     #[test]
     fn matches_javascript_number_tostring() {
         // (value, expected) — every `expected` is what Node's `String(value)` produces.
+        // `String(-0) === "0"`: ToString drops the sign of negative zero (the inspect form keeps
+        // it, but that path is `Value::to_display_string`, not this function). (#247)
         let cases: &[(f64, &str)] = &[
             (0.0, "0"),
-            (-0.0, "-0"),
+            (-0.0, "0"),
             (123.0, "123"),
             (123.456, "123.456"),
             (0.5, "0.5"),
