@@ -227,17 +227,44 @@ fn pi_stmt(s: Statement) -> Statement {
     {
         // Locals provably numeric in this body (annotated, incl. base-inferred `let i = 0`), so a
         // bare loop counter `i` counts as a numeric operand and `i < n` can prove the param `n`.
-        let mut nums = HashSet::new();
-        collect_numeric_locals(&body, &mut nums);
+        // Fixpoint-closed so copy-chains of numeric literals (`let a = 0; let b = a`) propagate.
+        let mut base_nums = HashSet::new();
+        collect_numeric_locals_fixpoint(&body, &mut base_nums);
         let new_params = params
             .into_iter()
             .map(|p| match p {
                 FunParam::Simple(mut tp) => {
+                    // OPTIMISTIC PER-PARAM FIXPOINT (#172): assume the candidate param numeric, then
+                    // propagate its copies — `let r = n` makes `r` numeric — to a fixpoint, so the
+                    // chicken-and-egg `n` needs `r` (via `r === n`); `r` (`let r = n`) needs `n`
+                    // closes. We then VERIFY every use of `n` is numeric-safe (`nus_stmt`) under this
+                    // augmented set; a genuinely non-numeric use (string concat, object store, bare
+                    // escape) still bails, so `fn label(x){return "v="+x}` keeps `x` dynamic.
+                    //
+                    // SOUNDNESS of the copy laundering: a copy `let r = n` only stays sound if `r`
+                    // ITSELF is used numeric-safely everywhere — else `let r = n; r + "!"` would
+                    // type `n` numeric yet do string concat (a divergence). So we also require every
+                    // local the fixpoint added *because of this candidate* (in `nums` but not in
+                    // `base_nums` — i.e. a copy-descendant of `n`) to pass `lns_stmt` (the
+                    // local-numeric verifier). A poisoned copy-target bails the whole param.
+                    // Monotone, locals/param-candidate-only.
                     if tp.type_ann.is_none()
                         && tp.default.is_none()
-                        && nus_stmt(&body, tp.name.as_ref(), &nums)
                     {
-                        tp.type_ann = Some(TypeAnnotation::Simple(std::sync::Arc::from("number"), tishlang_ast::Span::default()));
+                        let mut nums = base_nums.clone();
+                        nums.insert(tp.name.to_string());
+                        collect_numeric_locals_fixpoint(&body, &mut nums);
+                        let copy_descendants: Vec<&String> = nums
+                            .iter()
+                            .filter(|x| x.as_str() != tp.name.as_ref() && !base_nums.contains(*x))
+                            .collect();
+                        if nus_stmt(&body, tp.name.as_ref(), &nums)
+                            && copy_descendants
+                                .iter()
+                                .all(|x| lns_stmt(&body, x.as_str(), &nums))
+                        {
+                            tp.type_ann = Some(TypeAnnotation::Simple(std::sync::Arc::from("number"), tishlang_ast::Span::default()));
+                        }
                     }
                     FunParam::Simple(tp)
                 }
@@ -264,6 +291,13 @@ fn pi_stmt(s: Statement) -> Statement {
 /// letting `i < n` / `i * n + k` prove the *param* `n` numeric. Flat across nested scopes; at worst
 /// it over-includes a shadowed name, which only widens inference (still bounded by the same
 /// caller-passes-a-number assumption M4 already makes).
+///
+/// MONOTONE FIXPOINT (#172): a single pass seeds number-LITERAL / annotated inits AND propagates
+/// bare-ident copies — `let x = y` where `y` is ALREADY in `out` (a copy of an already-numeric
+/// local/param). Run to a fixpoint via `collect_numeric_locals_fixpoint` so a chain
+/// `let r = n; let s = r` closes. Soundness is identical to the literal seeding: a copy of a value
+/// known numeric is itself numeric; over-inclusion only widens, bounded by M4's
+/// caller-passes-a-number / NaN-coercion contract and the gauntlet/corpus differential oracles.
 fn collect_numeric_locals(s: &Statement, out: &mut HashSet<String>) {
     use Statement::*;
     match s {
@@ -286,6 +320,12 @@ fn collect_numeric_locals(s: &Statement, out: &mut HashSet<String>) {
                         value: tishlang_ast::Literal::Number(_),
                         ..
                     })
+                )
+                // FIXPOINT: a bare-ident copy of an already-numeric local/param — `let r = n` where
+                // `n` is already known numeric. The copied value carries the source's numeric type.
+                || matches!(
+                    init,
+                    Some(tishlang_ast::Expr::Ident { name: src, .. }) if out.contains(src.as_ref())
                 );
             if numeric {
                 out.insert(name.to_string());
@@ -312,6 +352,21 @@ fn collect_numeric_locals(s: &Statement, out: &mut HashSet<String>) {
         }
         While { body, .. } => collect_numeric_locals(body, out),
         _ => {}
+    }
+}
+
+/// Run `collect_numeric_locals` to a monotone fixpoint over `body`, seeding `out` with any
+/// pre-known-numeric names (e.g. the param-candidate assumed numeric). Each pass can only ADD
+/// names (a copy of an already-numeric source), so it converges in at most one pass per copy-chain
+/// link; the `out.len()` watermark detects quiescence. Soundness: every added name is a copy of a
+/// value already proven/assumed numeric, the same basis as the literal seeding.
+fn collect_numeric_locals_fixpoint(body: &Statement, out: &mut HashSet<String>) {
+    loop {
+        let before = out.len();
+        collect_numeric_locals(body, out);
+        if out.len() == before {
+            break;
+        }
     }
 }
 
@@ -394,7 +449,19 @@ fn nus_stmt(s: &Statement, name: &str, nums: &HashSet<String>) -> bool {
         }
         VarDecl {
             name: vn, init, ..
-        } => vn.as_ref() != name && init.as_ref().is_none_or(|e| nus_expr(e, name, nums)),
+        } => {
+            // Writing the candidate to a name that shadows it bails (its type could change).
+            // Otherwise a bare-ident COPY of the candidate — `let r = n` — is a numeric-safe use:
+            // the param's value flows into a local that the per-param fixpoint already proved
+            // numeric (`r ∈ nums`), so it lowers to `f64`. This is what gates the fannkuch cascade
+            // (#172). Any other init form is checked by `nus_expr` as before (so `let s = n + ":"`
+            // still bails via the overloaded-`+` rule, keeping string-concat params dynamic).
+            vn.as_ref() != name
+                && init.as_ref().is_none_or(|e| {
+                    matches!(e, Expr::Ident { name: src, .. } if src.as_ref() == name)
+                        || nus_expr(e, name, nums)
+                })
+        }
         Break { .. } | Continue { .. } => true,
         // Any other statement (switch/throw/try/nested fn/...) -> bail (don't infer this param).
         _ => false,
@@ -500,6 +567,203 @@ fn nus_num_operand(e: &Expr, name: &str, nums: &HashSet<String>) -> bool {
         return true;
     }
     nus_expr(e, name, nums)
+}
+
+// ---------------------------------------------------------------------------
+// LOCAL-numeric-safe (#172): verify a LOCAL `loc` that the per-param copy-fixpoint marked numeric
+// (a copy-descendant of the candidate param, e.g. `r` in `let r = n`) is used consistently as a
+// number throughout the body — so the param→local laundering can't mask a non-numeric use. This is
+// the dual of `nus_*` (which is for params), differing in exactly the local-only safe forms:
+//   * a bare read `loc` is a numeric VALUE (it IS a number) → safe in any value position;
+//   * the DEFINING `let loc = <numeric/copy>` and self-reassign `loc = <numeric>` keep it numeric;
+//   * the SAME bail set as params — `loc + <non-numeric>` (string concat), member/object store,
+//     bare call-arg escape, index-OBJECT use — still bails, so `let r = n; r + "!"` poisons it.
+// `nums` already contains every numeric local/param-candidate, so the overloaded-`+`/comparison
+// "other side provably numeric" rule reuses `numeric_provable` unchanged.
+// ---------------------------------------------------------------------------
+
+/// Every use of the known-numeric local `loc` in `s` is consistent with `loc` being a number.
+fn lns_stmt(s: &Statement, loc: &str, nums: &HashSet<String>) -> bool {
+    use Statement::*;
+    match s {
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().all(|x| lns_stmt(x, loc, nums))
+        }
+        Return { value, .. } => value.as_ref().is_none_or(|e| lns_num_operand(e, loc, nums)),
+        If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            lns_expr(cond, loc, nums)
+                && lns_stmt(then_branch, loc, nums)
+                && else_branch.as_ref().is_none_or(|e| lns_stmt(e, loc, nums))
+        }
+        ExprStmt { expr, .. } => lns_expr(expr, loc, nums),
+        While { cond, body, .. } => lns_expr(cond, loc, nums) && lns_stmt(body, loc, nums),
+        For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
+            init.as_ref().is_none_or(|x| lns_stmt(x, loc, nums))
+                && cond.as_ref().is_none_or(|e| lns_expr(e, loc, nums))
+                && update.as_ref().is_none_or(|e| lns_expr(e, loc, nums))
+                && lns_stmt(body, loc, nums)
+        }
+        VarDecl {
+            name: vn, init, ..
+        } => {
+            if vn.as_ref() == loc {
+                // The DEFINING decl of `loc`: a numeric / copy-of-numeric init keeps it numeric.
+                // (Re-`let` to a non-numeric value would poison it — require a provable init.)
+                init.as_ref().is_none_or(|e| lns_def_init_ok(e, nums))
+            } else {
+                init.as_ref().is_none_or(|e| lns_expr(e, loc, nums))
+            }
+        }
+        Break { .. } | Continue { .. } => true,
+        _ => false,
+    }
+}
+
+/// The init/RHS of a numeric local's defining decl or self-assign: must be PROVABLY numeric (a
+/// number literal / arithmetic / Math / a bare numeric local incl. the param-candidate). This is
+/// `numeric_provable` over `nums` — bare `loc` itself counts (it is numeric).
+fn lns_def_init_ok(e: &Expr, nums: &HashSet<String>) -> bool {
+    use Expr::*;
+    match e {
+        // Bare ident: a copy of a numeric local/param-candidate (`let r = n`, `r = i`).
+        Ident { name: n, .. } => nums.contains(n.as_ref()),
+        // `r = r - 1`, `r = r + 1` etc.: overloaded ops need at least one provably-numeric operand,
+        // which `numeric_provable` already enforces for the non-`Add` family; for `+` we require
+        // BOTH sides numeric-provable (so `r + "!"` is rejected — string concat poisons `r`).
+        Binary {
+            left, op, right, ..
+        } => {
+            use tishlang_ast::BinOp::*;
+            match op {
+                Sub | Mul | Div | Mod | Pow | BitAnd | BitOr | BitXor | Shl | Shr | UShr | Add => {
+                    numeric_provable(left, nums) && numeric_provable(right, nums)
+                }
+                _ => false,
+            }
+        }
+        _ => numeric_provable(e, nums),
+    }
+}
+
+/// `e` with the known-numeric local `loc` used only where a number is valid.
+fn lns_expr(e: &Expr, loc: &str, nums: &HashSet<String>) -> bool {
+    use Expr::*;
+    match e {
+        Literal { .. } => true,
+        // Bare read of `loc` (a number) — or of any other ident — is a numeric VALUE, always safe.
+        Ident { .. } => true,
+        Binary {
+            left, op, right, ..
+        } => {
+            use tishlang_ast::BinOp::*;
+            match op {
+                Sub | Mul | Div | Mod | Pow | BitAnd | BitOr | BitXor | Shl | Shr | UShr => {
+                    lns_num_operand(left, loc, nums) && lns_num_operand(right, loc, nums)
+                }
+                // OVERLOADED: if `loc` is a direct operand, the OTHER side must be provably numeric
+                // — so `loc + "!"` (string concat) bails, poisoning the candidate.
+                Add | Lt | Le | Gt | Ge | StrictEq | StrictNe => {
+                    lns_overloaded(left, right, loc, nums) && lns_overloaded(right, left, loc, nums)
+                }
+                And | Or => lns_expr(left, loc, nums) && lns_expr(right, loc, nums),
+                _ => !pi_mentions(left, loc) && !pi_mentions(right, loc),
+            }
+        }
+        Unary { op, operand, .. } => {
+            if matches!(
+                op,
+                tishlang_ast::UnaryOp::Neg | tishlang_ast::UnaryOp::Pos | tishlang_ast::UnaryOp::BitNot
+            ) {
+                lns_num_operand(operand, loc, nums)
+            } else {
+                !pi_mentions(operand, loc)
+            }
+        }
+        // `a[loc]`: index is a numeric operand; `loc` must NOT be the array object (member-ish use).
+        Index { object, index, .. } => {
+            !pi_mentions(object, loc) && lns_num_operand(index, loc, nums)
+        }
+        Call { callee, args, .. } => {
+            !pi_mentions(callee, loc)
+                && args.iter().all(|a| match a {
+                    tishlang_ast::CallArg::Expr(x) => lns_arg(x, loc, nums),
+                    tishlang_ast::CallArg::Spread(_) => false,
+                })
+        }
+        Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            lns_expr(cond, loc, nums)
+                && lns_num_operand(then_branch, loc, nums)
+                && lns_num_operand(else_branch, loc, nums)
+        }
+        // Self-assign `loc = <numeric>` keeps it numeric; assign to another var may read `loc`.
+        Assign { name: an, value, .. }
+        | CompoundAssign { name: an, value, .. }
+        | LogicalAssign { name: an, value, .. } => {
+            if an.as_ref() == loc {
+                lns_def_init_ok(value, nums)
+            } else {
+                lns_expr(value, loc, nums)
+            }
+        }
+        // `loc++` / `--loc`: numeric in/decrement keeps `loc` numeric.
+        PostfixInc { .. } | PostfixDec { .. } | PrefixInc { .. } | PrefixDec { .. } => true,
+        // `c[idx] = <val>`: index & val are numeric-operand positions (bare `loc` value is a number).
+        IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => {
+            !pi_mentions(object, loc)
+                && lns_num_operand(index, loc, nums)
+                && lns_num_operand(value, loc, nums)
+        }
+        MemberAssign { object, value, .. } => {
+            !pi_mentions(object, loc) && lns_expr(value, loc, nums)
+        }
+        _ => !pi_mentions(e, loc),
+    }
+}
+
+/// One side of an overloaded binop for a numeric local: if it is bare `loc`, the OTHER side must be
+/// provably numeric; otherwise recurse.
+fn lns_overloaded(operand: &Expr, other: &Expr, loc: &str, nums: &HashSet<String>) -> bool {
+    if matches!(operand, Expr::Ident { name: n, .. } if n.as_ref() == loc) {
+        return numeric_provable(other, nums);
+    }
+    lns_expr(operand, loc, nums)
+}
+
+/// A numeric-operand position for a numeric local: bare `loc` is a number; else a numeric sub-expr.
+fn lns_num_operand(e: &Expr, loc: &str, nums: &HashSet<String>) -> bool {
+    if matches!(e, Expr::Ident { name: n, .. } if n.as_ref() == loc) {
+        return true;
+    }
+    lns_expr(e, loc, nums)
+}
+
+/// A call argument for a numeric local: passing `loc` BARE bails (callee param type unknown).
+fn lns_arg(e: &Expr, loc: &str, nums: &HashSet<String>) -> bool {
+    if matches!(e, Expr::Ident { name: n, .. } if n.as_ref() == loc) {
+        return false;
+    }
+    lns_expr(e, loc, nums)
 }
 
 /// A call argument: passing `name` BARE bails (callee param type unknown); a numeric sub-expr ok.
@@ -1701,6 +1965,27 @@ mod param_infer_tests {
         let src = "fn cmp(a, b) { if (a < b) { return 1 } return 0 }";
         assert_eq!(inferred_param(src, "cmp", "a"), None);
         assert_eq!(inferred_param(src, "cmp", "b"), None);
+    }
+
+    #[test]
+    fn infers_param_copied_to_local_then_compared() {
+        // #172 fannkuch keystone: the param `n` is copied into `r` (`let r = n`) and later compared
+        // against it (`r === n`). The optimistic per-param fixpoint assumes `n` numeric, propagates
+        // the copy so `r` is numeric, and `r === n` then proves `n` numeric (the other operand `r`
+        // is provable). Closes the chicken-and-egg that previously left `n`/`r`/`count` boxed.
+        let src =
+            "fn f(n) { let r = n; while (r !== 1) { r = r - 1 }; return r === n }";
+        assert_eq!(inferred_param(src, "f", "n").as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn does_not_infer_param_copied_then_string_concatenated() {
+        // NEGATIVE (soundness): the copy `let r = x` flows into `+` against a string literal. The
+        // overloaded-`+` rule still bails on `r + "!"` for the candidate... but more directly, `x`
+        // itself is used in a non-numeric `+`, so the param MUST stay dynamic even though it is
+        // copied to a local — the copy relaxation must not mask a genuinely non-numeric use.
+        let src = "fn g(x) { let r = x; return r + \"!\" }";
+        assert_eq!(inferred_param(src, "g", "x"), None);
     }
 }
 
