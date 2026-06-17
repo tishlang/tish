@@ -796,16 +796,40 @@ fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx)
         // `{ x: i }` can't resolve `i`'s type and the object stays a boxed `PropMap` (object_sum gap).
         if let Statement::VarDecl {
             name,
+            name_span,
+            mutable,
             type_ann,
             init,
-            ..
+            span,
         } = stmt
         {
-            let t = type_ann
+            let inferred = type_ann
                 .clone()
                 .or_else(|| init.as_ref().and_then(|e| infer_expr_type(e, ctx)));
-            if let Some(t) = t {
-                ctx.define(name.as_ref(), t);
+            if let Some(t) = &inferred {
+                ctx.define(name.as_ref(), t.clone());
+            }
+            // #170: the base inference pass ran before array types were known, so an unannotated
+            // local whose init only types now that `perm: number[]` is known (`let k = perm[0]`,
+            // `let temp = perm[i]`) was left `type_ann: None` — and codegen reads the NODE, not
+            // `ctx`, so it stayed a boxed `Value` despite being provably `f64`. Persist a proven
+            // `number` type back onto the node here (the second, type-aware pass). The codegen
+            // demote-gate (`collect_demoted_numeric_locals`) re-boxes any such local whose later
+            // reassignment can escape `number`, so writing the annotation can never miscompile.
+            if type_ann.is_none() {
+                if let Some(t @ TypeAnnotation::Simple(s, _)) = &inferred {
+                    if s.as_ref() == "number" {
+                        out.push(Statement::VarDecl {
+                            name: name.clone(),
+                            name_span: *name_span,
+                            mutable: *mutable,
+                            type_ann: Some(t.clone()),
+                            init: stmt_init_clone(stmt),
+                            span: *span,
+                        });
+                        continue;
+                    }
+                }
             }
         }
         out.push(si_recurse(stmt, reg, ctx));
@@ -1677,5 +1701,47 @@ mod param_infer_tests {
         let src = "fn cmp(a, b) { if (a < b) { return 1 } return 0 }";
         assert_eq!(inferred_param(src, "cmp", "a"), None);
         assert_eq!(inferred_param(src, "cmp", "b"), None);
+    }
+}
+
+#[cfg(test)]
+mod struct_infer_writeback_tests {
+    use super::*;
+    use tishlang_parser::parse;
+
+    /// Annotation name written onto top-level `let <var>` after base inference + struct inference.
+    fn local_ann(src: &str, var: &str) -> Option<String> {
+        let parsed = parse(src).unwrap();
+        let base = Program {
+            statements: infer_statements(&parsed.statements, &mut InferCtx::new()),
+        };
+        let prog = struct_infer_program(base);
+        for s in &prog.statements {
+            if let Statement::VarDecl { name, type_ann, .. } = s {
+                if name.as_ref() == var {
+                    return type_ann.as_ref().map(|a| match a {
+                        TypeAnnotation::Simple(s, _) => s.to_string(),
+                        _ => "<complex>".to_string(),
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn writes_native_scalar_back_from_typed_array_index() {
+        // #170: once `perm: number[]` is known, `let k = perm[0]` must carry `type_ann: number` on
+        // the NODE (codegen reads the node, not the inference ctx) so it lowers to a native f64.
+        let src = "let perm = [3, 2, 1, 0]\nlet k = perm[0]\nconsole.log(k)";
+        assert_eq!(local_ann(src, "k").as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn does_not_annotate_non_native_local() {
+        // The write-back must NEVER turn a non-number local into `number` (the base pass already
+        // types this as `string`; the invariant is that the #170 write-back can't clobber it).
+        let src = "let s = \"hi\"\nconsole.log(s)";
+        assert_ne!(local_ann(src, "s").as_deref(), Some("number"));
     }
 }
