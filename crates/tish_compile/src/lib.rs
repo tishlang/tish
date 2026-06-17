@@ -186,6 +186,44 @@ fn factory() {
             "expected outerVar to be inferred as f64 (Copy, no clone needed)"
         );
     }
+
+    /// i32-loop-var lowering: an FNV-style integer/bitwise hash accumulator declared before a `for`
+    /// and reassigned only by `>>> 0`/bitwise ops lives in an `i32` register across the loop — no
+    /// per-op `to_int32(h)`↔`f64` round-trip — with a single `f64` excursion for the `h * C`
+    /// multiply (which exceeds 2^53, so it must round in f64 before `>>> 0`, exactly as V8 does).
+    #[test]
+    fn fnv_accumulator_lowers_to_i32_register() {
+        let src = r#"
+let h = 2166136261
+for (let i = 0; i < 100; i++) {
+  h = h ^ (i & 255)
+  h = (h * 16777619) >>> 0
+  h = ((h << 13) | (h >>> 19)) >>> 0
+}
+let check = h >>> 0
+console.log(check)
+"#;
+        let rust = compile(&parse(src).unwrap()).unwrap();
+        // The accumulator is an i32 register, initialized via the u32 reinterpretation so the
+        // > i32::MAX seed keeps its JS ToInt32 bit-pattern.
+        assert!(
+            rust.contains("let mut h: i32 = (2166136261u32) as i32;"),
+            "expected `h` to be an i32 register seeded via u32 reinterpretation; got:\n{}",
+            rust.lines().filter(|l| l.contains("h")).take(8).collect::<Vec<_>>().join("\n")
+        );
+        // The per-iteration `to_int32(h)` round-trips are gone: `h` is read straight from the
+        // register inside the bitwise chain (no `to_int32(h)` substring referencing the accumulator).
+        assert!(
+            !rust.contains("to_int32(h)"),
+            "expected NO per-op `to_int32(h)` round-trip on the i32 accumulator"
+        );
+        // The only f64 excursion is the multiply, lowered as an unchecked truncation of the
+        // provably-finite product (`h as f64 * 16777619`).
+        assert!(
+            rust.contains(".to_int_unchecked::<i64>()") && rust.contains("16777619"),
+            "expected the `h * 16777619` excursion to lower to an unchecked f64 truncation"
+        );
+    }
 }
 
 #[cfg(test)]

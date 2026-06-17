@@ -797,6 +797,12 @@ struct Codegen {
     /// literals → the inclusive element range, both inside `(-2^53, 2^53)`. Bounds a native fold's
     /// element variable so the fold body can lower to native `i64` arithmetic.
     array_elem_ranges: std::collections::HashMap<String, (i64, i64)>,
+    /// i32-loop-var lowering: names of `number` accumulators a per-body analysis proved can live
+    /// in an `i32` register across a bitwise/hash hot loop (`h` in FNV) instead of round-tripping
+    /// `f64`↔`i32` every op. Each is declared `let mut h: i32`, every reassignment lowers via
+    /// `emit_int32_operand`, and reads coerce `(h as f64)`. See `collect_i32_loop_vars` for the
+    /// (strict) eligibility/soundness gate. Scoped per function body / top level.
+    i32_loop_vars: std::collections::HashSet<String>,
     /// Scopes of names whose Rust binding is actually `Rc<RefCell<_>>` (emitted at VarDecl).
     /// `refcell_wrapped_vars` alone is insufficient: it is set by prepasses before decl may run.
     rc_cell_storage_scopes: Vec<std::collections::HashSet<String>>,
@@ -854,6 +860,7 @@ impl Codegen {
             int_range_locals: std::collections::HashMap::new(),
             int_valued_locals: std::collections::HashSet::new(),
             array_elem_ranges: std::collections::HashMap::new(),
+            i32_loop_vars: std::collections::HashSet::new(),
             rc_cell_storage_scopes: vec![std::collections::HashSet::new()],
             usage_analyzer: None,
             type_context: TypeContext::new(),
@@ -1544,6 +1551,9 @@ impl Codegen {
         self.int_valued_locals = Self::collect_int_valued_locals(&program.statements);
         self.int_range_locals = self.collect_int_range_locals(&program.statements);
         self.array_elem_ranges = Self::collect_array_elem_ranges(&program.statements);
+        // i32-loop-var lowering: must run AFTER `int_range_locals` (the soundness backstop that
+        // proves the accumulator stays an exact integer reinterpretable as i32).
+        self.i32_loop_vars = self.collect_i32_loop_vars(&program.statements);
         if self.is_async {
             self.writeln("async fn run() -> Result<(), Box<dyn std::error::Error>> {");
         } else if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
@@ -1893,6 +1903,30 @@ impl Codegen {
         match expr {
             Expr::Assign { name, value, .. } => {
                 let rust_type = self.type_context.get_type(name.as_ref());
+                // i32-loop-var lowering: the accumulator lives in an `i32` register. Each
+                // reassignment RHS is a bitwise/shift chain the gate proved lowers fully via
+                // `emit_int32_operand` (a `>>> 0` result is u32 reinterpreted to i32; signed
+                // bitwise ops yield i32 directly) — so store the i32 with NO `f64` round-trip.
+                if rust_type == RustType::I32 {
+                    if let Some(int_code) = self.emit_int32_operand(value)? {
+                        let escaped = Self::escape_ident(name.as_ref());
+                        return Ok(format!("{} = ({}) as i32", escaped, int_code));
+                    }
+                    // Defensive: gate guarantees `Some`, but if a future RHS shape slips through,
+                    // fall back to a sound f64-narrowed store rather than miscompiling.
+                    let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                    let v = if val_ty.is_native() {
+                        val_ty.to_value_expr(&val_code)
+                    } else {
+                        val_code
+                    };
+                    let escaped = Self::escape_ident(name.as_ref());
+                    return Ok(format!(
+                        "{} = {}",
+                        escaped,
+                        RustType::I32.from_value_expr(&v)
+                    ));
+                }
                 // String self-append `s = s + rhs` -> in-place push_str (amortized O(1)). The
                 // general path boxes via `ops::add(Value::String(s.clone()), ...)` which clones
                 // the whole string per concat -> O(n^2) string building. rhs must be String-typed.
@@ -2069,6 +2103,33 @@ impl Codegen {
                 if rust_type == RustType::F64 && self.demoted_numeric_locals.contains(name.as_ref())
                 {
                     rust_type = RustType::Value;
+                }
+
+                // i32-loop-var lowering: a `number` accumulator the analysis proved can live in an
+                // `i32` register across a bitwise/hash hot loop. Declare `let mut h: i32` with the
+                // init reinterpreted via `u32` so a literal ≥ 2^31 keeps its JS ToInt32 bit-pattern.
+                if rust_type == RustType::F64 && self.i32_loop_vars.contains(name.as_ref()) {
+                    let init_lit = init
+                        .as_ref()
+                        .and_then(|e| Self::int_literal_value_of(e));
+                    if let Some(v) = init_lit {
+                        rust_type = RustType::I32;
+                        self.type_context.define(name.as_ref(), rust_type.clone());
+                        let escaped_name = Self::escape_ident(name.as_ref());
+                        let mutability = if *mutable { "let mut" } else { "let" };
+                        // `v` is an exact integer (gate proved it); reinterpret its low 32 bits as
+                        // i32 = ToInt32(v), the same bit-pattern the bitwise path produces.
+                        self.writeln(&format!(
+                            "{} {}: i32 = ({}u32) as i32;",
+                            mutability,
+                            escaped_name,
+                            (v as i64 as u32)
+                        ));
+                        if let Some(scope) = self.outer_vars_stack.last_mut() {
+                            scope.push(name.to_string());
+                        }
+                        return Ok(());
+                    }
                 }
 
                 // Track the variable type
@@ -6252,6 +6313,436 @@ impl Codegen {
         }
     }
 
+    // ── i32-loop-var lowering (bun/JSC-style integer-register hash accumulator) ─────────────────
+    //
+    // A `number` local `h` that (i) is declared `let h = <int literal>` immediately before a `for`,
+    // (ii) is reassigned ONLY inside that loop by bitwise/shift expressions that lower fully in the
+    // int32 domain, and (iii) whose every NUMERIC (non-bitwise) read happens where `h`'s JS value is
+    // a *signed* int32 — can be kept in an `i32` register across the loop instead of round-tripping
+    // `f64`↔`i32` on each op. The single excursion is an arithmetic node (`h * C`) that `int_range`
+    // proves exceeds 2^53, so it stays `f64` (the multiply rounds in f64 *before* `ToUint32`, exactly
+    // as V8 does). Soundness rests on:
+    //   • `int_range_locals` proving `h` is always an exact integer in (-2^53, 2^53) — the i32
+    //     register then holds precisely `ToInt32(h)`, and reads coerce `(h as f64)` = the signed
+    //     int32 value, while `>>> 0` boxings reinterpret the register as `u32`.
+    //   • the SIGNEDNESS pass below: after `^ & | << >>` `h` is signed-int32-valued; after `>>>`
+    //     (and at init, since the literal may exceed i32::MAX) it is uint32-valued. A *numeric* read
+    //     of `h` at a uint32-valued point would see the wrong sign → BAIL to the f64 path.
+    // Anything unprovable bails → the existing f64 lowering, so this is purely additive.
+
+    /// `op` is a bitwise/shift operator (operands coerced to int32 by JS).
+    fn is_bitwise_op(op: BinOp) -> bool {
+        matches!(
+            op,
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr
+        )
+    }
+
+    /// `e` lowers FULLY in the int32 domain (top node bitwise/shift; every leaf is either a numeric
+    /// literal, the loop var `h`, or an arithmetic/`Mod` subtree of int-provable numbers that becomes
+    /// a single `f64` excursion re-narrowed by `to_int32`). Mirrors what `emit_int32_operand` will
+    /// actually emit, so a `true` here means the reassignment really lowers without a per-op round
+    /// trip. Conservative: unknown forms (calls, member access, etc.) → false.
+    fn i32_chain_lowerable(&self, e: &Expr, var: &str) -> bool {
+        match e {
+            Expr::Binary { left, op, right, .. } if Self::is_bitwise_op(*op) => {
+                self.i32_chain_lowerable(left, var) && self.i32_chain_lowerable(right, var)
+            }
+            // A non-bitwise node is a LEAF in the int32 chain: it must lower to a plain `f64` that
+            // `to_int32` then narrows. Require it provably integer-valued (so the f64 is exact) —
+            // either the var itself, an int literal, or an int-range/int-valued arithmetic subtree.
+            _ => self.i32_leaf_is_f64(e, var),
+        }
+    }
+
+    /// An int32-chain LEAF that provably emits a plain `f64`: the loop var, an integer literal, or a
+    /// `+ - * % / **`-arithmetic / unary subtree over numbers proven integer-valued (so `as f64` is
+    /// exact and `to_int32` recovers the bit-pattern). Bitwise sub-nodes are handled by the caller.
+    fn i32_leaf_is_f64(&self, e: &Expr, var: &str) -> bool {
+        match e {
+            Expr::Ident { name, .. } => name.as_ref() == var || self.expr_is_int_valued(e),
+            Expr::Literal { value: Literal::Number(n), .. } => {
+                n.is_finite() && n.fract() == 0.0
+            }
+            Expr::Unary { op: UnaryOp::Neg | UnaryOp::BitNot, operand, .. } => {
+                self.i32_leaf_is_f64(operand, var)
+            }
+            Expr::Binary { left, op, right, .. } => match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Mod => {
+                    self.i32_leaf_is_f64(left, var) && self.i32_leaf_is_f64(right, var)
+                }
+                op if Self::is_bitwise_op(*op) => {
+                    self.i32_chain_lowerable(left, var) && self.i32_chain_lowerable(right, var)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// `e` provably evaluates to a FINITE f64 with `|e| < 2^62`, so `to_int32_unchecked` (no
+    /// `is_finite` guard, no saturating cast) is sound for it. Handled shapes: an `I32`-register read
+    /// (`|x| < 2^31`), a finite numeric literal, unary `-`, and `+ - *` over such operands (bounds
+    /// combined; any branch unprovable ⇒ `None`). Bitwise/shift sub-nodes are NOT leaves here, so we
+    /// don't descend into them (the caller's `to_int32`/`to_uint32` already bound those to 32 bits).
+    fn f64_finite_bounded_below_2pow62(&self, e: &Expr) -> bool {
+        self.f64_abs_bound(e).is_some_and(|b| b < 4.611686018427388e18) // 2^62
+    }
+
+    /// Conservative magnitude bound for [`f64_finite_bounded_below_2pow62`]; `None` if not provable.
+    fn f64_abs_bound(&self, e: &Expr) -> Option<f64> {
+        match e {
+            // An i32-register accumulator: its magnitude is `< 2^31`.
+            Expr::Ident { name, .. }
+                if self.type_context.get_type(name.as_ref()) == RustType::I32 =>
+            {
+                Some(2147483648.0) // 2^31
+            }
+            Expr::Literal { value: Literal::Number(n), .. } if n.is_finite() => Some(n.abs()),
+            Expr::Unary { op: UnaryOp::Neg, operand, .. } => self.f64_abs_bound(operand),
+            Expr::Binary { left, op, right, .. } => {
+                let la = self.f64_abs_bound(left)?;
+                let ra = self.f64_abs_bound(right)?;
+                match op {
+                    BinOp::Add | BinOp::Sub => Some(la + ra),
+                    BinOp::Mul => Some(la * ra),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Walk `e` and decide whether `var` is read SAFELY given it is currently `signed`-int32-valued
+    /// (`signed == false` ⇒ uint32-valued). A read of `var` directly under a bitwise/shift op is a
+    /// register read (always safe); a read of `var` in any *numeric* position is safe only while
+    /// `signed`. `bitwise_parent` tracks whether the immediate parent op is bitwise/shift. Returns
+    /// `false` (bail) if any numeric read happens while not `signed`.
+    fn i32_reads_ok(e: &Expr, var: &str, signed: bool, bitwise_parent: bool) -> bool {
+        match e {
+            Expr::Ident { name, .. } if name.as_ref() == var => bitwise_parent || signed,
+            Expr::Binary { left, op, right, .. } => {
+                let bw = Self::is_bitwise_op(*op);
+                Self::i32_reads_ok(left, var, signed, bw)
+                    && Self::i32_reads_ok(right, var, signed, bw)
+            }
+            Expr::Unary { operand, .. } => Self::i32_reads_ok(operand, var, signed, false),
+            _ => {
+                // Any other read of `var` (call arg, member, index, ternary, …) is a numeric/opaque
+                // use: only bitwise-parent or signed positions pass; otherwise bail if it mentions
+                // `var` at all (conservative — we can't track signedness through opaque forms).
+                if Self::collect_idents_of(e).contains(var) {
+                    bitwise_parent || signed
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    fn collect_idents_of(e: &Expr) -> HashSet<String> {
+        let mut idents = HashSet::new();
+        Self::collect_expr_idents(e, &mut idents);
+        idents
+    }
+
+    /// EVERY read of `var` outside its own body-assignment RHSs must be a register (bitwise) read —
+    /// e.g. the final `return h >>> 0`. Body-assignment RHSs (`var = <rhs>`) are vetted by the
+    /// ordered signedness pass, so this walker SKIPS the RHS of an assignment whose target is `var`,
+    /// and rejects any other numeric (non-bitwise) read of `var` anywhere in `stmts`.
+    fn i32_only_bitwise_reads_outside_assigns(stmts: &[Statement], var: &str) -> bool {
+        stmts
+            .iter()
+            .all(|s| Self::i32_external_reads_ok_stmt(s, var))
+    }
+
+    fn i32_external_reads_ok_stmt(s: &Statement, var: &str) -> bool {
+        let mut ok = true;
+        Self::for_each_stmt_expr(s, &mut |e| {
+            if !ok {
+                return;
+            }
+            ok &= Self::i32_external_reads_ok_expr(e, var, false);
+        });
+        ok
+    }
+
+    /// As `i32_reads_ok` with `signed = false` (the strictest state), but a `var = <rhs>` assignment
+    /// node has its RHS reads SKIPPED — those are the loop assignments, vetted by the ordered pass.
+    fn i32_external_reads_ok_expr(e: &Expr, var: &str, bitwise_parent: bool) -> bool {
+        match e {
+            // The write target name is not a read; its RHS is vetted by the ordered signedness pass.
+            Expr::Assign { name, value, .. } if name.as_ref() == var => {
+                // The RHS may itself contain *nested* assigns to OTHER vars referencing `var`, but
+                // those would have failed the "single-writer" check; the RHS `var` reads are the
+                // ordered-pass's job, so don't re-check them here.
+                let _ = value;
+                true
+            }
+            Expr::Ident { name, .. } if name.as_ref() == var => bitwise_parent,
+            Expr::Binary { left, op, right, .. } => {
+                let bw = Self::is_bitwise_op(*op);
+                Self::i32_external_reads_ok_expr(left, var, bw)
+                    && Self::i32_external_reads_ok_expr(right, var, bw)
+            }
+            Expr::Unary { operand, .. } => Self::i32_external_reads_ok_expr(operand, var, false),
+            _ => {
+                if Self::collect_idents_of(e).contains(var) {
+                    bitwise_parent
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    /// Collect every `number` accumulator eligible for i32-register loop lowering. Scans every
+    /// statement list (top level + nested blocks/loops/fn bodies); the eligibility gate itself uses
+    /// the whole-program (name-keyed) reassignment set, so a name with any writer outside its loop
+    /// body bails. Soundness is per-name, not per-scope, which the strict gate guarantees.
+    fn collect_i32_loop_vars(&self, stmts: &[Statement]) -> HashSet<String> {
+        let mut out = HashSet::new();
+        self.collect_i32_loop_vars_in(stmts, stmts, &mut out);
+        out
+    }
+
+    /// `stmts` is the statement list currently being scanned for the decl-then-`for` pattern;
+    /// `root` is the whole program, used by the gate's whole-program writer/reader checks.
+    fn collect_i32_loop_vars_in(
+        &self,
+        stmts: &[Statement],
+        root: &[Statement],
+        out: &mut HashSet<String>,
+    ) {
+        // `let h = <int>` directly followed by a `for` whose body reassigns `h`.
+        for win in stmts.windows(2) {
+            if let (
+                Statement::VarDecl {
+                    name,
+                    mutable: true,
+                    init: Some(init),
+                    ..
+                },
+                Statement::For { body, .. },
+            ) = (&win[0], &win[1])
+            {
+                if Self::int_literal_value_of(init).is_some()
+                    && self.i32_loop_var_eligible(name.as_ref(), body, root)
+                {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+        // Recurse into nested statement lists (each block / fn body / loop body is scanned).
+        for s in stmts {
+            Self::for_each_child_stmt_list(s, &mut |list| {
+                self.collect_i32_loop_vars_in(list, root, out)
+            });
+        }
+    }
+
+    /// Eligibility gate for the i32-register lowering of `var`, declared just before `for (…) body`.
+    /// All bail conditions keep the existing f64 path (purely additive). `var` qualifies iff:
+    ///   (a) `int_range` proves it always holds an exact integer in (-2^53, 2^53);
+    ///   (b) it is not closure-captured into a cell;
+    ///   (c) it is written ONLY by the assignments inside `body`, each a bitwise/shift expr that
+    ///       lowers fully in the int32 domain;
+    ///   (d) the forward signedness pass over those assignments admits every numeric read of `var`;
+    ///   (e) every read of `var` OUTSIDE those assignment RHSs is a register (bitwise) read.
+    fn i32_loop_var_eligible(&self, var: &str, body: &Statement, root: &[Statement]) -> bool {
+        // (a)
+        if !self.int_range_locals.contains_key(var) {
+            return false;
+        }
+        // (b)
+        if self.refcell_wrapped_vars.contains(var) {
+            return false;
+        }
+        // (c) reassignments to `var` inside the loop body, in source order.
+        let mut body_assigns: Vec<&Expr> = Vec::new();
+        Self::collect_ordered_assigns_to(body, var, &mut body_assigns);
+        if body_assigns.is_empty() {
+            return false;
+        }
+        for rhs in &body_assigns {
+            let top_bitwise = matches!(rhs, Expr::Binary { op, .. } if Self::is_bitwise_op(*op));
+            if !top_bitwise || !self.i32_chain_lowerable(rhs, var) {
+                return false;
+            }
+        }
+        // `var` must have NO writer outside this loop body — whole-program count must match.
+        let mut all_assigns: Vec<(String, &Expr)> = Vec::new();
+        Self::collect_reassignments_stmts(root, &mut all_assigns);
+        let total_writes = all_assigns.iter().filter(|(n, _)| n == var).count();
+        if total_writes != body_assigns.len() {
+            return false;
+        }
+        // (d) SIGNEDNESS pass. Init value may exceed i32::MAX ⇒ start uint32-valued. Each RHS is read
+        // against the CURRENT signedness; new signedness follows the top op (`>>>` → unsigned).
+        let mut signed = false;
+        for rhs in &body_assigns {
+            if !Self::i32_reads_ok(rhs, var, signed, false) {
+                return false;
+            }
+            signed = !matches!(rhs, Expr::Binary { op: BinOp::UShr, .. });
+        }
+        // (e) Every other read of `var` in the program must be a register (bitwise) read.
+        if !Self::i32_only_bitwise_reads_outside_assigns(root, var) {
+            return false;
+        }
+        true
+    }
+
+    /// Collect, in source order, the RHS of every top-level `var = <rhs>` assignment to `var`
+    /// reachable in `body` (descending blocks/if/loops but NOT into nested fn bodies).
+    fn collect_ordered_assigns_to<'a>(s: &'a Statement, var: &str, out: &mut Vec<&'a Expr>) {
+        match s {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                for st in statements {
+                    Self::collect_ordered_assigns_to(st, var, out);
+                }
+            }
+            Statement::ExprStmt { expr, .. } => {
+                if let Expr::Assign { name, value, .. } = expr {
+                    if name.as_ref() == var {
+                        out.push(value.as_ref());
+                    }
+                }
+            }
+            Statement::If { then_branch, else_branch, .. } => {
+                Self::collect_ordered_assigns_to(then_branch, var, out);
+                if let Some(e) = else_branch {
+                    Self::collect_ordered_assigns_to(e, var, out);
+                }
+            }
+            Statement::For { body, .. }
+            | Statement::ForOf { body, .. }
+            | Statement::While { body, .. }
+            | Statement::DoWhile { body, .. } => {
+                Self::collect_ordered_assigns_to(body, var, out)
+            }
+            _ => {}
+        }
+    }
+
+    /// Invoke `f` with every nested *statement list* directly reachable from `s` (blocks, `if`
+    /// branches, loop bodies, fn bodies). Used to scan each lexical scope for the decl-then-`for`
+    /// pattern. Branch/loop bodies are single `Statement`s, passed as 1-element slices.
+    fn for_each_child_stmt_list(s: &Statement, f: &mut dyn FnMut(&[Statement])) {
+        match s {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                f(statements)
+            }
+            Statement::If { then_branch, else_branch, .. } => {
+                f(std::slice::from_ref(then_branch));
+                if let Some(e) = else_branch {
+                    f(std::slice::from_ref(e));
+                }
+            }
+            Statement::For { body, .. }
+            | Statement::ForOf { body, .. }
+            | Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::FunDecl { body, .. } => f(std::slice::from_ref(body)),
+            Statement::Switch { cases, default_body, .. } => {
+                for (_, body) in cases {
+                    f(body);
+                }
+                if let Some(b) = default_body {
+                    f(b);
+                }
+            }
+            Statement::Try { body, catch_body, finally_body, .. } => {
+                f(std::slice::from_ref(body));
+                if let Some(b) = catch_body {
+                    f(std::slice::from_ref(b));
+                }
+                if let Some(b) = finally_body {
+                    f(std::slice::from_ref(b));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Invoke `f` on every top-level expression of `s`, recursing through nested control-flow
+    /// statements (blocks, if, loops, switch, try, return/throw). `f` is responsible for recursing
+    /// into each expression's own subtree. Does NOT descend into nested fn-decl bodies (a different
+    /// lexical scope; a captured loop var would be RefCell-bailed before reaching here).
+    fn for_each_stmt_expr(s: &Statement, f: &mut dyn FnMut(&Expr)) {
+        match s {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                for st in statements {
+                    Self::for_each_stmt_expr(st, f);
+                }
+            }
+            Statement::VarDecl { init: Some(e), .. } => f(e),
+            Statement::VarDeclDestructure { init, .. } => f(init),
+            Statement::ExprStmt { expr, .. } => f(expr),
+            Statement::If { cond, then_branch, else_branch, .. } => {
+                f(cond);
+                Self::for_each_stmt_expr(then_branch, f);
+                if let Some(e) = else_branch {
+                    Self::for_each_stmt_expr(e, f);
+                }
+            }
+            Statement::While { cond, body, .. } => {
+                f(cond);
+                Self::for_each_stmt_expr(body, f);
+            }
+            Statement::DoWhile { body, cond, .. } => {
+                Self::for_each_stmt_expr(body, f);
+                f(cond);
+            }
+            Statement::For { init, cond, update, body, .. } => {
+                if let Some(i) = init {
+                    Self::for_each_stmt_expr(i, f);
+                }
+                if let Some(c) = cond {
+                    f(c);
+                }
+                if let Some(u) = update {
+                    f(u);
+                }
+                Self::for_each_stmt_expr(body, f);
+            }
+            Statement::ForOf { iterable, body, .. } => {
+                f(iterable);
+                Self::for_each_stmt_expr(body, f);
+            }
+            Statement::Return { value: Some(e), .. } => f(e),
+            Statement::Throw { value, .. } => f(value),
+            Statement::Switch { expr, cases, default_body, .. } => {
+                f(expr);
+                for (g, body) in cases {
+                    if let Some(g) = g {
+                        f(g);
+                    }
+                    for st in body {
+                        Self::for_each_stmt_expr(st, f);
+                    }
+                }
+                if let Some(b) = default_body {
+                    for st in b {
+                        Self::for_each_stmt_expr(st, f);
+                    }
+                }
+            }
+            Statement::Try { body, catch_body, finally_body, .. } => {
+                Self::for_each_stmt_expr(body, f);
+                if let Some(b) = catch_body {
+                    Self::for_each_stmt_expr(b, f);
+                }
+                if let Some(b) = finally_body {
+                    Self::for_each_stmt_expr(b, f);
+                }
+            }
+            // A nested `function f(){…}` body is a separate scope: a loop var read there would be a
+            // capture (RefCell-bailed) or a shadow (different binding) — don't descend.
+            _ => {}
+        }
+    }
+
     /// Seed integer ranges: integer-literal `let` initializers and literal-bounded `for` counters.
     fn seed_int_ranges(stmts: &[Statement], out: &mut HashMap<String, (i64, i64)>) {
         for s in stmts {
@@ -7336,7 +7827,25 @@ impl Codegen {
         // keeps its `is_finite` guard here — a leaf may legitimately be NaN/±Infinity (→ 0).
         let (code, ty) = self.emit_typed_expr(e)?;
         if ty == RustType::F64 {
-            Ok(Some(format!("tishlang_runtime::to_int32({})", code)))
+            // When the leaf is an ARITHMETIC node PROVABLY finite with `|x| < 2^62` (operands are
+            // i32-register reads and finite literals — e.g. the FNV `h * 16777619` excursion), drop
+            // the `is_finite` guard and Rust's saturating cast and truncate directly. Bit-identical
+            // on this domain (`x as i64` truncates toward zero = JS ToInt32 truncation; `as i32` =
+            // modulo 2^32), a few instructions cheaper per iteration. Emitted inline so the generated
+            // crate needs no new runtime symbol. Any unproven leaf keeps the guarded `to_int32`.
+            if matches!(e, Expr::Binary { .. }) && self.f64_finite_bounded_below_2pow62(e) {
+                Ok(Some(format!(
+                    "(unsafe {{ ({}).to_int_unchecked::<i64>() }} as i32)",
+                    code
+                )))
+            } else {
+                Ok(Some(format!("tishlang_runtime::to_int32({})", code)))
+            }
+        } else if ty == RustType::I32 {
+            // An `I32` loop-accumulator already holds its JS ToInt32 bit-pattern in an integer
+            // register — feed it straight in, NO `to_int32` round-trip. This is the perf win: the
+            // per-op `f64`→i32 narrowing across the hash loop collapses to a register read.
+            Ok(Some(code))
         } else {
             Ok(None)
         }
@@ -7384,6 +7893,23 @@ impl Codegen {
             } => {
                 let (l, lt) = self.emit_typed_expr(left)?;
                 let (r, rt) = self.emit_typed_expr(right)?;
+
+                // An `I32` loop-accumulator (the i32-loop-var lowering) used in a NON-bitwise
+                // expression reads as its signed int32 value coerced to `f64` — every i32 is exact
+                // in f64. Bitwise/shift parents never see this: they recurse into the raw AST via
+                // `emit_int32_operand`, which reads the i32 register directly. So coercing here only
+                // governs arithmetic/relational reads (e.g. the `h * 16777619` excursion), where the
+                // operand must be f64 to keep JS Number semantics.
+                let (l, lt) = if lt == RustType::I32 {
+                    (format!("(({}) as f64)", l), RustType::F64)
+                } else {
+                    (l, lt)
+                };
+                let (r, rt) = if rt == RustType::I32 {
+                    (format!("(({}) as f64)", r), RustType::F64)
+                } else {
+                    (r, rt)
+                };
 
                 if let Some(result_ty) = RustType::result_type_of_binop(*op, &lt, &rt) {
                     // Bitwise/shift over numbers: lower the *whole* chain in the int32 domain so

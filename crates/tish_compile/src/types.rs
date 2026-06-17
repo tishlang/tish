@@ -13,6 +13,12 @@ pub enum RustType {
     Value,
     /// f64 (for number)
     F64,
+    /// i32 — a `number` local PROVEN to always hold an integer reinterpretable as a JS ToInt32
+    /// bit-pattern, kept in an integer register across a bitwise/hash hot loop (bun/JSC-style)
+    /// instead of round-tripping `f64`↔`i32` on every op. The value is the signed int32
+    /// (= JS `ToInt32`) view; `>>> 0` results are uint32 reinterpreted into this i32. Only the
+    /// codegen's i32-loop-var lowering produces this type — never `from_annotation`.
+    I32,
     /// String (for string)
     String,
     /// bool (for boolean)
@@ -222,6 +228,7 @@ impl RustType {
         match self {
             RustType::Value => "Value".to_string(),
             RustType::F64 => "f64".to_string(),
+            RustType::I32 => "i32".to_string(),
             RustType::String => "String".to_string(),
             RustType::Bool => "bool".to_string(),
             RustType::Unit => "()".to_string(),
@@ -250,6 +257,7 @@ impl RustType {
         match self {
             RustType::Value => "Value::Null".to_string(),
             RustType::F64 => "0.0".to_string(),
+            RustType::I32 => "0i32".to_string(),
             RustType::String => "String::new()".to_string(),
             RustType::Bool => "false".to_string(),
             RustType::Unit => "()".to_string(),
@@ -304,6 +312,12 @@ impl RustType {
             RustType::Value => value_expr.to_string(),
             RustType::F64 => format!(
                 "match &{} {{ Value::Number(n) => *n, _ => panic!(\"expected number\") }}",
+                value_expr
+            ),
+            // A `Value::Number` narrowed to its JS ToInt32 bit-pattern (NaN/±Inf → 0, exactly as
+            // the bitwise/shift path coerces). Only reached for an `I32`-typed binding boundary.
+            RustType::I32 => format!(
+                "match &{} {{ Value::Number(n) => tishlang_runtime::to_int32(*n), _ => panic!(\"expected number\") }}",
                 value_expr
             ),
             RustType::String => format!(
@@ -363,6 +377,9 @@ impl RustType {
             }
             RustType::Value => native_expr.to_string(),
             RustType::F64 => format!("Value::Number({})", native_expr),
+            // The signed int32 view boxes as a JS Number (every i32 is exactly representable in
+            // f64). The uint32 `>>> 0` reinterpretation is applied at the boxing site, not here.
+            RustType::I32 => format!("Value::Number(({}) as f64)", native_expr),
             RustType::String => format!("Value::String({}.clone().into())", native_expr),
             RustType::Bool => format!("Value::Bool({})", native_expr),
             RustType::Unit => "Value::Null".to_string(),
