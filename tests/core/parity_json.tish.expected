@@ -1,0 +1,6 @@
+nums [0,0,1,42,-7,1.5,4.5,0.1,100000,1e+21,1e-7,12345.678]
+keyorder k1,zoo,alpha,m,b
+roundtrip {"a":[1,2.5,0,1e+21],"b":"he\"llo\n","c":{"d":true,"e":null}}
+negzero-parse -Infinity
+bigint 9007199254740992
+escapes "tab\tnl\nq\"bs\\"

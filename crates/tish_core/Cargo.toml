@@ -23,6 +23,8 @@ ahash = "0.8.11"
 arcstr = "1"
 smallvec = "1"
 indexmap = "2"
+# Fast integer→decimal for the JSON.stringify number fast-path (already in the workspace lock).
+itoa = "1"
 fancy-regex = { version = "0.17.0", optional = true }
 # Only under `send-values` (the Arc<Mutex> path): parking_lot's uncontended lock is a
 # single atomic with no pthread syscall — profiled as a top cost on object/array access.

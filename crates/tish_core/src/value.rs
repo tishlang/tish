@@ -940,18 +940,31 @@ impl std::fmt::Debug for Value {
 /// `"0"` (the sign is dropped — `(-0).toString() === "0"`). The *inspect* form (`console.log` of a
 /// bare number / array element) keeps `"-0"`; that distinction lives in [`Value::to_display_string`].
 pub fn js_number_to_string(value: f64) -> String {
+    let mut out = String::new();
+    js_number_to_string_into(&mut out, value);
+    out
+}
+
+/// Append the ECMAScript `Number::toString` of `value` to `out` — identical result to
+/// [`js_number_to_string`] but with no intermediate `String` allocation. The JSON.stringify
+/// hot path appends millions of numbers into a single buffer, so the alloc-free form matters.
+pub fn js_number_to_string_into(out: &mut String, value: f64) {
     if value.is_nan() {
-        return "NaN".to_string();
+        out.push_str("NaN");
+        return;
     }
     if value == f64::INFINITY {
-        return "Infinity".to_string();
+        out.push_str("Infinity");
+        return;
     }
     if value == f64::NEG_INFINITY {
-        return "-Infinity".to_string();
+        out.push_str("-Infinity");
+        return;
     }
     if value == 0.0 {
         // ECMAScript `Number::toString`: both `+0` and `-0` stringify to `"0"`.
-        return "0".to_string();
+        out.push('0');
+        return;
     }
 
     let negative = value < 0.0;
@@ -967,7 +980,6 @@ pub fn js_number_to_string(value: f64) -> String {
     let k = digits.len() as i32; // significant digit count (≤ 17 for an f64)
     let point = exp + 1; // ECMAScript's `n`: value = digits × 10^(point − k)
 
-    let mut out = String::new();
     if negative {
         out.push('-');
     }
@@ -997,7 +1009,6 @@ pub fn js_number_to_string(value: f64) -> String {
         out.push(if e >= 0 { '+' } else { '-' });
         out.push_str(&e.abs().to_string());
     }
-    out
 }
 
 impl Value {

@@ -3854,11 +3854,12 @@ impl Evaluator {
             Value::Null => "null".to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Number(n) => {
-                if n.is_finite() {
-                    n.to_string()
-                } else {
-                    "null".to_string()
-                }
+                // Format numbers exactly like the VM/native path (shared helper) so JSON output
+                // matches across backends and Node — Rust's `{}` Display diverges (e.g. `1e21`,
+                // `1e-7`, `-0`). #180.
+                let mut s = String::new();
+                tishlang_core::write_json_number(&mut s, *n);
+                s
             }
             Value::String(s) => format!(
                 "\"{}\"",
