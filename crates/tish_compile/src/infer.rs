@@ -1981,6 +1981,17 @@ pub struct AggregateAnalysis {
     pub fn_numeric_params: HashMap<String, HashSet<String>>,
     /// top-level `let` name → inferred aggregate type (S-B/S-C), for tests.
     pub local_agg: HashMap<String, AggReturn>,
+    /// S-D: the whole-program unboxing verdict. `Some(alias)` ⇒ the struct alias
+    /// `alias` is fully unboxable: its factory, array-factory, the top-level
+    /// `Array(alias)` local(s), and every fn taking that array by param pass the
+    /// all-or-nothing candidacy predicate, so codegen may emit the typed free-fn
+    /// tier. `None` ⇒ bail the whole group to boxed (S-0 scalars still stamp).
+    pub unbox_alias: Option<String>,
+    /// S-D: fn name → (param-index, param-name) of the `Array(alias)` param, for
+    /// the fns in the unbox group. Only populated when `unbox_alias` is `Some`.
+    pub array_param_fns: HashMap<String, (usize, String)>,
+    /// S-D: top-level `let` names whose inferred type is `Array(unbox_alias)`.
+    pub array_locals: Vec<String>,
 }
 
 /// An inferred aggregate (struct-ish) type produced by the S-A..S-C passes.
@@ -2231,7 +2242,565 @@ pub fn analyze_aggregate(program: &Program) -> AggregateAnalysis {
     analysis.local_agg = local_types;
 
     analysis.struct_decls = reg.decls;
+
+    // ---- S-D: whole-program unboxing candidacy. All-or-nothing per struct alias.
+    compute_unbox_candidacy(program, &mut analysis);
+
     analysis
+}
+
+/// S-D candidacy: decide whether a single struct alias may be FULLY unboxed into a
+/// native `VmRef<Vec<TishStruct_alias>>` threaded through de-virtualized typed free
+/// fns. Sets `analysis.unbox_alias`/`array_param_fns`/`array_locals` iff EVERY use of
+/// the struct group is safe (else leaves them empty → boxed). Conservative and
+/// all-or-nothing: a single unsafe use anywhere bails the whole alias.
+fn compute_unbox_candidacy(program: &Program, analysis: &mut AggregateAnalysis) {
+    // The factory: a fn whose return shape is `Struct(alias)`.
+    // Require EXACTLY one struct alias overall (nbody shape) — keeps it monomorphic
+    // and avoids ambiguity about which array elements are which struct.
+    if analysis.struct_decls.len() != 1 {
+        return;
+    }
+    let alias = analysis.struct_decls[0].0.clone();
+
+    // There must be an array factory returning `ArrayOfStruct(alias)` (makeBodies),
+    // and at least one top-level `let` of `ArrayOfStruct(alias)` (bodies).
+    let has_array_factory = analysis
+        .fn_return
+        .values()
+        .any(|r| matches!(r, AggReturn::ArrayOfStruct(a) if *a == alias));
+    if !has_array_factory {
+        return;
+    }
+    let array_locals: Vec<String> = analysis
+        .local_agg
+        .iter()
+        .filter_map(|(n, r)| match r {
+            AggReturn::ArrayOfStruct(a) if *a == alias => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
+    if array_locals.is_empty() {
+        return;
+    }
+
+    // Identify every fn whose first param is THE bodies array (used as `p[i]`,
+    // `p.length`, `p[i].field` read/write). Each such fn must pass the per-fn
+    // struct-array body safety predicate; a single failure bails the whole alias.
+    let mut array_param_fns: HashMap<String, (usize, String)> = HashMap::new();
+    for s in &program.statements {
+        if let Statement::FunDecl {
+            name, params, body, async_: false, rest_param: None, ..
+        } = s
+        {
+            // Find a param used array-of-struct-ish.
+            for (pi, p) in params.iter().enumerate() {
+                let pname = match p {
+                    FunParam::Simple(tp) if tp.default.is_none() => tp.name.as_ref(),
+                    _ => continue,
+                };
+                if !param_used_as_struct_array(body, pname) {
+                    continue;
+                }
+                // This param is the bodies array. The whole fn body must be unbox-safe
+                // for that array (every element use is a literal-key field op; no escape,
+                // no reshape, no `===`, no computed-key). Bail the whole alias otherwise.
+                if !struct_array_fn_safe(body, pname) {
+                    return;
+                }
+                array_param_fns.insert(name.to_string(), (pi, pname.to_string()));
+                break; // one array param per fn (nbody shape)
+            }
+        }
+    }
+    if array_param_fns.is_empty() {
+        return;
+    }
+
+    // Every CALL of an array-param fn must pass the array as a bare top-level array
+    // local (no boxed reshaping). And the array local must not escape elsewhere
+    // (passed to a non-group fn, stored, console.log'd, indexed-assigned wholesale).
+    // The call-site routing + escape check is enforced in codegen too, but we gate
+    // here so the annotations are only stamped when the program globally conforms.
+    if !array_use_sites_safe(program, &array_locals, &array_param_fns) {
+        return;
+    }
+
+    analysis.unbox_alias = Some(alias);
+    analysis.array_param_fns = array_param_fns;
+    analysis.array_locals = array_locals;
+}
+
+/// Does `body` use `p` in a struct-array shape — at least one `p[i]` index, `p.length`,
+/// or `p[i].field` access? (Used to *identify* the array param, before safety-checking.)
+fn param_used_as_struct_array(body: &Statement, p: &str) -> bool {
+    let mut found = false;
+    walk_exprs_stmt(body, &mut |e| {
+        match e {
+            Expr::Index { object, .. } => {
+                if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == p) {
+                    found = true;
+                }
+            }
+            Expr::Member { object, prop: tishlang_ast::MemberProp::Name { name: m, .. }, .. } => {
+                if m.as_ref() == "length"
+                    && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == p)
+                {
+                    found = true;
+                }
+            }
+            _ => {}
+        }
+    });
+    found
+}
+
+/// S-D per-fn struct-array safety. Every use of array param `p` inside `body` must be one of:
+///   * `p.length`                        (read)
+///   * `p[i]` as a `let x = p[i]` element-alias OR directly `p[i].field` read/write
+///   * `p[i].field` read / `p[i].field = <scalar>` write
+///   * `x.field` read / `x.field = <scalar>` write where `x` is an alias `let x = p[i]`
+/// Anything else — bare `p`, `p` as a call arg, `p[i]` stored/escaped, computed `.field`,
+/// `===`/`!==` on a body, `p.push`/`p.splice`/`p.length = …` reshape — bails (false).
+fn struct_array_fn_safe(body: &Statement, p: &str) -> bool {
+    // Collect element-alias locals: `let x = p[i]` where `i` is a simple ident.
+    // Track alias name → index-var name. Require the index var is never reassigned
+    // in the alias's scope and the alias never escapes (checked via uses).
+    let mut aliases: HashSet<String> = HashSet::new();
+    collect_element_aliases(body, p, &mut aliases);
+    saf_stmt(body, p, &aliases)
+}
+
+/// Collect `let x = p[idx]` element-alias binding names (idx a bare ident).
+fn collect_element_aliases(s: &Statement, p: &str, out: &mut HashSet<String>) {
+    use Statement::*;
+    match s {
+        VarDecl { name, init: Some(init), .. } => {
+            if let Expr::Index { object, index, .. } = init {
+                if matches!(object.as_ref(), Expr::Ident { name: o, .. } if o.as_ref() == p)
+                    && matches!(index.as_ref(), Expr::Ident { .. })
+                {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().for_each(|x| collect_element_aliases(x, p, out))
+        }
+        If { then_branch, else_branch, .. } => {
+            collect_element_aliases(then_branch, p, out);
+            if let Some(e) = else_branch {
+                collect_element_aliases(e, p, out);
+            }
+        }
+        For { init, body, .. } => {
+            if let Some(i) = init {
+                collect_element_aliases(i, p, out);
+            }
+            collect_element_aliases(body, p, out);
+        }
+        While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+            collect_element_aliases(body, p, out)
+        }
+        _ => {}
+    }
+}
+
+/// Statement-level S-D safety walk for array param `p` with element aliases `aliases`.
+fn saf_stmt(s: &Statement, p: &str, aliases: &HashSet<String>) -> bool {
+    use Statement::*;
+    match s {
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().all(|x| saf_stmt(x, p, aliases))
+        }
+        VarDecl { name, init, .. } => {
+            // `let x = p[i]` element-alias decl is OK (the alias is registered).
+            // Any other decl: the init must be p-safe AND must not bind `p` itself.
+            if name.as_ref() == p {
+                return false;
+            }
+            if let Some(Expr::Index { object, index, .. }) = init {
+                if matches!(object.as_ref(), Expr::Ident { name: o, .. } if o.as_ref() == p) {
+                    // element alias: index must be a simple ident, and the binding must be
+                    // in `aliases` (it is, by construction). OK.
+                    return matches!(index.as_ref(), Expr::Ident { .. })
+                        && aliases.contains(name.as_ref());
+                }
+            }
+            init.as_ref().is_none_or(|e| saf_expr(e, p, aliases))
+        }
+        ExprStmt { expr, .. } => saf_expr(expr, p, aliases),
+        Return { value, .. } => {
+            // A bare `return p` escapes the array; a `return <scalar>` is fine.
+            value.as_ref().is_none_or(|e| saf_expr(e, p, aliases))
+        }
+        If { cond, then_branch, else_branch, .. } => {
+            saf_expr(cond, p, aliases)
+                && saf_stmt(then_branch, p, aliases)
+                && else_branch.as_ref().is_none_or(|e| saf_stmt(e, p, aliases))
+        }
+        While { cond, body, .. } => saf_expr(cond, p, aliases) && saf_stmt(body, p, aliases),
+        DoWhile { cond, body, .. } => saf_expr(cond, p, aliases) && saf_stmt(body, p, aliases),
+        For { init, cond, update, body, .. } => {
+            init.as_ref().is_none_or(|x| saf_stmt(x, p, aliases))
+                && cond.as_ref().is_none_or(|e| saf_expr(e, p, aliases))
+                && update.as_ref().is_none_or(|e| saf_expr(e, p, aliases))
+                && saf_stmt(body, p, aliases)
+        }
+        Break { .. } | Continue { .. } => true,
+        _ => false,
+    }
+}
+
+/// Expression-level S-D safety. `p` is the array param; `aliases` are `let x = p[i]`
+/// element aliases. Returns false on any unsafe use of `p` or an alias.
+fn saf_expr(e: &Expr, p: &str, aliases: &HashSet<String>) -> bool {
+    use Expr::*;
+    match e {
+        Literal { .. } => true,
+        Ident { name, .. } => {
+            // A BARE reference to the array `p` (not behind `[]`/`.length`) escapes — bail.
+            // A bare reference to an element alias `x` ALSO escapes (the alias must only
+            // appear as `x.field`); bail so the alias never leaks as a value.
+            name.as_ref() != p && !aliases.contains(name.as_ref())
+        }
+        // `p.length` (read) — OK. `p.field` for any other field is not a thing on the array;
+        // bail. `x.field` where `x` is an element alias — OK (Copy f64 read).
+        Member { object, prop, optional: false, .. } => {
+            let mname = match prop {
+                tishlang_ast::MemberProp::Name { name, .. } => name.as_ref(),
+                tishlang_ast::MemberProp::Expr(_) => return false, // computed key bails
+            };
+            match object.as_ref() {
+                Ident { name, .. } if name.as_ref() == p => mname == "length",
+                Ident { name, .. } if aliases.contains(name.as_ref()) => true,
+                // `p[i].field` read.
+                Index { object: io, index, .. } => {
+                    matches!(io.as_ref(), Ident { name, .. } if name.as_ref() == p)
+                        && saf_expr(index, p, aliases)
+                }
+                _ => saf_expr(object, p, aliases),
+            }
+        }
+        Member { .. } => false, // optional member on the array/alias bails
+        // `p[i]` index: only valid as part of `p[i].field` (handled above) or `let x = p[i]`
+        // (handled in saf_stmt). A bare `p[i]` value here escapes the element — bail.
+        Index { object, .. } => {
+            if matches!(object.as_ref(), Ident { name, .. } if name.as_ref() == p) {
+                return false;
+            }
+            // index into something else (not the array) — safe if its parts are safe.
+            saf_expr(object, p, aliases)
+        }
+        Binary { left, op, right, .. } => {
+            // `===`/`!==` directly on a body element / alias would compare references — bail.
+            if matches!(op, BinOp::StrictEq | BinOp::StrictNe | BinOp::Eq | BinOp::Ne) {
+                if expr_is_body_ref(left, p, aliases) || expr_is_body_ref(right, p, aliases) {
+                    return false;
+                }
+            }
+            saf_expr(left, p, aliases) && saf_expr(right, p, aliases)
+        }
+        Unary { operand, .. } => saf_expr(operand, p, aliases),
+        Conditional { cond, then_branch, else_branch, .. } => {
+            saf_expr(cond, p, aliases)
+                && saf_expr(then_branch, p, aliases)
+                && saf_expr(else_branch, p, aliases)
+        }
+        Assign { name, value, .. } => {
+            name.as_ref() != p && !aliases.contains(name.as_ref()) && saf_expr(value, p, aliases)
+        }
+        CompoundAssign { name, value, .. } => {
+            name.as_ref() != p && !aliases.contains(name.as_ref()) && saf_expr(value, p, aliases)
+        }
+        // Field write: `x.field = <scalar>` (alias) or `p[i].field = <scalar>` — OK iff RHS p-safe
+        // (scalar). Computed-key write or write onto the bare array bails.
+        MemberAssign { object, prop: _, value, .. } => {
+            let target_ok = match object.as_ref() {
+                Ident { name, .. } if aliases.contains(name.as_ref()) => true,
+                Index { object: io, index, .. } => {
+                    matches!(io.as_ref(), Ident { name, .. } if name.as_ref() == p)
+                        && saf_expr(index, p, aliases)
+                }
+                _ => false,
+            };
+            target_ok && saf_expr(value, p, aliases)
+        }
+        // `p[i] = …` / `p.length = …` reshape, or any index-assign onto the array, bails.
+        IndexAssign { object, .. } => {
+            !matches!(object.as_ref(), Ident { name, .. } if name.as_ref() == p)
+        }
+        Call { callee, args, .. } => {
+            // Method calls on the array (push/splice/etc.) or on an alias bail: `p.push(...)`,
+            // `x.something()`. Math.<fn>(...) and other free calls are fine if args are p-safe
+            // (and no body ref escapes as an arg — checked by saf_expr on each arg).
+            if let Member { object, .. } = callee.as_ref() {
+                if expr_is_body_ref(object, p, aliases) {
+                    return false; // method call on the array/element
+                }
+            }
+            saf_expr(callee, p, aliases)
+                && args.iter().all(|a| match a {
+                    CallArg::Expr(x) => saf_expr(x, p, aliases),
+                    CallArg::Spread(_) => false,
+                })
+        }
+        TemplateLiteral { exprs, .. } => exprs.iter().all(|x| saf_expr(x, p, aliases)),
+        // Any other expr form that could touch `p` is not modelled — be conservative.
+        PostfixInc { name, .. } | PostfixDec { name, .. } | PrefixInc { name, .. }
+        | PrefixDec { name, .. } => name.as_ref() != p && !aliases.contains(name.as_ref()),
+        _ => false,
+    }
+}
+
+/// Is `e` a direct reference to the array `p` or an element alias (`x` or `p[i]`)?
+fn expr_is_body_ref(e: &Expr, p: &str, aliases: &HashSet<String>) -> bool {
+    match e {
+        Expr::Ident { name, .. } => name.as_ref() == p || aliases.contains(name.as_ref()),
+        Expr::Index { object, .. } => {
+            matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == p)
+        }
+        _ => false,
+    }
+}
+
+/// The top-level program's uses of the array locals must be safe: each is constructed
+/// once by an array factory call, only passed to group fns (or read scalar-only), and
+/// never escapes (no console.log of the array, no store, no bare pass to a non-group fn).
+fn array_use_sites_safe(
+    program: &Program,
+    array_locals: &[String],
+    group_fns: &HashMap<String, (usize, String)>,
+) -> bool {
+    let set: HashSet<&str> = array_locals.iter().map(|s| s.as_str()).collect();
+    let mut ok = true;
+    for s in &program.statements {
+        // Skip the decl of the array local itself.
+        if let Statement::VarDecl { name, .. } = s {
+            if set.contains(name.as_ref()) {
+                continue;
+            }
+        }
+        if !top_use_safe(s, &set, group_fns) {
+            ok = false;
+            break;
+        }
+    }
+    ok
+}
+
+fn top_use_safe(
+    s: &Statement,
+    set: &HashSet<&str>,
+    group_fns: &HashMap<String, (usize, String)>,
+) -> bool {
+    use Statement::*;
+    match s {
+        FunDecl { .. } | TypeAlias { .. } | DeclareVar { .. } | DeclareFun { .. } => true,
+        VarDecl { init, .. } => init.as_ref().is_none_or(|e| top_use_expr(e, set, group_fns)),
+        ExprStmt { expr, .. } => top_use_expr(expr, set, group_fns),
+        For { init, cond, update, body, .. } => {
+            init.as_ref().is_none_or(|x| top_use_safe(x, set, group_fns))
+                && cond.as_ref().is_none_or(|e| top_use_expr(e, set, group_fns))
+                && update.as_ref().is_none_or(|e| top_use_expr(e, set, group_fns))
+                && top_use_safe(body, set, group_fns)
+        }
+        While { cond, body, .. } | DoWhile { cond, body, .. } => {
+            top_use_expr(cond, set, group_fns) && top_use_safe(body, set, group_fns)
+        }
+        If { cond, then_branch, else_branch, .. } => {
+            top_use_expr(cond, set, group_fns)
+                && top_use_safe(then_branch, set, group_fns)
+                && else_branch.as_ref().is_none_or(|e| top_use_safe(e, set, group_fns))
+        }
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().all(|x| top_use_safe(x, set, group_fns))
+        }
+        Return { value, .. } => value.as_ref().is_none_or(|e| top_use_expr(e, set, group_fns)),
+        _ => true,
+    }
+}
+
+fn top_use_expr(
+    e: &Expr,
+    set: &HashSet<&str>,
+    group_fns: &HashMap<String, (usize, String)>,
+) -> bool {
+    use Expr::*;
+    match e {
+        // A bare reference to an array local escapes UNLESS it's a call arg to a group fn
+        // at the expected array-param position (handled in Call below).
+        Ident { name, .. } => !set.contains(name.as_ref()),
+        Call { callee, args, .. } => {
+            // A call to a group fn may pass an array local at its array-param slot.
+            if let Ident { name: fname, .. } = callee.as_ref() {
+                if let Some((api, _)) = group_fns.get(fname.as_ref()) {
+                    return args.iter().enumerate().all(|(ai, a)| match a {
+                        CallArg::Expr(Ident { name, .. }) if ai == *api => {
+                            // array local at the array slot — OK; or a non-array ident.
+                            set.contains(name.as_ref()) || true
+                        }
+                        CallArg::Expr(x) => top_use_expr(x, set, group_fns),
+                        CallArg::Spread(_) => false,
+                    });
+                }
+            }
+            top_use_expr(callee, set, group_fns)
+                && args.iter().all(|a| match a {
+                    CallArg::Expr(x) => top_use_expr(x, set, group_fns),
+                    CallArg::Spread(_) => false,
+                })
+        }
+        // `arr[i]` / `arr.length` at top level reads scalars — that's a boxed read; but the
+        // array local should only be consumed via group fns. Reading `arr.length` etc. at top
+        // level is rare and would require the boxed array; bail to keep semantics simple.
+        Index { object, .. } => !expr_refs_set(object, set) && top_use_expr(object, set, group_fns),
+        Member { object, .. } => !expr_refs_set(object, set) && top_use_expr(object, set, group_fns),
+        Binary { left, right, .. } => {
+            top_use_expr(left, set, group_fns) && top_use_expr(right, set, group_fns)
+        }
+        Unary { operand, .. } => top_use_expr(operand, set, group_fns),
+        Conditional { cond, then_branch, else_branch, .. } => {
+            top_use_expr(cond, set, group_fns)
+                && top_use_expr(then_branch, set, group_fns)
+                && top_use_expr(else_branch, set, group_fns)
+        }
+        Assign { value, .. } => top_use_expr(value, set, group_fns),
+        CompoundAssign { value, .. } => top_use_expr(value, set, group_fns),
+        TemplateLiteral { exprs, .. } => exprs.iter().all(|x| top_use_expr(x, set, group_fns)),
+        Literal { .. } => true,
+        Array { elements, .. } => elements.iter().all(|el| match el {
+            tishlang_ast::ArrayElement::Expr(x) => top_use_expr(x, set, group_fns),
+            tishlang_ast::ArrayElement::Spread(_) => false,
+        }),
+        PostfixInc { .. } | PostfixDec { .. } | PrefixInc { .. } | PrefixDec { .. } => true,
+        _ => true,
+    }
+}
+
+fn expr_refs_set(e: &Expr, set: &HashSet<&str>) -> bool {
+    matches!(e, Expr::Ident { name, .. } if set.contains(name.as_ref()))
+}
+
+/// Walk every sub-expression of a statement, invoking `f` on each.
+fn walk_exprs_stmt(s: &Statement, f: &mut impl FnMut(&Expr)) {
+    use Statement::*;
+    match s {
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().for_each(|x| walk_exprs_stmt(x, f))
+        }
+        VarDecl { init, .. } => {
+            if let Some(e) = init {
+                walk_exprs_expr(e, f);
+            }
+        }
+        VarDeclDestructure { init, .. } => walk_exprs_expr(init, f),
+        ExprStmt { expr, .. } => walk_exprs_expr(expr, f),
+        Return { value, .. } => {
+            if let Some(e) = value {
+                walk_exprs_expr(e, f);
+            }
+        }
+        If { cond, then_branch, else_branch, .. } => {
+            walk_exprs_expr(cond, f);
+            walk_exprs_stmt(then_branch, f);
+            if let Some(e) = else_branch {
+                walk_exprs_stmt(e, f);
+            }
+        }
+        While { cond, body, .. } | DoWhile { cond, body, .. } => {
+            walk_exprs_expr(cond, f);
+            walk_exprs_stmt(body, f);
+        }
+        For { init, cond, update, body, .. } => {
+            if let Some(i) = init {
+                walk_exprs_stmt(i, f);
+            }
+            if let Some(c) = cond {
+                walk_exprs_expr(c, f);
+            }
+            if let Some(u) = update {
+                walk_exprs_expr(u, f);
+            }
+            walk_exprs_stmt(body, f);
+        }
+        ForOf { iterable, body, .. } => {
+            walk_exprs_expr(iterable, f);
+            walk_exprs_stmt(body, f);
+        }
+        Throw { value, .. } => walk_exprs_expr(value, f),
+        _ => {}
+    }
+}
+
+fn walk_exprs_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
+    use Expr::*;
+    f(e);
+    match e {
+        Binary { left, right, .. } => {
+            walk_exprs_expr(left, f);
+            walk_exprs_expr(right, f);
+        }
+        Unary { operand, .. } | TypeOf { operand, .. } | Await { operand, .. }
+        | Delete { target: operand, .. } => walk_exprs_expr(operand, f),
+        Call { callee, args, .. } | New { callee, args, .. } => {
+            walk_exprs_expr(callee, f);
+            for a in args {
+                match a {
+                    CallArg::Expr(x) | CallArg::Spread(x) => walk_exprs_expr(x, f),
+                }
+            }
+        }
+        Member { object, prop, .. } => {
+            walk_exprs_expr(object, f);
+            if let tishlang_ast::MemberProp::Expr(p) = prop {
+                walk_exprs_expr(p, f);
+            }
+        }
+        Index { object, index, .. } => {
+            walk_exprs_expr(object, f);
+            walk_exprs_expr(index, f);
+        }
+        Conditional { cond, then_branch, else_branch, .. } => {
+            walk_exprs_expr(cond, f);
+            walk_exprs_expr(then_branch, f);
+            walk_exprs_expr(else_branch, f);
+        }
+        NullishCoalesce { left, right, .. } => {
+            walk_exprs_expr(left, f);
+            walk_exprs_expr(right, f);
+        }
+        Array { elements, .. } => {
+            for el in elements {
+                match el {
+                    tishlang_ast::ArrayElement::Expr(x)
+                    | tishlang_ast::ArrayElement::Spread(x) => walk_exprs_expr(x, f),
+                }
+            }
+        }
+        Object { props, .. } => {
+            for p in props {
+                match p {
+                    tishlang_ast::ObjectProp::KeyValue(_, v, _) => walk_exprs_expr(v, f),
+                    tishlang_ast::ObjectProp::Spread(x) => walk_exprs_expr(x, f),
+                }
+            }
+        }
+        Assign { value, .. } | CompoundAssign { value, .. } | LogicalAssign { value, .. } => {
+            walk_exprs_expr(value, f)
+        }
+        MemberAssign { object, value, .. } => {
+            walk_exprs_expr(object, f);
+            walk_exprs_expr(value, f);
+        }
+        IndexAssign { object, index, value, .. } => {
+            walk_exprs_expr(object, f);
+            walk_exprs_expr(index, f);
+            walk_exprs_expr(value, f);
+        }
+        TemplateLiteral { exprs, .. } => exprs.iter().for_each(|x| walk_exprs_expr(x, f)),
+        _ => {}
+    }
 }
 
 /// S-B array-return: `return [a, b, …]` where each element is a bare ident of the
@@ -2367,15 +2936,20 @@ fn infer_aggregate_expr(
 fn aggregate_infer_program(program: Program) -> Program {
     let analysis = analyze_aggregate(&program);
 
-    // Stamp S-0 numeric params onto the matching FunDecls.
+    // Stamp S-0 numeric params onto the matching FunDecls. When S-D candidacy holds
+    // (`unbox_alias` is `Some`), ALSO stamp the struct/array annotations: the factory
+    // return `: alias`, the array-factory return `: alias[]`, the group fns' array
+    // params `: alias[]`, and the top-level array local(s) `: alias[]`. Codegen's S-F
+    // tier consumes these (and bypasses the boxed closure path) so the writes persist.
     let mut statements: Vec<Statement> = program
         .statements
         .into_iter()
-        .map(|s| stamp_numeric_params(s, &analysis))
+        .map(|s| stamp_aggregate(s, &analysis))
         .collect();
 
-    // Prepend the inert struct alias decls (so the future S-F consumer / codegen can
-    // see them; unreferenced aliases are dropped downstream and change nothing today).
+    // Prepend the struct alias decls. Under S-D candidacy codegen canonicalises the
+    // matching alias into `RustType::Named` and emits a `Copy` struct; otherwise the
+    // alias is inert (unreferenced aliases are dropped downstream).
     if !analysis.struct_decls.is_empty() {
         let span = statements.first().map(stmt_span).unwrap_or_else(zero_span);
         let mut out: Vec<Statement> = Vec::with_capacity(statements.len() + analysis.struct_decls.len());
@@ -2392,6 +2966,64 @@ fn aggregate_infer_program(program: Program) -> Program {
     }
 
     Program { statements }
+}
+
+/// `alias[]` annotation (an `Array(Simple(alias))`), the S-D array-param/local type.
+fn array_of_alias_ann(alias: &str) -> TypeAnnotation {
+    TypeAnnotation::Array(Box::new(TypeAnnotation::Simple(alias.into(), zero_span())))
+}
+
+/// Stamp both the S-0 numeric scalar params AND, under S-D candidacy, the struct/array
+/// annotations onto a top-level statement.
+fn stamp_aggregate(s: Statement, analysis: &AggregateAnalysis) -> Statement {
+    // First apply the always-safe S-0 numeric-param stamping.
+    let s = stamp_numeric_params(s, analysis);
+    let Some(alias) = analysis.unbox_alias.as_deref() else {
+        return s; // no S-D candidacy → only S-0 params stamped
+    };
+    match s {
+        // Stamp fn returns / array params for the unbox group.
+        Statement::FunDecl {
+            async_, name, name_span, params, rest_param, return_type, body, span,
+        } => {
+            // Return type: factory → `: alias`; array-factory → `: alias[]`.
+            let new_return = match analysis.fn_return.get(name.as_ref()) {
+                Some(AggReturn::Struct(a)) if a == alias => {
+                    Some(TypeAnnotation::Simple(alias.into(), zero_span()))
+                }
+                Some(AggReturn::ArrayOfStruct(a)) if a == alias => Some(array_of_alias_ann(alias)),
+                _ => return_type,
+            };
+            // Array param: the group fn's bodies param → `: alias[]`.
+            let array_pi = analysis.array_param_fns.get(name.as_ref()).map(|(pi, _)| *pi);
+            let new_params: Vec<FunParam> = params
+                .into_iter()
+                .enumerate()
+                .map(|(pi, p)| match p {
+                    FunParam::Simple(mut tp) if Some(pi) == array_pi => {
+                        tp.type_ann = Some(array_of_alias_ann(alias));
+                        FunParam::Simple(tp)
+                    }
+                    other => other,
+                })
+                .collect();
+            Statement::FunDecl {
+                async_, name, name_span, params: new_params, rest_param,
+                return_type: new_return, body, span,
+            }
+        }
+        // Stamp the top-level array local(s) `: alias[]`.
+        Statement::VarDecl { name, name_span, mutable, type_ann, init, span }
+            if analysis.array_locals.iter().any(|n| n == name.as_ref()) =>
+        {
+            Statement::VarDecl {
+                name, name_span, mutable,
+                type_ann: type_ann.or_else(|| Some(array_of_alias_ann(alias))),
+                init, span,
+            }
+        }
+        other => other,
+    }
 }
 
 fn stamp_numeric_params(s: Statement, analysis: &AggregateAnalysis) -> Statement {
@@ -2772,9 +3404,172 @@ mod aggregate_infer_tests {
         for s in &prog.statements {
             if let Statement::VarDecl { name, type_ann, .. } = s {
                 if name.as_ref() == "b" {
-                    assert!(type_ann.is_none(), "call-local must stay unannotated pre-S-F");
+                    // No array factory / array-param fns ⇒ S-D candidacy fails ⇒ `b` unstamped.
+                    assert!(type_ann.is_none(), "non-array struct local must stay unannotated");
                 }
             }
         }
+    }
+
+    // ---- S-D: whole-program unboxing candidacy + stamping --------------------
+
+    /// The full nbody factory + array-fn chain, trimmed to the structural essentials.
+    const NBODY_SHAPE: &str = "\
+        let SOLAR_MASS = 39.47841760435743\n\
+        function body(x, y, z, vx, vy, vz, mass) {\n\
+          return { x: x, y: y, z: z, vx: vx, vy: vy, vz: vz, mass: mass }\n\
+        }\n\
+        function makeBodies() {\n\
+          let sun = body(0, 0, 0, 0, 0, 0, SOLAR_MASS)\n\
+          let jup = body(1, 1, 1, 1, 1, 1, 1)\n\
+          return [sun, jup]\n\
+        }\n\
+        function offsetMomentum(bodies) {\n\
+          let px = 0\n\
+          for (let i = 0; i < bodies.length; i++) { let b = bodies[i]; px = px + b.vx * b.mass }\n\
+          bodies[0].vx = -px / SOLAR_MASS\n\
+        }\n\
+        function advance(bodies, dt) {\n\
+          let n = bodies.length\n\
+          for (let i = 0; i < n; i++) {\n\
+            let bi = bodies[i]\n\
+            for (let j = i + 1; j < n; j++) {\n\
+              let bj = bodies[j]\n\
+              let dx = bi.x - bj.x\n\
+              bi.vx = bi.vx - dx\n\
+              bj.vx = bj.vx + dx\n\
+            }\n\
+          }\n\
+        }\n\
+        function energy(bodies) {\n\
+          let e = 0\n\
+          let n = bodies.length\n\
+          for (let i = 0; i < n; i++) { let bi = bodies[i]; e = e + bi.mass }\n\
+          return e\n\
+        }\n\
+        let bodies = makeBodies()\n\
+        offsetMomentum(bodies)\n\
+        for (let s = 0; s < 10; s++) { advance(bodies, 0.01) }\n\
+        let check = energy(bodies)\n\
+        console.log(check)";
+
+    #[test]
+    fn sd_nbody_shape_is_unbox_candidate() {
+        let a = analyze(NBODY_SHAPE);
+        // Exactly one struct alias, and the whole group passes candidacy.
+        assert_eq!(a.struct_decls.len(), 1);
+        let alias = a.unbox_alias.clone();
+        assert!(alias.is_some(), "nbody shape must be an unbox candidate");
+        let alias = alias.unwrap();
+        // body=Struct, makeBodies=ArrayOfStruct, bodies local = ArrayOfStruct.
+        assert!(matches!(a.fn_return.get("body"), Some(AggReturn::Struct(s)) if *s == alias));
+        assert!(matches!(a.fn_return.get("makeBodies"), Some(AggReturn::ArrayOfStruct(s)) if *s == alias));
+        assert!(a.array_locals.contains(&"bodies".to_string()));
+        // advance/energy/offsetMomentum all recognised as array-param fns at param 0.
+        for f in ["advance", "energy", "offsetMomentum"] {
+            let (pi, pn) = a.array_param_fns.get(f).unwrap_or_else(|| panic!("{f} not in group"));
+            assert_eq!(*pi, 0);
+            assert_eq!(pn, "bodies");
+        }
+    }
+
+    #[test]
+    fn sd_stamps_struct_and_array_annotations() {
+        let parsed = parse(NBODY_SHAPE).unwrap();
+        let base = Program {
+            statements: infer_statements(&parsed.statements, &mut InferCtx::new()),
+        };
+        let prog = aggregate_infer_program(base);
+        let alias = analyze_aggregate(&Program {
+            statements: infer_statements(&parse(NBODY_SHAPE).unwrap().statements, &mut InferCtx::new()),
+        })
+        .unbox_alias
+        .unwrap();
+        let mut saw_body_ret = false;
+        let mut saw_makebodies_ret = false;
+        let mut saw_advance_param = false;
+        let mut saw_bodies_local = false;
+        for s in &prog.statements {
+            match s {
+                Statement::FunDecl { name, params, return_type, .. } => match name.as_ref() {
+                    "body" => {
+                        saw_body_ret = matches!(return_type, Some(TypeAnnotation::Simple(a, _)) if a.as_ref() == alias);
+                    }
+                    "makeBodies" => {
+                        saw_makebodies_ret = matches!(return_type,
+                            Some(TypeAnnotation::Array(b)) if matches!(b.as_ref(), TypeAnnotation::Simple(a, _) if a.as_ref() == alias));
+                    }
+                    "advance" => {
+                        if let Some(FunParam::Simple(tp)) = params.first() {
+                            saw_advance_param = matches!(&tp.type_ann,
+                                Some(TypeAnnotation::Array(b)) if matches!(b.as_ref(), TypeAnnotation::Simple(a, _) if a.as_ref() == alias));
+                        }
+                    }
+                    _ => {}
+                },
+                Statement::VarDecl { name, type_ann, .. } if name.as_ref() == "bodies" => {
+                    saw_bodies_local = matches!(type_ann,
+                        Some(TypeAnnotation::Array(b)) if matches!(b.as_ref(), TypeAnnotation::Simple(a, _) if a.as_ref() == alias));
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_body_ret, "body return must be stamped `: alias`");
+        assert!(saw_makebodies_ret, "makeBodies return must be stamped `: alias[]`");
+        assert!(saw_advance_param, "advance bodies param must be stamped `: alias[]`");
+        assert!(saw_bodies_local, "top-level bodies local must be stamped `: alias[]`");
+    }
+
+    #[test]
+    fn sd_bails_on_strict_eq_on_body() {
+        // `===` on an element alias compares references in JS — not unboxable. Whole group bails.
+        let src = "\
+            function body(x) { return { x: x } }\n\
+            function makeBodies() { let a = body(1); return [a] }\n\
+            function check(bodies) { let b0 = bodies[0]; let b1 = bodies[0]; return b0 === b1 }\n\
+            let bodies = makeBodies()\n\
+            check(bodies)";
+        let a = analyze(src);
+        assert!(a.unbox_alias.is_none(), "=== on a body must bail the unbox group");
+    }
+
+    #[test]
+    fn sd_bails_on_array_push_reshape() {
+        // `bodies.push(...)` reshapes the array — not a fixed `Vec`. Bail.
+        let src = "\
+            function body(x) { return { x: x } }\n\
+            function makeBodies() { let a = body(1); return [a] }\n\
+            function grow(bodies) { bodies.push(body(2)) }\n\
+            let bodies = makeBodies()\n\
+            grow(bodies)";
+        let a = analyze(src);
+        assert!(a.unbox_alias.is_none(), "array reshape must bail the unbox group");
+    }
+
+    #[test]
+    fn sd_bails_on_array_escape_to_console() {
+        // Passing the whole array to console.log escapes it to the boxed world. Bail.
+        let src = "\
+            function body(x) { return { x: x } }\n\
+            function makeBodies() { let a = body(1); return [a] }\n\
+            function energy(bodies) { let b = bodies[0]; return b.x }\n\
+            let bodies = makeBodies()\n\
+            energy(bodies)\n\
+            console.log(bodies)";
+        let a = analyze(src);
+        assert!(a.unbox_alias.is_none(), "array escape to console.log must bail");
+    }
+
+    #[test]
+    fn sd_bails_on_string_field_struct() {
+        // A string field ⇒ no struct factory at all ⇒ no unbox candidacy.
+        let src = "\
+            function body(x) { return { x: x, name: \"a\" } }\n\
+            function makeBodies() { let a = body(1); return [a] }\n\
+            function energy(bodies) { let b = bodies[0]; return b.x }\n\
+            let bodies = makeBodies()\n\
+            energy(bodies)";
+        let a = analyze(src);
+        assert!(a.unbox_alias.is_none(), "string field bails the struct factory → no unbox");
     }
 }
