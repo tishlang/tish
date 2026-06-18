@@ -737,6 +737,41 @@ pub fn compile_with_native_modules_emit(
     Ok(g.output)
 }
 
+/// #177 (S-E/S-F): the return shape of a de-virtualized aggregate (struct/array) free fn.
+#[derive(Debug, Clone, PartialEq)]
+enum AggRet {
+    /// Returns the unboxed struct by value (the `body()` factory).
+    Struct,
+    /// Returns `Vec<TishStruct_alias>` by value (the `makeBodies()` array factory).
+    ArrayOfStruct,
+    /// Returns a plain `f64` (`energy()`).
+    F64,
+    /// Returns nothing (`advance()`, `offsetMomentum()` — JS `undefined`).
+    Unit,
+}
+
+/// #177: one parameter of an aggregate free fn, in source order.
+#[derive(Debug, Clone)]
+enum AggParamKind {
+    /// The `Vec<TishStruct_alias>` array param, threaded by shared reference
+    /// (`&mut` if the fn mutates an element, `&` if read-only).
+    Array { is_mut: bool },
+    /// A scalar param (always `f64` for the nbody shape).
+    Scalar(RustType),
+}
+
+/// #177: the de-virtualized native signature of one aggregate fn.
+#[derive(Debug, Clone)]
+struct AggFnSig {
+    /// Source params in order: (name, kind).
+    params: Vec<(String, AggParamKind)>,
+    /// Top-level numeric globals the body references, appended as trailing `f64`
+    /// params (sorted for a stable decl/call-site order).
+    captured: Vec<String>,
+    /// What the fn returns.
+    ret: AggRet,
+}
+
 struct Codegen {
     output: String,
     indent: usize,
@@ -774,6 +809,20 @@ struct Codegen {
     /// free `fn f_native(f64,..)->f64` (all params `: number`, returns `number`, native-safe
     /// body). Direct calls to these route to the native fn, bypassing the boxed `value_call`.
     native_fns: std::collections::HashSet<String>,
+    /// #177 S-E/S-F (dark-shipped behind `TISH_AGGREGATE_INFER`): the unboxed struct alias name
+    /// (e.g. `TishAnon_0`) when the interprocedural aggregate path is active for this program,
+    /// else `None`. Set in `emit_program` only after the de-virtualized fns emit successfully.
+    aggregate_alias: Option<String>,
+    /// #177: fn name → its de-virtualized native signature. Calls to these route directly to the
+    /// `fn name_agg(..)` free fn (threading the `Vec<TishStruct_alias>` by reference), bypassing
+    /// the boxed `value_call`. Empty when the aggregate path is inactive.
+    aggregate_fns: std::collections::HashMap<String, AggFnSig>,
+    /// #177: top-level `let` names bound to the unboxed `Vec<TishStruct_alias>` (e.g. `bodies`).
+    /// These are emitted `let mut` and passed `&mut`/`&` into the aggregate fns.
+    aggregate_array_locals: std::collections::HashSet<String>,
+    /// #177: while emitting an aggregate fn body, the return shape of the fn currently being
+    /// emitted (drives `Return` lowering). `None` outside aggregate-fn emission.
+    agg_cur_ret: Option<AggRet>,
     /// Names of `number`-typed locals demoted to a boxed `Value` because some reassignment can
     /// store a non-number — e.g. `let s = 0; s = s + arr[i]` where `arr` is a boxed Value: `+` is
     /// JS string concat, so `s` may become a `String`. Lowering `s` to a native `f64` would panic
@@ -856,6 +905,10 @@ impl Codegen {
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
             native_fns: std::collections::HashSet::new(),
+            aggregate_alias: None,
+            aggregate_fns: std::collections::HashMap::new(),
+            aggregate_array_locals: std::collections::HashSet::new(),
+            agg_cur_ret: None,
             demoted_numeric_locals: std::collections::HashSet::new(),
             int_range_locals: std::collections::HashMap::new(),
             int_valued_locals: std::collections::HashSet::new(),
@@ -1542,6 +1595,13 @@ impl Codegen {
                 self.writeln("");
             }
         }
+        // #177 (S-E/S-F, dark-shipped behind TISH_AGGREGATE_INFER): de-virtualize the nbody-shape
+        // aggregate fns into native Rust free fns operating on an unboxed `Vec<TishStruct_alias>`
+        // threaded by reference. Computed + emitted here (before `run()`); if any fn can't be
+        // lowered the whole path is disabled and we fall back to the boxed closures unchanged.
+        if std::env::var("TISH_AGGREGATE_INFER").map(|v| v != "0").unwrap_or(false) {
+            self.setup_aggregate_fns(program);
+        }
         // Soundness pass — must run after type aliases + `native_fns` are known (both feed the
         // native-type oracle): find `number`-typed locals a reassignment can turn non-numeric so
         // `VarDecl` lowers them as boxed `Value` rather than native `f64` (else the store coerces
@@ -1836,6 +1896,11 @@ impl Codegen {
         let top_level_funcs = self.prescan_function_decls(&program.statements);
         *self.function_scope_stack.last_mut().unwrap() = top_level_funcs.clone();
         for func_name in &top_level_funcs {
+            // #177: functions promoted to native aggregate free fns (`<name>_agg`) have their
+            // boxed closure + cell suppressed — no boxed value exists to back-patch.
+            if self.aggregate_alias.is_some() && self.aggregate_fns.contains_key(func_name) {
+                continue;
+            }
             let escaped = Self::escape_ident(func_name);
             self.writeln(&format!(
                 "let {}_cell: VmRef<Value> = VmRef::new(Value::Null);",
@@ -2135,7 +2200,11 @@ impl Codegen {
                 // Track the variable type
                 self.type_context.define(name.as_ref(), rust_type.clone());
 
-                let mutability = if *mutable { "let mut" } else { "let" };
+                // #177: the unboxed `Vec<TishStruct>` local is threaded `&mut` into the aggregate
+                // operators (`advance`/`offsetMomentum`), so it must be `mut` even when never
+                // directly reassigned in source.
+                let force_mut = self.aggregate_array_locals.contains(name.as_ref());
+                let mutability = if *mutable || force_mut { "let mut" } else { "let" };
                 let escaped_name = Self::escape_ident(name.as_ref());
 
                 if rust_type.is_native() {
@@ -2605,6 +2674,15 @@ impl Codegen {
                 span,
                 ..
             } => {
+                // #177: this function was de-virtualized into a native aggregate free fn
+                // (`<name>_agg`, emitted before `run()`); all call sites were routed there.
+                // Skip the boxed closure entirely — its body now references unboxed structs
+                // that no longer fit the boxed `Value` ABI.
+                if self.aggregate_alias.is_some()
+                    && self.aggregate_fns.contains_key(name.as_ref())
+                {
+                    return Ok(());
+                }
                 // Use Rc<RefCell<>> pattern to allow recursive function calls
                 // The function can reference itself through the cell
                 let name_raw = name.as_ref();
@@ -3321,6 +3399,14 @@ impl Codegen {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                // #177: route a top-level call to a de-virtualized aggregate fn. Void fns
+                // (`advance`/`offsetMomentum`) emit `name_agg(&mut bodies, …)` (a `()` statement);
+                // an f64-returning fn (`energy`) is boxed back into `Value::Number` for this path.
+                if !self.aggregate_fns.is_empty() {
+                    if let Some((code, _)) = self.try_emit_toplevel_agg_call(callee, args, true)? {
+                        return Ok(code);
+                    }
+                }
                 // Typed-struct shortcut for `JSON.stringify(typedValue)`.
                 // When the single arg has a known native type that owns a
                 // hand-rolled `_tish_write_json` (struct or `Vec<struct>`),
@@ -5897,6 +5983,16 @@ impl Codegen {
         expr: &Expr,
         target_type: &RustType,
     ) -> Result<String, CompileError> {
+        // #177: `let bodies = makeBodies()` — route the array-factory call to its native free fn
+        // returning `Vec<TishStruct_alias>` directly (no boxed `Value::Array` round-trip).
+        if !self.aggregate_fns.is_empty() {
+            if let Expr::Call { callee, args, .. } = expr {
+                if let Some((code, _)) = self.try_emit_toplevel_agg_call(callee, args, false)? {
+                    return Ok(code);
+                }
+            }
+        }
+
         // Try to emit literals directly as native types
         if let Expr::Literal { value, .. } = expr {
             match (target_type, value) {
@@ -7769,6 +7865,1110 @@ impl Codegen {
         Ok(())
     }
 
+    // ====================================================================================
+    // #177 (S-E / S-F): interprocedural aggregate (unboxed struct + Vec<Struct>) free fns.
+    //
+    // The infer front-end (S-0..S-D, behind TISH_AGGREGATE_INFER) stamps a struct alias and
+    // `: alias` / `: alias[]` annotations onto the nbody-shape factory/array/operator fns iff a
+    // whole-program candidacy predicate holds (monomorphic all-f64 struct, no `===`/escape/
+    // reshape, write-permitting field ops). Here we consume that: emit each such fn as a native
+    // Rust free fn over `Vec<TishStruct_alias>` threaded by `&mut`/`&`, with element access by
+    // index (so JS reference aliasing — `let bi = bodies[i]; bi.vx = …` — lowers to in-place
+    // `bodies[i].vx = …` and the mutation persists, exactly like the boxed `Value::Array`).
+    //
+    // SOUNDNESS: this is the codegen-side gate. We re-run `analyze_aggregate` to recover the
+    // verdict, then emit every fn into a scratch buffer; if ANY construct can't be lowered the
+    // whole path is disabled (the fns + the call hooks fall back to the boxed closures, byte-
+    // identical to flag-off). So we never half-wire the feature or miscompile.
+    // ====================================================================================
+
+    /// Compute the aggregate group from the stamped `: alias` / `: alias[]` annotations the infer
+    /// front-end wrote (the infer→codegen contract — re-running `analyze_aggregate` on the already
+    /// stamped program is NOT idempotent), emit the native free fns, and (on full success) record
+    /// the routing state so call sites de-virtualize. On any failure the state is left empty (path
+    /// disabled) and nothing is appended to the output.
+    fn setup_aggregate_fns(&mut self, program: &Program) {
+        let dbg = std::env::var("TISH_AGG_DEBUG").is_ok();
+        // The unboxed struct alias: the (unique) name `A` used as an `A[]` array param of some fn,
+        // and registered as an all-`Copy`-field struct alias.
+        let Some(alias) = self.detect_aggregate_alias(program) else {
+            if dbg {
+                eprintln!("[agg] detect_aggregate_alias = None; aliases={:?}", self.type_aliases.keys().collect::<Vec<_>>());
+            }
+            return;
+        };
+        if dbg {
+            eprintln!("[agg] alias = {}", alias);
+        }
+        // Top-level numeric global `let` names available to capture as trailing params.
+        let globals = Self::collect_toplevel_global_lets(program);
+
+        // Build a signature for every fn in the group from its stamped annotations.
+        let mut sigs: std::collections::HashMap<String, AggFnSig> = std::collections::HashMap::new();
+        let mut decls: Vec<(String, Vec<FunParam>, Statement)> = Vec::new();
+        for s in &program.statements {
+            if let Statement::FunDecl {
+                async_: false,
+                name,
+                params,
+                rest_param: None,
+                return_type,
+                body,
+                ..
+            } = s
+            {
+                let nm = name.to_string();
+                // The array param: a `Simple`-param annotated `: alias[]`.
+                let array_pi = params.iter().position(|p| {
+                    matches!(p, FunParam::Simple(tp)
+                        if Self::ann_is_array_of(tp.type_ann.as_ref(), &alias))
+                });
+                // Return shape from the stamped return type, else from the body.
+                let ret = if Self::ann_is_simple(return_type.as_ref(), &alias) {
+                    AggRet::Struct
+                } else if Self::ann_is_array_of(return_type.as_ref(), &alias) {
+                    AggRet::ArrayOfStruct
+                } else if array_pi.is_some() {
+                    if Self::stmt_returns_value(body) {
+                        AggRet::F64
+                    } else {
+                        AggRet::Unit
+                    }
+                } else {
+                    // Not a factory and takes no array param → not in the group.
+                    continue;
+                };
+                let array_pname = array_pi.and_then(|pi| match params.get(pi) {
+                    Some(FunParam::Simple(tp)) => Some(tp.name.to_string()),
+                    _ => None,
+                });
+                let is_mut = array_pname
+                    .as_deref()
+                    .map(|p| Self::agg_fn_mutates_array(body, p))
+                    .unwrap_or(false);
+                // Per-source-param kind.
+                let mut sig_params: Vec<(String, AggParamKind)> = Vec::new();
+                let mut ok = true;
+                for (pi, p) in params.iter().enumerate() {
+                    match p {
+                        FunParam::Simple(tp) => {
+                            let kind = if Some(pi) == array_pi {
+                                AggParamKind::Array { is_mut }
+                            } else {
+                                // Scalar param: must be annotated `: number` (→ f64).
+                                let ty = tp
+                                    .type_ann
+                                    .as_ref()
+                                    .map(|t| {
+                                        crate::types::RustType::from_annotation_with_aliases(
+                                            t,
+                                            &self.type_aliases,
+                                        )
+                                    })
+                                    .unwrap_or(RustType::Value);
+                                if ty != RustType::F64 {
+                                    ok = false;
+                                    break;
+                                }
+                                AggParamKind::Scalar(ty)
+                            };
+                            sig_params.push((tp.name.to_string(), kind));
+                        }
+                        _ => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                // Captured globals: free idents in the body that are top-level numeric globals and
+                // not params/locals/group-fn names.
+                let captured = Self::agg_captured_globals(body, params, &globals, &sigs, &nm, &alias);
+                sigs.insert(
+                    nm.clone(),
+                    AggFnSig {
+                        params: sig_params,
+                        captured,
+                        ret,
+                    },
+                );
+                decls.push((nm, params.clone(), (**body).clone()));
+            }
+        }
+        if dbg {
+            eprintln!("[agg] sigs = {:?}", sigs.keys().collect::<Vec<_>>());
+        }
+        if sigs.is_empty() {
+            return;
+        }
+
+        // Top-level array locals: a `let bodies: alias[] = …` VarDecl.
+        let array_locals: std::collections::HashSet<String> = program
+            .statements
+            .iter()
+            .filter_map(|s| match s {
+                Statement::VarDecl { name, type_ann, .. }
+                    if Self::ann_is_array_of(type_ann.as_ref(), &alias) =>
+                {
+                    Some(name.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+
+        // Tentatively commit the routing state so `emit_agg_*` can resolve nested group calls.
+        self.aggregate_alias = Some(alias.clone());
+        self.aggregate_fns = sigs;
+        self.aggregate_array_locals = array_locals;
+
+        // Emit every fn into a scratch buffer; on any failure, roll back (disable the path).
+        let saved = std::mem::take(&mut self.output);
+        let saved_indent = self.indent;
+        self.indent = 0;
+        let mut all_ok = true;
+        for (nm, params, body) in &decls {
+            if self.emit_aggregate_fn(nm, params, body).is_err() {
+                all_ok = false;
+                break;
+            }
+        }
+        let emitted = std::mem::replace(&mut self.output, saved);
+        self.indent = saved_indent;
+        if dbg {
+            eprintln!("[agg] all_ok = {} array_locals = {:?}", all_ok, self.aggregate_array_locals);
+        }
+        if all_ok {
+            self.output.push_str(&emitted);
+            self.writeln("");
+        } else {
+            // Roll back: disable the aggregate path entirely.
+            self.aggregate_alias = None;
+            self.aggregate_fns.clear();
+            self.aggregate_array_locals.clear();
+        }
+    }
+
+    /// Emit one aggregate fn as a native Rust free fn (`fn name_agg(..) -> ..`).
+    fn emit_aggregate_fn(
+        &mut self,
+        name: &str,
+        _params: &[FunParam],
+        body: &Statement,
+    ) -> Result<(), CompileError> {
+        let sig = self
+            .aggregate_fns
+            .get(name)
+            .cloned()
+            .expect("emit_aggregate_fn: sig present");
+        let alias = self
+            .aggregate_alias
+            .clone()
+            .expect("emit_aggregate_fn: alias present");
+        let struct_ty = crate::types::named_struct_ident(&alias);
+
+        // Build the param list + register types in a fresh scope.
+        self.type_context.push_scope();
+        let mut plist: Vec<String> = Vec::new();
+        let mut array_param: Option<String> = None;
+        for (pname, kind) in &sig.params {
+            let esc = Self::escape_ident(pname).into_owned();
+            match kind {
+                AggParamKind::Array { is_mut } => {
+                    let r = if *is_mut { "&mut " } else { "&" };
+                    plist.push(format!("{}: {}Vec<{}>", esc, r, struct_ty));
+                    array_param = Some(pname.clone());
+                }
+                AggParamKind::Scalar(ty) => {
+                    plist.push(format!("{}: {}", esc, ty.to_rust_type_str()));
+                    self.type_context.define(pname, ty.clone());
+                }
+            }
+        }
+        for g in &sig.captured {
+            plist.push(format!("{}: f64", Self::escape_ident(g)));
+            self.type_context.define(g, RustType::F64);
+        }
+        let ret_str = match sig.ret {
+            AggRet::Struct => format!(" -> {}", struct_ty),
+            AggRet::ArrayOfStruct => format!(" -> Vec<{}>", struct_ty),
+            AggRet::F64 => " -> f64".to_string(),
+            AggRet::Unit => String::new(),
+        };
+        self.writeln("#[allow(non_snake_case, unused)]");
+        self.writeln(&format!(
+            "fn {}_agg({}){} {{",
+            Self::escape_ident(name),
+            plist.join(", "),
+            ret_str
+        ));
+        self.indent += 1;
+        let prev_ret = self.agg_cur_ret.replace(sig.ret.clone());
+        let mut aliases: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let res = self.emit_agg_stmt(body, array_param.as_deref(), &mut aliases);
+        self.agg_cur_ret = prev_ret;
+        self.indent -= 1;
+        self.writeln("}");
+        self.type_context.pop_scope();
+        res
+    }
+
+    /// Emit a statement inside an aggregate fn body. `arr` is the array param name (if any);
+    /// `aliases` maps element-alias locals (`let bi = bodies[i]`) to their index-var name.
+    fn emit_agg_stmt(
+        &mut self,
+        stmt: &Statement,
+        arr: Option<&str>,
+        aliases: &mut std::collections::HashMap<String, String>,
+    ) -> Result<(), CompileError> {
+        match stmt {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                for s in statements {
+                    self.emit_agg_stmt(s, arr, aliases)?;
+                }
+                Ok(())
+            }
+            Statement::VarDecl { name, init, .. } => {
+                let init = init
+                    .as_ref()
+                    .ok_or_else(|| CompileError::new("agg: uninit let", None))?;
+                // Element alias: `let bi = bodies[i]` (i a bare ident) → record, emit nothing.
+                if let Expr::Index { object, index, .. } = init {
+                    if let (Expr::Ident { name: on, .. }, Expr::Ident { name: iv, .. }) =
+                        (object.as_ref(), index.as_ref())
+                    {
+                        if Some(on.as_ref()) == arr {
+                            aliases.insert(name.to_string(), iv.to_string());
+                            return Ok(());
+                        }
+                    }
+                }
+                let (code, ty) = self.emit_agg_expr(init, arr, aliases)?;
+                self.type_context.define(name, ty);
+                self.writeln(&format!("let mut {} = {};", Self::escape_ident(name), code));
+                Ok(())
+            }
+            Statement::ExprStmt { expr, .. } => {
+                let code = self.emit_agg_assign(expr, arr, aliases)?;
+                self.writeln(&format!("{};", code));
+                Ok(())
+            }
+            Statement::Return { value, .. } => {
+                let ret = self
+                    .agg_cur_ret
+                    .clone()
+                    .unwrap_or(AggRet::Unit);
+                match (&ret, value) {
+                    (AggRet::Unit, _) => {
+                        self.writeln("return;");
+                        Ok(())
+                    }
+                    (AggRet::F64, Some(e)) => {
+                        let (code, ty) = self.emit_agg_expr(e, arr, aliases)?;
+                        let f = if ty == RustType::F64 {
+                            code
+                        } else {
+                            return Err(CompileError::new("agg: non-f64 return", None));
+                        };
+                        self.writeln(&format!("return {};", f));
+                        Ok(())
+                    }
+                    (AggRet::Struct, Some(e)) => {
+                        let code = self.emit_agg_struct_literal(e, arr, aliases)?;
+                        self.writeln(&format!("return {};", code));
+                        Ok(())
+                    }
+                    (AggRet::ArrayOfStruct, Some(e)) => {
+                        let code = self.emit_agg_array_literal(e, arr, aliases)?;
+                        self.writeln(&format!("return {};", code));
+                        Ok(())
+                    }
+                    _ => Err(CompileError::new("agg: bad return", None)),
+                }
+            }
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
+                // `for (init; cond; update) body` → `{ init; while cond { body; update; } }`.
+                // The candidacy predicate forbids `break`/`continue` reaching this emitter (the
+                // codegen gate below bails on them), so the lowering is faithful.
+                self.writeln("{");
+                self.indent += 1;
+                if let Some(i) = init {
+                    self.emit_agg_stmt(i, arr, aliases)?;
+                }
+                let cond_code = match cond {
+                    Some(c) => {
+                        let (code, _) = self.emit_agg_expr(c, arr, aliases)?;
+                        code
+                    }
+                    None => "true".to_string(),
+                };
+                self.writeln(&format!("while {} {{", cond_code));
+                self.indent += 1;
+                self.emit_agg_stmt(body, arr, aliases)?;
+                if let Some(u) = update {
+                    let ucode = self.emit_agg_assign(u, arr, aliases)?;
+                    self.writeln(&format!("{};", ucode));
+                }
+                self.indent -= 1;
+                self.writeln("}");
+                self.indent -= 1;
+                self.writeln("}");
+                Ok(())
+            }
+            _ => Err(CompileError::new("agg: unsupported statement", None)),
+        }
+    }
+
+    /// Emit an assignment / increment expression in statement position inside an aggregate fn.
+    fn emit_agg_assign(
+        &mut self,
+        expr: &Expr,
+        arr: Option<&str>,
+        aliases: &std::collections::HashMap<String, String>,
+    ) -> Result<String, CompileError> {
+        match expr {
+            // `px = <f64>` — scalar local/param assign.
+            Expr::Assign { name, value, .. } => {
+                let (v, _) = self.emit_agg_expr(value, arr, aliases)?;
+                Ok(format!("{} = {}", Self::escape_ident(name), v))
+            }
+            Expr::CompoundAssign {
+                name, op, value, ..
+            } => {
+                let (v, _) = self.emit_agg_expr(value, arr, aliases)?;
+                let op_str = match op {
+                    CompoundOp::Add => "+=",
+                    CompoundOp::Sub => "-=",
+                    CompoundOp::Mul => "*=",
+                    CompoundOp::Div => "/=",
+                    CompoundOp::Mod => "%=",
+                };
+                Ok(format!("{} {} {}", Self::escape_ident(name), op_str, v))
+            }
+            // `i++` / `++i` / `i--` / `--i` (loop update) → native f64 step.
+            Expr::PostfixInc { name, .. } | Expr::PrefixInc { name, .. } => {
+                Ok(format!("{} += 1f64", Self::escape_ident(name)))
+            }
+            Expr::PostfixDec { name, .. } | Expr::PrefixDec { name, .. } => {
+                Ok(format!("{} -= 1f64", Self::escape_ident(name)))
+            }
+            // `bi.vx = <f64>` (alias) / `bodies[i].vx = <f64>` (direct index) field write.
+            Expr::MemberAssign {
+                object,
+                prop,
+                value,
+                ..
+            } => {
+                let field = crate::types::field_ident(prop.as_ref());
+                let place = self.emit_agg_place(object, arr, aliases)?;
+                let (v, _) = self.emit_agg_expr(value, arr, aliases)?;
+                Ok(format!("{}.{} = {}", place, field, v))
+            }
+            _ => Err(CompileError::new("agg: unsupported statement expr", None)),
+        }
+    }
+
+    /// Emit the array-element place for a field write target: an alias ident `bi` or `bodies[i]`.
+    fn emit_agg_place(
+        &mut self,
+        object: &Expr,
+        arr: Option<&str>,
+        aliases: &std::collections::HashMap<String, String>,
+    ) -> Result<String, CompileError> {
+        match object {
+            Expr::Ident { name, .. } => {
+                if let Some(idxvar) = aliases.get(name.as_ref()) {
+                    let a = arr.ok_or_else(|| CompileError::new("agg: alias no array", None))?;
+                    return Ok(format!(
+                        "{}[({}) as usize]",
+                        Self::escape_ident(a),
+                        Self::escape_ident(idxvar)
+                    ));
+                }
+                Err(CompileError::new("agg: bad write target", None))
+            }
+            Expr::Index { object: io, index, .. } => {
+                if let Expr::Ident { name: on, .. } = io.as_ref() {
+                    if Some(on.as_ref()) == arr {
+                        let (idx, _) = self.emit_agg_expr(index, arr, aliases)?;
+                        return Ok(format!("{}[({}) as usize]", Self::escape_ident(on.as_ref()), idx));
+                    }
+                }
+                Err(CompileError::new("agg: bad index write target", None))
+            }
+            _ => Err(CompileError::new("agg: bad write target", None)),
+        }
+    }
+
+    /// Emit a (scalar / bool) expression inside an aggregate fn body.
+    fn emit_agg_expr(
+        &mut self,
+        e: &Expr,
+        arr: Option<&str>,
+        aliases: &std::collections::HashMap<String, String>,
+    ) -> Result<(String, RustType), CompileError> {
+        match e {
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => Ok((Self::f64_lit(*n), RustType::F64)),
+            Expr::Literal {
+                value: Literal::Bool(b),
+                ..
+            } => Ok((format!("{}", b), RustType::Bool)),
+            Expr::Ident { name, .. } => {
+                let ty = self.type_context.get_type(name.as_ref());
+                Ok((Self::escape_ident(name.as_ref()).into_owned(), ty))
+            }
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                operand,
+                ..
+            } => {
+                let (o, _) = self.emit_agg_expr(operand, arr, aliases)?;
+                Ok((format!("(-({}))", o), RustType::F64))
+            }
+            Expr::Unary {
+                op: UnaryOp::Pos,
+                operand,
+                ..
+            } => {
+                let (o, _) = self.emit_agg_expr(operand, arr, aliases)?;
+                Ok((format!("({})", o), RustType::F64))
+            }
+            Expr::Binary {
+                left, op, right, ..
+            } => {
+                let (l, _) = self.emit_agg_expr(left, arr, aliases)?;
+                let (r, _) = self.emit_agg_expr(right, arr, aliases)?;
+                let (code, ty) = match op {
+                    BinOp::Add => (format!("({} + {})", l, r), RustType::F64),
+                    BinOp::Sub => (format!("({} - {})", l, r), RustType::F64),
+                    BinOp::Mul => (format!("({} * {})", l, r), RustType::F64),
+                    BinOp::Div => (format!("({} / {})", l, r), RustType::F64),
+                    BinOp::Mod => (format!("({} % {})", l, r), RustType::F64),
+                    BinOp::Pow => (format!("({}).powf({})", l, r), RustType::F64),
+                    BinOp::Lt => (format!("({} < {})", l, r), RustType::Bool),
+                    BinOp::Le => (format!("({} <= {})", l, r), RustType::Bool),
+                    BinOp::Gt => (format!("({} > {})", l, r), RustType::Bool),
+                    BinOp::Ge => (format!("({} >= {})", l, r), RustType::Bool),
+                    _ => {
+                        return Err(CompileError::new("agg: unsupported binop", None))
+                    }
+                };
+                Ok((code, ty))
+            }
+            Expr::Member {
+                object,
+                prop: MemberProp::Name { name: m, .. },
+                optional: false,
+                ..
+            } => {
+                if let Expr::Ident { name: on, .. } = object.as_ref() {
+                    // `bodies.length` → `(len() as f64)`.
+                    if Some(on.as_ref()) == arr && m.as_ref() == "length" {
+                        return Ok((
+                            format!("({}.len() as f64)", Self::escape_ident(on.as_ref())),
+                            RustType::F64,
+                        ));
+                    }
+                    // `bi.field` (element alias) → `bodies[i].field`.
+                    if let Some(idxvar) = aliases.get(on.as_ref()) {
+                        let a = arr
+                            .ok_or_else(|| CompileError::new("agg: alias no array", None))?;
+                        return Ok((
+                            format!(
+                                "{}[({}) as usize].{}",
+                                Self::escape_ident(a),
+                                Self::escape_ident(idxvar),
+                                crate::types::field_ident(m.as_ref())
+                            ),
+                            RustType::F64,
+                        ));
+                    }
+                    // `localStruct.field` (a `Named` local).
+                    let ty = self.type_context.get_type(on.as_ref());
+                    if let RustType::Named { fields, .. } = &ty {
+                        if let Some((_, ft)) =
+                            fields.iter().find(|(k, _)| k.as_ref() == m.as_ref())
+                        {
+                            return Ok((
+                                format!(
+                                    "{}.{}",
+                                    Self::escape_ident(on.as_ref()),
+                                    crate::types::field_ident(m.as_ref())
+                                ),
+                                ft.clone(),
+                            ));
+                        }
+                    }
+                }
+                // `bodies[i].field` read.
+                if let Expr::Index { object: io, index, .. } = object.as_ref() {
+                    if let Expr::Ident { name: on, .. } = io.as_ref() {
+                        if Some(on.as_ref()) == arr {
+                            let (idx, _) = self.emit_agg_expr(index, arr, aliases)?;
+                            return Ok((
+                                format!(
+                                    "{}[({}) as usize].{}",
+                                    Self::escape_ident(on.as_ref()),
+                                    idx,
+                                    crate::types::field_ident(m.as_ref())
+                                ),
+                                RustType::F64,
+                            ));
+                        }
+                    }
+                }
+                Err(CompileError::new("agg: unsupported member", None))
+            }
+            Expr::Call { callee, args, .. } => {
+                // Nested call to another group fn (e.g. `body(...)` from `makeBodies`).
+                if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                    if self.aggregate_fns.contains_key(fname.as_ref()) {
+                        let (code, ret) =
+                            self.emit_agg_group_call(fname.as_ref(), args, arr, aliases)?;
+                        let ty = match ret {
+                            AggRet::F64 => RustType::F64,
+                            AggRet::Struct => {
+                                let alias = self.aggregate_alias.clone().unwrap();
+                                RustType::Named {
+                                    name: alias.as_str().into(),
+                                    fields: Vec::new(),
+                                }
+                            }
+                            _ => {
+                                return Err(CompileError::new(
+                                    "agg: call return not usable here",
+                                    None,
+                                ))
+                            }
+                        };
+                        return Ok((code, ty));
+                    }
+                }
+                // `Math.<fn>(x)` clean f64-method intrinsics.
+                if let Expr::Member {
+                    object,
+                    prop: MemberProp::Name { name: method, .. },
+                    ..
+                } = callee.as_ref()
+                {
+                    if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                    {
+                        if let Some(m) = Self::agg_clean_math_method(method.as_ref()) {
+                            if let [CallArg::Expr(a)] = args.as_slice() {
+                                let (ac, _) = self.emit_agg_expr(a, arr, aliases)?;
+                                return Ok((format!("({}).{}()", ac, m), RustType::F64));
+                            }
+                        }
+                    }
+                }
+                Err(CompileError::new("agg: unsupported call", None))
+            }
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let (c, _) = self.emit_agg_expr(cond, arr, aliases)?;
+                let (t, _) = self.emit_agg_expr(then_branch, arr, aliases)?;
+                let (el, _) = self.emit_agg_expr(else_branch, arr, aliases)?;
+                Ok((format!("(if {} {{ {} }} else {{ {} }})", c, t, el), RustType::F64))
+            }
+            _ => Err(CompileError::new("agg: unsupported expr", None)),
+        }
+    }
+
+    /// Emit a `return { ... }` object literal as a native struct literal (the `body()` factory).
+    fn emit_agg_struct_literal(
+        &mut self,
+        e: &Expr,
+        arr: Option<&str>,
+        aliases: &std::collections::HashMap<String, String>,
+    ) -> Result<String, CompileError> {
+        let alias = self.aggregate_alias.clone().unwrap();
+        let struct_ty = crate::types::named_struct_ident(&alias);
+        let fields = match self.type_aliases.get(&alias) {
+            Some(RustType::Named { fields, .. }) | Some(RustType::Object(fields)) => fields.clone(),
+            _ => return Err(CompileError::new("agg: alias not a struct", None)),
+        };
+        let Expr::Object { props, .. } = e else {
+            return Err(CompileError::new("agg: struct return not literal", None));
+        };
+        use std::collections::HashMap;
+        let mut by_key: HashMap<String, &Expr> = HashMap::new();
+        for p in props {
+            match p {
+                ObjectProp::KeyValue(k, v, _) => {
+                    by_key.insert(k.to_string(), v);
+                }
+                ObjectProp::Spread(_) => {
+                    return Err(CompileError::new("agg: struct spread", None))
+                }
+            }
+        }
+        let mut inits: Vec<String> = Vec::new();
+        for (k, _) in &fields {
+            let v = by_key
+                .get(k.as_ref())
+                .ok_or_else(|| CompileError::new("agg: struct missing field", None))?;
+            let (code, _) = self.emit_agg_expr(v, arr, aliases)?;
+            inits.push(format!("{}: {}", crate::types::field_ident(k.as_ref()), code));
+        }
+        Ok(format!("{} {{ {} }}", struct_ty, inits.join(", ")))
+    }
+
+    /// Emit a `return [a, b, c]` array literal of struct-typed idents as `vec![a, b, c]`.
+    fn emit_agg_array_literal(
+        &mut self,
+        e: &Expr,
+        _arr: Option<&str>,
+        _aliases: &std::collections::HashMap<String, String>,
+    ) -> Result<String, CompileError> {
+        let Expr::Array { elements, .. } = e else {
+            return Err(CompileError::new("agg: array return not literal", None));
+        };
+        let mut items: Vec<String> = Vec::new();
+        for el in elements {
+            match el {
+                ArrayElement::Expr(Expr::Ident { name, .. }) => {
+                    items.push(Self::escape_ident(name.as_ref()).into_owned());
+                }
+                _ => {
+                    return Err(CompileError::new(
+                        "agg: array element not a struct ident",
+                        None,
+                    ))
+                }
+            }
+        }
+        Ok(format!("vec![{}]", items.join(", ")))
+    }
+
+    /// Emit a direct call to a group fn, threading the array by `&mut`/`&` plus captured globals.
+    /// Returns the call code and the callee's return shape. `arr`/`aliases` describe the CALLER's
+    /// context (so an array arg can be the caller's array param, though nbody only passes scalars
+    /// across nested group calls).
+    fn emit_agg_group_call(
+        &mut self,
+        name: &str,
+        args: &[CallArg],
+        arr: Option<&str>,
+        aliases: &std::collections::HashMap<String, String>,
+    ) -> Result<(String, AggRet), CompileError> {
+        let sig = self
+            .aggregate_fns
+            .get(name)
+            .cloned()
+            .ok_or_else(|| CompileError::new("agg: unknown group fn", None))?;
+        let mut call_args: Vec<String> = Vec::new();
+        for (i, (_pname, kind)) in sig.params.iter().enumerate() {
+            let a = match args.get(i) {
+                Some(CallArg::Expr(e)) => e,
+                _ => return Err(CompileError::new("agg: call arg shape", None)),
+            };
+            match kind {
+                AggParamKind::Array { is_mut } => {
+                    // The arg must be a bare ident naming an array (caller's param or local).
+                    let Expr::Ident { name: an, .. } = a else {
+                        return Err(CompileError::new("agg: array arg not ident", None));
+                    };
+                    let r = if *is_mut { "&mut " } else { "&" };
+                    call_args.push(format!("{}{}", r, Self::escape_ident(an.as_ref())));
+                }
+                AggParamKind::Scalar(_) => {
+                    let (code, _) = self.emit_agg_expr(a, arr, aliases)?;
+                    call_args.push(code);
+                }
+            }
+        }
+        // Captured globals are visible as same-named f64 params/locals in the caller too.
+        for g in &sig.captured {
+            call_args.push(Self::escape_ident(g).into_owned());
+        }
+        Ok((
+            format!("{}_agg({})", Self::escape_ident(name), call_args.join(", ")),
+            sig.ret,
+        ))
+    }
+
+    /// Try to route a top-level call `name(args)` to its aggregate free fn. `as_value` wraps an
+    /// f64 result in `Value::Number` for the boxed `emit_expr` context. Returns `None` if `name`
+    /// isn't a group fn (caller falls back to the normal path).
+    fn try_emit_toplevel_agg_call(
+        &mut self,
+        callee: &Expr,
+        args: &[CallArg],
+        as_value: bool,
+    ) -> Result<Option<(String, RustType)>, CompileError> {
+        let Expr::Ident { name, .. } = callee else {
+            return Ok(None);
+        };
+        if !self.aggregate_fns.contains_key(name.as_ref()) {
+            return Ok(None);
+        }
+        let sig = self.aggregate_fns.get(name.as_ref()).cloned().unwrap();
+        let mut call_args: Vec<String> = Vec::new();
+        for (i, (_pname, kind)) in sig.params.iter().enumerate() {
+            let a = match args.get(i) {
+                Some(CallArg::Expr(e)) => e,
+                _ => return Ok(None),
+            };
+            match kind {
+                AggParamKind::Array { is_mut } => {
+                    let Expr::Ident { name: an, .. } = a else {
+                        return Ok(None);
+                    };
+                    let r = if *is_mut { "&mut " } else { "&" };
+                    call_args.push(format!("{}{}", r, Self::escape_ident(an.as_ref())));
+                }
+                AggParamKind::Scalar(_) => {
+                    let (code, ty) = self.emit_typed_expr(a)?;
+                    let f = if ty == RustType::F64 {
+                        code
+                    } else if ty == RustType::Value {
+                        RustType::F64.from_value_expr(&code)
+                    } else {
+                        code
+                    };
+                    call_args.push(f);
+                }
+            }
+        }
+        for g in &sig.captured {
+            let (code, ty) = self.emit_typed_expr(&Expr::Ident {
+                name: g.as_str().into(),
+                span: tishlang_ast::Span::default(),
+            })?;
+            let f = if ty == RustType::F64 {
+                code
+            } else if ty == RustType::Value {
+                RustType::F64.from_value_expr(&code)
+            } else {
+                code
+            };
+            call_args.push(f);
+        }
+        let call = format!("{}_agg({})", Self::escape_ident(name.as_ref()), call_args.join(", "));
+        let (code, ty) = match sig.ret {
+            AggRet::F64 => {
+                if as_value {
+                    (format!("Value::Number({})", call), RustType::Value)
+                } else {
+                    (call, RustType::F64)
+                }
+            }
+            AggRet::ArrayOfStruct => {
+                let alias = self.aggregate_alias.clone().unwrap();
+                (
+                    call,
+                    RustType::Vec(Box::new(RustType::Named {
+                        name: alias.as_str().into(),
+                        fields: Vec::new(),
+                    })),
+                )
+            }
+            AggRet::Struct => {
+                let alias = self.aggregate_alias.clone().unwrap();
+                (
+                    call,
+                    RustType::Named {
+                        name: alias.as_str().into(),
+                        fields: Vec::new(),
+                    },
+                )
+            }
+            // void call: `()`; valid only in statement position (ExprStmt).
+            AggRet::Unit => (call, RustType::Unit),
+        };
+        Ok(Some((code, ty)))
+    }
+
+    /// Detect the unboxed struct alias: the unique type-alias name `A` that is (a) used as an
+    /// `A[]` array param of some top-level fn and (b) registered as a struct whose fields are all
+    /// `Copy` (numeric/bool) — so element field reads/writes by index are sound. Returns `None`
+    /// if there is no such alias or more than one (ambiguous → bail to boxed).
+    fn detect_aggregate_alias(&self, program: &Program) -> Option<String> {
+        let mut found: Option<String> = None;
+        for s in &program.statements {
+            if let Statement::FunDecl { params, .. } = s {
+                for p in params {
+                    if let FunParam::Simple(tp) = p {
+                        if let Some(TypeAnnotation::Array(inner)) = tp.type_ann.as_ref() {
+                            if let TypeAnnotation::Simple(a, _) = inner.as_ref() {
+                                let a = a.to_string();
+                                if !self.alias_is_copy_struct(&a) {
+                                    continue;
+                                }
+                                match &found {
+                                    Some(prev) if prev != &a => return None, // ambiguous
+                                    _ => found = Some(a),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// Is `name` a registered struct alias whose every field is a `Copy` scalar (f64/bool/i32)?
+    fn alias_is_copy_struct(&self, name: &str) -> bool {
+        match self.type_aliases.get(name) {
+            Some(RustType::Named { fields, .. }) | Some(RustType::Object(fields)) => {
+                !fields.is_empty()
+                    && fields.iter().all(|(_, t)| {
+                        matches!(t, RustType::F64 | RustType::Bool | RustType::I32)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Is `ann` exactly `Simple(alias)`?
+    fn ann_is_simple(ann: Option<&TypeAnnotation>, alias: &str) -> bool {
+        matches!(ann, Some(TypeAnnotation::Simple(a, _)) if a.as_ref() == alias)
+    }
+
+    /// Is `ann` exactly `Array(Simple(alias))` (i.e. `alias[]`)?
+    fn ann_is_array_of(ann: Option<&TypeAnnotation>, alias: &str) -> bool {
+        matches!(ann, Some(TypeAnnotation::Array(inner))
+            if matches!(inner.as_ref(), TypeAnnotation::Simple(a, _) if a.as_ref() == alias))
+    }
+
+    /// Math methods whose JS semantics match the Rust `f64` method 1:1 (no rounding/sign quirks).
+    fn agg_clean_math_method(m: &str) -> Option<&'static str> {
+        Some(match m {
+            "sqrt" => "sqrt",
+            "sin" => "sin",
+            "cos" => "cos",
+            "tan" => "tan",
+            "exp" => "exp",
+            "log" => "ln",
+            "sinh" => "sinh",
+            "cosh" => "cosh",
+            "tanh" => "tanh",
+            "asin" => "asin",
+            "acos" => "acos",
+            "atan" => "atan",
+            "asinh" => "asinh",
+            "acosh" => "acosh",
+            "atanh" => "atanh",
+            "cbrt" => "cbrt",
+            "log2" => "log2",
+            "log10" => "log10",
+            _ => return None,
+        })
+    }
+
+    /// Does `body` contain a write through array param `p` (element field write / index write)?
+    fn agg_fn_mutates_array(body: &Statement, p: &str) -> bool {
+        let mut aliases: std::collections::HashSet<String> = std::collections::HashSet::new();
+        Self::agg_collect_aliases(body, p, &mut aliases);
+        Self::agg_stmt_writes(body, p, &aliases)
+    }
+
+    fn agg_collect_aliases(s: &Statement, p: &str, out: &mut std::collections::HashSet<String>) {
+        match s {
+            Statement::VarDecl {
+                name,
+                init: Some(Expr::Index { object, index, .. }),
+                ..
+            } => {
+                if matches!(object.as_ref(), Expr::Ident { name: o, .. } if o.as_ref() == p)
+                    && matches!(index.as_ref(), Expr::Ident { .. })
+                {
+                    out.insert(name.to_string());
+                }
+            }
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().for_each(|x| Self::agg_collect_aliases(x, p, out));
+            }
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::agg_collect_aliases(then_branch, p, out);
+                if let Some(e) = else_branch {
+                    Self::agg_collect_aliases(e, p, out);
+                }
+            }
+            Statement::For { init, body, .. } => {
+                if let Some(i) = init {
+                    Self::agg_collect_aliases(i, p, out);
+                }
+                Self::agg_collect_aliases(body, p, out);
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::ForOf { body, .. } => Self::agg_collect_aliases(body, p, out),
+            _ => {}
+        }
+    }
+
+    fn agg_stmt_writes(
+        s: &Statement,
+        p: &str,
+        aliases: &std::collections::HashSet<String>,
+    ) -> bool {
+        match s {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().any(|x| Self::agg_stmt_writes(x, p, aliases))
+            }
+            Statement::ExprStmt { expr, .. } => Self::agg_expr_writes(expr, p, aliases),
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::agg_stmt_writes(then_branch, p, aliases)
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|e| Self::agg_stmt_writes(e, p, aliases))
+            }
+            Statement::For { body, .. }
+            | Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::ForOf { body, .. } => Self::agg_stmt_writes(body, p, aliases),
+            _ => false,
+        }
+    }
+
+    fn agg_expr_writes(
+        e: &Expr,
+        p: &str,
+        aliases: &std::collections::HashSet<String>,
+    ) -> bool {
+        match e {
+            Expr::MemberAssign { object, .. } => match object.as_ref() {
+                Expr::Ident { name, .. } => aliases.contains(name.as_ref()),
+                Expr::Index { object: io, .. } => {
+                    matches!(io.as_ref(), Expr::Ident { name, .. } if name.as_ref() == p)
+                }
+                _ => false,
+            },
+            Expr::IndexAssign { object, .. } => {
+                matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == p)
+            }
+            _ => false,
+        }
+    }
+
+    /// Top-level `let` names whose initializer is a numeric constant — the only globals safe to
+    /// thread into an aggregate fn as a trailing `f64` param. A `let bodies = makeBodies()` or
+    /// `let t0 = Date.now()` is excluded so it can never be mistyped as `f64`.
+    fn collect_toplevel_global_lets(program: &Program) -> std::collections::HashSet<String> {
+        let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for s in &program.statements {
+            if let Statement::VarDecl {
+                name,
+                init: Some(e),
+                ..
+            } = s
+            {
+                if Self::expr_is_numeric_const(e, &out) {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// Conservatively: a numeric literal, an arithmetic combination of such, or a reference to an
+    /// already-proven numeric global (`numeric` carries the names accepted so far, in source order).
+    fn expr_is_numeric_const(e: &Expr, numeric: &std::collections::HashSet<String>) -> bool {
+        match e {
+            Expr::Literal {
+                value: Literal::Number(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => numeric.contains(name.as_ref()),
+            Expr::Unary {
+                op: UnaryOp::Neg | UnaryOp::Pos,
+                operand,
+                ..
+            } => Self::expr_is_numeric_const(operand, numeric),
+            Expr::Binary {
+                left, op, right, ..
+            } => {
+                matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
+                ) && Self::expr_is_numeric_const(left, numeric)
+                    && Self::expr_is_numeric_const(right, numeric)
+            }
+            _ => false,
+        }
+    }
+
+    /// Captured globals a fn body references: free idents that are top-level globals, excluding
+    /// the fn's own params, its locals, the other group-fn names, and the struct alias.
+    fn agg_captured_globals(
+        body: &Statement,
+        params: &[FunParam],
+        globals: &std::collections::HashSet<String>,
+        group_fns: &std::collections::HashMap<String, AggFnSig>,
+        self_name: &str,
+        alias: &str,
+    ) -> Vec<String> {
+        let mut idents: std::collections::HashSet<String> = std::collections::HashSet::new();
+        Self::collect_stmt_idents(body, &mut idents);
+        let mut locals: std::collections::HashSet<String> = std::collections::HashSet::new();
+        Self::collect_local_var_names(body, &mut locals);
+        let pnames: std::collections::HashSet<String> = params
+            .iter()
+            .flat_map(|p| p.bound_names())
+            .map(|n| n.to_string())
+            .collect();
+        let mut out: Vec<String> = idents
+            .into_iter()
+            .filter(|id| {
+                globals.contains(id)
+                    && !pnames.contains(id)
+                    && !locals.contains(id)
+                    && !group_fns.contains_key(id)
+                    && id != self_name
+                    && id != alias
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Does `s` contain a `return <value>` (vs only bare `return;` / no return)?
+    fn stmt_returns_value(s: &Statement) -> bool {
+        match s {
+            Statement::Return { value, .. } => value.is_some(),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().any(Self::stmt_returns_value)
+            }
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::stmt_returns_value(then_branch)
+                    || else_branch.as_ref().is_some_and(|e| Self::stmt_returns_value(e))
+            }
+            Statement::For { body, .. }
+            | Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::ForOf { body, .. } => Self::stmt_returns_value(body),
+            _ => false,
+        }
+    }
+
     /// Lower an expression that JS will coerce to **int32** inside a bitwise/shift computation,
     /// staying in the integer domain instead of round-tripping every intermediate through `f64`.
     ///
@@ -8138,6 +9338,13 @@ impl Codegen {
             // skipping the boxed value_call per element. Only methods whose Rust f64 op
             // matches JS semantics (round half-up & sign(0) differ → left to the runtime).
             Expr::Call { callee, args, .. } => {
+                // #177: a de-virtualized aggregate fn used in native arithmetic (e.g. `energy(bodies)`
+                // feeding an f64 expression) → call `name_agg(..)` returning the native type.
+                if !self.aggregate_fns.is_empty() {
+                    if let Some((code, ty)) = self.try_emit_toplevel_agg_call(callee, args, false)? {
+                        return Ok((code, ty));
+                    }
+                }
                 // M5: direct call to an eligible native fn -> `name_native(<native args>)`.
                 if let Expr::Ident { name: fname, .. } = callee.as_ref() {
                     if self.native_fns.contains(fname.as_ref()) {
