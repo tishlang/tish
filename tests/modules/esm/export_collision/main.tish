@@ -1,0 +1,5 @@
+// #282 repro: import the same exported name from two modules under different local aliases.
+import { activate as activateA } from "./a.tish"
+import { activate as activateB } from "./b.tish"
+
+console.log(activateA() + activateB())

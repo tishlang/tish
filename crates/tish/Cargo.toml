@@ -64,3 +64,4 @@ mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
 rayon = "1.11"
+tempfile = "3"

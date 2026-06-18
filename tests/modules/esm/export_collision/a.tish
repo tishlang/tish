@@ -1,0 +1,6 @@
+// #282: two modules export the same name. In `--format bundle` these collide into one flat
+// scope (duplicate `function activate` → SyntaxError); in `--format esm` each module keeps its
+// own scope, so the collision is impossible.
+export fn activate() {
+  return "a"
+}

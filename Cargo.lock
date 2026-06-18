@@ -3205,6 +3205,7 @@ dependencies = [
  "mimalloc",
  "rayon",
  "rustyline",
+ "tempfile",
  "tishlang_ast",
  "tishlang_bytecode",
  "tishlang_compile",
@@ -3283,6 +3284,7 @@ name = "tishlang_compile_js"
 version = "0.1.0"
 dependencies = [
  "sourcemap",
+ "tempfile",
  "tishlang_ast",
  "tishlang_compile",
  "tishlang_opt",
