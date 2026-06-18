@@ -702,8 +702,8 @@ fn test_js_esm_export_collision() {
         .map(|o| o.status.success())
         .unwrap_or(false);
     if node_available {
-        let out_dir = std::env::temp_dir().join(format!("tish_esm_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&out_dir);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out_dir = tmp.path().join("esm_out");
         let build = Command::new(&bin)
             .args(["build"])
             .arg(&main)
@@ -725,7 +725,6 @@ fn test_js_esm_export_collision() {
             .current_dir(workspace_root())
             .output()
             .expect("run node");
-        let _ = std::fs::remove_dir_all(&out_dir);
         assert!(
             out.status.success(),
             "esm JS run failed (collision not isolated?): stderr={}",

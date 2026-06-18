@@ -461,16 +461,8 @@ fn factory() {
     /// Write a set of `(relative_path, source)` modules into a fresh temp dir and compile the entry
     /// in ESM mode. Returns the emitted modules keyed for easy lookup by their output relative path.
     fn build_esm(entry: &str, modules: &[(&str, &str)]) -> Vec<EmittedJsModule> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "tish_esm_unit_{}_{}",
-            std::process::id(),
-            unique
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
         for (rel, src) in modules {
             let p = dir.join(rel);
             if let Some(parent) = p.parent() {
@@ -480,10 +472,7 @@ fn factory() {
             f.write_all(src.as_bytes()).unwrap();
             f.sync_all().unwrap();
         }
-        let out = compile_project_esm(&dir.join(entry), Some(&dir), false)
-            .expect("compile_project_esm failed");
-        let _ = std::fs::remove_dir_all(&dir);
-        out
+        compile_project_esm(&dir.join(entry), Some(dir), false).expect("compile_project_esm failed")
     }
 
     fn module_js<'a>(mods: &'a [EmittedJsModule], rel: &str) -> &'a str {
@@ -550,15 +539,8 @@ fn factory() {
     fn esm_module_outside_project_root_is_emitted() {
         // #282 follow-up: a dependency in a *sibling* package (outside the entry's project root)
         // must still be emitted — the output tree is rooted at the directory common to all modules.
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let base = std::env::temp_dir().join(format!(
-            "tish_esm_xroot_{}_{}",
-            std::process::id(),
-            unique
-        ));
-        let _ = std::fs::remove_dir_all(&base);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
         std::fs::create_dir_all(base.join("app/src")).unwrap();
         std::fs::create_dir_all(base.join("lib")).unwrap();
         std::fs::write(base.join("lib/util.tish"), "export fn id(x) { return x }\n").unwrap();
@@ -582,7 +564,6 @@ fn factory() {
             .iter()
             .find(|m| m.relative_path.to_string_lossy().replace('\\', "/").ends_with("app/src/main.js"))
             .map(|m| m.js.clone());
-        let _ = std::fs::remove_dir_all(&base);
         assert!(
             rels.iter().any(|r| r.ends_with("lib/util.js")),
             "sibling dep emitted under common base: {:?}",
@@ -604,15 +585,8 @@ fn factory() {
     fn esm_bare_node_modules_dep_is_emitted() {
         // #282 follow-up: a bare specifier resolved from `node_modules` (like `lattish`) is emitted
         // into the output tree and the importer points at it with a relative `.js` specifier.
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let base = std::env::temp_dir().join(format!(
-            "tish_esm_nm_{}_{}",
-            std::process::id(),
-            unique
-        ));
-        let _ = std::fs::remove_dir_all(&base);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
         std::fs::create_dir_all(base.join("src")).unwrap();
         std::fs::create_dir_all(base.join("node_modules/pkg")).unwrap();
         std::fs::write(
@@ -630,7 +604,7 @@ fn factory() {
             "import { ping } from \"pkg\"\nconsole.log(ping())\n",
         )
         .unwrap();
-        let mods = compile_project_esm(&base.join("src/main.tish"), Some(&base), false)
+        let mods = compile_project_esm(&base.join("src/main.tish"), Some(base), false)
             .expect("compile_project_esm failed for node_modules dep");
         let rels: Vec<String> = mods
             .iter()
@@ -640,7 +614,6 @@ fn factory() {
             .iter()
             .find(|m| m.relative_path.to_string_lossy().replace('\\', "/").ends_with("src/main.js"))
             .map(|m| m.js.clone());
-        let _ = std::fs::remove_dir_all(&base);
         assert!(
             rels.iter().any(|r| r.ends_with("node_modules/pkg/index.js")),
             "node_modules dep emitted: {:?}",
@@ -655,13 +628,11 @@ fn factory() {
 
     #[test]
     fn esm_rejects_native_imports() {
-        let dir = std::env::temp_dir().join(format!("tish_esm_native_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
         let p = dir.join("main.tish");
         std::fs::write(&p, "import { readFile } from \"fs\"\nconsole.log(1)\n").unwrap();
-        let err = compile_project_esm(&p, Some(&dir), false).unwrap_err();
-        let _ = std::fs::remove_dir_all(&dir);
+        let err = compile_project_esm(&p, Some(dir), false).unwrap_err();
         assert!(
             err.message.contains("Native module import") && err.message.contains("esm"),
             "expected a native-import rejection for ESM, got: {}",
