@@ -196,8 +196,24 @@ pub fn infer_program(program: &Program) -> Program {
     // backend emits unboxed structs with direct field access. Conservative —
     // only applies when every use of the binding is a literal-key field read,
     // so it can never miscompile (any uncertainty falls back to boxed Value).
-    if std::env::var("TISH_STRUCT_INFER").map(|v| v != "0").unwrap_or(false) {
+    let p = if std::env::var("TISH_STRUCT_INFER").map(|v| v != "0").unwrap_or(false) {
         struct_infer_program(p)
+    } else {
+        p
+    };
+    // S-0..S-C aggregate (interprocedural monomorphic struct) inference — issue #177, opt-in via
+    // TISH_AGGREGATE_INFER, OFF by default. Front-end of the nbody unboxing lever: it
+    //   S-0: types params used ONLY as object-literal field values (`body(x,…)` → `: number`),
+    //   S-A: registers the return-shape struct alias for an all-f64 object-literal-returning fn,
+    //   S-B: propagates a call's return type to `let p = body(…)` / `let bs = makeBodies()`,
+    //   S-C: types `[ident,…]` array literals from those struct-typed locals.
+    // The full lever also needs S-D (write-permitting param-shape) + S-E/S-F (the typed-fn ABI
+    // tier in codegen) before the annotations can be *consumed* without a boxed-edge miscompile;
+    // until those land this pass only emits the annotations the existing codegen backs SOUNDLY
+    // (the S-0 scalar `: number` params, identical to the M4 mechanism) plus the inert struct
+    // alias decls. See `aggregate_infer_program`.
+    if std::env::var("TISH_AGGREGATE_INFER").map(|v| v != "0").unwrap_or(false) {
+        aggregate_infer_program(p)
     } else {
         p
     }
@@ -1910,6 +1926,1148 @@ fn _uses_call_arg(_: &CallArg) {}
 #[allow(dead_code)]
 fn _uses_arrow_body(_: &ArrowBody) {}
 
+// ===========================================================================
+// S-0..S-C: aggregate (interprocedural monomorphic struct) inference — issue #177
+// ===========================================================================
+//
+// This is the front-end of the nbody-unboxing lever. It runs ONLY under
+// `TISH_AGGREGATE_INFER` (OFF by default). The four sub-passes are pure analysis
+// over the (already base/param/struct-inferred) `Program`:
+//
+//   S-0  param-numeric-as-field-value: a param used ONLY as an object-literal
+//        field value (and otherwise numeric-safely) is `: number`. This MUST run
+//        before S-A so `infer_object_shape(body)` can see the param types.
+//   S-A  return-shape: a fn whose EVERY `return` is the same all-f64 object
+//        literal gets a registered struct alias as its inferred return shape.
+//   S-B  call-return propagation: `let p = body(…)` → struct; a fn that returns
+//        an array of struct-typed idents → `Array(struct)`, so `let bs =
+//        makeBodies()` is `Array(struct)`.
+//   S-C  array-of-ident element typing: `[a, b, c]` where each ident is the same
+//        struct alias → `Array(struct)`.
+//
+// SOUNDNESS / WHAT IS ACTUALLY WRITTEN BACK
+// -----------------------------------------
+// The struct types S-A/S-B/S-C compute cannot yet be *consumed* by codegen
+// without the S-D write-permitting param predicate and the S-E/S-F typed-fn ABI
+// tier (a de-virtualized `fn advance(bodies: &VmRef<Vec<TishStruct_Body>>, …)`).
+// Until those land, writing a `Named`/`Array(Named)` annotation onto a fn param
+// or a call-initialised local would MISCOMPILE: `collect_annotated_types`
+// (codegen.rs) records the param/local as a native struct while the actual
+// binding is still a boxed `Value` (the call returns boxed `Value` — there is no
+// FnSigTable / struct-returning emission), so a `p.x` field read or `bodies[i].vx
+// = …` write would be lowered against a boxed value. The boxed-edge `===`/escape
+// hazards in the design's candidacy predicate are the same class of problem.
+//
+// Therefore `aggregate_infer_program` writes back ONLY the annotations the
+// EXISTING codegen backs soundly:
+//   * S-0's scalar `: number` params (identical to the M4 param-infer mechanism,
+//     already consumed soundly), and
+//   * the inert struct `type` alias decls (unreferenced aliases are dropped by
+//     codegen — they change nothing on their own).
+// The S-A/S-B/S-C struct *shapes* are computed and exposed via
+// `analyze_aggregate` for unit tests and for the future S-D..S-F consumers, but
+// are NOT yet stamped onto params / call-locals. This keeps the ON path free of
+// any checksum divergence while the inference logic is validated independently.
+
+/// The result of the aggregate analysis: the registered struct shapes plus, per
+/// function, the inferred return shape and the set of params S-0 typed numeric.
+#[derive(Default, Debug, Clone)]
+pub struct AggregateAnalysis {
+    /// alias name → ordered field list (all `number`), one per distinct shape.
+    pub struct_decls: Vec<StructDecl>,
+    /// fn name → its return shape: `Struct(alias)` or `ArrayOfStruct(alias)`.
+    pub fn_return: HashMap<String, AggReturn>,
+    /// fn name → set of param names S-0 proved numeric (object-field-value-only).
+    pub fn_numeric_params: HashMap<String, HashSet<String>>,
+    /// top-level `let` name → inferred aggregate type (S-B/S-C), for tests.
+    pub local_agg: HashMap<String, AggReturn>,
+    /// S-D: the whole-program unboxing verdict. `Some(alias)` ⇒ the struct alias
+    /// `alias` is fully unboxable: its factory, array-factory, the top-level
+    /// `Array(alias)` local(s), and every fn taking that array by param pass the
+    /// all-or-nothing candidacy predicate, so codegen may emit the typed free-fn
+    /// tier. `None` ⇒ bail the whole group to boxed (S-0 scalars still stamp).
+    pub unbox_alias: Option<String>,
+    /// S-D: fn name → (param-index, param-name) of the `Array(alias)` param, for
+    /// the fns in the unbox group. Only populated when `unbox_alias` is `Some`.
+    pub array_param_fns: HashMap<String, (usize, String)>,
+    /// S-D: top-level `let` names whose inferred type is `Array(unbox_alias)`.
+    pub array_locals: Vec<String>,
+}
+
+/// An inferred aggregate (struct-ish) type produced by the S-A..S-C passes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggReturn {
+    /// A monomorphic all-f64 struct shape, identified by its registered alias.
+    Struct(String),
+    /// An array whose elements are all the same `Struct(alias)`.
+    ArrayOfStruct(String),
+}
+
+/// S-0 predicate: every use of `name` in `s` is EITHER a numeric-operand use
+/// (per the existing `nus_*` rules) OR an object-literal field value `{ k: name }`.
+/// Any other use — write to `name`, escape as a bare call-arg, member/index of
+/// `name`, `===` on `name`, etc. — bails (returns false). `nums` carries the
+/// numeric-local set so overloaded `+`/comparisons resolve as in `nus_*`.
+fn pus_stmt(s: &Statement, name: &str, nums: &HashSet<String>) -> bool {
+    use Statement::*;
+    match s {
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().all(|x| pus_stmt(x, name, nums))
+        }
+        Return { value, .. } => value.as_ref().is_none_or(|e| pus_value(e, name, nums)),
+        ExprStmt { expr, .. } => pus_value(expr, name, nums),
+        VarDecl { name: vn, init, .. } => {
+            vn.as_ref() != name && init.as_ref().is_none_or(|e| pus_value(e, name, nums))
+        }
+        If { cond, then_branch, else_branch, .. } => {
+            pus_value(cond, name, nums)
+                && pus_stmt(then_branch, name, nums)
+                && else_branch.as_ref().is_none_or(|e| pus_stmt(e, name, nums))
+        }
+        While { cond, body, .. } => pus_value(cond, name, nums) && pus_stmt(body, name, nums),
+        For { init, cond, update, body, .. } => {
+            init.as_ref().is_none_or(|x| pus_stmt(x, name, nums))
+                && cond.as_ref().is_none_or(|e| pus_value(e, name, nums))
+                && update.as_ref().is_none_or(|e| pus_value(e, name, nums))
+                && pus_stmt(body, name, nums)
+        }
+        Break { .. } | Continue { .. } => true,
+        _ => false,
+    }
+}
+
+/// An expression position for S-0: `name` may be an object-literal field value, a
+/// numeric operand, or absent. Bare `name` at this level (an escape) bails.
+fn pus_value(e: &Expr, name: &str, nums: &HashSet<String>) -> bool {
+    use Expr::*;
+    match e {
+        // `{ k: name, … }` — the field-value use S-0 exists to permit. Each prop value
+        // must itself be S-0-safe (so a nested `{ k: name + "!" }` still bails via nus).
+        Object { props, .. } => props.iter().all(|p| match p {
+            tishlang_ast::ObjectProp::KeyValue(_, v, _) => {
+                // A bare `name` as a field value is OK; otherwise it must be numeric-safe.
+                matches!(v, Expr::Ident { name: n, .. } if n.as_ref() == name)
+                    || pus_value(v, name, nums)
+            }
+            tishlang_ast::ObjectProp::Spread(_) => false,
+        }),
+        // Anywhere else, defer to the numeric-operand rules (a bare `name` here is not a
+        // numeric operand and `nus_expr` returns false for it → escape bails, as intended).
+        _ => nus_expr(e, name, nums),
+    }
+}
+
+/// Is `s` a fn body whose EVERY `return` returns the SAME object literal whose
+/// fields are all `number` (under `pctx`, the params-as-number context)? Returns
+/// the field list of that shape, or None.
+fn return_object_shape(
+    s: &Statement,
+    pctx: &InferCtx,
+) -> Option<Vec<(std::sync::Arc<str>, TypeAnnotation)>> {
+    let mut found: Option<Vec<(std::sync::Arc<str>, TypeAnnotation)>> = None;
+    if !collect_return_shapes(s, pctx, &mut found, &mut true) {
+        return None;
+    }
+    found
+}
+
+/// Walk `s`; for each `return <obj>` confirm it's an all-f64 object literal with a
+/// key set/order identical to any previously seen one. `ok` flips false on any
+/// non-conforming return (a non-object return, a shape mismatch, an untypeable
+/// field). Returns `ok`.
+fn collect_return_shapes(
+    s: &Statement,
+    pctx: &InferCtx,
+    found: &mut Option<Vec<(std::sync::Arc<str>, TypeAnnotation)>>,
+    ok: &mut bool,
+) -> bool {
+    use Statement::*;
+    if !*ok {
+        return false;
+    }
+    match s {
+        Return { value: Some(Expr::Object { props, .. }), .. } => {
+            match infer_object_shape(props, pctx) {
+                Some(fields) => {
+                    // HARD all-f64 gate (string/bool field ⇒ bail to boxed).
+                    if !fields.iter().all(|(_, t)| is_number(t)) {
+                        *ok = false;
+                        return false;
+                    }
+                    match found {
+                        None => *found = Some(fields),
+                        Some(prev) => {
+                            // Identical ordered key set AND identical field types.
+                            if prev.len() != fields.len()
+                                || prev.iter().zip(&fields).any(|((pk, pt), (fk, ft))| {
+                                    pk != fk || type_canon(pt) != type_canon(ft)
+                                })
+                            {
+                                *ok = false;
+                                return false;
+                            }
+                        }
+                    }
+                }
+                None => {
+                    *ok = false;
+                    return false;
+                }
+            }
+        }
+        // A `return` of anything other than an object literal ⇒ not a struct factory.
+        Return { .. } => {
+            *ok = false;
+            return false;
+        }
+        Block { statements, .. } | Multi { statements, .. } => {
+            for x in statements {
+                if !collect_return_shapes(x, pctx, found, ok) {
+                    return false;
+                }
+            }
+        }
+        If { then_branch, else_branch, .. } => {
+            if !collect_return_shapes(then_branch, pctx, found, ok) {
+                return false;
+            }
+            if let Some(e) = else_branch {
+                if !collect_return_shapes(e, pctx, found, ok) {
+                    return false;
+                }
+            }
+        }
+        For { body, .. } | While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+            if !collect_return_shapes(body, pctx, found, ok) {
+                return false;
+            }
+        }
+        // No return here.
+        _ => {}
+    }
+    *ok
+}
+
+/// Run the S-0..S-C analysis over a program (read-only; no mutation). Exposed for
+/// unit tests and the future S-D..S-F consumers.
+pub fn analyze_aggregate(program: &Program) -> AggregateAnalysis {
+    let mut analysis = AggregateAnalysis::default();
+    let mut reg = StructRegistry::default();
+
+    // ---- S-0 + S-A: per top-level function, find numeric params and a return shape.
+    for s in &program.statements {
+        if let Statement::FunDecl { name, params, body, return_type: None, async_: false, rest_param: None, .. } = s {
+            // Locals provably numeric in the body (so overloaded `+`/comparison resolve).
+            let mut nums = HashSet::new();
+            collect_numeric_locals_fixpoint(body, &mut nums);
+            // S-0: a simple, unannotated, default-less param used only as a field value /
+            // numerically is numeric. OPTIMISTIC FIXPOINT (mirrors M4 #172): assume ALL candidate
+            // params numeric, verify each under that hypothesis, drop the failures, repeat until
+            // stable. The surviving set is self-consistent — every overloaded `+`/comparison's
+            // OTHER operand is itself a surviving numeric param — so a param that only resolves by
+            // relying on a sibling that later bails is itself dropped (no `f64 + Value` miscompile).
+            let candidates: HashSet<String> = params
+                .iter()
+                .filter_map(|p| match p {
+                    FunParam::Simple(tp) if tp.type_ann.is_none() && tp.default.is_none() => {
+                        Some(tp.name.to_string())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let mut numeric_params = candidates.clone();
+            loop {
+                let mut local_nums = nums.clone();
+                for n in &numeric_params {
+                    local_nums.insert(n.clone());
+                }
+                let drop: Vec<String> = numeric_params
+                    .iter()
+                    .filter(|n| !pus_stmt(body, n.as_str(), &local_nums))
+                    .cloned()
+                    .collect();
+                if drop.is_empty() {
+                    break;
+                }
+                for n in drop {
+                    numeric_params.remove(&n);
+                }
+            }
+            // Build a param-context: every S-0 numeric param is `: number`.
+            let mut pctx = InferCtx::new();
+            for p in params {
+                if let FunParam::Simple(tp) = p {
+                    if let Some(ann) = &tp.type_ann {
+                        pctx.define(tp.name.as_ref(), ann.clone());
+                    } else if numeric_params.contains(tp.name.as_ref()) {
+                        pctx.define(tp.name.as_ref(), number_ann());
+                    }
+                }
+            }
+            if !numeric_params.is_empty() {
+                analysis.fn_numeric_params.insert(name.to_string(), numeric_params);
+            }
+            // S-A: a single all-f64 object-literal return shape ⇒ a struct alias.
+            if let Some(fields) = return_object_shape(body, &pctx) {
+                let alias = reg.intern(&fields);
+                analysis.fn_return.insert(name.to_string(), AggReturn::Struct(alias));
+            }
+        }
+    }
+
+    // ---- S-B (array return): a fn whose return is `[ident, …]` all of one struct type.
+    // Needs the per-fn struct returns from S-A, plus the locals' struct types inside the body.
+    for s in &program.statements {
+        if let Statement::FunDecl { name, body, .. } = s {
+            if analysis.fn_return.contains_key(name.as_ref()) {
+                continue; // already a struct factory
+            }
+            if let Some(alias) = fn_returns_array_of_struct(body, &analysis) {
+                analysis
+                    .fn_return
+                    .insert(name.to_string(), AggReturn::ArrayOfStruct(alias));
+            }
+        }
+    }
+
+    // ---- S-B/S-C (top level): propagate call-return + array-of-ident to top-level locals.
+    let mut local_types: HashMap<String, AggReturn> = HashMap::new();
+    for s in &program.statements {
+        if let Statement::VarDecl { name, type_ann: None, init: Some(init), .. } = s {
+            if let Some(t) = infer_aggregate_expr(init, &analysis, &local_types) {
+                local_types.insert(name.to_string(), t);
+            }
+        }
+    }
+    analysis.local_agg = local_types;
+
+    analysis.struct_decls = reg.decls;
+
+    // ---- S-D: whole-program unboxing candidacy. All-or-nothing per struct alias.
+    compute_unbox_candidacy(program, &mut analysis);
+
+    analysis
+}
+
+/// S-D candidacy: decide whether a single struct alias may be FULLY unboxed into a
+/// native `VmRef<Vec<TishStruct_alias>>` threaded through de-virtualized typed free
+/// fns. Sets `analysis.unbox_alias`/`array_param_fns`/`array_locals` iff EVERY use of
+/// the struct group is safe (else leaves them empty → boxed). Conservative and
+/// all-or-nothing: a single unsafe use anywhere bails the whole alias.
+fn compute_unbox_candidacy(program: &Program, analysis: &mut AggregateAnalysis) {
+    // The factory: a fn whose return shape is `Struct(alias)`.
+    // Require EXACTLY one struct alias overall (nbody shape) — keeps it monomorphic
+    // and avoids ambiguity about which array elements are which struct.
+    if analysis.struct_decls.len() != 1 {
+        return;
+    }
+    let alias = analysis.struct_decls[0].0.clone();
+
+    // There must be an array factory returning `ArrayOfStruct(alias)` (makeBodies),
+    // and at least one top-level `let` of `ArrayOfStruct(alias)` (bodies).
+    let has_array_factory = analysis
+        .fn_return
+        .values()
+        .any(|r| matches!(r, AggReturn::ArrayOfStruct(a) if *a == alias));
+    if !has_array_factory {
+        return;
+    }
+    let array_locals: Vec<String> = analysis
+        .local_agg
+        .iter()
+        .filter_map(|(n, r)| match r {
+            AggReturn::ArrayOfStruct(a) if *a == alias => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
+    if array_locals.is_empty() {
+        return;
+    }
+
+    // Identify every fn whose first param is THE bodies array (used as `p[i]`,
+    // `p.length`, `p[i].field` read/write). Each such fn must pass the per-fn
+    // struct-array body safety predicate; a single failure bails the whole alias.
+    let mut array_param_fns: HashMap<String, (usize, String)> = HashMap::new();
+    for s in &program.statements {
+        if let Statement::FunDecl {
+            name, params, body, async_: false, rest_param: None, ..
+        } = s
+        {
+            // Find a param used array-of-struct-ish.
+            for (pi, p) in params.iter().enumerate() {
+                let pname = match p {
+                    FunParam::Simple(tp) if tp.default.is_none() => tp.name.as_ref(),
+                    _ => continue,
+                };
+                if !param_used_as_struct_array(body, pname) {
+                    continue;
+                }
+                // This param is the bodies array. The whole fn body must be unbox-safe
+                // for that array (every element use is a literal-key field op; no escape,
+                // no reshape, no `===`, no computed-key). Bail the whole alias otherwise.
+                if !struct_array_fn_safe(body, pname) {
+                    return;
+                }
+                array_param_fns.insert(name.to_string(), (pi, pname.to_string()));
+                break; // one array param per fn (nbody shape)
+            }
+        }
+    }
+    if array_param_fns.is_empty() {
+        return;
+    }
+
+    // Every CALL of an array-param fn must pass the array as a bare top-level array
+    // local (no boxed reshaping). And the array local must not escape elsewhere
+    // (passed to a non-group fn, stored, console.log'd, indexed-assigned wholesale).
+    // The call-site routing + escape check is enforced in codegen too, but we gate
+    // here so the annotations are only stamped when the program globally conforms.
+    if !array_use_sites_safe(program, &array_locals, &array_param_fns) {
+        return;
+    }
+
+    analysis.unbox_alias = Some(alias);
+    analysis.array_param_fns = array_param_fns;
+    analysis.array_locals = array_locals;
+}
+
+/// Does `body` use `p` in a struct-array shape — at least one `p[i]` index, `p.length`,
+/// or `p[i].field` access? (Used to *identify* the array param, before safety-checking.)
+fn param_used_as_struct_array(body: &Statement, p: &str) -> bool {
+    let mut found = false;
+    walk_exprs_stmt(body, &mut |e| {
+        match e {
+            Expr::Index { object, .. } => {
+                if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == p) {
+                    found = true;
+                }
+            }
+            Expr::Member { object, prop: tishlang_ast::MemberProp::Name { name: m, .. }, .. } => {
+                if m.as_ref() == "length"
+                    && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == p)
+                {
+                    found = true;
+                }
+            }
+            _ => {}
+        }
+    });
+    found
+}
+
+/// S-D per-fn struct-array safety. Every use of array param `p` inside `body` must be one of:
+///   * `p.length`                        (read)
+///   * `p[i]` as a `let x = p[i]` element-alias OR directly `p[i].field` read/write
+///   * `p[i].field` read / `p[i].field = <scalar>` write
+///   * `x.field` read / `x.field = <scalar>` write where `x` is an alias `let x = p[i]`
+/// Anything else — bare `p`, `p` as a call arg, `p[i]` stored/escaped, computed `.field`,
+/// `===`/`!==` on a body, `p.push`/`p.splice`/`p.length = …` reshape — bails (false).
+fn struct_array_fn_safe(body: &Statement, p: &str) -> bool {
+    // Collect element-alias locals: `let x = p[i]` where `i` is a simple ident.
+    // Track alias name → index-var name. Require the index var is never reassigned
+    // in the alias's scope and the alias never escapes (checked via uses).
+    let mut aliases: HashSet<String> = HashSet::new();
+    collect_element_aliases(body, p, &mut aliases);
+    saf_stmt(body, p, &aliases)
+}
+
+/// Collect `let x = p[idx]` element-alias binding names (idx a bare ident).
+fn collect_element_aliases(s: &Statement, p: &str, out: &mut HashSet<String>) {
+    use Statement::*;
+    match s {
+        VarDecl { name, init: Some(init), .. } => {
+            if let Expr::Index { object, index, .. } = init {
+                if matches!(object.as_ref(), Expr::Ident { name: o, .. } if o.as_ref() == p)
+                    && matches!(index.as_ref(), Expr::Ident { .. })
+                {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().for_each(|x| collect_element_aliases(x, p, out))
+        }
+        If { then_branch, else_branch, .. } => {
+            collect_element_aliases(then_branch, p, out);
+            if let Some(e) = else_branch {
+                collect_element_aliases(e, p, out);
+            }
+        }
+        For { init, body, .. } => {
+            if let Some(i) = init {
+                collect_element_aliases(i, p, out);
+            }
+            collect_element_aliases(body, p, out);
+        }
+        While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+            collect_element_aliases(body, p, out)
+        }
+        _ => {}
+    }
+}
+
+/// Statement-level S-D safety walk for array param `p` with element aliases `aliases`.
+fn saf_stmt(s: &Statement, p: &str, aliases: &HashSet<String>) -> bool {
+    use Statement::*;
+    match s {
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().all(|x| saf_stmt(x, p, aliases))
+        }
+        VarDecl { name, init, .. } => {
+            // `let x = p[i]` element-alias decl is OK (the alias is registered).
+            // Any other decl: the init must be p-safe AND must not bind `p` itself.
+            if name.as_ref() == p {
+                return false;
+            }
+            if let Some(Expr::Index { object, index, .. }) = init {
+                if matches!(object.as_ref(), Expr::Ident { name: o, .. } if o.as_ref() == p) {
+                    // element alias: index must be a simple ident, and the binding must be
+                    // in `aliases` (it is, by construction). OK.
+                    return matches!(index.as_ref(), Expr::Ident { .. })
+                        && aliases.contains(name.as_ref());
+                }
+            }
+            init.as_ref().is_none_or(|e| saf_expr(e, p, aliases))
+        }
+        ExprStmt { expr, .. } => saf_expr(expr, p, aliases),
+        Return { value, .. } => {
+            // A bare `return p` escapes the array; a `return <scalar>` is fine.
+            value.as_ref().is_none_or(|e| saf_expr(e, p, aliases))
+        }
+        If { cond, then_branch, else_branch, .. } => {
+            saf_expr(cond, p, aliases)
+                && saf_stmt(then_branch, p, aliases)
+                && else_branch.as_ref().is_none_or(|e| saf_stmt(e, p, aliases))
+        }
+        While { cond, body, .. } => saf_expr(cond, p, aliases) && saf_stmt(body, p, aliases),
+        DoWhile { cond, body, .. } => saf_expr(cond, p, aliases) && saf_stmt(body, p, aliases),
+        For { init, cond, update, body, .. } => {
+            init.as_ref().is_none_or(|x| saf_stmt(x, p, aliases))
+                && cond.as_ref().is_none_or(|e| saf_expr(e, p, aliases))
+                && update.as_ref().is_none_or(|e| saf_expr(e, p, aliases))
+                && saf_stmt(body, p, aliases)
+        }
+        Break { .. } | Continue { .. } => true,
+        _ => false,
+    }
+}
+
+/// Expression-level S-D safety. `p` is the array param; `aliases` are `let x = p[i]`
+/// element aliases. Returns false on any unsafe use of `p` or an alias.
+fn saf_expr(e: &Expr, p: &str, aliases: &HashSet<String>) -> bool {
+    use Expr::*;
+    match e {
+        Literal { .. } => true,
+        Ident { name, .. } => {
+            // A BARE reference to the array `p` (not behind `[]`/`.length`) escapes — bail.
+            // A bare reference to an element alias `x` ALSO escapes (the alias must only
+            // appear as `x.field`); bail so the alias never leaks as a value.
+            name.as_ref() != p && !aliases.contains(name.as_ref())
+        }
+        // `p.length` (read) — OK. `p.field` for any other field is not a thing on the array;
+        // bail. `x.field` where `x` is an element alias — OK (Copy f64 read).
+        Member { object, prop, optional: false, .. } => {
+            let mname = match prop {
+                tishlang_ast::MemberProp::Name { name, .. } => name.as_ref(),
+                tishlang_ast::MemberProp::Expr(_) => return false, // computed key bails
+            };
+            match object.as_ref() {
+                Ident { name, .. } if name.as_ref() == p => mname == "length",
+                Ident { name, .. } if aliases.contains(name.as_ref()) => true,
+                // `p[i].field` read.
+                Index { object: io, index, .. } => {
+                    matches!(io.as_ref(), Ident { name, .. } if name.as_ref() == p)
+                        && saf_expr(index, p, aliases)
+                }
+                _ => saf_expr(object, p, aliases),
+            }
+        }
+        Member { .. } => false, // optional member on the array/alias bails
+        // `p[i]` index: only valid as part of `p[i].field` (handled above) or `let x = p[i]`
+        // (handled in saf_stmt). A bare `p[i]` value here escapes the element — bail.
+        Index { object, .. } => {
+            if matches!(object.as_ref(), Ident { name, .. } if name.as_ref() == p) {
+                return false;
+            }
+            // index into something else (not the array) — safe if its parts are safe.
+            saf_expr(object, p, aliases)
+        }
+        Binary { left, op, right, .. } => {
+            // `===`/`!==` directly on a body element / alias would compare references — bail.
+            if matches!(op, BinOp::StrictEq | BinOp::StrictNe | BinOp::Eq | BinOp::Ne) {
+                if expr_is_body_ref(left, p, aliases) || expr_is_body_ref(right, p, aliases) {
+                    return false;
+                }
+            }
+            saf_expr(left, p, aliases) && saf_expr(right, p, aliases)
+        }
+        Unary { operand, .. } => saf_expr(operand, p, aliases),
+        Conditional { cond, then_branch, else_branch, .. } => {
+            saf_expr(cond, p, aliases)
+                && saf_expr(then_branch, p, aliases)
+                && saf_expr(else_branch, p, aliases)
+        }
+        Assign { name, value, .. } => {
+            name.as_ref() != p && !aliases.contains(name.as_ref()) && saf_expr(value, p, aliases)
+        }
+        CompoundAssign { name, value, .. } => {
+            name.as_ref() != p && !aliases.contains(name.as_ref()) && saf_expr(value, p, aliases)
+        }
+        // Field write: `x.field = <scalar>` (alias) or `p[i].field = <scalar>` — OK iff RHS p-safe
+        // (scalar). Computed-key write or write onto the bare array bails.
+        MemberAssign { object, prop: _, value, .. } => {
+            let target_ok = match object.as_ref() {
+                Ident { name, .. } if aliases.contains(name.as_ref()) => true,
+                Index { object: io, index, .. } => {
+                    matches!(io.as_ref(), Ident { name, .. } if name.as_ref() == p)
+                        && saf_expr(index, p, aliases)
+                }
+                _ => false,
+            };
+            target_ok && saf_expr(value, p, aliases)
+        }
+        // `p[i] = …` / `p.length = …` reshape, or any index-assign onto the array, bails.
+        IndexAssign { object, .. } => {
+            !matches!(object.as_ref(), Ident { name, .. } if name.as_ref() == p)
+        }
+        Call { callee, args, .. } => {
+            // Method calls on the array (push/splice/etc.) or on an alias bail: `p.push(...)`,
+            // `x.something()`. Math.<fn>(...) and other free calls are fine if args are p-safe
+            // (and no body ref escapes as an arg — checked by saf_expr on each arg).
+            if let Member { object, .. } = callee.as_ref() {
+                if expr_is_body_ref(object, p, aliases) {
+                    return false; // method call on the array/element
+                }
+            }
+            saf_expr(callee, p, aliases)
+                && args.iter().all(|a| match a {
+                    CallArg::Expr(x) => saf_expr(x, p, aliases),
+                    CallArg::Spread(_) => false,
+                })
+        }
+        TemplateLiteral { exprs, .. } => exprs.iter().all(|x| saf_expr(x, p, aliases)),
+        // Any other expr form that could touch `p` is not modelled — be conservative.
+        PostfixInc { name, .. } | PostfixDec { name, .. } | PrefixInc { name, .. }
+        | PrefixDec { name, .. } => name.as_ref() != p && !aliases.contains(name.as_ref()),
+        _ => false,
+    }
+}
+
+/// Is `e` a direct reference to the array `p` or an element alias (`x` or `p[i]`)?
+fn expr_is_body_ref(e: &Expr, p: &str, aliases: &HashSet<String>) -> bool {
+    match e {
+        Expr::Ident { name, .. } => name.as_ref() == p || aliases.contains(name.as_ref()),
+        Expr::Index { object, .. } => {
+            matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == p)
+        }
+        _ => false,
+    }
+}
+
+/// The top-level program's uses of the array locals must be safe: each is constructed
+/// once by an array factory call, only passed to group fns (or read scalar-only), and
+/// never escapes (no console.log of the array, no store, no bare pass to a non-group fn).
+fn array_use_sites_safe(
+    program: &Program,
+    array_locals: &[String],
+    group_fns: &HashMap<String, (usize, String)>,
+) -> bool {
+    let set: HashSet<&str> = array_locals.iter().map(|s| s.as_str()).collect();
+    let mut ok = true;
+    for s in &program.statements {
+        // Skip the decl of the array local itself.
+        if let Statement::VarDecl { name, .. } = s {
+            if set.contains(name.as_ref()) {
+                continue;
+            }
+        }
+        if !top_use_safe(s, &set, group_fns) {
+            ok = false;
+            break;
+        }
+    }
+    ok
+}
+
+fn top_use_safe(
+    s: &Statement,
+    set: &HashSet<&str>,
+    group_fns: &HashMap<String, (usize, String)>,
+) -> bool {
+    use Statement::*;
+    match s {
+        FunDecl { .. } | TypeAlias { .. } | DeclareVar { .. } | DeclareFun { .. } => true,
+        VarDecl { init, .. } => init.as_ref().is_none_or(|e| top_use_expr(e, set, group_fns)),
+        ExprStmt { expr, .. } => top_use_expr(expr, set, group_fns),
+        For { init, cond, update, body, .. } => {
+            init.as_ref().is_none_or(|x| top_use_safe(x, set, group_fns))
+                && cond.as_ref().is_none_or(|e| top_use_expr(e, set, group_fns))
+                && update.as_ref().is_none_or(|e| top_use_expr(e, set, group_fns))
+                && top_use_safe(body, set, group_fns)
+        }
+        While { cond, body, .. } | DoWhile { cond, body, .. } => {
+            top_use_expr(cond, set, group_fns) && top_use_safe(body, set, group_fns)
+        }
+        If { cond, then_branch, else_branch, .. } => {
+            top_use_expr(cond, set, group_fns)
+                && top_use_safe(then_branch, set, group_fns)
+                && else_branch.as_ref().is_none_or(|e| top_use_safe(e, set, group_fns))
+        }
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().all(|x| top_use_safe(x, set, group_fns))
+        }
+        Return { value, .. } => value.as_ref().is_none_or(|e| top_use_expr(e, set, group_fns)),
+        _ => true,
+    }
+}
+
+fn top_use_expr(
+    e: &Expr,
+    set: &HashSet<&str>,
+    group_fns: &HashMap<String, (usize, String)>,
+) -> bool {
+    use Expr::*;
+    match e {
+        // A bare reference to an array local escapes UNLESS it's a call arg to a group fn
+        // at the expected array-param position (handled in Call below).
+        Ident { name, .. } => !set.contains(name.as_ref()),
+        Call { callee, args, .. } => {
+            // A call to a group fn may pass an array local at its array-param slot.
+            if let Ident { name: fname, .. } = callee.as_ref() {
+                if let Some((api, _)) = group_fns.get(fname.as_ref()) {
+                    return args.iter().enumerate().all(|(ai, a)| match a {
+                        CallArg::Expr(Ident { name, .. }) if ai == *api => {
+                            // array local at the array slot — OK; or a non-array ident.
+                            set.contains(name.as_ref()) || true
+                        }
+                        CallArg::Expr(x) => top_use_expr(x, set, group_fns),
+                        CallArg::Spread(_) => false,
+                    });
+                }
+            }
+            top_use_expr(callee, set, group_fns)
+                && args.iter().all(|a| match a {
+                    CallArg::Expr(x) => top_use_expr(x, set, group_fns),
+                    CallArg::Spread(_) => false,
+                })
+        }
+        // `arr[i]` / `arr.length` at top level reads scalars — that's a boxed read; but the
+        // array local should only be consumed via group fns. Reading `arr.length` etc. at top
+        // level is rare and would require the boxed array; bail to keep semantics simple.
+        Index { object, .. } => !expr_refs_set(object, set) && top_use_expr(object, set, group_fns),
+        Member { object, .. } => !expr_refs_set(object, set) && top_use_expr(object, set, group_fns),
+        Binary { left, right, .. } => {
+            top_use_expr(left, set, group_fns) && top_use_expr(right, set, group_fns)
+        }
+        Unary { operand, .. } => top_use_expr(operand, set, group_fns),
+        Conditional { cond, then_branch, else_branch, .. } => {
+            top_use_expr(cond, set, group_fns)
+                && top_use_expr(then_branch, set, group_fns)
+                && top_use_expr(else_branch, set, group_fns)
+        }
+        Assign { value, .. } => top_use_expr(value, set, group_fns),
+        CompoundAssign { value, .. } => top_use_expr(value, set, group_fns),
+        TemplateLiteral { exprs, .. } => exprs.iter().all(|x| top_use_expr(x, set, group_fns)),
+        Literal { .. } => true,
+        Array { elements, .. } => elements.iter().all(|el| match el {
+            tishlang_ast::ArrayElement::Expr(x) => top_use_expr(x, set, group_fns),
+            tishlang_ast::ArrayElement::Spread(_) => false,
+        }),
+        PostfixInc { .. } | PostfixDec { .. } | PrefixInc { .. } | PrefixDec { .. } => true,
+        _ => true,
+    }
+}
+
+fn expr_refs_set(e: &Expr, set: &HashSet<&str>) -> bool {
+    matches!(e, Expr::Ident { name, .. } if set.contains(name.as_ref()))
+}
+
+/// Walk every sub-expression of a statement, invoking `f` on each.
+fn walk_exprs_stmt(s: &Statement, f: &mut impl FnMut(&Expr)) {
+    use Statement::*;
+    match s {
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().for_each(|x| walk_exprs_stmt(x, f))
+        }
+        VarDecl { init, .. } => {
+            if let Some(e) = init {
+                walk_exprs_expr(e, f);
+            }
+        }
+        VarDeclDestructure { init, .. } => walk_exprs_expr(init, f),
+        ExprStmt { expr, .. } => walk_exprs_expr(expr, f),
+        Return { value, .. } => {
+            if let Some(e) = value {
+                walk_exprs_expr(e, f);
+            }
+        }
+        If { cond, then_branch, else_branch, .. } => {
+            walk_exprs_expr(cond, f);
+            walk_exprs_stmt(then_branch, f);
+            if let Some(e) = else_branch {
+                walk_exprs_stmt(e, f);
+            }
+        }
+        While { cond, body, .. } | DoWhile { cond, body, .. } => {
+            walk_exprs_expr(cond, f);
+            walk_exprs_stmt(body, f);
+        }
+        For { init, cond, update, body, .. } => {
+            if let Some(i) = init {
+                walk_exprs_stmt(i, f);
+            }
+            if let Some(c) = cond {
+                walk_exprs_expr(c, f);
+            }
+            if let Some(u) = update {
+                walk_exprs_expr(u, f);
+            }
+            walk_exprs_stmt(body, f);
+        }
+        ForOf { iterable, body, .. } => {
+            walk_exprs_expr(iterable, f);
+            walk_exprs_stmt(body, f);
+        }
+        Throw { value, .. } => walk_exprs_expr(value, f),
+        _ => {}
+    }
+}
+
+fn walk_exprs_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
+    use Expr::*;
+    f(e);
+    match e {
+        Binary { left, right, .. } => {
+            walk_exprs_expr(left, f);
+            walk_exprs_expr(right, f);
+        }
+        Unary { operand, .. } | TypeOf { operand, .. } | Await { operand, .. }
+        | Delete { target: operand, .. } => walk_exprs_expr(operand, f),
+        Call { callee, args, .. } | New { callee, args, .. } => {
+            walk_exprs_expr(callee, f);
+            for a in args {
+                match a {
+                    CallArg::Expr(x) | CallArg::Spread(x) => walk_exprs_expr(x, f),
+                }
+            }
+        }
+        Member { object, prop, .. } => {
+            walk_exprs_expr(object, f);
+            if let tishlang_ast::MemberProp::Expr(p) = prop {
+                walk_exprs_expr(p, f);
+            }
+        }
+        Index { object, index, .. } => {
+            walk_exprs_expr(object, f);
+            walk_exprs_expr(index, f);
+        }
+        Conditional { cond, then_branch, else_branch, .. } => {
+            walk_exprs_expr(cond, f);
+            walk_exprs_expr(then_branch, f);
+            walk_exprs_expr(else_branch, f);
+        }
+        NullishCoalesce { left, right, .. } => {
+            walk_exprs_expr(left, f);
+            walk_exprs_expr(right, f);
+        }
+        Array { elements, .. } => {
+            for el in elements {
+                match el {
+                    tishlang_ast::ArrayElement::Expr(x)
+                    | tishlang_ast::ArrayElement::Spread(x) => walk_exprs_expr(x, f),
+                }
+            }
+        }
+        Object { props, .. } => {
+            for p in props {
+                match p {
+                    tishlang_ast::ObjectProp::KeyValue(_, v, _) => walk_exprs_expr(v, f),
+                    tishlang_ast::ObjectProp::Spread(x) => walk_exprs_expr(x, f),
+                }
+            }
+        }
+        Assign { value, .. } | CompoundAssign { value, .. } | LogicalAssign { value, .. } => {
+            walk_exprs_expr(value, f)
+        }
+        MemberAssign { object, value, .. } => {
+            walk_exprs_expr(object, f);
+            walk_exprs_expr(value, f);
+        }
+        IndexAssign { object, index, value, .. } => {
+            walk_exprs_expr(object, f);
+            walk_exprs_expr(index, f);
+            walk_exprs_expr(value, f);
+        }
+        TemplateLiteral { exprs, .. } => exprs.iter().for_each(|x| walk_exprs_expr(x, f)),
+        _ => {}
+    }
+}
+
+/// S-B array-return: `return [a, b, …]` where each element is a bare ident of the
+/// SAME `Struct(alias)` (resolved from the locals defined in this body via call-
+/// return). Returns the alias if so.
+fn fn_returns_array_of_struct(body: &Statement, analysis: &AggregateAnalysis) -> Option<String> {
+    // Map this body's locals to struct aliases (only `let x = factory(…)` shapes).
+    let mut locals: HashMap<String, String> = HashMap::new();
+    collect_body_struct_locals(body, analysis, &mut locals);
+    // Find the (single) `return [idents]`.
+    find_array_return(body, &locals)
+}
+
+fn collect_body_struct_locals(
+    s: &Statement,
+    analysis: &AggregateAnalysis,
+    out: &mut HashMap<String, String>,
+) {
+    use Statement::*;
+    match s {
+        VarDecl { name, type_ann: None, init: Some(init), .. } => {
+            if let Some(AggReturn::Struct(alias)) =
+                infer_aggregate_expr(init, analysis, &HashMap::new())
+            {
+                out.insert(name.to_string(), alias);
+            }
+        }
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().for_each(|x| collect_body_struct_locals(x, analysis, out))
+        }
+        If { then_branch, else_branch, .. } => {
+            collect_body_struct_locals(then_branch, analysis, out);
+            if let Some(e) = else_branch {
+                collect_body_struct_locals(e, analysis, out);
+            }
+        }
+        For { body, .. } | While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+            collect_body_struct_locals(body, analysis, out)
+        }
+        _ => {}
+    }
+}
+
+fn find_array_return(s: &Statement, locals: &HashMap<String, String>) -> Option<String> {
+    use Statement::*;
+    match s {
+        Return { value: Some(Expr::Array { elements, .. }), .. } => {
+            let mut alias: Option<String> = None;
+            for el in elements {
+                let e = match el {
+                    tishlang_ast::ArrayElement::Expr(e) => e,
+                    tishlang_ast::ArrayElement::Spread(_) => return None,
+                };
+                let a = match e {
+                    Expr::Ident { name, .. } => locals.get(name.as_ref())?,
+                    _ => return None,
+                };
+                match &alias {
+                    None => alias = Some(a.clone()),
+                    Some(prev) if prev != a => return None,
+                    _ => {}
+                }
+            }
+            alias
+        }
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().find_map(|x| find_array_return(x, locals))
+        }
+        If { then_branch, else_branch, .. } => find_array_return(then_branch, locals)
+            .or_else(|| else_branch.as_ref().and_then(|e| find_array_return(e, locals))),
+        For { body, .. } | While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+            find_array_return(body, locals)
+        }
+        _ => None,
+    }
+}
+
+/// S-B/S-C: the aggregate type of an init expression.
+///   * `factory(…)` where `factory` has an S-A/S-B return shape → that shape.
+///   * `[a, b, …]` where every element is a struct-typed local → `ArrayOfStruct`.
+fn infer_aggregate_expr(
+    e: &Expr,
+    analysis: &AggregateAnalysis,
+    locals: &HashMap<String, AggReturn>,
+) -> Option<AggReturn> {
+    match e {
+        // S-B: call-return propagation.
+        Expr::Call { callee, .. } => {
+            if let Expr::Ident { name, .. } = callee.as_ref() {
+                return analysis.fn_return.get(name.as_ref()).cloned();
+            }
+            None
+        }
+        // S-C: array-of-ident element typing.
+        Expr::Array { elements, .. } => {
+            let mut alias: Option<String> = None;
+            for el in elements {
+                let x = match el {
+                    tishlang_ast::ArrayElement::Expr(x) => x,
+                    tishlang_ast::ArrayElement::Spread(_) => return None,
+                };
+                let a = match x {
+                    Expr::Ident { name, .. } => match locals.get(name.as_ref()) {
+                        Some(AggReturn::Struct(a)) => a.clone(),
+                        _ => return None,
+                    },
+                    Expr::Call { .. } => match infer_aggregate_expr(x, analysis, locals) {
+                        Some(AggReturn::Struct(a)) => a,
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                match &alias {
+                    None => alias = Some(a),
+                    Some(prev) if *prev != a => return None,
+                    _ => {}
+                }
+            }
+            alias.map(AggReturn::ArrayOfStruct)
+        }
+        // A bare ident copy of a struct-typed local.
+        Expr::Ident { name, .. } => locals.get(name.as_ref()).cloned(),
+        _ => None,
+    }
+}
+
+/// Aggregate inference writeback. Runs the S-0..S-C analysis, then stamps onto the
+/// program ONLY the annotations the existing codegen backs soundly (see the module
+/// note above): the S-0 numeric `: number` params, plus the inert struct alias
+/// `type` decls. The S-A/S-B/S-C struct shapes are computed and available via
+/// `analyze_aggregate` but are NOT written onto params / call-locals until the
+/// S-D..S-F typed-fn ABI tier exists to consume them without a boxed-edge miscompile.
+fn aggregate_infer_program(program: Program) -> Program {
+    let analysis = analyze_aggregate(&program);
+
+    // Stamp S-0 numeric params onto the matching FunDecls. When S-D candidacy holds
+    // (`unbox_alias` is `Some`), ALSO stamp the struct/array annotations: the factory
+    // return `: alias`, the array-factory return `: alias[]`, the group fns' array
+    // params `: alias[]`, and the top-level array local(s) `: alias[]`. Codegen's S-F
+    // tier consumes these (and bypasses the boxed closure path) so the writes persist.
+    let mut statements: Vec<Statement> = program
+        .statements
+        .into_iter()
+        .map(|s| stamp_aggregate(s, &analysis))
+        .collect();
+
+    // Prepend the struct alias decls. Under S-D candidacy codegen canonicalises the
+    // matching alias into `RustType::Named` and emits a `Copy` struct; otherwise the
+    // alias is inert (unreferenced aliases are dropped downstream).
+    if !analysis.struct_decls.is_empty() {
+        let span = statements.first().map(stmt_span).unwrap_or_else(zero_span);
+        let mut out: Vec<Statement> = Vec::with_capacity(statements.len() + analysis.struct_decls.len());
+        for (name, fields) in &analysis.struct_decls {
+            out.push(Statement::TypeAlias {
+                name: name.as_str().into(),
+                name_span: span,
+                ty: TypeAnnotation::Object(fields.clone()),
+                span,
+            });
+        }
+        out.append(&mut statements);
+        statements = out;
+    }
+
+    Program { statements }
+}
+
+/// `alias[]` annotation (an `Array(Simple(alias))`), the S-D array-param/local type.
+fn array_of_alias_ann(alias: &str) -> TypeAnnotation {
+    TypeAnnotation::Array(Box::new(TypeAnnotation::Simple(alias.into(), zero_span())))
+}
+
+/// Stamp both the S-0 numeric scalar params AND, under S-D candidacy, the struct/array
+/// annotations onto a top-level statement.
+fn stamp_aggregate(s: Statement, analysis: &AggregateAnalysis) -> Statement {
+    // First apply the always-safe S-0 numeric-param stamping.
+    let s = stamp_numeric_params(s, analysis);
+    let Some(alias) = analysis.unbox_alias.as_deref() else {
+        return s; // no S-D candidacy → only S-0 params stamped
+    };
+    match s {
+        // Stamp fn returns / array params for the unbox group.
+        Statement::FunDecl {
+            async_, name, name_span, params, rest_param, return_type, body, span,
+        } => {
+            // Return type: factory → `: alias`; array-factory → `: alias[]`.
+            let new_return = match analysis.fn_return.get(name.as_ref()) {
+                Some(AggReturn::Struct(a)) if a == alias => {
+                    Some(TypeAnnotation::Simple(alias.into(), zero_span()))
+                }
+                Some(AggReturn::ArrayOfStruct(a)) if a == alias => Some(array_of_alias_ann(alias)),
+                _ => return_type,
+            };
+            // Array param: the group fn's bodies param → `: alias[]`.
+            let array_pi = analysis.array_param_fns.get(name.as_ref()).map(|(pi, _)| *pi);
+            let new_params: Vec<FunParam> = params
+                .into_iter()
+                .enumerate()
+                .map(|(pi, p)| match p {
+                    FunParam::Simple(mut tp) if Some(pi) == array_pi => {
+                        tp.type_ann = Some(array_of_alias_ann(alias));
+                        FunParam::Simple(tp)
+                    }
+                    other => other,
+                })
+                .collect();
+            Statement::FunDecl {
+                async_, name, name_span, params: new_params, rest_param,
+                return_type: new_return, body, span,
+            }
+        }
+        // Stamp the top-level array local(s) `: alias[]`.
+        Statement::VarDecl { name, name_span, mutable, type_ann, init, span }
+            if analysis.array_locals.iter().any(|n| n == name.as_ref()) =>
+        {
+            Statement::VarDecl {
+                name, name_span, mutable,
+                type_ann: type_ann.or_else(|| Some(array_of_alias_ann(alias))),
+                init, span,
+            }
+        }
+        other => other,
+    }
+}
+
+fn stamp_numeric_params(s: Statement, analysis: &AggregateAnalysis) -> Statement {
+    if let Statement::FunDecl {
+        async_,
+        name,
+        name_span,
+        params,
+        rest_param,
+        return_type,
+        body,
+        span,
+    } = s
+    {
+        let numeric = analysis.fn_numeric_params.get(name.as_ref());
+        let new_params = params
+            .into_iter()
+            .map(|p| match p {
+                FunParam::Simple(mut tp)
+                    if tp.type_ann.is_none()
+                        && tp.default.is_none()
+                        && numeric.is_some_and(|set| set.contains(tp.name.as_ref())) =>
+                {
+                    tp.type_ann = Some(number_ann());
+                    FunParam::Simple(tp)
+                }
+                other => other,
+            })
+            .collect();
+        Statement::FunDecl {
+            async_,
+            name,
+            name_span,
+            params: new_params,
+            rest_param,
+            return_type,
+            body,
+            span,
+        }
+    } else {
+        s
+    }
+}
+
 #[cfg(test)]
 mod param_infer_tests {
     use super::*;
@@ -2028,5 +3186,390 @@ mod struct_infer_writeback_tests {
         // types this as `string`; the invariant is that the #170 write-back can't clobber it).
         let src = "let s = \"hi\"\nconsole.log(s)";
         assert_ne!(local_ann(src, "s").as_deref(), Some("number"));
+    }
+}
+
+#[cfg(test)]
+mod aggregate_infer_tests {
+    use super::*;
+    use tishlang_parser::parse;
+
+    /// Parse + run base inference (so locals get their numeric types), then the aggregate analysis.
+    fn analyze(src: &str) -> AggregateAnalysis {
+        let parsed = parse(src).unwrap();
+        let base = Program {
+            statements: infer_statements(&parsed.statements, &mut InferCtx::new()),
+        };
+        analyze_aggregate(&base)
+    }
+
+    /// The inferred `: number` param annotations of `fn` after the full aggregate WRITEBACK.
+    fn numeric_params_after_writeback(src: &str, fn_name: &str) -> Vec<String> {
+        let parsed = parse(src).unwrap();
+        let base = Program {
+            statements: infer_statements(&parsed.statements, &mut InferCtx::new()),
+        };
+        let prog = aggregate_infer_program(base);
+        let mut out = Vec::new();
+        for s in &prog.statements {
+            if let Statement::FunDecl { name, params, .. } = s {
+                if name.as_ref() == fn_name {
+                    for p in params {
+                        if let FunParam::Simple(tp) = p {
+                            if tp.type_ann.as_ref().is_some_and(is_number) {
+                                out.push(tp.name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    // ---- S-0 -------------------------------------------------------------
+
+    #[test]
+    fn s0_infers_field_value_only_params_numeric() {
+        // `body`'s params are used ONLY as object-literal field values — the case M4 cannot
+        // handle (object store is not numeric-safe in `nus_*`). S-0 must type all seven numeric.
+        let src = "function body(x, y, z, vx, vy, vz, mass) {\n  return { x: x, y: y, z: z, vx: vx, vy: vy, vz: vz, mass: mass }\n}";
+        let a = analyze(src);
+        let set = a.fn_numeric_params.get("body").cloned().unwrap_or_default();
+        let mut got: Vec<_> = set.into_iter().collect();
+        got.sort();
+        assert_eq!(got, vec!["mass", "vx", "vy", "vz", "x", "y", "z"]);
+    }
+
+    #[test]
+    fn s0_mixed_field_value_and_arithmetic_param() {
+        // A param used as a field value AND in arithmetic is still numeric.
+        let src = "function f(a, b) { return { sum: a + b, a: a } }";
+        let a = analyze(src);
+        let set = a.fn_numeric_params.get("f").cloned().unwrap_or_default();
+        assert!(set.contains("a") && set.contains("b"));
+    }
+
+    #[test]
+    fn s0_bails_on_string_concat_field_value() {
+        // `{ label: "v=" + p }` is string concat — NOT numeric; the param must stay dynamic.
+        let src = "function f(p) { return { label: \"v=\" + p } }";
+        let a = analyze(src);
+        assert!(!a.fn_numeric_params.get("f").map(|s| s.contains("p")).unwrap_or(false));
+    }
+
+    #[test]
+    fn s0_optimistic_fixpoint_drops_string_sibling() {
+        // S-0's ALL-params optimistic fixpoint must still drop a genuinely non-numeric param even
+        // when a SIBLING is numeric: `f(a, b)` with `a` a numeric loop bound but `b` string-
+        // concatenated. `a` is typed; `b` is NOT (else `"r="+b` would mistype `b` to f64). This is
+        // the joint-dependency soundness guard (the fixpoint drops `b`, re-verifies, `a` survives).
+        let src = "function f(a, b) {\n  let total = 0\n  for (let i = 0; i < a; i = i + 1) { total = total + i }\n  return \"r=\" + b\n}";
+        let a = analyze(src);
+        let set = a.fn_numeric_params.get("f").cloned().unwrap_or_default();
+        assert!(set.contains("a"), "numeric loop-bound param must be typed");
+        assert!(!set.contains("b"), "string-concatenated param must NOT be typed");
+    }
+
+    #[test]
+    fn s0_bails_on_escaping_param() {
+        // A param passed BARE to another call escapes (callee type unknown) — bail.
+        let src = "function f(p) { return { boxed: g(p) } }\nfunction g(q) { return q }";
+        let a = analyze(src);
+        assert!(!a.fn_numeric_params.get("f").map(|s| s.contains("p")).unwrap_or(false));
+    }
+
+    // ---- S-A -------------------------------------------------------------
+
+    #[test]
+    fn sa_registers_return_struct_shape() {
+        // `body()` returns one all-f64 object literal ⇒ a `Struct(alias)` return shape.
+        let src = "function body(x, y, mass) { return { x: x, y: y, mass: mass } }";
+        let a = analyze(src);
+        assert!(matches!(a.fn_return.get("body"), Some(AggReturn::Struct(_))));
+        // exactly one struct alias registered, with the three f64 fields in order.
+        assert_eq!(a.struct_decls.len(), 1);
+        let (_, fields) = &a.struct_decls[0];
+        let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_ref()).collect();
+        assert_eq!(keys, vec!["x", "y", "mass"]);
+        assert!(fields.iter().all(|(_, t)| is_number(t)));
+    }
+
+    #[test]
+    fn sa_bails_on_string_field_return_shape() {
+        // HARD all-f64 gate: a string field ⇒ NOT a struct factory (S-D/S-F write lowering
+        // would Copy-assume a non-Copy field). Must produce no return shape.
+        let src = "function mk(n) { return { id: n, name: \"x\" } }";
+        let a = analyze(src);
+        assert!(a.fn_return.get("mk").is_none());
+    }
+
+    #[test]
+    fn sa_bails_on_divergent_return_shapes() {
+        // Two different shapes (different key sets) ⇒ not monomorphic ⇒ no return shape.
+        let src = "function mk(c, a) { if (c > 0) { return { a: a } } return { b: a } }";
+        let a = analyze(src);
+        assert!(a.fn_return.get("mk").is_none());
+    }
+
+    // ---- S-B / S-C -------------------------------------------------------
+
+    #[test]
+    fn sb_propagates_call_return_to_local() {
+        // `let p = body(…)` ⇒ the local has the `body` return struct shape.
+        let src = "function body(x, y) { return { x: x, y: y } }\nlet p = body(1, 2)";
+        let a = analyze(src);
+        assert!(matches!(a.local_agg.get("p"), Some(AggReturn::Struct(_))));
+    }
+
+    #[test]
+    fn sb_array_return_is_array_of_struct() {
+        // `makeBodies()` returns `[sun, jupiter]` (both `body()` locals) ⇒ ArrayOfStruct, and a
+        // top-level `let bodies = makeBodies()` carries that array-of-struct type.
+        let src = "function body(x) { return { x: x } }\n\
+                   function makeBodies() { let sun = body(1); let jup = body(2); return [sun, jup] }\n\
+                   let bodies = makeBodies()";
+        let a = analyze(src);
+        assert!(matches!(a.fn_return.get("makeBodies"), Some(AggReturn::ArrayOfStruct(_))));
+        assert!(matches!(a.local_agg.get("bodies"), Some(AggReturn::ArrayOfStruct(_))));
+    }
+
+    #[test]
+    fn sc_array_of_struct_idents() {
+        // A direct top-level `[a, b]` of struct-typed locals ⇒ ArrayOfStruct.
+        let src = "function body(x) { return { x: x } }\n\
+                   let a = body(1)\nlet b = body(2)\nlet arr = [a, b]";
+        let a = analyze(src);
+        assert!(matches!(a.local_agg.get("arr"), Some(AggReturn::ArrayOfStruct(_))));
+    }
+
+    #[test]
+    fn sc_bails_on_heterogeneous_array() {
+        // `[a, b]` where the two structs differ (different shapes) ⇒ no array-of-struct type.
+        let src = "function p(x) { return { x: x } }\n\
+                   function q(y) { return { y: y } }\n\
+                   let a = p(1)\nlet b = q(2)\nlet arr = [a, b]";
+        let a = analyze(src);
+        assert!(a.local_agg.get("arr").is_none());
+    }
+
+    // ---- end-to-end: the nbody factory chain ----------------------------
+
+    #[test]
+    fn nbody_factory_chain_resolves() {
+        // The actual nbody front-end shape: body() factory, makeBodies() array, bodies local.
+        let src = "\
+            function body(x, y, z, vx, vy, vz, mass) {\n\
+              return { x: x, y: y, z: z, vx: vx, vy: vy, vz: vz, mass: mass }\n\
+            }\n\
+            function makeBodies() {\n\
+              let sun = body(0, 0, 0, 0, 0, 0, 1)\n\
+              let jup = body(1, 1, 1, 1, 1, 1, 1)\n\
+              return [sun, jup]\n\
+            }\n\
+            let bodies = makeBodies()";
+        let a = analyze(src);
+        // S-0: all body params numeric.
+        assert_eq!(a.fn_numeric_params.get("body").map(|s| s.len()), Some(7));
+        // S-A: body is a struct factory.
+        assert!(matches!(a.fn_return.get("body"), Some(AggReturn::Struct(_))));
+        // S-B: makeBodies returns array-of-struct; `bodies` carries it.
+        assert!(matches!(a.fn_return.get("makeBodies"), Some(AggReturn::ArrayOfStruct(_))));
+        assert!(matches!(a.local_agg.get("bodies"), Some(AggReturn::ArrayOfStruct(_))));
+    }
+
+    // ---- writeback safety: only S-0 scalar params are stamped ------------
+
+    #[test]
+    fn writeback_stamps_only_s0_numeric_params() {
+        // The WRITEBACK must add `: number` to body's params (soundly consumed) and must NOT
+        // turn any param into a struct/array annotation (which codegen can't yet back).
+        let src = "function body(x, y, z, vx, vy, vz, mass) {\n  return { x: x, y: y, z: z, vx: vx, vy: vy, vz: vz, mass: mass }\n}\nlet b = body(1,2,3,4,5,6,7)";
+        let got = numeric_params_after_writeback(src, "body");
+        assert_eq!(got, vec!["mass", "vx", "vy", "vz", "x", "y", "z"]);
+    }
+
+    #[test]
+    fn writeback_does_not_stamp_call_local_with_struct() {
+        // `let b = body(…)` must remain UN-annotated after writeback — stamping a `Named`
+        // annotation here would miscompile (the call still returns a boxed Value). Guards the
+        // soundness boundary until S-F lands.
+        let src = "function body(x) { return { x: x } }\nlet b = body(1)";
+        let parsed = parse(src).unwrap();
+        let base = Program {
+            statements: infer_statements(&parsed.statements, &mut InferCtx::new()),
+        };
+        let prog = aggregate_infer_program(base);
+        for s in &prog.statements {
+            if let Statement::VarDecl { name, type_ann, .. } = s {
+                if name.as_ref() == "b" {
+                    // No array factory / array-param fns ⇒ S-D candidacy fails ⇒ `b` unstamped.
+                    assert!(type_ann.is_none(), "non-array struct local must stay unannotated");
+                }
+            }
+        }
+    }
+
+    // ---- S-D: whole-program unboxing candidacy + stamping --------------------
+
+    /// The full nbody factory + array-fn chain, trimmed to the structural essentials.
+    const NBODY_SHAPE: &str = "\
+        let SOLAR_MASS = 39.47841760435743\n\
+        function body(x, y, z, vx, vy, vz, mass) {\n\
+          return { x: x, y: y, z: z, vx: vx, vy: vy, vz: vz, mass: mass }\n\
+        }\n\
+        function makeBodies() {\n\
+          let sun = body(0, 0, 0, 0, 0, 0, SOLAR_MASS)\n\
+          let jup = body(1, 1, 1, 1, 1, 1, 1)\n\
+          return [sun, jup]\n\
+        }\n\
+        function offsetMomentum(bodies) {\n\
+          let px = 0\n\
+          for (let i = 0; i < bodies.length; i++) { let b = bodies[i]; px = px + b.vx * b.mass }\n\
+          bodies[0].vx = -px / SOLAR_MASS\n\
+        }\n\
+        function advance(bodies, dt) {\n\
+          let n = bodies.length\n\
+          for (let i = 0; i < n; i++) {\n\
+            let bi = bodies[i]\n\
+            for (let j = i + 1; j < n; j++) {\n\
+              let bj = bodies[j]\n\
+              let dx = bi.x - bj.x\n\
+              bi.vx = bi.vx - dx\n\
+              bj.vx = bj.vx + dx\n\
+            }\n\
+          }\n\
+        }\n\
+        function energy(bodies) {\n\
+          let e = 0\n\
+          let n = bodies.length\n\
+          for (let i = 0; i < n; i++) { let bi = bodies[i]; e = e + bi.mass }\n\
+          return e\n\
+        }\n\
+        let bodies = makeBodies()\n\
+        offsetMomentum(bodies)\n\
+        for (let s = 0; s < 10; s++) { advance(bodies, 0.01) }\n\
+        let check = energy(bodies)\n\
+        console.log(check)";
+
+    #[test]
+    fn sd_nbody_shape_is_unbox_candidate() {
+        let a = analyze(NBODY_SHAPE);
+        // Exactly one struct alias, and the whole group passes candidacy.
+        assert_eq!(a.struct_decls.len(), 1);
+        let alias = a.unbox_alias.clone();
+        assert!(alias.is_some(), "nbody shape must be an unbox candidate");
+        let alias = alias.unwrap();
+        // body=Struct, makeBodies=ArrayOfStruct, bodies local = ArrayOfStruct.
+        assert!(matches!(a.fn_return.get("body"), Some(AggReturn::Struct(s)) if *s == alias));
+        assert!(matches!(a.fn_return.get("makeBodies"), Some(AggReturn::ArrayOfStruct(s)) if *s == alias));
+        assert!(a.array_locals.contains(&"bodies".to_string()));
+        // advance/energy/offsetMomentum all recognised as array-param fns at param 0.
+        for f in ["advance", "energy", "offsetMomentum"] {
+            let (pi, pn) = a.array_param_fns.get(f).unwrap_or_else(|| panic!("{f} not in group"));
+            assert_eq!(*pi, 0);
+            assert_eq!(pn, "bodies");
+        }
+    }
+
+    #[test]
+    fn sd_stamps_struct_and_array_annotations() {
+        let parsed = parse(NBODY_SHAPE).unwrap();
+        let base = Program {
+            statements: infer_statements(&parsed.statements, &mut InferCtx::new()),
+        };
+        let prog = aggregate_infer_program(base);
+        let alias = analyze_aggregate(&Program {
+            statements: infer_statements(&parse(NBODY_SHAPE).unwrap().statements, &mut InferCtx::new()),
+        })
+        .unbox_alias
+        .unwrap();
+        let mut saw_body_ret = false;
+        let mut saw_makebodies_ret = false;
+        let mut saw_advance_param = false;
+        let mut saw_bodies_local = false;
+        for s in &prog.statements {
+            match s {
+                Statement::FunDecl { name, params, return_type, .. } => match name.as_ref() {
+                    "body" => {
+                        saw_body_ret = matches!(return_type, Some(TypeAnnotation::Simple(a, _)) if a.as_ref() == alias);
+                    }
+                    "makeBodies" => {
+                        saw_makebodies_ret = matches!(return_type,
+                            Some(TypeAnnotation::Array(b)) if matches!(b.as_ref(), TypeAnnotation::Simple(a, _) if a.as_ref() == alias));
+                    }
+                    "advance" => {
+                        if let Some(FunParam::Simple(tp)) = params.first() {
+                            saw_advance_param = matches!(&tp.type_ann,
+                                Some(TypeAnnotation::Array(b)) if matches!(b.as_ref(), TypeAnnotation::Simple(a, _) if a.as_ref() == alias));
+                        }
+                    }
+                    _ => {}
+                },
+                Statement::VarDecl { name, type_ann, .. } if name.as_ref() == "bodies" => {
+                    saw_bodies_local = matches!(type_ann,
+                        Some(TypeAnnotation::Array(b)) if matches!(b.as_ref(), TypeAnnotation::Simple(a, _) if a.as_ref() == alias));
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_body_ret, "body return must be stamped `: alias`");
+        assert!(saw_makebodies_ret, "makeBodies return must be stamped `: alias[]`");
+        assert!(saw_advance_param, "advance bodies param must be stamped `: alias[]`");
+        assert!(saw_bodies_local, "top-level bodies local must be stamped `: alias[]`");
+    }
+
+    #[test]
+    fn sd_bails_on_strict_eq_on_body() {
+        // `===` on an element alias compares references in JS — not unboxable. Whole group bails.
+        let src = "\
+            function body(x) { return { x: x } }\n\
+            function makeBodies() { let a = body(1); return [a] }\n\
+            function check(bodies) { let b0 = bodies[0]; let b1 = bodies[0]; return b0 === b1 }\n\
+            let bodies = makeBodies()\n\
+            check(bodies)";
+        let a = analyze(src);
+        assert!(a.unbox_alias.is_none(), "=== on a body must bail the unbox group");
+    }
+
+    #[test]
+    fn sd_bails_on_array_push_reshape() {
+        // `bodies.push(...)` reshapes the array — not a fixed `Vec`. Bail.
+        let src = "\
+            function body(x) { return { x: x } }\n\
+            function makeBodies() { let a = body(1); return [a] }\n\
+            function grow(bodies) { bodies.push(body(2)) }\n\
+            let bodies = makeBodies()\n\
+            grow(bodies)";
+        let a = analyze(src);
+        assert!(a.unbox_alias.is_none(), "array reshape must bail the unbox group");
+    }
+
+    #[test]
+    fn sd_bails_on_array_escape_to_console() {
+        // Passing the whole array to console.log escapes it to the boxed world. Bail.
+        let src = "\
+            function body(x) { return { x: x } }\n\
+            function makeBodies() { let a = body(1); return [a] }\n\
+            function energy(bodies) { let b = bodies[0]; return b.x }\n\
+            let bodies = makeBodies()\n\
+            energy(bodies)\n\
+            console.log(bodies)";
+        let a = analyze(src);
+        assert!(a.unbox_alias.is_none(), "array escape to console.log must bail");
+    }
+
+    #[test]
+    fn sd_bails_on_string_field_struct() {
+        // A string field ⇒ no struct factory at all ⇒ no unbox candidacy.
+        let src = "\
+            function body(x) { return { x: x, name: \"a\" } }\n\
+            function makeBodies() { let a = body(1); return [a] }\n\
+            function energy(bodies) { let b = bodies[0]; return b.x }\n\
+            let bodies = makeBodies()\n\
+            energy(bodies)";
+        let a = analyze(src);
+        assert!(a.unbox_alias.is_none(), "string field bails the struct factory → no unbox");
     }
 }

@@ -31,6 +31,7 @@ TYPED_FLAGS=(
   TISH_STRUCT_INFER=1   # struct / array-literal inference
   TISH_FUSED_HOF=1      # fused reduce over a boxed array
   TISH_NATIVE_HOF=1     # native reduce/map/filter/some/every over a `number[]` (Vec<f64>)
+  TISH_AGGREGATE_INFER=1 # #177 S-0..S-C aggregate (interprocedural struct) inference front-end
 )
 
 RUNS=3; NO_BUILD=0; ONLY=()
@@ -74,7 +75,7 @@ for tish_src in tests/perf/*.tish; do
     fi
     # boxed(off): same source + backend, every typing flag unset (the dynamic Value baseline).
     if ! env -u TISH_PARAM_NATIVE -u TISH_PARAM_INFER -u TISH_NATIVE_FN -u TISH_STRUCT_INFER \
-            -u TISH_FUSED_HOF -u TISH_NATIVE_HOF "$TISH" build "$tish_src" -o "$bin_off" \
+            -u TISH_FUSED_HOF -u TISH_NATIVE_HOF -u TISH_AGGREGATE_INFER "$TISH" build "$tish_src" -o "$bin_off" \
         --target native --native-backend rust >/dev/null 2>&1; then
       rows+=("${name}|BUILD-FAIL|-|-|-|-"); total=$((total + 1)); continue
     fi

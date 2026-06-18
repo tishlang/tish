@@ -31,7 +31,8 @@ just perf-gauntlet            # or: ./scripts/run_perf_gauntlet.sh --runs 3
 The flag set lives in `scripts/run_perf_gauntlet.sh` (`TYPED_FLAGS`) and must stay in lockstep with
 `docs/type-system-roadmap.md`: `TISH_PARAM_NATIVE` (M1), `TISH_PARAM_INFER` (M4), `TISH_NATIVE_FN`
 (M5), `TISH_STRUCT_INFER` (struct/array), `TISH_FUSED_HOF` (fused reduce), `TISH_NATIVE_HOF` (native
-`number[]` HOFs).
+`number[]` HOFs), `TISH_AGGREGATE_INFER` (#177 interprocedural struct inference — array-of-objects
+→ native `Vec<Struct>`).
 
 ## Update 2026-06-10 — phase 1: M4 inference widening (idiomatic numeric code goes native)
 
