@@ -8,7 +8,8 @@ mod error;
 mod tests_jsx;
 
 pub use codegen::{
-    compile_project_with_jsx, compile_project_with_jsx_and_source_map, compile_with_jsx, JsBundle,
+    compile_project_esm, compile_project_with_jsx, compile_project_with_jsx_and_source_map,
+    compile_with_jsx, EmittedJsModule, JsBundle,
 };
 pub use error::CompileError;
 

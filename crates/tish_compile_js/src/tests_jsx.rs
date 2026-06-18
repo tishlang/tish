@@ -4,7 +4,7 @@ mod tests {
 
     use tishlang_parser::parse;
 
-    use crate::{compile_project_with_jsx, compile_with_jsx};
+    use crate::{compile_project_esm, compile_project_with_jsx, compile_with_jsx, EmittedJsModule};
 
     #[test]
     fn lattish_jsx_emits_h_with_children_array() {
@@ -454,5 +454,218 @@ fn factory() {
         assert!(!pos.contains("inf"), "must not emit Rust's lowercase `inf`:\n{pos}");
         let neg = crate::compile(&parse("console.log(-1 / 0)\n").unwrap(), true).unwrap();
         assert!(neg.contains("-Infinity"), "-1/0 must emit -Infinity:\n{neg}");
+    }
+
+    // ── #282: ESM module output (one file per module, real import/export) ──────────────────────
+
+    /// Write a set of `(relative_path, source)` modules into a fresh temp dir and compile the entry
+    /// in ESM mode. Returns the emitted modules keyed for easy lookup by their output relative path.
+    fn build_esm(entry: &str, modules: &[(&str, &str)]) -> Vec<EmittedJsModule> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "tish_esm_unit_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (rel, src) in modules {
+            let p = dir.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            let mut f = std::fs::File::create(&p).unwrap();
+            f.write_all(src.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
+        let out = compile_project_esm(&dir.join(entry), Some(&dir), false)
+            .expect("compile_project_esm failed");
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+
+    fn module_js<'a>(mods: &'a [EmittedJsModule], rel: &str) -> &'a str {
+        mods.iter()
+            .find(|m| m.relative_path.to_string_lossy() == rel)
+            .map(|m| m.js.as_str())
+            .unwrap_or_else(|| panic!("module {rel} not emitted; got {:?}", mods.iter().map(|m| m.relative_path.display().to_string()).collect::<Vec<_>>()))
+    }
+
+    #[test]
+    fn esm_emits_named_and_default_exports() {
+        let mods = build_esm(
+            "main.tish",
+            &[(
+                "main.tish",
+                "export const VERSION = \"1.0\"\nexport fn greet(n) { return \"hi \" + n }\nexport default greet\n",
+            )],
+        );
+        let js = module_js(&mods, "main.js");
+        assert!(js.contains("export const VERSION = \"1.0\";"), "named const export:\n{js}");
+        assert!(js.contains("export function greet "), "named fn export:\n{js}");
+        assert!(js.contains("export default greet;"), "default export:\n{js}");
+    }
+
+    #[test]
+    fn esm_rewrites_import_specifier_to_js_with_alias() {
+        let mods = build_esm(
+            "main.tish",
+            &[
+                ("dep.tish", "export const ssrH = 42\nexport fn greet(n) { return n }\n"),
+                (
+                    "main.tish",
+                    "import { ssrH as h, greet } from \"./dep.tish\"\nimport * as M from \"./dep.tish\"\nconsole.log(h)\nconsole.log(greet(M.ssrH))\n",
+                ),
+            ],
+        );
+        let js = module_js(&mods, "main.js");
+        assert!(
+            js.contains("import { ssrH as h, greet } from \"./dep.js\";"),
+            "named import with alias, .tish->.js:\n{js}"
+        );
+        assert!(js.contains("import * as M from \"./dep.js\";"), "namespace import:\n{js}");
+    }
+
+    #[test]
+    fn esm_one_file_per_module_preserves_tree() {
+        let mods = build_esm(
+            "main.tish",
+            &[
+                ("lib/util.tish", "export fn id(x) { return x }\n"),
+                ("main.tish", "import { id } from \"./lib/util.tish\"\nconsole.log(id(1))\n"),
+            ],
+        );
+        // Nested module keeps its relative path; importer points at the nested `.js`.
+        let _ = module_js(&mods, "lib/util.js");
+        let main = module_js(&mods, "main.js");
+        assert!(
+            main.contains("from \"./lib/util.js\";"),
+            "nested relative import preserved:\n{main}"
+        );
+    }
+
+    #[test]
+    fn esm_module_outside_project_root_is_emitted() {
+        // #282 follow-up: a dependency in a *sibling* package (outside the entry's project root)
+        // must still be emitted — the output tree is rooted at the directory common to all modules.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!(
+            "tish_esm_xroot_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("app/src")).unwrap();
+        std::fs::create_dir_all(base.join("lib")).unwrap();
+        std::fs::write(base.join("lib/util.tish"), "export fn id(x) { return x }\n").unwrap();
+        std::fs::write(
+            base.join("app/src/main.tish"),
+            "import { id } from \"../../lib/util.tish\"\nconsole.log(id(1))\n",
+        )
+        .unwrap();
+        // Project root is the entry's package (`app`); `lib/util.tish` lives outside it.
+        let mods = compile_project_esm(
+            &base.join("app/src/main.tish"),
+            Some(&base.join("app")),
+            false,
+        )
+        .expect("compile_project_esm failed for sibling dep");
+        let rels: Vec<String> = mods
+            .iter()
+            .map(|m| m.relative_path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        let main_js = mods
+            .iter()
+            .find(|m| m.relative_path.to_string_lossy().replace('\\', "/").ends_with("app/src/main.js"))
+            .map(|m| m.js.clone());
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            rels.iter().any(|r| r.ends_with("lib/util.js")),
+            "sibling dep emitted under common base: {:?}",
+            rels
+        );
+        assert!(
+            rels.iter().any(|r| r.ends_with("app/src/main.js")),
+            "entry emitted under its own subtree: {:?}",
+            rels
+        );
+        let main_js = main_js.expect("entry module present");
+        assert!(
+            main_js.contains("from \"../../lib/util.js\";"),
+            "relative import to sibling rewritten to .js:\n{main_js}"
+        );
+    }
+
+    #[test]
+    fn esm_bare_node_modules_dep_is_emitted() {
+        // #282 follow-up: a bare specifier resolved from `node_modules` (like `lattish`) is emitted
+        // into the output tree and the importer points at it with a relative `.js` specifier.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!(
+            "tish_esm_nm_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::create_dir_all(base.join("node_modules/pkg")).unwrap();
+        std::fs::write(
+            base.join("node_modules/pkg/package.json"),
+            "{\"name\":\"pkg\",\"main\":\"index.tish\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("node_modules/pkg/index.tish"),
+            "export fn ping() { return \"pong\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("src/main.tish"),
+            "import { ping } from \"pkg\"\nconsole.log(ping())\n",
+        )
+        .unwrap();
+        let mods = compile_project_esm(&base.join("src/main.tish"), Some(&base), false)
+            .expect("compile_project_esm failed for node_modules dep");
+        let rels: Vec<String> = mods
+            .iter()
+            .map(|m| m.relative_path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        let main_js = mods
+            .iter()
+            .find(|m| m.relative_path.to_string_lossy().replace('\\', "/").ends_with("src/main.js"))
+            .map(|m| m.js.clone());
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            rels.iter().any(|r| r.ends_with("node_modules/pkg/index.js")),
+            "node_modules dep emitted: {:?}",
+            rels
+        );
+        let main_js = main_js.expect("entry module present");
+        assert!(
+            main_js.contains("from \"../node_modules/pkg/index.js\";"),
+            "bare specifier rewritten to relative .js path:\n{main_js}"
+        );
+    }
+
+    #[test]
+    fn esm_rejects_native_imports() {
+        let dir = std::env::temp_dir().join(format!("tish_esm_native_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("main.tish");
+        std::fs::write(&p, "import { readFile } from \"fs\"\nconsole.log(1)\n").unwrap();
+        let err = compile_project_esm(&p, Some(&dir), false).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            err.message.contains("Native module import") && err.message.contains("esm"),
+            "expected a native-import rejection for ESM, got: {}",
+            err.message
+        );
     }
 }

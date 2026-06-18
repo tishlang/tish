@@ -1,0 +1,4 @@
+// Sibling of a.tish with the same exported name `activate` (see #282).
+export fn activate() {
+  return "b"
+}

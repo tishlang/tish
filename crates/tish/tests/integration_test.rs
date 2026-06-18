@@ -673,6 +673,72 @@ fn test_module_private_binding_isolation() {
     }
 }
 
+/// #282: `--target js --format esm` emits one ES module per `.tish` file with real
+/// `import`/`export`, so two modules exporting the same name (`export fn activate`) keep separate
+/// scopes instead of colliding. The merge-based pipeline (interp/VM/native and `--format bundle`)
+/// still flattens both into one scope — a separately-tracked collision — so this test pins the ESM
+/// JS target, which is the path that isolates them. Builds the module tree and runs it under Node.
+#[test]
+fn test_js_esm_export_collision() {
+    let bin = tish_bin();
+    if !bin.exists() {
+        return;
+    }
+    let main = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("esm")
+        .join("export_collision")
+        .join("main.tish");
+    if !main.exists() {
+        return;
+    }
+    let expected = "ab\n";
+
+    // JS ESM target: build the module tree, then load + run the entry under Node.
+    let node_available = Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if node_available {
+        let out_dir = std::env::temp_dir().join(format!("tish_esm_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        let build = Command::new(&bin)
+            .args(["build"])
+            .arg(&main)
+            .args(["-o"])
+            .arg(&out_dir)
+            .args(["--target", "js", "--format", "esm"])
+            .current_dir(workspace_root())
+            .output()
+            .expect("build esm");
+        assert!(
+            build.status.success(),
+            "esm build failed: stderr={}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let entry = out_dir.join("main.js");
+        assert!(entry.exists(), "esm entry {} not emitted", entry.display());
+        let out = Command::new("node")
+            .arg(&entry)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run node");
+        let _ = std::fs::remove_dir_all(&out_dir);
+        assert!(
+            out.status.success(),
+            "esm JS run failed (collision not isolated?): stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected,
+            "esm export_collision mismatch on JS ESM target"
+        );
+    }
+}
+
 /// Ignored: tishlang_eval::run() does not run the event loop.
 #[test]
 #[cfg(feature = "http")]

@@ -136,6 +136,7 @@ fn main() {
                 a.source_map,
                 a.ios_triple.as_deref(),
                 &a.crate_type,
+                &a.format,
             )
         }
         Some(Commands::DumpAst {
@@ -541,7 +542,14 @@ fn compile_to_js(
     output_path: &str,
     optimize: bool,
     source_map: bool,
+    format: &str,
 ) -> Result<(), String> {
+    if format != "bundle" && format != "esm" {
+        return Err(format!(
+            "Unknown --format '{}' for --target js. Use 'bundle' (single merged file) or 'esm' (one file per module).",
+            format
+        ));
+    }
     if source_map && optimize {
         return Err(
             "tish build --target js --source-map requires --no-optimize (mappings follow unmerged statement order)."
@@ -564,6 +572,9 @@ fn compile_to_js(
             Some(p)
         }
     });
+    if format == "esm" {
+        return compile_to_js_esm(input_path, output_path, optimize, source_map, project_root);
+    }
     let out_path = Path::new(output_path);
     let out_path = if out_path.extension().is_none()
         || out_path.extension() == Some(std::ffi::OsStr::new(""))
@@ -635,6 +646,63 @@ fn compile_to_js(
     Ok(())
 }
 
+/// `--target js --format esm`: emit one `.js` per `.tish` module under the output directory,
+/// preserving the source tree layout, with real ES `import`/`export` so a bundler (Vite/Rollup)
+/// can tree-shake and code-split. `-o` is treated as a directory.
+fn compile_to_js_esm(
+    input_path: &Path,
+    output_path: &str,
+    optimize: bool,
+    source_map: bool,
+    project_root: Option<&Path>,
+) -> Result<(), String> {
+    if source_map {
+        return Err(
+            "tish build --target js --format esm does not yet support --source-map; use --format bundle for source maps."
+                .into(),
+        );
+    }
+    if input_path.extension().map(|e| e == "jsx") == Some(true)
+        || input_path.extension().map(|e| e == "js") == Some(true)
+    {
+        return Err(
+            "tish build --target js --format esm is only supported for .tish entry files; use --format bundle for .jsx / .js inputs."
+                .into(),
+        );
+    }
+    let modules = tishlang_compile_js::compile_project_esm(input_path, project_root, optimize)
+        .map_err(|e| format!("{}", e))?;
+    let out_dir = Path::new(output_path);
+    fs::create_dir_all(out_dir)
+        .map_err(|e| format!("Cannot create output directory {}: {}", out_dir.display(), e))?;
+    for module in &modules {
+        let out = out_dir.join(&module.relative_path);
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Cannot create output directory {}: {}", parent.display(), e))?;
+        }
+        fs::write(&out, &module.js)
+            .map_err(|e| format!("Cannot write {}: {}", out.display(), e))?;
+    }
+    println!("Built {} module(s) to {}", modules.len(), out_dir.display());
+    // The entry may sit in a subtree (the output is rooted at the directory common to every module,
+    // which can be an ancestor of the entry when deps live in sibling packages / node_modules), so
+    // point the user at the actual entry `.js` they should hand to a bundler.
+    let entry_js = input_path
+        .canonicalize()
+        .unwrap_or_else(|_| input_path.to_path_buf())
+        .with_extension("js");
+    if let Some(entry_rel) = modules
+        .iter()
+        .filter(|m| entry_js.ends_with(&m.relative_path))
+        .max_by_key(|m| m.relative_path.components().count())
+        .map(|m| m.relative_path.clone())
+    {
+        println!("Entry: {}", out_dir.join(entry_rel).display());
+    }
+    Ok(())
+}
+
 #[allow(clippy::vec_init_then_push, clippy::too_many_arguments)] // build_file maps CLI build flags 1:1
 fn build_file(
     input_path: &str,
@@ -646,6 +714,7 @@ fn build_file(
     source_map: bool,
     ios_triple: Option<&str>,
     crate_type: &str,
+    format: &str,
 ) -> Result<(), String> {
     let optimize = !no_optimize;
     let input_path = Path::new(input_path)
@@ -655,7 +724,7 @@ fn build_file(
     let is_js = input_path.extension().map(|e| e == "js") == Some(true);
 
     if target == "js" {
-        return compile_to_js(&input_path, output_path, optimize, source_map);
+        return compile_to_js(&input_path, output_path, optimize, source_map, format);
     }
 
     // `wasm-gpu` (#277): same pipeline as `wasm` but builds the `--features gpu` WebGPU runtime and

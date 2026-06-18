@@ -24,3 +24,5 @@ npm/*/bin/
 
 node_modules
 .zectre
+.claude
+.cursor
