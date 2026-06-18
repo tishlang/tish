@@ -10,6 +10,32 @@
 > compare.
 
 ################################################################################
+##  ★ FLAGSHIP WIN — #177 interprocedural struct inference, nbody 824ms→5ms (2026-06-18). FLAG: TISH_AGGREGATE_INFER.
+################################################################################
+nbody's hot loop paid ~26 `get_prop`/`set_prop` calls per body-pair through boxed `Value` + `RefCell`
++ linear PropMap scan, because the existing block-local struct inference (`TISH_STRUCT_INFER`) can't
+fire when objects escape through function returns, array params, and indexed mutation. **#177**
+(dark-shipped behind `TISH_AGGREGATE_INFER`, OFF by default) is interprocedural monomorphic struct
+inference: when a whole-program candidacy predicate holds (a monomorphic all-`f64` object shape with
+no `===`/escape/reshape), it unboxes the array-of-objects into a native `Vec<TishStruct_X>` threaded
+by reference and de-virtualizes `body`/`makeBodies`/`offsetMomentum`/`advance`/`energy` into typed
+Rust free fns.
+
+HOW (infer.rs S-0..S-D + codegen.rs S-E/S-F): the infer front-end stamps a struct alias and
+`: alias` / `: alias[]` annotations onto the factory/array/operator fns iff candidacy holds; codegen
+consumes those stamped annotations (the infer→codegen contract — re-running the analysis on a stamped
+program is NOT idempotent) and emits the aggregate native-fn tier: indexed struct field read/write,
+all-`Copy` struct decls, alias-pair lowering (`let bi = bodies[i]; bi.vx = …` → `bodies[i].vx`),
+direct call routing, trailing global capture (`SOLAR_MASS`), borrow-once per fn. The boxed closure +
+cell for any promoted fn is suppressed. All-or-nothing per group: any unlowerable use disables the
+whole path and falls back to the boxed closures (byte-identical).
+
+MEASURED (gauntlet, darwin-arm64, rust backend): nbody **824ms → 5ms (164×)**, **0.45× of Node**
+(beats V8 ~2×). Checksum oracle **-169083713** preserved (typed == boxed == node). Full gauntlet
+**12/21 PASS**, zero `TYPED≠BOXED`/`≠NODE` rows; flag-OFF codegen byte-identical. See
+docs/type-system-roadmap.md for the flag table. (PR #283.)
+
+################################################################################
 ##  ★ WIN — Map/Set O(n)→O(1) per op (hash-backed), ~350× at scale (2026-06-10). DEFAULT ON.
 ################################################################################
 `Map`/`Set` were backed by parallel `Vec<Value>` with a `iter().position(same_value_zero)` LINEAR SCAN
