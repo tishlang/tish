@@ -2097,6 +2097,148 @@ impl Codegen {
         self.emit_expr(expr)
     }
 
+    /// Is `update` a `+1` step on `var` (`var++`, `++var`, `var += 1`, or `var = var + 1`)?
+    fn is_increment_of(update: &Expr, var: &str) -> bool {
+        match update {
+            Expr::PostfixInc { name, .. } | Expr::PrefixInc { name, .. } => name.as_ref() == var,
+            Expr::CompoundAssign {
+                name,
+                op: CompoundOp::Add,
+                value,
+                ..
+            } => name.as_ref() == var && Self::int_literal_value_of(value) == Some(1),
+            Expr::Assign { name, value, .. } => {
+                name.as_ref() == var
+                    && matches!(
+                        value.as_ref(),
+                        Expr::Binary { left, op: BinOp::Add, right, .. }
+                            if matches!(left.as_ref(), Expr::Ident { name: l, .. } if l.as_ref() == var)
+                                && Self::int_literal_value_of(right) == Some(1)
+                    )
+            }
+            _ => false,
+        }
+    }
+
+    /// #173: detect a fill loop `for (let i = 0; i < N; i++) { a.push(K) }` over a native `Vec<T>`
+    /// and emit it as a single bulk `a.extend(std::iter::repeat(K).take((N) as usize))` — one
+    /// allocation instead of N per-element pushes that repeatedly realloc as the Vec grows. Returns
+    /// `Ok(true)` when the fused form was emitted (the caller then skips the normal loop).
+    ///
+    /// Sound only when `N` is a proven, side-effect-free integer (so the bulk count matches the loop
+    /// iteration count exactly, including the truncating `as usize` for `0`/negative) and `K` is a
+    /// constant of the element type (no per-element variation). Any miss returns `Ok(false)` and the
+    /// normal loop is emitted — correctness over coverage.
+    fn try_emit_native_fill_loop(
+        &mut self,
+        init: Option<&Statement>,
+        cond: Option<&Expr>,
+        update: Option<&Expr>,
+        body: &Statement,
+    ) -> Result<bool, CompileError> {
+        // init: `let i = 0`
+        let (
+            Some(Statement::VarDecl {
+                name: i_name,
+                init: Some(i_init),
+                ..
+            }),
+            Some(cond),
+            Some(update),
+        ) = (init, cond, update)
+        else {
+            return Ok(false);
+        };
+        if Self::int_literal_value_of(i_init) != Some(0) {
+            return Ok(false);
+        }
+        // cond: `i < N`
+        let Expr::Binary {
+            left,
+            op: BinOp::Lt,
+            right: bound,
+            ..
+        } = cond
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: c_name, .. } = left.as_ref() else {
+            return Ok(false);
+        };
+        if c_name.as_ref() != i_name.as_ref() {
+            return Ok(false);
+        }
+        // update: `i++` / `++i` / `i += 1` / `i = i + 1`
+        if !Self::is_increment_of(update, i_name.as_ref()) {
+            return Ok(false);
+        }
+        // body: exactly one statement `a.push(K)`
+        let push_stmt = match body {
+            Statement::Block { statements, .. } if statements.len() == 1 => &statements[0],
+            Statement::ExprStmt { .. } => body,
+            _ => return Ok(false),
+        };
+        let Statement::ExprStmt {
+            expr: Expr::Call { callee, args, .. },
+            ..
+        } = push_stmt
+        else {
+            return Ok(false);
+        };
+        let Expr::Member {
+            object,
+            prop: MemberProp::Name { name: method, .. },
+            optional: false,
+            ..
+        } = callee.as_ref()
+        else {
+            return Ok(false);
+        };
+        if method.as_ref() != "push" || args.len() != 1 {
+            return Ok(false);
+        }
+        let Expr::Ident { name: arr_name, .. } = object.as_ref() else {
+            return Ok(false);
+        };
+        // `a` must be a native `Vec<T>`. A closure-captured (RefCell) Vec would need a borrow_mut;
+        // skip it (rare) and keep the plain loop.
+        let RustType::Vec(elem) = self.type_context.get_type(arr_name.as_ref()) else {
+            return Ok(false);
+        };
+        if self.refcell_wrapped_vars.contains(arr_name.as_ref()) {
+            return Ok(false);
+        }
+        let CallArg::Expr(k_expr) = &args[0] else {
+            return Ok(false);
+        };
+        // K must be a constant literal of the element type (no per-element variation, no `i` ref).
+        let k_code = match (&*elem, k_expr) {
+            (RustType::F64, Expr::Literal { value: Literal::Number(n), .. }) => Self::f64_lit(*n),
+            (RustType::Bool, Expr::Literal { value: Literal::Bool(b), .. }) => format!("{}", b),
+            _ => return Ok(false),
+        };
+        // N must be a proven, side-effect-free integer: an integer literal or an int-range local.
+        let n_code = match bound.as_ref() {
+            Expr::Literal {
+                value: Literal::Number(_),
+                ..
+            } if Self::int_literal_value_of(bound).is_some() => self.emit_typed_expr(bound)?.0,
+            Expr::Ident { name, .. }
+                if self.int_range_locals.contains_key(name.as_ref())
+                    && self.type_context.get_type(name.as_ref()) == RustType::F64 =>
+            {
+                Self::escape_ident(name.as_ref()).into_owned()
+            }
+            _ => return Ok(false),
+        };
+        let arr_esc = Self::escape_ident(arr_name.as_ref()).into_owned();
+        self.writeln(&format!(
+            "{}.extend(std::iter::repeat({}).take(({}) as usize));",
+            arr_esc, k_code, n_code
+        ));
+        Ok(true)
+    }
+
     fn emit_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
         match stmt {
             Statement::Block { statements, .. } => {
@@ -2424,6 +2566,18 @@ impl Codegen {
                 body,
                 ..
             } => {
+                // #173: fuse a fill loop `for (let i = 0; i < N; i++) { a.push(K) }` over a native
+                // `Vec<T>` into a single bulk `extend` — one allocation instead of N per-element
+                // pushes (which repeatedly realloc as the Vec grows). Sound only when `N` is a proven,
+                // side-effect-free integer; otherwise the normal loop is emitted below.
+                if self.try_emit_native_fill_loop(
+                    init.as_deref(),
+                    cond.as_ref(),
+                    update.as_ref(),
+                    body,
+                )? {
+                    return Ok(());
+                }
                 self.writeln("{");
                 self.indent += 1;
                 if let Some(i) = init {
@@ -7537,6 +7691,13 @@ impl Codegen {
                 ..
             } => {
                 if let Expr::Ident { name: var_name, .. } = object.as_ref() {
+                    // #173: `vec.length` on a native `Vec<_>` is a native `f64` (the emitter lowers it
+                    // to `(vec.len() as f64)`), so a local fed by `arr.length` stays native.
+                    if let Some(RustType::Vec(_)) = env.get(var_name.as_ref()) {
+                        if prop_name.as_ref() == "length" {
+                            return RustType::F64;
+                        }
+                    }
                     if let Some(RustType::Named { fields, .. }) = env.get(var_name.as_ref()) {
                         if let Some((_, field_ty)) =
                             fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
@@ -7577,12 +7738,93 @@ impl Codegen {
                         }
                     }
                 }
+                // #169: a fused native `Vec<f64>` reduce produces an `f64` (the emitter lowers it via
+                // `native_vec_hof_for_call`). Model it here so an accumulator fed by `xs.reduce(...)`
+                // is not wrongly demoted to a boxed `Value`. Conservative: any miss → `Value`.
+                if let Some(t) = self.native_vec_reduce_result_type(callee, args, env) {
+                    return t;
+                }
                 RustType::Value
             }
             // Unary, Conditional, etc. are not modelled by `emit_typed_expr` (it boxes them), so a
             // store from one already coerces; treat as `Value` to match (→ demote if it feeds an
             // accumulator). Sound and consistent.
             _ => RustType::Value,
+        }
+    }
+
+    /// #169: read-only mirror of [`try_native_vec_hof`]'s `reduce` preconditions, for
+    /// [`expr_native_type`]. Returns `Some(F64)` exactly when a `xs.reduce((acc, x) => body, init)`
+    /// call would fuse to a native `f64` fold (so an accumulator it feeds stays native instead of
+    /// being demoted to a boxed `Value`). Any uncertainty returns `None` — the oracle never claims
+    /// `F64` where the emitter would box, which is what keeps the demotion analysis sound.
+    fn native_vec_reduce_result_type(
+        &self,
+        callee: &Expr,
+        args: &[CallArg],
+        env: &HashMap<String, RustType>,
+    ) -> Option<RustType> {
+        if std::env::var("TISH_NATIVE_HOF").is_err() {
+            return None;
+        }
+        let Expr::Member {
+            object,
+            prop: MemberProp::Name { name: method, .. },
+            optional: false,
+            ..
+        } = callee
+        else {
+            return None;
+        };
+        if method.as_ref() != "reduce" {
+            return None;
+        }
+        let Expr::Ident { name: recv_name, .. } = object.as_ref() else {
+            return None;
+        };
+        // Receiver must be a native `Vec<f64>` (`.copied()` needs a `Copy` element).
+        match env.get(recv_name.as_ref()) {
+            Some(RustType::Vec(inner)) if **inner == RustType::F64 => {}
+            _ => return None,
+        }
+        // `reduce(callback, init)` with a simple-param expression-body arrow that does not touch the
+        // receiver (an alias inside the closure would break the `.iter()` borrow).
+        if args.len() != 2 {
+            return None;
+        }
+        let Some(CallArg::Expr(Expr::ArrowFunction { params, body, .. })) = args.first() else {
+            return None;
+        };
+        if params.len() != 2 {
+            return None;
+        }
+        let (FunParam::Simple(acc_p), FunParam::Simple(x_p)) = (&params[0], &params[1]) else {
+            return None;
+        };
+        if acc_p.default.is_some() || x_p.default.is_some() {
+            return None;
+        }
+        let ArrowBody::Expr(be) = body else {
+            return None;
+        };
+        if crate::infer::pi_mentions(be, recv_name.as_ref()) {
+            return None;
+        }
+        // The init must be native-numeric, and the body must lower to `f64` with both closure params
+        // bound `f64` — exactly the emitter's preconditions, evaluated read-only.
+        let CallArg::Expr(init_e) = &args[1] else {
+            return None;
+        };
+        if self.expr_native_type(init_e, env) != RustType::F64 {
+            return None;
+        }
+        let mut benv = env.clone();
+        benv.insert(acc_p.name.to_string(), RustType::F64);
+        benv.insert(x_p.name.to_string(), RustType::F64);
+        if self.expr_native_type(be, &benv) == RustType::F64 {
+            Some(RustType::F64)
+        } else {
+            None
         }
     }
 
@@ -9444,6 +9686,19 @@ impl Codegen {
             } => {
                 if let Expr::Ident { name: var_name, .. } = object.as_ref() {
                     let var_type = self.type_context.get_type(var_name.as_ref());
+                    // #173: `vec.length` on a native `Vec<_>` → `(vec.len() as f64)`, so the length
+                    // (and arithmetic derived from it) stays native instead of a boxed `get_prop`.
+                    if let RustType::Vec(_) = &var_type {
+                        if prop_name.as_ref() == "length" {
+                            let var_esc = Self::escape_ident(var_name.as_ref()).into_owned();
+                            let code = if self.refcell_wrapped_vars.contains(var_name.as_ref()) {
+                                format!("({}.borrow().len() as f64)", var_esc)
+                            } else {
+                                format!("({}.len() as f64)", var_esc)
+                            };
+                            return Ok((code, RustType::F64));
+                        }
+                    }
                     if let RustType::Named { fields, .. } = &var_type {
                         if let Some((_, field_ty)) =
                             fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
