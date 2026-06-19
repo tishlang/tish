@@ -66,6 +66,10 @@ jobs:
             npm: "@tishlang/pg"
             type: source
             dir: pg
+          - label: "@tishlang/vite-plugin-tish"
+            npm: "@tishlang/vite-plugin-tish"
+            type: source
+            dir: vite-plugin-tish
           - label: "@tishlang/create-tish-app"
             npm: "@tishlang/create-tish-app"
             type: source
