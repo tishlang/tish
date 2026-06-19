@@ -9265,17 +9265,31 @@ impl Codegen {
                 return Ok(Some(code));
             }
         }
+        // Integer-literal leaf: `ToInt32(<int literal>)` is a compile-time constant — emit it
+        // directly (`v as i32` = modulo 2^32 = JS ToInt32 of the integer) instead of a runtime
+        // `to_int32(1_f64)` call. Removes the constant round-trip in masks/shift-counts
+        // (`x & 255`, `x >> 1`, …). Trivially sound: the value is known.
+        if let Some(v) = Self::int_literal_value_of(e) {
+            return Ok(Some(format!("{}i32", v as i32)));
+        }
         // Leaf: fold only when it is a plain `f64` (so `to_int32` applies directly). `to_int32`
         // keeps its `is_finite` guard here — a leaf may legitimately be NaN/±Infinity (→ 0).
         let (code, ty) = self.emit_typed_expr(e)?;
         if ty == RustType::F64 {
-            // When the leaf is an ARITHMETIC node PROVABLY finite with `|x| < 2^62` (operands are
-            // i32-register reads and finite literals — e.g. the FNV `h * 16777619` excursion), drop
-            // the `is_finite` guard and Rust's saturating cast and truncate directly. Bit-identical
-            // on this domain (`x as i64` truncates toward zero = JS ToInt32 truncation; `as i32` =
-            // modulo 2^32), a few instructions cheaper per iteration. Emitted inline so the generated
-            // crate needs no new runtime symbol. Any unproven leaf keeps the guarded `to_int32`.
-            if matches!(e, Expr::Binary { .. }) && self.f64_finite_bounded_below_2pow62(e) {
+            // Drop the `is_finite` guard and truncate directly when the leaf is PROVABLY a finite
+            // integer, via either of two independent proofs:
+            //   • an ARITHMETIC node with `|x| < 2^62` (operands are i32-register reads / finite
+            //     literals — e.g. the FNV `h * 16777619` excursion); or
+            //   • the integer-range lattice proves `x ∈ (-2^53, 2^53)` (#174 — e.g. a range-bounded
+            //     induction counter `i` in `i & 255`, or `(k+1)` when `k` is range-proven).
+            // Both guarantee finiteness, so `to_int_unchecked::<i64>()` is defined and truncates
+            // toward zero (a no-op on an integer); `as i32` = modulo 2^32 = JS ToInt32. Bit-identical
+            // to the guarded `to_int32`, a few instructions cheaper per iteration. Any unproven leaf
+            // keeps the guarded `to_int32` (NaN/±Infinity → 0).
+            let proven_finite_int = (matches!(e, Expr::Binary { .. })
+                && self.f64_finite_bounded_below_2pow62(e))
+                || self.int_range(e, &self.int_range_locals).is_some();
+            if proven_finite_int {
                 Ok(Some(format!(
                     "(unsafe {{ ({}).to_int_unchecked::<i64>() }} as i32)",
                     code
