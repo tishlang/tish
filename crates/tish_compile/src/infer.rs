@@ -18,12 +18,17 @@ use tishlang_ast::{
 #[derive(Default, Clone)]
 pub struct InferCtx {
     scopes: Vec<HashMap<String, TypeAnnotation>>,
+    /// #175: fns de-virtualized to native-vec free fns → per-param "is an array param" flags. Lets
+    /// the mutable-array co-inference treat `f(arr)` as a native use (the callee takes `&/&mut Vec`),
+    /// not a boxing escape, so the caller's array stays an unboxed `Vec`.
+    native_vec_array_params: HashMap<String, Vec<bool>>,
 }
 
 impl InferCtx {
     pub fn new() -> Self {
         Self {
             scopes: vec![HashMap::new()],
+            native_vec_array_params: HashMap::new(),
         }
     }
 
@@ -936,6 +941,19 @@ fn infer_object_shape(
 fn struct_infer_program(program: Program) -> Program {
     let mut reg = StructRegistry::default();
     let mut ctx = InferCtx::new();
+    // #175: tell the mutable-array co-inference which fns take native `&/&mut Vec` array params, so
+    // forwarding an array into one isn't treated as a boxing escape (lets the caller's array stay
+    // unboxed). Same AST-only detection codegen uses, so the two never disagree.
+    if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+        for (fname, sig) in crate::codegen::Codegen::detect_native_vec_fns(&program) {
+            let flags: Vec<bool> = sig
+                .params
+                .iter()
+                .map(|(_, k)| matches!(k, crate::codegen::VecParamKind::Array { .. }))
+                .collect();
+            ctx.native_vec_array_params.insert(fname, flags);
+        }
+    }
     let mut stmts = si_block(program.statements, &mut reg, &mut ctx);
     // Prepend the generated struct `type` aliases so codegen synthesizes them.
     let mut out: Vec<Statement> = Vec::with_capacity(stmts.len() + reg.decls.len());
@@ -1418,6 +1436,20 @@ fn mut_arr_expr_ok(e: &Expr, name: &str, elem: &TypeAnnotation, hyp: &InferCtx) 
                             }
                             tishlang_ast::CallArg::Spread(_) => false,
                         });
+                }
+            }
+            // #175: forwarding `name` into a native-vec fn's ARRAY param is a native use, not a
+            // boxing escape — the callee takes it by `&/&mut Vec<elem>`, so the array stays unboxed.
+            if let Ident { name: fname, .. } = callee.as_ref() {
+                if let Some(is_arr) = hyp.native_vec_array_params.get(fname.as_ref()) {
+                    if args.len() == is_arr.len() {
+                        return args.iter().enumerate().all(|(i, a)| match a {
+                            tishlang_ast::CallArg::Expr(v) => {
+                                (is_name(v) && is_arr[i]) || mut_arr_expr_ok(v, name, elem, hyp)
+                            }
+                            tishlang_ast::CallArg::Spread(_) => false,
+                        });
+                    }
                 }
             }
             mut_arr_expr_ok(callee, name, elem, hyp)
