@@ -563,6 +563,14 @@ pub(crate) struct BuildArgs {
     /// For `--target js`: `bundle` (default) merges all modules into one file; `esm` emits one `.js` per `.tish` module with real `import`/`export` (so `-o` is a directory) for Vite/Rollup tree-shaking.
     #[arg(long, default_value = "bundle", value_name = "FORMAT", help_heading = "Options")]
     pub format: String,
+    /// For `--target js --format esm`: package the JSX runtime (`h`/`Fragment`) is auto-imported from when a module uses JSX without importing them (default `lattish`).
+    #[arg(
+        long = "jsx-import-source",
+        default_value = "lattish",
+        value_name = "PKG",
+        help_heading = "Options"
+    )]
+    pub jsx_import_source: String,
     /// Run the gradual type checker: `warn` prints `line:col` type diagnostics; `error` also fails the build on them. (Equivalent to setting `TISH_CHECK`.)
     #[arg(long, value_name = "MODE", help_heading = "Options")]
     pub check: Option<String>,
@@ -594,6 +602,14 @@ pub(crate) struct CompileModuleArgs {
     /// Disable AST optimizations (forced on when a source map is emitted).
     #[arg(long, help_heading = "Options")]
     pub no_optimize: bool,
+    /// Package the JSX runtime (`h`/`Fragment`) is auto-imported from when a module uses JSX without importing them (default `lattish`).
+    #[arg(
+        long = "jsx-import-source",
+        default_value = "lattish",
+        value_name = "PKG",
+        help_heading = "Options"
+    )]
+    pub jsx_import_source: String,
     /// Entry `.tish` file to compile (only this file is read; dependencies are left to the bundler).
     #[arg(required = true, value_name = "FILE", help_heading = "Arguments")]
     pub file: String,

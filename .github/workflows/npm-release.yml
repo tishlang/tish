@@ -202,7 +202,13 @@ jobs:
           NEW_BODY="${CURRENT_BODY}
 
           ---
-          Published to npm: ${NPM_URL} | cargo-bindgen: ${NPM_BINDGEN_URL} | tish-format: ${NPM_FORMAT_URL} | tish-lint: ${NPM_LINT_URL} | create-tish-app: ${CTA_SCOPED} · ${CTA_UNSCOPED} | vite-plugin-tish: ${VITE_PLUGIN_URL} | crates.io: ${CRATES_URL}"
+          Published to npm: ${NPM_URL}
+          cargo-bindgen: ${NPM_BINDGEN_URL}
+          tish-format: ${NPM_FORMAT_URL}
+          tish-lint: ${NPM_LINT_URL}
+          create-tish-app: ${CTA_SCOPED} · ${CTA_UNSCOPED}
+          vite-plugin-tish: ${VITE_PLUGIN_URL}
+          crates.io: ${CRATES_URL}"
           curl -s -X PATCH \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \

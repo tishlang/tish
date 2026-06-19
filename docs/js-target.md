@@ -98,6 +98,30 @@ Dev source maps require no optimization (mappings follow unmerged statement orde
 
 For `--target bytecode` apps (the wasm VM owns all engine state) per-module HMR does not apply — set `mode: "full-reload"` on the plugin as the documented fallback.
 
+## JSX runtime auto-import
+
+JSX lowers to `h(tag, props, children)` and fragments (`<>…</>`) to `h(Fragment, …)`. You do **not** need to import `h` / `Fragment` by hand:
+
+- In **`--format esm`** and **`compile-module`** (Vite dev), each module is its own scope, so the compiler injects the runtime import automatically when a module uses JSX and doesn't already provide those bindings:
+
+```javascript
+// generated for a module that uses <div/> and <>…</> but imports neither
+import { h, Fragment } from "lattish";
+```
+
+  Only the missing names are added — an explicit `import { h } from "lattish"` is never duplicated, and a module that already imports both gets nothing injected. This fixes the `ReferenceError: h` / `Fragment` that per-module ESM output would otherwise throw at load.
+
+- In **`--format bundle`**, every module shares one scope, so a single merged `lattish` (pulled in by any `import { … } from "lattish"`, e.g. `createRoot`) makes `h` / `Fragment` visible to all JSX in the bundle — no per-module injection is needed.
+
+The runtime package defaults to `lattish` and is configurable:
+
+```bash
+tish build src/main.tish -o dist --target js --format esm --jsx-import-source @tishlang/lattish
+tish compile-module src/widget.tish --target js --format esm --vite-dev --jsx-import-source @tishlang/lattish
+```
+
+The classic factory shape (`h` + `Fragment`) is used; the modern `jsx`/`jsxs`/`jsxDEV` runtime shape is not emitted.
+
 ### Limitations (current)
 
 - `-o` is treated as a **directory** in ESM mode.

@@ -1,0 +1,7 @@
+// JSX leaf module that does NOT import the runtime: per-module ESM must auto-import `h` /
+// `Fragment` (issue #291) or it throws `ReferenceError: h` at load under the Vite plugin.
+export fn Widget(label) {
+  return <>
+    <div class="widget"><span>{label}</span></div>
+  </>
+}

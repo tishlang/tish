@@ -10,11 +10,14 @@ mod tests_jsx;
 pub use codegen::{
     compile_module_esm, compile_project_esm, compile_project_with_jsx,
     compile_project_with_jsx_and_source_map, compile_with_jsx, EmittedJsModule, ImportRewrite,
-    JsBundle,
+    JsBundle, DEFAULT_JSX_IMPORT_SOURCE,
 };
 pub use error::CompileError;
 
-/// JSX lowers to `h` / `Fragment`; merge the `lattish` runtime for hooks and DOM.
+/// Compile a single program to a bundle-style JS string. JSX lowers to `h` / `Fragment`; in bundle
+/// mode those resolve against the merged scope (merge the `lattish` runtime for hooks and DOM). The
+/// per-module ESM paths ([`compile_module_esm`] / [`compile_project_esm`]) auto-import the runtime
+/// for JSX modules that don't import it themselves (issue #291).
 pub fn compile(program: &tishlang_ast::Program, optimize: bool) -> Result<String, CompileError> {
     compile_with_jsx(program, optimize)
 }
