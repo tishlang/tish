@@ -137,6 +137,7 @@ fn main() {
                 a.ios_triple.as_deref(),
                 &a.crate_type,
                 &a.format,
+                &a.jsx_import_source,
             )
         }
         Some(Commands::CompileModule(a)) => compile_module(&a),
@@ -544,6 +545,7 @@ fn compile_to_js(
     optimize: bool,
     source_map: bool,
     format: &str,
+    jsx_import_source: &str,
 ) -> Result<(), String> {
     if format != "bundle" && format != "esm" {
         return Err(format!(
@@ -574,7 +576,14 @@ fn compile_to_js(
         }
     });
     if format == "esm" {
-        return compile_to_js_esm(input_path, output_path, optimize, source_map, project_root);
+        return compile_to_js_esm(
+            input_path,
+            output_path,
+            optimize,
+            source_map,
+            project_root,
+            jsx_import_source,
+        );
     }
     let out_path = Path::new(output_path);
     let out_path = if out_path.extension().is_none()
@@ -656,6 +665,7 @@ fn compile_to_js_esm(
     optimize: bool,
     source_map: bool,
     project_root: Option<&Path>,
+    jsx_import_source: &str,
 ) -> Result<(), String> {
     if source_map {
         return Err(
@@ -671,8 +681,9 @@ fn compile_to_js_esm(
                 .into(),
         );
     }
-    let modules = tishlang_compile_js::compile_project_esm(input_path, project_root, optimize)
-        .map_err(|e| format!("{}", e))?;
+    let modules =
+        tishlang_compile_js::compile_project_esm(input_path, project_root, optimize, jsx_import_source)
+            .map_err(|e| format!("{}", e))?;
     let out_dir = Path::new(output_path);
     fs::create_dir_all(out_dir)
         .map_err(|e| format!("Cannot create output directory {}: {}", out_dir.display(), e))?;
@@ -753,6 +764,7 @@ fn compile_module(args: &CompileModuleArgs) -> Result<(), String> {
         optimize,
         import_rewrite,
         want_map,
+        &args.jsx_import_source,
     )
     .map_err(|e| format!("{}", e))?;
 
@@ -781,6 +793,7 @@ fn build_file(
     ios_triple: Option<&str>,
     crate_type: &str,
     format: &str,
+    jsx_import_source: &str,
 ) -> Result<(), String> {
     let optimize = !no_optimize;
     let input_path = Path::new(input_path)
@@ -790,7 +803,14 @@ fn build_file(
     let is_js = input_path.extension().map(|e| e == "js") == Some(true);
 
     if target == "js" {
-        return compile_to_js(&input_path, output_path, optimize, source_map, format);
+        return compile_to_js(
+            &input_path,
+            output_path,
+            optimize,
+            source_map,
+            format,
+            jsx_import_source,
+        );
     }
 
     // `wasm-gpu` (#277): same pipeline as `wasm` but builds the `--features gpu` WebGPU runtime and

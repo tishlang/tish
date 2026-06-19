@@ -541,6 +541,256 @@ pub fn program_contains_jsx(program: &tishlang_ast::Program) -> bool {
     program.statements.iter().any(stmt_contains_jsx)
 }
 
+/// Whether the program contains any JSX **fragment** (`<>…</>`). Fragments lower to
+/// `h(Fragment, null, …)`, so they require the `Fragment` runtime binding in addition to `h`.
+pub fn program_contains_jsx_fragment(program: &tishlang_ast::Program) -> bool {
+    program.statements.iter().any(stmt_contains_jsx_fragment)
+}
+
+/// Which JSX runtime bindings (`h`, `Fragment`) a module needs auto-imported, given which names are
+/// already in module scope. Any JSX needs `h`; fragments additionally need `Fragment`. A binding is
+/// omitted if it's already provided by a top-level import/declaration (see
+/// [`collect_jsx_runtime_bindings_in_scope`]).
+///
+/// Returns a subset of `["h", "Fragment"]` (in that order), or `[]` when the module has no JSX.
+pub fn jsx_runtime_imports_needed(program: &tishlang_ast::Program) -> Vec<&'static str> {
+    if !program_contains_jsx(program) {
+        return Vec::new();
+    }
+    let in_scope = collect_jsx_runtime_bindings_in_scope(program);
+    let mut needed = Vec::new();
+    if !in_scope.contains("h") {
+        needed.push("h");
+    }
+    if program_contains_jsx_fragment(program) && !in_scope.contains("Fragment") {
+        needed.push("Fragment");
+    }
+    needed
+}
+
+/// Top-level names that already bind the JSX runtime symbols `h` / `Fragment`, so the auto-import
+/// must not shadow or duplicate them. Covers named imports (local alias), top-level `const`/`let`,
+/// and `fn` declarations, including those wrapped in `export`.
+pub fn collect_jsx_runtime_bindings_in_scope(program: &tishlang_ast::Program) -> HashSet<String> {
+    use tishlang_ast::{ExportDeclaration, ImportSpecifier, Statement};
+    let mut names = HashSet::new();
+    let note = |n: &str, names: &mut HashSet<String>| {
+        if n == "h" || n == "Fragment" {
+            names.insert(n.to_string());
+        }
+    };
+    for stmt in &program.statements {
+        match stmt {
+            Statement::Import { specifiers, .. } => {
+                for s in specifiers {
+                    if let ImportSpecifier::Named { name, alias, .. } = s {
+                        let local = alias.as_deref().unwrap_or(name.as_ref());
+                        note(local, &mut names);
+                    }
+                }
+            }
+            Statement::VarDecl { name, .. } | Statement::FunDecl { name, .. } => {
+                note(name.as_ref(), &mut names)
+            }
+            Statement::Export { declaration, .. } => {
+                if let ExportDeclaration::Named(inner) = declaration.as_ref() {
+                    match inner.as_ref() {
+                        Statement::VarDecl { name, .. } | Statement::FunDecl { name, .. } => {
+                            note(name.as_ref(), &mut names)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+fn stmt_contains_jsx_fragment(stmt: &tishlang_ast::Statement) -> bool {
+    use tishlang_ast::{ExportDeclaration, Statement};
+    match stmt {
+        Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+            statements.iter().any(stmt_contains_jsx_fragment)
+        }
+        Statement::VarDecl { init, .. } => init.as_ref().is_some_and(expr_contains_jsx_fragment),
+        Statement::VarDeclDestructure { init, .. } => expr_contains_jsx_fragment(init),
+        Statement::ExprStmt { expr, .. } => expr_contains_jsx_fragment(expr),
+        Statement::Return { value, .. } => value.as_ref().is_some_and(expr_contains_jsx_fragment),
+        Statement::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_contains_jsx_fragment(cond)
+                || stmt_contains_jsx_fragment(then_branch)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|s| stmt_contains_jsx_fragment(s))
+        }
+        Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
+            expr_contains_jsx_fragment(cond) || stmt_contains_jsx_fragment(body)
+        }
+        Statement::For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
+            init.as_ref().is_some_and(|s| stmt_contains_jsx_fragment(s))
+                || cond.as_ref().is_some_and(expr_contains_jsx_fragment)
+                || update.as_ref().is_some_and(expr_contains_jsx_fragment)
+                || stmt_contains_jsx_fragment(body)
+        }
+        Statement::ForOf { iterable, body, .. } => {
+            expr_contains_jsx_fragment(iterable) || stmt_contains_jsx_fragment(body)
+        }
+        Statement::Switch {
+            expr,
+            cases,
+            default_body,
+            ..
+        } => {
+            expr_contains_jsx_fragment(expr)
+                || cases.iter().any(|(e, ss)| {
+                    e.as_ref().is_some_and(expr_contains_jsx_fragment)
+                        || ss.iter().any(stmt_contains_jsx_fragment)
+                })
+                || default_body
+                    .as_ref()
+                    .is_some_and(|ss| ss.iter().any(stmt_contains_jsx_fragment))
+        }
+        Statement::Try {
+            body,
+            catch_body,
+            finally_body,
+            ..
+        } => {
+            stmt_contains_jsx_fragment(body)
+                || catch_body
+                    .as_ref()
+                    .is_some_and(|s| stmt_contains_jsx_fragment(s))
+                || finally_body
+                    .as_ref()
+                    .is_some_and(|s| stmt_contains_jsx_fragment(s))
+        }
+        Statement::FunDecl { body, .. } => stmt_contains_jsx_fragment(body),
+        Statement::Throw { value, .. } => expr_contains_jsx_fragment(value),
+        Statement::Export { declaration, .. } => match declaration.as_ref() {
+            ExportDeclaration::Named(inner) => stmt_contains_jsx_fragment(inner),
+            ExportDeclaration::Default(e) => expr_contains_jsx_fragment(e),
+        },
+        Statement::Import { .. }
+        | Statement::Break { .. }
+        | Statement::Continue { .. }
+        | Statement::TypeAlias { .. }
+        | Statement::DeclareVar { .. }
+        | Statement::DeclareFun { .. } => false,
+    }
+}
+
+fn expr_contains_jsx_fragment(expr: &Expr) -> bool {
+    match expr {
+        Expr::JsxFragment { .. } => true,
+        Expr::JsxElement {
+            props, children, ..
+        } => {
+            props.iter().any(|p| match p {
+                JsxProp::Attr {
+                    value: JsxAttrValue::Expr(e),
+                    ..
+                }
+                | JsxProp::Spread(e) => expr_contains_jsx_fragment(e),
+                _ => false,
+            }) || children.iter().any(|c| match c {
+                JsxChild::Expr(e) => expr_contains_jsx_fragment(e),
+                JsxChild::Text(_) => false,
+            })
+        }
+        Expr::Binary { left, right, .. } => {
+            expr_contains_jsx_fragment(left) || expr_contains_jsx_fragment(right)
+        }
+        Expr::Unary { operand, .. } => expr_contains_jsx_fragment(operand),
+        Expr::Assign { value, .. } => expr_contains_jsx_fragment(value),
+        Expr::Call { callee, args, .. } => {
+            expr_contains_jsx_fragment(callee)
+                || args.iter().any(|a| match a {
+                    tishlang_ast::CallArg::Expr(e) | tishlang_ast::CallArg::Spread(e) => {
+                        expr_contains_jsx_fragment(e)
+                    }
+                })
+        }
+        Expr::Member { object, prop, .. } => {
+            expr_contains_jsx_fragment(object)
+                || matches!(prop, tishlang_ast::MemberProp::Expr(e) if expr_contains_jsx_fragment(e))
+        }
+        Expr::Index { object, index, .. } => {
+            expr_contains_jsx_fragment(object) || expr_contains_jsx_fragment(index)
+        }
+        Expr::Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_contains_jsx_fragment(cond)
+                || expr_contains_jsx_fragment(then_branch)
+                || expr_contains_jsx_fragment(else_branch)
+        }
+        Expr::Array { elements, .. } => elements.iter().any(|el| match el {
+            ArrayElement::Expr(e) | ArrayElement::Spread(e) => expr_contains_jsx_fragment(e),
+        }),
+        Expr::Object { props, .. } => props.iter().any(|p| match p {
+            ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => expr_contains_jsx_fragment(e),
+        }),
+        Expr::ArrowFunction { body, .. } => match body {
+            tishlang_ast::ArrowBody::Expr(e) => expr_contains_jsx_fragment(e),
+            tishlang_ast::ArrowBody::Block(s) => stmt_contains_jsx_fragment(s),
+        },
+        Expr::NullishCoalesce { left, right, .. } => {
+            expr_contains_jsx_fragment(left) || expr_contains_jsx_fragment(right)
+        }
+        Expr::TemplateLiteral { exprs, .. } => exprs.iter().any(expr_contains_jsx_fragment),
+        Expr::Await { operand, .. } => expr_contains_jsx_fragment(operand),
+        Expr::TypeOf { operand, .. } => expr_contains_jsx_fragment(operand),
+        Expr::Delete { target, .. } => expr_contains_jsx_fragment(target),
+        Expr::CompoundAssign { value, .. } | Expr::LogicalAssign { value, .. } => {
+            expr_contains_jsx_fragment(value)
+        }
+        Expr::MemberAssign { object, value, .. } => {
+            expr_contains_jsx_fragment(object) || expr_contains_jsx_fragment(value)
+        }
+        Expr::IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => {
+            expr_contains_jsx_fragment(object)
+                || expr_contains_jsx_fragment(index)
+                || expr_contains_jsx_fragment(value)
+        }
+        Expr::New { callee, args, .. } => {
+            expr_contains_jsx_fragment(callee)
+                || args.iter().any(|a| match a {
+                    tishlang_ast::CallArg::Expr(e) | tishlang_ast::CallArg::Spread(e) => {
+                        expr_contains_jsx_fragment(e)
+                    }
+                })
+        }
+        Expr::PostfixInc { .. }
+        | Expr::PrefixInc { .. }
+        | Expr::PostfixDec { .. }
+        | Expr::PrefixDec { .. }
+        | Expr::Literal { .. }
+        | Expr::Ident { .. }
+        | Expr::NativeModuleLoad { .. } => false,
+    }
+}
+
 fn stmt_contains_jsx(stmt: &tishlang_ast::Statement) -> bool {
     use tishlang_ast::{ExportDeclaration, Statement};
     match stmt {

@@ -475,7 +475,8 @@ fn factory() {
             f.write_all(src.as_bytes()).unwrap();
             f.sync_all().unwrap();
         }
-        compile_project_esm(&dir.join(entry), Some(dir), false).expect("compile_project_esm failed")
+        compile_project_esm(&dir.join(entry), Some(dir), false, "lattish")
+            .expect("compile_project_esm failed")
     }
 
     fn module_js<'a>(mods: &'a [EmittedJsModule], rel: &str) -> &'a str {
@@ -557,6 +558,7 @@ fn factory() {
             &base.join("app/src/main.tish"),
             Some(&base.join("app")),
             false,
+            "lattish",
         )
         .expect("compile_project_esm failed for sibling dep");
         let rels: Vec<String> = mods
@@ -607,7 +609,7 @@ fn factory() {
             "import { ping } from \"pkg\"\nconsole.log(ping())\n",
         )
         .unwrap();
-        let mods = compile_project_esm(&base.join("src/main.tish"), Some(base), false)
+        let mods = compile_project_esm(&base.join("src/main.tish"), Some(base), false, "lattish")
             .expect("compile_project_esm failed for node_modules dep");
         let rels: Vec<String> = mods
             .iter()
@@ -635,7 +637,7 @@ fn factory() {
         let dir = tmp.path();
         let p = dir.join("main.tish");
         std::fs::write(&p, "import { readFile } from \"fs\"\nconsole.log(1)\n").unwrap();
-        let err = compile_project_esm(&p, Some(dir), false).unwrap_err();
+        let err = compile_project_esm(&p, Some(dir), false, "lattish").unwrap_err();
         assert!(
             err.message.contains("Native module import") && err.message.contains("esm"),
             "expected a native-import rejection for ESM, got: {}",
@@ -665,6 +667,7 @@ fn factory() {
             false,
             ImportRewrite::ViteDev,
             false,
+            "lattish",
         )
         .expect("compile_module_esm failed")
         .js
@@ -741,7 +744,7 @@ fn factory() {
         let dir = tmp.path();
         let p = dir.join("main.tish");
         std::fs::write(&p, "import { readFile } from \"fs\"\nconsole.log(1)\n").unwrap();
-        let err = compile_module_esm(&p, Some(dir), false, ImportRewrite::ViteDev, false)
+        let err = compile_module_esm(&p, Some(dir), false, ImportRewrite::ViteDev, false, "lattish")
             .unwrap_err();
         assert!(
             err.message.contains("Native module import"),
@@ -758,7 +761,8 @@ fn factory() {
         std::fs::write(&p, "export fn greet(n) { return \"hi \" + n }\nconsole.log(greet(\"x\"))\n")
             .unwrap();
         let bundle =
-            compile_module_esm(&p, Some(dir), false, ImportRewrite::ViteDev, true).unwrap();
+            compile_module_esm(&p, Some(dir), false, ImportRewrite::ViteDev, true, "lattish")
+                .unwrap();
         let map = bundle
             .source_map_json
             .expect("source map requested → must be present");
@@ -782,7 +786,8 @@ fn factory() {
         let src = "export fn greet(n) { return \"hi \" + n }\n";
         std::fs::write(&p, src).unwrap();
         let bundle =
-            compile_module_esm(&p, Some(dir), false, ImportRewrite::ViteDev, true).unwrap();
+            compile_module_esm(&p, Some(dir), false, ImportRewrite::ViteDev, true, "lattish")
+                .unwrap();
         let map = bundle.source_map_json.expect("source map requested");
         assert!(
             map.contains("\"sourcesContent\""),
@@ -800,12 +805,175 @@ fn factory() {
         let dir = tmp.path();
         let p = dir.join("main.tish");
         std::fs::write(&p, "console.log(1)\n").unwrap();
-        let err = compile_module_esm(&p, Some(dir), true, ImportRewrite::ViteDev, true)
+        let err = compile_module_esm(&p, Some(dir), true, ImportRewrite::ViteDev, true, "lattish")
             .unwrap_err();
         assert!(
             err.message.to_lowercase().contains("optimiz"),
             "source map + optimize must be rejected, got: {}",
             err.message
+        );
+    }
+
+    // ── #291: JSX runtime auto-import (h / Fragment) for per-module ESM ────────────────────────
+
+    #[test]
+    fn compile_module_esm_jsx_auto_imports_h() {
+        // A module that uses a JSX element but never imports `h` must get the runtime auto-imported,
+        // or it throws `ReferenceError: h` at load in per-module ESM (issue #291).
+        let js = build_module_vite("main.tish", &[("main.tish", "fn X() { return <div/> }\n")]);
+        assert!(
+            js.contains("import { h } from \"lattish\";"),
+            "JSX element module must auto-import h:\n{js}"
+        );
+        assert!(
+            !js.contains("Fragment"),
+            "no fragment used → Fragment must not be imported:\n{js}"
+        );
+        assert!(js.contains("h(\"div\""), "JSX still lowers to h(...):\n{js}");
+    }
+
+    #[test]
+    fn compile_module_esm_jsx_auto_imports_fragment() {
+        // A fragment lowers to `h(Fragment, …)`, so both `h` and `Fragment` must be auto-imported.
+        let js = build_module_vite(
+            "main.tish",
+            &[("main.tish", "fn X() { return <>{\"a\"}</> }\n")],
+        );
+        assert!(
+            js.contains("import { h, Fragment } from \"lattish\";"),
+            "fragment module must auto-import both h and Fragment:\n{js}"
+        );
+    }
+
+    #[test]
+    fn compile_module_esm_jsx_skips_import_when_present() {
+        // An explicit `import { h, Fragment } from "lattish"` must not be duplicated.
+        let js = build_module_vite(
+            "main.tish",
+            &[(
+                "main.tish",
+                "import { h, Fragment } from \"lattish\"\nfn X() { return <></> }\n",
+            )],
+        );
+        assert_eq!(
+            js.matches("from \"lattish\"").count(),
+            1,
+            "exactly one lattish import (the author's), no auto-import duplicate:\n{js}"
+        );
+        assert!(
+            js.contains("import { h, Fragment } from \"lattish\";"),
+            "the author's import is preserved:\n{js}"
+        );
+    }
+
+    #[test]
+    fn compile_module_esm_jsx_partial_import_extends() {
+        // The author imported only `h`; a fragment also needs `Fragment`, so just that one missing
+        // binding is auto-imported (no re-import of `h`).
+        let js = build_module_vite(
+            "main.tish",
+            &[(
+                "main.tish",
+                "import { h } from \"lattish\"\nfn X() { return <></> }\n",
+            )],
+        );
+        assert!(
+            js.contains("import { Fragment } from \"lattish\";"),
+            "only the missing Fragment binding is auto-imported:\n{js}"
+        );
+        assert!(
+            js.contains("import { h } from \"lattish\";"),
+            "the author's h import is preserved:\n{js}"
+        );
+        assert!(
+            !js.contains("import { h, Fragment }"),
+            "h must not be re-imported alongside Fragment:\n{js}"
+        );
+    }
+
+    #[test]
+    fn compile_module_esm_vite_dev_jsx_keeps_bare_runtime_import() {
+        // In Vite-dev mode the auto-import specifier stays the bare package so Node/Vite resolves it
+        // (it is NOT rewritten to a relative `.js` path the way disk ESM does).
+        let js = build_module_vite("main.tish", &[("main.tish", "fn X() { return <div/> }\n")]);
+        assert!(
+            js.contains("from \"lattish\";"),
+            "Vite dev keeps the bare runtime specifier:\n{js}"
+        );
+        assert!(
+            !js.contains("lattish.js") && !js.contains("./lattish"),
+            "Vite dev must not rewrite the runtime specifier to a path:\n{js}"
+        );
+    }
+
+    #[test]
+    fn compile_module_esm_jsx_import_source_is_configurable() {
+        // The runtime package is overridable (e.g. the scoped `@tishlang/lattish`, or a custom runtime).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let p = dir.join("main.tish");
+        std::fs::write(&p, "fn X() { return <div/> }\n").unwrap();
+        let js = compile_module_esm(
+            &p,
+            Some(dir),
+            false,
+            ImportRewrite::ViteDev,
+            false,
+            "@tishlang/lattish",
+        )
+        .expect("compile_module_esm failed")
+        .js;
+        assert!(
+            js.contains("import { h } from \"@tishlang/lattish\";"),
+            "custom jsx import source used:\n{js}"
+        );
+    }
+
+    #[test]
+    fn compile_project_esm_jsx_auto_import_per_module() {
+        // Only the module that actually uses JSX gets the runtime import; plain modules are untouched.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::create_dir_all(base.join("node_modules/lattish")).unwrap();
+        std::fs::write(
+            base.join("node_modules/lattish/package.json"),
+            "{\"name\":\"lattish\",\"main\":\"index.tish\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("node_modules/lattish/index.tish"),
+            "export fn h(tag, props, children) { return tag }\nexport let Fragment = \"frag\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("src/view.tish"),
+            "export fn V() { return <div/> }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("src/plain.tish"),
+            "export fn add(a, b) { return a + b }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("src/main.tish"),
+            "import { V } from \"./view.tish\"\nimport { add } from \"./plain.tish\"\nconsole.log(add(1, 2))\n",
+        )
+        .unwrap();
+        let mods = compile_project_esm(&base.join("src/main.tish"), Some(base), false, "lattish")
+            .expect("compile_project_esm failed");
+        // The runtime isn't imported by any module, so it's not in the graph; the common-ancestor
+        // output base is `src/`, making the emitted paths flat (`view.js`, `plain.js`, `main.js`).
+        let view = module_js(&mods, "view.js");
+        let plain = module_js(&mods, "plain.js");
+        assert!(
+            view.contains("import { h } from") && view.contains("lattish"),
+            "JSX module auto-imports the runtime:\n{view}"
+        );
+        assert!(
+            !plain.contains("import { h }") && !plain.contains("Fragment"),
+            "non-JSX module must not get a runtime import:\n{plain}"
         );
     }
 }

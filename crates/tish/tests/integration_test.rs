@@ -846,6 +846,75 @@ fn test_compile_module_no_source_map_prints_raw_js() {
     );
 }
 
+/// #291: `compile-module` auto-imports the JSX runtime (`h` / `Fragment`) when a module uses JSX
+/// but doesn't import them itself, so per-module ESM output doesn't throw `ReferenceError` at load.
+/// `--jsx-import-source` overrides the runtime package.
+#[test]
+fn test_compile_module_jsx_auto_imports_runtime() {
+    let bin = tish_bin();
+    if !bin.exists() {
+        return;
+    }
+    let widget = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("esm")
+        .join("vite_hmr")
+        .join("widget.tish");
+    if !widget.exists() {
+        return;
+    }
+    // Default runtime source (`lattish`), Vite-dev so the specifier stays bare.
+    let out = Command::new(&bin)
+        .args(["compile-module"])
+        .arg(&widget)
+        .args([
+            "--target",
+            "js",
+            "--format",
+            "esm",
+            "--vite-dev",
+            "--no-source-map",
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .expect("run compile-module");
+    assert!(
+        out.status.success(),
+        "compile-module failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("import { h, Fragment } from \"lattish\";"),
+        "JSX module with a fragment auto-imports both h and Fragment:\n{stdout}"
+    );
+
+    // Custom runtime source via --jsx-import-source.
+    let out2 = Command::new(&bin)
+        .args(["compile-module"])
+        .arg(&widget)
+        .args([
+            "--target",
+            "js",
+            "--format",
+            "esm",
+            "--vite-dev",
+            "--no-source-map",
+            "--jsx-import-source",
+            "@tishlang/lattish",
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .expect("run compile-module");
+    assert!(out2.status.success());
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        stdout2.contains("from \"@tishlang/lattish\";"),
+        "--jsx-import-source overrides the runtime package:\n{stdout2}"
+    );
+}
+
 /// Ignored: tishlang_eval::run() does not run the event loop.
 #[test]
 #[cfg(feature = "http")]
