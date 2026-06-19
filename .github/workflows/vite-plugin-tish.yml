@@ -1,0 +1,61 @@
+name: vite-plugin-tish
+
+# Tests the official Vite plugin (@tishlang/vite-plugin-tish, #284). The plugin shells out to the
+# `tish` CLI's `compile-module` subcommand, so we build the CLI first and point the tests at it via
+# TISH_PATH. Triggers when the plugin or the compile paths it depends on change.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "npm/vite-plugin-tish/**"
+      - "npm/package.json"
+      - "npm/package-lock.json"
+      - "crates/tish_compile_js/**"
+      - "crates/tish/**"
+      - ".github/workflows/vite-plugin-tish.yml"
+  pull_request:
+    paths:
+      - "npm/vite-plugin-tish/**"
+      - "npm/package.json"
+      - "npm/package-lock.json"
+      - "crates/tish_compile_js/**"
+      - "crates/tish/**"
+      - ".github/workflows/vite-plugin-tish.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Build tish CLI
+        run: cargo build -p tishlang --bin tish
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # `--ignore-scripts` skips the other npm workspaces' postinstall binary downloads (tish,
+      # cargo-bindgen, create-tish-app); the plugin tests use the cargo-built CLI via TISH_PATH.
+      - name: Install npm dependencies
+        working-directory: npm
+        run: npm ci --ignore-scripts
+
+      - name: Run vite-plugin-tish tests
+        working-directory: npm
+        env:
+          TISH_PATH: ${{ github.workspace }}/target/debug/tish
+        run: npm test --workspace @tishlang/vite-plugin-tish

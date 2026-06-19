@@ -22,7 +22,7 @@ use tishlang_core::VmRef;
 use clap::FromArgMatches;
 use rustyline::{Behavior, ColorMode, CompletionType, Config, Editor};
 
-use cli_help::{Cli, Commands};
+use cli_help::{Cli, Commands, CompileModuleArgs};
 
 /// Normalize `--feature` / `--feature http,timers,fs` / `--feature full` for VM runs and native builds.
 fn normalize_capability_flags(features: &[String]) -> HashSet<String> {
@@ -73,7 +73,7 @@ fn native_build_features_from_cli(cli_features: &[String]) -> Vec<String> {
 fn argv_with_implicit_run(mut argv: Vec<String>) -> Vec<String> {
     if argv.len() >= 2 {
         let first = argv[1].as_str();
-        const SUBCOMMANDS: &[&str] = &["run", "repl", "build", "dump-ast"];
+        const SUBCOMMANDS: &[&str] = &["run", "repl", "build", "compile-module", "dump-ast"];
         let looks_like_file = !first.starts_with('-') && !SUBCOMMANDS.contains(&first);
         if looks_like_file {
             argv.insert(1, "run".to_string());
@@ -139,6 +139,7 @@ fn main() {
                 &a.format,
             )
         }
+        Some(Commands::CompileModule(a)) => compile_module(&a),
         Some(Commands::DumpAst {
             file,
             ignore_indent,
@@ -699,6 +700,71 @@ fn compile_to_js_esm(
         .map(|m| m.relative_path.clone())
     {
         println!("Entry: {}", out_dir.join(entry_rel).display());
+    }
+    Ok(())
+}
+
+/// `tish compile-module FILE` (#284): compile a single `.tish` file to one ES module and print it
+/// to stdout. This is the fast, in-graph path the Vite plugin shells out to in `load()` — only the
+/// one file is read (no dependency graph resolution), so Vite owns the module graph and can HMR a
+/// leaf module without a full reload.
+///
+/// With a source map (default), stdout is a JSON envelope `{"js":…,"map":…}` so the plugin gets
+/// both artifacts from one spawn; with `--no-source-map`, stdout is raw ES module JS.
+fn compile_module(args: &CompileModuleArgs) -> Result<(), String> {
+    if args.target != "js" {
+        return Err(format!(
+            "tish compile-module only supports --target js (got '{}').",
+            args.target
+        ));
+    }
+    if args.format != "esm" {
+        return Err(format!(
+            "tish compile-module only supports --format esm (got '{}').",
+            args.format
+        ));
+    }
+    let input_path = Path::new(&args.file)
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve {}: {}", args.file, e))?;
+    if input_path.extension().map(|e| e != "tish").unwrap_or(true) {
+        return Err(format!(
+            "tish compile-module expects a .tish file (got '{}').",
+            args.file
+        ));
+    }
+    let want_map = !args.no_source_map;
+    // A source map needs unmerged statement order, so it forces no optimization (same rule as
+    // `build --target js --source-map`).
+    let optimize = !args.no_optimize && !want_map;
+    let import_rewrite = if args.vite_dev {
+        tishlang_compile_js::ImportRewrite::ViteDev
+    } else {
+        tishlang_compile_js::ImportRewrite::Disk
+    };
+    let project_root = args
+        .project_root
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| input_path.parent().map(Path::to_path_buf));
+    let bundle = tishlang_compile_js::compile_module_esm(
+        &input_path,
+        project_root.as_deref(),
+        optimize,
+        import_rewrite,
+        want_map,
+    )
+    .map_err(|e| format!("{}", e))?;
+
+    if let Some(map_json) = bundle.source_map_json {
+        let map: serde_json::Value = serde_json::from_str(&map_json)
+            .map_err(|e| format!("Internal: source map is not valid JSON: {}", e))?;
+        let envelope = serde_json::json!({ "js": bundle.js, "map": map });
+        let line = serde_json::to_string(&envelope)
+            .map_err(|e| format!("Cannot serialize compile-module output: {}", e))?;
+        println!("{}", line);
+    } else {
+        print!("{}", bundle.js);
     }
     Ok(())
 }

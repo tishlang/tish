@@ -1,0 +1,4 @@
+import { makeCounter } from "./counter.tish"
+
+let next = makeCounter(0)
+console.log(next() + next())

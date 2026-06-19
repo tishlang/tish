@@ -1,0 +1,7 @@
+export fn makeCounter(start) {
+  let n = start
+  return fn() {
+    n = n + 1
+    return n
+  }
+}

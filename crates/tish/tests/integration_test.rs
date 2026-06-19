@@ -738,6 +738,114 @@ fn test_js_esm_export_collision() {
     }
 }
 
+/// #284: `tish compile-module --vite-dev --source-map` compiles a single `.tish` file (no graph
+/// resolution) to one ES module, keeps relative `.tish` specifiers, and emits a `{ js, map }` JSON
+/// envelope whose map references the `.tish` source. This is the in-graph path the Vite plugin uses.
+#[test]
+fn test_compile_module_vite_dev_with_source_map() {
+    let bin = tish_bin();
+    if !bin.exists() {
+        return;
+    }
+    let main = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("esm")
+        .join("vite_hmr")
+        .join("main.tish");
+    if !main.exists() {
+        return;
+    }
+    let out = Command::new(&bin)
+        .args(["compile-module"])
+        .arg(&main)
+        .args([
+            "--target",
+            "js",
+            "--format",
+            "esm",
+            "--vite-dev",
+            "--source-map",
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .expect("run compile-module");
+    assert!(
+        out.status.success(),
+        "compile-module failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("stdout is not JSON: {e}\n{stdout}"));
+    let js = parsed["js"].as_str().expect("envelope has string `js`");
+    assert!(
+        js.contains("import { makeCounter } from \"./counter.tish\";"),
+        "Vite-dev keeps the .tish specifier:\n{js}"
+    );
+    assert!(
+        !js.contains("./counter.js"),
+        "Vite-dev must not rewrite .tish to .js:\n{js}"
+    );
+    let map = &parsed["map"];
+    assert!(map.is_object(), "envelope has object `map`: {map}");
+    assert_eq!(map["version"], serde_json::json!(3), "v3 source map");
+    let sources = map["sources"].as_array().expect("map has sources");
+    assert!(
+        sources
+            .iter()
+            .any(|s| s.as_str().map(|s| s.contains("main.tish")).unwrap_or(false)),
+        "map sources reference the .tish file: {sources:?}"
+    );
+}
+
+/// #284: without `--source-map`, `compile-module` prints raw ES module JS to stdout (no envelope),
+/// so the output can be consumed directly.
+#[test]
+fn test_compile_module_no_source_map_prints_raw_js() {
+    let bin = tish_bin();
+    if !bin.exists() {
+        return;
+    }
+    let counter = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("esm")
+        .join("vite_hmr")
+        .join("counter.tish");
+    if !counter.exists() {
+        return;
+    }
+    let out = Command::new(&bin)
+        .args(["compile-module"])
+        .arg(&counter)
+        .args([
+            "--target",
+            "js",
+            "--format",
+            "esm",
+            "--vite-dev",
+            "--no-source-map",
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .expect("run compile-module");
+    assert!(
+        out.status.success(),
+        "compile-module failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("export function makeCounter"),
+        "raw JS output includes the export:\n{stdout}"
+    );
+    assert!(
+        !stdout.trim_start().starts_with('{'),
+        "no-source-map output is raw JS, not a JSON envelope:\n{stdout}"
+    );
+}
+
 /// Ignored: tishlang_eval::run() does not run the event loop.
 #[test]
 #[cfg(feature = "http")]

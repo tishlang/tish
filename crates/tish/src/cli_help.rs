@@ -571,6 +571,34 @@ pub(crate) struct BuildArgs {
     pub file: String,
 }
 
+#[derive(Parser)]
+pub(crate) struct CompileModuleArgs {
+    /// `--target js` only (the single-module ESM path is JS-specific).
+    #[arg(long, default_value = "js", value_name = "TARGET", help_heading = "Options")]
+    pub target: String,
+    /// `--format esm` only (one ES module per file).
+    #[arg(long, default_value = "esm", value_name = "FORMAT", help_heading = "Options")]
+    pub format: String,
+    /// Keep relative `.tish` specifiers and bare packages verbatim so Vite's resolveId/load re-enters the plugin per module (in-graph HMR). Omit for disk-style `.tish`->`.js` rewriting.
+    #[arg(long, help_heading = "Options")]
+    pub vite_dev: bool,
+    /// Emit a v3 source map back to the `.tish` source as a `{ "js", "map" }` JSON envelope on stdout (on by default; implies no optimization).
+    #[arg(long, help_heading = "Options")]
+    pub source_map: bool,
+    /// Disable the source map; print raw ES module JS to stdout instead of the JSON envelope.
+    #[arg(long = "no-source-map", help_heading = "Options")]
+    pub no_source_map: bool,
+    /// Project root for resolving bare specifiers / `node_modules` (defaults to the file's parent).
+    #[arg(long, value_name = "DIR", help_heading = "Options")]
+    pub project_root: Option<String>,
+    /// Disable AST optimizations (forced on when a source map is emitted).
+    #[arg(long, help_heading = "Options")]
+    pub no_optimize: bool,
+    /// Entry `.tish` file to compile (only this file is read; dependencies are left to the bundler).
+    #[arg(required = true, value_name = "FILE", help_heading = "Arguments")]
+    pub file: String,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum Commands {
     /// Run a Tish file (interpret)
@@ -579,6 +607,9 @@ pub(crate) enum Commands {
     Repl(ReplArgs),
     /// Build native binary, wasm, wasi, or JavaScript output
     Build(BuildArgs),
+    /// Compile a single `.tish` module to one ES module (for Vite dev / HMR); prints to stdout
+    #[command(name = "compile-module")]
+    CompileModule(CompileModuleArgs),
     /// Parse and dump AST
     #[command(name = "dump-ast")]
     DumpAst {

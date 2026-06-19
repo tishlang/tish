@@ -113,6 +113,7 @@ Build: `cargo build --features full`. CLI artifact output: `tish build … --fea
 | `tish build --native-backend cranelift` | Native binary that loads **embedded serialized bytecode** and runs **`tishlang_vm`** (`tish_cranelift_runtime`). Cranelift is used only to build a tiny object file holding the blob; **bytecode is not lowered to CLIF**. Throughput is **VM-class** (similar order to `tish run --backend vm`), not “rustc/LLVM on numeric loops.” |
 | `tish build --native-backend llvm` | Same **embedded bytecode + VM** link pattern as Cranelift (see `tishlang_llvm` + `tishlang_cranelift_runtime`). |
 | `tish build --target js` | Emitted JavaScript; the host (V8, etc.) may **JIT** tight loops. **`--format bundle`** (default) merges every module into one file; **`--format esm`** emits one `.js` per `.tish` module with real `import`/`export` (so `-o` is a directory) for Vite/Rollup tree-shaking — see [js-target.md](js-target.md). |
+| `tish compile-module FILE --target js --format esm --vite-dev` | Compiles a **single** `.tish` file (no graph resolution) to one ES module on stdout, keeping relative `.tish` specifiers so a bundler owns the graph. Used by the [`@tishlang/vite-plugin-tish`](../npm/vite-plugin-tish/README.md) plugin for in-graph dev / HMR; `--source-map` (default) emits a `{ "js", "map" }` JSON envelope with a map back to the `.tish` source. |
 
 **Interop:** `tish:*` and npm-style native imports require **`--native-backend rust`**. The Cranelift/LLVM native-binary paths are **pure Tish** only (no external native modules).
 
