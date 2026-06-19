@@ -772,7 +772,38 @@ struct AggFnSig {
     ret: AggRet,
 }
 
-struct Codegen {
+/// #175 — accumulated facts about how a fn param is used in the body (for param classification).
+#[derive(Debug, Default)]
+struct ParamUse {
+    indexed: bool,
+    is_mut: bool,
+    elem_bool: bool,
+    numeric: bool,
+    escaped: bool,
+}
+
+/// #175 — kind of one parameter of a native-vec free fn (spectral_norm/queens shape).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum VecParamKind {
+    /// A scalar `f64` param.
+    Scalar,
+    /// A `number[]` / `boolean[]` param threaded by reference: `&Vec<T>` (read-only) or
+    /// `&mut Vec<T>` (the body writes an element). `elem` is `F64` or `Bool`.
+    Array { elem: RustType, is_mut: bool },
+}
+
+/// #175 — the de-virtualized native signature of one plain-array free fn. Unlike the #177 aggregate
+/// path (single struct-alias array), this supports MULTIPLE plain `number[]`/`boolean[]` params and
+/// recursion; call sites pass pairwise-distinct array idents (statically checked) so no runtime
+/// alias guard is needed. Emitted as `fn name_nv(<f64..>, <&/&mut Vec<T>..>) -> f64 | ()`.
+#[derive(Debug, Clone)]
+pub(crate) struct NativeVecFnSig {
+    pub(crate) params: Vec<(String, VecParamKind)>,
+    /// `true` → returns `f64`; `false` → returns `()` (JS `undefined`).
+    ret_f64: bool,
+}
+
+pub(crate) struct Codegen {
     output: String,
     indent: usize,
     loop_label_index: usize,
@@ -809,6 +840,18 @@ struct Codegen {
     /// free `fn f_native(f64,..)->f64` (all params `: number`, returns `number`, native-safe
     /// body). Direct calls to these route to the native fn, bypassing the boxed `value_call`.
     native_fns: std::collections::HashSet<String>,
+    /// #175 (behind `TISH_NATIVE_FN`): top-level fns de-virtualized to native free fns over plain
+    /// `&/&mut Vec<f64|bool>` + `f64` params (`name -> sig`). Direct calls route to `name_nv(..)`
+    /// passing array idents by reference; the boxed closure is suppressed. Empty unless the whole
+    /// group lowers cleanly (scratch-buffer rollback), so it can never regress the boxed path.
+    native_vec_fns: std::collections::HashMap<String, NativeVecFnSig>,
+    /// #175 — while emitting a native-vec free fn body: `Some(true)` returns `f64`, `Some(false)`
+    /// returns `()`. Consulted by the `Return` arm so a `return e;` coerces to the native shape.
+    native_vec_ret: Option<bool>,
+    /// #175 — the array params of the native-vec fn currently being emitted (name → is_mut). At a
+    /// nested call site these are already `&/&mut Vec<T>` references, so they pass through by reborrow
+    /// (`&mut *p`) rather than being address-of'd like a local `Vec` (`&mut local`).
+    vec_ref_params: std::collections::HashMap<String, bool>,
     /// #177 S-E/S-F (dark-shipped behind `TISH_AGGREGATE_INFER`): the unboxed struct alias name
     /// (e.g. `TishAnon_0`) when the interprocedural aggregate path is active for this program,
     /// else `None`. Set in `emit_program` only after the de-virtualized fns emit successfully.
@@ -905,6 +948,9 @@ impl Codegen {
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
             native_fns: std::collections::HashSet::new(),
+            native_vec_fns: std::collections::HashMap::new(),
+            native_vec_ret: None,
+            vec_ref_params: std::collections::HashMap::new(),
             aggregate_alias: None,
             aggregate_fns: std::collections::HashMap::new(),
             aggregate_array_locals: std::collections::HashSet::new(),
@@ -1601,6 +1647,13 @@ impl Codegen {
         // lowered the whole path is disabled and we fall back to the boxed closures unchanged.
         if std::env::var("TISH_AGGREGATE_INFER").map(|v| v != "0").unwrap_or(false) {
             self.setup_aggregate_fns(program);
+        }
+        // #175 (behind TISH_NATIVE_FN): de-virtualize fns over plain `number[]`/`boolean[]` params
+        // into native free fns threaded by `&/&mut Vec<T>` (spectral_norm / queens). Runs after the
+        // aggregate path so it can skip any fn that path already claimed; emits before `run()` with
+        // its own scratch-buffer rollback so a failure leaves the boxed closures untouched.
+        if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+            self.setup_native_vec_fns(program);
         }
         // Soundness pass — must run after type aliases + `native_fns` are known (both feed the
         // native-type oracle): find `number`-typed locals a reassignment can turn non-numeric so
@@ -2611,6 +2664,20 @@ impl Codegen {
                 self.writeln("}");
             }
             Statement::Return { value, .. } => {
+                // #175: inside a native-vec free fn body, returns lower to the native shape
+                // (`f64` or `()`), not a boxed `Value`.
+                if let Some(ret_f64) = self.native_vec_ret {
+                    if ret_f64 {
+                        let e = value
+                            .as_ref()
+                            .ok_or_else(|| CompileError::new("native-vec f64 fn: empty return", None))?;
+                        let f = self.emit_f64(e)?;
+                        self.writeln(&format!("return {};", f));
+                    } else {
+                        self.writeln("return;");
+                    }
+                    return Ok(());
+                }
                 let v = value
                     .as_ref()
                     .map(|e| self.emit_expr(e))
@@ -3558,6 +3625,12 @@ impl Codegen {
                 // an f64-returning fn (`energy`) is boxed back into `Value::Number` for this path.
                 if !self.aggregate_fns.is_empty() {
                     if let Some((code, _)) = self.try_emit_toplevel_agg_call(callee, args, true)? {
+                        return Ok(code);
+                    }
+                }
+                // #175: route a boxed-context call to a native-vec fn (`name_nv(&/&mut Vec, …)`).
+                if !self.native_vec_fns.is_empty() {
+                    if let Some(code) = self.try_emit_native_vec_call(callee, args, true)? {
                         return Ok(code);
                     }
                 }
@@ -8107,6 +8180,695 @@ impl Codegen {
         Ok(())
     }
 
+    /// #175: emit `e` as a native `f64`, coercing a boxed `Value` result via `as_number`.
+    fn emit_f64(&mut self, e: &Expr) -> Result<String, CompileError> {
+        let (code, ty) = self.emit_typed_expr(e)?;
+        Ok(if ty == RustType::F64 {
+            code
+        } else if ty == RustType::Value {
+            RustType::F64.from_value_expr(&code)
+        } else {
+            code
+        })
+    }
+
+    // ====================================================================================
+    // #175: native plain-array free fns (spectral_norm / queens shape).
+    //
+    // A top-level fn whose params are `f64` and plain `number[]`/`boolean[]` arrays, whose body only
+    // uses native-safe constructs (loops, index get/set, arithmetic, recursion / calls to fns in the
+    // same group or M5 / 1-arg Math), and whose array params never escape, is de-virtualized to a
+    // native Rust free fn `name_nv(<f64..>, <&/&mut Vec<T>..>) -> f64 | ()`. Call sites pass array
+    // idents by reference; they must be PAIRWISE DISTINCT (statically checked) so the `&mut` borrows
+    // can't alias — no runtime guard needed. The boxed closure is suppressed for these fns.
+    //
+    // SOUNDNESS: emitted into a scratch buffer; ANY failure disables the whole group (boxed fallback,
+    // byte-identical to flag-off). Reuses the normal `emit_statement` for the body, so loops / index
+    // elision / arithmetic are shared with `run()`; only `return` lowers to the native shape.
+    // ====================================================================================
+
+    /// Detect the native-vec fn group from the AST alone (no codegen state), so the array-inference
+    /// pre-pass and codegen agree on exactly which fns are de-virtualized. Pure: classify each fn's
+    /// params, then fixpoint-drop any fn whose call sites are malformed (a dropped callee can
+    /// disqualify a caller). M5 / #177 fns are auto-excluded — M5 has no array params, and the param
+    /// classifier rejects struct-element arrays (`p[i].field`), which is the aggregate path's shape.
+    pub(crate) fn detect_native_vec_fns(
+        program: &Program,
+    ) -> std::collections::HashMap<String, NativeVecFnSig> {
+        use std::collections::HashMap;
+        let mut sigs: HashMap<String, NativeVecFnSig> = HashMap::new();
+        for s in &program.statements {
+            if let Statement::FunDecl {
+                async_: false,
+                name,
+                params,
+                rest_param: None,
+                body,
+                ..
+            } = s
+            {
+                if let Some(sig) = Self::infer_vec_fn_sig(params, body) {
+                    if sig
+                        .params
+                        .iter()
+                        .any(|(_, k)| matches!(k, VecParamKind::Array { .. }))
+                    {
+                        sigs.insert(name.to_string(), sig);
+                    }
+                }
+            }
+        }
+        loop {
+            let mut remove: Vec<String> = Vec::new();
+            for s in &program.statements {
+                Self::collect_bad_vec_callsites(s, &sigs, &mut remove);
+            }
+            remove.sort();
+            remove.dedup();
+            if remove.is_empty() {
+                break;
+            }
+            for n in remove {
+                sigs.remove(&n);
+            }
+            if sigs.is_empty() {
+                break;
+            }
+        }
+        sigs
+    }
+
+    /// Detect, validate, and emit the native-vec fn group. On any gap the group is left empty.
+    fn setup_native_vec_fns(&mut self, program: &Program) {
+        use std::collections::HashMap;
+        let mut sigs = Self::detect_native_vec_fns(program);
+        // Codegen-side gate (needs `native_fns`): a native-vec body may only CALL fns that have a
+        // native form — other native-vec fns or M5 `native_fns` — plus 1-arg `Math`. Calling a boxed
+        // closure (e.g. spectral_norm's `evalA`, which isn't M5) can't be referenced from the
+        // module-level free fn, so drop such fns (fixpoint: a dropped callee disqualifies its caller).
+        let bodies: HashMap<String, &Statement> = program
+            .statements
+            .iter()
+            .filter_map(|s| match s {
+                Statement::FunDecl { name, body, .. } => Some((name.to_string(), body.as_ref())),
+                _ => None,
+            })
+            .collect();
+        loop {
+            let mut remove: Vec<String> = Vec::new();
+            for name in sigs.keys() {
+                if let Some(body) = bodies.get(name) {
+                    if !self.vec_body_calls_native(body, &sigs) {
+                        remove.push(name.clone());
+                    }
+                }
+            }
+            if remove.is_empty() {
+                break;
+            }
+            for n in remove {
+                sigs.remove(&n);
+            }
+            if sigs.is_empty() {
+                return;
+            }
+        }
+        if sigs.is_empty() {
+            return;
+        }
+        let decls: Vec<(String, Statement)> = program
+            .statements
+            .iter()
+            .filter_map(|s| match s {
+                Statement::FunDecl { name, body, .. } if sigs.contains_key(name.as_ref()) => {
+                    Some((name.to_string(), (**body).clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        // Emit into a scratch buffer; roll back on any failure.
+        self.native_vec_fns = sigs;
+        let body_of: HashMap<&str, &Statement> =
+            decls.iter().map(|(n, b)| (n.as_str(), b)).collect();
+        let saved = std::mem::take(&mut self.output);
+        let saved_indent = self.indent;
+        self.indent = 0;
+        let mut all_ok = true;
+        let mut names: Vec<String> = self.native_vec_fns.keys().cloned().collect();
+        names.sort();
+        for n in &names {
+            let body = body_of.get(n.as_str()).copied().unwrap();
+            if self.emit_native_vec_fn(n, body).is_err() {
+                all_ok = false;
+                break;
+            }
+        }
+        let emitted = std::mem::replace(&mut self.output, saved);
+        self.indent = saved_indent;
+        if all_ok {
+            self.output.push_str(&emitted);
+            self.writeln("");
+        } else {
+            self.native_vec_fns.clear();
+        }
+    }
+
+    /// Infer a [`NativeVecFnSig`] from a fn's params + body, or `None` if a param can't be cleanly
+    /// classified as a scalar `f64` or an indexed `number[]`/`boolean[]`. Also requires a consistent
+    /// return shape (all returns numeric → f64, or none → unit).
+    fn infer_vec_fn_sig(params: &[FunParam], body: &Statement) -> Option<NativeVecFnSig> {
+        let mut sig_params = Vec::with_capacity(params.len());
+        for p in params {
+            let FunParam::Simple(tp) = p else {
+                return None;
+            };
+            if tp.default.is_some() {
+                return None;
+            }
+            let kind = Self::classify_vec_param(body, tp.name.as_ref())?;
+            sig_params.push((tp.name.to_string(), kind));
+        }
+        let ret_f64 = Self::vec_fn_return_shape(body)?;
+        Some(NativeVecFnSig {
+            params: sig_params,
+            ret_f64,
+        })
+    }
+
+    /// Classify one param by how the body uses it: indexed/`.length` → `Array` (`is_mut` if any
+    /// element store; element `Bool` if any store writes a bool literal, else `F64`); only-numeric →
+    /// `Scalar`. A use that escapes (bare value flowing somewhere other than index/length/call-arg),
+    /// or a param both indexed and arithmetic'd, yields `None`.
+    fn classify_vec_param(body: &Statement, p: &str) -> Option<VecParamKind> {
+        let mut f = ParamUse::default();
+        Self::for_each_stmt_expr(body, &mut |e| Self::scan_param_use(e, p, false, &mut f));
+        if f.escaped || (f.indexed && f.numeric) {
+            return None;
+        }
+        if f.indexed {
+            Some(VecParamKind::Array {
+                elem: if f.elem_bool {
+                    RustType::Bool
+                } else {
+                    RustType::F64
+                },
+                is_mut: f.is_mut,
+            })
+        } else {
+            Some(VecParamKind::Scalar)
+        }
+    }
+
+    /// Context-aware scan of one expression for uses of `p`. `arith_parent` marks an arithmetic/
+    /// comparison parent (a bare `p` there is a numeric use, not an escape).
+    fn scan_param_use(e: &Expr, p: &str, arith_parent: bool, f: &mut ParamUse) {
+        match e {
+            Expr::Ident { name, .. } if name.as_ref() == p => {
+                if arith_parent {
+                    f.numeric = true;
+                } else {
+                    f.escaped = true; // a bare value use we can't account for
+                }
+            }
+            Expr::Ident { .. } | Expr::Literal { .. } => {}
+            Expr::Index { object, index, .. } => {
+                if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == p) {
+                    f.indexed = true;
+                } else {
+                    Self::scan_param_use(object, p, false, f);
+                }
+                Self::scan_param_use(index, p, true, f);
+            }
+            Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            } => {
+                if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == p) {
+                    f.indexed = true;
+                    f.is_mut = true;
+                    if matches!(value.as_ref(), Expr::Literal { value: Literal::Bool(_), .. }) {
+                        f.elem_bool = true;
+                    }
+                } else {
+                    Self::scan_param_use(object, p, false, f);
+                }
+                Self::scan_param_use(index, p, true, f);
+                Self::scan_param_use(value, p, false, f);
+            }
+            Expr::Member { object, prop, .. } => {
+                // `p.length` is fine; any other `p.x` is an escape (object read in non-index ctx).
+                let is_len = matches!(prop, MemberProp::Name { name, .. } if name.as_ref() == "length");
+                if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == p) {
+                    if !is_len {
+                        f.escaped = true;
+                    }
+                } else if matches!(object.as_ref(), Expr::Index { object: io, .. } if matches!(io.as_ref(), Expr::Ident { name, .. } if name.as_ref() == p))
+                {
+                    // `p[i].field` — `p` is an array of STRUCTS, not a native `number[]`/`boolean[]`.
+                    // That's the #177 aggregate path's job; reject here so the two never overlap.
+                    f.escaped = true;
+                } else {
+                    Self::scan_param_use(object, p, false, f);
+                }
+                if let MemberProp::Expr(pe) = prop {
+                    Self::scan_param_use(pe, p, true, f);
+                }
+            }
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                // A bare `p` as a direct call argument is a forward (array param threaded to a callee,
+                // validated separately) — not an escape. The callee itself is scanned normally.
+                Self::scan_param_use(callee, p, false, f);
+                for a in args {
+                    match a {
+                        CallArg::Expr(Expr::Ident { name, .. }) if name.as_ref() == p => {}
+                        CallArg::Expr(e) | CallArg::Spread(e) => {
+                            Self::scan_param_use(e, p, false, f)
+                        }
+                    }
+                }
+            }
+            Expr::Binary { left, op, right, .. } => {
+                let a = matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Mod
+                        | BinOp::Pow
+                        | BinOp::Lt
+                        | BinOp::Le
+                        | BinOp::Gt
+                        | BinOp::Ge
+                        | BinOp::StrictEq
+                        | BinOp::StrictNe
+                );
+                Self::scan_param_use(left, p, a, f);
+                Self::scan_param_use(right, p, a, f);
+            }
+            Expr::Unary { operand, .. } => Self::scan_param_use(operand, p, arith_parent, f),
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. } => Self::scan_param_use(value, p, false, f),
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::scan_param_use(cond, p, false, f);
+                Self::scan_param_use(then_branch, p, arith_parent, f);
+                Self::scan_param_use(else_branch, p, arith_parent, f);
+            }
+            Expr::NullishCoalesce { left, right, .. } => {
+                Self::scan_param_use(left, p, arith_parent, f);
+                Self::scan_param_use(right, p, arith_parent, f);
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                // `p[i].field = v` — struct-element write → aggregate's job, reject (see Member arm).
+                if matches!(object.as_ref(), Expr::Index { object: io, .. } if matches!(io.as_ref(), Expr::Ident { name, .. } if name.as_ref() == p))
+                {
+                    f.escaped = true;
+                } else {
+                    Self::scan_param_use(object, p, false, f);
+                }
+                Self::scan_param_use(value, p, false, f);
+            }
+            Expr::TemplateLiteral { exprs, .. } => {
+                for e in exprs {
+                    Self::scan_param_use(e, p, false, f);
+                }
+            }
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(e) | ArrayElement::Spread(e) => {
+                            Self::scan_param_use(e, p, false, f)
+                        }
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for pr in props {
+                    match pr {
+                        ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => {
+                            Self::scan_param_use(e, p, false, f)
+                        }
+                    }
+                }
+            }
+            // Closures / await / other forms: a `p` mention here is an escape we don't model.
+            _ => {
+                if Self::collect_idents_of(e).contains(p) {
+                    f.escaped = true;
+                }
+            }
+        }
+    }
+
+    /// `Some(true)` if every `return` carries a value (→ `f64`), `Some(false)` if there is no
+    /// value-returning `return` (→ unit), `None` if mixed (can't pick one native shape).
+    fn vec_fn_return_shape(body: &Statement) -> Option<bool> {
+        let mut has_val = false;
+        let mut has_empty = false;
+        Self::scan_returns(body, &mut has_val, &mut has_empty);
+        match (has_val, has_empty) {
+            (true, false) => Some(true),
+            (false, _) => Some(false),
+            (true, true) => None,
+        }
+    }
+
+    fn scan_returns(s: &Statement, has_val: &mut bool, has_empty: &mut bool) {
+        if let Statement::Return { value, .. } = s {
+            if value.is_some() {
+                *has_val = true;
+            } else {
+                *has_empty = true;
+            }
+        }
+        Self::for_each_child_stmt_list(s, &mut |list| {
+            for st in list {
+                Self::scan_returns(st, has_val, has_empty);
+            }
+        });
+    }
+
+    /// Whether every call in a native-vec body targets a fn with a native form (another native-vec
+    /// fn or an M5 `native_fn`) or a 1-arg `Math.<intrinsic>`. A call to anything else (a boxed
+    /// closure, an array method, an arbitrary member) means the free fn can't be emitted — bail.
+    fn vec_body_calls_native(
+        &self,
+        body: &Statement,
+        group: &std::collections::HashMap<String, NativeVecFnSig>,
+    ) -> bool {
+        let mut ok = true;
+        Self::for_each_stmt_expr(body, &mut |root| {
+            Self::walk_subexprs(root, &mut |e| {
+                if let Expr::Call { callee, args, .. } = e {
+                    match callee.as_ref() {
+                        Expr::Ident { name, .. } => {
+                            if !group.contains_key(name.as_ref())
+                                && !self.native_fns.contains(name.as_ref())
+                            {
+                                ok = false;
+                            }
+                        }
+                        Expr::Member {
+                            object,
+                            prop: MemberProp::Name { name: m, .. },
+                            ..
+                        } => {
+                            let is_math1 = matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                                && args.len() == 1
+                                && matches!(
+                                    m.as_ref(),
+                                    "sqrt" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil"
+                                        | "exp" | "trunc" | "log"
+                                );
+                            if !is_math1 {
+                                ok = false;
+                            }
+                        }
+                        _ => ok = false,
+                    }
+                }
+            });
+        });
+        ok
+    }
+
+    /// Add to `bad` any group fn that has a malformed call site anywhere in `s`: an array argument
+    /// that isn't a bare ident, array args that aren't pairwise distinct, an arity mismatch, or an
+    /// array passed where the callee needs `&mut` but the arg is a read-only ref param.
+    fn collect_bad_vec_callsites(
+        s: &Statement,
+        sigs: &std::collections::HashMap<String, NativeVecFnSig>,
+        bad: &mut Vec<String>,
+    ) {
+        Self::for_each_stmt_expr(s, &mut |root| {
+            Self::walk_subexprs(root, &mut |e| {
+                if let Expr::Call { callee, args, .. } = e {
+                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                        if let Some(sig) = sigs.get(name.as_ref()) {
+                            if !Self::vec_call_args_ok(sig, args) {
+                                bad.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            });
+        });
+        Self::for_each_child_stmt_list(s, &mut |list| {
+            for st in list {
+                Self::collect_bad_vec_callsites(st, sigs, bad);
+            }
+        });
+    }
+
+    /// Apply `f` to `e` and every nested sub-expression (pre-order). Covers all `Expr` variants that
+    /// carry sub-expressions; leaves (`Ident`/`Literal`) just get `f`.
+    fn walk_subexprs(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+        f(e);
+        match e {
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                Self::walk_subexprs(left, f);
+                Self::walk_subexprs(right, f);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::TypeOf { operand, .. }
+            | Expr::Await { operand, .. } => Self::walk_subexprs(operand, f),
+            Expr::Delete { target, .. } => Self::walk_subexprs(target, f),
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                Self::walk_subexprs(callee, f);
+                for a in args {
+                    match a {
+                        CallArg::Expr(e) | CallArg::Spread(e) => Self::walk_subexprs(e, f),
+                    }
+                }
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::walk_subexprs(object, f);
+                if let MemberProp::Expr(pe) = prop {
+                    Self::walk_subexprs(pe, f);
+                }
+            }
+            Expr::Index { object, index, .. } => {
+                Self::walk_subexprs(object, f);
+                Self::walk_subexprs(index, f);
+            }
+            Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            } => {
+                Self::walk_subexprs(object, f);
+                Self::walk_subexprs(index, f);
+                Self::walk_subexprs(value, f);
+            }
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. } => Self::walk_subexprs(value, f),
+            Expr::MemberAssign { object, value, .. } => {
+                Self::walk_subexprs(object, f);
+                Self::walk_subexprs(value, f);
+            }
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::walk_subexprs(cond, f);
+                Self::walk_subexprs(then_branch, f);
+                Self::walk_subexprs(else_branch, f);
+            }
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(e) | ArrayElement::Spread(e) => Self::walk_subexprs(e, f),
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for pr in props {
+                    match pr {
+                        ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => {
+                            Self::walk_subexprs(e, f)
+                        }
+                    }
+                }
+            }
+            Expr::TemplateLiteral { exprs, .. } => {
+                for e in exprs {
+                    Self::walk_subexprs(e, f);
+                }
+            }
+            Expr::ArrowFunction { body, .. } => {
+                if let ArrowBody::Expr(e) = body {
+                    Self::walk_subexprs(e, f);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Validate a call's arguments against a native-vec signature: arity matches; each `Array` arg is
+    /// a bare ident; all array args are pairwise distinct (so `&mut` borrows can't alias).
+    fn vec_call_args_ok(sig: &NativeVecFnSig, args: &[CallArg]) -> bool {
+        if args.len() != sig.params.len() {
+            return false;
+        }
+        let mut array_idents: Vec<&str> = Vec::new();
+        for ((_, kind), a) in sig.params.iter().zip(args.iter()) {
+            let CallArg::Expr(ae) = a else {
+                return false;
+            };
+            if let VecParamKind::Array { .. } = kind {
+                let Expr::Ident { name, .. } = ae else {
+                    return false;
+                };
+                array_idents.push(name.as_ref());
+            }
+        }
+        // Pairwise-distinct array args.
+        for i in 0..array_idents.len() {
+            for j in (i + 1)..array_idents.len() {
+                if array_idents[i] == array_idents[j] {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Emit one native-vec fn: `fn name_nv(<f64..>, <&/&mut Vec<T>..>) -> f64|() { <body> }`, reusing
+    /// the normal statement emitter (with `native_vec_ret` set so returns lower to the native shape).
+    fn emit_native_vec_fn(&mut self, name: &str, body: &Statement) -> Result<(), CompileError> {
+        let sig = self.native_vec_fns.get(name).cloned().unwrap();
+        self.type_context.push_scope();
+        let saved_ret = self.native_vec_ret.take();
+        let saved_refs = std::mem::take(&mut self.vec_ref_params);
+        let mut plist: Vec<String> = Vec::new();
+        for (pname, kind) in &sig.params {
+            let esc = Self::escape_ident(pname).into_owned();
+            match kind {
+                VecParamKind::Scalar => {
+                    plist.push(format!("mut {}: f64", esc));
+                    self.type_context.define(pname, RustType::F64);
+                }
+                VecParamKind::Array { elem, is_mut } => {
+                    let r = if *is_mut { "&mut " } else { "&" };
+                    plist.push(format!("{}: {}Vec<{}>", esc, r, elem.to_rust_type_str()));
+                    self.type_context
+                        .define(pname, RustType::Vec(Box::new(elem.clone())));
+                    self.vec_ref_params.insert(pname.clone(), *is_mut);
+                }
+            }
+        }
+        let ret_str = if sig.ret_f64 { " -> f64" } else { "" };
+        self.writeln("#[allow(non_snake_case, unused)]");
+        self.writeln(&format!(
+            "fn {}_nv({}){} {{",
+            Self::escape_ident(name),
+            plist.join(", "),
+            ret_str
+        ));
+        self.indent += 1;
+        self.native_vec_ret = Some(sig.ret_f64);
+        let res = self.emit_statement(body);
+        // Total function: a value-returning fn that falls off the end gets a default.
+        if sig.ret_f64 {
+            self.writeln("0.0");
+        }
+        self.native_vec_ret = saved_ret;
+        self.vec_ref_params = saved_refs;
+        self.indent -= 1;
+        self.writeln("}");
+        self.type_context.pop_scope();
+        res
+    }
+
+    /// #175: route a direct call `f(args)` to `f_nv(..)` when `f` is a native-vec fn. Returns the
+    /// emitted code (boxed `Value` when `as_value`, else the bare native expr) or `None` to fall back.
+    fn try_emit_native_vec_call(
+        &mut self,
+        callee: &Expr,
+        args: &[CallArg],
+        as_value: bool,
+    ) -> Result<Option<String>, CompileError> {
+        let Expr::Ident { name, .. } = callee else {
+            return Ok(None);
+        };
+        let Some(sig) = self.native_vec_fns.get(name.as_ref()).cloned() else {
+            return Ok(None);
+        };
+        if !Self::vec_call_args_ok(&sig, args) {
+            return Ok(None);
+        }
+        let mut call_args: Vec<String> = Vec::new();
+        for ((_, kind), a) in sig.params.iter().zip(args.iter()) {
+            let CallArg::Expr(ae) = a else {
+                return Ok(None);
+            };
+            match kind {
+                VecParamKind::Scalar => call_args.push(self.emit_f64(ae)?),
+                VecParamKind::Array { elem, is_mut } => {
+                    let Expr::Ident { name: an, .. } = ae else {
+                        return Ok(None);
+                    };
+                    let esc = Self::escape_ident(an.as_ref()).into_owned();
+                    // A ref param is already `&/&mut Vec`; reborrow through it. A local `Vec` is
+                    // address-of'd. A `&mut` callee param can't take a read-only ref param.
+                    let code = match self.vec_ref_params.get(an.as_ref()) {
+                        Some(arg_is_mut) => {
+                            if *is_mut && !*arg_is_mut {
+                                return Ok(None);
+                            }
+                            if *is_mut {
+                                format!("&mut *{}", esc)
+                            } else {
+                                format!("&*{}", esc)
+                            }
+                        }
+                        None => {
+                            // A local: it must be a NATIVE `Vec<elem>` (not a boxed `Value::Array`,
+                            // not closure-captured) or the reference would be ill-typed — bail to the
+                            // boxed call in that case.
+                            let ty = self.type_context.get_type(an.as_ref());
+                            let native_vec = matches!(&ty, RustType::Vec(e) if **e == *elem)
+                                && !self.refcell_wrapped_vars.contains(an.as_ref());
+                            if !native_vec {
+                                return Ok(None);
+                            }
+                            if *is_mut {
+                                format!("&mut {}", esc)
+                            } else {
+                                format!("&{}", esc)
+                            }
+                        }
+                    };
+                    call_args.push(code);
+                }
+            }
+        }
+        let call = format!("{}_nv({})", Self::escape_ident(name.as_ref()), call_args.join(", "));
+        Ok(Some(if sig.ret_f64 {
+            if as_value {
+                format!("Value::Number({})", call)
+            } else {
+                call
+            }
+        } else if as_value {
+            format!("{{ {}; Value::Null }}", call)
+        } else {
+            call
+        }))
+    }
+
     // ====================================================================================
     // #177 (S-E / S-F): interprocedural aggregate (unboxed struct + Vec<Struct>) free fns.
     //
@@ -9585,6 +10347,22 @@ impl Codegen {
                 if !self.aggregate_fns.is_empty() {
                     if let Some((code, ty)) = self.try_emit_toplevel_agg_call(callee, args, false)? {
                         return Ok((code, ty));
+                    }
+                }
+                // #175: a native-vec fn used in a typed/native expression (e.g. the recursive
+                // `count + place(..)`). f64-returning → (call, F64); void → boxed unit.
+                if !self.native_vec_fns.is_empty() {
+                    if let Expr::Ident { name: vn, .. } = callee.as_ref() {
+                        if let Some(sig) = self.native_vec_fns.get(vn.as_ref()).cloned() {
+                            if let Some(code) = self.try_emit_native_vec_call(callee, args, false)? {
+                                let ty = if sig.ret_f64 {
+                                    RustType::F64
+                                } else {
+                                    RustType::Value
+                                };
+                                return Ok((code, ty));
+                            }
+                        }
                     }
                 }
                 // M5: direct call to an eligible native fn -> `name_native(<native args>)`.
