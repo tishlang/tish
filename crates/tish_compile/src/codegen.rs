@@ -845,6 +845,19 @@ pub(crate) struct Codegen {
     /// passing array idents by reference; the boxed closure is suppressed. Empty unless the whole
     /// group lowers cleanly (scratch-buffer rollback), so it can never regress the boxed path.
     native_vec_fns: std::collections::HashMap<String, NativeVecFnSig>,
+    /// #175 follow-up — top-level numeric "leaf" fns (`fn f(a,…){ return <numeric expr> }`, no other
+    /// statements, body built only from params/literals/arithmetic/1-arg `Math`) eligible for INLINING
+    /// at a native-f64 call site (`name -> (param names, body expr)`). Inlining at a site whose args
+    /// are already `f64` is sound regardless of the boxed closure (which is left intact for any
+    /// non-numeric callers) and removes the per-call dispatch — what spectral_norm's `evalA` needs.
+    inline_fns: std::collections::HashMap<String, (Vec<String>, Expr)>,
+    /// Active inline-substitution scopes (param name → the f64 temp it was bound to) while emitting an
+    /// inlined body. Top scope wins; an inner inline pushes its own. Read by the `Ident` arm.
+    inline_subst: Vec<std::collections::HashMap<String, String>>,
+    /// Inline fns currently being expanded (recursion guard) + a monotonically increasing depth used
+    /// to make the bound temps unique across nested inlines.
+    inlining_now: std::collections::HashSet<String>,
+    inline_depth: usize,
     /// #175 — while emitting a native-vec free fn body: `Some(true)` returns `f64`, `Some(false)`
     /// returns `()`. Consulted by the `Return` arm so a `return e;` coerces to the native shape.
     native_vec_ret: Option<bool>,
@@ -949,6 +962,10 @@ impl Codegen {
             refcell_wrapped_vars: std::collections::HashSet::new(),
             native_fns: std::collections::HashSet::new(),
             native_vec_fns: std::collections::HashMap::new(),
+            inline_fns: std::collections::HashMap::new(),
+            inline_subst: Vec::new(),
+            inlining_now: std::collections::HashSet::new(),
+            inline_depth: 0,
             native_vec_ret: None,
             vec_ref_params: std::collections::HashMap::new(),
             aggregate_alias: None,
@@ -1653,6 +1670,10 @@ impl Codegen {
         // aggregate path so it can skip any fn that path already claimed; emits before `run()` with
         // its own scratch-buffer rollback so a failure leaves the boxed closures untouched.
         if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+            // #175 inline: numeric leaf fns (e.g. spectral_norm's `evalA`) inlined at native-f64 call
+            // sites. Detect before native-vec so a native-vec body's call to one inlines (no boxed
+            // reference). The boxed closure is left intact for any non-f64 callers.
+            self.inline_fns = Self::collect_inline_fns(program);
             self.setup_native_vec_fns(program);
         }
         // Soundness pass — must run after type aliases + `native_fns` are known (both feed the
@@ -8192,6 +8213,150 @@ impl Codegen {
         })
     }
 
+    /// Numeric "leaf" fns inlinable at a native-f64 call site: a single `return <numeric expr>` body
+    /// (no other statements) built only from the params, number literals, arithmetic/unary, and 1-arg
+    /// `Math` — so substituting the params with f64 args yields a pure-f64 expression. Recursion and
+    /// any non-numeric form disqualify it. (Boxed callers keep the original closure — inlining only
+    /// fires where args are already proven f64, so it never assumes caller types.)
+    fn collect_inline_fns(
+        program: &Program,
+    ) -> std::collections::HashMap<String, (Vec<String>, Expr)> {
+        let mut out = std::collections::HashMap::new();
+        for s in &program.statements {
+            if let Statement::FunDecl {
+                async_: false,
+                name,
+                params,
+                rest_param: None,
+                body,
+                ..
+            } = s
+            {
+                let pnames: Vec<String> = params
+                    .iter()
+                    .filter_map(|p| match p {
+                        FunParam::Simple(tp) if tp.default.is_none() => Some(tp.name.to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                if pnames.len() != params.len() || pnames.is_empty() {
+                    continue;
+                }
+                // Body must be exactly `{ return <expr> }`.
+                let ret_expr = match body.as_ref() {
+                    Statement::Block { statements, .. } if statements.len() == 1 => {
+                        match &statements[0] {
+                            Statement::Return { value: Some(e), .. } => Some(e.clone()),
+                            _ => None,
+                        }
+                    }
+                    Statement::Return { value: Some(e), .. } => Some(e.clone()),
+                    _ => None,
+                };
+                let Some(expr) = ret_expr else { continue };
+                let pset: std::collections::HashSet<&str> =
+                    pnames.iter().map(|s| s.as_str()).collect();
+                if Self::inline_body_numeric(&expr, &pset, name.as_ref()) {
+                    out.insert(name.to_string(), (pnames, expr));
+                }
+            }
+        }
+        out
+    }
+
+    /// A body expr safe to inline as f64: params, number literals, arithmetic/unary, 1-arg `Math`.
+    /// No calls to other fns (incl. self), no string/overloaded shapes — keeps the inlined result f64.
+    fn inline_body_numeric(e: &Expr, params: &std::collections::HashSet<&str>, self_name: &str) -> bool {
+        match e {
+            Expr::Literal { value: Literal::Number(_), .. } => true,
+            Expr::Ident { name, .. } => params.contains(name.as_ref()),
+            Expr::Binary { left, op, right, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
+                ) && Self::inline_body_numeric(left, params, self_name)
+                    && Self::inline_body_numeric(right, params, self_name)
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnaryOp::Neg | UnaryOp::Pos)
+                    && Self::inline_body_numeric(operand, params, self_name)
+            }
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::inline_body_numeric(cond, params, self_name)
+                    && Self::inline_body_numeric(then_branch, params, self_name)
+                    && Self::inline_body_numeric(else_branch, params, self_name)
+            }
+            Expr::Call { callee, args, .. } => {
+                // Only 1-arg `Math.<intrinsic>` — never another fn (incl. self), to keep it a pure
+                // expression with no dispatch and no recursion.
+                matches!(callee.as_ref(),
+                    Expr::Member { object, prop: MemberProp::Name { name: m, .. }, .. }
+                        if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                            && matches!(m.as_ref(), "sqrt"|"sin"|"cos"|"tan"|"abs"|"floor"|"ceil"|"exp"|"trunc"|"log"))
+                    && args.len() == 1
+                    && matches!(&args[0], CallArg::Expr(a) if Self::inline_body_numeric(a, params, self_name))
+            }
+            _ => false,
+        }
+    }
+
+    /// #175 follow-up: inline a call to a numeric leaf fn when every arg is native `f64`. Binds each
+    /// arg to an f64 temp (no double-eval), substitutes the params, and emits the body inline — so the
+    /// 20M `evalA(i, j)` dispatches in spectral_norm collapse to pure f64 arithmetic. `None` ⇒ no
+    /// inline (non-f64 arg, arity/recursion mismatch) and the normal call path runs.
+    fn try_emit_inline_call(
+        &mut self,
+        callee: &Expr,
+        args: &[CallArg],
+    ) -> Result<Option<(String, RustType)>, CompileError> {
+        let Expr::Ident { name, .. } = callee else {
+            return Ok(None);
+        };
+        let Some((params, body)) = self.inline_fns.get(name.as_ref()).cloned() else {
+            return Ok(None);
+        };
+        if params.len() != args.len()
+            || self.inlining_now.contains(name.as_ref())
+            || self.inline_depth > 8
+        {
+            return Ok(None);
+        }
+        // Every arg must emit as native f64; otherwise fall back to the boxed/native call.
+        let mut arg_codes: Vec<String> = Vec::with_capacity(args.len());
+        for a in args {
+            let CallArg::Expr(e) = a else {
+                return Ok(None);
+            };
+            let (code, ty) = self.emit_typed_expr(e)?;
+            if ty != RustType::F64 {
+                return Ok(None);
+            }
+            arg_codes.push(code);
+        }
+        let depth = self.inline_depth;
+        let mut prelude = String::new();
+        let mut subst = std::collections::HashMap::new();
+        for (p, ac) in params.iter().zip(arg_codes.iter()) {
+            let temp = format!("_inl{}_{}", depth, Self::escape_ident(p));
+            prelude.push_str(&format!("let {}: f64 = {}; ", temp, ac));
+            subst.insert(p.clone(), temp);
+        }
+        self.inline_subst.push(subst);
+        self.inlining_now.insert(name.to_string());
+        self.inline_depth += 1;
+        let body_code = self.emit_f64(&body);
+        self.inline_depth -= 1;
+        self.inlining_now.remove(name.as_ref());
+        self.inline_subst.pop();
+        let body_code = body_code?;
+        Ok(Some((format!("{{ {}{} }}", prelude, body_code), RustType::F64)))
+    }
+
     // ====================================================================================
     // #175: native plain-array free fns (spectral_norm / queens shape).
     //
@@ -8570,8 +8735,11 @@ impl Codegen {
                 if let Expr::Call { callee, args, .. } = e {
                     match callee.as_ref() {
                         Expr::Ident { name, .. } => {
+                            // OK to call: another native-vec fn, an M5 native fn, or a numeric leaf
+                            // fn that inlines at the (f64) call site (no boxed reference remains).
                             if !group.contains_key(name.as_ref())
                                 && !self.native_fns.contains(name.as_ref())
+                                && !self.inline_fns.contains_key(name.as_ref())
                             {
                                 ok = false;
                             }
@@ -10069,6 +10237,12 @@ impl Codegen {
 
             // ── identifiers ──────────────────────────────────────────────────────
             Expr::Ident { name, .. } => {
+                // #175 inline: a param of the fn currently being inlined reads its bound f64 temp.
+                if let Some(top) = self.inline_subst.last() {
+                    if let Some(temp) = top.get(name.as_ref()) {
+                        return Ok((temp.clone(), RustType::F64));
+                    }
+                }
                 let escaped = Self::escape_ident(name.as_ref());
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     let var_type = self.type_context.get_type(name.as_ref());
@@ -10342,6 +10516,13 @@ impl Codegen {
             // skipping the boxed value_call per element. Only methods whose Rust f64 op
             // matches JS semantics (round half-up & sign(0) differ → left to the runtime).
             Expr::Call { callee, args, .. } => {
+                // #175 inline: a numeric leaf fn (`evalA`) called with all-f64 args expands inline to
+                // pure f64 arithmetic — no dispatch. Tried first so a hot helper never pays a call.
+                if !self.inline_fns.is_empty() {
+                    if let Some(res) = self.try_emit_inline_call(callee, args)? {
+                        return Ok(res);
+                    }
+                }
                 // #177: a de-virtualized aggregate fn used in native arithmetic (e.g. `energy(bodies)`
                 // feeding an f64 expression) → call `name_agg(..)` returning the native type.
                 if !self.aggregate_fns.is_empty() {

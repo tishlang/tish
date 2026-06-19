@@ -86,14 +86,27 @@ fn queens_place_devirtualizes_to_native_vec_fn() {
 }
 
 #[test]
-fn spectral_norm_bails_when_body_calls_a_boxed_fn() {
-    // `multiplyAv` calls `evalA`, which is not native (not M5) — the native-vec free fn can't
-    // reference the boxed closure, so the whole group must fall back to boxed (no `_nv`, no
-    // BUILD-FAIL). Soundness over coverage.
+fn spectral_norm_devirtualizes_with_inlined_evala() {
+    // `multiplyAv`/`multiplyAtv` (over `&Vec<f64>` + `&mut Vec<f64>`) call `evalA`, a numeric leaf fn.
+    // `evalA` inlines at the native-f64 call site (no dispatch, no boxed reference), so the native-vec
+    // group de-virtualizes. The boxed `evalA` closure is left intact for any non-f64 callers.
     let rust = compile_fixture_typed("tests/perf/spectral_norm.tish");
     assert!(
-        !rust.contains("_nv("),
-        "spectral_norm must bail to the boxed path (no native-vec fns):\n{}",
-        rust.lines().filter(|l| l.contains("_nv")).take(4).collect::<Vec<_>>().join("\n")
+        rust.contains("fn multiplyAv_nv(") && (rust.contains("v: &Vec<f64>") || rust.contains("av: &mut Vec<f64>")),
+        "multiplyAv lowers to a native-vec fn:\n{}",
+        rust.lines().filter(|l| l.contains("multiplyAv_nv")).take(3).collect::<Vec<_>>().join("\n")
+    );
+    // evalA is inlined: the native-vec body has the substituted body (a `_inl…` temp) and does NOT
+    // call evalA (no `value_call`/`evalA(` inside multiplyAv_nv).
+    let mav = rust
+        .lines()
+        .skip_while(|l| !l.contains("fn multiplyAv_nv("))
+        .take_while(|l| !l.trim_start().starts_with("fn ") || l.contains("multiplyAv_nv"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        mav.contains("_inl") && !mav.contains("value_call"),
+        "evalA must be inlined into multiplyAv_nv (substituted temps, no value_call):\n{}",
+        mav
     );
 }
