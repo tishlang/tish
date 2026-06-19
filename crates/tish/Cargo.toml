@@ -59,6 +59,7 @@ tishlang_runtime = { path = "../tish_runtime", version = ">=0.1" }
 tishlang_core = { path = "../tish_core", version = ">=0.1" }
 tishlang_js_to_tish = { path = "../js_to_tish", version = ">=0.1" }
 clap = { version = "4.6.0", features = ["derive", "color"] }
+serde_json = "1"
 tishlang_pg = { path = "../tish_pg", version = ">=0.1", optional = true }
 mimalloc = { version = "0.1", optional = true }
 

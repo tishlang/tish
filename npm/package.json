@@ -5,7 +5,8 @@
   "workspaces": [
     "tish",
     "cargo-bindgen",
-    "create-tish-app"
+    "create-tish-app",
+    "vite-plugin-tish"
   ],
   "scripts": {
     "build:binaries": "./scripts/build-binaries.sh"

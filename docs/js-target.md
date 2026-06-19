@@ -68,10 +68,40 @@ tish build src/main.tish -o dist/tish --target js --format esm
 # Vite bundles + tree-shakes the graph
 ```
 
+## Vite dev (HMR)
+
+For development, the official [`@tishlang/vite-plugin-tish`](../npm/vite-plugin-tish/README.md) plugin compiles each `.tish` file **into Vite's module graph one module at a time**, so editing a module hot-swaps in place (HMR) instead of reloading the whole page. This replaces the older shim that ran a whole-program `tish build` and sent `{ type: 'full-reload' }` on every change.
+
+```bash
+npm install -D @tishlang/vite-plugin-tish
+```
+
+```js
+// vite.config.js
+import { defineConfig } from "vite"
+import tish from "@tishlang/vite-plugin-tish"
+
+export default defineConfig({ plugins: [tish()] })
+```
+
+Under the hood the plugin shells out to a single-module compile:
+
+```bash
+tish compile-module src/counter.tish --target js --format esm --vite-dev --source-map
+```
+
+- `compile-module` reads and compiles **only that one file** (no dependency-graph resolution) — Vite owns the graph and resolves each `.tish` import back through the plugin.
+- `--vite-dev` keeps relative `.tish` specifiers (`./counter.tish`) and bare packages verbatim so Vite's `resolveId`/`load` re-enters the plugin per dependency.
+- `--source-map` (on by default for `compile-module`) emits a `{ "js": …, "map": … }` JSON envelope so Vite's error overlay and the browser debugger resolve back to the original `.tish` line/column. Pass `--no-source-map` to get raw JS on stdout instead.
+
+Dev source maps require no optimization (mappings follow unmerged statement order), so `compile-module --source-map` implies `--no-optimize`, the same rule as `build --target js --source-map`.
+
+For `--target bytecode` apps (the wasm VM owns all engine state) per-module HMR does not apply — set `mode: "full-reload"` on the plugin as the documented fallback.
+
 ### Limitations (current)
 
 - `-o` is treated as a **directory** in ESM mode.
 - **Native imports** (`tish:*`, `cargo:*`, `ffi:*`, and the built-in `fs`/`http`/`process`/`ws`) are rejected — they require `--target native`.
 - When the graph spans modules outside the entry's package, the output tree is rooted at their nearest common ancestor, so the entry is emitted in a subtree (the `Entry: …` line reports its path) and the tree may include `node_modules/` / sibling-package directories.
-- `--source-map` is **bundle-only** for now; ESM per-file source maps are a follow-up.
+- `--source-map` is **bundle-only** for disk `build` output; per-file source maps for production `--format esm` are a follow-up. (Dev source maps **are** available per module via `compile-module --source-map` / the Vite plugin.)
 - `.jsx` / `.js` single-file inputs are bundle-only.

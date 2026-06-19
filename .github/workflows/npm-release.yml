@@ -11,7 +11,8 @@
 # durable option). This requires a ONE-TIME setup on npmjs.com for EACH package
 # below; until that is done a publish fails with E404/E422. For every package
 # (@tishlang/tish, @tishlang/cargo-bindgen, @tishlang/tish-format, @tishlang/tish-lint,
-# @tishlang/pg, @tishlang/create-tish-app, and unscoped create-tish-app) open
+# @tishlang/tish-lsp, @tishlang/pg, @tishlang/create-tish-app, @tishlang/vite-plugin-tish,
+# and unscoped create-tish-app) open
 # npmjs.com > the package > Settings > "Trusted Publisher" > GitHub Actions and set:
 #   Organization or user: tishlang
 #   Repository:           tish
@@ -69,6 +70,10 @@ jobs:
             npm: "@tishlang/create-tish-app"
             type: source
             dir: create-tish-app
+          - label: "@tishlang/vite-plugin-tish"
+            npm: "@tishlang/vite-plugin-tish"
+            type: source
+            dir: vite-plugin-tish
           # Unscoped alias of create-tish-app — published as its own package, non-fatal.
           - label: "create-tish-app (unscoped)"
             npm: "create-tish-app"
@@ -178,6 +183,7 @@ jobs:
           NPM_LINT_URL="https://www.npmjs.com/package/@tishlang/tish-lint/v/${VERSION}"
           CTA_SCOPED="https://www.npmjs.com/package/@tishlang/create-tish-app/v/${VERSION}"
           CTA_UNSCOPED="https://www.npmjs.com/package/create-tish-app/v/${VERSION}"
+          VITE_PLUGIN_URL="https://www.npmjs.com/package/@tishlang/vite-plugin-tish/v/${VERSION}"
           CRATES_URL="https://crates.io/crates/tishlang/${VERSION}"
           RELEASE_ID="${{ github.event.release.id }}"
           REPO="${{ github.repository }}"
@@ -192,7 +198,7 @@ jobs:
           NEW_BODY="${CURRENT_BODY}
 
           ---
-          Published to npm: ${NPM_URL} | cargo-bindgen: ${NPM_BINDGEN_URL} | tish-format: ${NPM_FORMAT_URL} | tish-lint: ${NPM_LINT_URL} | create-tish-app: ${CTA_SCOPED} · ${CTA_UNSCOPED} | crates.io: ${CRATES_URL}"
+          Published to npm: ${NPM_URL} | cargo-bindgen: ${NPM_BINDGEN_URL} | tish-format: ${NPM_FORMAT_URL} | tish-lint: ${NPM_LINT_URL} | create-tish-app: ${CTA_SCOPED} · ${CTA_UNSCOPED} | vite-plugin-tish: ${VITE_PLUGIN_URL} | crates.io: ${CRATES_URL}"
           curl -s -X PATCH \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \

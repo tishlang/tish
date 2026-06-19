@@ -20,11 +20,23 @@ enum EmitMode {
     Esm,
 }
 
+/// How ESM import specifiers are rewritten. `Disk` (production `--format esm`) rewrites `.tish`
+/// specifiers to their sibling `.js` output paths and resolves bare specifiers to relative paths
+/// into the emitted module tree. `ViteDev` keeps relative `.tish` specifiers and bare specifiers
+/// as-is so Vite's `resolveId`/`load` re-enters the plugin per module (in-graph HMR, issue #284).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportRewrite {
+    Disk,
+    ViteDev,
+}
+
 struct Codegen {
     output: String,
     indent: usize,
     in_async: bool,
     emit_mode: EmitMode,
+    /// ESM only: how import specifiers are rewritten (disk `.js` paths vs Vite-dev `.tish`).
+    import_rewrite: ImportRewrite,
     /// ESM only: the absolute path of the module being emitted (the importer), used to rewrite
     /// relative/bare import specifiers to sibling `.js` output paths.
     module_path: PathBuf,
@@ -48,17 +60,19 @@ impl Codegen {
             indent: 0,
             in_async: false,
             emit_mode: EmitMode::Bundle,
+            import_rewrite: ImportRewrite::Disk,
             module_path: PathBuf::new(),
             project_root: PathBuf::new(),
         }
     }
 
-    fn new_esm(module_path: PathBuf, project_root: PathBuf) -> Self {
+    fn new_esm(module_path: PathBuf, project_root: PathBuf, import_rewrite: ImportRewrite) -> Self {
         Self {
             output: String::new(),
             indent: 0,
             in_async: false,
             emit_mode: EmitMode::Esm,
+            import_rewrite,
             module_path,
             project_root,
         }
@@ -907,7 +921,12 @@ impl Codegen {
         specifiers: &[ImportSpecifier],
         from: &str,
     ) -> Result<(), CompileError> {
-        let spec = rewrite_import_to_js(from, &self.module_path, &self.project_root)?;
+        let spec = rewrite_import_to_js(
+            from,
+            &self.module_path,
+            &self.project_root,
+            self.import_rewrite,
+        )?;
         let mut named: Vec<String> = Vec::new();
         let mut default_local: Option<String> = None;
         let mut namespace_local: Option<String> = None;
@@ -987,6 +1006,7 @@ fn rewrite_import_to_js(
     spec: &str,
     importer_abs: &Path,
     project_root: &Path,
+    rewrite: ImportRewrite,
 ) -> Result<String, CompileError> {
     if tishlang_compile::is_native_import(spec) {
         return Err(CompileError {
@@ -995,6 +1015,11 @@ fn rewrite_import_to_js(
                 spec
             ),
         });
+    }
+    // Vite dev keeps specifiers verbatim: relative `.tish` paths and bare packages are left for the
+    // plugin's `resolveId`/`load` (relative) or Node/Vite resolution (bare) to handle per-module.
+    if rewrite == ImportRewrite::ViteDev {
+        return Ok(spec.to_string());
     }
     if spec.starts_with("./") || spec.starts_with("../") {
         return Ok(spec_ext_to_js(spec));
@@ -1249,7 +1274,8 @@ pub fn compile_project_esm(
         } else {
             module.program.clone()
         };
-        let mut gen = Codegen::new_esm(mod_canon.clone(), res_root_canon.clone());
+        let mut gen =
+            Codegen::new_esm(mod_canon.clone(), res_root_canon.clone(), ImportRewrite::Disk);
         gen.emit_program(&program, None, None)?;
         out.push(EmittedJsModule {
             relative_path: rel_js,
@@ -1257,6 +1283,84 @@ pub fn compile_project_esm(
         });
     }
     Ok(out)
+}
+
+/// Compile a **single** `.tish` module to one ES module (issue #284, Vite dev / HMR). Unlike
+/// [`compile_project_esm`], the dependency graph is **not** resolved — only `module_path` is read
+/// and parsed — so a Vite plugin can compile one file per `load()` and let Vite own the module
+/// graph. With `ImportRewrite::ViteDev` relative `.tish` specifiers and bare packages are preserved
+/// so Vite re-enters the plugin per dependency. When `source_map` is set, a v3 map back to the
+/// `.tish` source is returned (requires `optimize == false`, matching the bundle source-map rule).
+pub fn compile_module_esm(
+    module_path: &Path,
+    project_root: Option<&Path>,
+    optimize: bool,
+    import_rewrite: ImportRewrite,
+    source_map: bool,
+) -> Result<JsBundle, CompileError> {
+    if source_map && optimize {
+        return Err(CompileError {
+            message: "source map requires no optimization (mappings follow unmerged statement order)."
+                .into(),
+        });
+    }
+    let source = std::fs::read_to_string(module_path).map_err(|e| CompileError {
+        message: format!("Cannot read {}: {}", module_path.display(), e),
+    })?;
+    let parsed = tishlang_parser::parse(&source).map_err(|e| CompileError {
+        message: format!("Parse error in {}: {}", module_path.display(), e),
+    })?;
+    let program = if optimize {
+        tishlang_opt::optimize(&parsed)
+    } else {
+        parsed
+    };
+    let module_canon = module_path
+        .canonicalize()
+        .unwrap_or_else(|_| module_path.to_path_buf());
+    let root = project_root
+        .map(Path::to_path_buf)
+        .or_else(|| module_path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let root_canon = root.canonicalize().unwrap_or(root);
+
+    let mut gen = Codegen::new_esm(module_canon.clone(), root_canon.clone(), import_rewrite);
+    if source_map {
+        let stmt_sources = vec![module_canon.clone(); program.statements.len()];
+        let mut builder = SourceMapBuilder::new(Some("module.js"));
+        builder.set_source_root(Some(""));
+        gen.emit_program(
+            &program,
+            Some((stmt_sources.as_slice(), root_canon.as_path())),
+            Some(&mut builder),
+        )?;
+        let mut sm = builder.into_sourcemap();
+        // Embed the original `.tish` so consumers (Vite, browser devtools) never resolve
+        // `sources` from disk. The map's `sources` are project-root-relative, but Vite resolves
+        // them against the module's own directory; without inline content it logs
+        // "Sourcemap ... points to missing source files" and devtools can't show the original.
+        let source_count = sm.get_source_count();
+        for id in 0..source_count {
+            sm.set_source_contents(id, Some(&source));
+        }
+        let mut v = Vec::new();
+        sm.to_writer(&mut v).map_err(|e| CompileError {
+            message: e.to_string(),
+        })?;
+        let map_json = String::from_utf8(v).map_err(|e| CompileError {
+            message: e.to_string(),
+        })?;
+        Ok(JsBundle {
+            js: gen.output,
+            source_map_json: Some(map_json),
+        })
+    } else {
+        gen.emit_program(&program, None, None)?;
+        Ok(JsBundle {
+            js: gen.output,
+            source_map_json: None,
+        })
+    }
 }
 
 /// Deepest directory that is an ancestor of every given file path, compared component-wise. Used as

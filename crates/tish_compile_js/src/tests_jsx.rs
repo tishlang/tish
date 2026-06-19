@@ -4,7 +4,10 @@ mod tests {
 
     use tishlang_parser::parse;
 
-    use crate::{compile_project_esm, compile_project_with_jsx, compile_with_jsx, EmittedJsModule};
+    use crate::{
+        compile_module_esm, compile_project_esm, compile_project_with_jsx, compile_with_jsx,
+        EmittedJsModule, ImportRewrite,
+    };
 
     #[test]
     fn lattish_jsx_emits_h_with_children_array() {
@@ -636,6 +639,172 @@ fn factory() {
         assert!(
             err.message.contains("Native module import") && err.message.contains("esm"),
             "expected a native-import rejection for ESM, got: {}",
+            err.message
+        );
+    }
+
+    // ── #284: single-module compile for Vite dev (in-graph HMR) ───────────────────────────────
+
+    /// Write `modules` into a fresh temp dir and compile just `entry` (no graph resolution),
+    /// in Vite-dev import-rewrite mode without a source map.
+    fn build_module_vite(entry: &str, modules: &[(&str, &str)]) -> String {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        for (rel, src) in modules {
+            let p = dir.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            let mut f = std::fs::File::create(&p).unwrap();
+            f.write_all(src.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
+        compile_module_esm(
+            &dir.join(entry),
+            Some(dir),
+            false,
+            ImportRewrite::ViteDev,
+            false,
+        )
+        .expect("compile_module_esm failed")
+        .js
+    }
+
+    #[test]
+    fn compile_module_esm_vite_preserves_relative_tish_imports() {
+        let js = build_module_vite(
+            "main.tish",
+            &[(
+                "main.tish",
+                "import { id } from \"./dep.tish\"\nconsole.log(id(1))\n",
+            )],
+        );
+        assert!(
+            js.contains("import { id } from \"./dep.tish\";"),
+            "Vite dev keeps the .tish specifier so resolveId re-enters the plugin:\n{js}"
+        );
+        assert!(
+            !js.contains("./dep.js"),
+            "Vite dev must NOT rewrite .tish to .js:\n{js}"
+        );
+    }
+
+    #[test]
+    fn compile_module_esm_vite_leaves_bare_specifiers_unchanged() {
+        let js = build_module_vite(
+            "main.tish",
+            &[(
+                "main.tish",
+                "import { h } from \"lattish\"\nconsole.log(h)\n",
+            )],
+        );
+        assert!(
+            js.contains("import { h } from \"lattish\";"),
+            "bare specifier passes through for normal Node/Vite resolution:\n{js}"
+        );
+    }
+
+    #[test]
+    fn compile_module_esm_vite_emits_exports() {
+        let js = build_module_vite(
+            "main.tish",
+            &[(
+                "main.tish",
+                "export const VERSION = \"1.0\"\nexport fn greet(n) { return \"hi \" + n }\nexport default greet\n",
+            )],
+        );
+        assert!(js.contains("export const VERSION = \"1.0\";"), "named const export:\n{js}");
+        assert!(js.contains("export function greet "), "named fn export:\n{js}");
+        assert!(js.contains("export default greet;"), "default export:\n{js}");
+    }
+
+    #[test]
+    fn compile_module_esm_does_not_resolve_graph() {
+        // Compiling a single module must not read or require its dependencies to exist on disk:
+        // only the entry file is created, yet the import to a missing `./dep.tish` compiles fine.
+        let js = build_module_vite(
+            "main.tish",
+            &[(
+                "main.tish",
+                "import { id } from \"./dep.tish\"\nconsole.log(id(1))\n",
+            )],
+        );
+        assert!(
+            js.contains("import { id } from \"./dep.tish\";"),
+            "single-module compile emits the import without loading the dependency:\n{js}"
+        );
+    }
+
+    #[test]
+    fn compile_module_esm_rejects_native_imports() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let p = dir.join("main.tish");
+        std::fs::write(&p, "import { readFile } from \"fs\"\nconsole.log(1)\n").unwrap();
+        let err = compile_module_esm(&p, Some(dir), false, ImportRewrite::ViteDev, false)
+            .unwrap_err();
+        assert!(
+            err.message.contains("Native module import"),
+            "expected a native-import rejection, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn compile_module_esm_source_map_maps_statement_to_tish_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let p = dir.join("main.tish");
+        std::fs::write(&p, "export fn greet(n) { return \"hi \" + n }\nconsole.log(greet(\"x\"))\n")
+            .unwrap();
+        let bundle =
+            compile_module_esm(&p, Some(dir), false, ImportRewrite::ViteDev, true).unwrap();
+        let map = bundle
+            .source_map_json
+            .expect("source map requested → must be present");
+        assert!(
+            map.contains("\"version\":3") || map.contains("\"version\": 3"),
+            "v3 source map:\n{map}"
+        );
+        assert!(
+            map.contains("main.tish"),
+            "map sources reference the .tish file:\n{map}"
+        );
+    }
+
+    #[test]
+    fn compile_module_esm_source_map_embeds_sources_content() {
+        // The map must carry sourcesContent so Vite/devtools never resolve `sources` from disk
+        // (otherwise Vite warns "Sourcemap ... points to missing source files").
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let p = dir.join("main.tish");
+        let src = "export fn greet(n) { return \"hi \" + n }\n";
+        std::fs::write(&p, src).unwrap();
+        let bundle =
+            compile_module_esm(&p, Some(dir), false, ImportRewrite::ViteDev, true).unwrap();
+        let map = bundle.source_map_json.expect("source map requested");
+        assert!(
+            map.contains("\"sourcesContent\""),
+            "map must include a sourcesContent field:\n{map}"
+        );
+        assert!(
+            map.contains("export fn greet"),
+            "sourcesContent must embed the original .tish source:\n{map}"
+        );
+    }
+
+    #[test]
+    fn compile_module_esm_source_map_requires_no_optimize() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let p = dir.join("main.tish");
+        std::fs::write(&p, "console.log(1)\n").unwrap();
+        let err = compile_module_esm(&p, Some(dir), true, ImportRewrite::ViteDev, true)
+            .unwrap_err();
+        assert!(
+            err.message.to_lowercase().contains("optimiz"),
+            "source map + optimize must be rejected, got: {}",
             err.message
         );
     }

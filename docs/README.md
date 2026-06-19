@@ -14,7 +14,7 @@ Internal and contributor-facing docs. User-facing docs live in the **[tishlang.c
 | File | Purpose |
 |------|---------|
 | `js-emit-philosophy.md` | **Normative:** Tish is not JS; JS emit scope; “obvious failures” vs feature creep; `type` keyword exceptions |
-| `js-target.md` | `tish build --target js` output formats: `--format bundle` (single merged file) vs `--format esm` (one file per module with real `import`/`export` for Vite/Rollup tree-shaking; fixes cross-module export collisions, #282) |
+| `js-target.md` | `tish build --target js` output formats: `--format bundle` (single merged file) vs `--format esm` (one file per module with real `import`/`export` for Vite/Rollup tree-shaking; fixes cross-module export collisions, #282); plus Vite dev / HMR via `tish compile-module` + `@tishlang/vite-plugin-tish` with dev source maps (#284) |
 | `ecma-alignment.md` | ECMA-262 / test262 mapping (source of truth; tish-docs summarizes) |
 | `LANGUAGE.md` | Canonical language reference (syntax, semantics, builtins; LLM/tool friendly) |
 | `plan-gap-analysis.md` | Implementation audit, MVP checklist, next steps |

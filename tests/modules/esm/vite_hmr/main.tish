@@ -1,0 +1,6 @@
+// Entry module: imports a leaf relative `.tish` module. Under `compile-module --vite-dev`
+// the specifier must stay `./counter.tish` so Vite's resolveId re-enters the plugin (#284).
+import { makeCounter } from "./counter.tish"
+
+let next = makeCounter(0)
+console.log(next() + next())
