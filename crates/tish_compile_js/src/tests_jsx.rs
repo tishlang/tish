@@ -773,6 +773,28 @@ fn factory() {
     }
 
     #[test]
+    fn compile_module_esm_source_map_embeds_sources_content() {
+        // The map must carry sourcesContent so Vite/devtools never resolve `sources` from disk
+        // (otherwise Vite warns "Sourcemap ... points to missing source files").
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let p = dir.join("main.tish");
+        let src = "export fn greet(n) { return \"hi \" + n }\n";
+        std::fs::write(&p, src).unwrap();
+        let bundle =
+            compile_module_esm(&p, Some(dir), false, ImportRewrite::ViteDev, true).unwrap();
+        let map = bundle.source_map_json.expect("source map requested");
+        assert!(
+            map.contains("\"sourcesContent\""),
+            "map must include a sourcesContent field:\n{map}"
+        );
+        assert!(
+            map.contains("export fn greet"),
+            "sourcesContent must embed the original .tish source:\n{map}"
+        );
+    }
+
+    #[test]
     fn compile_module_esm_source_map_requires_no_optimize() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path();

@@ -1334,7 +1334,15 @@ pub fn compile_module_esm(
             Some((stmt_sources.as_slice(), root_canon.as_path())),
             Some(&mut builder),
         )?;
-        let sm = builder.into_sourcemap();
+        let mut sm = builder.into_sourcemap();
+        // Embed the original `.tish` so consumers (Vite, browser devtools) never resolve
+        // `sources` from disk. The map's `sources` are project-root-relative, but Vite resolves
+        // them against the module's own directory; without inline content it logs
+        // "Sourcemap ... points to missing source files" and devtools can't show the original.
+        let source_count = sm.get_source_count();
+        for id in 0..source_count {
+            sm.set_source_contents(id, Some(&source));
+        }
         let mut v = Vec::new();
         sm.to_writer(&mut v).map_err(|e| CompileError {
             message: e.to_string(),
