@@ -24,7 +24,13 @@
   },
   "files": ["index.js", "README.md"],
   "peerDependencies": {
-    "vite": ">=5"
+    "vite": ">=5",
+    "@tishlang/tish": "*"
+  },
+  "peerDependenciesMeta": {
+    "@tishlang/tish": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "vite": "^7",
