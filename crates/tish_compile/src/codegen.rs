@@ -803,6 +803,30 @@ pub(crate) struct NativeVecFnSig {
     ret_f64: bool,
 }
 
+/// #173 part 3 — a symbolic upper bound used by the in-bounds index proof. Two forms are matched by
+/// structural equality: an integer constant (`vec![K; 100]`, guard `i < 100`) and a single variable
+/// (`a` filled to length `n`, guard `i < n`). Anything more complex (`2 * n`, `a.length` member,
+/// arithmetic bounds) is intentionally not modeled — those keep the existing OOB-safe lowering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BoundKey {
+    Const(i64),
+    Var(String),
+    /// `a.length` — the live length of array `a`. As a GUARD (`i < a.length`) it proves `a[i]` is in
+    /// bounds directly, provided `a` never shrinks (guaranteed when `a` is in `vec_fixed_len`).
+    Len(String),
+}
+
+/// #173 part 3 — an active upper-bound guard from an enclosing loop condition `var <cmp> bound`,
+/// live for the textual span of the loop body until `var` is reassigned (after which its value is no
+/// longer bounded, so `live` is cleared and the guard stops proving anything).
+#[derive(Debug, Clone)]
+struct IndexGuard {
+    var: String,
+    bound: BoundKey,
+    strict: bool,
+    live: bool,
+}
+
 pub(crate) struct Codegen {
     output: String,
     indent: usize,
@@ -908,6 +932,22 @@ pub(crate) struct Codegen {
     /// `emit_int32_operand`, and reads coerce `(h as f64)`. See `collect_i32_loop_vars` for the
     /// (strict) eligibility/soundness gate. Scoped per function body / top level.
     i32_loop_vars: std::collections::HashSet<String>,
+    /// #173 part 3 — in-bounds index elision. Native `Vec` locals whose length is FIXED to a known
+    /// bound after construction (filled once to `B`, then never push/pop/length-changed or
+    /// reassigned — only indexed) → `name -> B`. With this, an access `a[idx]` guarded by `idx < B`
+    /// (same key) is provably in-bounds, so it skips the OOB-growth resize branch (stores) and the
+    /// `.get().unwrap_or()` branch (reads). Recomputed per analyzed program.
+    vec_fixed_len: std::collections::HashMap<String, BoundKey>,
+    /// #173 part 3 — locals provably `>= 0` everywhere (a one-sided sign lattice: init and every
+    /// reassignment RHS are non-negative-valued). The lower-bound half of the in-bounds proof, so a
+    /// guarded index `idx < len` can't be a negative `idx` that wraps to a huge `usize`.
+    nonneg_locals: std::collections::HashSet<String>,
+    /// #173 part 3 — stack of active upper-bound guards from enclosing loops. Pushed around a loop
+    /// body's emission and popped after; an index `a[counter]` consults it to prove `counter` is
+    /// below `a`'s fixed length. A guard goes `live = false` the moment its counter is reassigned
+    /// within the body (flow-sensitive: an access before the reassignment is still bounded, one after
+    /// is not).
+    active_index_guards: Vec<IndexGuard>,
     /// Scopes of names whose Rust binding is actually `Rc<RefCell<_>>` (emitted at VarDecl).
     /// `refcell_wrapped_vars` alone is insufficient: it is set by prepasses before decl may run.
     rc_cell_storage_scopes: Vec<std::collections::HashSet<String>>,
@@ -977,6 +1017,9 @@ impl Codegen {
             int_valued_locals: std::collections::HashSet::new(),
             array_elem_ranges: std::collections::HashMap::new(),
             i32_loop_vars: std::collections::HashSet::new(),
+            vec_fixed_len: std::collections::HashMap::new(),
+            nonneg_locals: std::collections::HashSet::new(),
+            active_index_guards: Vec::new(),
             rc_cell_storage_scopes: vec![std::collections::HashSet::new()],
             usage_analyzer: None,
             type_context: TypeContext::new(),
@@ -1688,6 +1731,10 @@ impl Codegen {
         // i32-loop-var lowering: must run AFTER `int_range_locals` (the soundness backstop that
         // proves the accumulator stays an exact integer reinterpretable as i32).
         self.i32_loop_vars = self.collect_i32_loop_vars(&program.statements);
+        // #173 part 3 — in-bounds index elision facts: fixed-length Vecs + provably non-negative
+        // locals. Read together with the per-loop guard stack during emission.
+        self.vec_fixed_len = self.collect_vec_fixed_len(&program.statements);
+        self.nonneg_locals = self.collect_nonneg_locals(&program.statements);
         if self.is_async {
             self.writeln("async fn run() -> Result<(), Box<dyn std::error::Error>> {");
         } else if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
@@ -2039,6 +2086,23 @@ impl Codegen {
     /// vectorize/fold the loop. Falls back to `emit_expr` for everything else (whose trailing
     /// value is simply dropped by the `;`).
     fn emit_expr_discard(&mut self, expr: &Expr) -> Result<String, CompileError> {
+        // #173 part 3: a statement-position reassignment of a guarded loop counter ends that guard's
+        // bound for everything emitted after it (flow-sensitive). Every statement (at any nesting)
+        // routes through here in textual/runtime order, so clearing the guard here is exact.
+        match expr {
+            Expr::Assign { name, .. }
+            | Expr::CompoundAssign { name, .. }
+            | Expr::LogicalAssign { name, .. }
+            | Expr::PostfixInc { name, .. }
+            | Expr::PostfixDec { name, .. }
+            | Expr::PrefixInc { name, .. }
+            | Expr::PrefixDec { name, .. } => {
+                if !self.active_index_guards.is_empty() {
+                    self.invalidate_index_guard(name.as_ref());
+                }
+            }
+            _ => {}
+        }
         match expr {
             Expr::Assign { name, value, .. } => {
                 let rust_type = self.type_context.get_type(name.as_ref());
@@ -2524,7 +2588,12 @@ impl Codegen {
                 self.break_stack.push(label.clone());
                 self.write(&format!("{}: while {} {{\n", label, c));
                 self.indent += 1;
+                // #173 part 3: `while (i < n)` bounds `i` above by `n` inside the body.
+                let pushed_guard = self.push_index_guard(Some(cond));
                 self.emit_statement(body)?;
+                if pushed_guard {
+                    self.active_index_guards.pop();
+                }
                 self.break_stack.pop();
                 self.loop_stack.pop();
                 self.indent -= 1;
@@ -2672,7 +2741,12 @@ impl Codegen {
                 self.write(&format!("{}: loop {{\n", label));
                 self.indent += 1;
                 self.writeln(&format!("if !{} {{ break; }}", cond_expr));
+                // #173 part 3: `for (…; i < n; …)` bounds `i` above by `n` inside the body.
+                let pushed_guard = self.push_index_guard(cond.as_ref());
                 self.emit_statement(body)?;
+                if pushed_guard {
+                    self.active_index_guards.pop();
+                }
                 if let Some(u) = update {
                     let ue = self.emit_expr_discard(u)?;
                     self.writeln(&format!("{};", ue));
@@ -4358,6 +4432,8 @@ impl Codegen {
                 }
             }
             Expr::Assign { name, value, .. } => {
+                // #173 part 3: expression-position reassignment also ends a counter's in-bounds guard.
+                self.invalidate_index_guard(name.as_ref());
                 let escaped = Self::escape_ident(name.as_ref());
                 let rust_type = self.type_context.get_type(name.as_ref());
                 let is_ref = self.refcell_wrapped_vars.contains(name.as_ref());
@@ -4484,11 +4560,24 @@ impl Codegen {
                 }
                 _ => "Value::Bool(true)".to_string(),
             },
-            Expr::PostfixInc { name, .. } => self.emit_inc_dec(name.as_ref(), false, "+ 1.0", "++"),
-            Expr::PostfixDec { name, .. } => self.emit_inc_dec(name.as_ref(), false, "- 1.0", "--"),
-            Expr::PrefixInc { name, .. } => self.emit_inc_dec(name.as_ref(), true, "+ 1.0", "++"),
-            Expr::PrefixDec { name, .. } => self.emit_inc_dec(name.as_ref(), true, "- 1.0", "--"),
+            Expr::PostfixInc { name, .. } => {
+                self.invalidate_index_guard(name.as_ref());
+                self.emit_inc_dec(name.as_ref(), false, "+ 1.0", "++")
+            }
+            Expr::PostfixDec { name, .. } => {
+                self.invalidate_index_guard(name.as_ref());
+                self.emit_inc_dec(name.as_ref(), false, "- 1.0", "--")
+            }
+            Expr::PrefixInc { name, .. } => {
+                self.invalidate_index_guard(name.as_ref());
+                self.emit_inc_dec(name.as_ref(), true, "+ 1.0", "++")
+            }
+            Expr::PrefixDec { name, .. } => {
+                self.invalidate_index_guard(name.as_ref());
+                self.emit_inc_dec(name.as_ref(), true, "- 1.0", "--")
+            }
             Expr::CompoundAssign { name, op, value, .. } => {
+                self.invalidate_index_guard(name.as_ref());
                 let n = Self::escape_ident(name.as_ref());
                 let is_refcell = self.refcell_wrapped_vars.contains(name.as_ref());
                 let var_type = self.type_context.get_type(name.as_ref());
@@ -4629,6 +4718,7 @@ impl Codegen {
                 }
             }
             Expr::LogicalAssign { name, op, value, .. } => {
+                self.invalidate_index_guard(name.as_ref());
                 let val = self.emit_expr(value)?;
                 let n = Self::escape_ident(name.as_ref()).into_owned();
                 let is_refcell = self.refcell_wrapped_vars.contains(name.as_ref());
@@ -4747,6 +4837,9 @@ impl Codegen {
                         let obj_type = self.type_context.get_type(name.as_ref());
                         if let RustType::Vec(elem_type) = obj_type {
                             let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
+                            // #173 part 3: capture the in-bounds proof BEFORE emitting the index /
+                            // value (either could reassign the guard counter and flip the proof).
+                            let in_bounds = self.index_in_bounds(index, name.as_ref());
                             let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
                             let idx_usize = if idx_ty == RustType::F64 {
                                 format!("({}) as usize", idx_code)
@@ -4772,9 +4865,15 @@ impl Codegen {
                             };
                             // OOB-safe write for numeric/bool Vecs: JS `a[i] = x` past the end
                             // grows the array (holes read back as `undefined` → NaN/false), it does
-                            // not panic. In-bounds is the same direct store. Other element types keep
-                            // the direct store (their OOB semantics aren't a native-inference target).
+                            // not panic. Other element types keep the direct store (their OOB
+                            // semantics aren't a native-inference target).
                             let assign = match elem_type.as_ref() {
+                                // #173 part 3: a proven in-bounds index needs neither the grow branch
+                                // nor a bounds compare — a direct store (V8/Bun do exactly this after
+                                // range-proving the loop). Sound: `idx < len` ⇒ never resizes/panics.
+                                RustType::F64 | RustType::Bool if in_bounds => {
+                                    format!("{{ {}[{}] = {}; Value::Null }}", esc_obj, idx_usize, native_val)
+                                }
                                 RustType::F64 | RustType::Bool => {
                                     let pad = if matches!(elem_type.as_ref(), RustType::F64) {
                                         "f64::NAN"
@@ -6450,6 +6549,517 @@ impl Codegen {
             }
         }
         demoted
+    }
+
+    // ── In-bounds index elision (#173 part 3) ────────────────────────────────────────────────────
+    //
+    // JS `a[i] = v` past the end GROWS the array, and `a[oob]` reads `undefined` (→ NaN/false), so the
+    // native lowering wraps every numeric/bool `Vec` store in a `resize`-grow branch and every read in
+    // `.get().unwrap_or(..)`. When the index is PROVABLY in `[0, len)` for a fixed-length `Vec`, both
+    // guards are dead: the store is a direct `a[i] = v`, the read a direct `a[i]`. This is the
+    // bounds-check elision fast JS engines (JSC/Bun) do after range-proving a counted loop.
+    //
+    // Soundness rests on three independent facts, all conservative (any gap keeps the safe lowering):
+    //   • `vec_fixed_len[a] = B`  — `a` is filled once to length `B` and never length-changed after;
+    //   • an active guard `i < B`  — the access sits inside a loop bounding the index above by `B`;
+    //   • `i` is non-negative      — so it can't wrap to a huge `usize` below the bound.
+
+    /// Parse a loop condition `counter < bound` / `counter <= bound` into `(counter, bound, strict)`
+    /// when it has the bare `Ident <cmp> (int-literal | Ident)` shape; else `None`.
+    fn parse_loop_guard(cond: &Expr) -> Option<(String, BoundKey, bool)> {
+        let Expr::Binary { left, op, right, .. } = cond else {
+            return None;
+        };
+        let strict = match op {
+            BinOp::Lt => true,
+            BinOp::Le => false,
+            _ => return None,
+        };
+        let Expr::Ident { name, .. } = left.as_ref() else {
+            return None;
+        };
+        Some((name.to_string(), Self::bound_key_of(right)?, strict))
+    }
+
+    /// A symbolic bound from an integer literal, a bare variable, or an `a.length` member read;
+    /// richer forms (`2 * n`, `a.length - 1`, …) are not modeled.
+    fn bound_key_of(e: &Expr) -> Option<BoundKey> {
+        match e {
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => Self::int_literal_value(*n).map(BoundKey::Const),
+            Expr::Ident { name, .. } => Some(BoundKey::Var(name.to_string())),
+            Expr::Member {
+                object,
+                prop: MemberProp::Name { name: p, .. },
+                optional: false,
+                ..
+            } if p.as_ref() == "length" => match object.as_ref() {
+                Expr::Ident { name, .. } => Some(BoundKey::Len(name.to_string())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Prove `a[index]` is in-bounds for the native `Vec` local `a`: `a` has a fixed length `B`, an
+    /// enclosing guard bounds the index strictly below `B` (a non-strict `<= B-1` const works too),
+    /// and the index is a non-negative bare counter. Conservative — only a bare `Ident` index is
+    /// modeled (covers `a[i]` / `a[k]`; not `a[k - i]`).
+    fn index_in_bounds(&self, index: &Expr, arr: &str) -> bool {
+        let Some(len) = self.vec_fixed_len.get(arr) else {
+            return false;
+        };
+        let Expr::Ident { name: idx, .. } = index else {
+            return false;
+        };
+        let idx = idx.as_ref();
+        // Lower bound: the index can never be negative.
+        let nonneg = self.nonneg_locals.contains(idx)
+            || self
+                .int_range_locals
+                .get(idx)
+                .is_some_and(|&(lo, _)| lo >= 0);
+        if !nonneg {
+            return false;
+        }
+        // Upper bound: some LIVE active guard proves `idx < len`. `arr` is in `vec_fixed_len`, so it
+        // never shrinks — a guard on `arr.length` (`i < arr.length`) therefore also bounds `idx`.
+        self.active_index_guards.iter().any(|g| {
+            g.live
+                && g.var == idx
+                && match (&g.bound, len) {
+                    // `i < arr.length` directly bounds `arr[i]` (fixed-len ⇒ no shrink).
+                    (BoundKey::Len(a), _) => g.strict && a == arr,
+                    // `i < B` where `B` is the same key as `arr`'s fixed length.
+                    _ if &g.bound == len => g.strict,
+                    // `i <= C-1` with a constant length `C` also proves `i < C`.
+                    (BoundKey::Const(gc), BoundKey::Const(lc)) => !g.strict && *gc + 1 <= *lc,
+                    _ => false,
+                }
+        })
+    }
+
+    /// Push an active index guard parsed from a loop condition `var < bound` / `var <= bound`.
+    /// Returns whether a guard was pushed (the caller pops it after emitting the loop body).
+    fn push_index_guard(&mut self, cond: Option<&Expr>) -> bool {
+        if let Some((var, bound, strict)) = cond.and_then(Self::parse_loop_guard) {
+            self.active_index_guards.push(IndexGuard {
+                var,
+                bound,
+                strict,
+                live: true,
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear any live guard whose counter is `name`: once the counter is reassigned, its value is no
+    /// longer bounded by the loop condition for the remainder of the body. Conservatively clears ALL
+    /// matching guards (a same-named outer counter is mutated by the same store).
+    fn invalidate_index_guard(&mut self, name: &str) {
+        for g in self.active_index_guards.iter_mut() {
+            if g.var == name {
+                g.live = false;
+            }
+        }
+    }
+
+    /// Native `Vec` locals whose length is provably `>= B` at every use and can only GROW: filled
+    /// once to length `B` (a fill loop `for (i=0;i<B;i++){ a.push(_); … }` or a non-empty array
+    /// literal) and never shrunk, aliased, or escaped. Growing ops (`push`) are fine — they keep
+    /// `len >= B`, which is all the upper-bound proof `idx < B <= len` needs. Anything that could
+    /// shrink (`pop`/`shift`/`splice`/`length=`), reassign, or let `a` escape (passed as an argument,
+    /// captured, aliased into another binding) DISQUALIFIES it. The element type is re-checked at the
+    /// use site, so this name-keyed prepass need not know which locals are `Vec`s yet.
+    fn collect_vec_fixed_len(&self, stmts: &[Statement]) -> HashMap<String, BoundKey> {
+        let mut cand: HashMap<String, BoundKey> = HashMap::new();
+        let mut escaped: HashSet<String> = HashSet::new();
+        self.scan_vec_fill(stmts, &mut cand, &mut escaped);
+        for s in stmts {
+            Self::for_each_stmt_expr(s, &mut |e| Self::flag_vec_escapes(e, &mut escaped));
+        }
+        cand.retain(|name, _| !escaped.contains(name));
+        cand
+    }
+
+    /// Record a length-`B` candidate for each `Vec` set by a fill loop (`for (i=0;i<B;i++){ … }` whose
+    /// body is one-or-more `a.push(_)` statements, `B` a literal/var) or a non-empty array literal. A
+    /// second length-setter for the same name disqualifies it (ambiguous).
+    fn scan_vec_fill(
+        &self,
+        stmts: &[Statement],
+        cand: &mut HashMap<String, BoundKey>,
+        escaped: &mut HashSet<String>,
+    ) {
+        for s in stmts {
+            if let Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } = s
+            {
+                if let Some((arrs, len)) = Self::match_fill_loop_arrays(
+                    init.as_deref(),
+                    cond.as_ref(),
+                    update.as_ref(),
+                    body,
+                ) {
+                    for a in arrs {
+                        if cand.insert(a.clone(), len.clone()).is_some() {
+                            escaped.insert(a);
+                        }
+                    }
+                }
+            }
+            if let Statement::VarDecl {
+                name,
+                init: Some(Expr::Array { elements, .. }),
+                ..
+            } = s
+            {
+                if !elements.is_empty()
+                    && elements.iter().all(|el| matches!(el, ArrayElement::Expr(_)))
+                    && cand
+                        .insert(name.to_string(), BoundKey::Const(elements.len() as i64))
+                        .is_some()
+                {
+                    escaped.insert(name.to_string());
+                }
+            }
+            Self::for_each_child_stmt_list(s, &mut |list| self.scan_vec_fill(list, cand, escaped));
+        }
+    }
+
+    /// Context-aware escape walk: any bare-`Ident` use of a name in a value position adds it to
+    /// `escaped` (it could be aliased/mutated elsewhere). Uses that CANNOT shrink the array are
+    /// exempt: `a[i]` / `a[i]=v` (the object), `a.push(...)` (grows, keeps `len >= B`), and a
+    /// non-call member read like `a.length`. Conservative — over-flagging only loses the optimization.
+    fn flag_vec_escapes(e: &Expr, escaped: &mut HashSet<String>) {
+        match e {
+            // A bare value-position read of `a` — it can flow into another binding / call and be
+            // mutated out of sight, so the fixed-length fact no longer holds.
+            Expr::Ident { name, .. } => {
+                escaped.insert(name.to_string());
+            }
+            Expr::Index { object, index, .. } => {
+                if !matches!(object.as_ref(), Expr::Ident { .. }) {
+                    Self::flag_vec_escapes(object, escaped);
+                }
+                Self::flag_vec_escapes(index, escaped);
+            }
+            Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            } => {
+                if !matches!(object.as_ref(), Expr::Ident { .. }) {
+                    Self::flag_vec_escapes(object, escaped);
+                }
+                Self::flag_vec_escapes(index, escaped);
+                Self::flag_vec_escapes(value, escaped);
+            }
+            Expr::Member { object, prop, .. } => {
+                // A member READ (`a.length`, `a.foo`) doesn't mutate or alias the array.
+                if !matches!(object.as_ref(), Expr::Ident { .. }) {
+                    Self::flag_vec_escapes(object, escaped);
+                }
+                if let MemberProp::Expr(pe) = prop {
+                    Self::flag_vec_escapes(pe, escaped);
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                match callee.as_ref() {
+                    // `a.push(x)` grows the array (keeps `len >= B`) — `a` itself is not flagged; the
+                    // ARGUMENT is still a value position. Any OTHER method (`pop`/`shift`/`splice`/…
+                    // or a user method that could mutate) flags `a`.
+                    Expr::Member {
+                        object,
+                        prop: MemberProp::Name { name: method, .. },
+                        ..
+                    } if matches!(object.as_ref(), Expr::Ident { .. }) => {
+                        if method.as_ref() != "push" {
+                            if let Expr::Ident { name, .. } = object.as_ref() {
+                                escaped.insert(name.to_string());
+                            }
+                        }
+                    }
+                    other => Self::flag_vec_escapes(other, escaped),
+                }
+                for a in args {
+                    match a {
+                        CallArg::Expr(e) | CallArg::Spread(e) => Self::flag_vec_escapes(e, escaped),
+                    }
+                }
+            }
+            Expr::New { callee, args, .. } => {
+                Self::flag_vec_escapes(callee, escaped);
+                for a in args {
+                    match a {
+                        CallArg::Expr(e) | CallArg::Spread(e) => Self::flag_vec_escapes(e, escaped),
+                    }
+                }
+            }
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                Self::flag_vec_escapes(left, escaped);
+                Self::flag_vec_escapes(right, escaped);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::TypeOf { operand, .. }
+            | Expr::Await { operand, .. } => Self::flag_vec_escapes(operand, escaped),
+            Expr::Delete { target, .. } => Self::flag_vec_escapes(target, escaped),
+            // A reassignment target could install a shorter array; flag it. (RHS is a value pos.)
+            Expr::Assign { name, value, .. }
+            | Expr::CompoundAssign { name, value, .. }
+            | Expr::LogicalAssign { name, value, .. } => {
+                escaped.insert(name.to_string());
+                Self::flag_vec_escapes(value, escaped);
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                if let Expr::Ident { name, .. } = object.as_ref() {
+                    escaped.insert(name.to_string()); // `a.length = …` etc.
+                } else {
+                    Self::flag_vec_escapes(object, escaped);
+                }
+                Self::flag_vec_escapes(value, escaped);
+            }
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::flag_vec_escapes(cond, escaped);
+                Self::flag_vec_escapes(then_branch, escaped);
+                Self::flag_vec_escapes(else_branch, escaped);
+            }
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(e) | ArrayElement::Spread(e) => {
+                            Self::flag_vec_escapes(e, escaped)
+                        }
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for p in props {
+                    match p {
+                        ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => {
+                            Self::flag_vec_escapes(e, escaped)
+                        }
+                    }
+                }
+            }
+            Expr::TemplateLiteral { exprs, .. } => {
+                for e in exprs {
+                    Self::flag_vec_escapes(e, escaped);
+                }
+            }
+            // A closure body can capture and mutate an array out of line; conservatively flag every
+            // name it mentions so a captured Vec is never treated as fixed-length.
+            Expr::ArrowFunction { body, .. } => {
+                let mut idents = HashSet::new();
+                match body {
+                    ArrowBody::Expr(e) => Self::collect_expr_idents(e, &mut idents),
+                    ArrowBody::Block(s) => {
+                        Self::for_each_stmt_expr(s, &mut |e| {
+                            Self::collect_expr_idents(e, &mut idents)
+                        });
+                    }
+                }
+                escaped.extend(idents);
+            }
+            _ => {}
+        }
+    }
+
+    /// A fill loop `for (let i = 0; i < B; i++) { a1.push(_); a2.push(_); … }`: every body statement
+    /// is a distinct `Ident.push(<one arg>)`, `i` starts at 0 and increments, `B` is a literal/var.
+    /// Returns the pushed array names and the shared length `B`.
+    fn match_fill_loop_arrays(
+        init: Option<&Statement>,
+        cond: Option<&Expr>,
+        update: Option<&Expr>,
+        body: &Statement,
+    ) -> Option<(Vec<String>, BoundKey)> {
+        let Some(Statement::VarDecl {
+            name: i_name,
+            init: Some(i_init),
+            ..
+        }) = init
+        else {
+            return None;
+        };
+        if Self::int_literal_value_of(i_init) != Some(0) {
+            return None;
+        }
+        let Expr::Binary {
+            left,
+            op: BinOp::Lt,
+            right: bound,
+            ..
+        } = cond?
+        else {
+            return None;
+        };
+        let Expr::Ident { name: c, .. } = left.as_ref() else {
+            return None;
+        };
+        if c.as_ref() != i_name.as_ref() {
+            return None;
+        }
+        if !Self::is_increment_of(update?, i_name.as_ref()) {
+            return None;
+        }
+        let len = Self::bound_key_of(bound)?;
+        let stmts = match body {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.as_slice()
+            }
+            single => std::slice::from_ref(single),
+        };
+        if stmts.is_empty() {
+            return None;
+        }
+        let mut arrs = Vec::new();
+        for st in stmts {
+            let Statement::ExprStmt {
+                expr: Expr::Call { callee, args, .. },
+                ..
+            } = st
+            else {
+                return None;
+            };
+            let Expr::Member {
+                object,
+                prop: MemberProp::Name { name: method, .. },
+                optional: false,
+                ..
+            } = callee.as_ref()
+            else {
+                return None;
+            };
+            if method.as_ref() != "push" || args.len() != 1 {
+                return None;
+            }
+            let Expr::Ident { name: arr, .. } = object.as_ref() else {
+                return None;
+            };
+            arrs.push(arr.to_string());
+        }
+        Some((arrs, len))
+    }
+
+    /// Locals provably `>= 0` at every program point: a one-sided sign fixpoint. Seeds non-negative
+    /// `for` counters (init `>= 0` literal, increment-only) and `let x = <nonneg expr>`, then keeps a
+    /// name only while its init AND every reassignment RHS evaluate non-negative given the current
+    /// set. Conservative: a name that can't be proven simply isn't included.
+    fn collect_nonneg_locals(&self, stmts: &[Statement]) -> HashSet<String> {
+        // Candidate decls/reassigns and the non-negative `for` counters.
+        let mut counters: HashSet<String> = HashSet::new();
+        let mut defs: Vec<(String, Expr)> = Vec::new();
+        self.collect_nonneg_defs(stmts, &mut counters, &mut defs);
+        let mut nonneg = counters.clone();
+        for (n, _) in &defs {
+            nonneg.insert(n.clone());
+        }
+        // Fixpoint: drop any name whose init/reassignment RHS isn't provably non-negative.
+        loop {
+            let mut changed = false;
+            let snapshot = nonneg.clone();
+            for (n, rhs) in &defs {
+                if snapshot.contains(n) && !Self::expr_nonneg(rhs, &snapshot, &counters) {
+                    nonneg.remove(n);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return nonneg;
+            }
+        }
+    }
+
+    fn collect_nonneg_defs(
+        &self,
+        stmts: &[Statement],
+        counters: &mut HashSet<String>,
+        defs: &mut Vec<(String, Expr)>,
+    ) {
+        for s in stmts {
+            if let Statement::For {
+                init: Some(init),
+                update: Some(update),
+                ..
+            } = s
+            {
+                if let Statement::VarDecl {
+                    name,
+                    init: Some(i0),
+                    ..
+                } = init.as_ref()
+                {
+                    if Self::int_literal_value_of(i0).is_some_and(|v| v >= 0)
+                        && Self::is_increment_of(update, name.as_ref())
+                    {
+                        counters.insert(name.to_string());
+                    }
+                }
+            }
+            if let Statement::VarDecl {
+                name,
+                init: Some(init),
+                ..
+            } = s
+            {
+                defs.push((name.to_string(), init.clone()));
+            }
+            // Reassignments (`x = rhs`) are additional defs the RHS must keep non-negative.
+            Self::for_each_stmt_expr(s, &mut |e| {
+                if let Expr::Assign { name, value, .. } = e {
+                    defs.push((name.to_string(), (**value).clone()));
+                }
+            });
+            Self::for_each_child_stmt_list(s, &mut |list| {
+                self.collect_nonneg_defs(list, counters, defs)
+            });
+        }
+    }
+
+    /// Whether `e` evaluates to a non-negative number given the current `nonneg` set and the
+    /// non-negative `counters`. Conservative: only the structurally-obvious non-negative forms.
+    fn expr_nonneg(e: &Expr, nonneg: &HashSet<String>, counters: &HashSet<String>) -> bool {
+        match e {
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => *n >= 0.0,
+            Expr::Ident { name, .. } => {
+                nonneg.contains(name.as_ref()) || counters.contains(name.as_ref())
+            }
+            Expr::Binary { left, op, right, .. } => match op {
+                // Sum/product of non-negatives is non-negative; `%`/`&`/`>>>` of a non-negative
+                // dividend/operand stays non-negative; `<<`/`|`/`^` could flip the sign bit, so no.
+                BinOp::Add | BinOp::Mul => {
+                    Self::expr_nonneg(left, nonneg, counters)
+                        && Self::expr_nonneg(right, nonneg, counters)
+                }
+                BinOp::Mod => Self::expr_nonneg(left, nonneg, counters),
+                BinOp::UShr => true,
+                BinOp::BitAnd => {
+                    Self::expr_nonneg(left, nonneg, counters)
+                        || Self::expr_nonneg(right, nonneg, counters)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     // ── Integer-range lattice (#174) ────────────────────────────────────────────────────────────
@@ -10195,17 +10805,31 @@ impl Codegen {
                 return Ok(Some(code));
             }
         }
+        // Integer-literal leaf: `ToInt32(<int literal>)` is a compile-time constant — emit it
+        // directly (`v as i32` = modulo 2^32 = JS ToInt32 of the integer) instead of a runtime
+        // `to_int32(1_f64)` call. Removes the constant round-trip in masks/shift-counts
+        // (`x & 255`, `x >> 1`, …). Trivially sound: the value is known.
+        if let Some(v) = Self::int_literal_value_of(e) {
+            return Ok(Some(format!("{}i32", v as i32)));
+        }
         // Leaf: fold only when it is a plain `f64` (so `to_int32` applies directly). `to_int32`
         // keeps its `is_finite` guard here — a leaf may legitimately be NaN/±Infinity (→ 0).
         let (code, ty) = self.emit_typed_expr(e)?;
         if ty == RustType::F64 {
-            // When the leaf is an ARITHMETIC node PROVABLY finite with `|x| < 2^62` (operands are
-            // i32-register reads and finite literals — e.g. the FNV `h * 16777619` excursion), drop
-            // the `is_finite` guard and Rust's saturating cast and truncate directly. Bit-identical
-            // on this domain (`x as i64` truncates toward zero = JS ToInt32 truncation; `as i32` =
-            // modulo 2^32), a few instructions cheaper per iteration. Emitted inline so the generated
-            // crate needs no new runtime symbol. Any unproven leaf keeps the guarded `to_int32`.
-            if matches!(e, Expr::Binary { .. }) && self.f64_finite_bounded_below_2pow62(e) {
+            // Drop the `is_finite` guard and truncate directly when the leaf is PROVABLY a finite
+            // integer, via either of two independent proofs:
+            //   • an ARITHMETIC node with `|x| < 2^62` (operands are i32-register reads / finite
+            //     literals — e.g. the FNV `h * 16777619` excursion); or
+            //   • the integer-range lattice proves `x ∈ (-2^53, 2^53)` (#174 — e.g. a range-bounded
+            //     induction counter `i` in `i & 255`, or `(k+1)` when `k` is range-proven).
+            // Both guarantee finiteness, so `to_int_unchecked::<i64>()` is defined and truncates
+            // toward zero (a no-op on an integer); `as i32` = modulo 2^32 = JS ToInt32. Bit-identical
+            // to the guarded `to_int32`, a few instructions cheaper per iteration. Any unproven leaf
+            // keeps the guarded `to_int32` (NaN/±Infinity → 0).
+            let proven_finite_int = (matches!(e, Expr::Binary { .. })
+                && self.f64_finite_bounded_below_2pow62(e))
+                || self.int_range(e, &self.int_range_locals).is_some();
+            if proven_finite_int {
                 Ok(Some(format!(
                     "(unsafe {{ ({}).to_int_unchecked::<i64>() }} as i32)",
                     code
@@ -10445,6 +11069,8 @@ impl Codegen {
                             let obj_type = self.type_context.get_type(name.as_ref());
                             if let RustType::Vec(elem_type) = &obj_type {
                                 let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
+                                // #173 part 3: prove the index in-bounds BEFORE emitting it.
+                                let in_bounds = self.index_in_bounds(index, name.as_ref());
                                 let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
                                 let idx_usize = if idx_ty == RustType::F64 {
                                     format!("({}) as usize", idx_code)
@@ -10465,6 +11091,11 @@ impl Codegen {
                                 // same bounds-checked access, so this is purely a correctness gain
                                 // (and what lets index reads be *inferred* as native — phase 2).
                                 let access = match &elem_ty {
+                                    // #173 part 3: a proven in-bounds read skips the `.get().unwrap_or`
+                                    // branch — a direct `a[i]` (the `idx < len` proof guarantees it).
+                                    RustType::F64 | RustType::Bool if in_bounds => {
+                                        format!("{}[{}]", esc_obj, idx_usize)
+                                    }
                                     RustType::F64 => format!(
                                         "{}.get({}).copied().unwrap_or(f64::NAN)",
                                         esc_obj, idx_usize
