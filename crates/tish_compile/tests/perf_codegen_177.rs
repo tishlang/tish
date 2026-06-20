@@ -72,6 +72,17 @@ fn mandelbrot_lowers_mandel_native() {
             rust.contains("for _usize_iter") && rust.contains("0..100"),
             "mandel_native should use usize bounded escape loop for maxIter=100"
         );
+        assert!(
+            rust.contains("_stayed_") && rust.contains("if _stayed_"),
+            "mandel_native should fuse iter===maxIter into stayed flag"
+        );
+        if let Some(native) = rust.split("fn mandel_native(").nth(1) {
+            let native = native.split("fn run()").next().unwrap_or(native);
+            assert!(
+                !native.contains("iter = (iter + 1_f64)"),
+                "mandel_native should skip iter increment in usize escape loop"
+            );
+        }
     }
 }
 
@@ -90,6 +101,14 @@ fn fannkuch_nv_uses_direct_flip_indexing() {
         assert!(
             rust.contains("_usize_shift_") && rust.contains("perm1[_usize_shift_"),
             "fannkuch_nv should fuse perm1 left-shift while loop"
+        );
+        assert!(
+            rust.contains("perm1[(r) as usize] = perm0"),
+            "fannkuch_nv rotation should assign perm1[r] without resize"
+        );
+        assert!(
+            rust.contains("count[(r) as usize] = (count[(r) as usize] - 1_f64)"),
+            "fannkuch_nv should decrement count[r] via direct indexing"
         );
     }
 }
