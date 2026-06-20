@@ -869,11 +869,20 @@ pub(crate) struct Codegen {
     /// #176 (behind `TISH_NATIVE_FN`): top-level `let` bindings lowered to `thread_local Cell<f64>`
     /// (`G_NAME`) when every use is a numeric read or a whole-binding numeric assign (fasta `seed`).
     native_numeric_globals: std::collections::HashMap<String, f64>,
+    /// Top-level `let name = [f64 literals…]` never reassigned — emitted as `const G_name: [f64; N]`
+    /// for direct indexing from native fns (fasta `codes`/`probs`).
+    module_const_f64_arrays: std::collections::HashMap<String, Vec<f64>>,
+    /// Precomputed cumulative arrays for `module_const_f64_arrays` used as `cumulative(p)` input
+    /// (`probs` → `G_probs_cum`).
+    module_const_f64_cum: std::collections::HashMap<String, String>,
+    /// Locals aliased to a module const array (`cum` → `G_probs_cum` after `let cum = cumulative(probs)`).
+    module_const_f64_aliases: std::collections::HashMap<String, String>,
     /// M5 (dark-shipped behind `TISH_NATIVE_FN`): top-level functions eligible for a parallel
     /// free `fn f_native(f64,..)->f64` (all params `: number`, returns `number`, native-safe
     /// body). Direct calls to these route to the native fn, bypassing the boxed `value_call`.
     native_fns: std::collections::HashSet<String>,
-    /// #175 (behind `TISH_NATIVE_FN`): top-level fns de-virtualized to native free fns over plain
+    /// True while emitting an M5 `fn name_native` body — keeps VarDecl inits on the native path.
+    native_fn_body_emit: bool,
     /// `&/&mut Vec<f64|bool>` + `f64` params (`name -> sig`). Direct calls route to `name_nv(..)`
     /// passing array idents by reference; the boxed closure is suppressed. Empty unless the whole
     /// group lowers cleanly (scratch-buffer rollback), so it can never regress the boxed path.
@@ -1010,7 +1019,11 @@ impl Codegen {
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
             native_numeric_globals: std::collections::HashMap::new(),
+            module_const_f64_arrays: std::collections::HashMap::new(),
+            module_const_f64_cum: std::collections::HashMap::new(),
+            module_const_f64_aliases: std::collections::HashMap::new(),
             native_fns: std::collections::HashSet::new(),
+            native_fn_body_emit: false,
             native_vec_fns: std::collections::HashMap::new(),
             inline_fns: std::collections::HashMap::new(),
             inline_subst: Vec::new(),
@@ -1711,10 +1724,26 @@ impl Codegen {
                 self.emit_native_numeric_global_tls()?;
                 self.writeln("");
             }
-            let global_names: std::collections::HashSet<String> =
+            self.module_const_f64_arrays =
+                Self::collect_module_const_f64_arrays(&program.statements);
+            self.module_const_f64_cum =
+                Self::collect_module_const_cum(&program.statements, &self.module_const_f64_arrays);
+            self.module_const_f64_aliases =
+                Self::collect_module_const_aliases(&program.statements, &self.module_const_f64_cum);
+            if !self.module_const_f64_arrays.is_empty() {
+                self.emit_module_const_f64_arrays()?;
+                self.writeln("");
+            }
+            let native_vec_names: std::collections::HashSet<String> =
+                Self::detect_native_vec_fns(program).keys().cloned().collect();
+            let mut global_names: std::collections::HashSet<String> =
                 self.native_numeric_globals.keys().cloned().collect();
-            self.native_fns =
-                Self::collect_native_fns(&program.statements, &global_names);
+            global_names.extend(self.module_const_f64_arrays.keys().cloned());
+            self.native_fns = Self::collect_native_fns(
+                &program.statements,
+                &global_names,
+                &native_vec_names,
+            );
             if !self.native_fns.is_empty() {
                 self.emit_native_fns(&program.statements)?;
                 self.writeln("");
@@ -1753,6 +1782,20 @@ impl Codegen {
         // #173 part 3 — in-bounds index elision facts: fixed-length Vecs + provably non-negative
         // locals. Read together with the per-loop guard stack during emission.
         self.vec_fixed_len = self.collect_vec_fixed_len(&program.statements);
+        for (name, vals) in &self.module_const_f64_arrays {
+            self.vec_fixed_len
+                .insert(name.clone(), BoundKey::Const(vals.len() as i64));
+        }
+        for (local, cum_static) in &self.module_const_f64_aliases {
+            for (src, cs) in &self.module_const_f64_cum {
+                if cs == cum_static {
+                    if let Some(vals) = self.module_const_f64_arrays.get(src) {
+                        self.vec_fixed_len
+                            .insert(local.clone(), BoundKey::Const(vals.len() as i64));
+                    }
+                }
+            }
+        }
         self.nonneg_locals = self.collect_nonneg_locals(&program.statements);
         if self.is_async {
             self.writeln("async fn run() -> Result<(), Box<dyn std::error::Error>> {");
@@ -2473,6 +2516,17 @@ impl Codegen {
                     })
                     .unwrap_or(RustType::Value);
 
+                // M5 native-fn body: `let r = genRandom(1)` without a `: number` annotation.
+                if self.native_fn_body_emit && rust_type == RustType::Value {
+                    if let Some(Expr::Call { callee, .. }) = init.as_ref() {
+                        if let Expr::Ident { name: fnname, .. } = callee.as_ref() {
+                            if self.native_fns.contains(fnname.as_ref()) {
+                                rust_type = RustType::F64;
+                            }
+                        }
+                    }
+                }
+
                 // Soundness: a `number` local that a reassignment can turn non-numeric (e.g.
                 // `s = s + arr[i]`, JS string concat) must stay a boxed `Value` — a native-f64
                 // store would panic at the `from_value_expr(F64)` coercion. See
@@ -2496,6 +2550,20 @@ impl Codegen {
                     && self.outer_vars_stack.len() == 1
                 {
                     self.type_context.define(name.as_ref(), RustType::F64);
+                    return Ok(());
+                }
+
+                // Module-level const f64 arrays — no local slot in `run()`.
+                if self.module_const_f64_arrays.contains_key(name.as_ref())
+                    && self.outer_vars_stack.len() == 1
+                {
+                    return Ok(());
+                }
+
+                // `let cum = cumulative(probs)` → precomputed module const; no local slot.
+                if self.module_const_f64_aliases.contains_key(name.as_ref()) {
+                    self.type_context
+                        .define(name.as_ref(), RustType::Vec(Box::new(RustType::F64)));
                     return Ok(());
                 }
 
@@ -6928,6 +6996,7 @@ impl Codegen {
                 {
                     escaped.insert(name.to_string());
                 }
+                // Empty `[]` init does NOT pin length — a subsequent fill loop sets the real bound.
             }
             Self::for_each_child_stmt_list(s, &mut |list| self.scan_vec_fill(list, cand, escaped));
         }
@@ -8767,6 +8836,464 @@ impl Codegen {
         Ok(())
     }
 
+    /// Top-level `let name = [n0, n1, …]` with numeric literals, never reassigned — emitted as
+    /// `const G_name: [f64; N]` for direct indexing from native fns (fasta `codes`/`probs`).
+    fn collect_module_const_f64_arrays(stmts: &[Statement]) -> HashMap<String, Vec<f64>> {
+        use std::collections::{HashMap, HashSet};
+        let mut candidates: HashMap<String, Vec<f64>> = HashMap::new();
+        for s in stmts {
+            if let Statement::VarDecl {
+                name,
+                init,
+                ..
+            } = s
+            {
+                if let Some(Expr::Array { elements, .. }) = init.as_ref() {
+                    let mut vals: Vec<f64> = Vec::new();
+                    for el in elements {
+                        if let ArrayElement::Expr(Expr::Literal {
+                            value: Literal::Number(n),
+                            ..
+                        }) = el
+                        {
+                            vals.push(*n);
+                        } else {
+                            vals.clear();
+                            break;
+                        }
+                    }
+                    if !vals.is_empty() {
+                        candidates.insert(name.to_string(), vals);
+                    }
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return HashMap::new();
+        }
+        for s in stmts {
+            if let Statement::FunDecl { body, .. } = s {
+                let mut inner = HashSet::new();
+                Self::collect_local_var_names(body, &mut inner);
+                for n in inner {
+                    candidates.remove(&n);
+                }
+            }
+        }
+        let globals: HashSet<String> = candidates.keys().cloned().collect();
+        let mut reassigns: Vec<(String, &Expr)> = Vec::new();
+        Self::collect_reassignments_stmts(stmts, &mut reassigns);
+        for (name, _) in &reassigns {
+            if globals.contains(name) {
+                candidates.remove(name);
+            }
+        }
+        for name in candidates.keys().cloned().collect::<Vec<_>>() {
+            if Self::module_const_has_disqualifying_use(stmts, &name) {
+                candidates.remove(&name);
+            }
+        }
+        candidates
+    }
+
+    /// Disqualifying: bare value read, member/call on the name (index-as-object is OK).
+    fn module_const_has_disqualifying_use(stmts: &[Statement], g: &str) -> bool {
+        let mut bad = false;
+        Self::walk_stmts_for_module_const_disqualifiers(stmts, g, &mut bad);
+        bad
+    }
+
+    fn walk_stmts_for_module_const_disqualifiers(stmts: &[Statement], g: &str, bad: &mut bool) {
+        for s in stmts {
+            Self::walk_stmt_for_module_const_disqualifiers(s, g, bad);
+        }
+    }
+
+    fn walk_stmt_for_module_const_disqualifiers(s: &Statement, g: &str, bad: &mut bool) {
+        if *bad {
+            return;
+        }
+        match s {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                Self::walk_stmts_for_module_const_disqualifiers(statements, g, bad);
+            }
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::walk_stmt_for_module_const_disqualifiers(then_branch, g, bad);
+                if let Some(eb) = else_branch {
+                    Self::walk_stmt_for_module_const_disqualifiers(eb, g, bad);
+                }
+            }
+            Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+                Self::walk_stmt_for_module_const_disqualifiers(body, g, bad);
+            }
+            Statement::For { init, body, .. } => {
+                if let Some(i) = init {
+                    Self::walk_stmt_for_module_const_disqualifiers(i, g, bad);
+                }
+                Self::walk_stmt_for_module_const_disqualifiers(body, g, bad);
+            }
+            Statement::ForOf { body, .. } => {
+                Self::walk_stmt_for_module_const_disqualifiers(body, g, bad);
+            }
+            Statement::Switch {
+                cases,
+                default_body,
+                ..
+            } => {
+                for (_, stmts) in cases {
+                    Self::walk_stmts_for_module_const_disqualifiers(stmts, g, bad);
+                }
+                if let Some(stmts) = default_body {
+                    Self::walk_stmts_for_module_const_disqualifiers(stmts, g, bad);
+                }
+            }
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
+                Self::walk_stmt_for_module_const_disqualifiers(body, g, bad);
+                if let Some(c) = catch_body {
+                    Self::walk_stmt_for_module_const_disqualifiers(c, g, bad);
+                }
+                if let Some(f) = finally_body {
+                    Self::walk_stmt_for_module_const_disqualifiers(f, g, bad);
+                }
+            }
+            Statement::ExprStmt { expr, .. } => {
+                Self::walk_expr_for_module_const_disqualifiers(expr, g, bad);
+            }
+            Statement::Return { value, .. } => {
+                if let Some(e) = value {
+                    Self::walk_expr_for_module_const_disqualifiers(e, g, bad);
+                }
+            }
+            Statement::FunDecl { body, .. } => {
+                Self::walk_stmt_for_module_const_disqualifiers(body, g, bad);
+            }
+            Statement::VarDecl { init, .. } => {
+                if let Some(e) = init {
+                    Self::walk_expr_for_module_const_disqualifiers(e, g, bad);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_expr_for_module_const_disqualifiers(e: &Expr, g: &str, bad: &mut bool) {
+        if *bad {
+            return;
+        }
+        match e {
+            Expr::Ident { name, .. } if name.as_ref() == g => {
+                *bad = true;
+            }
+            Expr::Assign { name, value, .. }
+            | Expr::CompoundAssign { name, value, .. }
+            | Expr::LogicalAssign { name, value, .. } => {
+                if name.as_ref() == g {
+                    *bad = true;
+                }
+                Self::walk_expr_for_module_const_disqualifiers(value, g, bad);
+            }
+            Expr::PostfixInc { name, .. }
+            | Expr::PostfixDec { name, .. }
+            | Expr::PrefixInc { name, .. }
+            | Expr::PrefixDec { name, .. } if name.as_ref() == g => {
+                *bad = true;
+            }
+            Expr::Index { object, index, .. } => {
+                if !matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == g) {
+                    Self::walk_expr_for_module_const_disqualifiers(object, g, bad);
+                }
+                Self::walk_expr_for_module_const_disqualifiers(index, g, bad);
+            }
+            Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            } => {
+                if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == g) {
+                    *bad = true;
+                } else {
+                    Self::walk_expr_for_module_const_disqualifiers(object, g, bad);
+                }
+                Self::walk_expr_for_module_const_disqualifiers(index, g, bad);
+                Self::walk_expr_for_module_const_disqualifiers(value, g, bad);
+            }
+            Expr::Member { object, prop, .. } => {
+                if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == g) {
+                    *bad = true;
+                } else {
+                    Self::walk_expr_for_module_const_disqualifiers(object, g, bad);
+                }
+                if let MemberProp::Expr(pe) = prop {
+                    Self::walk_expr_for_module_const_disqualifiers(pe, g, bad);
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                let cumulative_arg_exempt = matches!(
+                    callee.as_ref(),
+                    Expr::Ident { name, .. } if name.as_ref() == "cumulative"
+                );
+                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == g) {
+                    *bad = true;
+                } else {
+                    Self::walk_expr_for_module_const_disqualifiers(callee, g, bad);
+                }
+                for (i, a) in args.iter().enumerate() {
+                    if let CallArg::Expr(arg) | CallArg::Spread(arg) = a {
+                        if cumulative_arg_exempt
+                            && i == 0
+                            && matches!(arg, Expr::Ident { name, .. } if name.as_ref() == g)
+                        {
+                            continue;
+                        }
+                        Self::walk_expr_for_module_const_disqualifiers(arg, g, bad);
+                    }
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::walk_expr_for_module_const_disqualifiers(left, g, bad);
+                Self::walk_expr_for_module_const_disqualifiers(right, g, bad);
+            }
+            Expr::Unary { operand, .. } => {
+                Self::walk_expr_for_module_const_disqualifiers(operand, g, bad);
+            }
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::walk_expr_for_module_const_disqualifiers(cond, g, bad);
+                Self::walk_expr_for_module_const_disqualifiers(then_branch, g, bad);
+                Self::walk_expr_for_module_const_disqualifiers(else_branch, g, bad);
+            }
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    if let ArrayElement::Expr(e) = el {
+                        Self::walk_expr_for_module_const_disqualifiers(e, g, bad);
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for p in props {
+                    match p {
+                        ObjectProp::KeyValue(_, value, _) => {
+                            Self::walk_expr_for_module_const_disqualifiers(value, g, bad);
+                        }
+                        ObjectProp::Spread(e) => {
+                            Self::walk_expr_for_module_const_disqualifiers(e, g, bad);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Precompute cumulative arrays for module const inputs referenced by `cumulative(p)`.
+    fn collect_module_const_cum(
+        stmts: &[Statement],
+        module_const: &HashMap<String, Vec<f64>>,
+    ) -> HashMap<String, String> {
+        let mut out: HashMap<String, String> = HashMap::new();
+        if module_const.is_empty() {
+            return out;
+        }
+        fn walk_stmt(stmt: &Statement, module_const: &HashMap<String, Vec<f64>>, out: &mut HashMap<String, String>) {
+            match stmt {
+                Statement::VarDecl { init: Some(e), .. } => scan_expr(e, module_const, out),
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    for s in statements {
+                        walk_stmt(s, module_const, out);
+                    }
+                }
+                Statement::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    walk_stmt(then_branch, module_const, out);
+                    if let Some(eb) = else_branch {
+                        walk_stmt(eb, module_const, out);
+                    }
+                }
+                Statement::For { init, body, .. } => {
+                    if let Some(i) = init {
+                        walk_stmt(i, module_const, out);
+                    }
+                    walk_stmt(body, module_const, out);
+                }
+                Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+                    walk_stmt(body, module_const, out);
+                }
+                Statement::FunDecl { body, .. } => walk_stmt(body, module_const, out),
+                Statement::ExprStmt { expr, .. } => scan_expr(expr, module_const, out),
+                Statement::Return { value: Some(e), .. } => scan_expr(e, module_const, out),
+                _ => {}
+            }
+        }
+        fn scan_expr(e: &Expr, module_const: &HashMap<String, Vec<f64>>, out: &mut HashMap<String, String>) {
+            if let Expr::Call { callee, args, .. } = e {
+                if let Expr::Ident { name: fnname, .. } = callee.as_ref() {
+                    if fnname.as_ref() == "cumulative" {
+                        if let Some(CallArg::Expr(Expr::Ident { name: argn, .. })) = args.first() {
+                            if module_const.contains_key(argn.as_ref()) {
+                                let cum_static =
+                                    Codegen::module_const_static(&format!("{}_cum", argn.as_ref()));
+                                out.insert(argn.to_string(), cum_static);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for s in stmts {
+            walk_stmt(s, module_const, &mut out);
+        }
+        out
+    }
+
+    /// `let cum = cumulative(probs)` where `probs` has a precomputed cum const → alias `cum`.
+    fn collect_module_const_aliases(
+        stmts: &[Statement],
+        cum_map: &HashMap<String, String>,
+    ) -> HashMap<String, String> {
+        let mut out: HashMap<String, String> = HashMap::new();
+        if cum_map.is_empty() {
+            return out;
+        }
+        let mut scan = |e: &Expr| {
+            if let Expr::Call { callee, args, .. } = e {
+                if let Expr::Ident { name: fnname, .. } = callee.as_ref() {
+                    if fnname.as_ref() == "cumulative" {
+                        if let Some(CallArg::Expr(Expr::Ident { name: argn, .. })) = args.first() {
+                            if let Some(cum_static) = cum_map.get(argn.as_ref()) {
+                                // Parent VarDecl name is handled in walk — see below.
+                                let _ = cum_static;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        fn walk_stmt(stmt: &Statement, cum_map: &HashMap<String, String>, out: &mut HashMap<String, String>) {
+            match stmt {
+                Statement::VarDecl { name, init, .. } => {
+                    if let Some(init_e) = init {
+                        if let Expr::Call { callee, args, .. } = init_e {
+                            if let Expr::Ident { name: fnname, .. } = callee.as_ref() {
+                                if fnname.as_ref() == "cumulative" {
+                                    if let Some(CallArg::Expr(Expr::Ident { name: argn, .. })) =
+                                        args.first()
+                                    {
+                                        if let Some(cum_static) = cum_map.get(argn.as_ref()) {
+                                            out.insert(name.to_string(), cum_static.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    for s in statements {
+                        walk_stmt(s, cum_map, out);
+                    }
+                }
+                Statement::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    walk_stmt(then_branch, cum_map, out);
+                    if let Some(eb) = else_branch {
+                        walk_stmt(eb, cum_map, out);
+                    }
+                }
+                Statement::For { init, body, .. } => {
+                    if let Some(i) = init {
+                        walk_stmt(i, cum_map, out);
+                    }
+                    walk_stmt(body, cum_map, out);
+                }
+                Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+                    walk_stmt(body, cum_map, out);
+                }
+                Statement::FunDecl { body, .. } => walk_stmt(body, cum_map, out),
+                _ => {}
+            }
+        }
+        for s in stmts {
+            walk_stmt(s, cum_map, &mut out);
+            Self::for_each_stmt_expr(s, &mut |e| scan(e));
+        }
+        out
+    }
+
+    fn module_const_static(name: &str) -> String {
+        format!("G_{}", Self::escape_ident(name).to_uppercase())
+    }
+
+    fn module_const_array_static(
+        module_const: &HashMap<String, Vec<f64>>,
+        aliases: &HashMap<String, String>,
+        name: &str,
+    ) -> Option<String> {
+        if let Some(cum_static) = aliases.get(name) {
+            return Some(cum_static.clone());
+        }
+        if module_const.contains_key(name) {
+            return Some(Self::module_const_static(name));
+        }
+        None
+    }
+
+    fn emit_module_const_f64_arrays(&mut self) -> Result<(), CompileError> {
+        for (name, vals) in self.module_const_f64_arrays.clone() {
+            let lit = vals
+                .iter()
+                .map(|v| Self::f64_lit(*v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.writeln(&format!(
+                "const {}: [f64; {}] = [{}];",
+                Self::module_const_static(name.as_str()),
+                vals.len(),
+                lit
+            ));
+        }
+        for (src, cum_static) in self.module_const_f64_cum.clone() {
+            let vals = self.module_const_f64_arrays.get(&src).expect("cum src");
+            let mut cum: Vec<f64> = Vec::new();
+            let mut c = 0.0;
+            for v in vals {
+                c += *v;
+                cum.push(c);
+            }
+            let lit = cum
+                .iter()
+                .map(|v| Self::f64_lit(*v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.writeln(&format!(
+                "const {}: [f64; {}] = [{}];",
+                cum_static,
+                cum.len(),
+                lit
+            ));
+        }
+        Ok(())
+    }
+
     /// #176 — classify top-level `let x = <number-literal>` bindings whose every use is a numeric
     /// read or a whole-binding assign with a numeric-shaped RHS (fasta `seed`).
     fn collect_native_numeric_globals(stmts: &[Statement]) -> HashMap<String, f64> {
@@ -9228,6 +9755,7 @@ impl Codegen {
     fn collect_native_fns(
         statements: &[Statement],
         globals: &std::collections::HashSet<String>,
+        native_vec_names: &std::collections::HashSet<String>,
     ) -> std::collections::HashSet<String> {
         use std::collections::HashSet;
         let mut cand: HashSet<String> = HashSet::new();
@@ -9268,8 +9796,14 @@ impl Codegen {
                 }
                 let pnames: HashSet<String> =
                     params.iter().flat_map(|p| p.bound_names()).map(|n| n.to_string()).collect();
-                let nums = Self::native_fn_numeric_locals(body, &pnames, globals);
-                if !Self::native_safe_stmt(body, &pnames, &cand, globals, &nums)
+                let nums = Self::native_fn_numeric_locals(
+                    body,
+                    &pnames,
+                    globals,
+                    &cand,
+                    native_vec_names,
+                );
+                if !Self::native_safe_stmt(body, &pnames, &cand, globals, &nums, native_vec_names)
                     || !Self::returns_numeric(body, &pnames, &cand, globals, &nums)
                 {
                     remove.push(name.to_string());
@@ -9290,12 +9824,14 @@ impl Codegen {
         body: &Statement,
         params: &HashSet<String>,
         globals: &HashSet<String>,
+        cand: &HashSet<String>,
+        native_vec_names: &HashSet<String>,
     ) -> HashSet<String> {
         let mut nums: HashSet<String> = params.clone();
         nums.extend(globals.iter().cloned());
         loop {
             let before = nums.len();
-            Self::seed_native_fn_numeric_locals(body, &mut nums);
+            Self::seed_native_fn_numeric_locals(body, &mut nums, cand, native_vec_names);
             if nums.len() == before {
                 break;
             }
@@ -9303,7 +9839,12 @@ impl Codegen {
         nums
     }
 
-    fn seed_native_fn_numeric_locals(stmt: &Statement, nums: &mut HashSet<String>) {
+    fn seed_native_fn_numeric_locals(
+        stmt: &Statement,
+        nums: &mut HashSet<String>,
+        cand: &HashSet<String>,
+        native_vec_names: &HashSet<String>,
+    ) {
         match stmt {
             Statement::VarDecl {
                 name,
@@ -9322,6 +9863,17 @@ impl Codegen {
                     || matches!(
                         init,
                         Some(Expr::Ident { name: src, .. }) if nums.contains(src.as_ref())
+                    )
+                    || matches!(
+                        init.as_ref(),
+                        Some(Expr::Call {
+                            callee,
+                            ..
+                        }) if matches!(
+                            callee.as_ref(),
+                            Expr::Ident { name: fnname, .. }
+                                if cand.contains(fnname.as_ref()) || native_vec_names.contains(fnname.as_ref())
+                        )
                     );
                 if numeric {
                     nums.insert(name.to_string());
@@ -9329,7 +9881,7 @@ impl Codegen {
             }
             Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 for s in statements {
-                    Self::seed_native_fn_numeric_locals(s, nums);
+                    Self::seed_native_fn_numeric_locals(s, nums, cand, native_vec_names);
                 }
             }
             Statement::If {
@@ -9337,19 +9889,19 @@ impl Codegen {
                 else_branch,
                 ..
             } => {
-                Self::seed_native_fn_numeric_locals(then_branch, nums);
+                Self::seed_native_fn_numeric_locals(then_branch, nums, cand, native_vec_names);
                 if let Some(e) = else_branch {
-                    Self::seed_native_fn_numeric_locals(e, nums);
+                    Self::seed_native_fn_numeric_locals(e, nums, cand, native_vec_names);
                 }
             }
             Statement::For { init, body, .. } => {
                 if let Some(i) = init {
-                    Self::seed_native_fn_numeric_locals(i, nums);
+                    Self::seed_native_fn_numeric_locals(i, nums, cand, native_vec_names);
                 }
-                Self::seed_native_fn_numeric_locals(body, nums);
+                Self::seed_native_fn_numeric_locals(body, nums, cand, native_vec_names);
             }
             Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
-                Self::seed_native_fn_numeric_locals(body, nums);
+                Self::seed_native_fn_numeric_locals(body, nums, cand, native_vec_names);
             }
             _ => {}
         }
@@ -9361,22 +9913,23 @@ impl Codegen {
         cand: &std::collections::HashSet<String>,
         globals: &std::collections::HashSet<String>,
         nums: &HashSet<String>,
+        native_vec_names: &std::collections::HashSet<String>,
     ) -> bool {
         match stmt {
             Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                statements.iter().all(|s| Self::native_safe_stmt(s, params, cand, globals, nums))
+                statements.iter().all(|s| Self::native_safe_stmt(s, params, cand, globals, nums, native_vec_names))
             }
             Statement::Return { value, .. } => {
-                value.as_ref().is_some_and(|e| Self::native_safe_expr(e, params, cand, globals, nums))
+                value.as_ref().is_some_and(|e| Self::native_safe_expr(e, params, cand, globals, nums, native_vec_names))
             }
             Statement::If { cond, then_branch, else_branch, .. } => {
-                Self::native_safe_expr(cond, params, cand, globals, nums)
-                    && Self::native_safe_stmt(then_branch, params, cand, globals, nums)
-                    && else_branch.as_ref().is_none_or(|e| Self::native_safe_stmt(e, params, cand, globals, nums))
+                Self::native_safe_expr(cond, params, cand, globals, nums, native_vec_names)
+                    && Self::native_safe_stmt(then_branch, params, cand, globals, nums, native_vec_names)
+                    && else_branch.as_ref().is_none_or(|e| Self::native_safe_stmt(e, params, cand, globals, nums, native_vec_names))
             }
-            Statement::ExprStmt { expr, .. } => Self::native_safe_expr(expr, params, cand, globals, nums),
+            Statement::ExprStmt { expr, .. } => Self::native_safe_expr(expr, params, cand, globals, nums, native_vec_names),
             Statement::VarDecl { init, .. } => {
-                init.as_ref().is_none_or(|e| Self::native_safe_expr(e, params, cand, globals, nums))
+                init.as_ref().is_none_or(|e| Self::native_safe_expr(e, params, cand, globals, nums, native_vec_names))
             }
             Statement::For {
                 init,
@@ -9385,18 +9938,18 @@ impl Codegen {
                 body,
                 ..
             } => {
-                init.as_ref().is_none_or(|i| Self::native_safe_stmt(i, params, cand, globals, nums))
-                    && cond.as_ref().is_none_or(|c| Self::native_safe_expr(c, params, cand, globals, nums))
-                    && update.as_ref().is_none_or(|u| Self::native_safe_expr(u, params, cand, globals, nums))
-                    && Self::native_safe_stmt(body, params, cand, globals, nums)
+                init.as_ref().is_none_or(|i| Self::native_safe_stmt(i, params, cand, globals, nums, native_vec_names))
+                    && cond.as_ref().is_none_or(|c| Self::native_safe_expr(c, params, cand, globals, nums, native_vec_names))
+                    && update.as_ref().is_none_or(|u| Self::native_safe_expr(u, params, cand, globals, nums, native_vec_names))
+                    && Self::native_safe_stmt(body, params, cand, globals, nums, native_vec_names)
             }
             Statement::While { cond, body, .. } => {
-                Self::native_safe_expr(cond, params, cand, globals, nums)
-                    && Self::native_safe_stmt(body, params, cand, globals, nums)
+                Self::native_safe_expr(cond, params, cand, globals, nums, native_vec_names)
+                    && Self::native_safe_stmt(body, params, cand, globals, nums, native_vec_names)
             }
             Statement::DoWhile { body, cond, .. } => {
-                Self::native_safe_stmt(body, params, cand, globals, nums)
-                    && Self::native_safe_expr(cond, params, cand, globals, nums)
+                Self::native_safe_stmt(body, params, cand, globals, nums, native_vec_names)
+                    && Self::native_safe_expr(cond, params, cand, globals, nums, native_vec_names)
             }
             _ => false,
         }
@@ -9408,6 +9961,7 @@ impl Codegen {
         cand: &std::collections::HashSet<String>,
         globals: &std::collections::HashSet<String>,
         nums: &HashSet<String>,
+        native_vec_names: &std::collections::HashSet<String>,
     ) -> bool {
         match expr {
             Expr::Literal { value, .. } => matches!(value, Literal::Number(_) | Literal::Bool(_)),
@@ -9416,11 +9970,11 @@ impl Codegen {
             }
             Expr::Assign { name, value, .. } => {
                 (globals.contains(name.as_ref()) || nums.contains(name.as_ref()))
-                    && Self::native_safe_expr(value, params, cand, globals, nums)
+                    && Self::native_safe_expr(value, params, cand, globals, nums, native_vec_names)
             }
             Expr::CompoundAssign { name, value, .. } => {
                 nums.contains(name.as_ref())
-                    && Self::native_safe_expr(value, params, cand, globals, nums)
+                    && Self::native_safe_expr(value, params, cand, globals, nums, native_vec_names)
             }
             Expr::Binary { left, op, right, .. } => {
                 matches!(
@@ -9428,22 +9982,42 @@ impl Codegen {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
                         | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                         | BinOp::StrictEq | BinOp::StrictNe | BinOp::And | BinOp::Or
-                ) && Self::native_safe_expr(left, params, cand, globals, nums)
-                    && Self::native_safe_expr(right, params, cand, globals, nums)
+                ) && Self::native_safe_expr(left, params, cand, globals, nums, native_vec_names)
+                    && Self::native_safe_expr(right, params, cand, globals, nums, native_vec_names)
             }
             Expr::Unary { op, operand, .. } => {
                 matches!(op, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::Not)
-                    && Self::native_safe_expr(operand, params, cand, globals, nums)
+                    && Self::native_safe_expr(operand, params, cand, globals, nums, native_vec_names)
+            }
+            Expr::PostfixInc { name, .. }
+            | Expr::PrefixInc { name, .. }
+            | Expr::PostfixDec { name, .. }
+            | Expr::PrefixDec { name, .. } => nums.contains(name.as_ref()),
+            Expr::Index { object, index, .. } => {
+                matches!(object.as_ref(), Expr::Ident { .. })
+                    && Self::native_safe_expr(index, params, cand, globals, nums, native_vec_names)
+            }
+            Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            } => {
+                matches!(object.as_ref(), Expr::Ident { .. })
+                    && Self::native_safe_expr(index, params, cand, globals, nums, native_vec_names)
+                    && Self::native_safe_expr(value, params, cand, globals, nums, native_vec_names)
             }
             Expr::Call { callee, args, .. } => {
                 let args_ok = args
                     .iter()
-                    .all(|a| matches!(a, CallArg::Expr(e) if Self::native_safe_expr(e, params, cand, globals, nums)));
+                    .all(|a| matches!(a, CallArg::Expr(e) if Self::native_safe_expr(e, params, cand, globals, nums, native_vec_names)));
                 if !args_ok {
                     return false;
                 }
                 match callee.as_ref() {
-                    Expr::Ident { name, .. } => cand.contains(name.as_ref()),
+                    Expr::Ident { name, .. } => {
+                        cand.contains(name.as_ref()) || native_vec_names.contains(name.as_ref())
+                    }
                     Expr::Member { object, prop: MemberProp::Name { name: m, .. }, .. } => {
                         matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
                             && args.len() == 1
@@ -9560,7 +10134,9 @@ impl Codegen {
                 }
                 self.writeln(&format!("fn {}_native({}) -> f64 {{", Self::escape_ident(name.as_ref()), plist.join(", ")));
                 self.indent += 1;
+                self.native_fn_body_emit = true;
                 self.emit_native_fn_body(body)?;
+                self.native_fn_body_emit = false;
                 // Functions that fall off the end without returning: JS yields undefined; an
                 // eligible numeric fn shouldn't, but emit a default to keep `-> f64` total.
                 self.writeln("0.0");
@@ -9611,7 +10187,7 @@ impl Codegen {
                 self.writeln("}");
             }
             Statement::ExprStmt { expr, .. } => {
-                let (code, _) = self.emit_typed_expr(expr)?;
+                let code = self.emit_expr_discard(expr)?;
                 self.writeln(&format!("{};", code));
             }
             Statement::VarDecl { .. }
@@ -11999,6 +12575,43 @@ impl Codegen {
                 optional,
                 ..
             } => {
+                // Module const `[f64; N]` — direct index, no Vec wrapper (fasta `codes`/`cum`).
+                if !optional {
+                    if let Expr::Ident { name, .. } = object.as_ref() {
+                        if let Some(static_name) = Self::module_const_array_static(
+                            &self.module_const_f64_arrays,
+                            &self.module_const_f64_aliases,
+                            name.as_ref(),
+                        ) {
+                            let in_bounds = self.index_in_bounds(index, name.as_ref());
+                            let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
+                            let idx_usize = if idx_ty == RustType::F64 {
+                                format!("({}) as usize", idx_code)
+                            } else {
+                                let iv = if idx_ty.is_native() {
+                                    idx_ty.to_value_expr(&idx_code)
+                                } else {
+                                    idx_code
+                                };
+                                format!(
+                                    "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
+                                    iv
+                                )
+                            };
+                            let access = if in_bounds {
+                                format!("{}[{}]", static_name, idx_usize)
+                            } else {
+                                format!(
+                                    "{{ let _i = {}; if _i < {}.len() {{ {}[_i] }} else {{ f64::NAN }} }}",
+                                    idx_usize,
+                                    static_name,
+                                    static_name
+                                )
+                            };
+                            return Ok((access, RustType::F64));
+                        }
+                    }
+                }
                 // Native fast path: `vec[i]` where vec is Vec<T> and i is numeric.
                 if !optional {
                     if let Expr::Ident { name, .. } = object.as_ref() {
