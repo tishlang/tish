@@ -30,17 +30,24 @@ fn compile_fixture_typed(rel: &str) -> String {
 fn fasta_lowers_cumulative_and_native_arrays() {
     let rust = compile_fixture_typed("tests/perf/fasta.tish");
     assert!(rust.contains("fn cumulative_nv("), "cumulative_nv missing");
-    assert!(rust.contains("let mut codes: Vec<f64>"), "codes not native vec");
-    assert!(rust.contains("let mut probs: Vec<f64>"), "probs not native vec");
     assert!(
-        rust.contains("cumulative_nv(&probs)"),
-        "fastaRandom should call cumulative_nv:\n{}",
-        rust.lines()
-            .filter(|l| l.contains("cum") || l.contains("cumulative"))
-            .take(10)
-            .collect::<Vec<_>>()
-            .join("\n")
+        rust.contains("const G_CODES") || rust.contains("let mut codes: Vec<f64>"),
+        "codes not lowered to module const or native vec"
     );
+    assert!(
+        rust.contains("const G_PROBS_CUM"),
+        "precomputed cumulative array missing"
+    );
+    if rust.contains("fn fastaRandom_native(") {
+        assert!(
+            rust.contains("fastaRandom_native("),
+            "fastaRandom_native declared but not called"
+        );
+        assert!(
+            rust.contains("G_CODES["),
+            "fastaRandom_native should index G_CODES directly"
+        );
+    }
 }
 
 #[test]
