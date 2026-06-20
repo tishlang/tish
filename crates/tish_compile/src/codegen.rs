@@ -860,6 +860,9 @@ pub(crate) struct Codegen {
     /// Variables currently wrapped in Rc<RefCell<Value>> for mutable capture in closures
     /// These need special handling: reads via .borrow().clone(), writes via *var.borrow_mut()
     refcell_wrapped_vars: std::collections::HashSet<String>,
+    /// #176 (behind `TISH_NATIVE_FN`): top-level `let` bindings lowered to `thread_local Cell<f64>`
+    /// (`G_NAME`) when every use is a numeric read or a whole-binding numeric assign (fasta `seed`).
+    native_numeric_globals: std::collections::HashMap<String, f64>,
     /// M5 (dark-shipped behind `TISH_NATIVE_FN`): top-level functions eligible for a parallel
     /// free `fn f_native(f64,..)->f64` (all params `: number`, returns `number`, native-safe
     /// body). Direct calls to these route to the native fn, bypassing the boxed `value_call`.
@@ -1000,6 +1003,7 @@ impl Codegen {
             outer_params_stack: Vec::new(),
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
+            native_numeric_globals: std::collections::HashMap::new(),
             native_fns: std::collections::HashSet::new(),
             native_vec_fns: std::collections::HashMap::new(),
             inline_fns: std::collections::HashMap::new(),
@@ -1695,7 +1699,16 @@ impl Codegen {
         // M5 (dark-shipped behind TISH_NATIVE_FN): emit a parallel native `fn f_native` for each
         // eligible top-level numeric fn at top level; direct calls route to it in emit_typed_expr.
         if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
-            self.native_fns = Self::collect_native_fns(&program.statements);
+            self.native_numeric_globals =
+                Self::collect_native_numeric_globals(&program.statements);
+            if !self.native_numeric_globals.is_empty() {
+                self.emit_native_numeric_global_tls()?;
+                self.writeln("");
+            }
+            let global_names: std::collections::HashSet<String> =
+                self.native_numeric_globals.keys().cloned().collect();
+            self.native_fns =
+                Self::collect_native_fns(&program.statements, &global_names);
             if !self.native_fns.is_empty() {
                 self.emit_native_fns(&program.statements)?;
                 self.writeln("");
@@ -2037,7 +2050,9 @@ impl Codegen {
         // Prepass: vars mutated by nested closures must be RefCell from the start (top-level)
         let top_level_mutated = Self::collect_vars_needing_capture_cell(&program.statements);
         for v in &top_level_mutated {
-            self.refcell_wrapped_vars.insert(v.clone());
+            if !self.native_numeric_globals.contains_key(v) {
+                self.refcell_wrapped_vars.insert(v.clone());
+            }
         }
 
         if self.is_async {
@@ -2105,6 +2120,17 @@ impl Codegen {
         }
         match expr {
             Expr::Assign { name, value, .. } => {
+                if self.native_numeric_globals.contains_key(name.as_ref()) {
+                    let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                    let native_val = if val_ty == RustType::F64 {
+                        val_code
+                    } else if val_ty == RustType::Value {
+                        RustType::F64.from_value_expr(&val_code)
+                    } else {
+                        val_code
+                    };
+                    return Ok(Self::native_global_set(name.as_ref(), &native_val));
+                }
                 let rust_type = self.type_context.get_type(name.as_ref());
                 // i32-loop-var lowering: the accumulator lives in an `i32` register. Each
                 // reassignment RHS is a bitwise/shift chain the gate proved lowers fully via
@@ -2448,6 +2474,14 @@ impl Codegen {
                 if rust_type == RustType::F64 && self.demoted_numeric_locals.contains(name.as_ref())
                 {
                     rust_type = RustType::Value;
+                }
+
+                // #176: top-level numeric globals live in a thread_local `Cell<f64>` — no local slot.
+                if self.native_numeric_globals.contains_key(name.as_ref())
+                    && self.outer_vars_stack.len() == 1
+                {
+                    self.type_context.define(name.as_ref(), RustType::F64);
+                    return Ok(());
                 }
 
                 // i32-loop-var lowering: a `number` accumulator the analysis proved can live in an
@@ -3066,6 +3100,7 @@ impl Codegen {
                             "Polars",
                         ]
                         .contains(&name.as_str())
+                            && !self.native_numeric_globals.contains_key(name.as_str())
                     })
                     .collect();
 
@@ -3665,6 +3700,12 @@ impl Codegen {
                 Literal::Null => "Value::Null".to_string(),
             },
             Expr::Ident { name, .. } => {
+                if self.native_numeric_globals.contains_key(name.as_ref()) {
+                    return Ok(format!(
+                        "Value::Number({})",
+                        Self::native_global_get(name.as_ref())
+                    ));
+                }
                 let escaped = Self::escape_ident(name.as_ref());
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     let var_type = self.type_context.get_type(name.as_ref());
@@ -4197,6 +4238,34 @@ impl Codegen {
                     }
                 }
                 
+                // M5: boxed-context call to an eligible native fn → `Value::Number(name_native(..))`.
+                if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                    if self.native_fns.contains(fname.as_ref()) {
+                        let mut argc: Vec<String> = Vec::with_capacity(args.len());
+                        let mut ok = true;
+                        for a in args {
+                            if let CallArg::Expr(e) = a {
+                                let (ac, at) = self.emit_typed_expr(e)?;
+                                argc.push(if at == RustType::Value {
+                                    RustType::F64.from_value_expr(&ac)
+                                } else {
+                                    ac
+                                });
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if ok {
+                            return Ok(format!(
+                                "Value::Number({}_native({}))",
+                                Self::escape_ident(fname.as_ref()),
+                                argc.join(", ")
+                            ));
+                        }
+                    }
+                }
+
                 let callee_expr = self.emit_expr(callee)?;
                 let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
                 if has_spread {
@@ -4434,6 +4503,23 @@ impl Codegen {
             Expr::Assign { name, value, .. } => {
                 // #173 part 3: expression-position reassignment also ends a counter's in-bounds guard.
                 self.invalidate_index_guard(name.as_ref());
+                // #176: whole-binding assign to a native numeric global → thread_local Cell.
+                if self.native_numeric_globals.contains_key(name.as_ref()) {
+                    let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                    let native_val = if val_ty == RustType::F64 {
+                        val_code
+                    } else if val_ty == RustType::Value {
+                        RustType::F64.from_value_expr(&val_code)
+                    } else {
+                        val_code
+                    };
+                    let set = Self::native_global_set(name.as_ref(), &native_val);
+                    let get = Self::native_global_get(name.as_ref());
+                    return Ok(format!(
+                        "{{ {}; Value::Number({}) }}",
+                        set, get
+                    ));
+                }
                 let escaped = Self::escape_ident(name.as_ref());
                 let rust_type = self.type_context.get_type(name.as_ref());
                 let is_ref = self.refcell_wrapped_vars.contains(name.as_ref());
@@ -6013,6 +6099,7 @@ impl Codegen {
                     "Polars",
                 ]
                 .contains(&name.as_str())
+                    && !self.native_numeric_globals.contains_key(name.as_str())
             })
             .collect();
 
@@ -8532,11 +8619,506 @@ impl Codegen {
         }
     }
 
+    /// #176 — `thread_local` static name for a native numeric global (`seed` → `G_SEED`).
+    fn native_global_static(name: &str) -> String {
+        format!("G_{}", Self::escape_ident(name).to_uppercase())
+    }
+
+    /// Read a native numeric global from its `thread_local Cell<f64>`.
+    fn native_global_get(name: &str) -> String {
+        format!(
+            "{}::with(|c| c.get())",
+            Self::native_global_static(name)
+        )
+    }
+
+    /// Write a native numeric global into its `thread_local Cell<f64>`.
+    fn native_global_set(name: &str, val: &str) -> String {
+        format!(
+            "{}::with(|c| c.set({}))",
+            Self::native_global_static(name),
+            val
+        )
+    }
+
+    /// Emit `thread_local! { static G_NAME: Cell<f64> = ... }` for each eligible global.
+    fn emit_native_numeric_global_tls(&mut self) -> Result<(), CompileError> {
+        self.writeln("thread_local! {");
+        self.indent += 1;
+        for (name, init) in self.native_numeric_globals.clone() {
+            self.writeln(&format!(
+                "static {}: std::cell::Cell<f64> = const {{ std::cell::Cell::new({}) }};",
+                Self::native_global_static(&name),
+                Self::f64_lit(init),
+            ));
+        }
+        self.indent -= 1;
+        self.writeln("};");
+        Ok(())
+    }
+
+    /// #176 — classify top-level `let x = <number-literal>` bindings whose every use is a numeric
+    /// read or a whole-binding assign with a numeric-shaped RHS (fasta `seed`).
+    fn collect_native_numeric_globals(stmts: &[Statement]) -> HashMap<String, f64> {
+        use std::collections::{HashMap, HashSet};
+        let mut candidates: HashMap<String, f64> = HashMap::new();
+        for s in stmts {
+            if let Statement::VarDecl {
+                name,
+                type_ann,
+                init,
+                ..
+            } = s
+            {
+                if let Some(ann) = type_ann {
+                    if !Self::ann_is_number(ann) {
+                        continue;
+                    }
+                }
+                if let Some(Expr::Literal {
+                    value: Literal::Number(n),
+                    ..
+                }) = init.as_ref()
+                {
+                    candidates.insert(name.to_string(), *n);
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return HashMap::new();
+        }
+        // Inner `let`/`const` with the same name disqualifies the global (shadowing).
+        for s in stmts {
+            if let Statement::FunDecl { body, .. } = s {
+                let mut inner = HashSet::new();
+                Self::collect_local_var_names(body, &mut inner);
+                for n in inner {
+                    candidates.remove(&n);
+                }
+            }
+        }
+        let globals: HashSet<String> = candidates.keys().cloned().collect();
+        let empty_p = HashSet::new();
+        let empty_c = HashSet::new();
+        let mut reassigns: Vec<(String, &Expr)> = Vec::new();
+        Self::collect_reassignments_stmts(stmts, &mut reassigns);
+        for (name, rhs) in &reassigns {
+            if globals.contains(name)
+                && !Self::numeric_shaped(rhs, &empty_p, &empty_c, &globals)
+            {
+                candidates.remove(name);
+            }
+        }
+        for name in candidates.keys().cloned().collect::<Vec<_>>() {
+            if Self::global_has_disqualifying_use(stmts, &name) {
+                candidates.remove(&name);
+            }
+        }
+        candidates
+    }
+
+    /// Disqualifying uses: compound/logical assign, inc/dec, member/index/call on the global name.
+    fn global_has_disqualifying_use(stmts: &[Statement], g: &str) -> bool {
+        let mut bad = false;
+        Self::walk_stmts_for_global_disqualifiers(stmts, g, &mut bad);
+        bad
+    }
+
+    fn walk_stmts_for_global_disqualifiers(stmts: &[Statement], g: &str, bad: &mut bool) {
+        for s in stmts {
+            Self::walk_stmt_for_global_disqualifiers(s, g, bad);
+        }
+    }
+
+    fn walk_stmt_for_global_disqualifiers(s: &Statement, g: &str, bad: &mut bool) {
+        if *bad {
+            return;
+        }
+        match s {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                Self::walk_stmts_for_global_disqualifiers(statements, g, bad);
+            }
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::walk_stmt_for_global_disqualifiers(then_branch, g, bad);
+                if let Some(eb) = else_branch {
+                    Self::walk_stmt_for_global_disqualifiers(eb, g, bad);
+                }
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::For { body, .. }
+            | Statement::ForOf { body, .. } => {
+                Self::walk_stmt_for_global_disqualifiers(body, g, bad);
+            }
+            Statement::Switch {
+                cases,
+                default_body,
+                ..
+            } => {
+                for (_, stmts) in cases {
+                    Self::walk_stmts_for_global_disqualifiers(stmts, g, bad);
+                }
+                if let Some(d) = default_body {
+                    Self::walk_stmts_for_global_disqualifiers(d, g, bad);
+                }
+            }
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
+                Self::walk_stmt_for_global_disqualifiers(body, g, bad);
+                if let Some(c) = catch_body {
+                    Self::walk_stmt_for_global_disqualifiers(c, g, bad);
+                }
+                if let Some(f) = finally_body {
+                    Self::walk_stmt_for_global_disqualifiers(f, g, bad);
+                }
+            }
+            Statement::FunDecl { body, .. } => {
+                Self::walk_stmt_for_global_disqualifiers(body, g, bad);
+            }
+            Statement::ExprStmt { expr, .. } => {
+                Self::walk_expr_for_global_disqualifiers(expr, g, bad);
+            }
+            Statement::Return { value: Some(e), .. } => {
+                Self::walk_expr_for_global_disqualifiers(e, g, bad);
+            }
+            Statement::VarDecl { init: Some(e), .. } => {
+                Self::walk_expr_for_global_disqualifiers(e, g, bad);
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_expr_for_global_disqualifiers(e: &Expr, g: &str, bad: &mut bool) {
+        if *bad {
+            return;
+        }
+        match e {
+            Expr::CompoundAssign { name, .. }
+            | Expr::LogicalAssign { name, .. }
+                if name.as_ref() == g =>
+            {
+                *bad = true;
+            }
+            Expr::PostfixInc { name, .. }
+            | Expr::PrefixInc { name, .. }
+            | Expr::PostfixDec { name, .. }
+            | Expr::PrefixDec { name, .. }
+                if name.as_ref() == g =>
+            {
+                *bad = true;
+            }
+            Expr::Call { callee, .. }
+                if matches!(callee.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == g) =>
+            {
+                *bad = true;
+            }
+            Expr::Member { object, .. }
+                if matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == g) =>
+            {
+                *bad = true;
+            }
+            Expr::Index { object, .. }
+                if matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == g) =>
+            {
+                *bad = true;
+            }
+            Expr::Delete { target, .. }
+                if matches!(target.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == g) =>
+            {
+                *bad = true;
+            }
+            _ => {}
+        }
+        Self::walk_expr_children_for_global_disqualifiers(e, g, bad);
+    }
+
+    fn walk_expr_children_for_global_disqualifiers(e: &Expr, g: &str, bad: &mut bool) {
+        if *bad {
+            return;
+        }
+        match e {
+            Expr::Binary { left, right, .. } => {
+                Self::walk_expr_for_global_disqualifiers(left, g, bad);
+                Self::walk_expr_for_global_disqualifiers(right, g, bad);
+            }
+            Expr::Unary { operand, .. } => {
+                Self::walk_expr_for_global_disqualifiers(operand, g, bad);
+            }
+            Expr::Assign { value, .. } => {
+                Self::walk_expr_for_global_disqualifiers(value, g, bad);
+            }
+            Expr::CompoundAssign { value, .. } | Expr::LogicalAssign { value, .. } => {
+                Self::walk_expr_for_global_disqualifiers(value, g, bad);
+            }
+            Expr::Conditional {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::walk_expr_for_global_disqualifiers(then_branch, g, bad);
+                Self::walk_expr_for_global_disqualifiers(else_branch, g, bad);
+            }
+            Expr::Call { callee, args, .. } => {
+                Self::walk_expr_for_global_disqualifiers(callee, g, bad);
+                for a in args {
+                    if let CallArg::Expr(e) | CallArg::Spread(e) = a {
+                        Self::walk_expr_for_global_disqualifiers(e, g, bad);
+                    }
+                }
+            }
+            Expr::New { callee, args, .. } => {
+                Self::walk_expr_for_global_disqualifiers(callee, g, bad);
+                for a in args {
+                    if let CallArg::Expr(e) | CallArg::Spread(e) = a {
+                        Self::walk_expr_for_global_disqualifiers(e, g, bad);
+                    }
+                }
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::walk_expr_for_global_disqualifiers(object, g, bad);
+                if let MemberProp::Expr(pe) = prop {
+                    Self::walk_expr_for_global_disqualifiers(pe, g, bad);
+                }
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                Self::walk_expr_for_global_disqualifiers(object, g, bad);
+                Self::walk_expr_for_global_disqualifiers(value, g, bad);
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                Self::walk_expr_for_global_disqualifiers(object, g, bad);
+                Self::walk_expr_for_global_disqualifiers(index, g, bad);
+                Self::walk_expr_for_global_disqualifiers(value, g, bad);
+            }
+            Expr::Index { object, index, .. } => {
+                Self::walk_expr_for_global_disqualifiers(object, g, bad);
+                Self::walk_expr_for_global_disqualifiers(index, g, bad);
+            }
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(e) | ArrayElement::Spread(e) => {
+                            Self::walk_expr_for_global_disqualifiers(e, g, bad);
+                        }
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for p in props {
+                    match p {
+                        ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => {
+                            Self::walk_expr_for_global_disqualifiers(e, g, bad);
+                        }
+                    }
+                }
+            }
+            Expr::ArrowFunction { body, .. } => match body {
+                ArrowBody::Expr(e) => Self::walk_expr_for_global_disqualifiers(e, g, bad),
+                ArrowBody::Block(s) => Self::walk_stmt_for_global_disqualifiers(s, g, bad),
+            },
+            Expr::NullishCoalesce { left, right, .. } => {
+                Self::walk_expr_for_global_disqualifiers(left, g, bad);
+                Self::walk_expr_for_global_disqualifiers(right, g, bad);
+            }
+            Expr::TypeOf { operand, .. } => {
+                Self::walk_expr_for_global_disqualifiers(operand, g, bad);
+            }
+            Expr::TemplateLiteral { exprs, .. } => {
+                for e in exprs {
+                    Self::walk_expr_for_global_disqualifiers(e, g, bad);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Every statement-level expression mentioning `g` must be numeric-shaped (assign-to-`g` checks RHS).
+    fn global_only_numeric_expr_roots(
+        stmts: &[Statement],
+        g: &str,
+        globals: &HashSet<String>,
+    ) -> bool {
+        let empty_p = HashSet::new();
+        let empty_c = HashSet::new();
+        let mut ok = true;
+        Self::for_each_expr_root(stmts, &mut |e| {
+            if Self::expr_mentions_global(e, g) {
+                let tree_ok = match e {
+                    Expr::Assign { name, value, .. } if name.as_ref() == g => {
+                        Self::numeric_shaped(value, &empty_p, &empty_c, globals)
+                    }
+                    _ => Self::numeric_shaped(e, &empty_p, &empty_c, globals),
+                };
+                if !tree_ok {
+                    ok = false;
+                }
+            }
+        });
+        ok
+    }
+
+    fn for_each_expr_root(stmts: &[Statement], f: &mut dyn FnMut(&Expr)) {
+        for s in stmts {
+            Self::for_each_expr_root_stmt(s, f);
+        }
+    }
+
+    fn for_each_expr_root_stmt(s: &Statement, f: &mut dyn FnMut(&Expr)) {
+        match s {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                Self::for_each_expr_root(statements, f);
+            }
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                f(cond);
+                Self::for_each_expr_root_stmt(then_branch, f);
+                if let Some(eb) = else_branch {
+                    Self::for_each_expr_root_stmt(eb, f);
+                }
+            }
+            Statement::While { cond, body, .. } | Statement::DoWhile { cond, body, .. } => {
+                f(cond);
+                Self::for_each_expr_root_stmt(body, f);
+            }
+            Statement::ForOf { iterable, body, .. } => {
+                f(iterable);
+                Self::for_each_expr_root_stmt(body, f);
+            }
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
+                if let Some(i) = init {
+                    Self::for_each_expr_root_stmt(i, f);
+                }
+                if let Some(c) = cond {
+                    f(c);
+                }
+                if let Some(u) = update {
+                    f(u);
+                }
+                Self::for_each_expr_root_stmt(body, f);
+            }
+            Statement::Switch {
+                cases,
+                default_body,
+                ..
+            } => {
+                for (_, stmts) in cases {
+                    Self::for_each_expr_root(stmts, f);
+                }
+                if let Some(d) = default_body {
+                    Self::for_each_expr_root(d, f);
+                }
+            }
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
+                Self::for_each_expr_root_stmt(body, f);
+                if let Some(c) = catch_body {
+                    Self::for_each_expr_root_stmt(c, f);
+                }
+                if let Some(fb) = finally_body {
+                    Self::for_each_expr_root_stmt(fb, f);
+                }
+            }
+            Statement::FunDecl { body, .. } => Self::for_each_expr_root_stmt(body, f),
+            Statement::ExprStmt { expr, .. } => f(expr),
+            Statement::Return { value: Some(e), .. } => f(e),
+            Statement::VarDecl { init: Some(e), .. } => f(e),
+            Statement::Switch { expr, .. } => f(expr),
+            _ => {}
+        }
+    }
+
+    fn expr_mentions_global(e: &Expr, g: &str) -> bool {
+        match e {
+            Expr::Ident { name, .. } if name.as_ref() == g => true,
+            Expr::Binary { left, right, .. } => {
+                Self::expr_mentions_global(left, g) || Self::expr_mentions_global(right, g)
+            }
+            Expr::Unary { operand, .. } => Self::expr_mentions_global(operand, g),
+            Expr::Assign { name, value, .. } if name.as_ref() == g => true,
+            Expr::Assign { value, .. } => Self::expr_mentions_global(value, g),
+            Expr::CompoundAssign { name, value, .. } if name.as_ref() == g => true,
+            Expr::CompoundAssign { value, .. } => Self::expr_mentions_global(value, g),
+            Expr::LogicalAssign { name, value, .. } if name.as_ref() == g => true,
+            Expr::LogicalAssign { value, .. } => Self::expr_mentions_global(value, g),
+            Expr::Conditional {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::expr_mentions_global(then_branch, g)
+                    || Self::expr_mentions_global(else_branch, g)
+            }
+            Expr::Call { callee, args, .. } => {
+                Self::expr_mentions_global(callee, g)
+                    || args.iter().any(|a| match a {
+                        CallArg::Expr(e) | CallArg::Spread(e) => Self::expr_mentions_global(e, g),
+                    })
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::expr_mentions_global(object, g)
+                    || matches!(prop, MemberProp::Expr(e) if Self::expr_mentions_global(e, g))
+            }
+            Expr::Index { object, index, .. } => {
+                Self::expr_mentions_global(object, g) || Self::expr_mentions_global(index, g)
+            }
+            Expr::MemberAssign { object, value, .. }
+            | Expr::IndexAssign { object, value, .. } => {
+                Self::expr_mentions_global(object, g) || Self::expr_mentions_global(value, g)
+            }
+            Expr::Array { elements, .. } => elements.iter().any(|el| match el {
+                ArrayElement::Expr(e) | ArrayElement::Spread(e) => Self::expr_mentions_global(e, g),
+            }),
+            Expr::Object { props, .. } => props.iter().any(|p| match p {
+                ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => Self::expr_mentions_global(e, g),
+            }),
+            Expr::TemplateLiteral { exprs, .. } => {
+                exprs.iter().any(|e| Self::expr_mentions_global(e, g))
+            }
+            Expr::ArrowFunction { body, .. } => match body {
+                ArrowBody::Expr(e) => Self::expr_mentions_global(e, g),
+                ArrowBody::Block(s) => {
+                    let mut found = false;
+                    Self::for_each_expr_root_stmt(s, &mut |e| {
+                        if Self::expr_mentions_global(e, g) {
+                            found = true;
+                        }
+                    });
+                    found
+                }
+            },
+            _ => false,
+        }
+    }
+
     /// Names of top-level fns eligible for a parallel native `fn f_native(f64,..)->f64`:
     /// non-async, every param `: number` (no default), `: number` return, and a native-safe
     /// body (only block/if/return/expr-stmt over native exprs + calls to other eligible fns or
     /// 1-arg Math intrinsics). Conservative fixpoint — bails on anything else.
-    fn collect_native_fns(statements: &[Statement]) -> std::collections::HashSet<String> {
+    fn collect_native_fns(
+        statements: &[Statement],
+        globals: &std::collections::HashSet<String>,
+    ) -> std::collections::HashSet<String> {
         use std::collections::HashSet;
         let mut cand: HashSet<String> = HashSet::new();
         let mut decls: Vec<(&str, &Vec<FunParam>, &Statement)> = Vec::new();
@@ -8576,8 +9158,8 @@ impl Codegen {
                 }
                 let pnames: HashSet<String> =
                     params.iter().flat_map(|p| p.bound_names()).map(|n| n.to_string()).collect();
-                if !Self::native_safe_stmt(body, &pnames, &cand)
-                    || !Self::returns_numeric(body, &pnames, &cand)
+                if !Self::native_safe_stmt(body, &pnames, &cand, globals)
+                    || !Self::returns_numeric(body, &pnames, &cand, globals)
                 {
                     remove.push(name.to_string());
                 }
@@ -8596,20 +9178,21 @@ impl Codegen {
         stmt: &Statement,
         params: &std::collections::HashSet<String>,
         cand: &std::collections::HashSet<String>,
+        globals: &std::collections::HashSet<String>,
     ) -> bool {
         match stmt {
             Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                statements.iter().all(|s| Self::native_safe_stmt(s, params, cand))
+                statements.iter().all(|s| Self::native_safe_stmt(s, params, cand, globals))
             }
             Statement::Return { value, .. } => {
-                value.as_ref().is_some_and(|e| Self::native_safe_expr(e, params, cand))
+                value.as_ref().is_some_and(|e| Self::native_safe_expr(e, params, cand, globals))
             }
             Statement::If { cond, then_branch, else_branch, .. } => {
-                Self::native_safe_expr(cond, params, cand)
-                    && Self::native_safe_stmt(then_branch, params, cand)
-                    && else_branch.as_ref().is_none_or(|e| Self::native_safe_stmt(e, params, cand))
+                Self::native_safe_expr(cond, params, cand, globals)
+                    && Self::native_safe_stmt(then_branch, params, cand, globals)
+                    && else_branch.as_ref().is_none_or(|e| Self::native_safe_stmt(e, params, cand, globals))
             }
-            Statement::ExprStmt { expr, .. } => Self::native_safe_expr(expr, params, cand),
+            Statement::ExprStmt { expr, .. } => Self::native_safe_expr(expr, params, cand, globals),
             _ => false,
         }
     }
@@ -8618,27 +9201,33 @@ impl Codegen {
         expr: &Expr,
         params: &std::collections::HashSet<String>,
         cand: &std::collections::HashSet<String>,
+        globals: &std::collections::HashSet<String>,
     ) -> bool {
         match expr {
             Expr::Literal { value, .. } => matches!(value, Literal::Number(_) | Literal::Bool(_)),
-            Expr::Ident { name, .. } => params.contains(name.as_ref()),
+            Expr::Ident { name, .. } => {
+                params.contains(name.as_ref()) || globals.contains(name.as_ref())
+            }
+            Expr::Assign { name, value, .. } if globals.contains(name.as_ref()) => {
+                Self::native_safe_expr(value, params, cand, globals)
+            }
             Expr::Binary { left, op, right, .. } => {
                 matches!(
                     op,
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
                         | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                         | BinOp::StrictEq | BinOp::StrictNe | BinOp::And | BinOp::Or
-                ) && Self::native_safe_expr(left, params, cand)
-                    && Self::native_safe_expr(right, params, cand)
+                ) && Self::native_safe_expr(left, params, cand, globals)
+                    && Self::native_safe_expr(right, params, cand, globals)
             }
             Expr::Unary { op, operand, .. } => {
                 matches!(op, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::Not)
-                    && Self::native_safe_expr(operand, params, cand)
+                    && Self::native_safe_expr(operand, params, cand, globals)
             }
             Expr::Call { callee, args, .. } => {
                 let args_ok = args
                     .iter()
-                    .all(|a| matches!(a, CallArg::Expr(e) if Self::native_safe_expr(e, params, cand)));
+                    .all(|a| matches!(a, CallArg::Expr(e) if Self::native_safe_expr(e, params, cand, globals)));
                 if !args_ok {
                     return false;
                 }
@@ -8667,20 +9256,21 @@ impl Codegen {
         s: &Statement,
         params: &std::collections::HashSet<String>,
         cand: &std::collections::HashSet<String>,
+        globals: &std::collections::HashSet<String>,
     ) -> bool {
         match s {
             Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                statements.iter().all(|x| Self::returns_numeric(x, params, cand))
+                statements.iter().all(|x| Self::returns_numeric(x, params, cand, globals))
             }
             Statement::Return { value, .. } => {
-                value.as_ref().is_some_and(|e| Self::numeric_shaped(e, params, cand))
+                value.as_ref().is_some_and(|e| Self::numeric_shaped(e, params, cand, globals))
             }
             Statement::If { then_branch, else_branch, .. } => {
-                Self::returns_numeric(then_branch, params, cand)
-                    && else_branch.as_ref().is_none_or(|e| Self::returns_numeric(e, params, cand))
+                Self::returns_numeric(then_branch, params, cand, globals)
+                    && else_branch.as_ref().is_none_or(|e| Self::returns_numeric(e, params, cand, globals))
             }
             Statement::While { body, .. } | Statement::For { body, .. } => {
-                Self::returns_numeric(body, params, cand)
+                Self::returns_numeric(body, params, cand, globals)
             }
             _ => true, // no return in this statement form
         }
@@ -8693,24 +9283,27 @@ impl Codegen {
         e: &Expr,
         params: &std::collections::HashSet<String>,
         cand: &std::collections::HashSet<String>,
+        globals: &std::collections::HashSet<String>,
     ) -> bool {
         match e {
             Expr::Literal { value: Literal::Number(_), .. } => true,
-            Expr::Ident { name, .. } => params.contains(name.as_ref()),
+            Expr::Ident { name, .. } => {
+                params.contains(name.as_ref()) || globals.contains(name.as_ref())
+            }
             Expr::Binary { left, op, right, .. } => {
                 matches!(
                     op,
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
-                ) && Self::numeric_shaped(left, params, cand)
-                    && Self::numeric_shaped(right, params, cand)
+                ) && Self::numeric_shaped(left, params, cand, globals)
+                    && Self::numeric_shaped(right, params, cand, globals)
             }
             Expr::Unary { op, operand, .. } => {
                 matches!(op, UnaryOp::Neg | UnaryOp::Pos)
-                    && Self::numeric_shaped(operand, params, cand)
+                    && Self::numeric_shaped(operand, params, cand, globals)
             }
             Expr::Conditional { then_branch, else_branch, .. } => {
-                Self::numeric_shaped(then_branch, params, cand)
-                    && Self::numeric_shaped(else_branch, params, cand)
+                Self::numeric_shaped(then_branch, params, cand, globals)
+                    && Self::numeric_shaped(else_branch, params, cand, globals)
             }
             Expr::Call { callee, .. } => match callee.as_ref() {
                 Expr::Ident { name, .. } => cand.contains(name.as_ref()),
@@ -10867,6 +11460,13 @@ impl Codegen {
                         return Ok((temp.clone(), RustType::F64));
                     }
                 }
+                // #176: native numeric global → thread_local Cell read.
+                if self.native_numeric_globals.contains_key(name.as_ref()) {
+                    return Ok((
+                        Self::native_global_get(name.as_ref()),
+                        RustType::F64,
+                    ));
+                }
                 let escaped = Self::escape_ident(name.as_ref());
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     let var_type = self.type_context.get_type(name.as_ref());
@@ -11731,5 +12331,41 @@ impl Codegen {
                 ))
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests_176 {
+    use super::Codegen;
+    use std::fs;
+    use tishlang_parser::parse;
+
+    #[test]
+    fn fasta_collects_seed_global() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest.join("../../tests/perf/fasta.tish");
+        let src = fs::read_to_string(&path).unwrap();
+        let program = parse(&src).unwrap();
+        let c = Codegen::collect_native_numeric_globals(&program.statements);
+        assert!(
+            c.contains_key("seed"),
+            "expected seed in {:?}",
+            c
+        );
+    }
+
+    #[test]
+    fn fasta_optimized_still_collects_seed_global() {
+        use tishlang_opt::optimize;
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest.join("../../tests/perf/fasta.tish");
+        let src = fs::read_to_string(&path).unwrap();
+        let program = parse(&src).unwrap();
+        let optimized = optimize(&program);
+        let c_opt = Codegen::collect_native_numeric_globals(&optimized.statements);
+        let inferred = crate::infer::infer_program(&optimized);
+        let c = Codegen::collect_native_numeric_globals(&inferred.statements);
+        assert!(c_opt.contains_key("seed"), "optimized only: {:?}", c_opt);
+        assert!(c.contains_key("seed"), "optimized+inferred: {:?}", c);
     }
 }
