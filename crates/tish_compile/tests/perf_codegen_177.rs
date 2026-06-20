@@ -51,6 +51,10 @@ fn fasta_lowers_cumulative_and_native_arrays() {
             rust.contains("_lcg_seed"),
             "fastaRandom_native should hoist LCG seed to a local"
         );
+        assert!(
+            rust.contains("_lcg_seed: i64") && rust.contains("3877i64"),
+            "fastaRandom_native should use integer LCG arithmetic"
+        );
     }
 }
 
@@ -82,6 +86,10 @@ fn fannkuch_nv_uses_direct_flip_indexing() {
         assert!(
             !rust.contains("perm.get(((k - i))"),
             "fannkuch_nv should not use perm.get for k-i sub-index"
+        );
+        assert!(
+            rust.contains("_usize_shift_") && rust.contains("perm1[_usize_shift_"),
+            "fannkuch_nv should fuse perm1 left-shift while loop"
         );
     }
 }

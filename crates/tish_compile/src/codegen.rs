@@ -893,6 +893,8 @@ pub(crate) struct Codegen {
     usize_for_counters: std::collections::HashSet<String>,
     /// Hoisted LCG seed local in a non-`genRandom` M5 body that calls `genRandom`.
     native_lcg_hoist: Option<(String, f64, f64, f64)>,
+    /// Hoisted LCG uses an `i64` seed when mul/add/mod are exact integers (fasta hot path).
+    native_lcg_hoist_int: bool,
     /// Set when an M5 body emits `return` so we skip the trailing `0.0` default.
     native_fn_body_returned: bool,
     /// M5 LCG fns (`genRandom`): `fn -> (global, mul, add, modulus)` for single-`with` emission.
@@ -1047,6 +1049,7 @@ impl Codegen {
             native_fn_param_names: std::collections::HashMap::new(),
             usize_for_counters: std::collections::HashSet::new(),
             native_lcg_hoist: None,
+            native_lcg_hoist_int: false,
             native_fn_body_returned: false,
             native_lcg_fns: std::collections::HashMap::new(),
             native_vec_fns: std::collections::HashMap::new(),
@@ -2201,6 +2204,11 @@ impl Codegen {
             }
             _ => {}
         }
+        if let Expr::IndexAssign { object, index, value, .. } = expr {
+            if let Some(code) = self.try_emit_native_vec_index_assign(object, index, value, true)? {
+                return Ok(code);
+            }
+        }
         match expr {
             Expr::Assign { name, value, .. } => {
                 if self.native_numeric_globals.contains_key(name.as_ref()) {
@@ -2788,6 +2796,11 @@ impl Codegen {
                 self.writeln("}");
             }
             Statement::While { cond, body, .. } => {
+                if (self.native_fn_body_emit || self.native_vec_ret.is_some())
+                    && self.try_emit_native_left_shift_while(cond, body)?
+                {
+                    return Ok(());
+                }
                 if (self.native_fn_body_emit || self.native_vec_ret.is_some())
                     && self.try_emit_usize_bounded_escape_while(cond, body)?
                 {
@@ -5128,65 +5141,10 @@ impl Codegen {
                 )
             }
             Expr::IndexAssign { object, index, value, .. } => {
-                // Native fast path: Vec<T>[i] = v
-                if let Expr::Ident { name, .. } = object.as_ref() {
-                    if !self.refcell_wrapped_vars.contains(name.as_ref()) {
-                        let obj_type = self.type_context.get_type(name.as_ref());
-                        if let RustType::Vec(elem_type) = obj_type {
-                            let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
-                            // #173 part 3: capture the in-bounds proof BEFORE emitting the index /
-                            // value (either could reassign the guard counter and flip the proof).
-                            let in_bounds = self.index_in_bounds(index, name.as_ref());
-                            let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-                            let idx_usize = if idx_ty == RustType::F64 {
-                                format!("({}) as usize", idx_code)
-                            } else {
-                                let iv = if idx_ty.is_native() {
-                                    idx_ty.to_value_expr(&idx_code)
-                                } else {
-                                    idx_code
-                                };
-                                format!(
-                                    "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
-                                    iv
-                                )
-                            };
-                            let (val_code, val_ty) = self.emit_typed_expr(value)?;
-                            let native_val = if val_ty == *elem_type {
-                                val_code
-                            } else if val_ty == RustType::Value {
-                                elem_type.from_value_expr(&val_code)
-                            } else {
-                                // both native but different type — best effort
-                                val_code
-                            };
-                            // OOB-safe write for numeric/bool Vecs: JS `a[i] = x` past the end
-                            // grows the array (holes read back as `undefined` → NaN/false), it does
-                            // not panic. Other element types keep the direct store (their OOB
-                            // semantics aren't a native-inference target).
-                            let assign = match elem_type.as_ref() {
-                                // #173 part 3: a proven in-bounds index needs neither the grow branch
-                                // nor a bounds compare — a direct store (V8/Bun do exactly this after
-                                // range-proving the loop). Sound: `idx < len` ⇒ never resizes/panics.
-                                RustType::F64 | RustType::Bool if in_bounds => {
-                                    format!("{{ {}[{}] = {}; Value::Null }}", esc_obj, idx_usize, native_val)
-                                }
-                                RustType::F64 | RustType::Bool => {
-                                    let pad = if matches!(elem_type.as_ref(), RustType::F64) {
-                                        "f64::NAN"
-                                    } else {
-                                        "false"
-                                    };
-                                    format!(
-                                        "{{ let _idx = {}; if _idx >= {}.len() {{ {}.resize(_idx + 1, {}); }} {}[_idx] = {}; Value::Null }}",
-                                        idx_usize, esc_obj, esc_obj, pad, esc_obj, native_val
-                                    )
-                                }
-                                _ => format!("{{ {}[{}] = {}; Value::Null }}", esc_obj, idx_usize, native_val),
-                            };
-                            return Ok(assign);
-                        }
-                    }
+                if let Some(assign) =
+                    self.try_emit_native_vec_index_assign(object, index, value, false)?
+                {
+                    return Ok(assign);
                 }
                 // Fallback: runtime set_index
                 let obj = self.emit_expr(object)?;
@@ -7538,6 +7496,188 @@ impl Codegen {
         Ok(true)
     }
 
+    /// Native `arr[i] = val` when `arr` is a local `Vec` — optionally without the boxed `Value::Null`
+    /// wrapper for statement-position side effects.
+    fn try_emit_native_vec_index_assign(
+        &mut self,
+        object: &Expr,
+        index: &Expr,
+        value: &Expr,
+        side_effect_only: bool,
+    ) -> Result<Option<String>, CompileError> {
+        let Expr::Ident { name, .. } = object else {
+            return Ok(None);
+        };
+        if self.refcell_wrapped_vars.contains(name.as_ref()) {
+            return Ok(None);
+        }
+        let obj_type = self.type_context.get_type(name.as_ref());
+        let RustType::Vec(elem_type) = obj_type else {
+            return Ok(None);
+        };
+        let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
+        let in_bounds = self.index_in_bounds(index, name.as_ref());
+        let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
+        let idx_usize = if idx_ty == RustType::F64 {
+            format!("({}) as usize", idx_code)
+        } else {
+            let iv = if idx_ty.is_native() {
+                idx_ty.to_value_expr(&idx_code)
+            } else {
+                idx_code
+            };
+            format!(
+                "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
+                iv
+            )
+        };
+        let (val_code, val_ty) = self.emit_typed_expr(value)?;
+        let native_val = if val_ty == *elem_type {
+            val_code
+        } else if val_ty == RustType::Value {
+            elem_type.from_value_expr(&val_code)
+        } else {
+            val_code
+        };
+        let assign = match elem_type.as_ref() {
+            RustType::F64 | RustType::Bool if in_bounds => {
+                if side_effect_only {
+                    format!("{}[{}] = {}", esc_obj, idx_usize, native_val)
+                } else {
+                    format!("{{ {}[{}] = {}; Value::Null }}", esc_obj, idx_usize, native_val)
+                }
+            }
+            RustType::F64 | RustType::Bool => {
+                let pad = if matches!(elem_type.as_ref(), RustType::F64) {
+                    "f64::NAN"
+                } else {
+                    "false"
+                };
+                format!(
+                    "{{ let _idx = {}; if _idx >= {}.len() {{ {}.resize(_idx + 1, {}); }} {}[_idx] = {}; Value::Null }}",
+                    idx_usize, esc_obj, esc_obj, pad, esc_obj, native_val
+                )
+            }
+            _ if side_effect_only => {
+                format!("{}[{}] = {}", esc_obj, idx_usize, native_val)
+            }
+            _ => format!("{{ {}[{}] = {}; Value::Null }}", esc_obj, idx_usize, native_val),
+        };
+        Ok(Some(assign))
+    }
+
+    /// `while (i < r) { let j = i+1; arr[i] = arr[j]; i = j }` → `for ui in 0..r { arr[ui]=arr[ui+1] }`.
+    fn try_emit_native_left_shift_while(
+        &mut self,
+        cond: &Expr,
+        body: &Statement,
+    ) -> Result<bool, CompileError> {
+        let Expr::Binary {
+            left: lv,
+            op: BinOp::Lt,
+            right: rv,
+            ..
+        } = cond
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: i_name, .. } = lv.as_ref() else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: r_name, .. } = rv.as_ref() else {
+            return Ok(false);
+        };
+        let stmts = match body {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.as_slice()
+            }
+            s => std::slice::from_ref(s),
+        };
+        if stmts.len() != 3 {
+            return Ok(false);
+        }
+        let Statement::VarDecl {
+            name: j_name,
+            init: Some(j_init),
+            ..
+        } = &stmts[0]
+        else {
+            return Ok(false);
+        };
+        let Statement::ExprStmt { expr: idx_assign, .. } = &stmts[1] else {
+            return Ok(false);
+        };
+        let Statement::ExprStmt { expr: i_upd, .. } = &stmts[2] else {
+            return Ok(false);
+        };
+        let Expr::Binary {
+            left: add_l,
+            op: BinOp::Add,
+            right: one,
+            ..
+        } = j_init
+        else {
+            return Ok(false);
+        };
+        if Self::int_literal_value_of(one) != Some(1) {
+            return Ok(false);
+        }
+        if !matches!(add_l.as_ref(), Expr::Ident { name, .. } if name.as_ref() == i_name.as_ref()) {
+            return Ok(false);
+        }
+        let Expr::IndexAssign {
+            object,
+            index: li,
+            value: rhs,
+            ..
+        } = idx_assign
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: arr_name, .. } = object.as_ref() else {
+            return Ok(false);
+        };
+        if !matches!(li.as_ref(), Expr::Ident { name, .. } if name.as_ref() == i_name.as_ref()) {
+            return Ok(false);
+        }
+        let Expr::Index {
+            object: ro,
+            index: rj,
+            optional: false,
+            ..
+        } = rhs.as_ref()
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: arr2, .. } = ro.as_ref() else {
+            return Ok(false);
+        };
+        if arr_name.as_ref() != arr2.as_ref() {
+            return Ok(false);
+        }
+        if !matches!(rj.as_ref(), Expr::Ident { name, .. } if name.as_ref() == j_name.as_ref()) {
+            return Ok(false);
+        }
+        let Expr::Assign { name: i_up, value: iv, .. } = i_upd else {
+            return Ok(false);
+        };
+        if i_up.as_ref() != i_name.as_ref() {
+            return Ok(false);
+        }
+        if !matches!(iv.as_ref(), Expr::Ident { name, .. } if name.as_ref() == j_name.as_ref()) {
+            return Ok(false);
+        }
+        let usize_var = format!("_usize_shift_{}", self.loop_label_index);
+        self.loop_label_index += 1;
+        let esc_arr = Self::escape_ident(arr_name.as_ref());
+        let esc_r = Self::escape_ident(r_name.as_ref());
+        self.writeln(&format!(
+            "for {} in 0..({} as usize) {{ {}[{}] = {}[{} + 1]; }}",
+            usize_var, esc_r, esc_arr, usize_var, esc_arr, usize_var
+        ));
+        Ok(true)
+    }
+
     /// `while (iter < N && escape)` in a native body when `N` is a known constant — a `usize`
     /// counted loop with an escape `break` (mandelbrot's inner iteration).
     fn try_emit_usize_bounded_escape_while(
@@ -9343,6 +9483,16 @@ impl Codegen {
     ) -> String {
         if let Some((g, hm, ha, hm_mod)) = &self.native_lcg_hoist {
             if g == global {
+                if self.native_lcg_hoist_int {
+                    return format!(
+                        "{{ let s = (_lcg_seed * {}i64 + {}i64) % {}i64; _lcg_seed = s; (({}) * (s as f64)) / {} }}",
+                        *hm as i64,
+                        *ha as i64,
+                        *hm_mod as i64,
+                        max_expr,
+                        Self::f64_lit(*hm_mod),
+                    );
+                }
                 return format!(
                     "{{ let s = (((_lcg_seed * {}) + {}) % {}); _lcg_seed = s; (({}) * s) / {} }}",
                     Self::f64_lit(*hm),
@@ -10989,7 +11139,23 @@ impl Codegen {
                             _ => None,
                         })
                         .unwrap_or_else(|| "max".into());
-                    let body = self.emit_native_lcg_with(global, *mul, *add, *modulus, &max_name);
+                    let body = if mul.fract() == 0.0
+                        && add.fract() == 0.0
+                        && modulus.fract() == 0.0
+                        && *modulus > 0.0
+                    {
+                        format!(
+                            "{{ {}.with(|g| {{ let prev = (g.get() as i64); let s = (prev * {}i64 + {}i64) % {}i64; g.set(s as f64); (({}) * (s as f64)) / {} }}) }}",
+                            Self::native_global_static(global),
+                            *mul as i64,
+                            *add as i64,
+                            *modulus as i64,
+                            max_name,
+                            Self::f64_lit(*modulus),
+                        )
+                    } else {
+                        self.emit_native_lcg_with(global, *mul, *add, *modulus, &max_name)
+                    };
                     self.writeln(&format!("return {};", body));
                 } else {
                     self.native_fn_emit_name = Some(name.to_string());
@@ -10999,7 +11165,18 @@ impl Codegen {
                         if let Some((global, mul, add, modulus)) =
                             self.native_lcg_fns.get("genRandom").cloned()
                         {
-                            self.writeln("let mut _lcg_seed: f64 = G_SEED.with(|g| g.get());");
+                            let int_lcg = mul.fract() == 0.0
+                                && add.fract() == 0.0
+                                && modulus.fract() == 0.0
+                                && modulus > 0.0;
+                            self.native_lcg_hoist_int = int_lcg;
+                            if int_lcg {
+                                self.writeln(
+                                    "let mut _lcg_seed: i64 = (G_SEED.with(|g| g.get()) as i64);",
+                                );
+                            } else {
+                                self.writeln("let mut _lcg_seed: f64 = G_SEED.with(|g| g.get());");
+                            }
                             self.native_lcg_hoist = Some((global, mul, add, modulus));
                         }
                     }
@@ -11007,6 +11184,7 @@ impl Codegen {
                     self.emit_native_fn_body(body)?;
                     self.native_fn_body_emit = false;
                     self.native_lcg_hoist.take();
+                    self.native_lcg_hoist_int = false;
                     if !self.native_fn_body_returned {
                         self.writeln("0.0");
                     }
@@ -11036,7 +11214,14 @@ impl Codegen {
                     code
                 };
                 if let Some((global, _, _, _)) = self.native_lcg_hoist.as_ref() {
-                    self.writeln(&format!("{};", Self::native_global_set(global, "_lcg_seed")));
+                    if self.native_lcg_hoist_int {
+                        self.writeln(&format!(
+                            "{};",
+                            Self::native_global_set(global, "(_lcg_seed as f64)")
+                        ));
+                    } else {
+                        self.writeln(&format!("{};", Self::native_global_set(global, "_lcg_seed")));
+                    }
                 }
                 self.writeln(&format!("return {};", f));
                 self.native_fn_body_returned = true;
