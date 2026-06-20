@@ -121,25 +121,35 @@ fn fannkuch_nv_uses_direct_flip_indexing() {
             "fannkuch_nv should not use perm.get for k-i sub-index"
         );
         assert!(
-            nv.contains("copy_within(1..(_ru + 1), 0)")
-                || (nv.contains("_usize_shift_") && nv.contains("perm1[_usize_shift_")),
-            "fannkuch_nv rotation should shift perm1 via copy_within or fused usize loop"
+            nv.contains("copy_within(1..((r as usize) + 1), 0)")
+                || nv.contains("copy_within(1..((r) as usize + 1), 0)")
+                || nv.contains("copy_within(1..(_ru + 1), 0)"),
+            "fannkuch_nv rotation should shift perm1 via copy_within"
         );
         assert!(
-            nv.contains("perm1[(r) as usize] = perm0"),
+            nv.contains("perm1[(r) as usize] = perm0")
+                || nv.contains("perm1[r as usize] = perm0")
+                || nv.contains("perm1[(r as usize)] = perm0")
+                || nv.contains("perm1[(r) as usize] = (perm0) as i32"),
             "fannkuch_nv rotation should assign perm1[r] without resize"
         );
         assert!(
-            nv.contains("count[(r) as usize] = (count[(r) as usize] - 1_f64)"),
+            nv.contains("count[(r) as usize] = (count[(r) as usize] - 1)")
+                || nv.contains("count[r as usize] = (count[r as usize] - 1)")
+                || nv.contains("count[(r) as usize] = (count[(r) as usize] - 1i32)")
+                || nv.contains("count[r as usize] = (count[r as usize] - 1i32)")
+                || nv.contains("count[(r) as usize] = (count[(r) as usize] - 1_f64)"),
             "fannkuch_nv should decrement count[r] via direct indexing"
         );
         assert!(
-            nv.contains("perm = std::iter::repeat(0_f64).take(10)")
-                || nv.contains("perm.extend(std::iter::repeat(0_f64).take(10))"),
+            nv.contains("perm = std::iter::repeat(0i32).take(10)")
+                || nv.contains("perm = std::iter::repeat(0_f64).take(10)")
+                || nv.contains("perm.extend(std::iter::repeat(0i32).take(10))"),
             "fannkuch_nv should bulk-init perm array"
         );
         assert!(
-            nv.contains("perm1 = (0..10).map(|j| j as f64).collect()"),
+            nv.contains("perm1 = (0..10).collect()")
+                || nv.contains("perm1 = (0..10).map(|j| j as f64).collect()"),
             "fannkuch_nv should iota-init perm1"
         );
         assert!(
@@ -151,8 +161,8 @@ fn fannkuch_nv_uses_direct_flip_indexing() {
             "fannkuch_nv should fill count via while r!=1 loop (not bulk 1..n init)"
         );
         assert!(
-            nv.contains("_usize_shift_") && !nv.contains("let mut i: f64 = (_usize_"),
-            "fannkuch_nv rotation loop should index via usize without f64 shadow i"
+            !nv.contains("_usize_shift_"),
+            "fannkuch_nv rotation should use copy_within, not per-element shift loop"
         );
         assert!(
             (nv.contains("if ((permCount as i64) & 1) == 0")
@@ -160,7 +170,8 @@ fn fannkuch_nv_uses_direct_flip_indexing() {
             "fannkuch_nv checksum parity should use fast int parity"
         );
         assert!(
-            nv.contains("count[ri - 1] = r"),
+            nv.contains("count[ri - 1] = r as i32")
+                || nv.contains("count[ri - 1] = r"),
             "fannkuch_nv count[r-1] init should use direct indexing in while loop"
         );
     }

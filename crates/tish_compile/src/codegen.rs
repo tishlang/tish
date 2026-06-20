@@ -955,6 +955,8 @@ pub(crate) struct Codegen {
     int_range_locals: std::collections::HashMap<String, (i64, i64)>,
     /// Queens `place_nv`: `d1`/`d2` coords (`row±col+n`) proven in-bounds for `diag1`/`diag2` (`2n`).
     diag_coord_indices: std::collections::HashSet<String>,
+    /// Fannkuch `fannkuch_nv`: `perm`/`perm1`/`count` lowered as `Vec<i32>` (integer-only arrays).
+    int_i32_vec_locals: std::collections::HashSet<String>,
     /// Integer-range lattice (#174): locals that are always INTEGER-valued (an `f64` with zero
     /// fractional part), possibly of unbounded magnitude — unlike `int_range_locals`. Loop counters
     /// (`i = i + 1`) qualify even though their magnitude isn't bounded. Used to prove a modulo
@@ -1078,6 +1080,7 @@ impl Codegen {
             demoted_numeric_locals: std::collections::HashSet::new(),
             int_range_locals: std::collections::HashMap::new(),
             diag_coord_indices: std::collections::HashSet::new(),
+            int_i32_vec_locals: std::collections::HashSet::new(),
             int_valued_locals: std::collections::HashSet::new(),
             array_elem_ranges: std::collections::HashMap::new(),
             i32_loop_vars: std::collections::HashSet::new(),
@@ -2664,6 +2667,146 @@ impl Codegen {
         Ok(true)
     }
 
+    /// `for (i=0; i<n; i++) { perm.push(0); perm1.push(i); count.push(0) }` shape (no emit).
+    fn parse_fannkuch_triple_init_for(
+        init: Option<&Statement>,
+        cond: Option<&Expr>,
+        update: Option<&Expr>,
+        body: &Statement,
+    ) -> Option<(String, String, String)> {
+        let Statement::VarDecl {
+            name: i_name,
+            init: Some(i_init),
+            ..
+        } = init?
+        else {
+            return None;
+        };
+        if Self::int_literal_value_of(i_init) != Some(0) {
+            return None;
+        }
+        let cond = cond?;
+        let Expr::Binary {
+            left,
+            op: BinOp::Lt,
+            right: _,
+            ..
+        } = cond
+        else {
+            return None;
+        };
+        let Expr::Ident { name: c, .. } = left.as_ref() else {
+            return None;
+        };
+        if c.as_ref() != i_name.as_ref() {
+            return None;
+        }
+        let update = update?;
+        if !Self::is_increment_of(update, i_name.as_ref()) {
+            return None;
+        }
+        let stmts = match body {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.as_slice()
+            }
+            single => std::slice::from_ref(single),
+        };
+        if stmts.len() != 3 {
+            return None;
+        }
+        fn parse_push_arr(st: &Statement) -> Option<String> {
+            let Statement::ExprStmt {
+                expr: Expr::Call { callee, args, .. },
+                ..
+            } = st
+            else {
+                return None;
+            };
+            let Expr::Member {
+                object,
+                prop: MemberProp::Name { name: method, .. },
+                optional: false,
+                ..
+            } = callee.as_ref()
+            else {
+                return None;
+            };
+            if method.as_ref() != "push" || args.len() != 1 {
+                return None;
+            }
+            let Expr::Ident { name: arr, .. } = object.as_ref() else {
+                return None;
+            };
+            Some(arr.to_string())
+        }
+        let perm = parse_push_arr(&stmts[0])?;
+        let perm1 = parse_push_arr(&stmts[1])?;
+        let count = parse_push_arr(&stmts[2])?;
+        let Statement::ExprStmt {
+            expr: Expr::Call { args: a0, .. },
+            ..
+        } = &stmts[0]
+        else {
+            return None;
+        };
+        let Statement::ExprStmt {
+            expr: Expr::Call { args: a1, .. },
+            ..
+        } = &stmts[1]
+        else {
+            return None;
+        };
+        let Statement::ExprStmt {
+            expr: Expr::Call { args: a2, .. },
+            ..
+        } = &stmts[2]
+        else {
+            return None;
+        };
+        let CallArg::Expr(k0) = &a0[0] else {
+            return None;
+        };
+        let CallArg::Expr(k1) = &a1[0] else {
+            return None;
+        };
+        let CallArg::Expr(k2) = &a2[0] else {
+            return None;
+        };
+        if !matches!(k0, Expr::Literal { value: Literal::Number(n), .. } if *n == 0.0)
+            || !matches!(k1, Expr::Ident { name, .. } if name.as_ref() == i_name.as_ref())
+            || !matches!(k2, Expr::Literal { value: Literal::Number(n), .. } if *n == 0.0)
+        {
+            return None;
+        }
+        Some((perm, perm1, count))
+    }
+
+    fn detect_fannkuch_i32_vec_locals(stmts: &[Statement]) -> HashSet<String> {
+        let mut out = HashSet::new();
+        for s in stmts {
+            if let Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } = s
+            {
+                if let Some((perm, perm1, count)) =
+                    Self::parse_fannkuch_triple_init_for(init.as_deref(), cond.as_ref(), update.as_ref(), body)
+                {
+                    out.insert(perm);
+                    out.insert(perm1);
+                    out.insert(count);
+                }
+            }
+            Self::for_each_child_stmt_list(s, &mut |list| {
+                out.extend(Self::detect_fannkuch_i32_vec_locals(list));
+            });
+        }
+        out
+    }
+
     /// `for (i=0; i<n; i++) { perm.push(0); perm1.push(i); count.push(0) }` → three bulk inits.
     fn try_emit_fannkuch_triple_init(
         &mut self,
@@ -2797,14 +2940,20 @@ impl Codegen {
         {
             return Ok(false);
         }
-        let RustType::Vec(elem) = self.type_context.get_type(&perm) else {
-            return Ok(false);
-        };
-        if *elem != RustType::F64
-            || self.type_context.get_type(&perm1) != RustType::Vec(Box::new(RustType::F64))
-            || self.type_context.get_type(&count) != RustType::Vec(Box::new(RustType::F64))
-        {
-            return Ok(false);
+        let use_i32 = self.native_vec_ret.is_some()
+            && self.int_i32_vec_locals.contains(perm.as_str())
+            && self.int_i32_vec_locals.contains(perm1.as_str())
+            && self.int_i32_vec_locals.contains(count.as_str());
+        if !use_i32 {
+            let RustType::Vec(elem) = self.type_context.get_type(&perm) else {
+                return Ok(false);
+            };
+            if *elem != RustType::F64
+                || self.type_context.get_type(&perm1) != RustType::Vec(Box::new(RustType::F64))
+                || self.type_context.get_type(&count) != RustType::Vec(Box::new(RustType::F64))
+            {
+                return Ok(false);
+            }
         }
         let n_usize = match &len {
             BoundKey::Const(c) => format!("{}", *c as usize),
@@ -2824,18 +2973,33 @@ impl Codegen {
         let perm_esc = Self::escape_ident(&perm);
         let perm1_esc = Self::escape_ident(&perm1);
         let count_esc = Self::escape_ident(&count);
-        self.writeln(&format!(
-            "{} = std::iter::repeat(0_f64).take({}).collect();",
-            perm_esc, n_usize
-        ));
-        self.writeln(&format!(
-            "{} = (0..{}).map(|j| j as f64).collect();",
-            perm1_esc, n_usize
-        ));
-        self.writeln(&format!(
-            "{} = std::iter::repeat(0_f64).take({}).collect();",
-            count_esc, n_usize
-        ));
+        if use_i32 {
+            self.writeln(&format!(
+                "{} = std::iter::repeat(0i32).take({}).collect();",
+                perm_esc, n_usize
+            ));
+            self.writeln(&format!(
+                "{} = (0..{}).collect();",
+                perm1_esc, n_usize
+            ));
+            self.writeln(&format!(
+                "{} = std::iter::repeat(0i32).take({}).collect();",
+                count_esc, n_usize
+            ));
+        } else {
+            self.writeln(&format!(
+                "{} = std::iter::repeat(0_f64).take({}).collect();",
+                perm_esc, n_usize
+            ));
+            self.writeln(&format!(
+                "{} = (0..{}).map(|j| j as f64).collect();",
+                perm1_esc, n_usize
+            ));
+            self.writeln(&format!(
+                "{} = std::iter::repeat(0_f64).take({}).collect();",
+                count_esc, n_usize
+            ));
+        }
         Ok(true)
     }
 
@@ -2933,10 +3097,14 @@ impl Codegen {
         if src_i.as_ref() != i_name.as_ref() {
             return Ok(false);
         }
-        if self.type_context.get_type(dst_name.as_ref()) != RustType::Vec(Box::new(RustType::F64))
-            || self.type_context.get_type(src_name.as_ref()) != RustType::Vec(Box::new(RustType::F64))
-        {
+        let dst_ty = self.type_context.get_type(dst_name.as_ref());
+        let src_ty = self.type_context.get_type(src_name.as_ref());
+        if dst_ty != src_ty {
             return Ok(false);
+        }
+        match dst_ty {
+            RustType::Vec(inner) if *inner == RustType::F64 || *inner == RustType::I32 => {}
+            _ => return Ok(false),
         }
         let dst_esc = Self::escape_ident(dst_name.as_ref());
         let src_esc = Self::escape_ident(src_name.as_ref());
@@ -3039,9 +3207,16 @@ impl Codegen {
         if rl_name.as_ref() != r_ne_one.as_str() || Self::int_literal_value_of(rr) != Some(1) {
             return Ok(false);
         }
-        if self.type_context.get_type(count_name.as_ref()) != RustType::Vec(Box::new(RustType::F64)) {
+        if self.type_context.get_type(count_name.as_ref()) != RustType::Vec(Box::new(RustType::F64))
+            && self.type_context.get_type(count_name.as_ref())
+                != RustType::Vec(Box::new(RustType::I32))
+        {
             return Ok(false);
         }
+        let count_i32 = matches!(
+            self.type_context.get_type(count_name.as_ref()),
+            RustType::Vec(inner) if *inner == RustType::I32
+        );
         let count_esc = Self::escape_ident(count_name.as_ref());
         let r_esc = Self::escape_ident(&r_ne_one);
         // Must preserve partial fill when `r` is not `n` (Lehmer counter) — bulk `1..n` init
@@ -3054,7 +3229,12 @@ impl Codegen {
         ));
         self.writeln(&format!(
             "{}[ri - 1] = {};",
-            count_esc, r_esc
+            count_esc,
+            if count_i32 {
+                format!("{} as i32", r_esc)
+            } else {
+                r_esc.to_string()
+            }
         ));
         self.writeln(&format!("{} -= 1_f64;", r_esc));
         self.indent -= 1;
@@ -3321,7 +3501,13 @@ impl Codegen {
         if Self::int_literal_value_of(k_idx) != Some(0) {
             return Ok(false);
         }
-        if self.type_context.get_type(perm_name.as_ref()) != RustType::Vec(Box::new(RustType::F64)) {
+        let perm_i32 = matches!(
+            self.type_context.get_type(perm_name.as_ref()),
+            RustType::Vec(inner) if *inner == RustType::I32
+        );
+        if !perm_i32
+            && self.type_context.get_type(perm_name.as_ref()) != RustType::Vec(Box::new(RustType::F64))
+        {
             return Ok(false);
         }
         let perm_esc = Self::escape_ident(perm_name.as_ref());
@@ -3331,33 +3517,57 @@ impl Codegen {
         self.loop_label_index += 1;
         self.loop_stack.push((label.clone(), None));
         self.break_stack.push(label.clone());
-        self.write(&format!("{}: while {} != 0_f64 {{\n", label, k_esc));
-        self.indent += 1;
-        self.writeln(&format!(
-            "let ku = (({} as usize) + 1) / 2;",
-            k_esc
-        ));
-        let usize_var = format!("_usize_flip_{}", self.loop_label_index);
-        self.loop_label_index += 1;
-        self.writeln(&format!("for {} in 0..ku {{", usize_var));
-        self.indent += 1;
-        self.writeln(&format!(
-            "let a = {}[{}];",
-            perm_esc, usize_var
-        ));
-        self.writeln(&format!(
-            "let b = {}[({} as usize) - {}];",
-            perm_esc, k_esc, usize_var
-        ));
-        self.writeln(&format!("{}[{}] = b;", perm_esc, usize_var));
-        self.writeln(&format!(
-            "{}[({} as usize) - {}] = a;",
-            perm_esc, k_esc, usize_var
-        ));
-        self.indent -= 1;
-        self.writeln("}");
-        self.writeln(&format!("{} += 1_f64;", flips_esc));
-        self.writeln(&format!("{} = {}[(0_f64) as usize];", k_esc, perm_esc));
+        if perm_i32 {
+            self.write(&format!("{}: while {} != 0 {{\n", label, k_esc));
+            self.indent += 1;
+            self.writeln(&format!("let ku = (({} as usize) + 1) / 2;", k_esc));
+            let usize_var = format!("_usize_flip_{}", self.loop_label_index);
+            self.loop_label_index += 1;
+            self.writeln(&format!("for {} in 0..ku {{", usize_var));
+            self.indent += 1;
+            self.writeln(&format!("let a = {}[{}];", perm_esc, usize_var));
+            self.writeln(&format!(
+                "let b = {}[({} as usize) - {}];",
+                perm_esc, k_esc, usize_var
+            ));
+            self.writeln(&format!("{}[{}] = b;", perm_esc, usize_var));
+            self.writeln(&format!(
+                "{}[({} as usize) - {}] = a;",
+                perm_esc, k_esc, usize_var
+            ));
+            self.indent -= 1;
+            self.writeln("}");
+            self.writeln(&format!("{} += 1_f64;", flips_esc));
+            self.writeln(&format!("{} = {}[0];", k_esc, perm_esc));
+        } else {
+            self.write(&format!("{}: while {} != 0_f64 {{\n", label, k_esc));
+            self.indent += 1;
+            self.writeln(&format!(
+                "let ku = (({} as usize) + 1) / 2;",
+                k_esc
+            ));
+            let usize_var = format!("_usize_flip_{}", self.loop_label_index);
+            self.loop_label_index += 1;
+            self.writeln(&format!("for {} in 0..ku {{", usize_var));
+            self.indent += 1;
+            self.writeln(&format!(
+                "let a = {}[{}];",
+                perm_esc, usize_var
+            ));
+            self.writeln(&format!(
+                "let b = {}[({} as usize) - {}];",
+                perm_esc, k_esc, usize_var
+            ));
+            self.writeln(&format!("{}[{}] = b;", perm_esc, usize_var));
+            self.writeln(&format!(
+                "{}[({} as usize) - {}] = a;",
+                perm_esc, k_esc, usize_var
+            ));
+            self.indent -= 1;
+            self.writeln("}");
+            self.writeln(&format!("{} += 1_f64;", flips_esc));
+            self.writeln(&format!("{} = {}[(0_f64) as usize];", k_esc, perm_esc));
+        }
         self.indent -= 1;
         self.writeln("}");
         self.break_stack.pop();
@@ -3682,6 +3892,27 @@ impl Codegen {
                     }
                 }
 
+                // Native-vec fn body: `let k = perm[0]` on `Vec<i32>` → `i32` local.
+                if self.native_vec_ret.is_some()
+                    && matches!(rust_type, RustType::Value | RustType::F64)
+                {
+                    if let Some(init_e) = init.as_ref() {
+                        if let Expr::Index { object, index, .. } = init_e {
+                            if let Expr::Ident { name: arr_name, .. } = object.as_ref() {
+                                if let RustType::Vec(inner) =
+                                    self.type_context.get_type(arr_name.as_ref())
+                                {
+                                    if *inner == RustType::I32
+                                        && self.index_in_bounds(index, arr_name.as_ref())
+                                    {
+                                        rust_type = RustType::I32;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Native-vec fn body: `let d1 = row + col` without `: number` → `f64` local.
                 if rust_type == RustType::Value
                     && self.native_vec_ret.is_some()
@@ -3696,6 +3927,10 @@ impl Codegen {
                             rust_type = RustType::F64;
                         }
                     }
+                }
+
+                if self.int_i32_vec_locals.contains(name.as_ref()) {
+                    rust_type = RustType::Vec(Box::new(RustType::I32));
                 }
 
                 // #176: top-level numeric globals live in a thread_local `Cell<f64>` — no local slot.
@@ -9210,7 +9445,7 @@ impl Codegen {
                 uv.clone()
             } else {
                 let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-                if idx_ty == RustType::F64 {
+                if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
                     format!("({}) as usize", idx_code)
                 } else {
                     let iv = if idx_ty.is_native() {
@@ -9226,7 +9461,7 @@ impl Codegen {
             }
         } else {
             let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-            if idx_ty == RustType::F64 {
+            if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
                 format!("({}) as usize", idx_code)
             } else {
                 let iv = if idx_ty.is_native() {
@@ -9240,16 +9475,56 @@ impl Codegen {
                 )
             }
         };
-        let (val_code, val_ty) = self.emit_typed_expr(value)?;
-        let native_val = if val_ty == *elem_type {
-            val_code
-        } else if val_ty == RustType::Value {
-            elem_type.from_value_expr(&val_code)
+        let native_val = if *elem_type == RustType::I32 {
+            if let Expr::Binary {
+                left,
+                op: BinOp::Sub,
+                right,
+                ..
+            } = value
+            {
+                if let Some(n) = Self::int_literal_value_of(right) {
+                    let (lc, lt) = self.emit_typed_expr(left)?;
+                    if lt == RustType::I32 {
+                        format!("({} - {}i32)", lc, n as i32)
+                    } else {
+                        let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                        if val_ty == RustType::I32 {
+                            val_code
+                        } else {
+                            format!("({}) as i32", val_code)
+                        }
+                    }
+                } else {
+                    let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                    if val_ty == RustType::I32 {
+                        val_code
+                    } else {
+                        format!("({}) as i32", val_code)
+                    }
+                }
+            } else {
+                let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                if val_ty == RustType::I32 {
+                    val_code
+                } else if val_ty == RustType::Value {
+                    elem_type.from_value_expr(&val_code)
+                } else {
+                    format!("({}) as i32", val_code)
+                }
+            }
         } else {
-            val_code
+            let (val_code, val_ty) = self.emit_typed_expr(value)?;
+            if val_ty == *elem_type {
+                val_code
+            } else if val_ty == RustType::Value {
+                elem_type.from_value_expr(&val_code)
+            } else {
+                val_code
+            }
         };
         let assign = match elem_type.as_ref() {
-            RustType::F64 | RustType::Bool if in_bounds => {
+            RustType::F64 | RustType::Bool | RustType::I32 if in_bounds => {
                 if side_effect_only {
                     format!("{}[{}] = {}", esc_obj, idx_usize, native_val)
                 } else {
@@ -9471,13 +9746,11 @@ impl Codegen {
         if !matches!(iv.as_ref(), Expr::Ident { name, .. } if name.as_ref() == j_name.as_ref()) {
             return Ok(false);
         }
-        let usize_var = format!("_usize_shift_{}", self.loop_label_index);
-        self.loop_label_index += 1;
         let esc_arr = Self::escape_ident(arr_name.as_ref());
         let esc_r = Self::escape_ident(r_name.as_ref());
         self.writeln(&format!(
-            "for {} in 0..({} as usize) {{ {}[{}] = {}[{} + 1]; }}",
-            usize_var, esc_r, esc_arr, usize_var, esc_arr, usize_var
+            "{}.copy_within(1..(({} as usize) + 1), 0);",
+            esc_arr, esc_r
         ));
         Ok(true)
     }
@@ -14413,7 +14686,24 @@ impl Codegen {
             }
         }
         self.merge_fn_body_inference(body_slice);
+        let saved_i32_vec = self.int_i32_vec_locals.clone();
+        self.int_i32_vec_locals = Self::detect_fannkuch_i32_vec_locals(body_slice);
+        for name in &self.int_i32_vec_locals {
+            self.type_context
+                .define(name.as_ref(), RustType::Vec(Box::new(RustType::I32)));
+        }
+        if !self.int_i32_vec_locals.is_empty() {
+            if let Some(lp) = sig.params.iter().find_map(|(name, kind)| {
+                matches!(kind, VecParamKind::Scalar).then(|| name.clone())
+            }) {
+                let bound = BoundKey::Var(lp);
+                for name in &self.int_i32_vec_locals {
+                    self.vec_fixed_len.insert(name.clone(), bound.clone());
+                }
+            }
+        }
         let res = self.emit_statement(body);
+        self.int_i32_vec_locals = saved_i32_vec;
         self.vec_fixed_len = saved_vec_fixed;
         self.nonneg_locals = saved_nonneg;
         self.int_range_locals = saved_int_range;
@@ -16055,7 +16345,7 @@ impl Codegen {
                                         uv.clone()
                                     } else {
                                         let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-                                        if idx_ty == RustType::F64 {
+                                        if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
                                             format!("({}) as usize", idx_code)
                                         } else {
                                             let iv = if idx_ty.is_native() {
@@ -16071,7 +16361,7 @@ impl Codegen {
                                     }
                                 } else {
                                     let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-                                    if idx_ty == RustType::F64 {
+                                    if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
                                         format!("({}) as usize", idx_code)
                                     } else {
                                         let iv = if idx_ty.is_native() {
@@ -16093,11 +16383,15 @@ impl Codegen {
                                 let access = match &elem_ty {
                                     // #173 part 3: a proven in-bounds read skips the `.get().unwrap_or`
                                     // branch — a direct `a[i]` (the `idx < len` proof guarantees it).
-                                    RustType::F64 | RustType::Bool if in_bounds => {
+                                    RustType::F64 | RustType::Bool | RustType::I32 if in_bounds => {
                                         format!("{}[{}]", esc_obj, idx_usize)
                                     }
                                     RustType::F64 => format!(
                                         "{}.get({}).copied().unwrap_or(f64::NAN)",
+                                        esc_obj, idx_usize
+                                    ),
+                                    RustType::I32 => format!(
+                                        "{}.get({}).copied().unwrap_or(0)",
                                         esc_obj, idx_usize
                                     ),
                                     RustType::Bool => {
