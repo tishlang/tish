@@ -2270,6 +2270,16 @@ impl Codegen {
                     }
                 }
                 if matches!(rust_type, RustType::F64 | RustType::Bool | RustType::String) {
+                    if let Expr::Index { object, index, .. } = value.as_ref() {
+                        if let Expr::Ident { name: arr_name, .. } = object.as_ref() {
+                            if self.index_in_bounds(index, arr_name.as_ref()) {
+                                if let Some(b) = self.vec_fixed_len.get(arr_name.as_ref()) {
+                                    self.bounded_below_len
+                                        .insert(name.to_string(), b.clone());
+                                }
+                            }
+                        }
+                    }
                     let escaped = Self::escape_ident(name.as_ref());
                     let is_ref = self.refcell_wrapped_vars.contains(name.as_ref());
                     let (val_code, val_ty) = self.emit_typed_expr(value)?;
@@ -2669,6 +2679,9 @@ impl Codegen {
                 let escaped_name = Self::escape_ident(name.as_ref());
 
                 if let Some(init_e) = init.as_ref() {
+                    if let Some(parent) = Self::parse_shift_half_init(init_e) {
+                        self.shift_half_of.insert(name.to_string(), parent);
+                    }
                     if let Expr::Index { object, index, .. } = init_e {
                         if let Expr::Ident { name: arr_name, .. } = object.as_ref() {
                             if self.index_in_bounds(index, arr_name.as_ref()) {
@@ -2775,6 +2788,11 @@ impl Codegen {
                 self.writeln("}");
             }
             Statement::While { cond, body, .. } => {
+                if (self.native_fn_body_emit || self.native_vec_ret.is_some())
+                    && self.try_emit_usize_bounded_escape_while(cond, body)?
+                {
+                    return Ok(());
+                }
                 let c = self.emit_cond_expr(cond)?;
                 let label = format!("'while_loop_{}", self.loop_label_index);
                 self.loop_label_index += 1;
@@ -6960,6 +6978,10 @@ impl Codegen {
                                 self.bounded_below_len.get(p) == Some(&BoundKey::Var(ll.clone()))
                             })
                     }
+                    // `i < k` where `k` was read from a proven in-bounds `arr[k']`.
+                    (BoundKey::Var(gv), bound_len) => {
+                        g.strict && self.bounded_below_len.get(gv) == Some(bound_len)
+                    }
                     _ => false,
                 }
         })
@@ -7009,7 +7031,7 @@ impl Codegen {
         }) || self
             .bounded_below_len
             .get(lk)
-            .is_some_and(|b| b == len);
+            .is_some_and(|b| b == len || self.index_guard_bounds_len(b, len, true));
         let rk_lt_lk = self.active_index_guards.iter().any(|g| {
             g.live && g.var == rk && g.bound == BoundKey::Var(lk.to_string()) && g.strict
         }) || self.active_index_guards.iter().any(|g| {
@@ -7481,18 +7503,108 @@ impl Codegen {
         ));
         self.type_context.define(counter, RustType::F64);
         self.usize_for_counters.insert(counter.to_string());
+        let extra_guard = match &bound_key {
+            BoundKey::Var(bv) => self.shift_half_of.get(bv).map(|parent| {
+                IndexGuard {
+                    var: counter.to_string(),
+                    bound: BoundKey::Var(parent.clone()),
+                    strict: true,
+                    live: true,
+                }
+            }),
+            _ => None,
+        };
+        let pushed_extra = extra_guard.is_some();
         self.active_index_guards.push(IndexGuard {
             var: counter.to_string(),
             bound: bound_key,
             strict: true,
             live: true,
         });
+        if let Some(g) = extra_guard {
+            self.active_index_guards.push(g);
+        }
         if self.native_fn_body_emit {
             self.emit_native_fn_body(body)?;
         } else {
             self.emit_statement(body)?;
         }
         self.active_index_guards.pop();
+        if pushed_extra {
+            self.active_index_guards.pop();
+        }
+        self.indent -= 1;
+        self.writeln("}");
+        Ok(true)
+    }
+
+    /// `while (iter < N && escape)` in a native body when `N` is a known constant — a `usize`
+    /// counted loop with an escape `break` (mandelbrot's inner iteration).
+    fn try_emit_usize_bounded_escape_while(
+        &mut self,
+        cond: &Expr,
+        body: &Statement,
+    ) -> Result<bool, CompileError> {
+        let Expr::Binary {
+            left,
+            op: BinOp::And,
+            right: escape,
+            ..
+        } = cond
+        else {
+            return Ok(false);
+        };
+        let Expr::Binary {
+            left: lv,
+            op: BinOp::Lt,
+            right: rv,
+            ..
+        } = left.as_ref()
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: iter_name, .. } = lv.as_ref() else {
+            return Ok(false);
+        };
+        let max_usize = match rv.as_ref() {
+            Expr::Ident { name: p, .. } => {
+                let v = match self.native_param_lit(p.as_ref()) {
+                    Some(v) if v.fract() == 0.0 && v >= 0.0 => v as usize,
+                    _ => return Ok(false),
+                };
+                v
+            }
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => {
+                if n.fract() != 0.0 || *n < 0.0 {
+                    return Ok(false);
+                }
+                *n as usize
+            }
+            _ => return Ok(false),
+        };
+        let (escape_code, escape_ty) = self.emit_typed_expr(escape)?;
+        let escape_bool = match escape_ty {
+            RustType::Bool => escape_code,
+            RustType::F64 => format!("({} != 0.0)", escape_code),
+            _ => format!("{}.is_truthy()", escape_code),
+        };
+        let usize_var = format!(
+            "_usize_{}_{}",
+            Self::escape_ident(iter_name.as_ref()),
+            self.loop_label_index
+        );
+        self.loop_label_index += 1;
+        self.writeln(&format!("for {} in 0..{} {{", usize_var, max_usize));
+        self.indent += 1;
+        self.writeln(&format!("if !{} {{ break; }}", escape_bool));
+        if self.native_fn_body_emit {
+            self.emit_native_fn_body(body)?;
+        } else {
+            self.emit_statement(body)?;
+        }
         self.indent -= 1;
         self.writeln("}");
         Ok(true)

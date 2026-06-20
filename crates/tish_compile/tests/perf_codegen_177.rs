@@ -64,5 +64,24 @@ fn mandelbrot_lowers_mandel_native() {
             rust.contains("mandel_native("),
             "mandel_native declared but not called"
         );
+        assert!(
+            rust.contains("for _usize_iter") && rust.contains("0..100"),
+            "mandel_native should use usize bounded escape loop for maxIter=100"
+        );
+    }
+}
+
+#[test]
+fn fannkuch_nv_uses_direct_flip_indexing() {
+    let rust = compile_fixture_typed("tests/perf/fannkuch.tish");
+    if rust.contains("fn fannkuch_nv(") {
+        assert!(
+            rust.contains("perm[((k - i)) as usize]"),
+            "fannkuch_nv flip loop should use direct perm[k-i] indexing"
+        );
+        assert!(
+            !rust.contains("perm.get(((k - i))"),
+            "fannkuch_nv should not use perm.get for k-i sub-index"
+        );
     }
 }
