@@ -795,12 +795,18 @@ pub(crate) enum VecParamKind {
 /// #175 — the de-virtualized native signature of one plain-array free fn. Unlike the #177 aggregate
 /// path (single struct-alias array), this supports MULTIPLE plain `number[]`/`boolean[]` params and
 /// recursion; call sites pass pairwise-distinct array idents (statically checked) so no runtime
-/// alias guard is needed. Emitted as `fn name_nv(<f64..>, <&/&mut Vec<T>..>) -> f64 | ()`.
+/// alias guard is needed. Emitted as `fn name_nv(<f64..>, <&/&mut Vec<T>..>) -> f64 | Vec<f64> | ()`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum VecRetKind {
+    F64,
+    Unit,
+    VecF64,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct NativeVecFnSig {
     pub(crate) params: Vec<(String, VecParamKind)>,
-    /// `true` → returns `f64`; `false` → returns `()` (JS `undefined`).
-    ret_f64: bool,
+    ret: VecRetKind,
 }
 
 /// #173 part 3 — a symbolic upper bound used by the in-bounds index proof. Two forms are matched by
@@ -887,7 +893,7 @@ pub(crate) struct Codegen {
     inline_depth: usize,
     /// #175 — while emitting a native-vec free fn body: `Some(true)` returns `f64`, `Some(false)`
     /// returns `()`. Consulted by the `Return` arm so a `return e;` coerces to the native shape.
-    native_vec_ret: Option<bool>,
+    native_vec_ret: Option<VecRetKind>,
     /// #175 — the array params of the native-vec fn currently being emitted (name → is_mut). At a
     /// nested call site these are already `&/&mut Vec<T>` references, so they pass through by reborrow
     /// (`&mut *p`) rather than being address-of'd like a local `Vec` (`&mut local`).
@@ -2476,6 +2482,15 @@ impl Codegen {
                     rust_type = RustType::Value;
                 }
 
+                // Native-vec call initializer: `let cum = cumulative(probs)` → `Vec<f64>`.
+                if rust_type == RustType::Value {
+                    if let Some(init_e) = init.as_ref() {
+                        if let Some(rt) = self.native_vec_init_type(init_e) {
+                            rust_type = rt;
+                        }
+                    }
+                }
+
                 // #176: top-level numeric globals live in a thread_local `Cell<f64>` — no local slot.
                 if self.native_numeric_globals.contains_key(name.as_ref())
                     && self.outer_vars_stack.len() == 1
@@ -2513,6 +2528,30 @@ impl Codegen {
 
                 // Track the variable type
                 self.type_context.define(name.as_ref(), rust_type.clone());
+
+                // `let cum = cumulative_nv(&probs)` inherits `probs`' fixed length for in-bounds reads.
+                if let RustType::Vec(inner) = &rust_type {
+                    if **inner == RustType::F64 {
+                        if let Some(Expr::Call { callee, args, .. }) = init.as_ref() {
+                            if let Expr::Ident { name: fnname, .. } = callee.as_ref() {
+                                if let Some(sig) = self.native_vec_fns.get(fnname.as_ref()) {
+                                    if sig.ret == VecRetKind::VecF64 {
+                                        if let Some(CallArg::Expr(Expr::Ident { name: argn, .. })) =
+                                            args.first()
+                                        {
+                                            if let Some(bound) =
+                                                self.vec_fixed_len.get(argn.as_ref()).cloned()
+                                            {
+                                                self.vec_fixed_len
+                                                    .insert(name.to_string(), bound);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // #177: the unboxed `Vec<TishStruct>` local is threaded `&mut` into the aggregate
                 // operators (`advance`/`offsetMomentum`), so it must be `mut` even when never
@@ -2795,15 +2834,39 @@ impl Codegen {
             Statement::Return { value, .. } => {
                 // #175: inside a native-vec free fn body, returns lower to the native shape
                 // (`f64` or `()`), not a boxed `Value`.
-                if let Some(ret_f64) = self.native_vec_ret {
-                    if ret_f64 {
-                        let e = value
-                            .as_ref()
-                            .ok_or_else(|| CompileError::new("native-vec f64 fn: empty return", None))?;
-                        let f = self.emit_f64(e)?;
-                        self.writeln(&format!("return {};", f));
-                    } else {
-                        self.writeln("return;");
+                if let Some(ret_kind) = self.native_vec_ret {
+                    match ret_kind {
+                        VecRetKind::F64 => {
+                            let e = value
+                                .as_ref()
+                                .ok_or_else(|| CompileError::new("native-vec f64 fn: empty return", None))?;
+                            let f = self.emit_f64(e)?;
+                            self.writeln(&format!("return {};", f));
+                        }
+                        VecRetKind::VecF64 => {
+                            let e = value
+                                .as_ref()
+                                .ok_or_else(|| CompileError::new("native-vec vec fn: empty return", None))?;
+                            if let Expr::Ident { name, .. } = e {
+                                self.writeln(&format!(
+                                    "return {};",
+                                    Self::escape_ident(name.as_ref())
+                                ));
+                            } else {
+                                let (c, ty) = self.emit_typed_expr(e)?;
+                                if ty == RustType::Vec(Box::new(RustType::F64)) {
+                                    self.writeln(&format!("return {};", c));
+                                } else {
+                                    return Err(CompileError::new(
+                                        "native-vec vec fn: return must be Vec<f64>",
+                                        None,
+                                    ));
+                                }
+                            }
+                        }
+                        VecRetKind::Unit => {
+                            self.writeln("return;");
+                        }
                     }
                     return Ok(());
                 }
@@ -6699,7 +6762,7 @@ impl Codegen {
             return false;
         };
         let Expr::Ident { name: idx, .. } = index else {
-            return false;
+            return self.sub_index_in_bounds(index, arr);
         };
         let idx = idx.as_ref();
         // Lower bound: the index can never be negative.
@@ -6726,6 +6789,53 @@ impl Codegen {
                     _ => false,
                 }
         })
+    }
+
+    /// `arr[lk - rk]` in-bounds when `lk` is strictly below the fixed length and `rk < lk`.
+    fn sub_index_in_bounds(&self, index: &Expr, arr: &str) -> bool {
+        let Some(len) = self.vec_fixed_len.get(arr) else {
+            return false;
+        };
+        let Expr::Binary {
+            left,
+            op: BinOp::Sub,
+            right,
+            ..
+        } = index
+        else {
+            return false;
+        };
+        let Expr::Ident { name: lk, .. } = left.as_ref() else {
+            return false;
+        };
+        let Expr::Ident { name: rk, .. } = right.as_ref() else {
+            return false;
+        };
+        let lk = lk.as_ref();
+        let rk = rk.as_ref();
+        let rk_nonneg = self.nonneg_locals.contains(rk)
+            || self
+                .int_range_locals
+                .get(rk)
+                .is_some_and(|&(lo, _)| lo >= 0);
+        if !rk_nonneg {
+            return false;
+        }
+        let lk_bounded = self.active_index_guards.iter().any(|g| {
+            g.live
+                && g.var == lk
+                && match (&g.bound, len) {
+                    (BoundKey::Len(a), _) => g.strict && a == arr,
+                    _ if &g.bound == len => g.strict,
+                    (BoundKey::Const(gc), BoundKey::Const(lc)) => g.strict && *gc < *lc,
+                    (BoundKey::Var(lv), BoundKey::Var(ll)) => g.strict && lv == ll,
+                    _ => false,
+                }
+        });
+        let rk_lt_lk = self.active_index_guards.iter().any(|g| {
+            g.live && g.var == rk && g.bound == BoundKey::Var(lk.to_string()) && g.strict
+        });
+        lk_bounded && rk_lt_lk
     }
 
     /// Push an active index guard parsed from a loop condition `var < bound` / `var <= bound`.
@@ -8704,7 +8814,7 @@ impl Codegen {
         Self::collect_reassignments_stmts(stmts, &mut reassigns);
         for (name, rhs) in &reassigns {
             if globals.contains(name)
-                && !Self::numeric_shaped(rhs, &empty_p, &empty_c, &globals)
+                && !Self::numeric_shaped(rhs, &empty_p, &empty_c, &globals, &HashSet::new())
             {
                 candidates.remove(name);
             }
@@ -8952,9 +9062,9 @@ impl Codegen {
             if Self::expr_mentions_global(e, g) {
                 let tree_ok = match e {
                     Expr::Assign { name, value, .. } if name.as_ref() == g => {
-                        Self::numeric_shaped(value, &empty_p, &empty_c, globals)
+                        Self::numeric_shaped(value, &empty_p, &empty_c, globals, &HashSet::new())
                     }
-                    _ => Self::numeric_shaped(e, &empty_p, &empty_c, globals),
+                    _ => Self::numeric_shaped(e, &empty_p, &empty_c, globals, &HashSet::new()),
                 };
                 if !tree_ok {
                     ok = false;
@@ -9136,7 +9246,7 @@ impl Codegen {
                 let params_ok = params.iter().all(|p| {
                     matches!(p, FunParam::Simple(tp)
                         if tp.default.is_none()
-                            && tp.type_ann.as_ref().map(Self::ann_is_number).unwrap_or(false))
+                            && tp.type_ann.as_ref().map_or(true, Self::ann_is_number))
                 });
                 // Return: an annotated `: number`, OR unannotated with all-numeric returns
                 // (verified in the fixpoint via `returns_numeric`), so the native `-> f64` holds.
@@ -9158,8 +9268,9 @@ impl Codegen {
                 }
                 let pnames: HashSet<String> =
                     params.iter().flat_map(|p| p.bound_names()).map(|n| n.to_string()).collect();
-                if !Self::native_safe_stmt(body, &pnames, &cand, globals)
-                    || !Self::returns_numeric(body, &pnames, &cand, globals)
+                let nums = Self::native_fn_numeric_locals(body, &pnames, globals);
+                if !Self::native_safe_stmt(body, &pnames, &cand, globals, &nums)
+                    || !Self::returns_numeric(body, &pnames, &cand, globals, &nums)
                 {
                     remove.push(name.to_string());
                 }
@@ -9174,25 +9285,119 @@ impl Codegen {
         cand
     }
 
+    /// Numeric locals in an M5-eligible fn body (params + fixpoint literal/copy seeds).
+    fn native_fn_numeric_locals(
+        body: &Statement,
+        params: &HashSet<String>,
+        globals: &HashSet<String>,
+    ) -> HashSet<String> {
+        let mut nums: HashSet<String> = params.clone();
+        nums.extend(globals.iter().cloned());
+        loop {
+            let before = nums.len();
+            Self::seed_native_fn_numeric_locals(body, &mut nums);
+            if nums.len() == before {
+                break;
+            }
+        }
+        nums
+    }
+
+    fn seed_native_fn_numeric_locals(stmt: &Statement, nums: &mut HashSet<String>) {
+        match stmt {
+            Statement::VarDecl {
+                name,
+                type_ann,
+                init,
+                ..
+            } => {
+                let numeric = type_ann.as_ref().is_some_and(Self::ann_is_number)
+                    || matches!(
+                        init,
+                        Some(Expr::Literal {
+                            value: Literal::Number(_),
+                            ..
+                        })
+                    )
+                    || matches!(
+                        init,
+                        Some(Expr::Ident { name: src, .. }) if nums.contains(src.as_ref())
+                    );
+                if numeric {
+                    nums.insert(name.to_string());
+                }
+            }
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                for s in statements {
+                    Self::seed_native_fn_numeric_locals(s, nums);
+                }
+            }
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::seed_native_fn_numeric_locals(then_branch, nums);
+                if let Some(e) = else_branch {
+                    Self::seed_native_fn_numeric_locals(e, nums);
+                }
+            }
+            Statement::For { init, body, .. } => {
+                if let Some(i) = init {
+                    Self::seed_native_fn_numeric_locals(i, nums);
+                }
+                Self::seed_native_fn_numeric_locals(body, nums);
+            }
+            Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+                Self::seed_native_fn_numeric_locals(body, nums);
+            }
+            _ => {}
+        }
+    }
+
     fn native_safe_stmt(
         stmt: &Statement,
         params: &std::collections::HashSet<String>,
         cand: &std::collections::HashSet<String>,
         globals: &std::collections::HashSet<String>,
+        nums: &HashSet<String>,
     ) -> bool {
         match stmt {
             Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                statements.iter().all(|s| Self::native_safe_stmt(s, params, cand, globals))
+                statements.iter().all(|s| Self::native_safe_stmt(s, params, cand, globals, nums))
             }
             Statement::Return { value, .. } => {
-                value.as_ref().is_some_and(|e| Self::native_safe_expr(e, params, cand, globals))
+                value.as_ref().is_some_and(|e| Self::native_safe_expr(e, params, cand, globals, nums))
             }
             Statement::If { cond, then_branch, else_branch, .. } => {
-                Self::native_safe_expr(cond, params, cand, globals)
-                    && Self::native_safe_stmt(then_branch, params, cand, globals)
-                    && else_branch.as_ref().is_none_or(|e| Self::native_safe_stmt(e, params, cand, globals))
+                Self::native_safe_expr(cond, params, cand, globals, nums)
+                    && Self::native_safe_stmt(then_branch, params, cand, globals, nums)
+                    && else_branch.as_ref().is_none_or(|e| Self::native_safe_stmt(e, params, cand, globals, nums))
             }
-            Statement::ExprStmt { expr, .. } => Self::native_safe_expr(expr, params, cand, globals),
+            Statement::ExprStmt { expr, .. } => Self::native_safe_expr(expr, params, cand, globals, nums),
+            Statement::VarDecl { init, .. } => {
+                init.as_ref().is_none_or(|e| Self::native_safe_expr(e, params, cand, globals, nums))
+            }
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
+                init.as_ref().is_none_or(|i| Self::native_safe_stmt(i, params, cand, globals, nums))
+                    && cond.as_ref().is_none_or(|c| Self::native_safe_expr(c, params, cand, globals, nums))
+                    && update.as_ref().is_none_or(|u| Self::native_safe_expr(u, params, cand, globals, nums))
+                    && Self::native_safe_stmt(body, params, cand, globals, nums)
+            }
+            Statement::While { cond, body, .. } => {
+                Self::native_safe_expr(cond, params, cand, globals, nums)
+                    && Self::native_safe_stmt(body, params, cand, globals, nums)
+            }
+            Statement::DoWhile { body, cond, .. } => {
+                Self::native_safe_stmt(body, params, cand, globals, nums)
+                    && Self::native_safe_expr(cond, params, cand, globals, nums)
+            }
             _ => false,
         }
     }
@@ -9202,14 +9407,20 @@ impl Codegen {
         params: &std::collections::HashSet<String>,
         cand: &std::collections::HashSet<String>,
         globals: &std::collections::HashSet<String>,
+        nums: &HashSet<String>,
     ) -> bool {
         match expr {
             Expr::Literal { value, .. } => matches!(value, Literal::Number(_) | Literal::Bool(_)),
             Expr::Ident { name, .. } => {
-                params.contains(name.as_ref()) || globals.contains(name.as_ref())
+                params.contains(name.as_ref()) || globals.contains(name.as_ref()) || nums.contains(name.as_ref())
             }
-            Expr::Assign { name, value, .. } if globals.contains(name.as_ref()) => {
-                Self::native_safe_expr(value, params, cand, globals)
+            Expr::Assign { name, value, .. } => {
+                (globals.contains(name.as_ref()) || nums.contains(name.as_ref()))
+                    && Self::native_safe_expr(value, params, cand, globals, nums)
+            }
+            Expr::CompoundAssign { name, value, .. } => {
+                nums.contains(name.as_ref())
+                    && Self::native_safe_expr(value, params, cand, globals, nums)
             }
             Expr::Binary { left, op, right, .. } => {
                 matches!(
@@ -9217,17 +9428,17 @@ impl Codegen {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
                         | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                         | BinOp::StrictEq | BinOp::StrictNe | BinOp::And | BinOp::Or
-                ) && Self::native_safe_expr(left, params, cand, globals)
-                    && Self::native_safe_expr(right, params, cand, globals)
+                ) && Self::native_safe_expr(left, params, cand, globals, nums)
+                    && Self::native_safe_expr(right, params, cand, globals, nums)
             }
             Expr::Unary { op, operand, .. } => {
                 matches!(op, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::Not)
-                    && Self::native_safe_expr(operand, params, cand, globals)
+                    && Self::native_safe_expr(operand, params, cand, globals, nums)
             }
             Expr::Call { callee, args, .. } => {
                 let args_ok = args
                     .iter()
-                    .all(|a| matches!(a, CallArg::Expr(e) if Self::native_safe_expr(e, params, cand, globals)));
+                    .all(|a| matches!(a, CallArg::Expr(e) if Self::native_safe_expr(e, params, cand, globals, nums)));
                 if !args_ok {
                     return false;
                 }
@@ -9257,20 +9468,21 @@ impl Codegen {
         params: &std::collections::HashSet<String>,
         cand: &std::collections::HashSet<String>,
         globals: &std::collections::HashSet<String>,
+        nums: &HashSet<String>,
     ) -> bool {
         match s {
             Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                statements.iter().all(|x| Self::returns_numeric(x, params, cand, globals))
+                statements.iter().all(|x| Self::returns_numeric(x, params, cand, globals, nums))
             }
             Statement::Return { value, .. } => {
-                value.as_ref().is_some_and(|e| Self::numeric_shaped(e, params, cand, globals))
+                value.as_ref().is_some_and(|e| Self::numeric_shaped(e, params, cand, globals, nums))
             }
             Statement::If { then_branch, else_branch, .. } => {
-                Self::returns_numeric(then_branch, params, cand, globals)
-                    && else_branch.as_ref().is_none_or(|e| Self::returns_numeric(e, params, cand, globals))
+                Self::returns_numeric(then_branch, params, cand, globals, nums)
+                    && else_branch.as_ref().is_none_or(|e| Self::returns_numeric(e, params, cand, globals, nums))
             }
             Statement::While { body, .. } | Statement::For { body, .. } => {
-                Self::returns_numeric(body, params, cand, globals)
+                Self::returns_numeric(body, params, cand, globals, nums)
             }
             _ => true, // no return in this statement form
         }
@@ -9284,26 +9496,29 @@ impl Codegen {
         params: &std::collections::HashSet<String>,
         cand: &std::collections::HashSet<String>,
         globals: &std::collections::HashSet<String>,
+        nums: &HashSet<String>,
     ) -> bool {
         match e {
             Expr::Literal { value: Literal::Number(_), .. } => true,
             Expr::Ident { name, .. } => {
-                params.contains(name.as_ref()) || globals.contains(name.as_ref())
+                params.contains(name.as_ref())
+                    || globals.contains(name.as_ref())
+                    || nums.contains(name.as_ref())
             }
             Expr::Binary { left, op, right, .. } => {
                 matches!(
                     op,
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
-                ) && Self::numeric_shaped(left, params, cand, globals)
-                    && Self::numeric_shaped(right, params, cand, globals)
+                ) && Self::numeric_shaped(left, params, cand, globals, nums)
+                    && Self::numeric_shaped(right, params, cand, globals, nums)
             }
             Expr::Unary { op, operand, .. } => {
                 matches!(op, UnaryOp::Neg | UnaryOp::Pos)
-                    && Self::numeric_shaped(operand, params, cand, globals)
+                    && Self::numeric_shaped(operand, params, cand, globals, nums)
             }
             Expr::Conditional { then_branch, else_branch, .. } => {
-                Self::numeric_shaped(then_branch, params, cand, globals)
-                    && Self::numeric_shaped(else_branch, params, cand, globals)
+                Self::numeric_shaped(then_branch, params, cand, globals, nums)
+                    && Self::numeric_shaped(else_branch, params, cand, globals, nums)
             }
             Expr::Call { callee, .. } => match callee.as_ref() {
                 Expr::Ident { name, .. } => cand.contains(name.as_ref()),
@@ -9399,6 +9614,10 @@ impl Codegen {
                 let (code, _) = self.emit_typed_expr(expr)?;
                 self.writeln(&format!("{};", code));
             }
+            Statement::VarDecl { .. }
+            | Statement::For { .. }
+            | Statement::While { .. }
+            | Statement::DoWhile { .. } => self.emit_statement(stmt)?,
             _ => unreachable!("emit_native_fn_body: eligibility guarantees only handled statements"),
         }
         Ok(())
@@ -9716,10 +9935,10 @@ impl Codegen {
             let kind = Self::classify_vec_param(body, tp.name.as_ref())?;
             sig_params.push((tp.name.to_string(), kind));
         }
-        let ret_f64 = Self::vec_fn_return_shape(body)?;
+        let ret = Self::vec_fn_return_kind(params, body)?;
         Some(NativeVecFnSig {
             params: sig_params,
-            ret_f64,
+            ret,
         })
     }
 
@@ -9896,32 +10115,110 @@ impl Codegen {
         }
     }
 
-    /// `Some(true)` if every `return` carries a value (→ `f64`), `Some(false)` if there is no
-    /// value-returning `return` (→ unit), `None` if mixed (can't pick one native shape).
-    fn vec_fn_return_shape(body: &Statement) -> Option<bool> {
-        let mut has_val = false;
+    /// `Some(ret)` when every `return` agrees on one native shape; `None` if mixed.
+    fn vec_fn_return_kind(params: &[FunParam], body: &Statement) -> Option<VecRetKind> {
+        let mut ret_exprs: Vec<Expr> = Vec::new();
         let mut has_empty = false;
-        Self::scan_returns(body, &mut has_val, &mut has_empty);
-        match (has_val, has_empty) {
-            (true, false) => Some(true),
-            (false, _) => Some(false),
-            (true, true) => None,
+        Self::scan_return_exprs(body, &mut ret_exprs, &mut has_empty);
+        if ret_exprs.is_empty() && !has_empty {
+            return Some(VecRetKind::Unit);
         }
+        if has_empty {
+            return None;
+        }
+        let builders = Self::vec_builder_locals(body);
+        if !builders.is_empty()
+            && ret_exprs.iter().all(|e| {
+                matches!(e, Expr::Ident { name, .. } if builders.contains(name.as_ref()))
+            })
+        {
+            return Some(VecRetKind::VecF64);
+        }
+        let pnames: std::collections::HashSet<String> = params
+            .iter()
+            .flat_map(|p| p.bound_names())
+            .map(|n| n.to_string())
+            .collect();
+        let cand: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if ret_exprs
+            .iter()
+            .all(|e| Self::numeric_shaped(e, &pnames, &cand, &std::collections::HashSet::new(), &std::collections::HashSet::new()))
+        {
+            return Some(VecRetKind::F64);
+        }
+        None
     }
 
-    fn scan_returns(s: &Statement, has_val: &mut bool, has_empty: &mut bool) {
+    fn scan_return_exprs(s: &Statement, exprs: &mut Vec<Expr>, has_empty: &mut bool) {
         if let Statement::Return { value, .. } = s {
-            if value.is_some() {
-                *has_val = true;
+            if let Some(e) = value {
+                exprs.push(e.clone());
             } else {
                 *has_empty = true;
             }
         }
         Self::for_each_child_stmt_list(s, &mut |list| {
             for st in list {
-                Self::scan_returns(st, has_val, has_empty);
+                Self::scan_return_exprs(st, exprs, has_empty);
             }
         });
+    }
+
+    /// Locals initialized as `[]` and mutated only via `.push` (e.g. `cumulative`'s `out`).
+    fn vec_builder_locals(body: &Statement) -> std::collections::HashSet<String> {
+        let mut builders: std::collections::HashSet<String> = std::collections::HashSet::new();
+        Self::for_each_child_stmt_list(body, &mut |list| {
+            for s in list {
+                if let Statement::VarDecl {
+                    name,
+                    init: Some(Expr::Array { elements, .. }),
+                    ..
+                } = s
+                {
+                    if elements.is_empty() {
+                        builders.insert(name.to_string());
+                    }
+                }
+            }
+        });
+        for local in builders.clone() {
+            if !Self::vec_builder_only_push(body, &local) {
+                builders.remove(&local);
+            }
+        }
+        builders
+    }
+
+    fn vec_builder_only_push(body: &Statement, local: &str) -> bool {
+        let mut ok = true;
+        Self::for_each_stmt_expr(body, &mut |e| {
+            if !ok {
+                return;
+            }
+            match e {
+                Expr::IndexAssign { object, .. } => {
+                    if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == local) {
+                        ok = false;
+                    }
+                }
+                Expr::Call { callee, .. } => {
+                    if let Expr::Member {
+                        object,
+                        prop: MemberProp::Name { name: method, .. },
+                        ..
+                    } = callee.as_ref()
+                    {
+                        if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == local)
+                            && method.as_ref() != "push"
+                        {
+                            ok = false;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        });
+        ok
     }
 
     /// Whether every call in a native-vec body targets a fn with a native form (another native-vec
@@ -9959,7 +10256,9 @@ impl Codegen {
                                     "sqrt" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil"
                                         | "exp" | "trunc" | "log"
                                 );
-                            if !is_math1 {
+                            let is_push = m.as_ref() == "push"
+                                && matches!(object.as_ref(), Expr::Ident { .. });
+                            if !is_math1 && !is_push {
                                 ok = false;
                             }
                         }
@@ -10116,6 +10415,25 @@ impl Codegen {
         true
     }
 
+    /// If `expr` is a direct call to a native-vec fn, the native Rust type of its result.
+    fn native_vec_init_type(&self, expr: &Expr) -> Option<RustType> {
+        let Expr::Call { callee, args, .. } = expr else {
+            return None;
+        };
+        let Expr::Ident { name, .. } = callee.as_ref() else {
+            return None;
+        };
+        let sig = self.native_vec_fns.get(name.as_ref())?;
+        if !Self::vec_call_args_ok(sig, args) {
+            return None;
+        }
+        match sig.ret {
+            VecRetKind::F64 => Some(RustType::F64),
+            VecRetKind::VecF64 => Some(RustType::Vec(Box::new(RustType::F64))),
+            VecRetKind::Unit => None,
+        }
+    }
+
     /// Emit one native-vec fn: `fn name_nv(<f64..>, <&/&mut Vec<T>..>) -> f64|() { <body> }`, reusing
     /// the normal statement emitter (with `native_vec_ret` set so returns lower to the native shape).
     fn emit_native_vec_fn(&mut self, name: &str, body: &Statement) -> Result<(), CompileError> {
@@ -10140,7 +10458,11 @@ impl Codegen {
                 }
             }
         }
-        let ret_str = if sig.ret_f64 { " -> f64" } else { "" };
+        let ret_str = match sig.ret {
+            VecRetKind::F64 => " -> f64",
+            VecRetKind::VecF64 => " -> Vec<f64>",
+            VecRetKind::Unit => "",
+        };
         self.writeln("#[allow(non_snake_case, unused)]");
         self.writeln(&format!(
             "fn {}_nv({}){} {{",
@@ -10149,10 +10471,10 @@ impl Codegen {
             ret_str
         ));
         self.indent += 1;
-        self.native_vec_ret = Some(sig.ret_f64);
+        self.native_vec_ret = Some(sig.ret.clone());
         let res = self.emit_statement(body);
         // Total function: a value-returning fn that falls off the end gets a default.
-        if sig.ret_f64 {
+        if sig.ret == VecRetKind::F64 {
             self.writeln("0.0");
         }
         self.native_vec_ret = saved_ret;
@@ -10227,16 +10549,31 @@ impl Codegen {
             }
         }
         let call = format!("{}_nv({})", Self::escape_ident(name.as_ref()), call_args.join(", "));
-        Ok(Some(if sig.ret_f64 {
-            if as_value {
-                format!("Value::Number({})", call)
-            } else {
-                call
+        Ok(Some(match sig.ret {
+            VecRetKind::F64 => {
+                if as_value {
+                    format!("Value::Number({})", call)
+                } else {
+                    call
+                }
             }
-        } else if as_value {
-            format!("{{ {}; Value::Null }}", call)
-        } else {
-            call
+            VecRetKind::VecF64 => {
+                if as_value {
+                    format!(
+                        "Value::Array(VmRef::new({}.iter().map(|&v| Value::Number(v)).collect()))",
+                        call
+                    )
+                } else {
+                    call
+                }
+            }
+            VecRetKind::Unit => {
+                if as_value {
+                    format!("{{ {}; Value::Null }}", call)
+                } else {
+                    call
+                }
+            }
         }))
     }
 
@@ -11767,10 +12104,10 @@ impl Codegen {
                     if let Expr::Ident { name: vn, .. } = callee.as_ref() {
                         if let Some(sig) = self.native_vec_fns.get(vn.as_ref()).cloned() {
                             if let Some(code) = self.try_emit_native_vec_call(callee, args, false)? {
-                                let ty = if sig.ret_f64 {
-                                    RustType::F64
-                                } else {
-                                    RustType::Value
+                                let ty = match sig.ret {
+                                    VecRetKind::F64 => RustType::F64,
+                                    VecRetKind::VecF64 => RustType::Vec(Box::new(RustType::F64)),
+                                    VecRetKind::Unit => RustType::Value,
                                 };
                                 return Ok((code, ty));
                             }
@@ -12368,4 +12705,5 @@ mod tests_176 {
         assert!(c_opt.contains_key("seed"), "optimized only: {:?}", c_opt);
         assert!(c.contains_key("seed"), "optimized+inferred: {:?}", c);
     }
+
 }

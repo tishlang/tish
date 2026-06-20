@@ -1397,7 +1397,8 @@ fn mut_arr_stmt_ok(s: &Statement, name: &str, elem: &TypeAnnotation, hyp: &Infer
         Return { value, .. } => value.as_ref().is_none_or(|e| mut_arr_expr_ok(e, name, elem, hyp)),
         Throw { value, .. } => mut_arr_expr_ok(value, name, elem, hyp),
         Break { .. } | Continue { .. } | TypeAlias { .. } => true,
-        _ => false, // switch / try / nested fn / etc: bail
+        FunDecl { body, .. } => mut_arr_stmt_ok(body, name, elem, hyp),
+        _ => false, // switch / try / etc: bail
     }
 }
 
@@ -1546,6 +1547,7 @@ fn arr_stmt_safe(s: &Statement, name: &str) -> bool {
         Return { value, .. } => arr_opt_expr_safe(value, name),
         Throw { value, .. } => arr_expr_safe(value, name),
         Break { .. } | Continue { .. } | TypeAlias { .. } => true,
+        FunDecl { body, .. } => arr_stmt_safe(body, name),
         // Nested fn could capture+mutate; switch/try and anything else: be safe, bail.
         _ => false,
     }
