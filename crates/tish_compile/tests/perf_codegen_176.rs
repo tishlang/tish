@@ -45,9 +45,9 @@ fn fasta_seed_lowers_to_thread_local_and_genrandom_native() {
         rust.lines().filter(|l| l.contains("genRandom")).take(6).collect::<Vec<_>>().join("\n")
     );
     assert!(
-        rust.contains("G_SEED::with(|c| c.set("),
+        rust.contains("G_SEED.with(|c| c.set("),
         "genRandom_native mutates G_SEED:\n{}",
-        rust.lines().filter(|l| l.contains("G_SEED::with")).take(6).collect::<Vec<_>>().join("\n")
+        rust.lines().filter(|l| l.contains("G_SEED.with")).take(6).collect::<Vec<_>>().join("\n")
     );
 }
 
@@ -60,7 +60,7 @@ fn native_numeric_global_fixture_interleaved_state() {
         rust.lines().filter(|l| l.contains("G_COUNTER")).take(4).collect::<Vec<_>>().join("\n")
     );
     assert!(
-        rust.contains("G_COUNTER::with(|c| c.get())") && rust.contains("G_COUNTER::with(|c| c.set("),
+        rust.contains("G_COUNTER.with(|c| c.get())") && rust.contains("G_COUNTER.with(|c| c.set("),
         "boxed + native paths share G_COUNTER:\n{}",
         rust.lines()
             .filter(|l| l.contains("G_COUNTER::with"))

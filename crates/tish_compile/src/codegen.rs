@@ -883,6 +883,8 @@ pub(crate) struct Codegen {
     native_fns: std::collections::HashSet<String>,
     /// True while emitting an M5 `fn name_native` body — keeps VarDecl inits on the native path.
     native_fn_body_emit: bool,
+    /// M5 LCG fns (`genRandom`): `fn -> (global, mul, add, modulus)` for single-`with` emission.
+    native_lcg_fns: std::collections::HashMap<String, (String, f64, f64, f64)>,
     /// `&/&mut Vec<f64|bool>` + `f64` params (`name -> sig`). Direct calls route to `name_nv(..)`
     /// passing array idents by reference; the boxed closure is suppressed. Empty unless the whole
     /// group lowers cleanly (scratch-buffer rollback), so it can never regress the boxed path.
@@ -966,6 +968,10 @@ pub(crate) struct Codegen {
     /// within the body (flow-sensitive: an access before the reassignment is still bounded, one after
     /// is not).
     active_index_guards: Vec<IndexGuard>,
+    /// `k2` locals initialized as `(k + 1) >> 1` — lets `i < k2` prove `i < k` for `arr[k - i]`.
+    shift_half_of: std::collections::HashMap<String, String>,
+    /// Locals assigned from a proven in-bounds `arr[idx]` read inherit `arr`'s length bound.
+    bounded_below_len: std::collections::HashMap<String, BoundKey>,
     /// Scopes of names whose Rust binding is actually `Rc<RefCell<_>>` (emitted at VarDecl).
     /// `refcell_wrapped_vars` alone is insufficient: it is set by prepasses before decl may run.
     rc_cell_storage_scopes: Vec<std::collections::HashSet<String>>,
@@ -1024,6 +1030,7 @@ impl Codegen {
             module_const_f64_aliases: std::collections::HashMap::new(),
             native_fns: std::collections::HashSet::new(),
             native_fn_body_emit: false,
+            native_lcg_fns: std::collections::HashMap::new(),
             native_vec_fns: std::collections::HashMap::new(),
             inline_fns: std::collections::HashMap::new(),
             inline_subst: Vec::new(),
@@ -1043,6 +1050,8 @@ impl Codegen {
             vec_fixed_len: std::collections::HashMap::new(),
             nonneg_locals: std::collections::HashSet::new(),
             active_index_guards: Vec::new(),
+            shift_half_of: std::collections::HashMap::new(),
+            bounded_below_len: std::collections::HashMap::new(),
             rc_cell_storage_scopes: vec![std::collections::HashSet::new()],
             usage_analyzer: None,
             type_context: TypeContext::new(),
@@ -1744,6 +1753,8 @@ impl Codegen {
                 &global_names,
                 &native_vec_names,
             );
+            self.native_lcg_fns =
+                Self::collect_native_lcg_fns(&program.statements, &self.native_fns);
             if !self.native_fns.is_empty() {
                 self.emit_native_fns(&program.statements)?;
                 self.writeln("");
@@ -1797,6 +1808,7 @@ impl Codegen {
             }
         }
         self.nonneg_locals = self.collect_nonneg_locals(&program.statements);
+        self.shift_half_of = Self::collect_shift_half_of(&program.statements);
         if self.is_async {
             self.writeln("async fn run() -> Result<(), Box<dyn std::error::Error>> {");
         } else if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
@@ -2478,9 +2490,7 @@ impl Codegen {
                         escaped
                     ));
                 }
-                for s in statements {
-                    self.emit_statement(s)?;
-                }
+                self.emit_statements_with_folds(statements)?;
                 self.function_scope_stack.pop(); // Exit scope
                 self.outer_vars_stack.pop(); // Exit variable scope
                 self.rc_cell_storage_scopes.pop();
@@ -2494,9 +2504,7 @@ impl Codegen {
             // Comma-declarators: emit each declarator into the *current* Rust scope
             // (no wrapping `{}`), so the bindings stay visible to later statements.
             Statement::Multi { statements, .. } => {
-                for s in statements {
-                    self.emit_statement(s)?;
-                }
+                self.emit_statements_with_folds(statements)?;
             }
             Statement::VarDecl {
                 name,
@@ -2524,6 +2532,16 @@ impl Codegen {
                                 rust_type = RustType::F64;
                             }
                         }
+                    }
+                }
+
+                // Native-vec fn body: `let out = []` builds a `Vec<f64>` accumulator.
+                if matches!(self.native_vec_ret, Some(VecRetKind::VecF64)) {
+                    if matches!(
+                        init.as_ref(),
+                        Some(Expr::Array { elements, .. }) if elements.is_empty()
+                    ) {
+                        rust_type = RustType::Vec(Box::new(RustType::F64));
                     }
                 }
 
@@ -2627,6 +2645,19 @@ impl Codegen {
                 let force_mut = self.aggregate_array_locals.contains(name.as_ref());
                 let mutability = if *mutable || force_mut { "let mut" } else { "let" };
                 let escaped_name = Self::escape_ident(name.as_ref());
+
+                if let Some(init_e) = init.as_ref() {
+                    if let Expr::Index { object, index, .. } = init_e {
+                        if let Expr::Ident { name: arr_name, .. } = object.as_ref() {
+                            if self.index_in_bounds(index, arr_name.as_ref()) {
+                                if let Some(b) = self.vec_fixed_len.get(arr_name.as_ref()) {
+                                    self.bounded_below_len
+                                        .insert(name.to_string(), b.clone());
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if rust_type.is_native() {
                     // Generate native typed variable
@@ -2861,6 +2892,15 @@ impl Codegen {
                     body,
                 )? {
                     return Ok(());
+                }
+                if self.native_fn_body_emit || self.native_vec_ret.is_some() {
+                    if let Some((ctr, bound)) =
+                        Self::parse_usize_for_counter(init.as_deref(), cond.as_ref(), update.as_ref())
+                    {
+                        if self.try_emit_usize_for_loop(&ctr, &bound, body)? {
+                            return Ok(());
+                        }
+                    }
                 }
                 self.writeln("{");
                 self.indent += 1;
@@ -6830,6 +6870,19 @@ impl Codegen {
             return false;
         };
         let Expr::Ident { name: idx, .. } = index else {
+            if let Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } = index
+            {
+                if let BoundKey::Const(len) = len {
+                    if Self::int_literal_value(*n).is_some_and(|v| v >= 0 && v < *len) {
+                        return true;
+                    }
+                } else if Self::int_literal_value(*n) == Some(0) {
+                    return true;
+                }
+            }
             return self.sub_index_in_bounds(index, arr);
         };
         let idx = idx.as_ref();
@@ -6854,6 +6907,13 @@ impl Codegen {
                     _ if &g.bound == len => g.strict,
                     // `i <= C-1` with a constant length `C` also proves `i < C`.
                     (BoundKey::Const(gc), BoundKey::Const(lc)) => !g.strict && *gc + 1 <= *lc,
+                    // `i < k2` where `k2 = (k+1)>>1` and `k` is bounded by the same length.
+                    (BoundKey::Var(gv), BoundKey::Var(ll)) => {
+                        g.strict
+                            && self.shift_half_of.get(gv).is_some_and(|p| {
+                                self.bounded_below_len.get(p) == Some(&BoundKey::Var(ll.clone()))
+                            })
+                    }
                     _ => false,
                 }
         })
@@ -6899,9 +6959,17 @@ impl Codegen {
                     (BoundKey::Var(lv), BoundKey::Var(ll)) => g.strict && lv == ll,
                     _ => false,
                 }
-        });
+        }) || self
+            .bounded_below_len
+            .get(lk)
+            .is_some_and(|b| b == len);
         let rk_lt_lk = self.active_index_guards.iter().any(|g| {
             g.live && g.var == rk && g.bound == BoundKey::Var(lk.to_string()) && g.strict
+        }) || self.active_index_guards.iter().any(|g| {
+            g.live
+                && g.var == rk
+                && g.strict
+                && matches!(&g.bound, BoundKey::Var(k2) if self.shift_half_of.get(k2) == Some(&lk.to_string()))
         });
         lk_bounded && rk_lt_lk
     }
@@ -7221,6 +7289,151 @@ impl Codegen {
             arrs.push(arr.to_string());
         }
         Some((arrs, len))
+    }
+
+    /// `let k2 = (k + 1) >> 1` seeds: `i < k2` then proves `i < k` for `arr[k - i]`.
+    fn parse_shift_half_init(e: &Expr) -> Option<String> {
+        let Expr::Binary {
+            left,
+            op: BinOp::Shr,
+            right,
+            ..
+        } = e
+        else {
+            return None;
+        };
+        if Self::int_literal_value_of(right) != Some(1) {
+            return None;
+        }
+        let Expr::Binary {
+            left: add_l,
+            op: BinOp::Add,
+            right: add_r,
+            ..
+        } = left.as_ref()
+        else {
+            return None;
+        };
+        let Expr::Ident { name: k, .. } = add_l.as_ref() else {
+            return None;
+        };
+        if Self::int_literal_value_of(add_r) != Some(1) {
+            return None;
+        }
+        Some(k.to_string())
+    }
+
+    fn collect_shift_half_of(stmts: &[Statement]) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        for s in stmts {
+            Self::for_each_stmt_expr(s, &mut |e| {
+                if let Expr::Assign { name, value, .. } = e {
+                    if let Some(k) = Self::parse_shift_half_init(value) {
+                        out.insert(name.to_string(), k);
+                    }
+                }
+            });
+            match s {
+                Statement::VarDecl {
+                    name,
+                    init: Some(e),
+                    ..
+                } => {
+                    if let Some(k) = Self::parse_shift_half_init(e) {
+                        out.insert(name.to_string(), k);
+                    }
+                }
+                _ => {}
+            }
+            Self::for_each_child_stmt_list(s, &mut |list| {
+                for (k2, k) in Self::collect_shift_half_of(list) {
+                    out.insert(k2, k);
+                }
+            });
+        }
+        out
+    }
+
+    /// `for (let i = 0; i < bound; i++)` with increment-only counter in a native body.
+    fn parse_usize_for_counter(
+        init: Option<&Statement>,
+        cond: Option<&Expr>,
+        update: Option<&Expr>,
+    ) -> Option<(String, String)> {
+        let Statement::VarDecl {
+            name,
+            init: Some(i0),
+            ..
+        } = init?
+        else {
+            return None;
+        };
+        if Self::int_literal_value_of(i0) != Some(0) {
+            return None;
+        }
+        if !Self::is_increment_of(update?, name.as_ref()) {
+            return None;
+        }
+        let Expr::Binary {
+            left,
+            op: BinOp::Lt,
+            right,
+            ..
+        } = cond?
+        else {
+            return None;
+        };
+        let Expr::Ident { name: lv, .. } = left.as_ref() else {
+            return None;
+        };
+        if lv.as_ref() != name.as_ref() {
+            return None;
+        }
+        let Expr::Ident { name: bound, .. } = right.as_ref() else {
+            return None;
+        };
+        Some((name.to_string(), bound.to_string()))
+    }
+
+    fn try_emit_usize_for_loop(
+        &mut self,
+        counter: &str,
+        bound: &str,
+        body: &Statement,
+    ) -> Result<bool, CompileError> {
+        let usize_var = format!(
+            "_usize_{}_{}",
+            Self::escape_ident(counter),
+            self.loop_label_index
+        );
+        self.loop_label_index += 1;
+        let esc_ctr = Self::escape_ident(counter).into_owned();
+        let esc_bound = Self::escape_ident(bound);
+        self.writeln(&format!(
+            "for {} in 0..({} as usize) {{",
+            usize_var, esc_bound
+        ));
+        self.indent += 1;
+        self.writeln(&format!(
+            "let mut {}: f64 = ({} as f64);",
+            esc_ctr, usize_var
+        ));
+        self.type_context.define(counter, RustType::F64);
+        self.active_index_guards.push(IndexGuard {
+            var: counter.to_string(),
+            bound: BoundKey::Var(bound.to_string()),
+            strict: true,
+            live: true,
+        });
+        if self.native_fn_body_emit {
+            self.emit_native_fn_body(body)?;
+        } else {
+            self.emit_statement(body)?;
+        }
+        self.active_index_guards.pop();
+        self.indent -= 1;
+        self.writeln("}");
+        Ok(true)
     }
 
     /// Locals provably `>= 0` at every program point: a one-sided sign fixpoint. Seeds non-negative
@@ -8806,7 +9019,7 @@ impl Codegen {
     /// Read a native numeric global from its `thread_local Cell<f64>`.
     fn native_global_get(name: &str) -> String {
         format!(
-            "{}::with(|c| c.get())",
+            "{}.with(|c| c.get())",
             Self::native_global_static(name)
         )
     }
@@ -8814,10 +9027,380 @@ impl Codegen {
     /// Write a native numeric global into its `thread_local Cell<f64>`.
     fn native_global_set(name: &str, val: &str) -> String {
         format!(
-            "{}::with(|c| c.set({}))",
+            "{}.with(|c| c.set({}))",
             Self::native_global_static(name),
             val
         )
+    }
+
+    /// Detect `fn f(max) { G = (G*mul+add)%mod; return max*G/mod }` eligible for M5.
+    fn collect_native_lcg_fns(
+        stmts: &[Statement],
+        native_fns: &std::collections::HashSet<String>,
+    ) -> std::collections::HashMap<String, (String, f64, f64, f64)> {
+        let mut out = std::collections::HashMap::new();
+        for s in stmts {
+            if let Statement::FunDecl { name, body, .. } = s {
+                if !native_fns.contains(name.as_ref()) {
+                    continue;
+                }
+                if let Some(sig) = Self::parse_native_lcg_fn(body) {
+                    out.insert(name.to_string(), sig);
+                }
+            }
+        }
+        out
+    }
+
+    /// Parse `global = (global*mul+add)%mod; return (max*global)/mod`.
+    fn parse_native_lcg_fn(body: &Statement) -> Option<(String, f64, f64, f64)> {
+        let stmts = match body {
+            Statement::Block { statements, .. } => statements.as_slice(),
+            _ => return None,
+        };
+        let mut global: Option<String> = None;
+        let mut mul = 0.0;
+        let mut add = 0.0;
+        let mut modulus = 0.0;
+        let mut saw_assign = false;
+        for s in stmts {
+            match s {
+                Statement::ExprStmt {
+                    expr: Expr::Assign { name, value, .. },
+                    ..
+                } => {
+                    if let Some((g, m, a, d)) = Self::parse_lcg_assign(value) {
+                        if name.as_ref() != g {
+                            return None;
+                        }
+                        global = Some(g);
+                        mul = m;
+                        add = a;
+                        modulus = d;
+                        saw_assign = true;
+                    }
+                }
+                Statement::Return { value: Some(ret), .. } => {
+                    if !saw_assign {
+                        return None;
+                    }
+                    let g = global.as_ref()?;
+                    if !Self::parse_lcg_return(ret, g, modulus) {
+                        return None;
+                    }
+                    return Some((g.clone(), mul, add, modulus));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn parse_lcg_assign(value: &Expr) -> Option<(String, f64, f64, f64)> {
+        let Expr::Binary {
+            left,
+            op: BinOp::Mod,
+            right: rd,
+            ..
+        } = value
+        else {
+            return None;
+        };
+        let d = Self::int_literal_value_of(rd)?;
+        let Expr::Binary {
+            left: add_l,
+            op: BinOp::Add,
+            right: add_r,
+            ..
+        } = left.as_ref()
+        else {
+            return None;
+        };
+        let (g_e, mr) = if let Expr::Binary {
+            left: ml,
+            op: BinOp::Mul,
+            right: mr,
+            ..
+        } = add_l.as_ref()
+        {
+            (ml.as_ref(), mr.as_ref())
+        } else {
+            return None;
+        };
+        let Expr::Ident { name: g, .. } = g_e else {
+            return None;
+        };
+        let m = Self::int_literal_value_of(mr)?;
+        let a = Self::int_literal_value_of(add_r)?;
+        Some((g.to_string(), m as f64, a as f64, d as f64))
+    }
+
+    fn parse_lcg_return(ret: &Expr, global: &str, modulus: f64) -> bool {
+        let Expr::Binary {
+            left,
+            op: BinOp::Div,
+            right: rd,
+            ..
+        } = ret
+        else {
+            return false;
+        };
+        if !matches!(rd.as_ref(), Expr::Literal { value: Literal::Number(n), .. } if *n == modulus) {
+            return false;
+        }
+        let Expr::Binary {
+            right: rg,
+            op: BinOp::Mul,
+            ..
+        } = left.as_ref()
+        else {
+            return false;
+        };
+        matches!(rg.as_ref(), Expr::Ident { name, .. } if name.as_ref() == global)
+    }
+
+    fn emit_native_lcg_with(
+        global: &str,
+        mul: f64,
+        add: f64,
+        modulus: f64,
+        max_expr: &str,
+    ) -> String {
+        let g = Self::native_global_static(global);
+        format!(
+            "{{ {}.with(|g| {{ let s = (((g.get() * {}) + {}) % {}); g.set(s); (({}) * s) / {} }}) }}",
+            g,
+            Self::f64_lit(mul),
+            Self::f64_lit(add),
+            Self::f64_lit(modulus),
+            max_expr,
+            Self::f64_lit(modulus),
+        )
+    }
+
+    fn cum_static_and_len(&self, name: &str) -> Option<(String, usize)> {
+        if let Some(static_name) = self.module_const_f64_aliases.get(name) {
+            for (src, cum_static) in &self.module_const_f64_cum {
+                if cum_static == static_name {
+                    if let Some(vals) = self.module_const_f64_arrays.get(src) {
+                        return Some((static_name.clone(), vals.len()));
+                    }
+                }
+            }
+        }
+        if let Some(vals) = self.module_const_f64_arrays.get(name) {
+            return Some((Self::module_const_static(name), vals.len()));
+        }
+        None
+    }
+
+    /// `let j = 0; while (cum[j] < r) { j++ }` → `let j = if (r < cum[0]) { 0 } …`.
+    fn try_emit_const_cum_search_fold(
+        &mut self,
+        stmts: &[Statement],
+    ) -> Result<Option<usize>, CompileError> {
+        if stmts.len() < 2 {
+            return Ok(None);
+        }
+        let j_name = match &stmts[0] {
+            Statement::VarDecl {
+                name,
+                init: Some(Expr::Literal {
+                    value: Literal::Number(n),
+                    ..
+                }),
+                ..
+            } if *n == 0.0 => name.as_ref(),
+            _ => return Ok(None),
+        };
+        let Statement::While { cond, body, .. } = &stmts[1] else {
+            return Ok(None);
+        };
+        let (cum_name, r_expr) = match cond {
+            Expr::Binary {
+                left,
+                op: BinOp::Lt,
+                right,
+                ..
+            } => {
+                let obj = match left.as_ref() {
+                    Expr::Index { object, .. } => object.as_ref(),
+                    _ => return Ok(None),
+                };
+                let Expr::Ident { name: cn, .. } = obj else {
+                    return Ok(None);
+                };
+                (cn.as_ref(), right.as_ref())
+            }
+            _ => return Ok(None),
+        };
+        let Some((cum_static, n)) = self.cum_static_and_len(cum_name) else {
+            return Ok(None);
+        };
+        if n == 0 || n > 16 {
+            return Ok(None);
+        }
+        let inc_ok = match body.as_ref() {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.len() == 1 && Self::stmt_increments_ident(&statements[0], j_name)
+            }
+            s => Self::stmt_increments_ident(s, j_name),
+        };
+        if !inc_ok {
+            return Ok(None);
+        }
+        let (r_code, r_ty) = self.emit_typed_expr(r_expr)?;
+        let r_f64 = if r_ty == RustType::F64 {
+            r_code
+        } else if r_ty == RustType::Value {
+            RustType::F64.from_value_expr(&r_code)
+        } else {
+            return Ok(None);
+        };
+        let mut ladder = String::new();
+        for i in 0..n {
+            if i == 0 {
+                ladder.push_str(&format!("if ({}) < {}[0] {{ 0_f64 }}", r_f64, cum_static));
+            } else {
+                ladder.push_str(&format!(
+                    " else if ({}) < {}[{}] {{ {}_f64 }}",
+                    r_f64,
+                    cum_static,
+                    i,
+                    i
+                ));
+            }
+        }
+        ladder.push_str(&format!(" else {{ {}_f64 }}", n - 1));
+        let escaped = Self::escape_ident(j_name);
+        self.writeln(&format!("let mut {}: f64 = {};", escaped, ladder));
+        self.type_context.define(j_name, RustType::F64);
+        let mut skip = 2;
+        if stmts.len() >= 3 {
+            if let Some(codes_static) = Self::parse_fasta_codes_sum_fold(
+                &stmts[2],
+                j_name,
+                &self.module_const_f64_arrays,
+            ) {
+                if let Statement::ExprStmt {
+                    expr: Expr::Assign { name: sum_name, .. },
+                    ..
+                } = &stmts[2]
+                {
+                    let sum_esc = Self::escape_ident(sum_name.as_ref());
+                    let arms: Vec<String> = (0..n)
+                        .map(|i| format!("{} => {}[{}]", i, codes_static, i))
+                        .collect();
+                    self.writeln(&format!(
+                        "{} = (({} + match ({} as usize) {{ {}, _ => 0.0 }}) % 2147483647_f64);",
+                        sum_esc,
+                        sum_esc,
+                        escaped,
+                        arms.join(", "),
+                    ));
+                    skip = 3;
+                }
+            }
+        }
+        Ok(Some(skip))
+    }
+
+    /// `sum = (sum + codes[j]) % 2147483647` when `codes` is a module const array.
+    fn parse_fasta_codes_sum_fold(
+        stmt: &Statement,
+        j_name: &str,
+        module_const: &HashMap<String, Vec<f64>>,
+    ) -> Option<String> {
+        let Statement::ExprStmt {
+            expr: Expr::Assign { name: _sum, value, .. },
+            ..
+        } = stmt
+        else {
+            return None;
+        };
+        let Expr::Binary {
+            left,
+            op: BinOp::Mod,
+            right: mod_r,
+            ..
+        } = value.as_ref()
+        else {
+            return None;
+        };
+        if Self::int_literal_value_of(mod_r) != Some(2147483647) {
+            return None;
+        }
+        let Expr::Binary {
+            left: add_l,
+            op: BinOp::Add,
+            right: add_r,
+            ..
+        } = left.as_ref()
+        else {
+            return None;
+        };
+        let Expr::Index {
+            object,
+            index,
+            ..
+        } = add_r.as_ref()
+        else {
+            return None;
+        };
+        let Expr::Ident { name: codes_name, .. } = object.as_ref() else {
+            return None;
+        };
+        if !module_const.contains_key(codes_name.as_ref()) {
+            return None;
+        }
+        matches!(index.as_ref(), Expr::Ident { name, .. } if name.as_ref() == j_name)
+            .then(|| Self::module_const_static(codes_name.as_ref()))
+    }
+
+    fn stmt_increments_ident(s: &Statement, name: &str) -> bool {
+        match s {
+            Statement::ExprStmt { expr, .. } => match expr {
+                Expr::Assign {
+                    name: n,
+                    value,
+                    ..
+                } => {
+                    let Expr::Binary {
+                        left,
+                        op: BinOp::Add,
+                        right,
+                        ..
+                    } = value.as_ref()
+                    else {
+                        return false;
+                    };
+                    n.as_ref() == name
+                        && matches!(left.as_ref(), Expr::Ident { name: ln, .. } if ln.as_ref() == name)
+                        && Self::int_literal_value_of(right) == Some(1)
+                }
+                Expr::PostfixInc { name: n, .. } | Expr::PrefixInc { name: n, .. } => {
+                    n.as_ref() == name
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn emit_statements_with_folds(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
+        let mut i = 0;
+        while i < statements.len() {
+            if let Some(skip) = self.try_emit_const_cum_search_fold(&statements[i..])? {
+                i += skip;
+            } else if self.native_fn_body_emit {
+                self.emit_native_fn_body(&statements[i])?;
+                i += 1;
+            } else {
+                self.emit_statement(&statements[i])?;
+                i += 1;
+            }
+        }
+        Ok(())
     }
 
     /// Emit `thread_local! { static G_NAME: Cell<f64> = ... }` for each eligible global.
@@ -8832,7 +9415,7 @@ impl Codegen {
             ));
         }
         self.indent -= 1;
-        self.writeln("};");
+        self.writeln("}");
         Ok(())
     }
 
@@ -10134,12 +10717,24 @@ impl Codegen {
                 }
                 self.writeln(&format!("fn {}_native({}) -> f64 {{", Self::escape_ident(name.as_ref()), plist.join(", ")));
                 self.indent += 1;
-                self.native_fn_body_emit = true;
-                self.emit_native_fn_body(body)?;
-                self.native_fn_body_emit = false;
-                // Functions that fall off the end without returning: JS yields undefined; an
-                // eligible numeric fn shouldn't, but emit a default to keep `-> f64` total.
-                self.writeln("0.0");
+                if let Some((global, mul, add, modulus)) = self.native_lcg_fns.get(name.as_ref()) {
+                    let max_name = params
+                        .iter()
+                        .find_map(|p| match p {
+                            FunParam::Simple(tp) => Some(Self::escape_ident(tp.name.as_ref())),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| "max".into());
+                    let body = Self::emit_native_lcg_with(global, *mul, *add, *modulus, &max_name);
+                    self.writeln(&format!("return {};", body));
+                } else {
+                    self.native_fn_body_emit = true;
+                    self.emit_native_fn_body(body)?;
+                    self.native_fn_body_emit = false;
+                    // Functions that fall off the end without returning: JS yields undefined; an
+                    // eligible numeric fn shouldn't, but emit a default to keep `-> f64` total.
+                    self.writeln("0.0");
+                }
                 self.indent -= 1;
                 self.writeln("}");
                 self.type_context.pop_scope();
@@ -10151,9 +10746,7 @@ impl Codegen {
     fn emit_native_fn_body(&mut self, stmt: &Statement) -> Result<(), CompileError> {
         match stmt {
             Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                for s in statements {
-                    self.emit_native_fn_body(s)?;
-                }
+                self.emit_statements_with_folds(statements)?;
             }
             Statement::Return { value, .. } => {
                 let e = value.as_ref().expect("eligible return has a value");
@@ -10375,6 +10968,27 @@ impl Codegen {
     /// params, then fixpoint-drop any fn whose call sites are malformed (a dropped callee can
     /// disqualify a caller). M5 / #177 fns are auto-excluded — M5 has no array params, and the param
     /// classifier rejects struct-element arrays (`p[i].field`), which is the aggregate path's shape.
+    fn body_uses_local_vec_ops(body: &Statement) -> bool {
+        let mut found = false;
+        Self::for_each_stmt_expr(body, &mut |e| {
+            if let Expr::Call { callee, .. } = e {
+                if let Expr::Member {
+                    object,
+                    prop: MemberProp::Name { name: method, .. },
+                    ..
+                } = callee.as_ref()
+                {
+                    if method.as_ref() == "push"
+                        && matches!(object.as_ref(), Expr::Ident { .. })
+                    {
+                        found = true;
+                    }
+                }
+            }
+        });
+        found
+    }
+
     pub(crate) fn detect_native_vec_fns(
         program: &Program,
     ) -> std::collections::HashMap<String, NativeVecFnSig> {
@@ -10391,11 +11005,11 @@ impl Codegen {
             } = s
             {
                 if let Some(sig) = Self::infer_vec_fn_sig(params, body) {
-                    if sig
+                    let has_array_param = sig
                         .params
                         .iter()
-                        .any(|(_, k)| matches!(k, VecParamKind::Array { .. }))
-                    {
+                        .any(|(_, k)| matches!(k, VecParamKind::Array { .. }));
+                    if has_array_param || Self::body_uses_local_vec_ops(body) {
                         sigs.insert(name.to_string(), sig);
                     }
                 }
@@ -10425,6 +11039,12 @@ impl Codegen {
     fn setup_native_vec_fns(&mut self, program: &Program) {
         use std::collections::HashMap;
         let mut sigs = Self::detect_native_vec_fns(program);
+        // #177 aggregate fns (`advance`/`offsetMomentum` on `Vec<Struct>`) take precedence — do not
+        // also emit a broken `name_nv(&Vec<f64>)` wrapper for them.
+        sigs.retain(|name, _| !self.aggregate_fns.contains_key(name));
+        if sigs.is_empty() {
+            return;
+        }
         // Codegen-side gate (needs `native_fns`): a native-vec body may only CALL fns that have a
         // native form — other native-vec fns or M5 `native_fns` — plus 1-arg `Math`. Calling a boxed
         // closure (e.g. spectral_norm's `evalA`, which isn't M5) can't be referenced from the
@@ -10525,7 +11145,7 @@ impl Codegen {
     fn classify_vec_param(body: &Statement, p: &str) -> Option<VecParamKind> {
         let mut f = ParamUse::default();
         Self::for_each_stmt_expr(body, &mut |e| Self::scan_param_use(e, p, false, &mut f));
-        if f.escaped || (f.indexed && f.numeric) {
+        if f.indexed && f.numeric {
             return None;
         }
         if f.indexed {
@@ -10537,6 +11157,8 @@ impl Codegen {
                 },
                 is_mut: f.is_mut,
             })
+        } else if f.escaped && !f.numeric {
+            None
         } else {
             Some(VecParamKind::Scalar)
         }
@@ -10715,10 +11337,25 @@ impl Codegen {
             .flat_map(|p| p.bound_names())
             .map(|n| n.to_string())
             .collect();
-        let cand: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let globals = std::collections::HashSet::new();
+        let nums = Self::native_fn_numeric_locals(
+            body,
+            &pnames,
+            &globals,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+        );
         if ret_exprs
             .iter()
-            .all(|e| Self::numeric_shaped(e, &pnames, &cand, &std::collections::HashSet::new(), &std::collections::HashSet::new()))
+            .all(|e| {
+                Self::numeric_shaped(
+                    e,
+                    &pnames,
+                    &std::collections::HashSet::new(),
+                    &globals,
+                    &nums,
+                )
+            })
         {
             return Some(VecRetKind::F64);
         }
@@ -12601,12 +13238,30 @@ impl Codegen {
                             let access = if in_bounds {
                                 format!("{}[{}]", static_name, idx_usize)
                             } else {
-                                format!(
-                                    "{{ let _i = {}; if _i < {}.len() {{ {}[_i] }} else {{ f64::NAN }} }}",
-                                    idx_usize,
-                                    static_name,
-                                    static_name
-                                )
+                                let const_len = self
+                                    .cum_static_and_len(name.as_ref())
+                                    .map(|(_, n)| n)
+                                    .or_else(|| {
+                                        self.module_const_f64_arrays
+                                            .get(name.as_ref())
+                                            .map(|v| v.len())
+                                    })
+                                    .unwrap_or(0);
+                                if const_len > 0 {
+                                    format!(
+                                        "{{ let _i = {}; if _i < {} {{ {}[_i] }} else {{ f64::NAN }} }}",
+                                        idx_usize,
+                                        const_len,
+                                        static_name
+                                    )
+                                } else {
+                                    format!(
+                                        "{{ let _i = {}; if _i < {}.len() {{ {}[_i] }} else {{ f64::NAN }} }}",
+                                        idx_usize,
+                                        static_name,
+                                        static_name
+                                    )
+                                }
                             };
                             return Ok((access, RustType::F64));
                         }
@@ -12746,6 +13401,15 @@ impl Codegen {
                             }
                         }
                         if ok {
+                            if let Some((global, mul, add, modulus)) =
+                                self.native_lcg_fns.get(fname.as_ref())
+                            {
+                                let max_expr = argc.first().cloned().unwrap_or_else(|| "1.0".into());
+                                return Ok((
+                                    Self::emit_native_lcg_with(global, *mul, *add, *modulus, &max_expr),
+                                    RustType::F64,
+                                ));
+                            }
                             return Ok((
                                 format!(
                                     "{}_native({})",
