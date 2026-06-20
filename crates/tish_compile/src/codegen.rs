@@ -883,6 +883,18 @@ pub(crate) struct Codegen {
     native_fns: std::collections::HashSet<String>,
     /// True while emitting an M5 `fn name_native` body — keeps VarDecl inits on the native path.
     native_fn_body_emit: bool,
+    /// M5 fn currently being emitted (`mandel_native`, `fastaRandom_native`, …).
+    native_fn_emit_name: Option<String>,
+    /// Top-level literal call args for each M5 fn (`mandel(1200,1200,100)` → mandel).
+    native_fn_literal_args: std::collections::HashMap<String, Vec<f64>>,
+    /// M5 fn param names in declaration order (for literal-arg specialization).
+    native_fn_param_names: std::collections::HashMap<String, Vec<String>>,
+    /// `usize` `for` loop counters — provably `>= 0` even when absent from `nonneg_locals`.
+    usize_for_counters: std::collections::HashSet<String>,
+    /// Hoisted LCG seed local in a non-`genRandom` M5 body that calls `genRandom`.
+    native_lcg_hoist: Option<(String, f64, f64, f64)>,
+    /// Set when an M5 body emits `return` so we skip the trailing `0.0` default.
+    native_fn_body_returned: bool,
     /// M5 LCG fns (`genRandom`): `fn -> (global, mul, add, modulus)` for single-`with` emission.
     native_lcg_fns: std::collections::HashMap<String, (String, f64, f64, f64)>,
     /// `&/&mut Vec<f64|bool>` + `f64` params (`name -> sig`). Direct calls route to `name_nv(..)`
@@ -1030,6 +1042,12 @@ impl Codegen {
             module_const_f64_aliases: std::collections::HashMap::new(),
             native_fns: std::collections::HashSet::new(),
             native_fn_body_emit: false,
+            native_fn_emit_name: None,
+            native_fn_literal_args: std::collections::HashMap::new(),
+            native_fn_param_names: std::collections::HashMap::new(),
+            usize_for_counters: std::collections::HashSet::new(),
+            native_lcg_hoist: None,
+            native_fn_body_returned: false,
             native_lcg_fns: std::collections::HashMap::new(),
             native_vec_fns: std::collections::HashMap::new(),
             inline_fns: std::collections::HashMap::new(),
@@ -1753,6 +1771,10 @@ impl Codegen {
                 &global_names,
                 &native_vec_names,
             );
+            self.native_fn_literal_args =
+                Self::collect_native_fn_literal_calls(&program.statements, &self.native_fns);
+            self.native_fn_param_names =
+                Self::collect_native_fn_param_names(&program.statements, &self.native_fns);
             self.native_lcg_fns =
                 Self::collect_native_lcg_fns(&program.statements, &self.native_fns);
             if !self.native_fns.is_empty() {
@@ -6865,6 +6887,29 @@ impl Codegen {
     /// enclosing guard bounds the index strictly below `B` (a non-strict `<= B-1` const works too),
     /// and the index is a non-negative bare counter. Conservative — only a bare `Ident` index is
     /// modeled (covers `a[i]` / `a[k]`; not `a[k - i]`).
+    fn index_guard_bounds_len(&self, guard_bound: &BoundKey, len: &BoundKey, strict: bool) -> bool {
+        if !strict {
+            return false;
+        }
+        if guard_bound == len {
+            return true;
+        }
+        if let (BoundKey::Const(gc), BoundKey::Var(lv)) = (guard_bound, len) {
+            if self.native_param_lit(lv) == Some(*gc as f64) {
+                return true;
+            }
+        }
+        if let (BoundKey::Var(gv), BoundKey::Var(lv)) = (guard_bound, len) {
+            if gv == lv {
+                return true;
+            }
+            if let (Some(gl), Some(ll)) = (self.native_param_lit(gv), self.native_param_lit(lv)) {
+                return gl == ll;
+            }
+        }
+        false
+    }
+
     fn index_in_bounds(&self, index: &Expr, arr: &str) -> bool {
         let Some(len) = self.vec_fixed_len.get(arr) else {
             return false;
@@ -6888,6 +6933,7 @@ impl Codegen {
         let idx = idx.as_ref();
         // Lower bound: the index can never be negative.
         let nonneg = self.nonneg_locals.contains(idx)
+            || self.usize_for_counters.contains(idx)
             || self
                 .int_range_locals
                 .get(idx)
@@ -6904,7 +6950,7 @@ impl Codegen {
                     // `i < arr.length` directly bounds `arr[i]` (fixed-len ⇒ no shrink).
                     (BoundKey::Len(a), _) => g.strict && a == arr,
                     // `i < B` where `B` is the same key as `arr`'s fixed length.
-                    _ if &g.bound == len => g.strict,
+                    _ if self.index_guard_bounds_len(&g.bound, len, g.strict) => true,
                     // `i <= C-1` with a constant length `C` also proves `i < C`.
                     (BoundKey::Const(gc), BoundKey::Const(lc)) => !g.strict && *gc + 1 <= *lc,
                     // `i < k2` where `k2 = (k+1)>>1` and `k` is bounded by the same length.
@@ -6942,6 +6988,7 @@ impl Codegen {
         let lk = lk.as_ref();
         let rk = rk.as_ref();
         let rk_nonneg = self.nonneg_locals.contains(rk)
+            || self.usize_for_counters.contains(rk)
             || self
                 .int_range_locals
                 .get(rk)
@@ -6954,7 +7001,7 @@ impl Codegen {
                 && g.var == lk
                 && match (&g.bound, len) {
                     (BoundKey::Len(a), _) => g.strict && a == arr,
-                    _ if &g.bound == len => g.strict,
+                    _ if self.index_guard_bounds_len(&g.bound, len, g.strict) => true,
                     (BoundKey::Const(gc), BoundKey::Const(lc)) => g.strict && *gc < *lc,
                     (BoundKey::Var(lv), BoundKey::Var(ll)) => g.strict && lv == ll,
                     _ => false,
@@ -7408,20 +7455,35 @@ impl Codegen {
         );
         self.loop_label_index += 1;
         let esc_ctr = Self::escape_ident(counter).into_owned();
-        let esc_bound = Self::escape_ident(bound);
-        self.writeln(&format!(
-            "for {} in 0..({} as usize) {{",
-            usize_var, esc_bound
-        ));
+        let bound_usize = if let Some(lit) = self.native_param_lit(bound) {
+            if lit.fract() == 0.0 && lit >= 0.0 {
+                format!("{}", lit as usize)
+            } else {
+                format!("({} as usize)", Self::escape_ident(bound))
+            }
+        } else {
+            format!("({} as usize)", Self::escape_ident(bound))
+        };
+        let bound_key = if let Some(lit) = self.native_param_lit(bound) {
+            if lit.fract() == 0.0 {
+                BoundKey::Const(lit as i64)
+            } else {
+                BoundKey::Var(bound.to_string())
+            }
+        } else {
+            BoundKey::Var(bound.to_string())
+        };
+        self.writeln(&format!("for {} in 0..{} {{", usize_var, bound_usize));
         self.indent += 1;
         self.writeln(&format!(
             "let mut {}: f64 = ({} as f64);",
             esc_ctr, usize_var
         ));
         self.type_context.define(counter, RustType::F64);
+        self.usize_for_counters.insert(counter.to_string());
         self.active_index_guards.push(IndexGuard {
             var: counter.to_string(),
-            bound: BoundKey::Var(bound.to_string()),
+            bound: bound_key,
             strict: true,
             live: true,
         });
@@ -9160,12 +9222,25 @@ impl Codegen {
     }
 
     fn emit_native_lcg_with(
+        &self,
         global: &str,
         mul: f64,
         add: f64,
         modulus: f64,
         max_expr: &str,
     ) -> String {
+        if let Some((g, hm, ha, hm_mod)) = &self.native_lcg_hoist {
+            if g == global {
+                return format!(
+                    "{{ let s = (((_lcg_seed * {}) + {}) % {}); _lcg_seed = s; (({}) * s) / {} }}",
+                    Self::f64_lit(*hm),
+                    Self::f64_lit(*ha),
+                    Self::f64_lit(*hm_mod),
+                    max_expr,
+                    Self::f64_lit(*hm_mod),
+                );
+            }
+        }
         let g = Self::native_global_static(global);
         format!(
             "{{ {}.with(|g| {{ let s = (((g.get() * {}) + {}) % {}); g.set(s); (({}) * s) / {} }}) }}",
@@ -9176,6 +9251,83 @@ impl Codegen {
             max_expr,
             Self::f64_lit(modulus),
         )
+    }
+
+    /// Literal call-site arg for an M5 fn param (`mandel(1200,1200,100)` → `w`/`h`/`maxIter`).
+    fn native_param_lit(&self, param: &str) -> Option<f64> {
+        let fname = self.native_fn_emit_name.as_ref()?;
+        let lits = self.native_fn_literal_args.get(fname)?;
+        let params = self.native_fn_param_names.get(fname)?;
+        params
+            .iter()
+            .position(|p| p == param)
+            .and_then(|i| lits.get(i).copied())
+    }
+
+    /// Top-level `let x = f(lit,…)` where `f` is M5-eligible — specialize the native fn body.
+    fn collect_native_fn_literal_calls(
+        stmts: &[Statement],
+        native_fns: &std::collections::HashSet<String>,
+    ) -> std::collections::HashMap<String, Vec<f64>> {
+        use std::collections::HashMap;
+        let mut out = HashMap::new();
+        for s in stmts {
+            if let Statement::VarDecl {
+                init: Some(e),
+                ..
+            } = s
+            {
+                if let Expr::Call { callee, args, .. } = e {
+                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                        let fname = name.as_ref();
+                        if !native_fns.contains(fname) {
+                            continue;
+                        }
+                        let mut lits: Vec<f64> = Vec::new();
+                        let ok = args.iter().all(|a| {
+                            if let CallArg::Expr(Expr::Literal {
+                                value: Literal::Number(n),
+                                ..
+                            }) = a
+                            {
+                                lits.push(*n);
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                        if ok && !lits.is_empty() {
+                            out.insert(fname.to_string(), lits);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn collect_native_fn_param_names(
+        stmts: &[Statement],
+        native_fns: &std::collections::HashSet<String>,
+    ) -> std::collections::HashMap<String, Vec<String>> {
+        use std::collections::HashMap;
+        let mut out = HashMap::new();
+        for s in stmts {
+            if let Statement::FunDecl { name, params, .. } = s {
+                if !native_fns.contains(name.as_ref()) {
+                    continue;
+                }
+                let ps: Vec<String> = params
+                    .iter()
+                    .filter_map(|p| match p {
+                        FunParam::Simple(tp) => Some(tp.name.to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                out.insert(name.to_string(), ps);
+            }
+        }
+        out
     }
 
     fn cum_static_and_len(&self, name: &str) -> Option<(String, usize)> {
@@ -10725,15 +10877,28 @@ impl Codegen {
                             _ => None,
                         })
                         .unwrap_or_else(|| "max".into());
-                    let body = Self::emit_native_lcg_with(global, *mul, *add, *modulus, &max_name);
+                    let body = self.emit_native_lcg_with(global, *mul, *add, *modulus, &max_name);
                     self.writeln(&format!("return {};", body));
                 } else {
+                    self.native_fn_emit_name = Some(name.to_string());
+                    self.native_fn_body_returned = false;
+                    self.usize_for_counters.clear();
+                    if name.as_ref() != "genRandom" {
+                        if let Some((global, mul, add, modulus)) =
+                            self.native_lcg_fns.get("genRandom").cloned()
+                        {
+                            self.writeln("let mut _lcg_seed: f64 = G_SEED.with(|g| g.get());");
+                            self.native_lcg_hoist = Some((global, mul, add, modulus));
+                        }
+                    }
                     self.native_fn_body_emit = true;
                     self.emit_native_fn_body(body)?;
                     self.native_fn_body_emit = false;
-                    // Functions that fall off the end without returning: JS yields undefined; an
-                    // eligible numeric fn shouldn't, but emit a default to keep `-> f64` total.
-                    self.writeln("0.0");
+                    self.native_lcg_hoist.take();
+                    if !self.native_fn_body_returned {
+                        self.writeln("0.0");
+                    }
+                    self.native_fn_emit_name = None;
                 }
                 self.indent -= 1;
                 self.writeln("}");
@@ -10758,7 +10923,11 @@ impl Codegen {
                 } else {
                     code
                 };
+                if let Some((global, _, _, _)) = self.native_lcg_hoist.as_ref() {
+                    self.writeln(&format!("{};", Self::native_global_set(global, "_lcg_seed")));
+                }
                 self.writeln(&format!("return {};", f));
+                self.native_fn_body_returned = true;
             }
             Statement::If { cond, then_branch, else_branch, .. } => {
                 let (c, ct) = self.emit_typed_expr(cond)?;
@@ -11093,6 +11262,17 @@ impl Codegen {
         self.native_vec_fns = sigs;
         let body_of: HashMap<&str, &Statement> =
             decls.iter().map(|(n, b)| (n.as_str(), b)).collect();
+        for (name, sig) in &self.native_vec_fns {
+            self.native_fn_param_names.insert(
+                name.clone(),
+                sig.params.iter().map(|(p, _)| p.clone()).collect(),
+            );
+        }
+        let vec_names: std::collections::HashSet<String> =
+            self.native_vec_fns.keys().cloned().collect();
+        self.native_fn_literal_args.extend(
+            Self::collect_native_fn_literal_calls(&program.statements, &vec_names),
+        );
         let saved = std::mem::take(&mut self.output);
         let saved_indent = self.indent;
         self.indent = 0;
@@ -11647,6 +11827,13 @@ impl Codegen {
         }
     }
 
+    fn fn_body_stmt_slice(body: &Statement) -> &[Statement] {
+        match body {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => statements,
+            _ => std::slice::from_ref(body),
+        }
+    }
+
     /// Emit one native-vec fn: `fn name_nv(<f64..>, <&/&mut Vec<T>..>) -> f64|() { <body> }`, reusing
     /// the normal statement emitter (with `native_vec_ret` set so returns lower to the native shape).
     fn emit_native_vec_fn(&mut self, name: &str, body: &Statement) -> Result<(), CompileError> {
@@ -11685,7 +11872,15 @@ impl Codegen {
         ));
         self.indent += 1;
         self.native_vec_ret = Some(sig.ret.clone());
+        self.native_fn_emit_name = Some(name.to_string());
+        self.usize_for_counters.clear();
+        let saved_vec_fixed = self.vec_fixed_len.clone();
+        for (k, v) in self.collect_vec_fixed_len(Self::fn_body_stmt_slice(body)) {
+            self.vec_fixed_len.insert(k, v);
+        }
         let res = self.emit_statement(body);
+        self.vec_fixed_len = saved_vec_fixed;
+        self.native_fn_emit_name = None;
         // Total function: a value-returning fn that falls off the end gets a default.
         if sig.ret == VecRetKind::F64 {
             self.writeln("0.0");
@@ -13010,6 +13205,12 @@ impl Codegen {
                         return Ok((temp.clone(), RustType::F64));
                     }
                 }
+                // M5 call-site literal specialization (`mandel(1200,1200,100)` → const params).
+                if self.native_fn_body_emit {
+                    if let Some(v) = self.native_param_lit(name.as_ref()) {
+                        return Ok((Self::f64_lit(v), RustType::F64));
+                    }
+                }
                 // #176: native numeric global → thread_local Cell read.
                 if self.native_numeric_globals.contains_key(name.as_ref()) {
                     return Ok((
@@ -13406,7 +13607,7 @@ impl Codegen {
                             {
                                 let max_expr = argc.first().cloned().unwrap_or_else(|| "1.0".into());
                                 return Ok((
-                                    Self::emit_native_lcg_with(global, *mul, *add, *modulus, &max_expr),
+                                    self.emit_native_lcg_with(global, *mul, *add, *modulus, &max_expr),
                                     RustType::F64,
                                 ));
                             }

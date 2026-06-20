@@ -47,6 +47,10 @@ fn fasta_lowers_cumulative_and_native_arrays() {
             rust.contains("G_CODES["),
             "fastaRandom_native should index G_CODES directly"
         );
+        assert!(
+            rust.contains("_lcg_seed"),
+            "fastaRandom_native should hoist LCG seed to a local"
+        );
     }
 }
 
