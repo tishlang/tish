@@ -82,6 +82,10 @@ fn mandelbrot_lowers_mandel_native() {
                 !native.contains("iter = (iter + 1_f64)"),
                 "mandel_native should skip iter increment in usize escape loop"
             );
+            assert!(
+                native.contains("0.0025_f64") && !native.contains("let mut py:"),
+                "mandel_native should fuse py/h and px/w into reciprocal coord init"
+            );
         }
     }
 }
@@ -109,6 +113,22 @@ fn fannkuch_nv_uses_direct_flip_indexing() {
         assert!(
             rust.contains("count[(r) as usize] = (count[(r) as usize] - 1_f64)"),
             "fannkuch_nv should decrement count[r] via direct indexing"
+        );
+        assert!(
+            rust.contains("perm.extend(std::iter::repeat(0_f64).take(10))"),
+            "fannkuch_nv should bulk-init perm/count arrays"
+        );
+        assert!(
+            rust.contains("perm1 = (0..10).map(|j| j as f64).collect()"),
+            "fannkuch_nv should iota-init perm1"
+        );
+        assert!(
+            rust.contains("to_int_unchecked") && rust.contains("wrapping_shr"),
+            "fannkuch_nv k2 shift should use native int32 path"
+        );
+        assert!(
+            rust.contains("count[((r - 1_f64)) as usize] = r"),
+            "fannkuch_nv count[r-1] init should use direct indexing"
         );
     }
 }

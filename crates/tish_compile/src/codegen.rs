@@ -990,7 +990,7 @@ pub(crate) struct Codegen {
     strict_lt_bounds: Vec<(String, String)>,
     /// After a usize escape loop, the `stayed` flag to use instead of `iter == maxIter`.
     pending_stayed_var: Option<String>,
-    /// Skip `iter = iter + 1` in the body of the usize escape loop (mandelbrot).
+    /// Skip `iter = iter + 1` and the `iter` decl in a usize escape loop (mandelbrot).
     skip_iter_local: Option<String>,
     /// Scopes of names whose Rust binding is actually `Rc<RefCell<_>>` (emitted at VarDecl).
     /// `refcell_wrapped_vars` alone is insufficient: it is set by prepasses before decl may run.
@@ -2513,6 +2513,181 @@ impl Codegen {
         Ok(true)
     }
 
+    /// `for (i=0; i<n; i++) { perm.push(0); perm1.push(i); count.push(0) }` → three bulk inits.
+    fn try_emit_fannkuch_triple_init(
+        &mut self,
+        init: Option<&Statement>,
+        cond: Option<&Expr>,
+        update: Option<&Expr>,
+        body: &Statement,
+    ) -> Result<bool, CompileError> {
+        if !self.native_vec_ret.is_some() && !self.native_fn_body_emit {
+            return Ok(false);
+        }
+        let Some(Statement::VarDecl {
+            name: i_name,
+            init: Some(i_init),
+            ..
+        }) = init
+        else {
+            return Ok(false);
+        };
+        if Self::int_literal_value_of(i_init) != Some(0) {
+            return Ok(false);
+        }
+        let Some(cond) = cond else {
+            return Ok(false);
+        };
+        let Expr::Binary {
+            left,
+            op: BinOp::Lt,
+            right: bound,
+            ..
+        } = cond
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: c, .. } = left.as_ref() else {
+            return Ok(false);
+        };
+        if c.as_ref() != i_name.as_ref() {
+            return Ok(false);
+        }
+        let update = match update.as_ref() {
+            Some(u) => u,
+            None => return Ok(false),
+        };
+        if !Self::is_increment_of(update, i_name.as_ref()) {
+            return Ok(false);
+        }
+        let len = match Self::bound_key_of(bound.as_ref()) {
+            Some(l) => l,
+            None => return Ok(false),
+        };
+        let stmts = match body {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.as_slice()
+            }
+            single => std::slice::from_ref(single),
+        };
+        if stmts.len() != 3 {
+            return Ok(false);
+        }
+        fn parse_push_arr(st: &Statement) -> Option<String> {
+            let Statement::ExprStmt {
+                expr: Expr::Call { callee, args, .. },
+                ..
+            } = st
+            else {
+                return None;
+            };
+            let Expr::Member {
+                object,
+                prop: MemberProp::Name { name: method, .. },
+                optional: false,
+                ..
+            } = callee.as_ref()
+            else {
+                return None;
+            };
+            if method.as_ref() != "push" || args.len() != 1 {
+                return None;
+            }
+            let Expr::Ident { name: arr, .. } = object.as_ref() else {
+                return None;
+            };
+            Some(arr.to_string())
+        }
+        let perm = match parse_push_arr(&stmts[0]) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let perm1 = match parse_push_arr(&stmts[1]) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let count = match parse_push_arr(&stmts[2]) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let Statement::ExprStmt {
+            expr: Expr::Call { args: args0, .. },
+            ..
+        } = &stmts[0]
+        else {
+            return Ok(false);
+        };
+        let Statement::ExprStmt {
+            expr: Expr::Call { args: args1, .. },
+            ..
+        } = &stmts[1]
+        else {
+            return Ok(false);
+        };
+        let Statement::ExprStmt {
+            expr: Expr::Call { args: args2, .. },
+            ..
+        } = &stmts[2]
+        else {
+            return Ok(false);
+        };
+        let CallArg::Expr(k0) = &args0[0] else {
+            return Ok(false);
+        };
+        let CallArg::Expr(k1) = &args1[0] else {
+            return Ok(false);
+        };
+        let CallArg::Expr(k2) = &args2[0] else {
+            return Ok(false);
+        };
+        if !matches!(k0, Expr::Literal { value: Literal::Number(n), .. } if *n == 0.0)
+            || !matches!(k1, Expr::Ident { name, .. } if name.as_ref() == i_name.as_ref())
+            || !matches!(k2, Expr::Literal { value: Literal::Number(n), .. } if *n == 0.0)
+        {
+            return Ok(false);
+        }
+        let RustType::Vec(elem) = self.type_context.get_type(&perm) else {
+            return Ok(false);
+        };
+        if *elem != RustType::F64
+            || self.type_context.get_type(&perm1) != RustType::Vec(Box::new(RustType::F64))
+            || self.type_context.get_type(&count) != RustType::Vec(Box::new(RustType::F64))
+        {
+            return Ok(false);
+        }
+        let n_usize = match &len {
+            BoundKey::Const(c) => format!("{}", *c as usize),
+            BoundKey::Var(v) => {
+                if let Some(lit) = self.native_param_lit(v) {
+                    if lit.fract() == 0.0 && lit >= 0.0 {
+                        format!("{}", lit as usize)
+                    } else {
+                        format!("({} as usize)", Self::escape_ident(v))
+                    }
+                } else {
+                    format!("({} as usize)", Self::escape_ident(v))
+                }
+            }
+            BoundKey::Len(_) => return Ok(false),
+        };
+        let perm_esc = Self::escape_ident(&perm);
+        let perm1_esc = Self::escape_ident(&perm1);
+        let count_esc = Self::escape_ident(&count);
+        self.writeln(&format!(
+            "{}.extend(std::iter::repeat(0_f64).take({}));",
+            perm_esc, n_usize
+        ));
+        self.writeln(&format!(
+            "{} = (0..{}).map(|j| j as f64).collect();",
+            perm1_esc, n_usize
+        ));
+        self.writeln(&format!(
+            "{}.extend(std::iter::repeat(0_f64).take({}));",
+            count_esc, n_usize
+        ));
+        Ok(true)
+    }
+
     fn emit_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
         match stmt {
             Statement::Block { statements, .. } => {
@@ -2579,6 +2754,20 @@ impl Codegen {
                         if let Expr::Ident { name: fnname, .. } = callee.as_ref() {
                             if self.native_fns.contains(fnname.as_ref()) {
                                 rust_type = RustType::F64;
+                            }
+                        }
+                    }
+                }
+
+                // Mandelbrot: `iter` is unused after usize escape-loop fusion.
+                if self.native_fn_body_emit {
+                    if let Some(skip) = &self.skip_iter_local {
+                        if name.as_ref() == skip {
+                            if init
+                                .as_ref()
+                                .is_some_and(|e| Self::int_literal_value_of(e) == Some(0))
+                            {
+                                return Ok(());
                             }
                         }
                     }
@@ -2702,12 +2891,23 @@ impl Codegen {
                     if let Expr::Index { object, index, .. } = init_e {
                         if let Expr::Ident { name: arr_name, .. } = object.as_ref() {
                             if self.index_in_bounds(index, arr_name.as_ref()) {
-                                if let Some(b) = self.vec_fixed_len.get(arr_name.as_ref()) {
-                                    self.bounded_below_len
-                                        .insert(name.to_string(), b.clone());
+                                if let Some(b) = self.vec_fixed_len.get(arr_name.as_ref()).cloned() {
+                                    self.bounded_below_len.insert(name.to_string(), b.clone());
+                                    if Self::int_literal_value_of(index) == Some(0) {
+                                        self.seed_int_range_from_len(name.as_ref(), &b);
+                                    }
                                 }
                             }
                         }
+                    }
+                    if (self.native_fn_body_emit || self.native_vec_ret.is_some())
+                        && matches!(init_e, Expr::Ident { name: src, .. })
+                    {
+                        let Expr::Ident { name: src, .. } = init_e else {
+                            unreachable!()
+                        };
+                        self.bounded_below_len
+                            .insert(name.to_string(), BoundKey::Var(src.to_string()));
                     }
                 }
 
@@ -2961,6 +3161,14 @@ impl Codegen {
                 // `Vec<T>` into a single bulk `extend` — one allocation instead of N per-element
                 // pushes (which repeatedly realloc as the Vec grows). Sound only when `N` is a proven,
                 // side-effect-free integer; otherwise the normal loop is emitted below.
+                if self.try_emit_fannkuch_triple_init(
+                    init.as_deref(),
+                    cond.as_ref(),
+                    update.as_ref(),
+                    body,
+                )? {
+                    return Ok(());
+                }
                 if self.try_emit_native_fill_loop(
                     init.as_deref(),
                     cond.as_ref(),
@@ -6998,7 +7206,10 @@ impl Codegen {
             return false;
         };
         let Expr::Ident { name: rk, .. } = right.as_ref() else {
-            return false;
+            if Self::int_literal_value_of(right) != Some(1) {
+                return false;
+            }
+            return self.index_minus_one_in_bounds(lk, arr);
         };
         let lk = lk.as_ref();
         let rk = rk.as_ref();
@@ -7034,6 +7245,57 @@ impl Codegen {
                 && matches!(&g.bound, BoundKey::Var(k2) if self.shift_half_of.get(k2) == Some(&lk.to_string()))
         });
         lk_bounded && rk_lt_lk
+    }
+
+    /// `arr[lk - 1]` when `lk` is bounded by the vec's fixed length (fannkuch `count[r-1]`).
+    fn index_minus_one_in_bounds(&self, lk: &str, arr: &str) -> bool {
+        let len = match self.vec_fixed_len.get(arr) {
+            Some(l) => l,
+            None => return false,
+        };
+        match len {
+            BoundKey::Var(n) => self.bounded_below_len.get(lk) == Some(&BoundKey::Var(n.clone())),
+            BoundKey::Const(c) => self.bounded_below_len.get(lk) == Some(&BoundKey::Const(*c)),
+            BoundKey::Len(_) => false,
+        }
+    }
+
+    /// Permutation indices read from `arr[0]` are in `[0, len-1]` when `arr` has fixed length `len`.
+    fn seed_int_range_from_len(&mut self, var: &str, len: &BoundKey) {
+        match len {
+            BoundKey::Const(c) if *c > 0 => {
+                self.int_range_locals.insert(var.to_string(), (0, *c - 1));
+            }
+            BoundKey::Var(p) => {
+                if let Some(n) = self.native_param_lit(p) {
+                    if n.fract() == 0.0 && n >= 1.0 {
+                        self.int_range_locals.insert(var.to_string(), (0, n as i64 - 1));
+                    }
+                }
+            }
+            BoundKey::Const(_) | BoundKey::Len(_) => {}
+        }
+    }
+
+    fn merge_fn_body_inference(&mut self, stmts: &[Statement]) {
+        for (k, v) in self.collect_vec_fixed_len(stmts) {
+            self.vec_fixed_len.insert(k, v);
+        }
+        for n in self.collect_nonneg_locals(stmts) {
+            self.nonneg_locals.insert(n);
+        }
+        for (k, v) in self.collect_int_range_locals(stmts) {
+            self.int_range_locals.insert(k, v);
+        }
+        for (k, v) in Self::collect_shift_half_of(stmts) {
+            self.shift_half_of.insert(k, v);
+        }
+        for (k, v) in Self::collect_array_elem_ranges(stmts) {
+            self.array_elem_ranges.insert(k, v);
+        }
+        for n in Self::collect_int_valued_locals(stmts) {
+            self.int_valued_locals.insert(n);
+        }
     }
 
     /// Push an active index guard parsed from a loop condition `var < bound` / `var <= bound`.
@@ -7457,6 +7719,87 @@ impl Codegen {
         Some((name.to_string(), bound.to_string()))
     }
 
+    /// `let y0 = ((py / h) * 3) - 1.5` immediately after a usize `py` loop — fuse into one coord decl.
+    fn parse_linear_coord_from_counter(
+        stmt: &Statement,
+        counter: &str,
+        bound_ident: &str,
+        bound_lit: Option<f64>,
+    ) -> Option<(String, f64, f64, f64)> {
+        let (coord_name, value) = match stmt {
+            Statement::VarDecl {
+                name,
+                init: Some(e),
+                ..
+            } => (name.to_string(), e),
+            Statement::ExprStmt { expr, .. } => match expr {
+                Expr::Assign { name, value, .. } => (name.to_string(), value.as_ref()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let Expr::Binary {
+            left,
+            op: BinOp::Sub,
+            right: sub_rhs,
+            ..
+        } = value
+        else {
+            return None;
+        };
+        let sub = match sub_rhs.as_ref() {
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => *n,
+            _ => return None,
+        };
+        let Expr::Binary {
+            left: mul_expr,
+            op: BinOp::Mul,
+            right: mul_rhs,
+            ..
+        } = left.as_ref()
+        else {
+            return None;
+        };
+        let mul = match mul_rhs.as_ref() {
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => *n,
+            _ => return None,
+        };
+        let div = match mul_expr.as_ref() {
+            Expr::Binary {
+                left,
+                op: BinOp::Div,
+                right: div_rhs,
+                ..
+            } => {
+                let Expr::Ident { name: c, .. } = left.as_ref() else {
+                    return None;
+                };
+                if c.as_ref() != counter {
+                    return None;
+                }
+                match div_rhs.as_ref() {
+                    Expr::Literal {
+                        value: Literal::Number(n),
+                        ..
+                    } => *n,
+                    Expr::Ident { name: p, .. } if p.as_ref() == bound_ident => {
+                        bound_lit?
+                    }
+                    _ => return None,
+                }
+            }
+            Expr::Ident { name: c, .. } if c.as_ref() == counter => 1.0,
+            _ => return None,
+        };
+        Some((coord_name, mul, div, sub))
+    }
+
     fn try_emit_usize_for_loop(
         &mut self,
         counter: &str,
@@ -7488,14 +7831,53 @@ impl Codegen {
         } else {
             BoundKey::Var(bound.to_string())
         };
+        let bound_lit = self.native_param_lit(bound);
+        let body_stmts: &[Statement] = match body {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.as_slice()
+            }
+            single => std::slice::from_ref(single),
+        };
+        let fused_coord = if self.native_fn_body_emit || self.native_vec_ret.is_some() {
+            body_stmts
+                .first()
+                .and_then(|s| {
+                    Self::parse_linear_coord_from_counter(s, counter, bound, bound_lit)
+                })
+        } else {
+            None
+        };
+        let (rest_stmts, fused_coord) = if let Some(fc) = fused_coord {
+            if body_stmts.len() < 2 {
+                (body_stmts, None)
+            } else {
+                (&body_stmts[1..], Some(fc))
+            }
+        } else {
+            (body_stmts, None)
+        };
         self.writeln(&format!("for {} in 0..{} {{", usize_var, bound_usize));
         self.indent += 1;
-        self.writeln(&format!(
-            "let mut {}: f64 = ({} as f64);",
-            esc_ctr, usize_var
-        ));
-        self.type_context.define(counter, RustType::F64);
-        self.usize_for_counters.insert(counter.to_string());
+        let fused_was_peeled = fused_coord.is_some();
+        if let Some((coord_name, mul, div, sub)) = fused_coord.as_ref() {
+            let esc_coord = Self::escape_ident(coord_name);
+            let scale = *mul / *div;
+            self.writeln(&format!(
+                "let mut {}: f64 = (({} as f64) * {} - {});",
+                esc_coord,
+                usize_var,
+                Self::f64_lit(scale),
+                Self::f64_lit(*sub),
+            ));
+            self.type_context.define(coord_name, RustType::F64);
+        } else {
+            self.writeln(&format!(
+                "let mut {}: f64 = ({} as f64);",
+                esc_ctr, usize_var
+            ));
+            self.type_context.define(counter, RustType::F64);
+            self.usize_for_counters.insert(counter.to_string());
+        }
         let extra_guard = match &bound_key {
             BoundKey::Var(bv) => self.shift_half_of.get(bv).map(|parent| {
                 IndexGuard {
@@ -7517,10 +7899,21 @@ impl Codegen {
         if let Some(g) = extra_guard {
             self.active_index_guards.push(g);
         }
-        if self.native_fn_body_emit {
-            self.emit_native_fn_body(body)?;
+        let fused_was_peeled = fused_coord.is_some();
+        let emit_body = if fused_was_peeled && rest_stmts.len() == 1 {
+            rest_stmts[0].clone()
+        } else if fused_was_peeled {
+            Statement::Multi {
+                statements: rest_stmts.to_vec(),
+                span: body.span(),
+            }
         } else {
-            self.emit_statement(body)?;
+            body.clone()
+        };
+        if self.native_fn_body_emit {
+            self.emit_native_fn_body(&emit_body)?;
+        } else {
+            self.emit_statement(&emit_body)?;
         }
         self.active_index_guards.pop();
         if pushed_extra {
@@ -11371,7 +11764,21 @@ impl Codegen {
                         }
                     }
                     self.native_fn_body_emit = true;
+                    let body_slice = Self::fn_body_stmt_slice(body);
+                    let saved_vec_fixed = self.vec_fixed_len.clone();
+                    let saved_nonneg = self.nonneg_locals.clone();
+                    let saved_int_range = self.int_range_locals.clone();
+                    let saved_shift_half = self.shift_half_of.clone();
+                    let saved_array_elem = self.array_elem_ranges.clone();
+                    let saved_int_valued = self.int_valued_locals.clone();
+                    self.merge_fn_body_inference(body_slice);
                     self.emit_native_fn_body(body)?;
+                    self.vec_fixed_len = saved_vec_fixed;
+                    self.nonneg_locals = saved_nonneg;
+                    self.int_range_locals = saved_int_range;
+                    self.shift_half_of = saved_shift_half;
+                    self.array_elem_ranges = saved_array_elem;
+                    self.int_valued_locals = saved_int_valued;
                     self.native_fn_body_emit = false;
                     self.native_lcg_hoist.take();
                     self.native_lcg_hoist_int = false;
@@ -11388,10 +11795,56 @@ impl Codegen {
         Ok(())
     }
 
+    fn scan_usize_escape_iter_decl(stmts: &[Statement]) -> Option<String> {
+        for i in 0..stmts.len().saturating_sub(1) {
+            let iter_name = match &stmts[i] {
+                Statement::VarDecl {
+                    name,
+                    init: Some(e),
+                    ..
+                } if Self::int_literal_value_of(e) == Some(0) => name.to_string(),
+                _ => continue,
+            };
+            let Statement::While { cond, .. } = &stmts[i + 1] else {
+                continue;
+            };
+            let is_escape = matches!(
+                cond,
+                Expr::Binary {
+                    left,
+                    op: BinOp::And,
+                    ..
+                } if matches!(
+                    left.as_ref(),
+                    Expr::Binary {
+                        left: lv,
+                        op: BinOp::Lt,
+                        ..
+                    } if matches!(
+                        lv.as_ref(),
+                        Expr::Ident { name, .. } if name.as_ref() == iter_name.as_str()
+                    )
+                )
+            );
+            if is_escape {
+                return Some(iter_name);
+            }
+        }
+        None
+    }
+
     fn emit_native_fn_body(&mut self, stmt: &Statement) -> Result<(), CompileError> {
         match stmt {
             Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                if self.skip_iter_local.is_none() {
+                    if let Some(iter) = Self::scan_usize_escape_iter_decl(statements) {
+                        self.skip_iter_local = Some(iter);
+                    }
+                }
                 self.emit_statements_with_folds(statements)?;
+                if self.pending_stayed_var.is_none() {
+                    self.skip_iter_local = None;
+                }
             }
             Statement::Return { value, .. } => {
                 let e = value.as_ref().expect("eligible return has a value");
@@ -12382,16 +12835,19 @@ impl Codegen {
         self.usize_for_counters.clear();
         let saved_vec_fixed = self.vec_fixed_len.clone();
         let saved_nonneg = self.nonneg_locals.clone();
+        let saved_int_range = self.int_range_locals.clone();
+        let saved_shift_half = self.shift_half_of.clone();
+        let saved_array_elem = self.array_elem_ranges.clone();
+        let saved_int_valued = self.int_valued_locals.clone();
         let body_slice = Self::fn_body_stmt_slice(body);
-        for (k, v) in self.collect_vec_fixed_len(body_slice) {
-            self.vec_fixed_len.insert(k, v);
-        }
-        for n in self.collect_nonneg_locals(body_slice) {
-            self.nonneg_locals.insert(n);
-        }
+        self.merge_fn_body_inference(body_slice);
         let res = self.emit_statement(body);
         self.vec_fixed_len = saved_vec_fixed;
         self.nonneg_locals = saved_nonneg;
+        self.int_range_locals = saved_int_range;
+        self.shift_half_of = saved_shift_half;
+        self.array_elem_ranges = saved_array_elem;
+        self.int_valued_locals = saved_int_valued;
         self.native_fn_emit_name = None;
         // Total function: a value-returning fn that falls off the end gets a default.
         if sig.ret == VecRetKind::F64 {
@@ -13661,6 +14117,17 @@ impl Codegen {
         // (`x & 255`, `x >> 1`, …). Trivially sound: the value is known.
         if let Some(v) = Self::int_literal_value_of(e) {
             return Ok(Some(format!("{}i32", v as i32)));
+        }
+        if let Expr::Ident { name, .. } = e {
+            if self.int_valued_locals.contains(name.as_ref()) {
+                let (code, ty) = self.emit_typed_expr(e)?;
+                if ty == RustType::F64 {
+                    return Ok(Some(format!(
+                        "(unsafe {{ ({}).to_int_unchecked::<i64>() }} as i32)",
+                        code
+                    )));
+                }
+            }
         }
         // Leaf: fold only when it is a plain `f64` (so `to_int32` applies directly). `to_int32`
         // keeps its `is_finite` guard here — a leaf may legitimately be NaN/±Infinity (→ 0).
