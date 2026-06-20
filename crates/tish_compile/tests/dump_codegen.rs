@@ -28,4 +28,5 @@ fn dump_perf_fixtures() {
     std::fs::write(out.join("dump_fannkuch.rs"), compile("tests/perf/fannkuch.tish")).unwrap();
     std::fs::write(out.join("dump_fnv_hash.rs"), compile("tests/perf/fnv_hash.tish")).unwrap();
     std::fs::write(out.join("dump_spectral_norm.rs"), compile("tests/perf/spectral_norm.tish")).unwrap();
+    std::fs::write(out.join("dump_queens.rs"), compile("tests/perf/queens.tish")).unwrap();
 }
