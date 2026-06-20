@@ -4110,6 +4110,14 @@ impl Codegen {
                 )? {
                     return Ok(());
                 }
+                if self.try_emit_vec_copy_within_shift_for(
+                    init.as_deref(),
+                    cond.as_ref(),
+                    update.as_ref(),
+                    body,
+                )? {
+                    return Ok(());
+                }
                 if self.native_fn_body_emit || self.native_vec_ret.is_some() {
                     if let Some((ctr, bound)) =
                         Self::parse_usize_for_counter(init.as_deref(), cond.as_ref(), update.as_ref())
@@ -9265,6 +9273,101 @@ impl Codegen {
             _ => format!("{{ {}[{}] = {}; Value::Null }}", esc_obj, idx_usize, native_val),
         };
         Ok(Some(assign))
+    }
+
+    /// `for (i=0; i<r; i++) { arr[i] = arr[i+1] }` → `arr.copy_within(1..(r+1), 0)` (fannkuch perm1 rotation).
+    fn try_emit_vec_copy_within_shift_for(
+        &mut self,
+        init: Option<&Statement>,
+        cond: Option<&Expr>,
+        update: Option<&Expr>,
+        body: &Statement,
+    ) -> Result<bool, CompileError> {
+        if !self.native_vec_ret.is_some() && !self.native_fn_body_emit {
+            return Ok(false);
+        }
+        let (i_name, r_name) = match Self::parse_usize_for_counter(init, cond, update) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let arr_name = match Self::parse_vec_left_shift_body(body, &i_name) {
+            Some(a) => a,
+            None => return Ok(false),
+        };
+        if self.refcell_wrapped_vars.contains(arr_name.as_str()) {
+            return Ok(false);
+        }
+        let RustType::Vec(elem) = self.type_context.get_type(arr_name.as_str()) else {
+            return Ok(false);
+        };
+        if *elem != RustType::F64 {
+            return Ok(false);
+        }
+        let esc_arr = Self::escape_ident(arr_name.as_str());
+        let esc_r = Self::escape_ident(&r_name);
+        self.writeln(&format!(
+            "{{ let _ru = ({} as usize); if _ru > 0 {{ {}.copy_within(1..(_ru + 1), 0); }} }}",
+            esc_r, esc_arr
+        ));
+        Ok(true)
+    }
+
+    /// `arr[i] = arr[i+1]` loop body for [`try_emit_vec_copy_within_shift_for`].
+    fn parse_vec_left_shift_body(body: &Statement, i_name: &str) -> Option<String> {
+        let st = match body {
+            Statement::Block { statements, .. } if statements.len() == 1 => &statements[0],
+            Statement::ExprStmt { .. } => body,
+            _ => return None,
+        };
+        let Statement::ExprStmt {
+            expr: Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            },
+            ..
+        } = st
+        else {
+            return None;
+        };
+        let Expr::Ident { name: arr, .. } = object.as_ref() else {
+            return None;
+        };
+        if !matches!(index.as_ref(), Expr::Ident { name, .. } if name.as_ref() == i_name) {
+            return None;
+        }
+        let Expr::Index {
+            object: o2,
+            index: idx2,
+            optional: false,
+            ..
+        } = value.as_ref()
+        else {
+            return None;
+        };
+        let Expr::Ident { name: arr2, .. } = o2.as_ref() else {
+            return None;
+        };
+        if arr.as_ref() != arr2.as_ref() {
+            return None;
+        }
+        let Expr::Binary {
+            left,
+            op: BinOp::Add,
+            right,
+            ..
+        } = idx2.as_ref()
+        else {
+            return None;
+        };
+        if !matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == i_name) {
+            return None;
+        }
+        if Self::int_literal_value_of(right) != Some(1) {
+            return None;
+        }
+        Some(arr.to_string())
     }
 
     /// `while (i < r) { let j = i+1; arr[i] = arr[j]; i = j }` → `for ui in 0..r { arr[ui]=arr[ui+1] }`.

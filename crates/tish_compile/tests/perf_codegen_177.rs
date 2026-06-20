@@ -121,8 +121,9 @@ fn fannkuch_nv_uses_direct_flip_indexing() {
             "fannkuch_nv should not use perm.get for k-i sub-index"
         );
         assert!(
-            nv.contains("_usize_shift_") && nv.contains("perm1[_usize_shift_"),
-            "fannkuch_nv should fuse perm1 left-shift while loop"
+            nv.contains("copy_within(1..(_ru + 1), 0)")
+                || (nv.contains("_usize_shift_") && nv.contains("perm1[_usize_shift_")),
+            "fannkuch_nv rotation should shift perm1 via copy_within or fused usize loop"
         );
         assert!(
             nv.contains("perm1[(r) as usize] = perm0"),
