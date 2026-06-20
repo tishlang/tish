@@ -76,6 +76,10 @@ fn mandelbrot_lowers_mandel_native() {
             rust.contains("_stayed_") && rust.contains("if _stayed_"),
             "mandel_native should fuse iter===maxIter into stayed flag"
         );
+        assert!(
+            rust.contains("count += 1_f64"),
+            "mandel_native should increment count with +="
+        );
         if let Some(native) = rust.split("fn mandel_native(").nth(1) {
             let native = native.split("fn run()").next().unwrap_or(native);
             assert!(
@@ -115,16 +119,30 @@ fn fannkuch_nv_uses_direct_flip_indexing() {
             "fannkuch_nv should decrement count[r] via direct indexing"
         );
         assert!(
-            rust.contains("perm.extend(std::iter::repeat(0_f64).take(10))"),
-            "fannkuch_nv should bulk-init perm/count arrays"
+            rust.contains("perm = std::iter::repeat(0_f64).take(10)")
+                || rust.contains("perm.extend(std::iter::repeat(0_f64).take(10))"),
+            "fannkuch_nv should bulk-init perm array"
         );
         assert!(
             rust.contains("perm1 = (0..10).map(|j| j as f64).collect()"),
             "fannkuch_nv should iota-init perm1"
         );
         assert!(
-            rust.contains("to_int_unchecked") && rust.contains("wrapping_shr"),
-            "fannkuch_nv k2 shift should use native int32 path"
+            rust.contains(".copy_from_slice(&perm1)"),
+            "fannkuch_nv should copy perm1 into perm via copy_from_slice"
+        );
+        assert!(
+            rust.contains("for ui in 1..10") && rust.contains("count[ui]"),
+            "fannkuch_nv should bulk-init count[r-1] via indexed for"
+        );
+        assert!(
+            rust.contains("perm[_usize_") && !rust.contains("let mut i: f64 = (_usize_"),
+            "fannkuch_nv flip/copy loops should index via usize without f64 shadow i"
+        );
+        assert!(
+            (rust.contains("if ((permCount as i64) & 1) == 0")
+                || (rust.contains("to_int_unchecked") && rust.contains("& 1"))),
+            "fannkuch_nv checksum parity should use fast int parity"
         );
         assert!(
             rust.contains("count[((r - 1_f64)) as usize] = r"),

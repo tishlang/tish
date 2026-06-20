@@ -992,6 +992,8 @@ pub(crate) struct Codegen {
     pending_stayed_var: Option<String>,
     /// Skip `iter = iter + 1` and the `iter` decl in a usize escape loop (mandelbrot).
     skip_iter_local: Option<String>,
+    /// Active usize `for` counter → `_usize_*` var (skip f64 shadow + direct `arr[ui]`).
+    usize_var_subst: std::collections::HashMap<String, String>,
     /// Scopes of names whose Rust binding is actually `Rc<RefCell<_>>` (emitted at VarDecl).
     /// `refcell_wrapped_vars` alone is insufficient: it is set by prepasses before decl may run.
     rc_cell_storage_scopes: Vec<std::collections::HashSet<String>>,
@@ -1082,6 +1084,7 @@ impl Codegen {
             strict_lt_bounds: Vec::new(),
             pending_stayed_var: None,
             skip_iter_local: None,
+            usize_var_subst: std::collections::HashMap::new(),
             rc_cell_storage_scopes: vec![std::collections::HashSet::new()],
             usage_analyzer: None,
             type_context: TypeContext::new(),
@@ -2674,7 +2677,7 @@ impl Codegen {
         let perm1_esc = Self::escape_ident(&perm1);
         let count_esc = Self::escape_ident(&count);
         self.writeln(&format!(
-            "{}.extend(std::iter::repeat(0_f64).take({}));",
+            "{} = std::iter::repeat(0_f64).take({}).collect();",
             perm_esc, n_usize
         ));
         self.writeln(&format!(
@@ -2682,9 +2685,237 @@ impl Codegen {
             perm1_esc, n_usize
         ));
         self.writeln(&format!(
-            "{}.extend(std::iter::repeat(0_f64).take({}));",
+            "{} = std::iter::repeat(0_f64).take({}).collect();",
             count_esc, n_usize
         ));
+        Ok(true)
+    }
+
+    /// `for (i=0; i<n; i++) { dst[i] = src[i] }` on equal native `Vec<f64>` → `copy_from_slice`.
+    fn try_emit_native_vec_copy_loop(
+        &mut self,
+        init: Option<&Statement>,
+        cond: Option<&Expr>,
+        update: Option<&Expr>,
+        body: &Statement,
+    ) -> Result<bool, CompileError> {
+        if !self.native_vec_ret.is_some() && !self.native_fn_body_emit {
+            return Ok(false);
+        }
+        let Some(Statement::VarDecl {
+            name: i_name,
+            init: Some(i_init),
+            ..
+        }) = init
+        else {
+            return Ok(false);
+        };
+        if Self::int_literal_value_of(i_init) != Some(0) {
+            return Ok(false);
+        }
+        let Some(cond) = cond else {
+            return Ok(false);
+        };
+        let Expr::Binary {
+            left,
+            op: BinOp::Lt,
+            right: bound,
+            ..
+        } = cond
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: c, .. } = left.as_ref() else {
+            return Ok(false);
+        };
+        if c.as_ref() != i_name.as_ref() {
+            return Ok(false);
+        }
+        let update = match update.as_ref() {
+            Some(u) => u,
+            None => return Ok(false),
+        };
+        if !Self::is_increment_of(update, i_name.as_ref()) {
+            return Ok(false);
+        }
+        let stmts = match body {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.as_slice()
+            }
+            single => std::slice::from_ref(single),
+        };
+        if stmts.len() != 1 {
+            return Ok(false);
+        }
+        let Statement::ExprStmt { expr, .. } = &stmts[0] else {
+            return Ok(false);
+        };
+        let Expr::IndexAssign {
+            object: dst,
+            index: idx,
+            value,
+            ..
+        } = expr
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: dst_name, .. } = dst.as_ref() else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: idx_name, .. } = idx.as_ref() else {
+            return Ok(false);
+        };
+        if idx_name.as_ref() != i_name.as_ref() {
+            return Ok(false);
+        }
+        let Expr::Index {
+            object: src,
+            index: src_idx,
+            ..
+        } = value.as_ref()
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: src_name, .. } = src.as_ref() else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: src_i, .. } = src_idx.as_ref() else {
+            return Ok(false);
+        };
+        if src_i.as_ref() != i_name.as_ref() {
+            return Ok(false);
+        }
+        if self.type_context.get_type(dst_name.as_ref()) != RustType::Vec(Box::new(RustType::F64))
+            || self.type_context.get_type(src_name.as_ref()) != RustType::Vec(Box::new(RustType::F64))
+        {
+            return Ok(false);
+        }
+        let dst_esc = Self::escape_ident(dst_name.as_ref());
+        let src_esc = Self::escape_ident(src_name.as_ref());
+        self.writeln(&format!("{}.copy_from_slice(&{});", dst_esc, src_esc));
+        Ok(true)
+    }
+
+    /// `while (r !== 1) { count[r-1] = r; r = r - 1 }` → indexed fill + `r = 1`.
+    fn try_emit_count_r_decr_while(
+        &mut self,
+        cond: &Expr,
+        body: &Statement,
+    ) -> Result<bool, CompileError> {
+        if !self.native_vec_ret.is_some() && !self.native_fn_body_emit {
+            return Ok(false);
+        }
+        let r_ne_one = match cond {
+            Expr::Binary {
+                left,
+                op: BinOp::StrictNe | BinOp::Ne,
+                right,
+                ..
+            } => {
+                let Expr::Ident { name: r, .. } = left.as_ref() else {
+                    return Ok(false);
+                };
+                if Self::int_literal_value_of(right) != Some(1) {
+                    return Ok(false);
+                }
+                r.to_string()
+            }
+            _ => return Ok(false),
+        };
+        let stmts = match body {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.as_slice()
+            }
+            single => std::slice::from_ref(single),
+        };
+        if stmts.len() != 2 {
+            return Ok(false);
+        }
+        let Statement::ExprStmt { expr: a0, .. } = &stmts[0] else {
+            return Ok(false);
+        };
+        let Statement::ExprStmt { expr: a1, .. } = &stmts[1] else {
+            return Ok(false);
+        };
+        let Expr::IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } = a0
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: count_name, .. } = object.as_ref() else {
+            return Ok(false);
+        };
+        let Expr::Binary {
+            left: lk,
+            op: BinOp::Sub,
+            right: lr,
+            ..
+        } = index.as_ref()
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: lk_name, .. } = lk.as_ref() else {
+            return Ok(false);
+        };
+        if lk_name.as_ref() != r_ne_one.as_str() || Self::int_literal_value_of(lr) != Some(1) {
+            return Ok(false);
+        }
+        let Expr::Ident { name: rv, .. } = value.as_ref() else {
+            return Ok(false);
+        };
+        if rv.as_ref() != r_ne_one.as_str() {
+            return Ok(false);
+        }
+        let Expr::Assign { name: r_name, value: r_upd, .. } = a1 else {
+            return Ok(false);
+        };
+        if r_name.as_ref() != r_ne_one.as_str() {
+            return Ok(false);
+        }
+        let Expr::Binary {
+            left: rl,
+            op: BinOp::Sub,
+            right: rr,
+            ..
+        } = r_upd.as_ref()
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: rl_name, .. } = rl.as_ref() else {
+            return Ok(false);
+        };
+        if rl_name.as_ref() != r_ne_one.as_str() || Self::int_literal_value_of(rr) != Some(1) {
+            return Ok(false);
+        }
+        if self.type_context.get_type(count_name.as_ref()) != RustType::Vec(Box::new(RustType::F64)) {
+            return Ok(false);
+        }
+        let n_usize = match self.vec_fixed_len.get(count_name.as_ref()) {
+            Some(BoundKey::Const(c)) => format!("{}", *c as usize),
+            Some(BoundKey::Var(v)) => {
+                if let Some(lit) = self.native_param_lit(v) {
+                    if lit.fract() == 0.0 && lit >= 0.0 {
+                        format!("{}", lit as usize)
+                    } else {
+                        format!("({} as usize)", Self::escape_ident(v))
+                    }
+                } else {
+                    format!("({} as usize)", Self::escape_ident(v))
+                }
+            }
+            _ => return Ok(false),
+        };
+        let count_esc = Self::escape_ident(count_name.as_ref());
+        let r_esc = Self::escape_ident(&r_ne_one);
+        self.writeln(&format!(
+            "for ui in 1..{} {{ {}[ui] = (ui as f64 + 1_f64); }}",
+            n_usize, count_esc
+        ));
+        self.writeln(&format!("{} = 1_f64;", r_esc));
         Ok(true)
     }
 
@@ -2991,6 +3222,11 @@ impl Codegen {
                 else_branch,
                 ..
             } => {
+                if (self.native_fn_body_emit || self.native_vec_ret.is_some())
+                    && self.try_emit_checksum_parity_if(cond, then_branch, else_branch)?
+                {
+                    return Ok(());
+                }
                 if let Some(stayed) = self.pending_stayed_var.take() {
                     if self.try_emit_stayed_count_if(cond, then_branch, &stayed)? {
                         return Ok(());
@@ -3019,6 +3255,11 @@ impl Codegen {
                 self.writeln("}");
             }
             Statement::While { cond, body, .. } => {
+                if (self.native_fn_body_emit || self.native_vec_ret.is_some())
+                    && self.try_emit_count_r_decr_while(cond, body)?
+                {
+                    return Ok(());
+                }
                 if (self.native_fn_body_emit || self.native_vec_ret.is_some())
                     && self.try_emit_native_left_shift_while(cond, body)?
                 {
@@ -3162,6 +3403,14 @@ impl Codegen {
                 // pushes (which repeatedly realloc as the Vec grows). Sound only when `N` is a proven,
                 // side-effect-free integer; otherwise the normal loop is emitted below.
                 if self.try_emit_fannkuch_triple_init(
+                    init.as_deref(),
+                    cond.as_ref(),
+                    update.as_ref(),
+                    body,
+                )? {
+                    return Ok(());
+                }
+                if self.try_emit_native_vec_copy_loop(
                     init.as_deref(),
                     cond.as_ref(),
                     update.as_ref(),
@@ -7858,6 +8107,11 @@ impl Codegen {
         };
         self.writeln(&format!("for {} in 0..{} {{", usize_var, bound_usize));
         self.indent += 1;
+        let native_usize = self.native_fn_body_emit || self.native_vec_ret.is_some();
+        if native_usize {
+            self.usize_var_subst.insert(counter.to_string(), usize_var.clone());
+            self.usize_for_counters.insert(counter.to_string());
+        }
         let fused_was_peeled = fused_coord.is_some();
         if let Some((coord_name, mul, div, sub)) = fused_coord.as_ref() {
             let esc_coord = Self::escape_ident(coord_name);
@@ -7870,13 +8124,15 @@ impl Codegen {
                 Self::f64_lit(*sub),
             ));
             self.type_context.define(coord_name, RustType::F64);
-        } else {
+        } else if !native_usize {
             self.writeln(&format!(
                 "let mut {}: f64 = ({} as f64);",
                 esc_ctr, usize_var
             ));
             self.type_context.define(counter, RustType::F64);
             self.usize_for_counters.insert(counter.to_string());
+        } else {
+            self.type_context.define(counter, RustType::F64);
         }
         let extra_guard = match &bound_key {
             BoundKey::Var(bv) => self.shift_half_of.get(bv).map(|parent| {
@@ -7919,9 +8175,157 @@ impl Codegen {
         if pushed_extra {
             self.active_index_guards.pop();
         }
+        if native_usize {
+            self.usize_var_subst.remove(counter);
+        }
         self.indent -= 1;
         self.writeln("}");
         Ok(true)
+    }
+
+    /// `if ((permCount & 1) === 0) { checksum += flips } else { checksum -= flips }`.
+    fn try_emit_checksum_parity_if(
+        &mut self,
+        cond: &Expr,
+        then_branch: &Statement,
+        else_branch: &Option<Box<Statement>>,
+    ) -> Result<bool, CompileError> {
+        let Some(eb) = else_branch.as_ref() else {
+            return Ok(false);
+        };
+        let Expr::Binary {
+            left,
+            op: BinOp::StrictEq,
+            right,
+            ..
+        } = cond
+        else {
+            return Ok(false);
+        };
+        if Self::int_literal_value_of(right) != Some(0) {
+            return Ok(false);
+        }
+        let Expr::Binary {
+            left: and_l,
+            op: BinOp::BitAnd,
+            right: and_r,
+            ..
+        } = left.as_ref()
+        else {
+            return Ok(false);
+        };
+        if Self::int_literal_value_of(and_r) != Some(1) {
+            return Ok(false);
+        };
+        let Expr::Ident { name: parity_var, .. } = and_l.as_ref() else {
+            return Ok(false);
+        };
+        if !self.int_valued_locals.contains(parity_var.as_ref()) {
+            return Ok(false);
+        }
+        let (check_name, flip_name) = match Self::parse_checksum_parity_branches(then_branch, eb.as_ref()) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let esc_check = Self::escape_ident(&check_name);
+        let esc_flip = Self::escape_ident(&flip_name);
+        let esc_parity = Self::escape_ident(parity_var.as_ref());
+        self.writeln(&format!("if (({} as i64) & 1) == 0 {{", esc_parity));
+        self.indent += 1;
+        self.writeln(&format!("{} += {};", esc_check, esc_flip));
+        self.indent -= 1;
+        self.writeln("} else {");
+        self.indent += 1;
+        self.writeln(&format!("{} -= {};", esc_check, esc_flip));
+        self.indent -= 1;
+        self.writeln("}");
+        Ok(true)
+    }
+
+    fn parse_checksum_parity_branches(
+        then_branch: &Statement,
+        else_branch: &Statement,
+    ) -> Option<(String, String)> {
+        let parse_add = |stmt: &Statement| -> Option<(String, String)> {
+            let expr = match stmt {
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    if statements.len() != 1 {
+                        return None;
+                    }
+                    match &statements[0] {
+                        Statement::ExprStmt { expr, .. } => expr,
+                        _ => return None,
+                    }
+                }
+                Statement::ExprStmt { expr, .. } => expr,
+                _ => return None,
+            };
+            let Expr::Assign { name: check, value, .. } = expr else {
+                return None;
+            };
+            let Expr::Binary {
+                left,
+                op: BinOp::Add,
+                right,
+                ..
+            } = value.as_ref()
+            else {
+                return None;
+            };
+            let Expr::Ident { name: l, .. } = left.as_ref() else {
+                return None;
+            };
+            if l.as_ref() != check.as_ref() {
+                return None;
+            }
+            let Expr::Ident { name: flip, .. } = right.as_ref() else {
+                return None;
+            };
+            Some((check.to_string(), flip.to_string()))
+        };
+        let parse_sub = |stmt: &Statement| -> Option<(String, String)> {
+            let expr = match stmt {
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    if statements.len() != 1 {
+                        return None;
+                    }
+                    match &statements[0] {
+                        Statement::ExprStmt { expr, .. } => expr,
+                        _ => return None,
+                    }
+                }
+                Statement::ExprStmt { expr, .. } => expr,
+                _ => return None,
+            };
+            let Expr::Assign { name: check, value, .. } = expr else {
+                return None;
+            };
+            let Expr::Binary {
+                left,
+                op: BinOp::Sub,
+                right,
+                ..
+            } = value.as_ref()
+            else {
+                return None;
+            };
+            let Expr::Ident { name: l, .. } = left.as_ref() else {
+                return None;
+            };
+            if l.as_ref() != check.as_ref() {
+                return None;
+            }
+            let Expr::Ident { name: flip, .. } = right.as_ref() else {
+                return None;
+            };
+            Some((check.to_string(), flip.to_string()))
+        };
+        let (tc, tf) = parse_add(then_branch)?;
+        let (ec, ef) = parse_sub(else_branch)?;
+        if tc != ec || tf != ef {
+            return None;
+        }
+        Some((tc, tf))
     }
 
     /// Native `arr[i] = val` when `arr` is a local `Vec` — optionally without the boxed `Value::Null`
@@ -7945,19 +8349,40 @@ impl Codegen {
         };
         let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
         let in_bounds = self.index_in_bounds(index, name.as_ref());
-        let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-        let idx_usize = if idx_ty == RustType::F64 {
-            format!("({}) as usize", idx_code)
-        } else {
-            let iv = if idx_ty.is_native() {
-                idx_ty.to_value_expr(&idx_code)
+        let idx_usize = if let Expr::Ident { name: idx_name, .. } = index {
+            if let Some(uv) = self.usize_var_subst.get(idx_name.as_ref()) {
+                uv.clone()
             } else {
-                idx_code
-            };
-            format!(
-                "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
-                iv
-            )
+                let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
+                if idx_ty == RustType::F64 {
+                    format!("({}) as usize", idx_code)
+                } else {
+                    let iv = if idx_ty.is_native() {
+                        idx_ty.to_value_expr(&idx_code)
+                    } else {
+                        idx_code
+                    };
+                    format!(
+                        "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
+                        iv
+                    )
+                }
+            }
+        } else {
+            let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
+            if idx_ty == RustType::F64 {
+                format!("({}) as usize", idx_code)
+            } else {
+                let iv = if idx_ty.is_native() {
+                    idx_ty.to_value_expr(&idx_code)
+                } else {
+                    idx_code
+                };
+                format!(
+                    "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
+                    iv
+                )
+            }
         };
         let (val_code, val_ty) = self.emit_typed_expr(value)?;
         let native_val = if val_ty == *elem_type {
@@ -8240,7 +8665,7 @@ impl Codegen {
         let esc_count = Self::escape_ident(&count_name);
         self.writeln(&format!("if {} {{", stayed));
         self.indent += 1;
-        self.writeln(&format!("{} = ({} + 1_f64);", esc_count, esc_count));
+        self.writeln(&format!("{} += 1_f64;", esc_count));
         self.indent -= 1;
         self.writeln("}");
         self.skip_iter_local = None;
@@ -11870,6 +12295,9 @@ impl Codegen {
                 self.native_fn_body_returned = true;
             }
             Statement::If { cond, then_branch, else_branch, .. } => {
+                if self.try_emit_checksum_parity_if(cond, then_branch, else_branch)? {
+                    return Ok(());
+                }
                 if let Some(stayed) = self.pending_stayed_var.take() {
                     if self.try_emit_stayed_count_if(cond, then_branch, &stayed)? {
                         return Ok(());
@@ -14197,6 +14625,9 @@ impl Codegen {
                         RustType::F64,
                     ));
                 }
+                if let Some(uv) = self.usize_var_subst.get(name.as_ref()) {
+                    return Ok((format!("({} as f64)", uv), RustType::F64));
+                }
                 let escaped = Self::escape_ident(name.as_ref());
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     let var_type = self.type_context.get_type(name.as_ref());
@@ -14456,19 +14887,44 @@ impl Codegen {
                                 let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
                                 // #173 part 3: prove the index in-bounds BEFORE emitting it.
                                 let in_bounds = self.index_in_bounds(index, name.as_ref());
-                                let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-                                let idx_usize = if idx_ty == RustType::F64 {
-                                    format!("({}) as usize", idx_code)
-                                } else {
-                                    let iv = if idx_ty.is_native() {
-                                        idx_ty.to_value_expr(&idx_code)
+                                let idx_usize = if let Expr::Ident { name: idx_name, .. } =
+                                    index.as_ref()
+                                {
+                                    if let Some(uv) =
+                                        self.usize_var_subst.get(idx_name.as_ref())
+                                    {
+                                        uv.clone()
                                     } else {
-                                        idx_code
-                                    };
-                                    format!(
-                                        "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
-                                        iv
-                                    )
+                                        let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
+                                        if idx_ty == RustType::F64 {
+                                            format!("({}) as usize", idx_code)
+                                        } else {
+                                            let iv = if idx_ty.is_native() {
+                                                idx_ty.to_value_expr(&idx_code)
+                                            } else {
+                                                idx_code
+                                            };
+                                            format!(
+                                                "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
+                                                iv
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
+                                    if idx_ty == RustType::F64 {
+                                        format!("({}) as usize", idx_code)
+                                    } else {
+                                        let iv = if idx_ty.is_native() {
+                                            idx_ty.to_value_expr(&idx_code)
+                                        } else {
+                                            idx_code
+                                        };
+                                        format!(
+                                            "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
+                                            iv
+                                        )
+                                    }
                                 };
                                 let elem_ty = *elem_type.clone();
                                 // OOB-safe read for numeric/bool Vecs: JS `arr[oob]` is `undefined`
