@@ -90,6 +90,14 @@ fn mandelbrot_lowers_mandel_native() {
                 native.contains("0.0025_f64") && !native.contains("let mut py:"),
                 "mandel_native should fuse py/h and px/w into reciprocal coord init"
             );
+            assert!(
+                !native.contains("let mut xt:"),
+                "mandel_native should fuse x2/y2/xy iteration temps"
+            );
+            assert!(
+                native.contains("let x2 =") && native.contains("let xy ="),
+                "mandel_native should emit fused iteration temps"
+            );
         }
     }
 }
@@ -98,55 +106,61 @@ fn mandelbrot_lowers_mandel_native() {
 fn fannkuch_nv_uses_direct_flip_indexing() {
     let rust = compile_fixture_typed("tests/perf/fannkuch.tish");
     if rust.contains("fn fannkuch_nv(") {
+        let nv = rust.split("fn fannkuch_nv(").nth(1).unwrap();
+        let nv = nv.split("fn run()").next().unwrap_or(nv);
         assert!(
-            rust.contains("perm[((k - i)) as usize]"),
-            "fannkuch_nv flip loop should use direct perm[k-i] indexing"
+            nv.contains("let ku =") && nv.contains("for _usize_flip_"),
+            "fannkuch_nv flip loop should fuse to ku half-loop"
         );
         assert!(
-            !rust.contains("perm.get(((k - i))"),
+            !nv.contains("let mut k2:") && !nv.contains("let mut temp:"),
+            "fannkuch_nv fused flip should not emit k2/temp"
+        );
+        assert!(
+            !nv.contains("perm.get(((k - i))"),
             "fannkuch_nv should not use perm.get for k-i sub-index"
         );
         assert!(
-            rust.contains("_usize_shift_") && rust.contains("perm1[_usize_shift_"),
+            nv.contains("_usize_shift_") && nv.contains("perm1[_usize_shift_"),
             "fannkuch_nv should fuse perm1 left-shift while loop"
         );
         assert!(
-            rust.contains("perm1[(r) as usize] = perm0"),
+            nv.contains("perm1[(r) as usize] = perm0"),
             "fannkuch_nv rotation should assign perm1[r] without resize"
         );
         assert!(
-            rust.contains("count[(r) as usize] = (count[(r) as usize] - 1_f64)"),
+            nv.contains("count[(r) as usize] = (count[(r) as usize] - 1_f64)"),
             "fannkuch_nv should decrement count[r] via direct indexing"
         );
         assert!(
-            rust.contains("perm = std::iter::repeat(0_f64).take(10)")
-                || rust.contains("perm.extend(std::iter::repeat(0_f64).take(10))"),
+            nv.contains("perm = std::iter::repeat(0_f64).take(10)")
+                || nv.contains("perm.extend(std::iter::repeat(0_f64).take(10))"),
             "fannkuch_nv should bulk-init perm array"
         );
         assert!(
-            rust.contains("perm1 = (0..10).map(|j| j as f64).collect()"),
+            nv.contains("perm1 = (0..10).map(|j| j as f64).collect()"),
             "fannkuch_nv should iota-init perm1"
         );
         assert!(
-            rust.contains(".copy_from_slice(&perm1)"),
+            nv.contains(".copy_from_slice(&perm1)"),
             "fannkuch_nv should copy perm1 into perm via copy_from_slice"
         );
         assert!(
-            rust.contains("for ui in 1..10") && rust.contains("count[ui]"),
-            "fannkuch_nv should bulk-init count[r-1] via indexed for"
+            nv.contains("while r != 1_f64") && nv.contains("count[ri - 1] = r"),
+            "fannkuch_nv should fill count via while r!=1 loop (not bulk 1..n init)"
         );
         assert!(
-            rust.contains("perm[_usize_") && !rust.contains("let mut i: f64 = (_usize_"),
-            "fannkuch_nv flip/copy loops should index via usize without f64 shadow i"
+            nv.contains("_usize_shift_") && !nv.contains("let mut i: f64 = (_usize_"),
+            "fannkuch_nv rotation loop should index via usize without f64 shadow i"
         );
         assert!(
-            (rust.contains("if ((permCount as i64) & 1) == 0")
-                || (rust.contains("to_int_unchecked") && rust.contains("& 1"))),
+            (nv.contains("if ((permCount as i64) & 1) == 0")
+                || (nv.contains("to_int_unchecked") && nv.contains("& 1"))),
             "fannkuch_nv checksum parity should use fast int parity"
         );
         assert!(
-            rust.contains("count[((r - 1_f64)) as usize] = r"),
-            "fannkuch_nv count[r-1] init should use direct indexing"
+            nv.contains("count[ri - 1] = r"),
+            "fannkuch_nv count[r-1] init should use direct indexing in while loop"
         );
     }
 }

@@ -2894,29 +2894,531 @@ impl Codegen {
         if self.type_context.get_type(count_name.as_ref()) != RustType::Vec(Box::new(RustType::F64)) {
             return Ok(false);
         }
-        let n_usize = match self.vec_fixed_len.get(count_name.as_ref()) {
-            Some(BoundKey::Const(c)) => format!("{}", *c as usize),
-            Some(BoundKey::Var(v)) => {
-                if let Some(lit) = self.native_param_lit(v) {
-                    if lit.fract() == 0.0 && lit >= 0.0 {
-                        format!("{}", lit as usize)
-                    } else {
-                        format!("({} as usize)", Self::escape_ident(v))
-                    }
-                } else {
-                    format!("({} as usize)", Self::escape_ident(v))
-                }
-            }
-            _ => return Ok(false),
-        };
         let count_esc = Self::escape_ident(count_name.as_ref());
         let r_esc = Self::escape_ident(&r_ne_one);
+        // Must preserve partial fill when `r` is not `n` (Lehmer counter) — bulk `1..n` init
+        // corrupts `count` on later outer-loop iterations and hangs fannkuch.
+        self.writeln(&format!("while {} != 1_f64 {{", r_esc));
+        self.indent += 1;
         self.writeln(&format!(
-            "for ui in 1..{} {{ {}[ui] = (ui as f64 + 1_f64); }}",
-            n_usize, count_esc
+            "let ri = {} as usize;",
+            r_esc
         ));
-        self.writeln(&format!("{} = 1_f64;", r_esc));
+        self.writeln(&format!(
+            "{}[ri - 1] = {};",
+            count_esc, r_esc
+        ));
+        self.writeln(&format!("{} -= 1_f64;", r_esc));
+        self.indent -= 1;
+        self.writeln("}");
         Ok(true)
+    }
+
+    fn stmt_slice_unwrapped(body: &Statement) -> Vec<&Statement> {
+        let mut cur = body;
+        loop {
+            match cur {
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    if statements.len() == 1 {
+                        cur = &statements[0];
+                    } else {
+                        return statements.iter().collect();
+                    }
+                }
+                other => return vec![other],
+            }
+        }
+    }
+
+    fn parse_k_ne_zero(cond: &Expr) -> Option<String> {
+        let Expr::Binary {
+            left,
+            op: BinOp::StrictNe | BinOp::Ne,
+            right,
+            ..
+        } = cond
+        else {
+            return None;
+        };
+        let Expr::Ident { name: k, .. } = left.as_ref() else {
+            return None;
+        };
+        if Self::int_literal_value_of(right) != Some(0) {
+            return None;
+        }
+        Some(k.to_string())
+    }
+
+    fn parse_perm_index_ident(index: &Expr) -> Option<String> {
+        let Expr::Ident { name: n, .. } = index else {
+            return None;
+        };
+        Some(n.to_string())
+    }
+
+    fn parse_perm_k_minus_counter(index: &Expr, k: &str, counter: &str) -> bool {
+        let Expr::Binary {
+            left,
+            op: BinOp::Sub,
+            right,
+            ..
+        } = index
+        else {
+            return false;
+        };
+        matches!(left.as_ref(), Expr::Ident { name: lk, .. } if lk.as_ref() == k)
+            && matches!(right.as_ref(), Expr::Ident { name: rc, .. } if rc.as_ref() == counter)
+    }
+
+    /// `for (i=0; i<k2; i++) { temp=perm[i]; perm[i]=perm[k-i]; perm[k-i]=temp }` when `k2=(k+1)>>1`.
+    fn parse_flip_swap_for(
+        init: Option<&Statement>,
+        cond: Option<&Expr>,
+        update: Option<&Expr>,
+        body: &Statement,
+        shift_half: &HashMap<String, String>,
+    ) -> Option<(String, String)> {
+        let (counter, bound) = Self::parse_usize_for_counter(init, cond, update)?;
+        let k = shift_half.get(&bound)?;
+        let stmts = Self::stmt_slice_unwrapped(body);
+        if stmts.len() != 3 {
+            return None;
+        }
+        let Statement::VarDecl {
+            name: temp,
+            init: Some(temp_init),
+            ..
+        } = stmts[0]
+        else {
+            return None;
+        };
+        let Expr::Index {
+            object,
+            index: idx0,
+            ..
+        } = temp_init
+        else {
+            return None;
+        };
+        let Expr::Ident { name: perm, .. } = object.as_ref() else {
+            return None;
+        };
+        if Self::parse_perm_index_ident(idx0) != Some(counter.clone()) {
+            return None;
+        }
+        let Statement::ExprStmt {
+            expr: Expr::IndexAssign {
+                object: obj1,
+                index: idx1,
+                value: val1,
+                ..
+            },
+            ..
+        } = stmts[1]
+        else {
+            return None;
+        };
+        let Expr::Ident { name: perm1, .. } = obj1.as_ref() else {
+            return None;
+        };
+        if perm1.as_ref() != perm.as_ref() {
+            return None;
+        }
+        if Self::parse_perm_index_ident(idx1) != Some(counter.clone()) {
+            return None;
+        }
+        let Expr::Index {
+            object: obj2,
+            index: idx2,
+            ..
+        } = val1.as_ref()
+        else {
+            return None;
+        };
+        let Expr::Ident { name: perm2, .. } = obj2.as_ref() else {
+            return None;
+        };
+        if perm2.as_ref() != perm.as_ref() || !Self::parse_perm_k_minus_counter(idx2, k, &counter) {
+            return None;
+        }
+        let Statement::ExprStmt {
+            expr: Expr::IndexAssign {
+                object: obj3,
+                index: idx3,
+                value: val3,
+                ..
+            },
+            ..
+        } = stmts[2]
+        else {
+            return None;
+        };
+        let Expr::Ident { name: perm3, .. } = obj3.as_ref() else {
+            return None;
+        };
+        if perm3.as_ref() != perm.as_ref() || !Self::parse_perm_k_minus_counter(idx3, k, &counter) {
+            return None;
+        }
+        if !matches!(val3.as_ref(), Expr::Ident { name: t, .. } if t.as_ref() == temp.as_ref()) {
+            return None;
+        }
+        Some((perm.to_string(), k.clone()))
+    }
+
+    /// `while (k!==0) { k2=(k+1)>>1; flip-for; flips++; k=perm[0] }` → fused usize half-loop.
+    fn try_emit_flip_k_while(
+        &mut self,
+        cond: &Expr,
+        body: &Statement,
+    ) -> Result<bool, CompileError> {
+        if !self.native_vec_ret.is_some() && !self.native_fn_body_emit {
+            return Ok(false);
+        }
+        let k_name = match Self::parse_k_ne_zero(cond) {
+            Some(k) => k,
+            None => return Ok(false),
+        };
+        let stmts = Self::fn_body_stmt_slice(body);
+        if stmts.len() != 4 {
+            return Ok(false);
+        }
+        let Statement::VarDecl {
+            name: k2_name,
+            init: Some(k2_init),
+            ..
+        } = &stmts[0]
+        else {
+            return Ok(false);
+        };
+        if Self::parse_shift_half_init(k2_init) != Some(k_name.clone()) {
+            return Ok(false);
+        }
+        let Statement::For {
+            init,
+            cond: for_cond,
+            update,
+            body: for_body,
+            ..
+        } = &stmts[1]
+        else {
+            return Ok(false);
+        };
+        let (perm_name, k_from_for) = match Self::parse_flip_swap_for(
+            init.as_deref(),
+            for_cond.as_ref(),
+            update.as_ref(),
+            for_body,
+            &self.shift_half_of,
+        ) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        if k_from_for != k_name {
+            return Ok(false);
+        }
+        let Statement::ExprStmt { expr: flips_upd, .. } = &stmts[2] else {
+            return Ok(false);
+        };
+        let Expr::Assign {
+            name: flips_name,
+            value: flips_val,
+            ..
+        } = flips_upd
+        else {
+            return Ok(false);
+        };
+        let Expr::Binary {
+            left: fl_l,
+            op: BinOp::Add,
+            right: fl_r,
+            ..
+        } = flips_val.as_ref()
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: fl_a, .. } = fl_l.as_ref() else {
+            return Ok(false);
+        };
+        if fl_a.as_ref() != flips_name.as_ref() || Self::int_literal_value_of(fl_r) != Some(1) {
+            return Ok(false);
+        }
+        let Statement::ExprStmt { expr: k_upd, .. } = &stmts[3] else {
+            return Ok(false);
+        };
+        let Expr::Assign {
+            name: k_upd_name,
+            value: k_val,
+            ..
+        } = k_upd
+        else {
+            return Ok(false);
+        };
+        if k_upd_name.as_ref() != k_name.as_str() {
+            return Ok(false);
+        }
+        let Expr::Index {
+            object: k_obj,
+            index: k_idx,
+            ..
+        } = k_val.as_ref()
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: k_perm, .. } = k_obj.as_ref() else {
+            return Ok(false);
+        };
+        if k_perm.as_ref() != perm_name.as_str() {
+            return Ok(false);
+        }
+        if Self::int_literal_value_of(k_idx) != Some(0) {
+            return Ok(false);
+        }
+        if self.type_context.get_type(perm_name.as_ref()) != RustType::Vec(Box::new(RustType::F64)) {
+            return Ok(false);
+        }
+        let perm_esc = Self::escape_ident(perm_name.as_ref());
+        let k_esc = Self::escape_ident(&k_name);
+        let flips_esc = Self::escape_ident(flips_name.as_ref());
+        let label = format!("'while_loop_{}", self.loop_label_index);
+        self.loop_label_index += 1;
+        self.loop_stack.push((label.clone(), None));
+        self.break_stack.push(label.clone());
+        self.write(&format!("{}: while {} != 0_f64 {{\n", label, k_esc));
+        self.indent += 1;
+        self.writeln(&format!(
+            "let ku = (({} as usize) + 1) / 2;",
+            k_esc
+        ));
+        let usize_var = format!("_usize_flip_{}", self.loop_label_index);
+        self.loop_label_index += 1;
+        self.writeln(&format!("for {} in 0..ku {{", usize_var));
+        self.indent += 1;
+        self.writeln(&format!(
+            "let a = {}[{}];",
+            perm_esc, usize_var
+        ));
+        self.writeln(&format!(
+            "let b = {}[({} as usize) - {}];",
+            perm_esc, k_esc, usize_var
+        ));
+        self.writeln(&format!("{}[{}] = b;", perm_esc, usize_var));
+        self.writeln(&format!(
+            "{}[({} as usize) - {}] = a;",
+            perm_esc, k_esc, usize_var
+        ));
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln(&format!("{} += 1_f64;", flips_esc));
+        self.writeln(&format!("{} = {}[(0_f64) as usize];", k_esc, perm_esc));
+        self.indent -= 1;
+        self.writeln("}");
+        self.break_stack.pop();
+        self.loop_stack.pop();
+        let _ = k2_name;
+        Ok(true)
+    }
+
+    fn parse_mandel_xt_assign(
+        stmt: &Statement,
+    ) -> Option<(String, String, String, String)> {
+        let (xt_name, expr) = match stmt {
+            Statement::VarDecl {
+                name,
+                init: Some(e),
+                ..
+            } => (name.to_string(), e),
+            Statement::ExprStmt {
+                expr: Expr::Assign { name, value, .. },
+                ..
+            } => (name.to_string(), value.as_ref()),
+            _ => return None,
+        };
+        let Expr::Binary {
+            left,
+            op: BinOp::Add,
+            right: x0_expr,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        let Expr::Ident { name: x0, .. } = x0_expr.as_ref() else {
+            return None;
+        };
+        let Expr::Binary {
+            left: sub_l,
+            op: BinOp::Sub,
+            right: sub_r,
+            ..
+        } = left.as_ref()
+        else {
+            return None;
+        };
+        let (x_name, y_name) = match (sub_l.as_ref(), sub_r.as_ref()) {
+            (
+                Expr::Binary {
+                    left: xl,
+                    op: BinOp::Mul,
+                    right: xr,
+                    ..
+                },
+                Expr::Binary {
+                    left: yl,
+                    op: BinOp::Mul,
+                    right: yr,
+                    ..
+                },
+            ) => {
+                let Expr::Ident { name: x, .. } = xl.as_ref() else {
+                    return None;
+                };
+                let Expr::Ident { name: x2, .. } = xr.as_ref() else {
+                    return None;
+                };
+                if x.as_ref() != x2.as_ref() {
+                    return None;
+                }
+                let Expr::Ident { name: y, .. } = yl.as_ref() else {
+                    return None;
+                };
+                let Expr::Ident { name: y2, .. } = yr.as_ref() else {
+                    return None;
+                };
+                if y.as_ref() != y2.as_ref() {
+                    return None;
+                }
+                (x.to_string(), y.to_string())
+            }
+            _ => return None,
+        };
+        Some((xt_name, x_name, y_name, x0.to_string()))
+    }
+
+    fn parse_mandel_y_assign(stmt: &Statement, x: &str, y: &str) -> Option<String> {
+        let expr = match stmt {
+            Statement::ExprStmt {
+                expr: Expr::Assign { value, .. },
+                ..
+            } => value.as_ref(),
+            _ => return None,
+        };
+        let Expr::Binary {
+            left,
+            op: BinOp::Add,
+            right,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        let Expr::Ident { name: y0, .. } = right.as_ref() else {
+            return None;
+        };
+        let Expr::Binary {
+            left: prod_l,
+            op: BinOp::Mul,
+            right: prod_r,
+            ..
+        } = left.as_ref()
+        else {
+            return None;
+        };
+        if Self::int_literal_value_of(prod_l) != Some(2) {
+            // `2 * x * y` may parse as `(2 * x) * y`.
+            if let Expr::Binary {
+                left: outer_l,
+                op: BinOp::Mul,
+                right: outer_r,
+                ..
+            } = left.as_ref()
+            {
+                if let Expr::Binary {
+                    left: two_l,
+                    op: BinOp::Mul,
+                    right: two_r,
+                    ..
+                } = outer_l.as_ref()
+                {
+                    if Self::int_literal_value_of(two_l) == Some(2) {
+                        let Expr::Ident { name: xa, .. } = two_r.as_ref() else {
+                            return None;
+                        };
+                        let Expr::Ident { name: ya, .. } = outer_r.as_ref() else {
+                            return None;
+                        };
+                        if xa.as_ref() == x && ya.as_ref() == y {
+                            return Some(y0.to_string());
+                        }
+                    }
+                }
+            }
+            return None;
+        }
+        let Expr::Binary {
+            left: xl,
+            op: BinOp::Mul,
+            right: yr,
+            ..
+        } = prod_r.as_ref()
+        else {
+            return None;
+        };
+        let Expr::Ident { name: xa, .. } = xl.as_ref() else {
+            return None;
+        };
+        let Expr::Ident { name: ya, .. } = yr.as_ref() else {
+            return None;
+        };
+        if xa.as_ref() != x || ya.as_ref() != y {
+            return None;
+        }
+        Some(y0.to_string())
+    }
+
+    fn parse_mandel_x_assign(stmt: &Statement, x: &str, xt: &str) -> bool {
+        let (name, src) = match stmt {
+            Statement::ExprStmt {
+                expr: Expr::Assign { name, value, .. },
+                ..
+            } => (name.as_ref(), value.as_ref()),
+            _ => return false,
+        };
+        name == x && matches!(src, Expr::Ident { name: n, .. } if n.as_ref() == xt)
+    }
+
+    /// `xt=x²-y²+x0; y=2xy+y0; x=xt` → fused `x2/y2/xy` temps (one fewer multiply per iter).
+    fn try_emit_mandel_iteration_fold(
+        &mut self,
+        statements: &[Statement],
+    ) -> Result<Option<usize>, CompileError> {
+        if !self.native_fn_body_emit && !self.native_vec_ret.is_some() {
+            return Ok(None);
+        }
+        if statements.len() < 3 {
+            return Ok(None);
+        }
+        let (xt, x, y, x0) = match Self::parse_mandel_xt_assign(&statements[0]) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let y0 = match Self::parse_mandel_y_assign(&statements[1], &x, &y) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        if !Self::parse_mandel_x_assign(&statements[2], &x, &xt) {
+            return Ok(None);
+        }
+        let x_esc = Self::escape_ident(&x);
+        let y_esc = Self::escape_ident(&y);
+        let x0_esc = Self::escape_ident(&x0);
+        let y0_esc = Self::escape_ident(&y0);
+        self.writeln(&format!("let x2 = {} * {};", x_esc, x_esc));
+        self.writeln(&format!("let y2 = {} * {};", y_esc, y_esc));
+        self.writeln(&format!("let xy = {} * {};", x_esc, y_esc));
+        self.writeln(&format!("{} = ((2_f64 * xy) + {});", y_esc, y0_esc));
+        self.writeln(&format!("{} = ((x2 - y2) + {});", x_esc, x0_esc));
+        let _ = xt;
+        Ok(Some(3))
     }
 
     fn emit_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
@@ -3255,6 +3757,11 @@ impl Codegen {
                 self.writeln("}");
             }
             Statement::While { cond, body, .. } => {
+                if (self.native_fn_body_emit || self.native_vec_ret.is_some())
+                    && self.try_emit_flip_k_while(cond, body)?
+                {
+                    return Ok(());
+                }
                 if (self.native_fn_body_emit || self.native_vec_ret.is_some())
                     && self.try_emit_count_r_decr_while(cond, body)?
                 {
@@ -10782,6 +11289,12 @@ impl Codegen {
             if let Some(skip) = self.try_emit_const_cum_search_fold(&statements[i..])? {
                 i += skip;
                 continue;
+            }
+            if self.native_fn_body_emit || self.native_vec_ret.is_some() {
+                if let Some(skip) = self.try_emit_mandel_iteration_fold(&statements[i..])? {
+                    i += skip;
+                    continue;
+                }
             }
             let promote_strict_lt = if let Statement::If {
                 cond,
