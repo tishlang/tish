@@ -14420,32 +14420,6 @@ impl Codegen {
         ok
     }
 
-    fn params_used_in_self_calls(
-        body: &Statement,
-        fn_name: &str,
-        param_names: &[String],
-    ) -> std::collections::HashSet<String> {
-        let mut out = std::collections::HashSet::new();
-        let param_set: std::collections::HashSet<&str> =
-            param_names.iter().map(|s| s.as_str()).collect();
-        Self::for_each_stmt_expr(body, &mut |e| {
-            if let Expr::Call { callee, args, .. } = e {
-                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == fn_name) {
-                    for a in args {
-                        if let CallArg::Expr(arg) = a {
-                            for id in Self::collect_idents_of(arg) {
-                                if param_set.contains(id.as_str()) {
-                                    out.insert(id);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        out
-    }
-
     fn vec_builder_only_push(body: &Statement, local: &str) -> bool {
         let mut ok = true;
         Self::for_each_stmt_expr(body, &mut |e| {
@@ -17142,25 +17116,32 @@ mod tests_176 {
     }
 
     #[test]
-    fn fib_param_not_literal_specialized_in_self_calls() {
-        use tishlang_opt::optimize;
-        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fn fib_native_body_uses_param_not_call_site_literal() {
+        use std::path::PathBuf;
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let path = manifest.join("../../tests/perf/recursion_fib.tish");
-        let src = fs::read_to_string(&path).unwrap();
-        let program = parse(&src).unwrap();
-        let optimized = optimize(&program);
-        let inferred = crate::infer::infer_program(&optimized);
-        let body = inferred
-            .statements
-            .iter()
-            .find_map(|s| match s {
-                tishlang_ast::Statement::FunDecl { name, body, .. } if name.as_ref() == "fib" => {
-                    Some(body.as_ref())
-                }
-                _ => None,
-            })
-            .expect("fib decl");
-        let used = Codegen::params_used_in_self_calls(body, "fib", &["n".to_string()]);
-        assert!(used.contains("n"), "expected n in self-call args, got {:?}", used);
+        for k in [
+            "TISH_PARAM_NATIVE",
+            "TISH_PARAM_INFER",
+            "TISH_NATIVE_FN",
+            "TISH_STRUCT_INFER",
+            "TISH_FUSED_HOF",
+            "TISH_NATIVE_HOF",
+            "TISH_AGGREGATE_INFER",
+        ] {
+            std::env::set_var(k, "1");
+        }
+        let (rust, _, _, _) =
+            crate::compile_project_full(&path, path.parent(), &[], true).unwrap();
+        let nv = rust
+            .split("fn fib_native(")
+            .nth(1)
+            .expect("fib_native");
+        let nv = nv.split("fn run()").next().unwrap_or(nv);
+        assert!(
+            !nv.contains("fib_native((35_f64"),
+            "fib_native must use param n, not call-site literal"
+        );
+        assert!(nv.contains("fib_native((n -"), "expected recursive n-1 call");
     }
 }
