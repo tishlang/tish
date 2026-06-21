@@ -11,6 +11,20 @@
 use tishlang_compile::compile;
 use tishlang_parser::parse;
 
+fn enable_typed_flags() {
+    for k in [
+        "TISH_PARAM_NATIVE",
+        "TISH_PARAM_INFER",
+        "TISH_NATIVE_FN",
+        "TISH_STRUCT_INFER",
+        "TISH_FUSED_HOF",
+        "TISH_NATIVE_HOF",
+        "TISH_AGGREGATE_INFER",
+    ] {
+        std::env::set_var(k, "1");
+    }
+}
+
 /// FNV-style hash loop: the canonical bitwise hot loop. The accumulator `h` lives in an i32 register
 /// (existing lowering); #174 additionally folds the constant mask / shift counts and keeps the
 /// `(h * C) >>> 0` f64-rounding excursion intact.
@@ -84,6 +98,34 @@ console.log(acc >>> 0)
         rust.contains("to_int_unchecked::<i64>()"),
         "a range-proven counter `i` in `i & 15` must drop the is_finite guard:\n{}",
         rust.lines().filter(|l| l.contains("acc") || l.contains("to_int")).take(8).collect::<Vec<_>>().join("\n")
+    );
+}
+
+#[test]
+fn fnv_value_fn_uses_usize_for_loop() {
+    let src = r#"
+function fnv1a(n) {
+  let h = 2166136261
+  for (let i = 0; i < n; i++) {
+    h = h ^ (i & 255)
+    h = (h * 16777619) >>> 0
+    h = ((h << 13) | (h >>> 19)) >>> 0
+  }
+  return h >>> 0
+}
+let check = fnv1a(100)
+console.log(check)
+"#;
+    enable_typed_flags();
+    let rust = compile(&parse(src).unwrap()).unwrap();
+    assert!(
+        rust.contains("for _usize_i_0 in 0..(n as usize)"),
+        "fnv1a hot loop should lower to a usize `for` over param n:\n{}",
+        rust.lines().filter(|l| l.contains("usize") || l.contains("fnv1a")).take(6).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        rust.contains("let mut h: i32 = (2166136261u32) as i32;"),
+        "accumulator h must stay on the i32 register path"
     );
 }
 
