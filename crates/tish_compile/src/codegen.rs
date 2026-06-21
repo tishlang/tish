@@ -4570,16 +4570,15 @@ impl Codegen {
                 )? {
                     return Ok(());
                 }
-                if self.native_fn_body_emit
-                    || self.native_vec_ret.is_some()
-                    || self.value_fn_depth > 0
+                if let Some((ctr, bound)) =
+                    Self::parse_usize_for_counter(init.as_deref(), cond.as_ref(), update.as_ref())
                 {
-                    if let Some((ctr, bound)) =
-                        Self::parse_usize_for_counter(init.as_deref(), cond.as_ref(), update.as_ref())
-                    {
-                        if self.try_emit_usize_for_loop(&ctr, &bound, body)? {
-                            return Ok(());
-                        }
+                    let emit_usize = self.native_fn_body_emit
+                        || self.native_vec_ret.is_some()
+                        || (self.value_fn_depth > 0
+                            && self.usize_for_loop_bound_is_native(bound.as_ref()));
+                    if emit_usize && self.try_emit_usize_for_loop(&ctr, &bound, body)? {
+                        return Ok(());
                     }
                 }
                 self.writeln("{");
@@ -9377,6 +9376,14 @@ impl Codegen {
         Some((coord_name, mul, div, sub))
     }
 
+    /// Loop bound is a native scalar (`f64`/`i32` shadow param or local) — safe for `0..(bound as usize)`.
+    fn usize_for_loop_bound_is_native(&self, bound: &str) -> bool {
+        matches!(
+            self.type_context.get_type(bound),
+            RustType::F64 | RustType::I32
+        )
+    }
+
     fn try_emit_usize_for_loop(
         &mut self,
         counter: &str,
@@ -9437,7 +9444,7 @@ impl Codegen {
         self.indent += 1;
         let native_usize = self.native_fn_body_emit
             || self.native_vec_ret.is_some()
-            || self.value_fn_depth > 0;
+            || (self.value_fn_depth > 0 && self.usize_for_loop_bound_is_native(bound));
         let emit_f64_counter = self.native_fn_body_emit || !self.native_vec_ret.is_some();
         if native_usize {
             self.usize_var_subst.insert(counter.to_string(), usize_var.clone());
