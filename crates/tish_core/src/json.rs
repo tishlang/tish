@@ -80,10 +80,31 @@ pub fn json_parse(json: &str) -> Result<Value, String> {
 /// per-node `String` only to copy + drop it on the way back up. For a
 /// 20-row TFB `/queries` response (~40 numbers, 2 keys × 20 = ~80 string
 /// ops) that saves dozens of small allocations per request.
+fn json_stringify_capacity_hint(value: &Value) -> usize {
+    match value {
+        Value::Array(arr) => {
+            let n = arr.borrow().len();
+            if n > 64 {
+                // json_roundtrip / large API payloads: ~80–100 B per row is typical.
+                n.saturating_mul(96).max(256)
+            } else {
+                256
+            }
+        }
+        Value::Object(obj) => {
+            let n = obj.borrow().strings.len();
+            if n > 32 {
+                n.saturating_mul(128).max(256)
+            } else {
+                256
+            }
+        }
+        _ => 256,
+    }
+}
+
 pub fn json_stringify(value: &Value) -> String {
-    // 256 B is enough for typical TFB responses (`/db` is 31 B,
-    // `/queries=20` is ~700 B). Larger payloads reallocate normally.
-    let mut buf = String::with_capacity(256);
+    let mut buf = String::with_capacity(json_stringify_capacity_hint(value));
     json_stringify_into(&mut buf, value);
     buf
 }

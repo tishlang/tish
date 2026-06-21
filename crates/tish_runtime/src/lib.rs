@@ -370,6 +370,7 @@ use tishlang_core::{json_parse as core_json_parse, json_stringify as core_json_s
 /// from the runtime keeps the generated source decoupled from
 /// `tishlang_core` — generated code only ever names `tishlang_runtime`.
 pub mod json {
+    pub use tishlang_core::json_parse;
     pub use tishlang_core::json_stringify_into as stringify_into;
     /// Append the JSON-escaped contents of `s` (without surrounding
     /// quotes) to `buf`. Used by typed-struct serialisers for `String`
