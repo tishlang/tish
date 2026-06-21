@@ -32,6 +32,26 @@ fn compile_fixture_typed(rel: &str) -> String {
     rust
 }
 
+fn compile_fixture_embedded_lib(rel: &str) -> String {
+    compile_fixture_embedded_lib_with_features(rel, &[])
+}
+
+fn compile_fixture_embedded_lib_with_features(rel: &str, features: &[String]) -> String {
+    enable_typed_flags();
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path = manifest.join("../..").join(rel).canonicalize().unwrap();
+    let (rust, _, _, _) = tishlang_compile::compile_project_full_emit(
+        &path,
+        path.parent(),
+        features,
+        true,
+        tishlang_compile::NativeEmitMode::EmbeddedLib,
+        None,
+    )
+    .unwrap();
+    rust
+}
+
 #[test]
 fn native_vec_params_emit_ref_signatures_and_route() {
     let rust = compile_fixture_typed("tests/core/native_vec_params.tish");
@@ -96,6 +116,11 @@ fn spectral_norm_devirtualizes_with_inlined_evala() {
         "multiplyAv lowers to a native-vec fn:\n{}",
         rust.lines().filter(|l| l.contains("multiplyAv_nv")).take(3).collect::<Vec<_>>().join("\n")
     );
+    assert!(
+        rust.contains("fn multiplyAtAv_nv("),
+        "multiplyAtAv should forward to native-vec callees:\n{}",
+        rust.lines().filter(|l| l.contains("multiplyAtAv_nv")).take(3).collect::<Vec<_>>().join("\n")
+    );
     // evalA is inlined: the native-vec body has the substituted body (a `_inl…` temp) and does NOT
     // call evalA (no `value_call`/`evalA(` inside multiplyAv_nv).
     let mav = rust
@@ -108,5 +133,61 @@ fn spectral_norm_devirtualizes_with_inlined_evala() {
         mav.contains("_inl") && !mav.contains("value_call"),
         "evalA must be inlined into multiplyAv_nv (substituted temps, no value_call):\n{}",
         mav
+    );
+    if rust.contains("fn spectralNorm_nv(") {
+        let sn = rust.split("fn spectralNorm_nv(").nth(1).unwrap();
+        let sn = sn.split("fn run()").next().unwrap_or(sn);
+        assert!(
+            sn.contains("let mut u: Vec<f64>"),
+            "spectralNorm_nv should keep u/v/w as native Vec<f64> locals"
+        );
+        assert!(
+            sn.contains("multiplyAtAv_nv(") && !sn.contains("multiplyAtAv_native("),
+            "spectralNorm_nv should call multiplyAtAv_nv, not the boxed native shim"
+        );
+    }
+}
+
+#[test]
+fn spectral_norm_embedded_lib_native_shim_compiles() {
+    let rust = compile_fixture_embedded_lib("tests/perf/spectral_norm.tish");
+    let mav = rust
+        .split("fn multiplyAv_native(")
+        .nth(1)
+        .and_then(|s| s.split("fn multiplyAtv_native").next())
+        .expect("multiplyAv_native");
+    assert!(
+        mav.contains("let mut j: f64")
+            || mav.contains("get_index(&Value::Number(v), &Value::Number((_usize_j"),
+        "boxed native shim must bind j from the usize loop counter:\n{}",
+        mav.lines().take(12).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        mav.contains("let mut i: f64")
+            || mav.contains("set_index(&(Value::Number(av)), &(Value::Number((_usize_i"),
+        "boxed native shim must bind i from the usize loop counter:\n{}",
+        mav.lines().take(12).collect::<Vec<_>>().join("\n")
+    );
+}
+
+#[test]
+fn spectral_norm_embedded_lib_with_runtime_features_native_shim_compiles() {
+    let features: Vec<String> = [
+        "http", "timers", "fs", "process", "regex", "ws", "tty",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let rust =
+        compile_fixture_embedded_lib_with_features("tests/perf/spectral_norm.tish", &features);
+    let mav = rust
+        .split("fn multiplyAv_native(")
+        .nth(1)
+        .and_then(|s| s.split("fn multiplyAtv_native").next())
+        .expect("multiplyAv_native");
+    assert!(
+        !mav.contains("Value::Number(j)") && !mav.contains("Value::Number(i)"),
+        "runtime-feature build must not reference bare i/j in boxed shims:\n{}",
+        mav.lines().take(12).collect::<Vec<_>>().join("\n")
     );
 }

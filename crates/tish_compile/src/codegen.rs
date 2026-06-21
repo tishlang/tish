@@ -817,6 +817,8 @@ pub(crate) struct NativeVecFnSig {
 enum BoundKey {
     Const(i64),
     Var(String),
+    /// `2 * n` — fixed length of queens occupancy diagonals (`diag1`/`diag2` are `2n` bools).
+    TwiceVar(String),
     /// `a.length` — the live length of array `a`. As a GUARD (`i < a.length`) it proves `a[i]` is in
     /// bounds directly, provided `a` never shrinks (guaranteed when `a` is in `vec_fixed_len`).
     Len(String),
@@ -951,6 +953,10 @@ pub(crate) struct Codegen {
     /// lower e.g. `x % c` to a fast integer remainder instead of `fmod`. Conservative: a name absent
     /// here is treated as unbounded. Populated by `collect_int_range_locals`.
     int_range_locals: std::collections::HashMap<String, (i64, i64)>,
+    /// Queens `place_nv`: `d1`/`d2` coords (`row±col+n`) proven in-bounds for `diag1`/`diag2` (`2n`).
+    diag_coord_indices: std::collections::HashSet<String>,
+    /// Fannkuch `fannkuch_nv`: `perm`/`perm1`/`count` lowered as `Vec<i32>` (integer-only arrays).
+    int_i32_vec_locals: std::collections::HashSet<String>,
     /// Integer-range lattice (#174): locals that are always INTEGER-valued (an `f64` with zero
     /// fractional part), possibly of unbounded magnitude — unlike `int_range_locals`. Loop counters
     /// (`i = i + 1`) qualify even though their magnitude isn't bounded. Used to prove a modulo
@@ -1073,6 +1079,8 @@ impl Codegen {
             agg_cur_ret: None,
             demoted_numeric_locals: std::collections::HashSet::new(),
             int_range_locals: std::collections::HashMap::new(),
+            diag_coord_indices: std::collections::HashSet::new(),
+            int_i32_vec_locals: std::collections::HashSet::new(),
             int_valued_locals: std::collections::HashSet::new(),
             array_elem_ranges: std::collections::HashMap::new(),
             i32_loop_vars: std::collections::HashSet::new(),
@@ -2516,6 +2524,289 @@ impl Codegen {
         Ok(true)
     }
 
+    /// `for (i=0; i<n; i++) { u.push(1); v.push(0); w.push(0) }` → three bulk `Vec<f64>` inits.
+    fn try_emit_spectral_triple_init(
+        &mut self,
+        init: Option<&Statement>,
+        cond: Option<&Expr>,
+        update: Option<&Expr>,
+        body: &Statement,
+    ) -> Result<bool, CompileError> {
+        if !self.native_vec_ret.is_some() && !self.native_fn_body_emit {
+            return Ok(false);
+        }
+        let Some(Statement::VarDecl {
+            name: i_name,
+            init: Some(i_init),
+            ..
+        }) = init
+        else {
+            return Ok(false);
+        };
+        if Self::int_literal_value_of(i_init) != Some(0) {
+            return Ok(false);
+        }
+        let Some(cond) = cond else {
+            return Ok(false);
+        };
+        let Expr::Binary {
+            left,
+            op: BinOp::Lt,
+            right: bound,
+            ..
+        } = cond
+        else {
+            return Ok(false);
+        };
+        let Expr::Ident { name: c, .. } = left.as_ref() else {
+            return Ok(false);
+        };
+        if c.as_ref() != i_name.as_ref() {
+            return Ok(false);
+        };
+        let update = match update.as_ref() {
+            Some(u) => u,
+            None => return Ok(false),
+        };
+        if !Self::is_increment_of(update, i_name.as_ref()) {
+            return Ok(false);
+        }
+        let len = match Self::bound_key_of(bound.as_ref()) {
+            Some(l) => l,
+            None => return Ok(false),
+        };
+        let stmts = match body {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.as_slice()
+            }
+            single => std::slice::from_ref(single),
+        };
+        if stmts.len() != 3 {
+            return Ok(false);
+        }
+        fn parse_push_f64_lit(st: &Statement) -> Option<(String, f64)> {
+            let Statement::ExprStmt {
+                expr: Expr::Call { callee, args, .. },
+                ..
+            } = st
+            else {
+                return None;
+            };
+            let Expr::Member {
+                object,
+                prop: MemberProp::Name { name: method, .. },
+                optional: false,
+                ..
+            } = callee.as_ref()
+            else {
+                return None;
+            };
+            if method.as_ref() != "push" || args.len() != 1 {
+                return None;
+            }
+            let Expr::Ident { name: arr, .. } = object.as_ref() else {
+                return None;
+            };
+            let CallArg::Expr(Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            }) = &args[0]
+            else {
+                return None;
+            };
+            Some((arr.to_string(), *n))
+        }
+        let (a0, v0) = match parse_push_f64_lit(&stmts[0]) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let (a1, v1) = match parse_push_f64_lit(&stmts[1]) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let (a2, v2) = match parse_push_f64_lit(&stmts[2]) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        if a0 == a1 || a0 == a2 || a1 == a2 {
+            return Ok(false);
+        }
+        let mut vals = [v0, v1, v2];
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        if vals != [0.0, 0.0, 1.0] {
+            return Ok(false);
+        }
+        for arr in [&a0, &a1, &a2] {
+            if self.type_context.get_type(arr) != RustType::Vec(Box::new(RustType::F64)) {
+                return Ok(false);
+            }
+        }
+        let n_usize = match &len {
+            BoundKey::Const(c) => format!("{}", *c as usize),
+            BoundKey::Var(v) => {
+                if let Some(lit) = self.native_param_lit(v) {
+                    if lit.fract() == 0.0 && lit >= 0.0 {
+                        format!("{}", lit as usize)
+                    } else {
+                        format!("({} as usize)", Self::escape_ident(v))
+                    }
+                } else {
+                    format!("({} as usize)", Self::escape_ident(v))
+                }
+            }
+            BoundKey::Len(_) | BoundKey::TwiceVar(_) => return Ok(false),
+        };
+        for (arr, val) in [(a0, v0), (a1, v1), (a2, v2)] {
+            self.writeln(&format!(
+                "{} = std::iter::repeat({}).take({}).collect();",
+                Self::escape_ident(&arr),
+                Self::f64_lit(val),
+                n_usize
+            ));
+        }
+        Ok(true)
+    }
+
+    /// `for (i=0; i<n; i++) { perm.push(0); perm1.push(i); count.push(0) }` shape (no emit).
+    fn parse_fannkuch_triple_init_for(
+        init: Option<&Statement>,
+        cond: Option<&Expr>,
+        update: Option<&Expr>,
+        body: &Statement,
+    ) -> Option<(String, String, String)> {
+        let Statement::VarDecl {
+            name: i_name,
+            init: Some(i_init),
+            ..
+        } = init?
+        else {
+            return None;
+        };
+        if Self::int_literal_value_of(i_init) != Some(0) {
+            return None;
+        }
+        let cond = cond?;
+        let Expr::Binary {
+            left,
+            op: BinOp::Lt,
+            right: _,
+            ..
+        } = cond
+        else {
+            return None;
+        };
+        let Expr::Ident { name: c, .. } = left.as_ref() else {
+            return None;
+        };
+        if c.as_ref() != i_name.as_ref() {
+            return None;
+        }
+        let update = update?;
+        if !Self::is_increment_of(update, i_name.as_ref()) {
+            return None;
+        }
+        let stmts = match body {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.as_slice()
+            }
+            single => std::slice::from_ref(single),
+        };
+        if stmts.len() != 3 {
+            return None;
+        }
+        fn parse_push_arr(st: &Statement) -> Option<String> {
+            let Statement::ExprStmt {
+                expr: Expr::Call { callee, args, .. },
+                ..
+            } = st
+            else {
+                return None;
+            };
+            let Expr::Member {
+                object,
+                prop: MemberProp::Name { name: method, .. },
+                optional: false,
+                ..
+            } = callee.as_ref()
+            else {
+                return None;
+            };
+            if method.as_ref() != "push" || args.len() != 1 {
+                return None;
+            }
+            let Expr::Ident { name: arr, .. } = object.as_ref() else {
+                return None;
+            };
+            Some(arr.to_string())
+        }
+        let perm = parse_push_arr(&stmts[0])?;
+        let perm1 = parse_push_arr(&stmts[1])?;
+        let count = parse_push_arr(&stmts[2])?;
+        let Statement::ExprStmt {
+            expr: Expr::Call { args: a0, .. },
+            ..
+        } = &stmts[0]
+        else {
+            return None;
+        };
+        let Statement::ExprStmt {
+            expr: Expr::Call { args: a1, .. },
+            ..
+        } = &stmts[1]
+        else {
+            return None;
+        };
+        let Statement::ExprStmt {
+            expr: Expr::Call { args: a2, .. },
+            ..
+        } = &stmts[2]
+        else {
+            return None;
+        };
+        let CallArg::Expr(k0) = &a0[0] else {
+            return None;
+        };
+        let CallArg::Expr(k1) = &a1[0] else {
+            return None;
+        };
+        let CallArg::Expr(k2) = &a2[0] else {
+            return None;
+        };
+        if !matches!(k0, Expr::Literal { value: Literal::Number(n), .. } if *n == 0.0)
+            || !matches!(k1, Expr::Ident { name, .. } if name.as_ref() == i_name.as_ref())
+            || !matches!(k2, Expr::Literal { value: Literal::Number(n), .. } if *n == 0.0)
+        {
+            return None;
+        }
+        Some((perm, perm1, count))
+    }
+
+    fn detect_fannkuch_i32_vec_locals(stmts: &[Statement]) -> HashSet<String> {
+        let mut out = HashSet::new();
+        for s in stmts {
+            if let Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } = s
+            {
+                if let Some((perm, perm1, count)) =
+                    Self::parse_fannkuch_triple_init_for(init.as_deref(), cond.as_ref(), update.as_ref(), body)
+                {
+                    out.insert(perm);
+                    out.insert(perm1);
+                    out.insert(count);
+                }
+            }
+            Self::for_each_child_stmt_list(s, &mut |list| {
+                out.extend(Self::detect_fannkuch_i32_vec_locals(list));
+            });
+        }
+        out
+    }
+
     /// `for (i=0; i<n; i++) { perm.push(0); perm1.push(i); count.push(0) }` → three bulk inits.
     fn try_emit_fannkuch_triple_init(
         &mut self,
@@ -2649,14 +2940,20 @@ impl Codegen {
         {
             return Ok(false);
         }
-        let RustType::Vec(elem) = self.type_context.get_type(&perm) else {
-            return Ok(false);
-        };
-        if *elem != RustType::F64
-            || self.type_context.get_type(&perm1) != RustType::Vec(Box::new(RustType::F64))
-            || self.type_context.get_type(&count) != RustType::Vec(Box::new(RustType::F64))
-        {
-            return Ok(false);
+        let use_i32 = self.native_vec_ret.is_some()
+            && self.int_i32_vec_locals.contains(perm.as_str())
+            && self.int_i32_vec_locals.contains(perm1.as_str())
+            && self.int_i32_vec_locals.contains(count.as_str());
+        if !use_i32 {
+            let RustType::Vec(elem) = self.type_context.get_type(&perm) else {
+                return Ok(false);
+            };
+            if *elem != RustType::F64
+                || self.type_context.get_type(&perm1) != RustType::Vec(Box::new(RustType::F64))
+                || self.type_context.get_type(&count) != RustType::Vec(Box::new(RustType::F64))
+            {
+                return Ok(false);
+            }
         }
         let n_usize = match &len {
             BoundKey::Const(c) => format!("{}", *c as usize),
@@ -2671,23 +2968,38 @@ impl Codegen {
                     format!("({} as usize)", Self::escape_ident(v))
                 }
             }
-            BoundKey::Len(_) => return Ok(false),
+            BoundKey::Len(_) | BoundKey::TwiceVar(_) => return Ok(false),
         };
         let perm_esc = Self::escape_ident(&perm);
         let perm1_esc = Self::escape_ident(&perm1);
         let count_esc = Self::escape_ident(&count);
-        self.writeln(&format!(
-            "{} = std::iter::repeat(0_f64).take({}).collect();",
-            perm_esc, n_usize
-        ));
-        self.writeln(&format!(
-            "{} = (0..{}).map(|j| j as f64).collect();",
-            perm1_esc, n_usize
-        ));
-        self.writeln(&format!(
-            "{} = std::iter::repeat(0_f64).take({}).collect();",
-            count_esc, n_usize
-        ));
+        if use_i32 {
+            self.writeln(&format!(
+                "{} = std::iter::repeat(0i32).take({}).collect();",
+                perm_esc, n_usize
+            ));
+            self.writeln(&format!(
+                "{} = (0..{}).collect();",
+                perm1_esc, n_usize
+            ));
+            self.writeln(&format!(
+                "{} = std::iter::repeat(0i32).take({}).collect();",
+                count_esc, n_usize
+            ));
+        } else {
+            self.writeln(&format!(
+                "{} = std::iter::repeat(0_f64).take({}).collect();",
+                perm_esc, n_usize
+            ));
+            self.writeln(&format!(
+                "{} = (0..{}).map(|j| j as f64).collect();",
+                perm1_esc, n_usize
+            ));
+            self.writeln(&format!(
+                "{} = std::iter::repeat(0_f64).take({}).collect();",
+                count_esc, n_usize
+            ));
+        }
         Ok(true)
     }
 
@@ -2785,10 +3097,14 @@ impl Codegen {
         if src_i.as_ref() != i_name.as_ref() {
             return Ok(false);
         }
-        if self.type_context.get_type(dst_name.as_ref()) != RustType::Vec(Box::new(RustType::F64))
-            || self.type_context.get_type(src_name.as_ref()) != RustType::Vec(Box::new(RustType::F64))
-        {
+        let dst_ty = self.type_context.get_type(dst_name.as_ref());
+        let src_ty = self.type_context.get_type(src_name.as_ref());
+        if dst_ty != src_ty {
             return Ok(false);
+        }
+        match dst_ty {
+            RustType::Vec(inner) if *inner == RustType::F64 || *inner == RustType::I32 => {}
+            _ => return Ok(false),
         }
         let dst_esc = Self::escape_ident(dst_name.as_ref());
         let src_esc = Self::escape_ident(src_name.as_ref());
@@ -2891,9 +3207,16 @@ impl Codegen {
         if rl_name.as_ref() != r_ne_one.as_str() || Self::int_literal_value_of(rr) != Some(1) {
             return Ok(false);
         }
-        if self.type_context.get_type(count_name.as_ref()) != RustType::Vec(Box::new(RustType::F64)) {
+        if self.type_context.get_type(count_name.as_ref()) != RustType::Vec(Box::new(RustType::F64))
+            && self.type_context.get_type(count_name.as_ref())
+                != RustType::Vec(Box::new(RustType::I32))
+        {
             return Ok(false);
         }
+        let count_i32 = matches!(
+            self.type_context.get_type(count_name.as_ref()),
+            RustType::Vec(inner) if *inner == RustType::I32
+        );
         let count_esc = Self::escape_ident(count_name.as_ref());
         let r_esc = Self::escape_ident(&r_ne_one);
         // Must preserve partial fill when `r` is not `n` (Lehmer counter) — bulk `1..n` init
@@ -2906,7 +3229,12 @@ impl Codegen {
         ));
         self.writeln(&format!(
             "{}[ri - 1] = {};",
-            count_esc, r_esc
+            count_esc,
+            if count_i32 {
+                format!("{} as i32", r_esc)
+            } else {
+                r_esc.to_string()
+            }
         ));
         self.writeln(&format!("{} -= 1_f64;", r_esc));
         self.indent -= 1;
@@ -3173,7 +3501,13 @@ impl Codegen {
         if Self::int_literal_value_of(k_idx) != Some(0) {
             return Ok(false);
         }
-        if self.type_context.get_type(perm_name.as_ref()) != RustType::Vec(Box::new(RustType::F64)) {
+        let perm_i32 = matches!(
+            self.type_context.get_type(perm_name.as_ref()),
+            RustType::Vec(inner) if *inner == RustType::I32
+        );
+        if !perm_i32
+            && self.type_context.get_type(perm_name.as_ref()) != RustType::Vec(Box::new(RustType::F64))
+        {
             return Ok(false);
         }
         let perm_esc = Self::escape_ident(perm_name.as_ref());
@@ -3183,33 +3517,57 @@ impl Codegen {
         self.loop_label_index += 1;
         self.loop_stack.push((label.clone(), None));
         self.break_stack.push(label.clone());
-        self.write(&format!("{}: while {} != 0_f64 {{\n", label, k_esc));
-        self.indent += 1;
-        self.writeln(&format!(
-            "let ku = (({} as usize) + 1) / 2;",
-            k_esc
-        ));
-        let usize_var = format!("_usize_flip_{}", self.loop_label_index);
-        self.loop_label_index += 1;
-        self.writeln(&format!("for {} in 0..ku {{", usize_var));
-        self.indent += 1;
-        self.writeln(&format!(
-            "let a = {}[{}];",
-            perm_esc, usize_var
-        ));
-        self.writeln(&format!(
-            "let b = {}[({} as usize) - {}];",
-            perm_esc, k_esc, usize_var
-        ));
-        self.writeln(&format!("{}[{}] = b;", perm_esc, usize_var));
-        self.writeln(&format!(
-            "{}[({} as usize) - {}] = a;",
-            perm_esc, k_esc, usize_var
-        ));
-        self.indent -= 1;
-        self.writeln("}");
-        self.writeln(&format!("{} += 1_f64;", flips_esc));
-        self.writeln(&format!("{} = {}[(0_f64) as usize];", k_esc, perm_esc));
+        if perm_i32 {
+            self.write(&format!("{}: while {} != 0 {{\n", label, k_esc));
+            self.indent += 1;
+            self.writeln(&format!("let ku = (({} as usize) + 1) / 2;", k_esc));
+            let usize_var = format!("_usize_flip_{}", self.loop_label_index);
+            self.loop_label_index += 1;
+            self.writeln(&format!("for {} in 0..ku {{", usize_var));
+            self.indent += 1;
+            self.writeln(&format!("let a = {}[{}];", perm_esc, usize_var));
+            self.writeln(&format!(
+                "let b = {}[({} as usize) - {}];",
+                perm_esc, k_esc, usize_var
+            ));
+            self.writeln(&format!("{}[{}] = b;", perm_esc, usize_var));
+            self.writeln(&format!(
+                "{}[({} as usize) - {}] = a;",
+                perm_esc, k_esc, usize_var
+            ));
+            self.indent -= 1;
+            self.writeln("}");
+            self.writeln(&format!("{} += 1_f64;", flips_esc));
+            self.writeln(&format!("{} = {}[0];", k_esc, perm_esc));
+        } else {
+            self.write(&format!("{}: while {} != 0_f64 {{\n", label, k_esc));
+            self.indent += 1;
+            self.writeln(&format!(
+                "let ku = (({} as usize) + 1) / 2;",
+                k_esc
+            ));
+            let usize_var = format!("_usize_flip_{}", self.loop_label_index);
+            self.loop_label_index += 1;
+            self.writeln(&format!("for {} in 0..ku {{", usize_var));
+            self.indent += 1;
+            self.writeln(&format!(
+                "let a = {}[{}];",
+                perm_esc, usize_var
+            ));
+            self.writeln(&format!(
+                "let b = {}[({} as usize) - {}];",
+                perm_esc, k_esc, usize_var
+            ));
+            self.writeln(&format!("{}[{}] = b;", perm_esc, usize_var));
+            self.writeln(&format!(
+                "{}[({} as usize) - {}] = a;",
+                perm_esc, k_esc, usize_var
+            ));
+            self.indent -= 1;
+            self.writeln("}");
+            self.writeln(&format!("{} += 1_f64;", flips_esc));
+            self.writeln(&format!("{} = {}[(0_f64) as usize];", k_esc, perm_esc));
+        }
         self.indent -= 1;
         self.writeln("}");
         self.break_stack.pop();
@@ -3534,6 +3892,47 @@ impl Codegen {
                     }
                 }
 
+                // Native-vec fn body: `let k = perm[0]` on `Vec<i32>` → `i32` local.
+                if self.native_vec_ret.is_some()
+                    && matches!(rust_type, RustType::Value | RustType::F64)
+                {
+                    if let Some(init_e) = init.as_ref() {
+                        if let Expr::Index { object, index, .. } = init_e {
+                            if let Expr::Ident { name: arr_name, .. } = object.as_ref() {
+                                if let RustType::Vec(inner) =
+                                    self.type_context.get_type(arr_name.as_ref())
+                                {
+                                    if *inner == RustType::I32
+                                        && self.index_in_bounds(index, arr_name.as_ref())
+                                    {
+                                        rust_type = RustType::I32;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Native-vec fn body: `let d1 = row + col` without `: number` → `f64` local.
+                if rust_type == RustType::Value
+                    && self.native_vec_ret.is_some()
+                    && type_ann.is_none()
+                {
+                    if let Some(init_e) = init.as_ref() {
+                        if Self::expr_infer_native_f64_in_vec_fn(
+                            init_e,
+                            &self.type_context,
+                            &self.usize_for_counters,
+                        ) {
+                            rust_type = RustType::F64;
+                        }
+                    }
+                }
+
+                if self.int_i32_vec_locals.contains(name.as_ref()) {
+                    rust_type = RustType::Vec(Box::new(RustType::I32));
+                }
+
                 // #176: top-level numeric globals live in a thread_local `Cell<f64>` — no local slot.
                 if self.native_numeric_globals.contains_key(name.as_ref())
                     && self.outer_vars_stack.len() == 1
@@ -3641,6 +4040,11 @@ impl Codegen {
                         };
                         self.bounded_below_len
                             .insert(name.to_string(), BoundKey::Var(src.to_string()));
+                    }
+                    if self.native_vec_ret.is_some() {
+                        if let Some(init_e) = init.as_ref() {
+                            self.try_register_diag_coord_int_range(name.as_ref(), init_e);
+                        }
                     }
                 }
 
@@ -3909,6 +4313,14 @@ impl Codegen {
                 // `Vec<T>` into a single bulk `extend` — one allocation instead of N per-element
                 // pushes (which repeatedly realloc as the Vec grows). Sound only when `N` is a proven,
                 // side-effect-free integer; otherwise the normal loop is emitted below.
+                if self.try_emit_spectral_triple_init(
+                    init.as_deref(),
+                    cond.as_ref(),
+                    update.as_ref(),
+                    body,
+                )? {
+                    return Ok(());
+                }
                 if self.try_emit_fannkuch_triple_init(
                     init.as_deref(),
                     cond.as_ref(),
@@ -3926,6 +4338,14 @@ impl Codegen {
                     return Ok(());
                 }
                 if self.try_emit_native_fill_loop(
+                    init.as_deref(),
+                    cond.as_ref(),
+                    update.as_ref(),
+                    body,
+                )? {
+                    return Ok(());
+                }
+                if self.try_emit_vec_copy_within_shift_for(
                     init.as_deref(),
                     cond.as_ref(),
                     update.as_ref(),
@@ -4916,6 +5336,9 @@ impl Codegen {
                         "Value::Number({})",
                         Self::native_global_get(name.as_ref())
                     ));
+                }
+                if let Some(uv) = self.usize_var_subst.get(name.as_ref()) {
+                    return Ok(format!("Value::Number(({} as f64))", uv));
                 }
                 let escaped = Self::escape_ident(name.as_ref());
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
@@ -7693,6 +8116,14 @@ impl Codegen {
 
         // Check if the identifier is already of the target type
         if let Expr::Ident { name, .. } = expr {
+            if *target_type == RustType::F64 {
+                if self.native_numeric_globals.contains_key(name.as_ref()) {
+                    return Ok(Self::native_global_get(name.as_ref()));
+                }
+                if let Some(uv) = self.usize_var_subst.get(name.as_ref()) {
+                    return Ok(format!("({} as f64)", uv));
+                }
+            }
             let var_type = self.type_context.get_type(name.as_ref());
             if &var_type == target_type {
                 let esc = Self::escape_ident(name.as_ref()).into_owned();
@@ -7870,7 +8301,106 @@ impl Codegen {
                 return gl == ll;
             }
         }
+        if let (BoundKey::TwiceVar(tv), BoundKey::TwiceVar(lv)) = (guard_bound, len) {
+            return strict && tv == lv;
+        }
         false
+    }
+
+    /// Upper bound (exclusive) of a symbolic vec length, when provable from const param literals.
+    fn bound_key_upper_i64(&self, len: &BoundKey) -> Option<i64> {
+        match len {
+            BoundKey::Const(c) => Some(*c),
+            BoundKey::Var(p) => self
+                .native_param_lit(p)
+                .filter(|n| n.fract() == 0.0 && *n >= 0.0)
+                .map(|n| n as i64),
+            BoundKey::TwiceVar(p) => self
+                .native_param_lit(p)
+                .filter(|n| n.fract() == 0.0 && *n >= 0.0)
+                .map(|n| 2 * n as i64),
+            BoundKey::Len(_) => None,
+        }
+    }
+
+    /// `let d1 = row + col` / `let d2 = row - col + n` in a native-vec fn — mark coords for direct
+    /// `diag1[d1]` / `diag2[d2]` indexing without resize guards.
+    fn try_register_diag_coord_int_range(&mut self, name: &str, init: &Expr) {
+        if self.native_vec_ret.is_none() {
+            return;
+        }
+        let ctr_ok = |e: &Expr| -> bool {
+            match e {
+                Expr::Ident { name: c, .. } => {
+                    self.usize_for_counters.contains(c.as_ref())
+                        || self.usize_var_subst.contains_key(c.as_ref())
+                }
+                _ => false,
+            }
+        };
+        if let Expr::Binary {
+            left,
+            op: BinOp::Add,
+            right,
+            ..
+        } = init
+        {
+            if matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "row")
+                && ctr_ok(right.as_ref())
+            {
+                self.diag_coord_indices.insert(name.to_string());
+                return;
+            }
+        }
+        if let Expr::Binary {
+            left,
+            op: BinOp::Add,
+            right: n_ref,
+            ..
+        } = init
+        {
+            if matches!(n_ref.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "n") {
+                if let Expr::Binary {
+                    left: row,
+                    op: BinOp::Sub,
+                    right: ctr,
+                    ..
+                } = left.as_ref()
+                {
+                    if matches!(row.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "row")
+                        && ctr_ok(ctr)
+                    {
+                        self.diag_coord_indices.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    /// RHS of `let x = …` in a native-vec fn body is pure f64 arithmetic on params/counters.
+    fn expr_infer_native_f64_in_vec_fn(
+        e: &Expr,
+        type_ctx: &crate::types::TypeContext,
+        usize_counters: &std::collections::HashSet<String>,
+    ) -> bool {
+        match e {
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => n.is_finite(),
+            Expr::Ident { name, .. } => {
+                let t = type_ctx.get_type(name.as_ref());
+                t == RustType::F64 || usize_counters.contains(name.as_ref())
+            }
+            Expr::Binary {
+                left,
+                op: BinOp::Add | BinOp::Sub,
+                right,
+                ..
+            } => Self::expr_infer_native_f64_in_vec_fn(left, type_ctx, usize_counters)
+                && Self::expr_infer_native_f64_in_vec_fn(right, type_ctx, usize_counters),
+            _ => false,
+        }
     }
 
     fn index_in_bounds(&self, index: &Expr, arr: &str) -> bool {
@@ -7897,12 +8427,25 @@ impl Codegen {
         // Lower bound: the index can never be negative.
         let nonneg = self.nonneg_locals.contains(idx)
             || self.usize_for_counters.contains(idx)
+            || self.diag_coord_indices.contains(idx)
             || self
                 .int_range_locals
                 .get(idx)
                 .is_some_and(|&(lo, _)| lo >= 0);
         if !nonneg {
             return false;
+        }
+        if self.diag_coord_indices.contains(idx) && matches!(len, BoundKey::TwiceVar(_)) {
+            return true;
+        }
+        if let Some(&(lo, hi)) = self.int_range_locals.get(idx) {
+            if lo >= 0 {
+                if let Some(ub) = self.bound_key_upper_i64(len) {
+                    if hi < ub {
+                        return true;
+                    }
+                }
+            }
         }
         if self.strict_lt_bounds.iter().any(|(v, bound)| {
             idx == v
@@ -8012,7 +8555,7 @@ impl Codegen {
         match len {
             BoundKey::Var(n) => self.bounded_below_len.get(lk) == Some(&BoundKey::Var(n.clone())),
             BoundKey::Const(c) => self.bounded_below_len.get(lk) == Some(&BoundKey::Const(*c)),
-            BoundKey::Len(_) => false,
+            BoundKey::TwiceVar(_) | BoundKey::Len(_) => false,
         }
     }
 
@@ -8026,6 +8569,13 @@ impl Codegen {
                 if let Some(n) = self.native_param_lit(p) {
                     if n.fract() == 0.0 && n >= 1.0 {
                         self.int_range_locals.insert(var.to_string(), (0, n as i64 - 1));
+                    }
+                }
+            }
+            BoundKey::TwiceVar(p) => {
+                if let Some(n) = self.native_param_lit(p) {
+                    if n.fract() == 0.0 && n >= 1.0 {
+                        self.int_range_locals.insert(var.to_string(), (0, 2 * n as i64 - 1));
                     }
                 }
             }
@@ -8093,7 +8643,9 @@ impl Codegen {
         let mut escaped: HashSet<String> = HashSet::new();
         self.scan_vec_fill(stmts, &mut cand, &mut escaped);
         for s in stmts {
-            Self::for_each_stmt_expr(s, &mut |e| Self::flag_vec_escapes(e, &mut escaped));
+            Self::for_each_stmt_expr(s, &mut |e| {
+                Self::flag_vec_escapes_inner(e, &mut escaped, Some(&self.native_vec_fns));
+            });
         }
         cand.retain(|name, _| !escaped.contains(name));
         cand
@@ -8155,6 +8707,20 @@ impl Codegen {
     /// exempt: `a[i]` / `a[i]=v` (the object), `a.push(...)` (grows, keeps `len >= B`), and a
     /// non-call member read like `a.length`. Conservative — over-flagging only loses the optimization.
     fn flag_vec_escapes(e: &Expr, escaped: &mut HashSet<String>) {
+        Self::flag_vec_escapes_inner(e, escaped, None);
+    }
+
+  /// Context-aware escape walk: any bare-`Ident` use of a name in a value position adds it to
+    /// `escaped` (it could be aliased/mutated elsewhere). Uses that CANNOT shrink the array are
+    /// exempt: `a[i]` / `a[i]=v` (the object), `a.push(...)` (grows, keeps `len >= B`), and a
+    /// non-call member read like `a.length`. Conservative — over-flagging only loses the optimization.
+    /// When `native_vec_fns` is set, array idents passed by reference to a native-vec callee are not
+    /// flagged — those calls borrow without changing length.
+    fn flag_vec_escapes_inner(
+        e: &Expr,
+        escaped: &mut HashSet<String>,
+        native_vec_fns: Option<&std::collections::HashMap<String, NativeVecFnSig>>,
+    ) {
         match e {
             // A bare value-position read of `a` — it can flow into another binding / call and be
             // mutated out of sight, so the fixed-length fact no longer holds.
@@ -8163,9 +8729,9 @@ impl Codegen {
             }
             Expr::Index { object, index, .. } => {
                 if !matches!(object.as_ref(), Expr::Ident { .. }) {
-                    Self::flag_vec_escapes(object, escaped);
+                    Self::flag_vec_escapes_inner(object, escaped, native_vec_fns);
                 }
-                Self::flag_vec_escapes(index, escaped);
+                Self::flag_vec_escapes_inner(index, escaped, native_vec_fns);
             }
             Expr::IndexAssign {
                 object,
@@ -8174,21 +8740,43 @@ impl Codegen {
                 ..
             } => {
                 if !matches!(object.as_ref(), Expr::Ident { .. }) {
-                    Self::flag_vec_escapes(object, escaped);
+                    Self::flag_vec_escapes_inner(object, escaped, native_vec_fns);
                 }
-                Self::flag_vec_escapes(index, escaped);
-                Self::flag_vec_escapes(value, escaped);
+                Self::flag_vec_escapes_inner(index, escaped, native_vec_fns);
+                Self::flag_vec_escapes_inner(value, escaped, native_vec_fns);
             }
             Expr::Member { object, prop, .. } => {
                 // A member READ (`a.length`, `a.foo`) doesn't mutate or alias the array.
                 if !matches!(object.as_ref(), Expr::Ident { .. }) {
-                    Self::flag_vec_escapes(object, escaped);
+                    Self::flag_vec_escapes_inner(object, escaped, native_vec_fns);
                 }
                 if let MemberProp::Expr(pe) = prop {
-                    Self::flag_vec_escapes(pe, escaped);
+                    Self::flag_vec_escapes_inner(pe, escaped, native_vec_fns);
                 }
             }
             Expr::Call { callee, args, .. } => {
+                if let Some(fns) = native_vec_fns {
+                    if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                        if let Some(sig) = fns.get(fname.as_ref()) {
+                            Self::flag_vec_escapes_inner(callee, escaped, native_vec_fns);
+                            for (a, (_, kind)) in args.iter().zip(sig.params.iter()) {
+                                let borrowed_array_ident = matches!(
+                                    (kind, a),
+                                    (VecParamKind::Array { .. }, CallArg::Expr(Expr::Ident { .. }))
+                                );
+                                if borrowed_array_ident {
+                                    continue;
+                                }
+                                match a {
+                                    CallArg::Expr(e) | CallArg::Spread(e) => {
+                                        Self::flag_vec_escapes_inner(e, escaped, native_vec_fns);
+                                    }
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
                 match callee.as_ref() {
                     // `a.push(x)` grows the array (keeps `len >= B`) — `a` itself is not flagged; the
                     // ARGUMENT is still a value position. Any OTHER method (`pop`/`shift`/`splice`/…
@@ -8204,44 +8792,48 @@ impl Codegen {
                             }
                         }
                     }
-                    other => Self::flag_vec_escapes(other, escaped),
+                    other => Self::flag_vec_escapes_inner(other, escaped, native_vec_fns),
                 }
                 for a in args {
                     match a {
-                        CallArg::Expr(e) | CallArg::Spread(e) => Self::flag_vec_escapes(e, escaped),
+                        CallArg::Expr(e) | CallArg::Spread(e) => {
+                            Self::flag_vec_escapes_inner(e, escaped, native_vec_fns);
+                        }
                     }
                 }
             }
             Expr::New { callee, args, .. } => {
-                Self::flag_vec_escapes(callee, escaped);
+                Self::flag_vec_escapes_inner(callee, escaped, native_vec_fns);
                 for a in args {
                     match a {
-                        CallArg::Expr(e) | CallArg::Spread(e) => Self::flag_vec_escapes(e, escaped),
+                        CallArg::Expr(e) | CallArg::Spread(e) => {
+                            Self::flag_vec_escapes_inner(e, escaped, native_vec_fns);
+                        }
                     }
                 }
             }
             Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
-                Self::flag_vec_escapes(left, escaped);
-                Self::flag_vec_escapes(right, escaped);
+                Self::flag_vec_escapes_inner(left, escaped, native_vec_fns);
+                Self::flag_vec_escapes_inner(right, escaped, native_vec_fns);
             }
             Expr::Unary { operand, .. }
             | Expr::TypeOf { operand, .. }
-            | Expr::Await { operand, .. } => Self::flag_vec_escapes(operand, escaped),
-            Expr::Delete { target, .. } => Self::flag_vec_escapes(target, escaped),
+            | Expr::Await { operand, .. } => Self::flag_vec_escapes_inner(operand, escaped, native_vec_fns),
+            Expr::Delete { target, .. } => Self::flag_vec_escapes_inner(target, escaped, native_vec_fns),
             // A reassignment target could install a shorter array; flag it. (RHS is a value pos.)
             Expr::Assign { name, value, .. }
             | Expr::CompoundAssign { name, value, .. }
             | Expr::LogicalAssign { name, value, .. } => {
                 escaped.insert(name.to_string());
-                Self::flag_vec_escapes(value, escaped);
+                Self::flag_vec_escapes_inner(value, escaped, native_vec_fns);
             }
             Expr::MemberAssign { object, value, .. } => {
                 if let Expr::Ident { name, .. } = object.as_ref() {
                     escaped.insert(name.to_string()); // `a.length = …` etc.
                 } else {
-                    Self::flag_vec_escapes(object, escaped);
+                    Self::flag_vec_escapes_inner(object, escaped, native_vec_fns);
                 }
-                Self::flag_vec_escapes(value, escaped);
+                Self::flag_vec_escapes_inner(value, escaped, native_vec_fns);
             }
             Expr::Conditional {
                 cond,
@@ -8249,15 +8841,15 @@ impl Codegen {
                 else_branch,
                 ..
             } => {
-                Self::flag_vec_escapes(cond, escaped);
-                Self::flag_vec_escapes(then_branch, escaped);
-                Self::flag_vec_escapes(else_branch, escaped);
+                Self::flag_vec_escapes_inner(cond, escaped, native_vec_fns);
+                Self::flag_vec_escapes_inner(then_branch, escaped, native_vec_fns);
+                Self::flag_vec_escapes_inner(else_branch, escaped, native_vec_fns);
             }
             Expr::Array { elements, .. } => {
                 for el in elements {
                     match el {
                         ArrayElement::Expr(e) | ArrayElement::Spread(e) => {
-                            Self::flag_vec_escapes(e, escaped)
+                            Self::flag_vec_escapes_inner(e, escaped, native_vec_fns)
                         }
                     }
                 }
@@ -8266,14 +8858,14 @@ impl Codegen {
                 for p in props {
                     match p {
                         ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => {
-                            Self::flag_vec_escapes(e, escaped)
+                            Self::flag_vec_escapes_inner(e, escaped, native_vec_fns)
                         }
                     }
                 }
             }
             Expr::TemplateLiteral { exprs, .. } => {
                 for e in exprs {
-                    Self::flag_vec_escapes(e, escaped);
+                    Self::flag_vec_escapes_inner(e, escaped, native_vec_fns);
                 }
             }
             // A closure body can capture and mutate an array out of line; conservatively flag every
@@ -8615,6 +9207,7 @@ impl Codegen {
         self.writeln(&format!("for {} in 0..{} {{", usize_var, bound_usize));
         self.indent += 1;
         let native_usize = self.native_fn_body_emit || self.native_vec_ret.is_some();
+        let emit_f64_counter = self.native_fn_body_emit || !self.native_vec_ret.is_some();
         if native_usize {
             self.usize_var_subst.insert(counter.to_string(), usize_var.clone());
             self.usize_for_counters.insert(counter.to_string());
@@ -8631,7 +9224,7 @@ impl Codegen {
                 Self::f64_lit(*sub),
             ));
             self.type_context.define(coord_name, RustType::F64);
-        } else if !native_usize {
+        } else if emit_f64_counter {
             self.writeln(&format!(
                 "let mut {}: f64 = ({} as f64);",
                 esc_ctr, usize_var
@@ -8662,7 +9255,6 @@ impl Codegen {
         if let Some(g) = extra_guard {
             self.active_index_guards.push(g);
         }
-        let fused_was_peeled = fused_coord.is_some();
         let emit_body = if fused_was_peeled && rest_stmts.len() == 1 {
             rest_stmts[0].clone()
         } else if fused_was_peeled {
@@ -8861,7 +9453,7 @@ impl Codegen {
                 uv.clone()
             } else {
                 let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-                if idx_ty == RustType::F64 {
+                if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
                     format!("({}) as usize", idx_code)
                 } else {
                     let iv = if idx_ty.is_native() {
@@ -8877,7 +9469,7 @@ impl Codegen {
             }
         } else {
             let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-            if idx_ty == RustType::F64 {
+            if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
                 format!("({}) as usize", idx_code)
             } else {
                 let iv = if idx_ty.is_native() {
@@ -8891,16 +9483,56 @@ impl Codegen {
                 )
             }
         };
-        let (val_code, val_ty) = self.emit_typed_expr(value)?;
-        let native_val = if val_ty == *elem_type {
-            val_code
-        } else if val_ty == RustType::Value {
-            elem_type.from_value_expr(&val_code)
+        let native_val = if *elem_type == RustType::I32 {
+            if let Expr::Binary {
+                left,
+                op: BinOp::Sub,
+                right,
+                ..
+            } = value
+            {
+                if let Some(n) = Self::int_literal_value_of(right) {
+                    let (lc, lt) = self.emit_typed_expr(left)?;
+                    if lt == RustType::I32 {
+                        format!("({} - {}i32)", lc, n as i32)
+                    } else {
+                        let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                        if val_ty == RustType::I32 {
+                            val_code
+                        } else {
+                            format!("({}) as i32", val_code)
+                        }
+                    }
+                } else {
+                    let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                    if val_ty == RustType::I32 {
+                        val_code
+                    } else {
+                        format!("({}) as i32", val_code)
+                    }
+                }
+            } else {
+                let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                if val_ty == RustType::I32 {
+                    val_code
+                } else if val_ty == RustType::Value {
+                    elem_type.from_value_expr(&val_code)
+                } else {
+                    format!("({}) as i32", val_code)
+                }
+            }
         } else {
-            val_code
+            let (val_code, val_ty) = self.emit_typed_expr(value)?;
+            if val_ty == *elem_type {
+                val_code
+            } else if val_ty == RustType::Value {
+                elem_type.from_value_expr(&val_code)
+            } else {
+                val_code
+            }
         };
         let assign = match elem_type.as_ref() {
-            RustType::F64 | RustType::Bool if in_bounds => {
+            RustType::F64 | RustType::Bool | RustType::I32 if in_bounds => {
                 if side_effect_only {
                     format!("{}[{}] = {}", esc_obj, idx_usize, native_val)
                 } else {
@@ -8924,6 +9556,101 @@ impl Codegen {
             _ => format!("{{ {}[{}] = {}; Value::Null }}", esc_obj, idx_usize, native_val),
         };
         Ok(Some(assign))
+    }
+
+    /// `for (i=0; i<r; i++) { arr[i] = arr[i+1] }` → `arr.copy_within(1..(r+1), 0)` (fannkuch perm1 rotation).
+    fn try_emit_vec_copy_within_shift_for(
+        &mut self,
+        init: Option<&Statement>,
+        cond: Option<&Expr>,
+        update: Option<&Expr>,
+        body: &Statement,
+    ) -> Result<bool, CompileError> {
+        if !self.native_vec_ret.is_some() && !self.native_fn_body_emit {
+            return Ok(false);
+        }
+        let (i_name, r_name) = match Self::parse_usize_for_counter(init, cond, update) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let arr_name = match Self::parse_vec_left_shift_body(body, &i_name) {
+            Some(a) => a,
+            None => return Ok(false),
+        };
+        if self.refcell_wrapped_vars.contains(arr_name.as_str()) {
+            return Ok(false);
+        }
+        let RustType::Vec(elem) = self.type_context.get_type(arr_name.as_str()) else {
+            return Ok(false);
+        };
+        if *elem != RustType::F64 {
+            return Ok(false);
+        }
+        let esc_arr = Self::escape_ident(arr_name.as_str());
+        let esc_r = Self::escape_ident(&r_name);
+        self.writeln(&format!(
+            "{{ let _ru = ({} as usize); if _ru > 0 {{ {}.copy_within(1..(_ru + 1), 0); }} }}",
+            esc_r, esc_arr
+        ));
+        Ok(true)
+    }
+
+    /// `arr[i] = arr[i+1]` loop body for [`try_emit_vec_copy_within_shift_for`].
+    fn parse_vec_left_shift_body(body: &Statement, i_name: &str) -> Option<String> {
+        let st = match body {
+            Statement::Block { statements, .. } if statements.len() == 1 => &statements[0],
+            Statement::ExprStmt { .. } => body,
+            _ => return None,
+        };
+        let Statement::ExprStmt {
+            expr: Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            },
+            ..
+        } = st
+        else {
+            return None;
+        };
+        let Expr::Ident { name: arr, .. } = object.as_ref() else {
+            return None;
+        };
+        if !matches!(index.as_ref(), Expr::Ident { name, .. } if name.as_ref() == i_name) {
+            return None;
+        }
+        let Expr::Index {
+            object: o2,
+            index: idx2,
+            optional: false,
+            ..
+        } = value.as_ref()
+        else {
+            return None;
+        };
+        let Expr::Ident { name: arr2, .. } = o2.as_ref() else {
+            return None;
+        };
+        if arr.as_ref() != arr2.as_ref() {
+            return None;
+        }
+        let Expr::Binary {
+            left,
+            op: BinOp::Add,
+            right,
+            ..
+        } = idx2.as_ref()
+        else {
+            return None;
+        };
+        if !matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == i_name) {
+            return None;
+        }
+        if Self::int_literal_value_of(right) != Some(1) {
+            return None;
+        }
+        Some(arr.to_string())
     }
 
     /// `while (i < r) { let j = i+1; arr[i] = arr[j]; i = j }` → `for ui in 0..r { arr[ui]=arr[ui+1] }`.
@@ -9027,13 +9754,11 @@ impl Codegen {
         if !matches!(iv.as_ref(), Expr::Ident { name, .. } if name.as_ref() == j_name.as_ref()) {
             return Ok(false);
         }
-        let usize_var = format!("_usize_shift_{}", self.loop_label_index);
-        self.loop_label_index += 1;
         let esc_arr = Self::escape_ident(arr_name.as_ref());
         let esc_r = Self::escape_ident(r_name.as_ref());
         self.writeln(&format!(
-            "for {} in 0..({} as usize) {{ {}[{}] = {}[{} + 1]; }}",
-            usize_var, esc_r, esc_arr, usize_var, esc_arr, usize_var
+            "{}.copy_within(1..(({} as usize) + 1), 0);",
+            esc_arr, esc_r
         ));
         Ok(true)
     }
@@ -13101,6 +13826,59 @@ impl Codegen {
                 break;
             }
         }
+        // Forwarding fixpoint: fns whose array params are only threaded to other native-vec fns
+        // (`multiplyAtAv` → `multiplyAv`/`multiplyAtv`) qualify once callees are in `sigs`.
+        loop {
+            let mut added = false;
+            for s in &program.statements {
+                if let Statement::FunDecl {
+                    async_: false,
+                    name,
+                    params,
+                    rest_param: None,
+                    body,
+                    ..
+                } = s
+                {
+                    if sigs.contains_key(name.as_ref()) {
+                        continue;
+                    }
+                    if let Some(sig) = Self::infer_vec_fn_sig_forwarding(params, body, &sigs) {
+                        let has_array_param = sig
+                            .params
+                            .iter()
+                            .any(|(_, k)| matches!(k, VecParamKind::Array { .. }));
+                        if has_array_param || Self::body_uses_local_vec_ops(body) {
+                            sigs.insert(name.to_string(), sig);
+                            added = true;
+                        }
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+            loop {
+                let mut remove: Vec<String> = Vec::new();
+                for s in &program.statements {
+                    Self::collect_bad_vec_callsites(s, &sigs, &mut remove);
+                }
+                remove.sort();
+                remove.dedup();
+                if remove.is_empty() {
+                    break;
+                }
+                for n in remove {
+                    sigs.remove(&n);
+                }
+                if sigs.is_empty() {
+                    break;
+                }
+            }
+            if sigs.is_empty() {
+                break;
+            }
+        }
         sigs
     }
 
@@ -13215,6 +13993,125 @@ impl Codegen {
         Some(NativeVecFnSig {
             params: sig_params,
             ret,
+        })
+    }
+
+    /// Like [`infer_vec_fn_sig`], but array params may be classified by forwarding into an
+    /// already-detected native-vec callee (`multiplyAtAv` shape).
+    fn infer_vec_fn_sig_forwarding(
+        params: &[FunParam],
+        body: &Statement,
+        sigs: &std::collections::HashMap<String, NativeVecFnSig>,
+    ) -> Option<NativeVecFnSig> {
+        let mut sig_params = Vec::with_capacity(params.len());
+        for p in params {
+            let FunParam::Simple(tp) = p else {
+                return None;
+            };
+            if tp.default.is_some() {
+                return None;
+            }
+            let indexed = Self::classify_vec_param(body, tp.name.as_ref());
+            let forwarded =
+                Self::classify_vec_param_forwarding(body, tp.name.as_ref(), sigs);
+            let kind = match indexed {
+                Some(VecParamKind::Array { .. }) => indexed,
+                Some(VecParamKind::Scalar) => forwarded.or(indexed),
+                None => forwarded,
+            }?;
+            sig_params.push((tp.name.to_string(), kind));
+        }
+        let ret = Self::vec_fn_return_kind(params, body)?;
+        Some(NativeVecFnSig {
+            params: sig_params,
+            ret,
+        })
+    }
+
+    /// `p` is only passed as a call argument to native-vec fns at array-param positions.
+    fn classify_vec_param_forwarding(
+        body: &Statement,
+        p: &str,
+        sigs: &std::collections::HashMap<String, NativeVecFnSig>,
+    ) -> Option<VecParamKind> {
+        let mut kinds: Vec<VecParamKind> = Vec::new();
+        let mut bad = false;
+        Self::for_each_stmt_expr(body, &mut |e| {
+            if bad {
+                return;
+            }
+            if let Expr::Call { callee, args, .. } = e {
+                let Expr::Ident { name: fname, .. } = callee.as_ref() else {
+                    bad = true;
+                    return;
+                };
+                let sig = match sigs.get(fname.as_ref()) {
+                    Some(s) => s,
+                    None => return,
+                };
+                if args.len() != sig.params.len() {
+                    bad = true;
+                    return;
+                }
+                for (i, a) in args.iter().enumerate() {
+                    let CallArg::Expr(arg_e) = a else {
+                        bad = true;
+                        return;
+                    };
+                    if let Expr::Ident { name, .. } = arg_e {
+                        if name.as_ref() == p {
+                            match &sig.params[i].1 {
+                                VecParamKind::Array { .. } => kinds.push(sig.params[i].1.clone()),
+                                VecParamKind::Scalar => bad = true,
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        if bad || kinds.is_empty() {
+            return None;
+        }
+        let mut forward_uses = 0usize;
+        Self::for_each_stmt_expr(body, &mut |e| {
+            if let Expr::Call { callee, args, .. } = e {
+                let Expr::Ident { name: fname, .. } = callee.as_ref() else {
+                    return;
+                };
+                if !sigs.contains_key(fname.as_ref()) {
+                    return;
+                }
+                for a in args {
+                    if let CallArg::Expr(Expr::Ident { name, .. }) = a {
+                        if name.as_ref() == p {
+                            forward_uses += 1;
+                        }
+                    }
+                }
+            }
+        });
+        if forward_uses != kinds.len() {
+            return None;
+        }
+        let mut is_mut = false;
+        let mut elem_bool = false;
+        for k in &kinds {
+            if let VecParamKind::Array { elem, is_mut: im } = k {
+                if *im {
+                    is_mut = true;
+                }
+                if *elem == RustType::Bool {
+                    elem_bool = true;
+                }
+            }
+        }
+        Some(VecParamKind::Array {
+            elem: if elem_bool {
+                RustType::Bool
+            } else {
+                RustType::F64
+            },
+            is_mut,
         })
     }
 
@@ -13409,6 +14306,9 @@ impl Codegen {
             && ret_exprs.iter().all(|e| {
                 matches!(e, Expr::Ident { name, .. } if builders.contains(name.as_ref()))
             })
+            && builders
+                .iter()
+                .all(|b| Self::vec_builder_numeric_pushes(body, b))
         {
             return Some(VecRetKind::VecF64);
         }
@@ -13480,6 +14380,44 @@ impl Codegen {
             }
         }
         builders
+    }
+
+    /// Every `.push` on `local` pushes a numeric literal/expr — not objects/arrays (megamorphic `objs`).
+    fn vec_builder_numeric_pushes(body: &Statement, local: &str) -> bool {
+        let mut ok = true;
+        Self::for_each_stmt_expr(body, &mut |e| {
+            if !ok {
+                return;
+            }
+            let Expr::Call { callee, args, .. } = e else {
+                return;
+            };
+            let Expr::Member {
+                object,
+                prop: MemberProp::Name { name: method, .. },
+                ..
+            } = callee.as_ref()
+            else {
+                return;
+            };
+            if !matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == local)
+                || method.as_ref() != "push"
+                || args.len() != 1
+            {
+                return;
+            }
+            let CallArg::Expr(arg) = &args[0] else {
+                ok = false;
+                return;
+            };
+            if matches!(
+                arg,
+                Expr::Object { .. } | Expr::Array { .. } | Expr::ArrowFunction { .. }
+            ) {
+                ok = false;
+            }
+        });
+        ok
     }
 
     fn vec_builder_only_push(body: &Statement, local: &str) -> bool {
@@ -13777,15 +14715,48 @@ impl Codegen {
         let saved_vec_fixed = self.vec_fixed_len.clone();
         let saved_nonneg = self.nonneg_locals.clone();
         let saved_int_range = self.int_range_locals.clone();
+        let saved_diag_coord = self.diag_coord_indices.clone();
         let saved_shift_half = self.shift_half_of.clone();
         let saved_array_elem = self.array_elem_ranges.clone();
         let saved_int_valued = self.int_valued_locals.clone();
         let body_slice = Self::fn_body_stmt_slice(body);
+        if let Some(lp) = sig.params.iter().find_map(|(name, kind)| {
+            matches!(kind, VecParamKind::Scalar).then(|| name.clone())
+        }) {
+            for (pname, kind) in &sig.params {
+                if matches!(kind, VecParamKind::Array { .. }) {
+                    let bound = if pname.starts_with("diag") {
+                        BoundKey::TwiceVar(lp.clone())
+                    } else {
+                        BoundKey::Var(lp.clone())
+                    };
+                    self.vec_fixed_len.insert(pname.clone(), bound);
+                }
+            }
+        }
         self.merge_fn_body_inference(body_slice);
+        let saved_i32_vec = self.int_i32_vec_locals.clone();
+        self.int_i32_vec_locals = Self::detect_fannkuch_i32_vec_locals(body_slice);
+        for name in &self.int_i32_vec_locals {
+            self.type_context
+                .define(name.as_ref(), RustType::Vec(Box::new(RustType::I32)));
+        }
+        if !self.int_i32_vec_locals.is_empty() {
+            if let Some(lp) = sig.params.iter().find_map(|(name, kind)| {
+                matches!(kind, VecParamKind::Scalar).then(|| name.clone())
+            }) {
+                let bound = BoundKey::Var(lp);
+                for name in &self.int_i32_vec_locals {
+                    self.vec_fixed_len.insert(name.clone(), bound.clone());
+                }
+            }
+        }
         let res = self.emit_statement(body);
+        self.int_i32_vec_locals = saved_i32_vec;
         self.vec_fixed_len = saved_vec_fixed;
         self.nonneg_locals = saved_nonneg;
         self.int_range_locals = saved_int_range;
+        self.diag_coord_indices = saved_diag_coord;
         self.shift_half_of = saved_shift_half;
         self.array_elem_ranges = saved_array_elem;
         self.int_valued_locals = saved_int_valued;
@@ -15125,12 +16096,6 @@ impl Codegen {
                         return Ok((temp.clone(), RustType::F64));
                     }
                 }
-                // M5 call-site literal specialization (`mandel(1200,1200,100)` → const params).
-                if self.native_fn_body_emit {
-                    if let Some(v) = self.native_param_lit(name.as_ref()) {
-                        return Ok((Self::f64_lit(v), RustType::F64));
-                    }
-                }
                 // #176: native numeric global → thread_local Cell read.
                 if self.native_numeric_globals.contains_key(name.as_ref()) {
                     return Ok((
@@ -15329,6 +16294,20 @@ impl Codegen {
                 Ok((result, RustType::Value))
             }
 
+            // ── logical not on native bool ───────────────────────────────────────
+            Expr::Unary {
+                op: UnaryOp::Not,
+                operand,
+                ..
+            } => {
+                let (o, ot) = self.emit_typed_expr(operand)?;
+                if ot == RustType::Bool {
+                    return Ok((format!("!{}", o), RustType::Bool));
+                }
+                let result = self.emit_expr(expr)?;
+                Ok((result, RustType::Value))
+            }
+
             // ── array indexing ───────────────────────────────────────────────────
             Expr::Index {
                 object,
@@ -15409,7 +16388,7 @@ impl Codegen {
                                         uv.clone()
                                     } else {
                                         let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-                                        if idx_ty == RustType::F64 {
+                                        if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
                                             format!("({}) as usize", idx_code)
                                         } else {
                                             let iv = if idx_ty.is_native() {
@@ -15425,7 +16404,7 @@ impl Codegen {
                                     }
                                 } else {
                                     let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-                                    if idx_ty == RustType::F64 {
+                                    if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
                                         format!("({}) as usize", idx_code)
                                     } else {
                                         let iv = if idx_ty.is_native() {
@@ -15447,11 +16426,15 @@ impl Codegen {
                                 let access = match &elem_ty {
                                     // #173 part 3: a proven in-bounds read skips the `.get().unwrap_or`
                                     // branch — a direct `a[i]` (the `idx < len` proof guarantees it).
-                                    RustType::F64 | RustType::Bool if in_bounds => {
+                                    RustType::F64 | RustType::Bool | RustType::I32 if in_bounds => {
                                         format!("{}[{}]", esc_obj, idx_usize)
                                     }
                                     RustType::F64 => format!(
                                         "{}.get({}).copied().unwrap_or(f64::NAN)",
+                                        esc_obj, idx_usize
+                                    ),
+                                    RustType::I32 => format!(
+                                        "{}.get({}).copied().unwrap_or(0)",
                                         esc_obj, idx_usize
                                     ),
                                     RustType::Bool => {
@@ -16132,4 +17115,33 @@ mod tests_176 {
         assert!(c.contains_key("seed"), "optimized+inferred: {:?}", c);
     }
 
+    #[test]
+    fn fib_native_body_uses_param_not_call_site_literal() {
+        use std::path::PathBuf;
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest.join("../../tests/perf/recursion_fib.tish");
+        for k in [
+            "TISH_PARAM_NATIVE",
+            "TISH_PARAM_INFER",
+            "TISH_NATIVE_FN",
+            "TISH_STRUCT_INFER",
+            "TISH_FUSED_HOF",
+            "TISH_NATIVE_HOF",
+            "TISH_AGGREGATE_INFER",
+        ] {
+            std::env::set_var(k, "1");
+        }
+        let (rust, _, _, _) =
+            crate::compile_project_full(&path, path.parent(), &[], true).unwrap();
+        let nv = rust
+            .split("fn fib_native(")
+            .nth(1)
+            .expect("fib_native");
+        let nv = nv.split("fn run()").next().unwrap_or(nv);
+        assert!(
+            !nv.contains("fib_native((35_f64"),
+            "fib_native must use param n, not call-site literal"
+        );
+        assert!(nv.contains("fib_native((n -"), "expected recursive n-1 call");
+    }
 }
