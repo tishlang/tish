@@ -4165,6 +4165,8 @@ impl Codegen {
                 if self.module_const_f64_arrays.contains_key(name.as_ref())
                     && self.outer_vars_stack.len() == 1
                 {
+                    self.type_context
+                        .define(name.as_ref(), RustType::Vec(Box::new(RustType::F64)));
                     return Ok(());
                 }
 
@@ -4437,12 +4439,22 @@ impl Codegen {
                 // body lowers natively — no per-element `Value::clone`, and accumulators stay f64.
                 let mut emitted_native = false;
                 if let Expr::Ident { name: it_name, .. } = iterable {
-                    if let RustType::Vec(elem) = self.type_context.get_type(it_name.as_ref()) {
+                    let module_const_it =
+                        self.module_const_f64_array_rust_ref(it_name.as_ref());
+                    let it_vec_ty = if module_const_it.is_some() {
+                        RustType::Vec(Box::new(RustType::F64))
+                    } else {
+                        self.type_context.get_type(it_name.as_ref())
+                    };
+                    if let RustType::Vec(elem) = it_vec_ty {
                         if elem.is_native() {
                             let mut body_idents = std::collections::HashSet::new();
                             Self::collect_stmt_idents(body, &mut body_idents);
                             if !body_idents.contains(it_name.as_ref()) {
-                                let esc_it = Self::escape_ident(it_name.as_ref()).into_owned();
+                                let esc_it = module_const_it
+                                    .unwrap_or_else(|| {
+                                        Self::escape_ident(it_name.as_ref()).into_owned()
+                                    });
                                 let esc_name = Self::escape_ident(name.as_ref()).into_owned();
                                 // Index-based iteration (not `.iter().cloned()`, which rustc fails to
                                 // tighten here): `0..len` indexing of a `Vec<f64>` matches a hand-
@@ -5564,6 +5576,14 @@ impl Codegen {
                         "Value::Number({})",
                         Self::native_global_get(name.as_ref())
                     ));
+                }
+                if let Some(static_name) = self.module_const_f64_array_rust_ref(name.as_ref()) {
+                    let v = Self::module_const_f64_array_as_value(&static_name);
+                    return Ok(if self.value_fn_depth > 0 || !self.loop_stack.is_empty() {
+                        format!("({}).clone()", v)
+                    } else {
+                        v
+                    });
                 }
                 if let Some(uv) = self.usize_var_subst.get(name.as_ref()) {
                     return Ok(format!("Value::Number(({} as f64))", uv));
@@ -8390,6 +8410,16 @@ impl Codegen {
                 }
                 if let Some(uv) = self.usize_var_subst.get(name.as_ref()) {
                     return Ok(format!("({} as f64)", uv));
+                }
+            }
+            if let RustType::Vec(inner) = target_type {
+                if **inner == RustType::F64 {
+                    if let Some(static_name) = self.module_const_f64_array_rust_ref(name.as_ref()) {
+                        return Ok(format!(
+                            "{}.iter().copied().collect::<Vec<f64>>()",
+                            static_name
+                        ));
+                    }
                 }
             }
             let var_type = self.type_context.get_type(name.as_ref());
@@ -12776,6 +12806,25 @@ impl Codegen {
             return Some(Self::module_const_static(name));
         }
         None
+    }
+
+    /// Top-level `let xs = [1,2,3]` hoisted to `const G_XS` — resolve the Rust static name.
+    fn module_const_f64_array_rust_ref(&self, name: &str) -> Option<String> {
+        if self.outer_vars_stack.len() != 1 {
+            return None;
+        }
+        Self::module_const_array_static(
+            &self.module_const_f64_arrays,
+            &self.module_const_f64_aliases,
+            name,
+        )
+    }
+
+    fn module_const_f64_array_as_value(static_name: &str) -> String {
+        format!(
+            "Value::NumberArray(VmRef::new({}.iter().copied().collect::<Vec<f64>>()))",
+            static_name
+        )
     }
 
     fn emit_module_const_f64_arrays(&mut self) -> Result<(), CompileError> {
@@ -17191,6 +17240,13 @@ impl Codegen {
                 }
                 if let Some(uv) = self.usize_var_subst.get(name.as_ref()) {
                     return Ok((format!("({} as f64)", uv), RustType::F64));
+                }
+                if let Some(static_name) = self.module_const_f64_array_rust_ref(name.as_ref()) {
+                    let var_type = RustType::Vec(Box::new(RustType::F64));
+                    return Ok((
+                        format!("{}.iter().copied().collect::<Vec<f64>>()", static_name),
+                        var_type,
+                    ));
                 }
                 let escaped = Self::escape_ident(name.as_ref());
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
