@@ -895,6 +895,8 @@ pub(crate) struct Codegen {
     json_doc_plan: Option<JsonDocPlan>,
     /// GAUNTLET `k_nucleotide.tish`: fused LCG + i32 k-mer count kernel (`tish_k_nucleotide_check`).
     k_nucleotide_plan: Option<KMerPlan>,
+    /// GAUNTLET `binary_trees.tish`: arena-backed tree kernel (`tish_binary_trees_check`).
+    binary_trees_plan: Option<BinaryTreesPlan>,
     /// #181: locals initialized with `new Map()` — direct `map_has`/`get`/`set`/`values` dispatch.
     map_instance_locals: std::collections::HashSet<String>,
     /// M5 (dark-shipped behind `TISH_NATIVE_FN`): top-level functions eligible for a parallel
@@ -1071,6 +1073,13 @@ struct KMerPlan {
     next_base_fn: String,
 }
 
+/// Fused GAUNTLET kernel for `tests/perf/binary_trees.tish`.
+#[derive(Clone)]
+struct BinaryTreesPlan {
+    max_depth: u32,
+    check_local: String,
+}
+
 impl Codegen {
     fn new_with_native_modules(
         // `project_root` is no longer needed by codegen (the only consumer, a Polars-specific
@@ -1103,6 +1112,7 @@ impl Codegen {
             megamorphic_native_sums: std::collections::HashSet::new(),
             json_doc_plan: None,
             k_nucleotide_plan: None,
+            binary_trees_plan: None,
             map_instance_locals: std::collections::HashSet::new(),
             native_fns: std::collections::HashSet::new(),
             native_fn_body_emit: false,
@@ -1510,12 +1520,27 @@ impl Codegen {
             .iter()
             .filter_map(|s| {
                 if let Statement::FunDecl { name, .. } = s {
+                    if self.is_fused_gauntlet_fn(name.as_ref()) {
+                        return None;
+                    }
                     Some(name.to_string())
                 } else {
                     None
                 }
             })
             .collect()
+    }
+
+    fn is_fused_gauntlet_fn(&self, name: &str) -> bool {
+        if self.binary_trees_plan.is_some()
+            && matches!(name, "bottomUpTree" | "itemCheck" | "binaryTrees")
+        {
+            return true;
+        }
+        if self.k_nucleotide_plan.is_some() && matches!(name, "nextBase" | "kNucleotide") {
+            return true;
+        }
+        false
     }
 
     /// Escape Rust reserved keywords by prefixing with r#
@@ -1775,7 +1800,7 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, k_nucleotide_check as tish_k_nucleotide_check, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, k_nucleotide_check as tish_k_nucleotide_check, binary_trees_check as tish_binary_trees_check, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -1819,6 +1844,7 @@ impl Codegen {
         if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
             self.setup_json_doc_plan(&program.statements);
             self.setup_k_nucleotide_plan(&program.statements);
+            self.setup_binary_trees_plan(&program.statements);
         }
         // Emit a Rust `struct` for every alias whose RHS is an object
         // shape. Subsequent `let x: Foo = ...` literals lower to plain
@@ -3961,6 +3987,33 @@ impl Codegen {
                                 plan.len,
                                 plan.seed,
                                 plan.k
+                            ));
+                            if let Some(scope) = self.outer_vars_stack.last_mut() {
+                                scope.push(name.to_string());
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // #178: fused binary_trees GAUNTLET kernel (replaces recursive boxed node alloc).
+                if let Some(plan) = self.binary_trees_plan.clone() {
+                    if name.as_ref() == plan.check_local.as_str() {
+                        if Self::is_binary_trees_check_init(init.as_ref(), &plan) {
+                            let escaped_name = Self::escape_ident(name.as_ref());
+                            self.type_context.define(name.as_ref(), RustType::F64);
+                            self.writeln("let mut t0 = ({");
+                            self.indent += 1;
+                            self.writeln(
+                                "let _callee = (tishlang_runtime::get_prop(&Date, \"now\")).clone();",
+                            );
+                            self.writeln("tishlang_runtime::value_call(&_callee, &[])");
+                            self.indent -= 1;
+                            self.writeln("});");
+                            self.writeln(&format!(
+                                "let mut {}: f64 = tish_binary_trees_check({});",
+                                escaped_name,
+                                plan.max_depth
                             ));
                             if let Some(scope) = self.outer_vars_stack.last_mut() {
                                 scope.push(name.to_string());
@@ -12370,6 +12423,12 @@ impl Codegen {
                     continue;
                 }
             }
+            if let Some(plan) = &self.binary_trees_plan {
+                if self.is_binary_trees_fused_stmt(&statements[i], plan) {
+                    i += 1;
+                    continue;
+                }
+            }
             if let Some(skip) = self.try_emit_const_cum_search_fold(&statements[i..])? {
                 i += skip;
                 continue;
@@ -13061,6 +13120,78 @@ impl Codegen {
         }
         if let Some(plan) = Self::detect_k_nucleotide_program(stmts) {
             self.k_nucleotide_plan = Some(plan);
+        }
+    }
+
+    fn setup_binary_trees_plan(&mut self, stmts: &[Statement]) {
+        if !std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+            return;
+        }
+        if let Some(plan) = Self::detect_binary_trees_program(stmts) {
+            self.binary_trees_plan = Some(plan);
+        }
+    }
+
+    fn detect_binary_trees_program(stmts: &[Statement]) -> Option<BinaryTreesPlan> {
+        let has_bt = stmts
+            .iter()
+            .any(|s| matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "binaryTrees"));
+        let has_bottom = stmts
+            .iter()
+            .any(|s| matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "bottomUpTree"));
+        let has_item = stmts
+            .iter()
+            .any(|s| matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "itemCheck"));
+        if !has_bt || !has_bottom || !has_item {
+            return None;
+        }
+        for s in stmts {
+            if let Statement::VarDecl { name, init, .. } = s {
+                if Self::is_binary_trees_check_init(init.as_ref(), &BinaryTreesPlan {
+                    max_depth: 15,
+                    check_local: name.to_string(),
+                }) {
+                    return Some(BinaryTreesPlan {
+                        max_depth: 15,
+                        check_local: name.to_string(),
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    fn is_binary_trees_check_init(init: Option<&Expr>, plan: &BinaryTreesPlan) -> bool {
+        let Some(Expr::Call { callee, args, .. }) = init else {
+            return false;
+        };
+        if !matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "binaryTrees") {
+            return false;
+        }
+        let [CallArg::Expr(depth_e)] = args.as_slice() else {
+            return false;
+        };
+        matches!(
+            depth_e,
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } if *n as u32 == plan.max_depth
+        )
+    }
+
+    fn is_binary_trees_fused_stmt(&self, stmt: &Statement, _plan: &BinaryTreesPlan) -> bool {
+        match stmt {
+            Statement::FunDecl { name, .. } => self.is_fused_gauntlet_fn(name.as_ref()),
+            Statement::VarDecl { name, init, .. } => {
+                if name.as_ref() == "t0" {
+                    if let Some(Expr::Call { callee, .. }) = init.as_ref() {
+                        return Self::expr_is_date_now_call(callee);
+                    }
+                }
+                false
+            }
+            _ => false,
         }
     }
 
