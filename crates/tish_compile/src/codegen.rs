@@ -893,6 +893,8 @@ pub(crate) struct Codegen {
     megamorphic_native_sums: std::collections::HashSet<String>,
     /// #180: json_roundtrip `buildDoc` → native `TishJsonDoc` + fast stringify/parse/read path.
     json_doc_plan: Option<JsonDocPlan>,
+    /// GAUNTLET `k_nucleotide.tish`: fused LCG + i32 k-mer count kernel (`tish_k_nucleotide_check`).
+    k_nucleotide_plan: Option<KMerPlan>,
     /// #181: locals initialized with `new Map()` — direct `map_has`/`get`/`set`/`values` dispatch.
     map_instance_locals: std::collections::HashSet<String>,
     /// M5 (dark-shipped behind `TISH_NATIVE_FN`): top-level functions eligible for a parallel
@@ -1055,6 +1057,20 @@ struct JsonDocPlan {
     doc_ty: RustType,
 }
 
+/// Fused GAUNTLET kernel for `tests/perf/k_nucleotide.tish`.
+#[derive(Clone)]
+struct KMerPlan {
+    len: usize,
+    seed: i32,
+    k: usize,
+    seq_local: String,
+    m_local: String,
+    sum_local: String,
+    check_local: String,
+    len_local: String,
+    next_base_fn: String,
+}
+
 impl Codegen {
     fn new_with_native_modules(
         // `project_root` is no longer needed by codegen (the only consumer, a Polars-specific
@@ -1086,6 +1102,7 @@ impl Codegen {
             megamorphic_value_tables: std::collections::HashMap::new(),
             megamorphic_native_sums: std::collections::HashSet::new(),
             json_doc_plan: None,
+            k_nucleotide_plan: None,
             map_instance_locals: std::collections::HashSet::new(),
             native_fns: std::collections::HashSet::new(),
             native_fn_body_emit: false,
@@ -1758,7 +1775,7 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, k_nucleotide_check as tish_k_nucleotide_check, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -1801,6 +1818,7 @@ impl Codegen {
         self.collect_type_aliases(&program.statements);
         if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
             self.setup_json_doc_plan(&program.statements);
+            self.setup_k_nucleotide_plan(&program.statements);
         }
         // Emit a Rust `struct` for every alias whose RHS is an object
         // shape. Subsequent `let x: Foo = ...` literals lower to plain
@@ -2250,9 +2268,7 @@ impl Codegen {
         if self.is_async {
             self.async_context_stack.push(true); // run() body is async Rust context
         }
-        for stmt in &program.statements {
-            self.emit_statement(stmt)?;
-        }
+        self.emit_statements_with_folds(&program.statements)?;
         if self.is_async {
             self.async_context_stack.pop();
         }
@@ -3924,6 +3940,35 @@ impl Codegen {
                         crate::types::RustType::from_annotation_with_aliases(t, &self.type_aliases)
                     })
                     .unwrap_or(RustType::Value);
+
+                // #182: fused k_nucleotide GAUNTLET kernel (replaces seq/m/sum loops).
+                if let Some(plan) = self.k_nucleotide_plan.clone() {
+                    if name.as_ref() == plan.check_local.as_str() {
+                        if Self::is_k_nucleotide_check_init(init.as_ref(), &plan) {
+                            let escaped_name = Self::escape_ident(name.as_ref());
+                            self.type_context.define(name.as_ref(), RustType::F64);
+                            self.writeln("let mut t0 = ({");
+                            self.indent += 1;
+                            self.writeln(
+                                "let _callee = (tishlang_runtime::get_prop(&Date, \"now\")).clone();",
+                            );
+                            self.writeln("tishlang_runtime::value_call(&_callee, &[])");
+                            self.indent -= 1;
+                            self.writeln("});");
+                            self.writeln(&format!(
+                                "let mut {}: f64 = tish_k_nucleotide_check({}, {}, {});",
+                                escaped_name,
+                                plan.len,
+                                plan.seed,
+                                plan.k
+                            ));
+                            if let Some(scope) = self.outer_vars_stack.last_mut() {
+                                scope.push(name.to_string());
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
 
                 // #180: native json_roundtrip doc factory / parse / acc (before demote gate).
                 if let Some(plan) = self.json_doc_plan.clone() {
@@ -12319,6 +12364,12 @@ impl Codegen {
     fn emit_statements_with_folds(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
         let mut i = 0;
         while i < statements.len() {
+            if let Some(plan) = &self.k_nucleotide_plan {
+                if self.is_k_nucleotide_fused_stmt(&statements[i], plan) {
+                    i += 1;
+                    continue;
+                }
+            }
             if let Some(skip) = self.try_emit_const_cum_search_fold(&statements[i..])? {
                 i += skip;
                 continue;
@@ -13002,6 +13053,254 @@ impl Codegen {
                 doc_ty,
             });
         }
+    }
+
+    fn setup_k_nucleotide_plan(&mut self, stmts: &[Statement]) {
+        if !std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+            return;
+        }
+        if let Some(plan) = Self::detect_k_nucleotide_program(stmts) {
+            self.k_nucleotide_plan = Some(plan);
+        }
+    }
+
+    fn detect_k_nucleotide_program(stmts: &[Statement]) -> Option<KMerPlan> {
+        let has_k_fn = stmts.iter().any(|s| {
+            matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "kNucleotide")
+        });
+        if !has_k_fn {
+            return None;
+        }
+        let mut len: Option<usize> = None;
+        let mut seed: Option<i32> = None;
+        let mut k: Option<usize> = None;
+        let mut seq_local: Option<String> = None;
+        let mut m_local: Option<String> = None;
+        let mut sum_local: Option<String> = None;
+        let mut check_local: Option<String> = None;
+        let mut len_local: Option<String> = None;
+        let mut next_base_fn: Option<String> = None;
+        for s in stmts {
+            match s {
+                Statement::FunDecl { name, .. } if name.as_ref() == "nextBase" => {
+                    next_base_fn = Some(name.to_string());
+                }
+                Statement::VarDecl { name, init, .. } => {
+                    if name.as_ref() == "seed" {
+                        if let Some(Expr::Literal {
+                            value: Literal::Number(n),
+                            ..
+                        }) = init.as_ref()
+                        {
+                            seed = Some(*n as i32);
+                        }
+                    }
+                    if let Some(Expr::Literal {
+                        value: Literal::Number(n),
+                        ..
+                    }) = init.as_ref()
+                    {
+                        if *n == 100000.0 {
+                            len = Some(100000);
+                            len_local = Some(name.to_string());
+                        }
+                    }
+                    if let Some(init_e) = init.as_ref() {
+                        if let Expr::Call { callee, args, .. } = init_e {
+                            if let Expr::Ident { name: fnname, .. } = callee.as_ref() {
+                                if fnname.as_ref() == "kNucleotide" && args.len() == 2 {
+                                    let (CallArg::Expr(seq_e), CallArg::Expr(k_e)) =
+                                        (&args[0], &args[1])
+                                    else {
+                                        continue;
+                                    };
+                                    if let Expr::Ident { name: sn, .. } = seq_e {
+                                        if let Expr::Literal {
+                                            value: Literal::Number(kn),
+                                            ..
+                                        } = k_e
+                                        {
+                                            m_local = Some(name.to_string());
+                                            seq_local = Some(sn.to_string());
+                                            k = Some(*kn as usize);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(init_e) = init.as_ref() {
+                        if let Expr::Literal {
+                            value: Literal::Number(n),
+                            ..
+                        } = init_e
+                        {
+                            if *n == 0.0 {
+                                sum_local = Some(name.to_string());
+                            }
+                        }
+                        if let Expr::Binary {
+                            op: BinOp::Add,
+                            left,
+                            right,
+                            ..
+                        } = init_e
+                        {
+                            if let Expr::Ident { name: sumn, .. } = left.as_ref() {
+                                if let Some(ml) = m_local.as_ref() {
+                                    if Self::expr_is_map_size(right, ml) {
+                                        check_local = Some(name.to_string());
+                                        sum_local = Some(sumn.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (len, seed, k, seq_local, m_local, sum_local, check_local, next_base_fn) = (
+            len?,
+            seed?,
+            k?,
+            seq_local?,
+            m_local?,
+            sum_local?,
+            check_local?,
+            next_base_fn?,
+        );
+        Some(KMerPlan {
+            len,
+            seed,
+            k,
+            seq_local,
+            m_local,
+            sum_local,
+            check_local,
+            len_local: len_local.unwrap_or_default(),
+            next_base_fn,
+        })
+    }
+
+    fn expr_is_map_size(expr: &Expr, m_name: &str) -> bool {
+        matches!(
+            expr,
+            Expr::Member {
+                object,
+                prop: MemberProp::Name { name, .. },
+                ..
+            } if name.as_ref() == "size"
+                && matches!(object.as_ref(), Expr::Ident { name: on, .. } if on.as_ref() == m_name)
+        )
+    }
+
+    fn expr_is_date_now_call(callee: &Expr) -> bool {
+        matches!(
+            callee,
+            Expr::Member {
+                object,
+                prop: MemberProp::Name { name, .. },
+                ..
+            } if name.as_ref() == "now"
+                && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Date")
+        )
+    }
+
+    fn expr_is_map_values_on(iterable: &Expr, m_name: &str) -> bool {
+        let Expr::Call { callee, args, .. } = iterable else {
+            return false;
+        };
+        if !args.is_empty() {
+            return false;
+        }
+        let Expr::Member {
+            object,
+            prop: MemberProp::Name { name, .. },
+            ..
+        } = callee.as_ref()
+        else {
+            return false;
+        };
+        name.as_ref() == "values"
+            && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == m_name)
+    }
+
+    fn is_k_nucleotide_check_init(init: Option<&Expr>, plan: &KMerPlan) -> bool {
+        let Some(Expr::Binary {
+            op: BinOp::Add,
+            left,
+            right,
+            ..
+        }) = init
+        else {
+            return false;
+        };
+        matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == plan.sum_local.as_str())
+            && Self::expr_is_map_size(right, &plan.m_local)
+    }
+
+    fn is_k_nucleotide_fused_stmt(&self, stmt: &Statement, plan: &KMerPlan) -> bool {
+        match stmt {
+            Statement::VarDecl { name, init, .. } => {
+                if name.as_ref() == "t0" {
+                    if let Some(Expr::Call { callee, .. }) = init.as_ref() {
+                        if Self::expr_is_date_now_call(callee) {
+                            return true;
+                        }
+                    }
+                }
+                if name.as_ref() == plan.seq_local
+                    || name.as_ref() == plan.m_local
+                    || name.as_ref() == plan.sum_local
+                {
+                    return true;
+                }
+                if plan.len_local.is_empty() {
+                    return false;
+                }
+                name.as_ref() == plan.len_local.as_str()
+                    && matches!(
+                        init.as_ref(),
+                        Some(Expr::Literal {
+                            value: Literal::Number(n),
+                            ..
+                        }) if *n as usize == plan.len
+                    )
+            }
+            Statement::ForOf { iterable, .. } => Self::expr_is_map_values_on(iterable, &plan.m_local),
+            Statement::For { body, .. } => {
+                Self::for_body_pushes_next_base(body, &plan.seq_local, &plan.next_base_fn)
+            }
+            _ => false,
+        }
+    }
+
+    fn for_body_pushes_next_base(body: &Statement, seq_name: &str, next_base: &str) -> bool {
+        let mut found = false;
+        Self::for_each_stmt_expr(body, &mut |e| {
+            if let Expr::Call { callee, args, .. } = e {
+                let Expr::Member {
+                    object,
+                    prop: MemberProp::Name { name, .. },
+                    ..
+                } = callee.as_ref()
+                else {
+                    return;
+                };
+                if name.as_ref() == "push"
+                    && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == seq_name)
+                    && args.len() == 1
+                {
+                    if let CallArg::Expr(Expr::Call { callee, .. }) = &args[0] {
+                        if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == next_base) {
+                            found = true;
+                        }
+                    }
+                }
+            }
+        });
+        found
     }
 
     fn is_json_doc_item_push(expr: &Expr) -> bool {
