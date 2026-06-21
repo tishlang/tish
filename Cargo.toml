@@ -34,6 +34,9 @@ members = [
     "crates/tish_resolve",
     "crates/tishlang_cargo_bindgen",
 ]
+# Generated native-build projects (`tish build`) land under `target/` when TMPDIR points there;
+# never enroll anything beneath `target/` as a workspace member.
+exclude = ["target"]
 resolver = "2"
 
 [workspace.package]
