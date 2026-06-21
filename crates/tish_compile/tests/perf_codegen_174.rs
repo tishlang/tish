@@ -88,6 +88,33 @@ console.log(acc >>> 0)
 }
 
 #[test]
+fn fnv_value_fn_uses_usize_for_loop() {
+    let src = r#"
+function fnv1a(n) {
+  let h = 2166136261
+  for (let i = 0; i < n; i++) {
+    h = h ^ (i & 255)
+    h = (h * 16777619) >>> 0
+    h = ((h << 13) | (h >>> 19)) >>> 0
+  }
+  return h >>> 0
+}
+let check = fnv1a(100)
+console.log(check)
+"#;
+    let rust = compile(&parse(src).unwrap()).unwrap();
+    assert!(
+        rust.contains("for _usize_i_0 in 0..(n as usize)"),
+        "fnv1a hot loop should lower to a usize `for` over param n:\n{}",
+        rust.lines().filter(|l| l.contains("usize") || l.contains("fnv1a")).take(6).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        rust.contains("let mut h: i32 = (2166136261u32) as i32;"),
+        "accumulator h must stay on the i32 register path"
+    );
+}
+
+#[test]
 fn issue_174_unproven_leaf_keeps_guarded_to_int32() {
     // SOUNDNESS: an f64 value that is NOT provably a finite integer (here a fractional accumulator —
     // the range lattice drops it because `n = n + 0.5` is not integer-preserving) must KEEP the

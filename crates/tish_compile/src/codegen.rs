@@ -4570,7 +4570,10 @@ impl Codegen {
                 )? {
                     return Ok(());
                 }
-                if self.native_fn_body_emit || self.native_vec_ret.is_some() {
+                if self.native_fn_body_emit
+                    || self.native_vec_ret.is_some()
+                    || self.value_fn_depth > 0
+                {
                     if let Some((ctr, bound)) =
                         Self::parse_usize_for_counter(init.as_deref(), cond.as_ref(), update.as_ref())
                     {
@@ -9432,7 +9435,9 @@ impl Codegen {
         };
         self.writeln(&format!("for {} in 0..{} {{", usize_var, bound_usize));
         self.indent += 1;
-        let native_usize = self.native_fn_body_emit || self.native_vec_ret.is_some();
+        let native_usize = self.native_fn_body_emit
+            || self.native_vec_ret.is_some()
+            || self.value_fn_depth > 0;
         let emit_f64_counter = self.native_fn_body_emit || !self.native_vec_ret.is_some();
         if native_usize {
             self.usize_var_subst.insert(counter.to_string(), usize_var.clone());
