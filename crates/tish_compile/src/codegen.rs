@@ -893,6 +893,8 @@ pub(crate) struct Codegen {
     megamorphic_native_sums: std::collections::HashSet<String>,
     /// #180: json_roundtrip `buildDoc` → native `TishJsonDoc` + fast stringify/parse/read path.
     json_doc_plan: Option<JsonDocPlan>,
+    /// #181: locals initialized with `new Map()` — direct `map_has`/`get`/`set`/`values` dispatch.
+    map_instance_locals: std::collections::HashSet<String>,
     /// M5 (dark-shipped behind `TISH_NATIVE_FN`): top-level functions eligible for a parallel
     /// free `fn f_native(f64,..)->f64` (all params `: number`, returns `number`, native-safe
     /// body). Direct calls to these route to the native fn, bypassing the boxed `value_call`.
@@ -1084,6 +1086,7 @@ impl Codegen {
             megamorphic_value_tables: std::collections::HashMap::new(),
             megamorphic_native_sums: std::collections::HashSet::new(),
             json_doc_plan: None,
+            map_instance_locals: std::collections::HashSet::new(),
             native_fns: std::collections::HashSet::new(),
             native_fn_body_emit: false,
             native_fn_emit_name: None,
@@ -1755,7 +1758,7 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -4202,6 +4205,12 @@ impl Codegen {
                 // Track the variable type
                 self.type_context.define(name.as_ref(), rust_type.clone());
 
+                if let Some(init_e) = init.as_ref() {
+                    if Self::expr_is_map_construct(init_e) {
+                        self.map_instance_locals.insert(name.to_string());
+                    }
+                }
+
                 // `let cum = cumulative_nv(&probs)` inherits `probs`' fixed length for in-bounds reads.
                 if let RustType::Vec(inner) = &rust_type {
                     if **inner == RustType::F64 {
@@ -5717,6 +5726,37 @@ impl Codegen {
                     let arg_exprs: Result<Vec<_>, _> =
                         args.iter().map(|a| self.emit_call_arg(a)).collect();
                     let arg_exprs = arg_exprs?;
+
+                    // #181: `new Map()` locals — direct store access (Bun/JSC-style monomorphic site).
+                    if let Expr::Ident { name: map_name, .. } = object.as_ref() {
+                        if self.map_instance_locals.contains(map_name.as_ref()) {
+                            let map_ref = format!("&{}", Self::escape_ident(map_name.as_ref()));
+                            match method_name.as_ref() {
+                                "has" if args.len() == 1 => {
+                                    return Ok(format!(
+                                        "tish_map_has({}, &{})",
+                                        map_ref, arg_exprs[0]
+                                    ));
+                                }
+                                "get" if args.len() == 1 => {
+                                    return Ok(format!(
+                                        "tish_map_get({}, &{})",
+                                        map_ref, arg_exprs[0]
+                                    ));
+                                }
+                                "set" if args.len() == 2 => {
+                                    return Ok(format!(
+                                        "tish_map_set({}, {}, {})",
+                                        map_ref, arg_exprs[0], arg_exprs[1]
+                                    ));
+                                }
+                                "values" if args.is_empty() => {
+                                    return Ok(format!("tish_map_values({})", map_ref));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     
                     // Array methods
                     match method_name.as_ref() {
@@ -13178,6 +13218,16 @@ impl Codegen {
             }
         }
         false
+    }
+
+    fn expr_is_map_construct(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::New {
+                callee,
+                ..
+            } if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Map")
+        )
     }
 
     fn is_json_parse_call(expr: &Expr) -> bool {
