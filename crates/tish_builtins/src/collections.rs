@@ -119,6 +119,52 @@ pub fn size_probe_len(op: &dyn TishOpaque) -> Option<f64> {
         .map(|p| p.0.borrow().len() as f64)
 }
 
+fn map_store(map: &Value) -> Option<Store> {
+    if let Value::Object(o) = map {
+        if let Some(Value::Opaque(op)) = o.borrow().strings.get(SIZE_SLOT) {
+            if let Some(probe) = op.as_ref().as_any().downcast_ref::<SizeProbe>() {
+                return Some(probe.0.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Direct `Map.prototype.has` — skips bound-method `get_prop` + `value_call` (k-nucleotide hot path).
+pub fn map_has(map: &Value, key: &Value) -> Value {
+    match map_store(map) {
+        Some(s) => Value::Bool(s.borrow().contains_key(&Key(key.clone()))),
+        None => Value::Bool(false),
+    }
+}
+
+/// Direct `Map.prototype.get`.
+pub fn map_get(map: &Value, key: &Value) -> Value {
+    match map_store(map) {
+        Some(s) => s.borrow().get(&Key(key.clone())).cloned().unwrap_or(Value::Null),
+        None => Value::Null,
+    }
+}
+
+/// Direct `Map.prototype.set` (mutates in place; returns `undefined` = `Null`).
+pub fn map_set(map: &Value, key: Value, val: Value) -> Value {
+    if let Some(s) = map_store(map) {
+        s.borrow_mut().insert(Key(key), val);
+    }
+    Value::Null
+}
+
+/// Direct `Map.prototype.values` — snapshot iterator (same as the bound native method).
+pub fn map_values(map: &Value) -> Value {
+    match map_store(map) {
+        Some(s) => {
+            let out: Vec<Value> = s.borrow().values().cloned().collect();
+            crate::iterator::array_iterator(out)
+        }
+        None => crate::iterator::array_iterator(vec![]),
+    }
+}
+
 /// Wrap a backing store as the hidden [`SIZE_SLOT`] opaque. `Value::Opaque`'s payload is always
 /// `Arc<dyn TishOpaque>`, so on the single-threaded build (`Rc`-based `VmRef`) clippy's
 /// `arc_with_non_send_sync` fires spuriously — the `Arc` is mandated by the API, not a thread choice.
