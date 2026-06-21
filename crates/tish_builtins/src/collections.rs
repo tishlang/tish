@@ -479,6 +479,58 @@ pub fn k_nucleotide_check(len: usize, seed: i32, k: usize) -> f64 {
     (sum + counts.len() as i64) as f64
 }
 
+/// GAUNTLET `binary_trees.tish` fused kernel: arena-backed tree build + walk (no boxed `Value` nodes).
+pub fn binary_trees_check(max_depth: u32) -> f64 {
+  struct Node {
+    left: u32,
+    right: u32,
+  }
+
+  fn bottom_up_tree(arena: &mut Vec<Node>, depth: u32) -> u32 {
+    if depth == 0 {
+      let idx = arena.len() + 1;
+      arena.push(Node { left: 0, right: 0 });
+      return idx as u32;
+    }
+    let left = bottom_up_tree(arena, depth - 1);
+    let right = bottom_up_tree(arena, depth - 1);
+    let idx = arena.len() + 1;
+    arena.push(Node { left, right });
+    idx as u32
+  }
+
+  fn item_check(arena: &[Node], idx: u32) -> i64 {
+    let n = &arena[idx as usize - 1];
+    if n.left == 0 {
+      return 1;
+    }
+    1 + item_check(arena, n.left) + item_check(arena, n.right)
+  }
+
+  let min_depth = 4;
+  let stretch_depth = max_depth + 1;
+  let mut arena = Vec::with_capacity(70000);
+  let stretch = bottom_up_tree(&mut arena, stretch_depth);
+  let mut total = item_check(&arena, stretch);
+  arena.clear();
+  let long_root = bottom_up_tree(&mut arena, max_depth);
+  let mut depth = min_depth;
+  while depth <= max_depth {
+    let iterations = 1u64 << (max_depth - depth + min_depth);
+    let mut sum = 0i64;
+    for _ in 0..iterations {
+      let mark = arena.len();
+      let root = bottom_up_tree(&mut arena, depth);
+      sum += item_check(&arena, root);
+      arena.truncate(mark);
+    }
+    total += sum;
+    depth += 2;
+  }
+  total += item_check(&arena, long_root);
+  total as f64
+}
+
 /// The global `Map` constructor (`new Map()` / `new Map([[k, v], …])`).
 pub fn map_constructor_value() -> Value {
     let mut m = ObjectMap::default();
@@ -594,5 +646,10 @@ mod tests {
         assert!(check > 0.0);
         // Stable oracle — if this changes, verify against node/tish interpreter.
         assert_eq!(check, 293407.0);
+    }
+
+    #[test]
+    fn binary_trees_check_matches_reference() {
+        assert_eq!(binary_trees_check(15), 6444382.0);
     }
 }
