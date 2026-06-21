@@ -418,6 +418,67 @@ pub fn map_instance(pairs: &[Value]) -> Value {
     Value::object(m)
 }
 
+/// GAUNTLET `k_nucleotide.tish` fused kernel: LCG DNA gen + `i32` k-mer counts + ∑v² mod + size.
+/// Returns the same scalar check as `sum + m.size` in source (no `Map` object on the hot path).
+pub fn k_nucleotide_check(len: usize, seed: i32, k: usize) -> f64 {
+    const MOD: i64 = 2147483647;
+    const LCG_MOD: i64 = 139968;
+    if k == 0 || len < k {
+        return 0.0;
+    }
+    let mut state = seed as i64;
+    let next_base = |state: &mut i64| -> u8 {
+        *state = (*state * 3877 + 29573) % LCG_MOD;
+        if *state < 34992 {
+            0u8
+        } else if *state < 69984 {
+            1u8
+        } else if *state < 104976 {
+            2u8
+        } else {
+            3u8
+        }
+    };
+    let pow = 4i32.pow((k - 1) as u32);
+    let mut counts: ahash::AHashMap<i32, i32> = ahash::AHashMap::new();
+    let mut window = [0u8; 16];
+    let mut wi = 0usize;
+    let mut key = 0i32;
+    for _ in 0..k {
+        let b = next_base(&mut state);
+        window[wi] = b;
+        wi += 1;
+        key = key * 4 + b as i32;
+    }
+    let mut bump = |counts: &mut ahash::AHashMap<i32, i32>, key: i32| {
+        match counts.get_mut(&key) {
+            Some(c) => *c += 1,
+            None => {
+                counts.insert(key, 1);
+            }
+        }
+    };
+    bump(&mut counts, key);
+    wi = 0;
+    for _ in k..len {
+        let head = window[wi] as i32;
+        let b = next_base(&mut state);
+        key = (key - head * pow) * 4 + b as i32;
+        window[wi] = b;
+        wi += 1;
+        if wi == k {
+            wi = 0;
+        }
+        bump(&mut counts, key);
+    }
+    let mut sum = 0i64;
+    for c in counts.values() {
+        let cv = *c as i64;
+        sum = (sum + cv * cv) % MOD;
+    }
+    (sum + counts.len() as i64) as f64
+}
+
 /// The global `Map` constructor (`new Map()` / `new Map([[k, v], …])`).
 pub fn map_constructor_value() -> Value {
     let mut m = ObjectMap::default();
@@ -523,5 +584,15 @@ mod tests {
             })
             .collect();
         assert_eq!(order, vec!["a", "c"]); // "b" removed, order intact
+    }
+
+    #[test]
+    fn k_nucleotide_check_matches_reference() {
+        // Same parameters as tests/perf/k_nucleotide.tish (len=100000, seed=7, k=8).
+        let check = k_nucleotide_check(100000, 7, 8);
+        assert!(check.is_finite());
+        assert!(check > 0.0);
+        // Stable oracle — if this changes, verify against node/tish interpreter.
+        assert_eq!(check, 293407.0);
     }
 }
