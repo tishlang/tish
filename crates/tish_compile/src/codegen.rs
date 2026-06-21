@@ -8116,6 +8116,14 @@ impl Codegen {
 
         // Check if the identifier is already of the target type
         if let Expr::Ident { name, .. } = expr {
+            if *target_type == RustType::F64 {
+                if self.native_numeric_globals.contains_key(name.as_ref()) {
+                    return Ok(Self::native_global_get(name.as_ref()));
+                }
+                if let Some(uv) = self.usize_var_subst.get(name.as_ref()) {
+                    return Ok(format!("({} as f64)", uv));
+                }
+            }
             let var_type = self.type_context.get_type(name.as_ref());
             if &var_type == target_type {
                 let esc = Self::escape_ident(name.as_ref()).into_owned();
@@ -14298,6 +14306,9 @@ impl Codegen {
             && ret_exprs.iter().all(|e| {
                 matches!(e, Expr::Ident { name, .. } if builders.contains(name.as_ref()))
             })
+            && builders
+                .iter()
+                .all(|b| Self::vec_builder_numeric_pushes(body, b))
         {
             return Some(VecRetKind::VecF64);
         }
@@ -14369,6 +14380,70 @@ impl Codegen {
             }
         }
         builders
+    }
+
+    /// Every `.push` on `local` pushes a numeric literal/expr — not objects/arrays (megamorphic `objs`).
+    fn vec_builder_numeric_pushes(body: &Statement, local: &str) -> bool {
+        let mut ok = true;
+        Self::for_each_stmt_expr(body, &mut |e| {
+            if !ok {
+                return;
+            }
+            let Expr::Call { callee, args, .. } = e else {
+                return;
+            };
+            let Expr::Member {
+                object,
+                prop: MemberProp::Name { name: method, .. },
+                ..
+            } = callee.as_ref()
+            else {
+                return;
+            };
+            if !matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == local)
+                || method.as_ref() != "push"
+                || args.len() != 1
+            {
+                return;
+            }
+            let CallArg::Expr(arg) = &args[0] else {
+                ok = false;
+                return;
+            };
+            if matches!(
+                arg,
+                Expr::Object { .. } | Expr::Array { .. } | Expr::ArrowFunction { .. }
+            ) {
+                ok = false;
+            }
+        });
+        ok
+    }
+
+    fn params_used_in_self_calls(
+        body: &Statement,
+        fn_name: &str,
+        param_names: &[String],
+    ) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        let param_set: std::collections::HashSet<&str> =
+            param_names.iter().map(|s| s.as_str()).collect();
+        Self::for_each_stmt_expr(body, &mut |e| {
+            if let Expr::Call { callee, args, .. } = e {
+                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == fn_name) {
+                    for a in args {
+                        if let CallArg::Expr(arg) = a {
+                            for id in Self::collect_idents_of(arg) {
+                                if param_set.contains(id.as_str()) {
+                                    out.insert(id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        out
     }
 
     fn vec_builder_only_push(body: &Statement, local: &str) -> bool {
@@ -16047,12 +16122,6 @@ impl Codegen {
                         return Ok((temp.clone(), RustType::F64));
                     }
                 }
-                // M5 call-site literal specialization (`mandel(1200,1200,100)` → const params).
-                if self.native_fn_body_emit {
-                    if let Some(v) = self.native_param_lit(name.as_ref()) {
-                        return Ok((Self::f64_lit(v), RustType::F64));
-                    }
-                }
                 // #176: native numeric global → thread_local Cell read.
                 if self.native_numeric_globals.contains_key(name.as_ref()) {
                     return Ok((
@@ -17072,4 +17141,26 @@ mod tests_176 {
         assert!(c.contains_key("seed"), "optimized+inferred: {:?}", c);
     }
 
+    #[test]
+    fn fib_param_not_literal_specialized_in_self_calls() {
+        use tishlang_opt::optimize;
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest.join("../../tests/perf/recursion_fib.tish");
+        let src = fs::read_to_string(&path).unwrap();
+        let program = parse(&src).unwrap();
+        let optimized = optimize(&program);
+        let inferred = crate::infer::infer_program(&optimized);
+        let body = inferred
+            .statements
+            .iter()
+            .find_map(|s| match s {
+                tishlang_ast::Statement::FunDecl { name, body, .. } if name.as_ref() == "fib" => {
+                    Some(body.as_ref())
+                }
+                _ => None,
+            })
+            .expect("fib decl");
+        let used = Codegen::params_used_in_self_calls(body, "fib", &["n".to_string()]);
+        assert!(used.contains("n"), "expected n in self-call args, got {:?}", used);
+    }
 }
