@@ -154,14 +154,14 @@ pub fn map_set(map: &Value, key: Value, val: Value) -> Value {
     Value::Null
 }
 
-/// Direct `Map.prototype.values` — materializes values as a `Value::Array` (for `for…of`).
+/// Direct `Map.prototype.values` — snapshot iterator (same as the bound native method).
 pub fn map_values(map: &Value) -> Value {
     match map_store(map) {
         Some(s) => {
             let out: Vec<Value> = s.borrow().values().cloned().collect();
-            Value::Array(VmRef::new(out))
+            crate::iterator::array_iterator(out)
         }
-        None => Value::Array(VmRef::new(vec![])),
+        None => crate::iterator::array_iterator(vec![]),
     }
 }
 
