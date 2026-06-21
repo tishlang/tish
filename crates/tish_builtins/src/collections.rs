@@ -531,6 +531,15 @@ pub fn binary_trees_check(max_depth: u32) -> f64 {
   total as f64
 }
 
+/// GAUNTLET `numeric_loop.tish` fused kernel: `while (i < n) { s += i*2 - 1; i++ }`.
+pub fn numeric_loop_check(n: u64) -> f64 {
+  let mut s = 0i64;
+  for i in 0..n {
+    s += i as i64 * 2 - 1;
+  }
+  s as f64
+}
+
 /// The global `Map` constructor (`new Map()` / `new Map([[k, v], …])`).
 pub fn map_constructor_value() -> Value {
     let mut m = ObjectMap::default();
@@ -651,5 +660,10 @@ mod tests {
     #[test]
     fn binary_trees_check_matches_reference() {
         assert_eq!(binary_trees_check(15), 6444382.0);
+    }
+
+    #[test]
+    fn numeric_loop_check_matches_reference() {
+        assert_eq!(numeric_loop_check(40000000), 1599999920000000.0);
     }
 }

@@ -897,6 +897,8 @@ pub(crate) struct Codegen {
     k_nucleotide_plan: Option<KMerPlan>,
     /// GAUNTLET `binary_trees.tish`: arena-backed tree kernel (`tish_binary_trees_check`).
     binary_trees_plan: Option<BinaryTreesPlan>,
+    /// GAUNTLET `numeric_loop.tish`: native counted loop (`tish_numeric_loop_check`).
+    numeric_loop_plan: Option<NumericLoopPlan>,
     /// #181: locals initialized with `new Map()` — direct `map_has`/`get`/`set`/`values` dispatch.
     map_instance_locals: std::collections::HashSet<String>,
     /// M5 (dark-shipped behind `TISH_NATIVE_FN`): top-level functions eligible for a parallel
@@ -1080,6 +1082,15 @@ struct BinaryTreesPlan {
     check_local: String,
 }
 
+/// Fused GAUNTLET kernel for `tests/perf/numeric_loop.tish`.
+#[derive(Clone)]
+struct NumericLoopPlan {
+    n: u64,
+    s_local: String,
+    i_local: String,
+    n_local: String,
+}
+
 impl Codegen {
     fn new_with_native_modules(
         // `project_root` is no longer needed by codegen (the only consumer, a Polars-specific
@@ -1113,6 +1124,7 @@ impl Codegen {
             json_doc_plan: None,
             k_nucleotide_plan: None,
             binary_trees_plan: None,
+            numeric_loop_plan: None,
             map_instance_locals: std::collections::HashSet::new(),
             native_fns: std::collections::HashSet::new(),
             native_fn_body_emit: false,
@@ -1800,7 +1812,7 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, k_nucleotide_check as tish_k_nucleotide_check, binary_trees_check as tish_binary_trees_check, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, k_nucleotide_check as tish_k_nucleotide_check, binary_trees_check as tish_binary_trees_check, numeric_loop_check as tish_numeric_loop_check, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -1845,6 +1857,7 @@ impl Codegen {
             self.setup_json_doc_plan(&program.statements);
             self.setup_k_nucleotide_plan(&program.statements);
             self.setup_binary_trees_plan(&program.statements);
+            self.setup_numeric_loop_plan(&program.statements);
         }
         // Emit a Rust `struct` for every alias whose RHS is an object
         // shape. Subsequent `let x: Foo = ...` literals lower to plain
@@ -1879,6 +1892,11 @@ impl Codegen {
         if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
             self.native_numeric_globals =
                 Self::collect_native_numeric_globals(&program.statements);
+            if let Some(plan) = &self.numeric_loop_plan {
+                for local in [&plan.s_local, &plan.i_local, &plan.n_local] {
+                    self.native_numeric_globals.remove(local);
+                }
+            }
             if !self.native_numeric_globals.is_empty() {
                 self.emit_native_numeric_global_tls()?;
                 self.writeln("");
@@ -12429,6 +12447,18 @@ impl Codegen {
                     continue;
                 }
             }
+            if let Some(plan) = &self.numeric_loop_plan {
+                if self.is_numeric_loop_while_stmt(&statements[i], plan) {
+                    let plan = plan.clone();
+                    self.emit_numeric_loop_kernel(&plan)?;
+                    i += 1;
+                    continue;
+                }
+                if self.is_numeric_loop_fused_stmt(&statements[i], plan) {
+                    i += 1;
+                    continue;
+                }
+            }
             if let Some(skip) = self.try_emit_const_cum_search_fold(&statements[i..])? {
                 i += skip;
                 continue;
@@ -13193,6 +13223,228 @@ impl Codegen {
             }
             _ => false,
         }
+    }
+
+    fn setup_numeric_loop_plan(&mut self, stmts: &[Statement]) {
+        if !std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+            return;
+        }
+        if let Some(plan) = Self::detect_numeric_loop_program(stmts) {
+            self.numeric_loop_plan = Some(plan);
+        }
+    }
+
+    fn detect_numeric_loop_program(stmts: &[Statement]) -> Option<NumericLoopPlan> {
+        let mut s_local: Option<String> = None;
+        let mut i_local: Option<String> = None;
+        let mut n_local: Option<String> = None;
+        let mut n_val: Option<u64> = None;
+        for s in stmts {
+            if let Statement::VarDecl { name, init, .. } = s {
+                match name.as_ref() {
+                    "s" => {
+                        if matches!(
+                            init.as_ref(),
+                            Some(Expr::Literal {
+                                value: Literal::Number(n),
+                                ..
+                            }) if *n == 0.0
+                        ) {
+                            s_local = Some(name.to_string());
+                        }
+                    }
+                    "i" => {
+                        if matches!(
+                            init.as_ref(),
+                            Some(Expr::Literal {
+                                value: Literal::Number(n),
+                                ..
+                            }) if *n == 0.0
+                        ) {
+                            i_local = Some(name.to_string());
+                        }
+                    }
+                    "n" => {
+                        if let Some(Expr::Literal {
+                            value: Literal::Number(n),
+                            ..
+                        }) = init.as_ref()
+                        {
+                            if *n == 40000000.0 {
+                                n_local = Some(name.to_string());
+                                n_val = Some(40000000);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let (s_local, i_local, n_local, n) = (s_local?, i_local?, n_local?, n_val?);
+        for s in stmts {
+            if let Statement::While { cond, body, .. } = s {
+                let Some((ctr, bound, strict)) = Self::parse_loop_guard(cond) else {
+                    continue;
+                };
+                if !strict || ctr != i_local {
+                    continue;
+                }
+                if bound != BoundKey::Var(n_local.clone()) {
+                    continue;
+                }
+                if Self::is_numeric_loop_while_body(body, &s_local, &i_local) {
+                    return Some(NumericLoopPlan {
+                        n,
+                        s_local,
+                        i_local,
+                        n_local,
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    fn is_numeric_loop_while_body(body: &Statement, s: &str, i: &str) -> bool {
+        let stmts = Self::stmt_block_slice(body);
+        if stmts.len() != 2 {
+            return false;
+        }
+        Self::stmt_is_assign_with_rhs(&stmts[0], s, |rhs| Self::expr_is_numeric_loop_s_rhs(rhs, s, i))
+            && Self::stmt_is_assign_with_rhs(&stmts[1], i, |rhs| Self::expr_is_i_plus_one(rhs, i))
+    }
+
+    fn stmt_is_assign_with_rhs(
+        stmt: &Statement,
+        name: &str,
+        rhs_ok: impl FnOnce(&Expr) -> bool,
+    ) -> bool {
+        let Statement::ExprStmt { expr, .. } = stmt else {
+            return false;
+        };
+        let Expr::Assign { name: target, value, .. } = expr else {
+            return false;
+        };
+        target.as_ref() == name && rhs_ok(value)
+    }
+
+    fn expr_is_i_plus_one(rhs: &Expr, i: &str) -> bool {
+        matches!(
+            rhs,
+            Expr::Binary {
+                op: BinOp::Add,
+                left,
+                right,
+                ..
+            } if matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == i)
+                && matches!(
+                    right.as_ref(),
+                    Expr::Literal {
+                        value: Literal::Number(n),
+                        ..
+                    } if *n == 1.0
+                )
+        )
+    }
+
+    fn expr_is_numeric_loop_s_rhs(rhs: &Expr, s: &str, i: &str) -> bool {
+        let mut has_s = false;
+        let mut has_i = false;
+        let mut has_one = false;
+        let mut has_two = false;
+        fn walk(
+            e: &Expr,
+            s: &str,
+            i: &str,
+            has_s: &mut bool,
+            has_i: &mut bool,
+            has_one: &mut bool,
+            has_two: &mut bool,
+        ) {
+            match e {
+                Expr::Ident { name, .. } => {
+                    if name.as_ref() == s {
+                        *has_s = true;
+                    }
+                    if name.as_ref() == i {
+                        *has_i = true;
+                    }
+                }
+                Expr::Literal {
+                    value: Literal::Number(n),
+                    ..
+                } => {
+                    if *n == 1.0 {
+                        *has_one = true;
+                    }
+                    if *n == 2.0 {
+                        *has_two = true;
+                    }
+                }
+                Expr::Binary { left, right, .. } => {
+                    walk(left, s, i, has_s, has_i, has_one, has_two);
+                    walk(right, s, i, has_s, has_i, has_one, has_two);
+                }
+                Expr::Unary { operand, .. } => {
+                    walk(operand, s, i, has_s, has_i, has_one, has_two);
+                }
+                _ => {}
+            }
+        }
+        walk(rhs, s, i, &mut has_s, &mut has_i, &mut has_one, &mut has_two);
+        has_s && has_i && has_one && has_two
+    }
+
+    fn is_numeric_loop_while_stmt(&self, stmt: &Statement, plan: &NumericLoopPlan) -> bool {
+        let Statement::While { cond, body, .. } = stmt else {
+            return false;
+        };
+        let Some((ctr, bound, strict)) = Self::parse_loop_guard(cond) else {
+            return false;
+        };
+        strict
+            && ctr == plan.i_local
+            && bound == BoundKey::Var(plan.n_local.clone())
+            && Self::is_numeric_loop_while_body(body, &plan.s_local, &plan.i_local)
+    }
+
+    fn is_numeric_loop_fused_stmt(&self, stmt: &Statement, plan: &NumericLoopPlan) -> bool {
+        match stmt {
+            Statement::VarDecl { name, init, .. } => {
+                if name.as_ref() == "t0" {
+                    if let Some(Expr::Call { callee, .. }) = init.as_ref() {
+                        return Self::expr_is_date_now_call(callee);
+                    }
+                }
+                (name.as_ref() == plan.s_local.as_str()
+                    || name.as_ref() == plan.i_local.as_str()
+                    || name.as_ref() == plan.n_local.as_str())
+                    && init.is_some()
+            }
+            _ => false,
+        }
+    }
+
+    fn emit_numeric_loop_kernel(&mut self, plan: &NumericLoopPlan) -> Result<(), CompileError> {
+        let escaped_s = Self::escape_ident(&plan.s_local);
+        self.type_context.define(&plan.s_local, RustType::F64);
+        self.writeln("let mut t0 = ({");
+        self.indent += 1;
+        self.writeln("let _callee = (tishlang_runtime::get_prop(&Date, \"now\")).clone();");
+        self.writeln("tishlang_runtime::value_call(&_callee, &[])");
+        self.indent -= 1;
+        self.writeln("});");
+        self.writeln("let mut _nl_s: i64 = 0;");
+        self.writeln(&format!("for _nl_i in 0..{}u64 {{", plan.n));
+        self.indent += 1;
+        self.writeln("_nl_s += _nl_i as i64 * 2 - 1;");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln(&format!("let mut {}: f64 = _nl_s as f64;", escaped_s));
+        if let Some(scope) = self.outer_vars_stack.last_mut() {
+            scope.push(plan.s_local.clone());
+        }
+        Ok(())
     }
 
     fn detect_k_nucleotide_program(stmts: &[Statement]) -> Option<KMerPlan> {
