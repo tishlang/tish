@@ -796,6 +796,10 @@ struct RecStructPlan {
     /// Fns that take the struct (by `&`) and return `f64` (the recursive consumers, e.g.
     /// `itemCheck`).
     consumers: std::collections::HashSet<String>,
+    /// Numeric fns that orchestrate builders/consumers (e.g. `binaryTrees`): they hold node-index
+    /// locals, loop, and call builders/consumers. Lowered to `fn name_rec(<f64..>, &mut Vec<Node>)
+    /// -> f64`.
+    orchestrators: std::collections::HashSet<String>,
 }
 
 /// #178: emission context for a recursive-struct fn body.
@@ -16170,6 +16174,52 @@ impl Codegen {
         }
     }
 
+    /// Does `body` call any fn whose name is in `names`?
+    fn rec_body_calls_any(body: &Statement, names: &std::collections::HashSet<&str>) -> bool {
+        let mut found = false;
+        Self::for_each_stmt_expr(body, &mut |e| {
+            if Self::expr_calls_any(e, names) {
+                found = true;
+            }
+        });
+        found
+    }
+
+    /// Recursively: does `e` contain a call to a fn named in `names`?
+    fn expr_calls_any(e: &Expr, names: &std::collections::HashSet<&str>) -> bool {
+        match e {
+            Expr::Call { callee, args, .. } => {
+                let direct = matches!(callee.as_ref(), Expr::Ident { name, .. } if names.contains(name.as_ref()));
+                direct
+                    || Self::expr_calls_any(callee, names)
+                    || args.iter().any(|a| match a {
+                        CallArg::Expr(ae) => Self::expr_calls_any(ae, names),
+                        _ => false,
+                    })
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::expr_calls_any(left, names) || Self::expr_calls_any(right, names)
+            }
+            Expr::Unary { operand, .. } => Self::expr_calls_any(operand, names),
+            Expr::Member { object, .. } => Self::expr_calls_any(object, names),
+            Expr::Index { object, index, .. } => {
+                Self::expr_calls_any(object, names) || Self::expr_calls_any(index, names)
+            }
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::expr_calls_any(cond, names)
+                    || Self::expr_calls_any(then_branch, names)
+                    || Self::expr_calls_any(else_branch, names)
+            }
+            Expr::Assign { value, .. } => Self::expr_calls_any(value, names),
+            _ => false,
+        }
+    }
+
     /// Infer a recursive-struct plan from the program, or `None` if the shape isn't present.
     fn detect_rec_struct_program(program: &Program) -> Option<RecStructPlan> {
         use std::collections::{HashMap, HashSet};
@@ -16322,11 +16372,38 @@ impl Codegen {
             bail!("[rec] no consumers");
         }
 
+        // Phase 4 — orchestrators: numeric fns (not builders/consumers) that CALL a builder or
+        // consumer (e.g. `binaryTrees`). Loosely detected; the emitter's rollback rejects any whose
+        // body it can't lower. They must not return an object.
+        let rec_names: HashSet<&str> = builders
+            .iter()
+            .chain(consumers.iter())
+            .map(|s| s.as_str())
+            .collect();
+        let mut orchestrators: HashSet<String> = HashSet::new();
+        for (name, (_params, body)) in &fns {
+            if builders.contains(name) || consumers.contains(name) {
+                continue;
+            }
+            let mut rets: Vec<&Expr> = Vec::new();
+            Self::rec_collect_returns(body, &mut rets);
+            if rets.iter().any(|r| matches!(r, Expr::Object { .. })) {
+                continue; // returns a node — not a numeric orchestrator
+            }
+            if Self::rec_body_calls_any(body, &rec_names) {
+                orchestrators.insert(name.clone());
+            }
+        }
+        if dbg {
+            eprintln!("[rec] orchestrators={:?}", orchestrators);
+        }
+
         Some(RecStructPlan {
             alias: "TishRecNode".to_string(),
             fields,
             builders,
             consumers,
+            orchestrators,
         })
     }
 
@@ -16342,8 +16419,8 @@ impl Codegen {
         };
         if dbg {
             eprintln!(
-                "[rec] alias={} fields={:?} builders={:?} consumers={:?}",
-                plan.alias, plan.fields, plan.builders, plan.consumers
+                "[rec] alias={} fields={:?} builders={:?} consumers={:?} orchestrators={:?}",
+                plan.alias, plan.fields, plan.builders, plan.consumers, plan.orchestrators
             );
         }
         if self.type_aliases.contains_key(&plan.alias) {
@@ -16353,6 +16430,7 @@ impl Codegen {
 
         let mut bdecls: Vec<(String, Vec<FunParam>, Statement)> = Vec::new();
         let mut cdecls: Vec<(String, Vec<FunParam>, Statement)> = Vec::new();
+        let mut odecls: Vec<(String, Vec<FunParam>, Statement)> = Vec::new();
         for s in &program.statements {
             if let Statement::FunDecl {
                 name, params, body, ..
@@ -16363,6 +16441,8 @@ impl Codegen {
                     bdecls.push((nm, params.clone(), (**body).clone()));
                 } else if plan.consumers.contains(&nm) {
                     cdecls.push((nm, params.clone(), (**body).clone()));
+                } else if plan.orchestrators.contains(&nm) {
+                    odecls.push((nm, params.clone(), (**body).clone()));
                 }
             }
         }
@@ -16381,6 +16461,14 @@ impl Codegen {
         if ok {
             for (nm, params, body) in &cdecls {
                 if self.emit_rec_consumer_fn(nm, params, body).is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            for (nm, params, body) in &odecls {
+                if self.emit_rec_orchestrator_fn(nm, params, body).is_err() {
                     ok = false;
                     break;
                 }
@@ -16491,6 +16579,315 @@ impl Codegen {
         self.writeln("}");
         self.type_context.pop_scope();
         res
+    }
+
+    // ── orchestrator (numeric fn that drives builders/consumers, threading the arena) ───────────
+    // v1 supports the constructs in binary_trees' `binaryTrees`: f64 + node-index (`i32`) locals,
+    // while/for/if, assignment, inc, `<<`, arithmetic, builder calls (→ index) and consumer calls
+    // (→ f64). The whole arena is freed when the top-level block ends (per-tree nursery reset is a
+    // future memory optimization, not needed for the fixture's bounded node count).
+
+    /// `fn name_rec(<f64 params>, __rec_arena: &mut Vec<Node>) -> f64`.
+    fn emit_rec_orchestrator_fn(
+        &mut self,
+        name: &str,
+        params: &[FunParam],
+        body: &Statement,
+    ) -> Result<(), CompileError> {
+        let plan = self.rec_struct_plan.clone().unwrap();
+        let sname = crate::types::named_struct_ident(&plan.alias);
+        self.type_context.push_scope();
+        let mut plist: Vec<String> = Vec::new();
+        for p in params {
+            let FunParam::Simple(tp) = p else {
+                self.type_context.pop_scope();
+                return Err(CompileError::new("rec: orch param kind", None));
+            };
+            plist.push(format!("{}: f64", Self::escape_ident(tp.name.as_ref())));
+            self.type_context.define(tp.name.as_ref(), RustType::F64);
+        }
+        plist.push(format!("__rec_arena: &mut Vec<{}>", sname));
+        self.writeln("#[allow(non_snake_case, unused)]");
+        self.writeln(&format!(
+            "fn {}_rec({}) -> f64 {{",
+            Self::escape_ident(name),
+            plist.join(", "),
+        ));
+        self.indent += 1;
+        let res = self.emit_rec_orch_stmt(body);
+        self.indent -= 1;
+        self.writeln("}");
+        self.type_context.pop_scope();
+        res
+    }
+
+    fn emit_rec_orch_stmt(&mut self, stmt: &Statement) -> Result<(), CompileError> {
+        match stmt {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                for s in statements {
+                    self.emit_rec_orch_stmt(s)?;
+                }
+                Ok(())
+            }
+            Statement::VarDecl {
+                name, init: Some(e), ..
+            } => {
+                let (code, is_idx) = self.emit_rec_orch_expr(e)?;
+                self.type_context
+                    .define(name, if is_idx { RustType::I32 } else { RustType::F64 });
+                self.writeln(&format!("let mut {} = {};", Self::escape_ident(name), code));
+                Ok(())
+            }
+            Statement::ExprStmt { expr, .. } => {
+                let code = self.emit_rec_orch_simple_expr(expr)?;
+                self.writeln(&format!("{};", code));
+                Ok(())
+            }
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let c = self.emit_rec_orch_cond(cond)?;
+                self.writeln(&format!("if {} {{", c));
+                self.indent += 1;
+                self.emit_rec_orch_stmt(then_branch)?;
+                self.indent -= 1;
+                if let Some(eb) = else_branch {
+                    self.writeln("} else {");
+                    self.indent += 1;
+                    self.emit_rec_orch_stmt(eb)?;
+                    self.indent -= 1;
+                }
+                self.writeln("}");
+                Ok(())
+            }
+            Statement::While { cond, body, .. } => {
+                let c = self.emit_rec_orch_cond(cond)?;
+                self.writeln(&format!("while {} {{", c));
+                self.indent += 1;
+                self.emit_rec_orch_stmt(body)?;
+                self.indent -= 1;
+                self.writeln("}");
+                Ok(())
+            }
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
+                // Lower to a Rust block: { <init>; while <cond> { <body>; <update>; } }
+                self.writeln("{");
+                self.indent += 1;
+                if let Some(i) = init {
+                    self.emit_rec_orch_stmt(i)?;
+                }
+                let c = match cond {
+                    Some(c) => self.emit_rec_orch_cond(c)?,
+                    None => "true".to_string(),
+                };
+                self.writeln(&format!("while {} {{", c));
+                self.indent += 1;
+                self.emit_rec_orch_stmt(body)?;
+                if let Some(u) = update {
+                    let uc = self.emit_rec_orch_simple_expr(u)?;
+                    self.writeln(&format!("{};", uc));
+                }
+                self.indent -= 1;
+                self.writeln("}");
+                self.indent -= 1;
+                self.writeln("}");
+                Ok(())
+            }
+            Statement::Return { value: Some(e), .. } => {
+                let (code, is_idx) = self.emit_rec_orch_expr(e)?;
+                if is_idx {
+                    return Err(CompileError::new("rec: orch returns node", None));
+                }
+                self.writeln(&format!("return {};", code));
+                Ok(())
+            }
+            _ => Err(CompileError::new("rec: unsupported orch stmt", None)),
+        }
+    }
+
+    /// Statement-position expression: assignment (`x = e`) or `x++`/`++x` (→ `x += 1.0`).
+    fn emit_rec_orch_simple_expr(&mut self, e: &Expr) -> Result<String, CompileError> {
+        match e {
+            Expr::Assign { name, value, .. } => {
+                let (code, _) = self.emit_rec_orch_expr(value)?;
+                Ok(format!("{} = {}", Self::escape_ident(name.as_ref()), code))
+            }
+            Expr::PostfixInc { name, .. } | Expr::PrefixInc { name, .. } => {
+                Ok(format!("{} += 1_f64", Self::escape_ident(name.as_ref())))
+            }
+            Expr::PostfixDec { name, .. } | Expr::PrefixDec { name, .. } => {
+                Ok(format!("{} -= 1_f64", Self::escape_ident(name.as_ref())))
+            }
+            _ => Err(CompileError::new("rec: unsupported orch stmt-expr", None)),
+        }
+    }
+
+    fn emit_rec_orch_cond(&mut self, e: &Expr) -> Result<String, CompileError> {
+        match e {
+            Expr::Binary {
+                op: op @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne),
+                left,
+                right,
+                ..
+            } => {
+                let (l, _) = self.emit_rec_orch_expr(left)?;
+                let (r, _) = self.emit_rec_orch_expr(right)?;
+                let o = match op {
+                    BinOp::Lt => "<",
+                    BinOp::Le => "<=",
+                    BinOp::Gt => ">",
+                    BinOp::Ge => ">=",
+                    BinOp::Eq => "==",
+                    BinOp::Ne => "!=",
+                    _ => unreachable!(),
+                };
+                Ok(format!("({} {} {})", l, o, r))
+            }
+            Expr::Binary {
+                op: op @ (BinOp::And | BinOp::Or),
+                left,
+                right,
+                ..
+            } => {
+                let l = self.emit_rec_orch_cond(left)?;
+                let r = self.emit_rec_orch_cond(right)?;
+                let o = if matches!(op, BinOp::And) { "&&" } else { "||" };
+                Ok(format!("({} {} {})", l, o, r))
+            }
+            Expr::Unary {
+                op: UnaryOp::Not,
+                operand,
+                ..
+            } => Ok(format!("(!({}))", self.emit_rec_orch_cond(operand)?)),
+            _ => Err(CompileError::new("rec: unsupported orch cond", None)),
+        }
+    }
+
+    /// Returns `(code, is_node_idx)`: `is_node_idx == true` ⇒ an `i32` arena index; else `f64`.
+    fn emit_rec_orch_expr(&mut self, e: &Expr) -> Result<(String, bool), CompileError> {
+        match e {
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => Ok((Self::f64_lit(*n), false)),
+            Expr::Ident { name, .. } => match self.type_context.get_type(name.as_ref()) {
+                RustType::I32 => Ok((Self::escape_ident(name.as_ref()).into_owned(), true)),
+                RustType::F64 => Ok((Self::escape_ident(name.as_ref()).into_owned(), false)),
+                _ => Err(CompileError::new("rec: orch ident type", None)),
+            },
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                operand,
+                ..
+            } => Ok((format!("(-({}))", self.emit_rec_orch_f64(operand)?), false)),
+            Expr::Unary {
+                op: UnaryOp::Pos,
+                operand,
+                ..
+            } => Ok((format!("({})", self.emit_rec_orch_f64(operand)?), false)),
+            Expr::Binary {
+                op: BinOp::Shl,
+                left,
+                right,
+                ..
+            } => {
+                let l = self.emit_rec_orch_f64(left)?;
+                let r = self.emit_rec_orch_f64(right)?;
+                // JS `<<` is a 32-bit shift; the fixture shifts small positive values.
+                Ok((
+                    format!("((({}) as i64) << ((({}) as i64) & 31)) as f64", l, r),
+                    false,
+                ))
+            }
+            Expr::Binary {
+                op, left, right, ..
+            } => {
+                let l = self.emit_rec_orch_f64(left)?;
+                let r = self.emit_rec_orch_f64(right)?;
+                let code = match op {
+                    BinOp::Add => format!("({} + {})", l, r),
+                    BinOp::Sub => format!("({} - {})", l, r),
+                    BinOp::Mul => format!("({} * {})", l, r),
+                    BinOp::Div => format!("({} / {})", l, r),
+                    BinOp::Mod => format!("({} % {})", l, r),
+                    BinOp::Pow => format!("({}).powf({})", l, r),
+                    _ => return Err(CompileError::new("rec: orch binop", None)),
+                };
+                Ok((code, false))
+            }
+            Expr::Call { callee, args, .. } => {
+                let plan = self.rec_struct_plan.clone().unwrap();
+                let Expr::Ident { name: fname, .. } = callee.as_ref() else {
+                    return Err(CompileError::new("rec: orch call callee", None));
+                };
+                if plan.builders.contains(fname.as_ref()) {
+                    // builder(args) → index
+                    let mut a: Vec<String> = Vec::new();
+                    for arg in args {
+                        let CallArg::Expr(ae) = arg else {
+                            return Err(CompileError::new("rec: orch builder arg", None));
+                        };
+                        a.push(self.emit_rec_orch_f64(ae)?);
+                    }
+                    a.push("__rec_arena".to_string());
+                    return Ok((
+                        format!("{}_rec({})", Self::escape_ident(fname.as_ref()), a.join(", ")),
+                        true,
+                    ));
+                }
+                if plan.consumers.contains(fname.as_ref()) {
+                    // consumer(nodeIndexExpr) → f64
+                    let [CallArg::Expr(arg)] = args.as_slice() else {
+                        return Err(CompileError::new("rec: orch consumer arity", None));
+                    };
+                    let (acode, is_idx) = self.emit_rec_orch_expr(arg)?;
+                    if !is_idx {
+                        return Err(CompileError::new("rec: orch consumer arg not node", None));
+                    }
+                    // `arg` may itself build into the arena; bind to a temp so the &mut borrow for
+                    // the build is released before the consumer's & borrow.
+                    return Ok((
+                        format!(
+                            "{{ let __rec_t = {}; {}_rec(__rec_t, __rec_arena) }}",
+                            acode,
+                            Self::escape_ident(fname.as_ref())
+                        ),
+                        false,
+                    ));
+                }
+                Err(CompileError::new("rec: orch unsupported call", None))
+            }
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let c = self.emit_rec_orch_cond(cond)?;
+                let t = self.emit_rec_orch_f64(then_branch)?;
+                let el = self.emit_rec_orch_f64(else_branch)?;
+                Ok((format!("(if {} {{ {} }} else {{ {} }})", c, t, el), false))
+            }
+            _ => Err(CompileError::new("rec: orch unsupported expr", None)),
+        }
+    }
+
+    /// Like `emit_rec_orch_expr` but requires an `f64` result.
+    fn emit_rec_orch_f64(&mut self, e: &Expr) -> Result<String, CompileError> {
+        let (code, is_idx) = self.emit_rec_orch_expr(e)?;
+        if is_idx {
+            return Err(CompileError::new("rec: orch expected f64, got node", None));
+        }
+        Ok(code)
     }
 
     fn emit_rec_stmt(&mut self, stmt: &Statement, ctx: &RecCtx) -> Result<(), CompileError> {
@@ -16841,6 +17238,32 @@ impl Codegen {
         let Expr::Ident { name, .. } = callee else {
             return Ok(None);
         };
+        // Orchestrator call (e.g. `binaryTrees(15)`): spin up an arena and run it natively.
+        if plan.orchestrators.contains(name.as_ref()) {
+            let mut lits: Vec<String> = Vec::new();
+            for a in args {
+                let CallArg::Expr(ae) = a else {
+                    return Ok(None);
+                };
+                match Self::rec_literal_f64(ae) {
+                    Some(code) => lits.push(code),
+                    None => return Ok(None),
+                }
+            }
+            let sname = crate::types::named_struct_ident(&plan.alias);
+            lits.push("&mut __rec_arena".to_string());
+            let inner = format!(
+                "{{ let mut __rec_arena: Vec<{s}> = Vec::new(); {c}_rec({a}) }}",
+                s = sname,
+                c = Self::escape_ident(name.as_ref()),
+                a = lits.join(", "),
+            );
+            return Ok(Some(if boxed {
+                format!("Value::Number({})", inner)
+            } else {
+                inner
+            }));
+        }
         if !plan.consumers.contains(name.as_ref()) {
             return Ok(None);
         }

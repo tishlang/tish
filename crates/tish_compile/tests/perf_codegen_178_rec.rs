@@ -78,3 +78,59 @@ fn recursive_tree_lowers_to_native_arena() {
         "expected nodes to be bump-allocated into the arena Vec"
     );
 }
+
+// The FULL binary_trees shape (with a loop-bearing orchestrator) — developer identifiers.
+const SRC_ORCH: &str = r#"
+function makeTree(d) {
+  if (d > 0) { return { left: makeTree(d - 1), right: makeTree(d - 1) } }
+  return { left: null, right: null }
+}
+function countTree(node) {
+  if (node.left === null) { return 1 }
+  return 1 + countTree(node.left) + countTree(node.right)
+}
+function run(maxDepth) {
+  let minDepth = 4
+  let total = countTree(makeTree(maxDepth + 1))
+  let longLived = makeTree(maxDepth)
+  let depth = minDepth
+  while (depth <= maxDepth) {
+    let iterations = 1 << (maxDepth - depth + minDepth)
+    let sum = 0
+    for (let i = 0; i < iterations; i++) { sum = sum + countTree(makeTree(depth)) }
+    total = total + sum
+    depth = depth + 2
+  }
+  total = total + countTree(longLived)
+  return total
+}
+let t0 = Date.now()
+let check = run(8)
+console.log("GAUNTLET t " + (Date.now() - t0) + " " + check)
+"#;
+
+#[test]
+fn recursive_tree_orchestrator_lowers_to_native_arena() {
+    enable_flags();
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let path = dir.join("rec_orch_dev_178.tish");
+    std::fs::write(&path, SRC_ORCH).unwrap();
+
+    let (rust, _, _, _) = compile_project_full(&path, path.parent(), &[], true).unwrap();
+
+    // The orchestrator becomes a native fn threading the arena and returning f64.
+    assert!(
+        rust.contains("fn run_rec(") && rust.contains("__rec_arena: &mut Vec<"),
+        "expected the orchestrator to lower to a native arena fn"
+    );
+    // It calls builders/consumers natively (no value_call on the hot path).
+    assert!(
+        rust.contains("makeTree_rec(") && rust.contains("countTree_rec("),
+        "expected the orchestrator to call builder/consumer fns natively"
+    );
+    // Top-level call routed through a fresh arena.
+    assert!(
+        rust.contains("let mut __rec_arena") && rust.contains("run_rec("),
+        "expected the top-level orchestrator call to set up and thread the arena"
+    );
+}

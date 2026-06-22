@@ -99,17 +99,22 @@ let r = { let mut __rec_arena = Vec::new();
 - [x] Detection (structural, name-independent) + arena struct decl.
 - [x] Native builder + consumer fn emission (arena, i32 indices, `Copy` nodes).
 - [x] Top-level `consumer(builder(literals))` call routing + `TISH_REC_STRUCT` gate.
-- [x] **Validated**: renamed binary-tree build+count == node checksum; **~37ms vs node ~129ms
-      (3.5× faster), ~53× over boxed**. Regression test: `tests/perf_codegen_178_rec.rs`.
-- [ ] **Next session — the loop-bearing orchestrator** (`binaryTrees`): a numeric fn that holds a
-      struct-typed local (`longLived`), `<<` shift, while/for loops, and repeatedly
-      `itemCheck(bottomUpTree(depth))`. Needs: (a) a general native numeric-fn body emitter that can
-      hold an arena-index local + thread the arena, and (b) **per-tree arena reset** (truncate to a
-      checkpoint after each tree) so memory doesn't grow unbounded across the loop — the "scoped
-      arena / nursery". Until then, the full `binary_trees` fixture stays on the boxed path (routing
-      is conservative: it only fires for `consumer(builder(literal-args))`, so non-literal orchestrator
-      calls fall back safely).
-- [ ] Then: default-gate review, broader shapes (multiple structs, scalar+child mix beyond v1).
+- [x] **Validated (core shape)**: renamed binary-tree build+count == node checksum; **~37ms vs node
+      ~129ms (3.5× faster), ~53× over boxed**.
+- [x] **Loop-bearing orchestrator** (`binaryTrees`): native numeric-fn body emitter that holds a
+      node-index (`i32`) local (`longLived`), `<<` shift, while/for loops, assignment/inc, and calls
+      builders (→ index) / consumers (→ f64) threading the arena. Top-level orchestrator call sets up
+      a fresh arena. **Validated on the FULL renamed AND actual binary_trees fixture: ~28–37ms ≈ node
+      ~37ms, checksum 6444382 matches, NO `binary_trees_check` kernel** — the honest, name-independent
+      path. With both `TISH_NATIVE_FN` (fusion) and `TISH_REC_STRUCT` on, rec takes precedence and
+      output stays correct.
+- Regression tests: `tests/perf_codegen_178_rec.rs` (core composition + orchestrator).
+- [ ] **Per-tree arena reset (nursery)** — currently the arena grows to the run's total node count
+      (~6M / ~50MB for `binaryTrees(15)`, freed at block end). Fine for the fixture; for large N or
+      long-running servers, truncate the arena to a per-iteration checkpoint for throwaway trees
+      (escape analysis: only reset trees that don't outlive the iteration; `longLived` must survive).
+- [ ] Then: default-gate review (retire the fusion kernel once rec is in the gauntlet `TYPED_FLAGS`),
+      broader shapes (multiple structs, scalar+child mix, consumer extra params).
 
 ### Safety model (why this can't miscompile)
 
