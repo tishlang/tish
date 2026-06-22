@@ -77,9 +77,31 @@ So the win needs a **4-link inference chain**, of which the native map is only t
 3. `key` → native `f64`/`i64` (follows once `seq[i+j]` is native).
 4. map → native `HashMap<u64,f64>` (this doc — sound, ready, but useless until 1–3 land).
 
-**Conclusion:** #320 is blocked on native array/fn-return inference, the same family as #170/#173/#177.
-A map-only lowering would leave ~2.4M boxed ops in place and not approach node — so it is NOT built.
-This file keeps the SOUND map design (f64-bits keys) for when links 1–3 land.
+**Conclusion:** #320 is blocked on native array/fn-return inference. A map-only lowering would leave
+~2.4M boxed ops in place and not approach node — so it is NOT built. The SOUND map design (f64-bits
+keys) below is kept for when links 1–3 land.
+
+### Update — it's TWO scoped fixes, not XL (probed 2026-06-22)
+
+Empirical probe (`target/fakenum/arr_probe.tish`): `let a=[]; a.push(i*2)` ALREADY lowers to native
+`Vec<f64>`; only `let b=[]; b.push(g())` (a **fn-call** push) stays boxed — even though `g` is native.
+So the existing array inference is fine; the gaps are precise:
+
+1. **Zero-param native fns** — `collect_native_fns` (codegen.rs **~14163**) requires
+   `!params.is_empty()`, so `nextBase()` (0 params, numeric body) is categorically excluded from
+   native promotion. Relax to allow 0-param numeric fns (verify the native-fn call-site routing
+   handles 0 args; check why the restriction was added).
+2. **Numeric fn-call pushes** — the array-element-type inference types a push expr `g(args)` as
+   `Value` (→ boxed `Vec`), not `F64`. It should type it `F64` when `g` returns numeric (reuse
+   `returns_numeric` / the `native_fns` set). Decision point: the top-level array-local element-type
+   inference feeding the `let a = []` VarDecl typing (codegen.rs ~4083+ handles the native-vec-fn-body
+   case; the TOP-LEVEL `Vec<f64>` path for the probe's `a` is a separate site to locate and extend).
+   Soundness: only type as F64 if the fn PROVABLY returns numeric on every path (returns_numeric).
+
+With 1+2, `seq.push(nextBase())` → `seq: Vec<f64>`; then `seq[i+j]` native ⇒ `key` native (existing
+machinery) ⇒ link 4 (native map below) finishes it. Each fix is small but lives in the
+soundness-critical inference frontend — do it carefully, validate `seq` Vec<f64> on the probe first,
+then k_nucleotide checksum == node + gauntlet.
 
 ## Status
 
