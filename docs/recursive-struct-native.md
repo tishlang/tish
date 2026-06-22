@@ -109,12 +109,17 @@ let r = { let mut __rec_arena = Vec::new();
       path. With both `TISH_NATIVE_FN` (fusion) and `TISH_REC_STRUCT` on, rec takes precedence and
       output stays correct.
 - Regression tests: `tests/perf_codegen_178_rec.rs` (core composition + orchestrator).
-- [ ] **Per-tree arena reset (nursery)** — currently the arena grows to the run's total node count
-      (~6M / ~50MB for `binaryTrees(15)`, freed at block end). Fine for the fixture; for large N or
-      long-running servers, truncate the arena to a per-iteration checkpoint for throwaway trees
-      (escape analysis: only reset trees that don't outlive the iteration; `longLived` must survive).
+- [x] **Per-tree arena reset (nursery)** — loop bodies that don't bind a built node (escape check:
+      no `let x = builder(..)` / `x = builder(..)`) get a checkpoint+`truncate` per iteration, so the
+      arena holds ~one tree at a time. `longLived` (bound before the loop) survives. Measured on
+      `binaryTrees(15)`: **35ms, peak RSS 11.7MB** vs boxed 798ms / 74.9MB — same speed, bounded
+      memory, scales to large N.
 - [ ] Then: default-gate review (retire the fusion kernel once rec is in the gauntlet `TYPED_FLAGS`),
       broader shapes (multiple structs, scalar+child mix, consumer extra params).
+
+> ⚠️ Measurement caveat: `tish build` has a hash-keyed compile cache, so re-building the SAME
+> `.tish` source returns a stale binary. Always measure perf from a NOVEL source (or clear the
+> cache) — reusing a filename silently gives old numbers.
 
 ### Safety model (why this can't miscompile)
 

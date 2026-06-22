@@ -16220,6 +16220,47 @@ impl Codegen {
         }
     }
 
+    /// Nursery safety: a loop body is safe to arena-reset iff no node built inside it ESCAPES the
+    /// iteration — i.e. no `let x = builder(..)` / `x = builder(..)` binds a node handle. Builder
+    /// calls that are consumed inline (args to a consumer) are fine; the node dies in-iteration.
+    fn rec_orch_body_nursery_safe(stmt: &Statement, builders: &std::collections::HashSet<String>) -> bool {
+        !Self::rec_orch_binds_node(stmt, builders)
+    }
+
+    fn rec_orch_binds_node(stmt: &Statement, builders: &std::collections::HashSet<String>) -> bool {
+        let is_builder_call = |e: &Expr| {
+            matches!(e, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident { name, .. } if builders.contains(name.as_ref())))
+        };
+        match stmt {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().any(|s| Self::rec_orch_binds_node(s, builders))
+            }
+            Statement::VarDecl { init: Some(e), .. } => is_builder_call(e),
+            Statement::ExprStmt { expr, .. } => {
+                matches!(expr, Expr::Assign { value, .. } if is_builder_call(value))
+            }
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::rec_orch_binds_node(then_branch, builders)
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|e| Self::rec_orch_binds_node(e, builders))
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::ForOf { body, .. } => Self::rec_orch_binds_node(body, builders),
+            Statement::For { init, body, .. } => {
+                init.as_ref()
+                    .is_some_and(|i| Self::rec_orch_binds_node(i, builders))
+                    || Self::rec_orch_binds_node(body, builders)
+            }
+            _ => false,
+        }
+    }
+
     /// Infer a recursive-struct plan from the program, or `None` if the shape isn't present.
     fn detect_rec_struct_program(program: &Program) -> Option<RecStructPlan> {
         use std::collections::{HashMap, HashSet};
@@ -16667,7 +16708,7 @@ impl Codegen {
                 let c = self.emit_rec_orch_cond(cond)?;
                 self.writeln(&format!("while {} {{", c));
                 self.indent += 1;
-                self.emit_rec_orch_stmt(body)?;
+                self.emit_rec_orch_loop_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
                 Ok(())
@@ -16691,7 +16732,7 @@ impl Codegen {
                 };
                 self.writeln(&format!("while {} {{", c));
                 self.indent += 1;
-                self.emit_rec_orch_stmt(body)?;
+                self.emit_rec_orch_loop_body(body)?;
                 if let Some(u) = update {
                     let uc = self.emit_rec_orch_simple_expr(u)?;
                     self.writeln(&format!("{};", uc));
@@ -16712,6 +16753,21 @@ impl Codegen {
             }
             _ => Err(CompileError::new("rec: unsupported orch stmt", None)),
         }
+    }
+
+    /// Emit a loop body, wrapping it in an arena checkpoint+truncate (nursery reset) when no node
+    /// built inside the body escapes the iteration — bounding arena growth to one tree at a time.
+    fn emit_rec_orch_loop_body(&mut self, body: &Statement) -> Result<(), CompileError> {
+        let builders = self.rec_struct_plan.as_ref().unwrap().builders.clone();
+        let reset = Self::rec_orch_body_nursery_safe(body, &builders);
+        if reset {
+            self.writeln("let __rec_cp = __rec_arena.len();");
+        }
+        self.emit_rec_orch_stmt(body)?;
+        if reset {
+            self.writeln("__rec_arena.truncate(__rec_cp);");
+        }
+        Ok(())
     }
 
     /// Statement-position expression: assignment (`x = e`) or `x++`/`++x` (→ `x += 1.0`).
