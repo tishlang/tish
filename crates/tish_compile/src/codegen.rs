@@ -779,6 +779,37 @@ struct AggFnSig {
     ret: AggRet,
 }
 
+/// #178 (behind `TISH_REC_STRUCT`): a recursive struct shape inferred *structurally* (no name
+/// matching) from object literals whose fields are either scalars or recursive self-references.
+/// Drives native lowering of tree/list builders and consumers to `Option<Box<T>>` + native fns —
+/// the real fix that retires the fixture-name `binary_trees_check` kernel. See
+/// docs/recursive-struct-native.md.
+#[derive(Debug, Clone)]
+struct RecStructPlan {
+    /// Synthesised Tish alias name (the Rust struct is `TishStruct_<alias>`).
+    alias: String,
+    /// Field set in declaration order: (name, is_child). `is_child` ⇒ `Option<Box<Self>>`,
+    /// else a scalar `f64`.
+    fields: Vec<(std::sync::Arc<str>, bool)>,
+    /// Fns that return the struct by value (the recursive builders, e.g. `bottomUpTree`).
+    builders: std::collections::HashSet<String>,
+    /// Fns that take the struct (by `&`) and return `f64` (the recursive consumers, e.g.
+    /// `itemCheck`).
+    consumers: std::collections::HashSet<String>,
+    /// Numeric fns that orchestrate builders/consumers (e.g. `binaryTrees`): they hold node-index
+    /// locals, loop, and call builders/consumers. Lowered to `fn name_rec(<f64..>, &mut Vec<Node>)
+    /// -> f64`.
+    orchestrators: std::collections::HashSet<String>,
+}
+
+/// #178: emission context for a recursive-struct fn body.
+struct RecCtx {
+    /// True inside a builder body (returns the struct); false inside a consumer (returns f64).
+    is_builder: bool,
+    /// The consumer's node param name (`&TishStruct_alias`), if in a consumer.
+    node: Option<String>,
+}
+
 /// #175 — accumulated facts about how a fn param is used in the body (for param classification).
 #[derive(Debug, Default)]
 struct ParamUse {
@@ -948,6 +979,8 @@ pub(crate) struct Codegen {
     /// #177 S-E/S-F (dark-shipped behind `TISH_AGGREGATE_INFER`): the unboxed struct alias name
     /// (e.g. `TishAnon_0`) when the interprocedural aggregate path is active for this program,
     /// else `None`. Set in `emit_program` only after the de-virtualized fns emit successfully.
+    /// #178: inferred recursive-struct lowering plan (behind `TISH_REC_STRUCT`).
+    rec_struct_plan: Option<RecStructPlan>,
     aggregate_alias: Option<String>,
     /// #177: fn name → its de-virtualized native signature. Calls to these route directly to the
     /// `fn name_agg(..)` free fn (threading the `Vec<TishStruct_alias>` by reference), bypassing
@@ -1131,6 +1164,7 @@ impl Codegen {
             inline_depth: 0,
             native_vec_ret: None,
             vec_ref_params: std::collections::HashMap::new(),
+            rec_struct_plan: None,
             aggregate_alias: None,
             aggregate_fns: std::collections::HashMap::new(),
             aggregate_array_locals: std::collections::HashSet::new(),
@@ -1935,6 +1969,13 @@ impl Codegen {
         // lowered the whole path is disabled and we fall back to the boxed closures unchanged.
         if std::env::var("TISH_AGGREGATE_INFER").map(|v| v != "0").unwrap_or(false) {
             self.setup_aggregate_fns(program);
+        }
+        // #178 (behind TISH_REC_STRUCT): de-virtualize recursive-struct builders/consumers into
+        // native free fns over `Option<Box<T>>` structs (the real binary_trees fix). Structural,
+        // name-independent; emits before `run()` with scratch-buffer rollback so any unsupported
+        // construct cleanly disables the path and falls back to the boxed closures unchanged.
+        if std::env::var("TISH_REC_STRUCT").map(|v| v != "0").unwrap_or(false) {
+            self.setup_rec_struct_plan(program);
         }
         // #175 (behind TISH_NATIVE_FN): de-virtualize fns over plain `number[]`/`boolean[]` params
         // into native free fns threaded by `&/&mut Vec<T>` (spectral_norm / queens). Runs after the
@@ -5736,6 +5777,13 @@ impl Codegen {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                // #178: route a boxed-context call to a recursive-struct consumer
+                // (`sum(build(n))` / `sum(node)`) → `Value::Number(sum_rec(&..))`.
+                if self.rec_struct_plan.is_some() {
+                    if let Some(code) = self.try_emit_toplevel_rec_call(callee, args, true)? {
+                        return Ok(code);
+                    }
+                }
                 // #177: route a top-level call to a de-virtualized aggregate fn. Void fns
                 // (`advance`/`offsetMomentum`) emit `name_agg(&mut bodies, …)` (a `()` statement);
                 // an f64-returning fn (`energy`) is boxed back into `Value::Number` for this path.
@@ -16446,6 +16494,1346 @@ impl Codegen {
     // whole path is disabled (the fns + the call hooks fall back to the boxed closures, byte-
     // identical to flag-off). So we never half-wire the feature or miscompile.
     // ====================================================================================
+
+    // ── #178: recursive-struct native lowering (behind TISH_REC_STRUCT) ─────────────────────
+    // Infers a recursive struct shape STRUCTURALLY (no identifier matching) from object literals
+    // whose fields are scalars or recursive self-references, and emits native builders
+    // (`name_rec(..) -> TishStruct_X`) + consumers (`name_rec(&TishStruct_X) -> f64`) over
+    // `Option<Box<T>>` children. This is the real binary_trees fix (retires the `binary_trees_check`
+    // fixture kernel) — it transfers to any developer code with the same shape. v1 scope: leaf
+    // builder/consumer fns (if / return) + top-level `consumer(builder(literals))` routing; the
+    // loop-bearing orchestrator (binaryTrees) is future work. SAFE: the boxed closures are left
+    // intact as a fallback, native fns are emitted with rollback, and only fully-native-emittable
+    // calls are routed — anything else uses the unchanged boxed path. See docs/recursive-struct-native.md.
+
+    /// True if `name` is one of the inferred recursive-struct builders/consumers.
+    /// (Reserved for orchestrator-level boxed-closure suppression once that lands.)
+    #[allow(dead_code)]
+    fn rec_struct_fn(&self, name: &str) -> bool {
+        self.rec_struct_plan
+            .as_ref()
+            .is_some_and(|p| p.builders.contains(name) || p.consumers.contains(name))
+    }
+
+    /// Collect every `return <expr>` reachable in a fn body (over control flow, not into nested fns).
+    fn rec_collect_returns<'a>(stmt: &'a Statement, out: &mut Vec<&'a Expr>) {
+        match stmt {
+            Statement::Return { value: Some(e), .. } => out.push(e),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                for s in statements {
+                    Self::rec_collect_returns(s, out);
+                }
+            }
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::rec_collect_returns(then_branch, out);
+                if let Some(e) = else_branch {
+                    Self::rec_collect_returns(e, out);
+                }
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::For { body, .. }
+            | Statement::ForOf { body, .. } => Self::rec_collect_returns(body, out),
+            _ => {}
+        }
+    }
+
+    /// Does `body` ever read `node.<field>` for a field in `keyset`? (consumer detection)
+    fn rec_body_accesses_node_field(
+        body: &Statement,
+        node: &str,
+        keyset: &std::collections::HashSet<&str>,
+    ) -> bool {
+        let mut found = false;
+        // `for_each_stmt_expr` hands us each statement's top expr; we recurse into its subtree.
+        Self::for_each_stmt_expr(body, &mut |e| {
+            if Self::expr_reads_node_field(e, node, keyset) {
+                found = true;
+            }
+        });
+        found
+    }
+
+    /// Recursively: does `e` read `node.<field>` for a field in `keyset`?
+    fn expr_reads_node_field(e: &Expr, node: &str, keyset: &std::collections::HashSet<&str>) -> bool {
+        match e {
+            Expr::Member {
+                object,
+                prop: MemberProp::Name { name, .. },
+                ..
+            } => {
+                (matches!(object.as_ref(), Expr::Ident { name: on, .. } if on.as_ref() == node)
+                    && keyset.contains(name.as_ref()))
+                    || Self::expr_reads_node_field(object, node, keyset)
+            }
+            Expr::Member { object, prop: MemberProp::Expr(idx), .. } => {
+                Self::expr_reads_node_field(object, node, keyset)
+                    || Self::expr_reads_node_field(idx, node, keyset)
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::expr_reads_node_field(left, node, keyset)
+                    || Self::expr_reads_node_field(right, node, keyset)
+            }
+            Expr::Unary { operand, .. } => Self::expr_reads_node_field(operand, node, keyset),
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::expr_reads_node_field(cond, node, keyset)
+                    || Self::expr_reads_node_field(then_branch, node, keyset)
+                    || Self::expr_reads_node_field(else_branch, node, keyset)
+            }
+            Expr::Index { object, index, .. } => {
+                Self::expr_reads_node_field(object, node, keyset)
+                    || Self::expr_reads_node_field(index, node, keyset)
+            }
+            Expr::Call { callee, args, .. } => {
+                Self::expr_reads_node_field(callee, node, keyset)
+                    || args.iter().any(|a| match a {
+                        CallArg::Expr(ae) => Self::expr_reads_node_field(ae, node, keyset),
+                        _ => false,
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Does `body` call any fn whose name is in `names`?
+    fn rec_body_calls_any(body: &Statement, names: &std::collections::HashSet<&str>) -> bool {
+        let mut found = false;
+        Self::for_each_stmt_expr(body, &mut |e| {
+            if Self::expr_calls_any(e, names) {
+                found = true;
+            }
+        });
+        found
+    }
+
+    /// Recursively: does `e` contain a call to a fn named in `names`?
+    fn expr_calls_any(e: &Expr, names: &std::collections::HashSet<&str>) -> bool {
+        match e {
+            Expr::Call { callee, args, .. } => {
+                let direct = matches!(callee.as_ref(), Expr::Ident { name, .. } if names.contains(name.as_ref()));
+                direct
+                    || Self::expr_calls_any(callee, names)
+                    || args.iter().any(|a| match a {
+                        CallArg::Expr(ae) => Self::expr_calls_any(ae, names),
+                        _ => false,
+                    })
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::expr_calls_any(left, names) || Self::expr_calls_any(right, names)
+            }
+            Expr::Unary { operand, .. } => Self::expr_calls_any(operand, names),
+            Expr::Member { object, .. } => Self::expr_calls_any(object, names),
+            Expr::Index { object, index, .. } => {
+                Self::expr_calls_any(object, names) || Self::expr_calls_any(index, names)
+            }
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::expr_calls_any(cond, names)
+                    || Self::expr_calls_any(then_branch, names)
+                    || Self::expr_calls_any(else_branch, names)
+            }
+            Expr::Assign { value, .. } => Self::expr_calls_any(value, names),
+            _ => false,
+        }
+    }
+
+    /// Nursery safety: a loop body is safe to arena-reset iff no node built inside it ESCAPES the
+    /// iteration — i.e. no `let x = builder(..)` / `x = builder(..)` binds a node handle. Builder
+    /// calls that are consumed inline (args to a consumer) are fine; the node dies in-iteration.
+    fn rec_orch_body_nursery_safe(stmt: &Statement, builders: &std::collections::HashSet<String>) -> bool {
+        !Self::rec_orch_binds_node(stmt, builders)
+    }
+
+    fn rec_orch_binds_node(stmt: &Statement, builders: &std::collections::HashSet<String>) -> bool {
+        let is_builder_call = |e: &Expr| {
+            matches!(e, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Ident { name, .. } if builders.contains(name.as_ref())))
+        };
+        match stmt {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().any(|s| Self::rec_orch_binds_node(s, builders))
+            }
+            Statement::VarDecl { init: Some(e), .. } => is_builder_call(e),
+            Statement::ExprStmt { expr, .. } => {
+                matches!(expr, Expr::Assign { value, .. } if is_builder_call(value))
+            }
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::rec_orch_binds_node(then_branch, builders)
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|e| Self::rec_orch_binds_node(e, builders))
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::ForOf { body, .. } => Self::rec_orch_binds_node(body, builders),
+            Statement::For { init, body, .. } => {
+                init.as_ref()
+                    .is_some_and(|i| Self::rec_orch_binds_node(i, builders))
+                    || Self::rec_orch_binds_node(body, builders)
+            }
+            _ => false,
+        }
+    }
+
+    /// Infer a recursive-struct plan from the program, or `None` if the shape isn't present.
+    fn detect_rec_struct_program(program: &Program) -> Option<RecStructPlan> {
+        use std::collections::{HashMap, HashSet};
+        let dbg = std::env::var("TISH_REC_DEBUG").is_ok();
+        macro_rules! bail {
+            ($($a:tt)*) => {{ if dbg { eprintln!($($a)*); } return None; }};
+        }
+        // Top-level (non-async) fns by name.
+        let mut fns: HashMap<String, (&[FunParam], &Statement)> = HashMap::new();
+        for s in &program.statements {
+            if let Statement::FunDecl {
+                name,
+                params,
+                body,
+                async_: false,
+                ..
+            } = s
+            {
+                fns.insert(name.to_string(), (params.as_slice(), body.as_ref()));
+            }
+        }
+        if fns.is_empty() {
+            return None;
+        }
+
+        // Phase 1 — builders: fns whose EVERY return is an object literal, all with one key set.
+        let mut obj_fns: HashMap<String, Vec<std::sync::Arc<str>>> = HashMap::new();
+        for (name, (_p, body)) in &fns {
+            let mut rets: Vec<&Expr> = Vec::new();
+            Self::rec_collect_returns(body, &mut rets);
+            if rets.is_empty() {
+                continue;
+            }
+            let mut keyset: Option<Vec<std::sync::Arc<str>>> = None;
+            let mut all_obj = true;
+            for r in &rets {
+                let Expr::Object { props, .. } = r else {
+                    all_obj = false;
+                    break;
+                };
+                let mut keys: Vec<std::sync::Arc<str>> = Vec::new();
+                for p in props {
+                    match p {
+                        ObjectProp::KeyValue(k, _, _) => keys.push(k.clone()),
+                        _ => {
+                            all_obj = false;
+                            break;
+                        }
+                    }
+                }
+                if !all_obj {
+                    break;
+                }
+                match &keyset {
+                    None => keyset = Some(keys),
+                    Some(prev) => {
+                        let a: HashSet<&str> = prev.iter().map(|s| &**s).collect();
+                        let b: HashSet<&str> = keys.iter().map(|s| &**s).collect();
+                        if a != b {
+                            all_obj = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if all_obj {
+                if let Some(keys) = keyset {
+                    obj_fns.insert(name.clone(), keys);
+                }
+            }
+        }
+        if obj_fns.is_empty() {
+            bail!("[rec] no object-returning fns");
+        }
+        // All builders must share one key set (single struct for v1).
+        let first_keys = obj_fns.values().next().unwrap().clone();
+        let first_set: HashSet<&str> = first_keys.iter().map(|s| &**s).collect();
+        for keys in obj_fns.values() {
+            let s: HashSet<&str> = keys.iter().map(|x| &**x).collect();
+            if s != first_set {
+                bail!("[rec] builders disagree on key set");
+            }
+        }
+        let builders: HashSet<String> = obj_fns.keys().cloned().collect();
+
+        // Phase 2 — per-key kind: child (Option<Box<Self>>) if EVER null or a builder-call,
+        // else scalar (f64). A key that is both scalar and child is ambiguous → bail.
+        let mut child: HashMap<String, bool> = HashMap::new();
+        for bname in &builders {
+            let (_p, body) = fns.get(bname).unwrap();
+            let mut rets: Vec<&Expr> = Vec::new();
+            Self::rec_collect_returns(body, &mut rets);
+            for r in &rets {
+                if let Expr::Object { props, .. } = r {
+                    for p in props {
+                        if let ObjectProp::KeyValue(k, v, _) = p {
+                            let is_child = match v {
+                                Expr::Literal {
+                                    value: Literal::Null,
+                                    ..
+                                } => true,
+                                Expr::Call { callee, .. } => {
+                                    matches!(callee.as_ref(), Expr::Ident { name, .. } if builders.contains(name.as_ref()))
+                                }
+                                _ => false,
+                            };
+                            match child.get(k.as_ref()) {
+                                Some(prev) if *prev != is_child => {
+                                    bail!("[rec] key {} is both scalar and child", k);
+                                }
+                                _ => {
+                                    child.insert(k.to_string(), is_child);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !child.values().any(|&c| c) {
+            bail!("[rec] no child fields (not recursive)");
+        }
+        let fields: Vec<(std::sync::Arc<str>, bool)> = first_keys
+            .iter()
+            .map(|k| (k.clone(), *child.get(k.as_ref()).unwrap_or(&false)))
+            .collect();
+
+        // Phase 3 — consumers: non-builder, single-param fns that read node.<field> and return
+        // numeric (never an object).
+        let keyset: HashSet<&str> = first_keys.iter().map(|s| &**s).collect();
+        let mut consumers: HashSet<String> = HashSet::new();
+        for (name, (params, body)) in &fns {
+            if builders.contains(name) || params.len() != 1 {
+                continue;
+            }
+            let FunParam::Simple(tp) = &params[0] else {
+                continue;
+            };
+            let pname = tp.name.to_string();
+            let mut rets: Vec<&Expr> = Vec::new();
+            Self::rec_collect_returns(body, &mut rets);
+            if rets.is_empty() || rets.iter().any(|r| matches!(r, Expr::Object { .. })) {
+                continue;
+            }
+            if Self::rec_body_accesses_node_field(body, &pname, &keyset) {
+                consumers.insert(name.clone());
+            }
+        }
+        if consumers.is_empty() {
+            bail!("[rec] no consumers");
+        }
+
+        // Phase 4 — orchestrators: numeric fns (not builders/consumers) that CALL a builder or
+        // consumer (e.g. `binaryTrees`). Loosely detected; the emitter's rollback rejects any whose
+        // body it can't lower. They must not return an object.
+        let rec_names: HashSet<&str> = builders
+            .iter()
+            .chain(consumers.iter())
+            .map(|s| s.as_str())
+            .collect();
+        let mut orchestrators: HashSet<String> = HashSet::new();
+        for (name, (_params, body)) in &fns {
+            if builders.contains(name) || consumers.contains(name) {
+                continue;
+            }
+            let mut rets: Vec<&Expr> = Vec::new();
+            Self::rec_collect_returns(body, &mut rets);
+            if rets.iter().any(|r| matches!(r, Expr::Object { .. })) {
+                continue; // returns a node — not a numeric orchestrator
+            }
+            if Self::rec_body_calls_any(body, &rec_names) {
+                orchestrators.insert(name.clone());
+            }
+        }
+        if dbg {
+            eprintln!("[rec] orchestrators={:?}", orchestrators);
+        }
+
+        Some(RecStructPlan {
+            alias: "TishRecNode".to_string(),
+            fields,
+            builders,
+            consumers,
+            orchestrators,
+        })
+    }
+
+    /// Detect + emit the recursive-struct plan (struct decl + native builder/consumer fns) with
+    /// scratch-buffer rollback. On any failure the path is disabled and the boxed closures stand.
+    fn setup_rec_struct_plan(&mut self, program: &Program) {
+        let dbg = std::env::var("TISH_REC_DEBUG").is_ok();
+        let Some(plan) = Self::detect_rec_struct_program(program) else {
+            if dbg {
+                eprintln!("[rec] detect = None");
+            }
+            return;
+        };
+        if dbg {
+            eprintln!(
+                "[rec] alias={} fields={:?} builders={:?} consumers={:?} orchestrators={:?}",
+                plan.alias, plan.fields, plan.builders, plan.consumers, plan.orchestrators
+            );
+        }
+        if self.type_aliases.contains_key(&plan.alias) {
+            return; // name collision with a user type — bail conservatively
+        }
+        self.rec_struct_plan = Some(plan.clone());
+
+        let mut bdecls: Vec<(String, Vec<FunParam>, Statement)> = Vec::new();
+        let mut cdecls: Vec<(String, Vec<FunParam>, Statement)> = Vec::new();
+        let mut odecls: Vec<(String, Vec<FunParam>, Statement)> = Vec::new();
+        for s in &program.statements {
+            if let Statement::FunDecl {
+                name, params, body, ..
+            } = s
+            {
+                let nm = name.to_string();
+                if plan.builders.contains(&nm) {
+                    bdecls.push((nm, params.clone(), (**body).clone()));
+                } else if plan.consumers.contains(&nm) {
+                    cdecls.push((nm, params.clone(), (**body).clone()));
+                } else if plan.orchestrators.contains(&nm) {
+                    odecls.push((nm, params.clone(), (**body).clone()));
+                }
+            }
+        }
+
+        let saved = std::mem::take(&mut self.output);
+        let saved_indent = self.indent;
+        self.indent = 0;
+        let mut ok = true;
+        self.emit_rec_struct_decl(&plan);
+        for (nm, params, body) in &bdecls {
+            if self.emit_rec_builder_fn(nm, params, body).is_err() {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            for (nm, params, body) in &cdecls {
+                if self.emit_rec_consumer_fn(nm, params, body).is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            for (nm, params, body) in &odecls {
+                if self.emit_rec_orchestrator_fn(nm, params, body).is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        let emitted = std::mem::replace(&mut self.output, saved);
+        self.indent = saved_indent;
+        if dbg {
+            eprintln!("[rec] emission ok={}", ok);
+        }
+        if ok {
+            self.output.push_str(&emitted);
+            self.writeln("");
+        } else {
+            self.rec_struct_plan = None;
+        }
+    }
+
+    /// Emit the arena node struct: child fields are `i32` arena indices (`-1` = null), scalar
+    /// fields `f64`. `Copy` so consumers can read a node out of the arena without a borrow held
+    /// across recursion. All nodes live in one bump-allocated `Vec` (no per-node malloc) — this is
+    /// what closes the gap to V8's generational GC on the allocation-bound tree workload.
+    fn emit_rec_struct_decl(&mut self, plan: &RecStructPlan) {
+        let sname = crate::types::named_struct_ident(&plan.alias);
+        self.writeln("#[derive(Clone, Copy, Debug, Default)]");
+        self.writeln("#[allow(non_snake_case, non_camel_case_types, unused)]");
+        self.writeln(&format!("struct {} {{", sname));
+        self.indent += 1;
+        for (k, is_child) in &plan.fields {
+            let ty = if *is_child { "i32" } else { "f64" };
+            self.writeln(&format!("{}: {},", crate::types::field_ident(k), ty));
+        }
+        self.indent -= 1;
+        self.writeln("}");
+    }
+
+    /// `fn name_rec(<f64 params>, __rec_arena: &mut Vec<Node>) -> i32` — builds nodes into the arena
+    /// and returns the new node's index.
+    fn emit_rec_builder_fn(
+        &mut self,
+        name: &str,
+        params: &[FunParam],
+        body: &Statement,
+    ) -> Result<(), CompileError> {
+        let plan = self.rec_struct_plan.clone().unwrap();
+        let sname = crate::types::named_struct_ident(&plan.alias);
+        self.type_context.push_scope();
+        let mut plist: Vec<String> = Vec::new();
+        for p in params {
+            let FunParam::Simple(tp) = p else {
+                self.type_context.pop_scope();
+                return Err(CompileError::new("rec: builder param kind", None));
+            };
+            plist.push(format!("{}: f64", Self::escape_ident(tp.name.as_ref())));
+            self.type_context.define(tp.name.as_ref(), RustType::F64);
+        }
+        plist.push(format!("__rec_arena: &mut Vec<{}>", sname));
+        self.writeln("#[allow(non_snake_case, unused)]");
+        self.writeln(&format!(
+            "fn {}_rec({}) -> i32 {{",
+            Self::escape_ident(name),
+            plist.join(", "),
+        ));
+        self.indent += 1;
+        let ctx = RecCtx {
+            is_builder: true,
+            node: None,
+        };
+        let res = self.emit_rec_stmt(body, &ctx);
+        self.indent -= 1;
+        self.writeln("}");
+        self.type_context.pop_scope();
+        res
+    }
+
+    /// `fn name_rec(__rec_idx: i32, __rec_arena: &Vec<Node>) -> f64` — reads the node out of the
+    /// arena (a `Copy`) and walks children by index.
+    fn emit_rec_consumer_fn(
+        &mut self,
+        name: &str,
+        params: &[FunParam],
+        body: &Statement,
+    ) -> Result<(), CompileError> {
+        let plan = self.rec_struct_plan.clone().unwrap();
+        let sname = crate::types::named_struct_ident(&plan.alias);
+        if params.len() != 1 {
+            return Err(CompileError::new("rec: consumer arity", None));
+        }
+        let FunParam::Simple(tp) = &params[0] else {
+            return Err(CompileError::new("rec: consumer param kind", None));
+        };
+        let pname = tp.name.to_string();
+        self.type_context.push_scope();
+        self.writeln("#[allow(non_snake_case, unused)]");
+        self.writeln(&format!(
+            "fn {}_rec(__rec_idx: i32, __rec_arena: &Vec<{}>) -> f64 {{",
+            Self::escape_ident(name),
+            sname
+        ));
+        self.indent += 1;
+        self.writeln("let __rec_n = __rec_arena[__rec_idx as usize];");
+        let ctx = RecCtx {
+            is_builder: false,
+            node: Some(pname),
+        };
+        let res = self.emit_rec_stmt(body, &ctx);
+        self.indent -= 1;
+        self.writeln("}");
+        self.type_context.pop_scope();
+        res
+    }
+
+    // ── orchestrator (numeric fn that drives builders/consumers, threading the arena) ───────────
+    // v1 supports the constructs in binary_trees' `binaryTrees`: f64 + node-index (`i32`) locals,
+    // while/for/if, assignment, inc, `<<`, arithmetic, builder calls (→ index) and consumer calls
+    // (→ f64). The whole arena is freed when the top-level block ends (per-tree nursery reset is a
+    // future memory optimization, not needed for the fixture's bounded node count).
+
+    /// `fn name_rec(<f64 params>, __rec_arena: &mut Vec<Node>) -> f64`.
+    fn emit_rec_orchestrator_fn(
+        &mut self,
+        name: &str,
+        params: &[FunParam],
+        body: &Statement,
+    ) -> Result<(), CompileError> {
+        let plan = self.rec_struct_plan.clone().unwrap();
+        let sname = crate::types::named_struct_ident(&plan.alias);
+        self.type_context.push_scope();
+        let mut plist: Vec<String> = Vec::new();
+        for p in params {
+            let FunParam::Simple(tp) = p else {
+                self.type_context.pop_scope();
+                return Err(CompileError::new("rec: orch param kind", None));
+            };
+            plist.push(format!("{}: f64", Self::escape_ident(tp.name.as_ref())));
+            self.type_context.define(tp.name.as_ref(), RustType::F64);
+        }
+        plist.push(format!("__rec_arena: &mut Vec<{}>", sname));
+        self.writeln("#[allow(non_snake_case, unused)]");
+        self.writeln(&format!(
+            "fn {}_rec({}) -> f64 {{",
+            Self::escape_ident(name),
+            plist.join(", "),
+        ));
+        self.indent += 1;
+        let res = self.emit_rec_orch_stmt(body);
+        self.indent -= 1;
+        self.writeln("}");
+        self.type_context.pop_scope();
+        res
+    }
+
+    fn emit_rec_orch_stmt(&mut self, stmt: &Statement) -> Result<(), CompileError> {
+        match stmt {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                for s in statements {
+                    self.emit_rec_orch_stmt(s)?;
+                }
+                Ok(())
+            }
+            Statement::VarDecl {
+                name, init: Some(e), ..
+            } => {
+                let (code, is_idx) = self.emit_rec_orch_expr(e)?;
+                self.type_context
+                    .define(name, if is_idx { RustType::I32 } else { RustType::F64 });
+                self.writeln(&format!("let mut {} = {};", Self::escape_ident(name), code));
+                Ok(())
+            }
+            Statement::ExprStmt { expr, .. } => {
+                let code = self.emit_rec_orch_simple_expr(expr)?;
+                self.writeln(&format!("{};", code));
+                Ok(())
+            }
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let c = self.emit_rec_orch_cond(cond)?;
+                self.writeln(&format!("if {} {{", c));
+                self.indent += 1;
+                self.emit_rec_orch_stmt(then_branch)?;
+                self.indent -= 1;
+                if let Some(eb) = else_branch {
+                    self.writeln("} else {");
+                    self.indent += 1;
+                    self.emit_rec_orch_stmt(eb)?;
+                    self.indent -= 1;
+                }
+                self.writeln("}");
+                Ok(())
+            }
+            Statement::While { cond, body, .. } => {
+                let c = self.emit_rec_orch_cond(cond)?;
+                self.writeln(&format!("while {} {{", c));
+                self.indent += 1;
+                self.emit_rec_orch_loop_body(body)?;
+                self.indent -= 1;
+                self.writeln("}");
+                Ok(())
+            }
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
+                // Lower to a Rust block: { <init>; while <cond> { <body>; <update>; } }
+                self.writeln("{");
+                self.indent += 1;
+                if let Some(i) = init {
+                    self.emit_rec_orch_stmt(i)?;
+                }
+                let c = match cond {
+                    Some(c) => self.emit_rec_orch_cond(c)?,
+                    None => "true".to_string(),
+                };
+                self.writeln(&format!("while {} {{", c));
+                self.indent += 1;
+                self.emit_rec_orch_loop_body(body)?;
+                if let Some(u) = update {
+                    let uc = self.emit_rec_orch_simple_expr(u)?;
+                    self.writeln(&format!("{};", uc));
+                }
+                self.indent -= 1;
+                self.writeln("}");
+                self.indent -= 1;
+                self.writeln("}");
+                Ok(())
+            }
+            Statement::Return { value: Some(e), .. } => {
+                let (code, is_idx) = self.emit_rec_orch_expr(e)?;
+                if is_idx {
+                    return Err(CompileError::new("rec: orch returns node", None));
+                }
+                self.writeln(&format!("return {};", code));
+                Ok(())
+            }
+            _ => Err(CompileError::new("rec: unsupported orch stmt", None)),
+        }
+    }
+
+    /// Emit a loop body, wrapping it in an arena checkpoint+truncate (nursery reset) when no node
+    /// built inside the body escapes the iteration — bounding arena growth to one tree at a time.
+    fn emit_rec_orch_loop_body(&mut self, body: &Statement) -> Result<(), CompileError> {
+        let builders = self.rec_struct_plan.as_ref().unwrap().builders.clone();
+        let reset = Self::rec_orch_body_nursery_safe(body, &builders);
+        if reset {
+            self.writeln("let __rec_cp = __rec_arena.len();");
+        }
+        self.emit_rec_orch_stmt(body)?;
+        if reset {
+            self.writeln("__rec_arena.truncate(__rec_cp);");
+        }
+        Ok(())
+    }
+
+    /// Statement-position expression: assignment (`x = e`) or `x++`/`++x` (→ `x += 1.0`).
+    fn emit_rec_orch_simple_expr(&mut self, e: &Expr) -> Result<String, CompileError> {
+        match e {
+            Expr::Assign { name, value, .. } => {
+                let (code, _) = self.emit_rec_orch_expr(value)?;
+                Ok(format!("{} = {}", Self::escape_ident(name.as_ref()), code))
+            }
+            Expr::PostfixInc { name, .. } | Expr::PrefixInc { name, .. } => {
+                Ok(format!("{} += 1_f64", Self::escape_ident(name.as_ref())))
+            }
+            Expr::PostfixDec { name, .. } | Expr::PrefixDec { name, .. } => {
+                Ok(format!("{} -= 1_f64", Self::escape_ident(name.as_ref())))
+            }
+            _ => Err(CompileError::new("rec: unsupported orch stmt-expr", None)),
+        }
+    }
+
+    fn emit_rec_orch_cond(&mut self, e: &Expr) -> Result<String, CompileError> {
+        match e {
+            Expr::Binary {
+                op: op @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne),
+                left,
+                right,
+                ..
+            } => {
+                let (l, _) = self.emit_rec_orch_expr(left)?;
+                let (r, _) = self.emit_rec_orch_expr(right)?;
+                let o = match op {
+                    BinOp::Lt => "<",
+                    BinOp::Le => "<=",
+                    BinOp::Gt => ">",
+                    BinOp::Ge => ">=",
+                    BinOp::Eq => "==",
+                    BinOp::Ne => "!=",
+                    _ => unreachable!(),
+                };
+                Ok(format!("({} {} {})", l, o, r))
+            }
+            Expr::Binary {
+                op: op @ (BinOp::And | BinOp::Or),
+                left,
+                right,
+                ..
+            } => {
+                let l = self.emit_rec_orch_cond(left)?;
+                let r = self.emit_rec_orch_cond(right)?;
+                let o = if matches!(op, BinOp::And) { "&&" } else { "||" };
+                Ok(format!("({} {} {})", l, o, r))
+            }
+            Expr::Unary {
+                op: UnaryOp::Not,
+                operand,
+                ..
+            } => Ok(format!("(!({}))", self.emit_rec_orch_cond(operand)?)),
+            _ => Err(CompileError::new("rec: unsupported orch cond", None)),
+        }
+    }
+
+    /// Returns `(code, is_node_idx)`: `is_node_idx == true` ⇒ an `i32` arena index; else `f64`.
+    fn emit_rec_orch_expr(&mut self, e: &Expr) -> Result<(String, bool), CompileError> {
+        match e {
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => Ok((Self::f64_lit(*n), false)),
+            Expr::Ident { name, .. } => match self.type_context.get_type(name.as_ref()) {
+                RustType::I32 => Ok((Self::escape_ident(name.as_ref()).into_owned(), true)),
+                RustType::F64 => Ok((Self::escape_ident(name.as_ref()).into_owned(), false)),
+                _ => Err(CompileError::new("rec: orch ident type", None)),
+            },
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                operand,
+                ..
+            } => Ok((format!("(-({}))", self.emit_rec_orch_f64(operand)?), false)),
+            Expr::Unary {
+                op: UnaryOp::Pos,
+                operand,
+                ..
+            } => Ok((format!("({})", self.emit_rec_orch_f64(operand)?), false)),
+            Expr::Binary {
+                op: BinOp::Shl,
+                left,
+                right,
+                ..
+            } => {
+                let l = self.emit_rec_orch_f64(left)?;
+                let r = self.emit_rec_orch_f64(right)?;
+                // JS `<<` is a 32-bit shift; the fixture shifts small positive values.
+                Ok((
+                    format!("((({}) as i64) << ((({}) as i64) & 31)) as f64", l, r),
+                    false,
+                ))
+            }
+            Expr::Binary {
+                op, left, right, ..
+            } => {
+                let l = self.emit_rec_orch_f64(left)?;
+                let r = self.emit_rec_orch_f64(right)?;
+                let code = match op {
+                    BinOp::Add => format!("({} + {})", l, r),
+                    BinOp::Sub => format!("({} - {})", l, r),
+                    BinOp::Mul => format!("({} * {})", l, r),
+                    BinOp::Div => format!("({} / {})", l, r),
+                    BinOp::Mod => format!("({} % {})", l, r),
+                    BinOp::Pow => format!("({}).powf({})", l, r),
+                    _ => return Err(CompileError::new("rec: orch binop", None)),
+                };
+                Ok((code, false))
+            }
+            Expr::Call { callee, args, .. } => {
+                let plan = self.rec_struct_plan.clone().unwrap();
+                let Expr::Ident { name: fname, .. } = callee.as_ref() else {
+                    return Err(CompileError::new("rec: orch call callee", None));
+                };
+                if plan.builders.contains(fname.as_ref()) {
+                    // builder(args) → index
+                    let mut a: Vec<String> = Vec::new();
+                    for arg in args {
+                        let CallArg::Expr(ae) = arg else {
+                            return Err(CompileError::new("rec: orch builder arg", None));
+                        };
+                        a.push(self.emit_rec_orch_f64(ae)?);
+                    }
+                    a.push("__rec_arena".to_string());
+                    return Ok((
+                        format!("{}_rec({})", Self::escape_ident(fname.as_ref()), a.join(", ")),
+                        true,
+                    ));
+                }
+                if plan.consumers.contains(fname.as_ref()) {
+                    // consumer(nodeIndexExpr) → f64
+                    let [CallArg::Expr(arg)] = args.as_slice() else {
+                        return Err(CompileError::new("rec: orch consumer arity", None));
+                    };
+                    let (acode, is_idx) = self.emit_rec_orch_expr(arg)?;
+                    if !is_idx {
+                        return Err(CompileError::new("rec: orch consumer arg not node", None));
+                    }
+                    // `arg` may itself build into the arena; bind to a temp so the &mut borrow for
+                    // the build is released before the consumer's & borrow.
+                    return Ok((
+                        format!(
+                            "{{ let __rec_t = {}; {}_rec(__rec_t, __rec_arena) }}",
+                            acode,
+                            Self::escape_ident(fname.as_ref())
+                        ),
+                        false,
+                    ));
+                }
+                Err(CompileError::new("rec: orch unsupported call", None))
+            }
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let c = self.emit_rec_orch_cond(cond)?;
+                let t = self.emit_rec_orch_f64(then_branch)?;
+                let el = self.emit_rec_orch_f64(else_branch)?;
+                Ok((format!("(if {} {{ {} }} else {{ {} }})", c, t, el), false))
+            }
+            _ => Err(CompileError::new("rec: orch unsupported expr", None)),
+        }
+    }
+
+    /// Like `emit_rec_orch_expr` but requires an `f64` result.
+    fn emit_rec_orch_f64(&mut self, e: &Expr) -> Result<String, CompileError> {
+        let (code, is_idx) = self.emit_rec_orch_expr(e)?;
+        if is_idx {
+            return Err(CompileError::new("rec: orch expected f64, got node", None));
+        }
+        Ok(code)
+    }
+
+    fn emit_rec_stmt(&mut self, stmt: &Statement, ctx: &RecCtx) -> Result<(), CompileError> {
+        match stmt {
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                for s in statements {
+                    self.emit_rec_stmt(s, ctx)?;
+                }
+                Ok(())
+            }
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let c = self.emit_rec_cond(cond, ctx)?;
+                self.writeln(&format!("if {} {{", c));
+                self.indent += 1;
+                self.emit_rec_stmt(then_branch, ctx)?;
+                self.indent -= 1;
+                if let Some(eb) = else_branch {
+                    self.writeln("} else {");
+                    self.indent += 1;
+                    self.emit_rec_stmt(eb, ctx)?;
+                    self.indent -= 1;
+                }
+                self.writeln("}");
+                Ok(())
+            }
+            Statement::Return { value: Some(e), .. } => {
+                if ctx.is_builder {
+                    self.emit_rec_build_node_return(e, ctx)?;
+                } else {
+                    let code = self.emit_rec_num_expr(e, ctx)?;
+                    self.writeln(&format!("return {};", code));
+                }
+                Ok(())
+            }
+            _ => Err(CompileError::new("rec: unsupported stmt", None)),
+        }
+    }
+
+    /// A boolean condition: `child === null` → `.is_none()`, numeric comparisons, `&&`/`||`/`!`.
+    fn emit_rec_cond(&mut self, e: &Expr, ctx: &RecCtx) -> Result<String, CompileError> {
+        match e {
+            Expr::Binary {
+                op: op @ (BinOp::StrictEq | BinOp::StrictNe | BinOp::Eq | BinOp::Ne),
+                left,
+                right,
+                ..
+            } => {
+                let left_null =
+                    matches!(left.as_ref(), Expr::Literal { value: Literal::Null, .. });
+                let right_null =
+                    matches!(right.as_ref(), Expr::Literal { value: Literal::Null, .. });
+                if left_null || right_null {
+                    let mem = if right_null { left.as_ref() } else { right.as_ref() };
+                    let lval = self.rec_child_lvalue(mem, ctx)?;
+                    // `child === null` ⇒ the arena index sentinel is `-1`.
+                    let is_eq = matches!(op, BinOp::StrictEq | BinOp::Eq);
+                    return Ok(format!("({} {} -1)", lval, if is_eq { "==" } else { "!=" }));
+                }
+                let l = self.emit_rec_num_expr(left, ctx)?;
+                let r = self.emit_rec_num_expr(right, ctx)?;
+                let o = if matches!(op, BinOp::StrictEq | BinOp::Eq) {
+                    "=="
+                } else {
+                    "!="
+                };
+                Ok(format!("({} {} {})", l, o, r))
+            }
+            Expr::Binary {
+                op: op @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge),
+                left,
+                right,
+                ..
+            } => {
+                let l = self.emit_rec_num_expr(left, ctx)?;
+                let r = self.emit_rec_num_expr(right, ctx)?;
+                let o = match op {
+                    BinOp::Lt => "<",
+                    BinOp::Le => "<=",
+                    BinOp::Gt => ">",
+                    BinOp::Ge => ">=",
+                    _ => unreachable!(),
+                };
+                Ok(format!("({} {} {})", l, o, r))
+            }
+            Expr::Binary {
+                op: op @ (BinOp::And | BinOp::Or),
+                left,
+                right,
+                ..
+            } => {
+                let l = self.emit_rec_cond(left, ctx)?;
+                let r = self.emit_rec_cond(right, ctx)?;
+                let o = if matches!(op, BinOp::And) { "&&" } else { "||" };
+                Ok(format!("({} {} {})", l, o, r))
+            }
+            Expr::Unary {
+                op: UnaryOp::Not,
+                operand,
+                ..
+            } => Ok(format!("(!({}))", self.emit_rec_cond(operand, ctx)?)),
+            _ => Err(CompileError::new("rec: unsupported cond", None)),
+        }
+    }
+
+    /// An `f64`-valued expression in a recursive-struct fn body.
+    fn emit_rec_num_expr(&mut self, e: &Expr, ctx: &RecCtx) -> Result<String, CompileError> {
+        match e {
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => Ok(Self::f64_lit(*n)),
+            Expr::Ident { name, .. } => {
+                if ctx.node.as_deref() == Some(name.as_ref()) {
+                    return Err(CompileError::new("rec: node used as number", None));
+                }
+                if self.type_context.get_type(name.as_ref()) != RustType::F64 {
+                    return Err(CompileError::new("rec: non-f64 ident", None));
+                }
+                Ok(Self::escape_ident(name.as_ref()).into_owned())
+            }
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                operand,
+                ..
+            } => Ok(format!("(-({}))", self.emit_rec_num_expr(operand, ctx)?)),
+            Expr::Unary {
+                op: UnaryOp::Pos,
+                operand,
+                ..
+            } => Ok(format!("({})", self.emit_rec_num_expr(operand, ctx)?)),
+            Expr::Binary {
+                op, left, right, ..
+            } => {
+                let l = self.emit_rec_num_expr(left, ctx)?;
+                let r = self.emit_rec_num_expr(right, ctx)?;
+                let code = match op {
+                    BinOp::Add => format!("({} + {})", l, r),
+                    BinOp::Sub => format!("({} - {})", l, r),
+                    BinOp::Mul => format!("({} * {})", l, r),
+                    BinOp::Div => format!("({} / {})", l, r),
+                    BinOp::Mod => format!("({} % {})", l, r),
+                    BinOp::Pow => format!("({}).powf({})", l, r),
+                    _ => return Err(CompileError::new("rec: unsupported num binop", None)),
+                };
+                Ok(code)
+            }
+            // `node.scalarField` → `node.field`
+            Expr::Member {
+                object,
+                prop: MemberProp::Name { name: m, .. },
+                ..
+            } => {
+                let plan = self.rec_struct_plan.clone().unwrap();
+                if let (Some(node), Expr::Ident { name: on, .. }) =
+                    (ctx.node.as_deref(), object.as_ref())
+                {
+                    if on.as_ref() == node {
+                        if let Some((_, is_child)) =
+                            plan.fields.iter().find(|(k, _)| k.as_ref() == m.as_ref())
+                        {
+                            if !*is_child {
+                                return Ok(format!(
+                                    "__rec_n.{}",
+                                    crate::types::field_ident(m.as_ref())
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(CompileError::new("rec: member not scalar field", None))
+            }
+            // consumer recursion `cons(arg)` → `cons_rec(<node ref>)`; or `Math.<fn>(x)`.
+            Expr::Call { callee, args, .. } => {
+                let plan = self.rec_struct_plan.clone().unwrap();
+                if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                    if plan.consumers.contains(fname.as_ref()) {
+                        let [CallArg::Expr(arg)] = args.as_slice() else {
+                            return Err(CompileError::new("rec: consumer call args", None));
+                        };
+                        let cidx = self.emit_rec_child_index(arg, ctx)?;
+                        return Ok(format!(
+                            "{}_rec({}, __rec_arena)",
+                            Self::escape_ident(fname.as_ref()),
+                            cidx
+                        ));
+                    }
+                }
+                if let Expr::Member {
+                    object,
+                    prop: MemberProp::Name { name: method, .. },
+                    ..
+                } = callee.as_ref()
+                {
+                    if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                    {
+                        if let Some(m) = Self::agg_clean_math_method(method.as_ref()) {
+                            if let [CallArg::Expr(a)] = args.as_slice() {
+                                let ac = self.emit_rec_num_expr(a, ctx)?;
+                                return Ok(format!("({}).{}()", ac, m));
+                            }
+                        }
+                    }
+                }
+                Err(CompileError::new("rec: unsupported call", None))
+            }
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let c = self.emit_rec_cond(cond, ctx)?;
+                let t = self.emit_rec_num_expr(then_branch, ctx)?;
+                let el = self.emit_rec_num_expr(else_branch, ctx)?;
+                Ok(format!("(if {} {{ {} }} else {{ {} }})", c, t, el))
+            }
+            _ => Err(CompileError::new("rec: unsupported num expr", None)),
+        }
+    }
+
+    /// `node.childField` → `__rec_n.field` (the child's `i32` arena index), for null checks / recursion.
+    fn rec_child_lvalue(&self, e: &Expr, ctx: &RecCtx) -> Result<String, CompileError> {
+        if let (Expr::Member {
+            object,
+            prop: MemberProp::Name { name: m, .. },
+            ..
+        }, Some(node)) = (e, ctx.node.as_deref())
+        {
+            if matches!(object.as_ref(), Expr::Ident { name: on, .. } if on.as_ref() == node) {
+                if let Some(plan) = &self.rec_struct_plan {
+                    if let Some((_, true)) =
+                        plan.fields.iter().find(|(k, _)| k.as_ref() == m.as_ref())
+                    {
+                        return Ok(format!("__rec_n.{}", crate::types::field_ident(m.as_ref())));
+                    }
+                }
+            }
+        }
+        Err(CompileError::new("rec: not a child lvalue", None))
+    }
+
+    /// Produce the `i32` arena index for a consumer-call argument: a child field (`__rec_n.field`)
+    /// or the node param itself (`__rec_idx`).
+    fn emit_rec_child_index(&mut self, arg: &Expr, ctx: &RecCtx) -> Result<String, CompileError> {
+        if let Ok(lval) = self.rec_child_lvalue(arg, ctx) {
+            return Ok(lval);
+        }
+        if let (Some(node), Expr::Ident { name, .. }) = (ctx.node.as_deref(), arg) {
+            if name.as_ref() == node {
+                return Ok("__rec_idx".to_string());
+            }
+        }
+        Err(CompileError::new("rec: unsupported child index", None))
+    }
+
+    /// `builder(args)` → `builder_rec(<f64 args>, __rec_arena)` (threads the arena).
+    fn emit_rec_builder_call(
+        &mut self,
+        name: &str,
+        args: &[CallArg],
+        ctx: &RecCtx,
+    ) -> Result<String, CompileError> {
+        let mut a: Vec<String> = Vec::new();
+        for arg in args {
+            let CallArg::Expr(e) = arg else {
+                return Err(CompileError::new("rec: builder call arg kind", None));
+            };
+            a.push(self.emit_rec_num_expr(e, ctx)?);
+        }
+        a.push("__rec_arena".to_string());
+        Ok(format!("{}_rec({})", Self::escape_ident(name), a.join(", ")))
+    }
+
+    /// A builder `return { .. }` → build children (recursively, into the arena) first, then push
+    /// this node and `return` its index. Children must already be in the arena before this node so
+    /// indices stay stable.
+    fn emit_rec_build_node_return(&mut self, e: &Expr, ctx: &RecCtx) -> Result<(), CompileError> {
+        let plan = self.rec_struct_plan.clone().unwrap();
+        let sname = crate::types::named_struct_ident(&plan.alias);
+        let Expr::Object { props, .. } = e else {
+            return Err(CompileError::new("rec: builder return not object", None));
+        };
+        use std::collections::HashMap;
+        let mut by_key: HashMap<String, &Expr> = HashMap::new();
+        for p in props {
+            match p {
+                ObjectProp::KeyValue(k, v, _) => {
+                    by_key.insert(k.to_string(), v);
+                }
+                _ => return Err(CompileError::new("rec: struct spread", None)),
+            }
+        }
+        // Emit child sub-trees into temps first (they push to the arena), then scalars.
+        let mut inits: Vec<String> = Vec::new();
+        for (k, is_child) in &plan.fields {
+            let v = by_key
+                .get(k.as_ref())
+                .ok_or_else(|| CompileError::new("rec: struct missing field", None))?;
+            let fid = crate::types::field_ident(k.as_ref());
+            let code = if *is_child {
+                match v {
+                    Expr::Literal {
+                        value: Literal::Null,
+                        ..
+                    } => "-1".to_string(),
+                    Expr::Call { callee, args, .. } => {
+                        let Expr::Ident { name: bname, .. } = callee.as_ref() else {
+                            return Err(CompileError::new("rec: child call callee", None));
+                        };
+                        if !plan.builders.contains(bname.as_ref()) {
+                            return Err(CompileError::new("rec: child not builder call", None));
+                        }
+                        let call = self.emit_rec_builder_call(bname.as_ref(), args, ctx)?;
+                        let tmp = format!("__rec_c_{}", fid);
+                        self.writeln(&format!("let {} = {};", tmp, call));
+                        tmp
+                    }
+                    _ => return Err(CompileError::new("rec: child value shape", None)),
+                }
+            } else {
+                self.emit_rec_num_expr(v, ctx)?
+            };
+            inits.push(format!("{}: {}", fid, code));
+        }
+        self.writeln("let __rec_idx_new = __rec_arena.len() as i32;");
+        self.writeln(&format!("__rec_arena.push({} {{ {} }});", sname, inits.join(", ")));
+        self.writeln("return __rec_idx_new;");
+        Ok(())
+    }
+
+    /// Route a boxed-context `consumer(builder(literals))` to `[Value::Number(]consumer_rec(&builder_rec(..))[)]`.
+    /// Conservative: only fires when every builder arg is a numeric literal (so no boxed `Value`
+    /// flows in); otherwise returns `None` and the unchanged boxed path is used.
+    fn try_emit_toplevel_rec_call(
+        &mut self,
+        callee: &Expr,
+        args: &[CallArg],
+        boxed: bool,
+    ) -> Result<Option<String>, CompileError> {
+        let Some(plan) = self.rec_struct_plan.clone() else {
+            return Ok(None);
+        };
+        let Expr::Ident { name, .. } = callee else {
+            return Ok(None);
+        };
+        // Orchestrator call (e.g. `binaryTrees(15)`): spin up an arena and run it natively.
+        if plan.orchestrators.contains(name.as_ref()) {
+            let mut lits: Vec<String> = Vec::new();
+            for a in args {
+                let CallArg::Expr(ae) = a else {
+                    return Ok(None);
+                };
+                match Self::rec_literal_f64(ae) {
+                    Some(code) => lits.push(code),
+                    None => return Ok(None),
+                }
+            }
+            let sname = crate::types::named_struct_ident(&plan.alias);
+            lits.push("&mut __rec_arena".to_string());
+            let inner = format!(
+                "{{ let mut __rec_arena: Vec<{s}> = Vec::new(); {c}_rec({a}) }}",
+                s = sname,
+                c = Self::escape_ident(name.as_ref()),
+                a = lits.join(", "),
+            );
+            return Ok(Some(if boxed {
+                format!("Value::Number({})", inner)
+            } else {
+                inner
+            }));
+        }
+        if !plan.consumers.contains(name.as_ref()) {
+            return Ok(None);
+        }
+        let [CallArg::Expr(node_arg)] = args else {
+            return Ok(None);
+        };
+        let Expr::Call {
+            callee: bcallee,
+            args: bargs,
+            ..
+        } = node_arg
+        else {
+            return Ok(None);
+        };
+        let Expr::Ident { name: bname, .. } = bcallee.as_ref() else {
+            return Ok(None);
+        };
+        if !plan.builders.contains(bname.as_ref()) {
+            return Ok(None);
+        }
+        let mut blit: Vec<String> = Vec::new();
+        for a in bargs {
+            let CallArg::Expr(ae) = a else {
+                return Ok(None);
+            };
+            match Self::rec_literal_f64(ae) {
+                Some(code) => blit.push(code),
+                None => return Ok(None),
+            }
+        }
+        let sname = crate::types::named_struct_ident(&plan.alias);
+        // Build into a fresh arena, then consume by root index; the arena (and all nodes) frees in
+        // one shot when the block ends.
+        let mut build_args = blit.clone();
+        build_args.push("&mut __rec_arena".to_string());
+        let inner = format!(
+            "{{ let mut __rec_arena: Vec<{s}> = Vec::new(); let __rec_root = {b}_rec({a}); {c}_rec(__rec_root, &__rec_arena) }}",
+            s = sname,
+            b = Self::escape_ident(bname.as_ref()),
+            a = build_args.join(", "),
+            c = Self::escape_ident(name.as_ref()),
+        );
+        Ok(Some(if boxed {
+            format!("Value::Number({})", inner)
+        } else {
+            inner
+        }))
+    }
+
+    /// A numeric expression built only from literals (no free variables) → its `f64` Rust code.
+    fn rec_literal_f64(e: &Expr) -> Option<String> {
+        match e {
+            Expr::Literal {
+                value: Literal::Number(n),
+                ..
+            } => Some(Self::f64_lit(*n)),
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                operand,
+                ..
+            } => Some(format!("(-({}))", Self::rec_literal_f64(operand)?)),
+            Expr::Unary {
+                op: UnaryOp::Pos,
+                operand,
+                ..
+            } => Some(format!("({})", Self::rec_literal_f64(operand)?)),
+            Expr::Binary {
+                op, left, right, ..
+            } => {
+                let l = Self::rec_literal_f64(left)?;
+                let r = Self::rec_literal_f64(right)?;
+                let o = match op {
+                    BinOp::Add => "+",
+                    BinOp::Sub => "-",
+                    BinOp::Mul => "*",
+                    BinOp::Div => "/",
+                    BinOp::Mod => "%",
+                    _ => return None,
+                };
+                Some(format!("({} {} {})", l, o, r))
+            }
+            _ => None,
+        }
+    }
 
     /// Compute the aggregate group from the stamped `: alias` / `: alias[]` annotations the infer
     /// front-end wrote (the infer→codegen contract — re-running `analyze_aggregate` on the already

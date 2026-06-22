@@ -29,6 +29,10 @@ pub enum RustType {
     Vec(Box<RustType>),
     /// Option<T> for nullable types (T | null)
     Option(Box<RustType>),
+    /// Box<T> — heap indirection required to make recursive structs finite-sized.
+    /// Only the recursive-struct native pass (#178) produces this, for child fields
+    /// like `Option<Box<TishRec_Node>>`; never from `from_annotation`.
+    Boxed(Box<RustType>),
     /// Inline object shape — used during inference / annotation lowering
     /// before a `Named` alias has been registered. Once a corresponding
     /// `type Foo = { ... }` declaration is found in the program, occurrences
@@ -234,6 +238,7 @@ impl RustType {
             RustType::Unit => "()".to_string(),
             RustType::Vec(inner) => format!("Vec<{}>", inner.to_rust_type_str()),
             RustType::Option(inner) => format!("Option<{}>", inner.to_rust_type_str()),
+            RustType::Boxed(inner) => format!("Box<{}>", inner.to_rust_type_str()),
             RustType::Object(_) => {
                 // Anonymous inline shapes don't have a Rust struct; fall
                 // back to the dynamic Value path.
@@ -263,6 +268,7 @@ impl RustType {
             RustType::Unit => "()".to_string(),
             RustType::Vec(_) => "Vec::new()".to_string(),
             RustType::Option(_) => "None".to_string(),
+            RustType::Boxed(inner) => format!("Box::new({})", inner.default_value()),
             RustType::Object(_) => "Value::Null".to_string(),
             RustType::Named { fields, .. } => {
                 // Build a literal struct with each field at its own default,
