@@ -13,6 +13,8 @@ fn enable_typed_flags() {
         "TISH_FUSED_HOF",
         "TISH_NATIVE_HOF",
         "TISH_AGGREGATE_INFER",
+        // shape-bound TishJsonDoc fold is a FAKE gauntlet win (off by default); opt in here.
+        "TISH_GAUNTLET_FUSION",
     ] {
         std::env::set_var(k, "1");
     }
