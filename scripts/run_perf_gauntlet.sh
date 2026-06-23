@@ -34,6 +34,7 @@ TYPED_FLAGS=(
   TISH_AGGREGATE_INFER=1 # #177 S-0..S-C aggregate (interprocedural struct) inference front-end
   TISH_REC_STRUCT=1      # #178 recursive-struct arena lowering (binary_trees native, no fixture kernel)
   TISH_NATIVE_ARR_PARAM=1 # #320 read-only number[] params unboxed to native Vec<f64> (k_nucleotide)
+  TISH_PACKED_ARRAYS=1   # packed Float64Array-backed number arrays (native Vec<f64>, boxed-fallback)
 )
 
 RUNS=3; NO_BUILD=0; ONLY=()
@@ -78,7 +79,7 @@ for tish_src in tests/perf/*.tish; do
     # boxed(off): same source + backend, every typing flag unset (the dynamic Value baseline).
     if ! env -u TISH_PARAM_NATIVE -u TISH_PARAM_INFER -u TISH_NATIVE_FN -u TISH_STRUCT_INFER \
             -u TISH_FUSED_HOF -u TISH_NATIVE_HOF -u TISH_AGGREGATE_INFER -u TISH_REC_STRUCT \
-            -u TISH_NATIVE_ARR_PARAM "$TISH" build "$tish_src" -o "$bin_off" \
+            -u TISH_NATIVE_ARR_PARAM -u TISH_PACKED_ARRAYS "$TISH" build "$tish_src" -o "$bin_off" \
         --target native --native-backend rust >/dev/null 2>&1; then
       rows+=("${name}|BUILD-FAIL|-|-|-|-"); total=$((total + 1)); continue
     fi
