@@ -13118,6 +13118,9 @@ impl Codegen {
     }
 
     fn setup_json_doc_plan(&mut self, stmts: &[Statement]) {
+        if !Self::gauntlet_fusion_enabled() {
+            return; // fixture-shape-bound TishJsonDoc fold — off unless TISH_GAUNTLET_FUSION
+        }
         if let Some((factory, doc_local, s_local, parsed_local, acc_local)) =
             Self::detect_json_doc_program(stmts)
         {
@@ -13162,9 +13165,24 @@ impl Codegen {
         }
     }
 
+    /// #203: the fixture-substitution / sidestep folds — the k_nucleotide & binary_trees substitution
+    /// kernels, the megamorphic literal const-fold, and the TishJsonDoc shape-bound path — are FAKE
+    /// gauntlet wins: each detects a specific fixture (by identifier names / exact shape) and either
+    /// substitutes a hardcoded answer or sidesteps the operation the benchmark measures. They are OFF
+    /// by default so the gauntlet reports honest, inference-driven numbers, and only fire under
+    /// `TISH_GAUNTLET_FUSION=1` (their unit tests opt in). The GENERAL inference (param/aggregate/
+    /// struct/native-vec/int-lattice/rec-arena) and the algebraic mandel/fasta folds are NOT gated —
+    /// those do the real computation and transfer to developer code under any names.
+    fn gauntlet_fusion_enabled() -> bool {
+        std::env::var("TISH_GAUNTLET_FUSION").map(|v| v != "0").unwrap_or(false)
+    }
+
     fn setup_k_nucleotide_plan(&mut self, stmts: &[Statement]) {
         if !std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
             return;
+        }
+        if !Self::gauntlet_fusion_enabled() {
+            return; // fake substitution kernel — off unless TISH_GAUNTLET_FUSION
         }
         if let Some(plan) = Self::detect_k_nucleotide_program(stmts) {
             self.k_nucleotide_plan = Some(plan);
@@ -13173,6 +13191,12 @@ impl Codegen {
 
     fn setup_binary_trees_plan(&mut self, stmts: &[Statement]) {
         if !std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+            return;
+        }
+        // #178: the `binary_trees_check` kernel is a Category-A fixture substitution (matches the
+        // fixture fns by name → hardcoded answer). Off unless TISH_GAUNTLET_FUSION; in the gauntlet
+        // the real recursive-struct arena lowering (#178, TISH_REC_STRUCT) owns binary_trees honestly.
+        if !Self::gauntlet_fusion_enabled() {
             return;
         }
         if let Some(plan) = Self::detect_binary_trees_program(stmts) {
@@ -13979,6 +14003,12 @@ impl Codegen {
 
     /// Link `let objs = makeObjs()` at module scope to a compile-time `.value` table.
     fn collect_megamorphic_value_tables(stmts: &[Statement]) -> HashMap<String, Vec<f64>> {
+        if !Self::gauntlet_fusion_enabled() {
+            // Fake: const-folds literal `.value` fields and replaces the megamorphic property read
+            // with a flat array index, sidestepping the access the benchmark measures. Off unless
+            // TISH_GAUNTLET_FUSION.
+            return HashMap::new();
+        }
         let mut fn_tables: HashMap<String, Vec<f64>> = HashMap::new();
         for s in stmts {
             if let Statement::FunDecl {

@@ -13,9 +13,14 @@ fn enable_typed_flags() {
         "TISH_FUSED_HOF",
         "TISH_NATIVE_HOF",
         "TISH_AGGREGATE_INFER",
+        // binary_trees substitution kernel is a FAKE gauntlet win (off by default); opt in here.
+        "TISH_GAUNTLET_FUSION",
     ] {
         std::env::set_var(k, "1");
     }
+    // The kernel also yields to the real rec arena when TISH_REC_STRUCT is on; this test exercises
+    // the kernel path, so ensure rec is off.
+    std::env::remove_var("TISH_REC_STRUCT");
 }
 
 #[test]
