@@ -818,6 +818,11 @@ struct ParamUse {
     elem_bool: bool,
     numeric: bool,
     escaped: bool,
+    /// #320 — the bare param was passed as a direct call argument (`f(p)`). The native-vec path
+    /// allows this (re-borrow into a callee), but the arr-param owned-copy path must NOT: the callee
+    /// could mutate the array, and a write to the caller's array would be lost on the owned copy.
+    /// `classify_vec_param` ignores this field; only `native_arr_param_fns` reads it.
+    forwarded: bool,
 }
 
 /// #175 — kind of one parameter of a native-vec free fn (spectral_norm/queens shape).
@@ -976,6 +981,14 @@ pub(crate) struct Codegen {
     /// nested call site these are already `&/&mut Vec<T>` references, so they pass through by reborrow
     /// (`&mut *p`) rather than being address-of'd like a local `Vec` (`&mut local`).
     vec_ref_params: std::collections::HashMap<String, bool>,
+    /// #320 (behind TISH_NATIVE_ARR_PARAM): normal boxed-closure fns that take one or more READ-ONLY
+    /// `number[]` params (e.g. k_nucleotide's `kNucleotide(seq, k)` — indexes `seq` but returns a
+    /// boxed Map). Per param: `true` = unbox the boxed arg into an owned native `Vec<f64>` so the
+    /// body indexes it natively (`seq[i+j]` → f64), `false` = leave it on its normal path. The fn
+    /// stays a normal closure (boxed body + boxed return); only the array param's indexing flips
+    /// native. Computed by `Self::native_arr_param_fns`, the SAME pure fn infer reads (agreement
+    /// contract — see `infer::native_vec_array_params`), disjoint from `native_vec_fns`.
+    native_arr_param_fns: std::collections::HashMap<String, Vec<bool>>,
     /// #177 S-E/S-F (dark-shipped behind `TISH_AGGREGATE_INFER`): the unboxed struct alias name
     /// (e.g. `TishAnon_0`) when the interprocedural aggregate path is active for this program,
     /// else `None`. Set in `emit_program` only after the de-virtualized fns emit successfully.
@@ -1164,6 +1177,7 @@ impl Codegen {
             inline_depth: 0,
             native_vec_ret: None,
             vec_ref_params: std::collections::HashMap::new(),
+            native_arr_param_fns: std::collections::HashMap::new(),
             rec_struct_plan: None,
             aggregate_alias: None,
             aggregate_fns: std::collections::HashMap::new(),
@@ -1987,6 +2001,13 @@ impl Codegen {
             // reference). The boxed closure is left intact for any non-f64 callers.
             self.inline_fns = Self::collect_inline_fns(program);
             self.setup_native_vec_fns(program);
+        }
+        // #320 (behind TISH_NATIVE_ARR_PARAM): normal fns taking read-only `number[]` params get
+        // those params unboxed to native owned `Vec<f64>` (boxed body + boxed return otherwise), so
+        // `seq[i+j]` indexes natively. The SAME pure detection infer reads to keep the caller's array
+        // `number[]`, so the two never disagree about which args pass as native arrays.
+        if std::env::var("TISH_NATIVE_ARR_PARAM").map(|v| v != "0").unwrap_or(false) {
+            self.native_arr_param_fns = Self::native_arr_param_fns(program);
         }
         // Soundness pass — must run after type aliases + `native_fns` are known (both feed the
         // native-type oracle): find `number`-typed locals a reassignment can turn non-numeric so
@@ -5330,9 +5351,35 @@ impl Codegen {
                     }
                 }
                 let mut native_params: Vec<(String, RustType)> = Vec::new();
+                let arr_param_flags = self.native_arr_param_fns.get(name.as_ref()).cloned();
                 for (i, p) in params.iter().enumerate() {
                     match p {
                         FunParam::Simple(tp) => {
+                            // #320: a READ-ONLY `number[]` param — unbox the boxed arg once into an
+                            // owned native `Vec<f64>` so `seq[i+j]` lowers to a native f64 index (the
+                            // shared `Expr::Index` fast-path fires on the `Vec` type). The rest of the
+                            // body stays boxed (Map ops, boxed return) — only this param flips native.
+                            if arr_param_flags
+                                .as_ref()
+                                .and_then(|f| f.get(i).copied())
+                                .unwrap_or(false)
+                            {
+                                let vt = RustType::Vec(Box::new(RustType::F64));
+                                // Unbox once: a packed `NumberArray` is already a `Vec<f64>` (clone
+                                // the backing), a boxed `Array` is mapped element-wise. A `number[]`
+                                // is all-numbers by inference, so the `_ => NaN` fallback (JS
+                                // `arr[oob]`→NaN) is unreachable for sound inputs but never panics.
+                                self.writeln(&format!(
+                                    "let mut {}: Vec<f64> = match args.get({}) {{ \
+                                       Some(Value::NumberArray(a)) => a.borrow().clone(), \
+                                       Some(Value::Array(arr)) => arr.borrow().iter().map(|v| match v {{ Value::Number(n) => *n, _ => f64::NAN }}).collect(), \
+                                       _ => Vec::new() }};",
+                                    Self::escape_ident(tp.name.as_ref()),
+                                    i,
+                                ));
+                                native_params.push((tp.name.to_string(), vt));
+                                continue;
+                            }
                             let native_ty = if param_native
                                 && tp.default.is_none()
                                 && !default_referenced.contains(tp.name.as_ref())
@@ -15429,6 +15476,347 @@ impl Codegen {
         found
     }
 
+    /// #320: candidate fns by BODY shape alone — a normal (boxed-closure) fn whose every param is
+    /// `Simple`/no-default, each used as either a plain scalar or a PURELY read-only `number[]` index
+    /// (no mutation, no escape, no forwarding — an owned `Vec<f64>` copy would otherwise lose a
+    /// caller-visible write/alias), with ≥1 array param, and which is NOT a native-vec (`_nv`) fn.
+    /// Returns per-param flags (`true` = array param). This is the READ-ONLY criterion only; INFER
+    /// reads it to mark `F(arr)` a non-escape (so `arr` stays `number[]`) — sound regardless of the
+    /// arg type because passing a native `Vec` to a boxed closure copies it. CODEGEN does NOT unbox
+    /// off this set directly (a caller could still pass a non-`number[]` array → NaN divergence); it
+    /// uses [`Self::native_arr_param_fns`], which additionally proves every call site passes a
+    /// `number[]`. Runs pre-`si_block` in infer, so it must not depend on `number[]` stamps.
+    pub(crate) fn arr_param_readonly_fns(
+        program: &Program,
+    ) -> std::collections::HashMap<String, Vec<bool>> {
+        use std::collections::HashMap;
+        let native_vec = Self::detect_native_vec_fns(program);
+        let mut out: HashMap<String, Vec<bool>> = HashMap::new();
+        for s in &program.statements {
+            if let Statement::FunDecl {
+                async_: false,
+                name,
+                params,
+                rest_param: None,
+                body,
+                ..
+            } = s
+            {
+                if native_vec.contains_key(name.as_ref()) {
+                    continue; // the native-vec `_nv` path already handles this fn
+                }
+                let mut flags: Vec<bool> = Vec::with_capacity(params.len());
+                let mut ok = true;
+                let mut has_arr = false;
+                for p in params {
+                    let FunParam::Simple(tp) = p else {
+                        ok = false;
+                        break;
+                    };
+                    if tp.default.is_some() {
+                        ok = false;
+                        break;
+                    }
+                    // Raw use-facts (NOT `classify_vec_param`, which returns `Array` whenever a param
+                    // is indexed even if it also escapes/forwards — too permissive for an owned copy).
+                    let mut f = ParamUse::default();
+                    Self::for_each_stmt_expr(body, &mut |e| {
+                        Self::scan_param_use(e, tp.name.as_ref(), false, &mut f)
+                    });
+                    if f.indexed {
+                        // An owned `Vec<f64>` copy is sound ONLY if the param is a pure read-only
+                        // numeric array: no element write (`is_mut`), no bare/escaping use, no
+                        // forward into a callee, no bool elements. Any of these would make a
+                        // mutation/aliasing observable to the caller that the copy can't reflect.
+                        if f.is_mut || f.escaped || f.forwarded || f.elem_bool || f.numeric {
+                            ok = false;
+                            break;
+                        }
+                        flags.push(true);
+                        has_arr = true;
+                    } else {
+                        // Non-indexed (scalar / object) param → leave it on its normal path.
+                        flags.push(false);
+                    }
+                }
+                if ok && has_arr {
+                    out.insert(name.to_string(), flags);
+                }
+            }
+        }
+        out
+    }
+
+    /// #320 (CODEGEN unbox set): the read-only candidates ([`Self::arr_param_readonly_fns`]) further
+    /// restricted to fns where EVERY call site passes a provably-`number[]` argument in each array
+    /// position — so unboxing the param to an owned `Vec<f64>` can never see a non-number element
+    /// (which would diverge from JS: `n + "x"` is string concat, not NaN arithmetic). Runs on the
+    /// FULLY-INFERRED program (so `number[]` stamps are present). A fn is dropped if it is used as a
+    /// non-call value, called indirectly, called with the wrong arity, or any array-position arg is
+    /// not an identifier bound to a `number[]`. If a fn is in the read-only set but dropped here, it
+    /// simply stays a fully boxed closure (sound, just unoptimized).
+    pub(crate) fn native_arr_param_fns(
+        program: &Program,
+    ) -> std::collections::HashMap<String, Vec<bool>> {
+        use std::collections::HashMap;
+        let readonly = Self::arr_param_readonly_fns(program);
+        if readonly.is_empty() {
+            return readonly;
+        }
+        let num_arrays = Self::collect_number_array_bindings(program);
+        let mut out: HashMap<String, Vec<bool>> = HashMap::new();
+        for (fname, flags) in &readonly {
+            if Self::all_callsites_pass_number_arrays(program, fname, flags, &num_arrays) {
+                out.insert(fname.clone(), flags.clone());
+            }
+        }
+        out
+    }
+
+    /// TOP-LEVEL names bound to a `number[]` (a top-level `VarDecl` annotated `Array<number>`). Only
+    /// top-level bindings: a fn param/local of the same name lives in another SCOPE, so conflating
+    /// them would be wrong — `all_callsites_pass_number_arrays` correspondingly only accepts calls at
+    /// top level, where an argument identifier resolves unambiguously to one of these. A top-level
+    /// name re-bound to a non-`number[]` value is conservatively dropped.
+    fn collect_number_array_bindings(program: &Program) -> std::collections::HashSet<String> {
+        use std::collections::HashSet;
+        let mut out: HashSet<String> = HashSet::new();
+        let mut conflict: HashSet<String> = HashSet::new();
+        for s in &program.statements {
+            if let Statement::VarDecl { name, type_ann, .. } = s {
+                let is_num_arr = matches!(type_ann, Some(TypeAnnotation::Array(inner)) if Self::ann_is_number(inner));
+                if is_num_arr && !conflict.contains(name.as_ref()) {
+                    out.insert(name.to_string());
+                } else if !is_num_arr {
+                    out.remove(name.as_ref());
+                    conflict.insert(name.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// True iff EVERY reference to `fname` in the WHOLE program (including nested fn bodies and
+    /// exports) is a direct call `fname(args)` whose array positions (per `flags`) are identifiers
+    /// bound to a `number[]`, with matching arity. Any other use — bare value, indirect/aliased
+    /// call, wrong arity, or a non-`number[]` array arg — makes it `false` (so the param stays boxed).
+    fn all_callsites_pass_number_arrays(
+        program: &Program,
+        fname: &str,
+        flags: &[bool],
+        num_arrays: &std::collections::HashSet<String>,
+    ) -> bool {
+        let mut ok = true;
+        for s in &program.statements {
+            Self::scan_stmt_for_fname(s, fname, flags, num_arrays, false, &mut ok);
+            if !ok {
+                return false;
+            }
+        }
+        ok
+    }
+
+    /// Recurse every statement (incl. nested `FunDecl` bodies and `export`ed declarations), applying
+    /// [`Self::scan_expr_for_fname`] to each statement-level expression.
+    fn scan_stmt_for_fname(
+        s: &Statement,
+        fname: &str,
+        flags: &[bool],
+        num_arrays: &std::collections::HashSet<String>,
+        in_fn: bool,
+        ok: &mut bool,
+    ) {
+        use Statement::*;
+        if !*ok {
+            return;
+        }
+        let mut e = |x: &Expr, ok: &mut bool| {
+            Self::scan_expr_for_fname(x, fname, flags, num_arrays, in_fn, ok)
+        };
+        let mut st = |x: &Statement, ok: &mut bool| {
+            Self::scan_stmt_for_fname(x, fname, flags, num_arrays, in_fn, ok)
+        };
+        match s {
+            Block { statements, .. } | Multi { statements, .. } => {
+                statements.iter().for_each(|x| st(x, ok))
+            }
+            VarDecl { init: Some(i), .. } => e(i, ok),
+            VarDeclDestructure { init, .. } => e(init, ok),
+            ExprStmt { expr, .. } => e(expr, ok),
+            If { cond, then_branch, else_branch, .. } => {
+                e(cond, ok);
+                st(then_branch, ok);
+                if let Some(eb) = else_branch {
+                    st(eb, ok);
+                }
+            }
+            While { cond, body, .. } | DoWhile { body, cond, .. } => {
+                e(cond, ok);
+                st(body, ok);
+            }
+            For { init, cond, update, body, .. } => {
+                if let Some(i) = init {
+                    st(i, ok);
+                }
+                if let Some(c) = cond {
+                    e(c, ok);
+                }
+                if let Some(u) = update {
+                    e(u, ok);
+                }
+                st(body, ok);
+            }
+            ForOf { iterable, body, .. } => {
+                e(iterable, ok);
+                st(body, ok);
+            }
+            Return { value: Some(v), .. } => e(v, ok),
+            Throw { value, .. } => e(value, ok),
+            Switch { expr, cases, default_body, .. } => {
+                e(expr, ok);
+                for (g, body) in cases {
+                    if let Some(ge) = g {
+                        e(ge, ok);
+                    }
+                    body.iter().for_each(|x| st(x, ok));
+                }
+                if let Some(d) = default_body {
+                    d.iter().for_each(|x| st(x, ok));
+                }
+            }
+            Try { body, catch_body, finally_body, .. } => {
+                st(body, ok);
+                if let Some(c) = catch_body {
+                    st(c, ok);
+                }
+                if let Some(fb) = finally_body {
+                    st(fb, ok);
+                }
+            }
+            // A nested fn body is a new scope: an array arg there could be a (shadowing) param/local,
+            // which `num_arrays` (top-level only) can't resolve — so flag `in_fn` and let any call to
+            // `fname` inside it disqualify the optimization.
+            FunDecl { body, .. } => {
+                Self::scan_stmt_for_fname(body, fname, flags, num_arrays, true, ok)
+            }
+            Export { declaration, .. } => match declaration.as_ref() {
+                tishlang_ast::ExportDeclaration::Named(inner) => st(inner, ok),
+                tishlang_ast::ExportDeclaration::Default(ex) => e(ex, ok),
+            },
+            // Break / Continue / Import / TypeAlias / DeclareVar / DeclareFun — no user-fn calls.
+            _ => {}
+        }
+    }
+
+    /// Recurse one expression: a direct `fname(args)` call is checked (arity + `number[]` array
+    /// args), other sub-expressions are recursed, and ANY bare `fname` identifier fails. Unhandled
+    /// expr forms fall to a conservative `collect_idents_of` net: if `fname` appears there, fail.
+    fn scan_expr_for_fname(
+        e: &Expr,
+        fname: &str,
+        flags: &[bool],
+        num_arrays: &std::collections::HashSet<String>,
+        in_fn: bool,
+        ok: &mut bool,
+    ) {
+        if !*ok {
+            return;
+        }
+        let mut rec = |x: &Expr, ok: &mut bool| {
+            Self::scan_expr_for_fname(x, fname, flags, num_arrays, in_fn, ok)
+        };
+        let mut rec_args = |args: &[CallArg], ok: &mut bool| {
+            for a in args {
+                if let CallArg::Expr(x) | CallArg::Spread(x) = a {
+                    rec(x, ok);
+                }
+            }
+        };
+        match e {
+            // A direct call to `fname`: validate it, then recurse into the ARGS only (the callee
+            // identifier is the consumed `fname`, not a bare use).
+            Expr::Call { callee, args, .. }
+                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == fname) =>
+            {
+                // A call inside a fn body can't have its array arg resolved against top-level-only
+                // `num_arrays` (the arg may be a shadowing param/local) — conservatively disqualify.
+                if in_fn || args.len() != flags.len() {
+                    *ok = false;
+                    return;
+                }
+                for (i, want_arr) in flags.iter().enumerate() {
+                    if *want_arr
+                        && !matches!(&args[i], CallArg::Expr(Expr::Ident { name, .. }) if num_arrays.contains(name.as_ref()))
+                    {
+                        *ok = false;
+                        return;
+                    }
+                }
+                rec_args(args, ok);
+            }
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                rec(callee, ok);
+                rec_args(args, ok);
+            }
+            // A bare `fname` (not the callee of a direct call handled above) → can't prove safety.
+            Expr::Ident { name, .. } if name.as_ref() == fname => *ok = false,
+            Expr::Ident { .. } | Expr::Literal { .. } => {}
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                rec(left, ok);
+                rec(right, ok);
+            }
+            Expr::Unary { operand, .. } => rec(operand, ok),
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                rec(cond, ok);
+                rec(then_branch, ok);
+                rec(else_branch, ok);
+            }
+            Expr::Index { object, index, .. } => {
+                rec(object, ok);
+                rec(index, ok);
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                rec(object, ok);
+                rec(index, ok);
+                rec(value, ok);
+            }
+            Expr::Member { object, prop, .. } => {
+                rec(object, ok);
+                if let MemberProp::Expr(pe) = prop {
+                    rec(pe, ok);
+                }
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                rec(object, ok);
+                rec(value, ok);
+            }
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. } => rec(value, ok),
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(x) | ArrayElement::Spread(x) => rec(x, ok),
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for pr in props {
+                    match pr {
+                        ObjectProp::KeyValue(_, x, _) | ObjectProp::Spread(x) => rec(x, ok),
+                    }
+                }
+            }
+            Expr::TemplateLiteral { exprs, .. } => exprs.iter().for_each(|x| rec(x, ok)),
+            // Unhandled form (closures, await, etc.): conservatively fail if `fname` appears at all.
+            other => {
+                if Self::collect_idents_of(other).contains(fname) {
+                    *ok = false;
+                }
+            }
+        }
+    }
+
     pub(crate) fn detect_native_vec_fns(
         program: &Program,
     ) -> std::collections::HashMap<String, NativeVecFnSig> {
@@ -15850,7 +16238,10 @@ impl Codegen {
                 Self::scan_param_use(callee, p, false, f);
                 for a in args {
                     match a {
-                        CallArg::Expr(Expr::Ident { name, .. }) if name.as_ref() == p => {}
+                        CallArg::Expr(Expr::Ident { name, .. }) if name.as_ref() == p => {
+                            // forward (native-vec re-borrows; arr-param owned-copy must reject).
+                            f.forwarded = true;
+                        }
                         CallArg::Expr(e) | CallArg::Spread(e) => {
                             Self::scan_param_use(e, p, false, f)
                         }

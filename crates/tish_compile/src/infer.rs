@@ -1111,6 +1111,18 @@ fn struct_infer_program(program: Program) -> Program {
             ctx.native_vec_array_params.insert(fname, flags);
         }
     }
+    // #320: mark a read-only `number[]`-param fn's array args as non-escapes so the caller's array
+    // stays `number[]` (e.g. `kNucleotide(seq, k)`). This uses the READ-ONLY criterion only — sound
+    // regardless of the arg type, since passing a native `Vec` to a boxed closure copies it (a
+    // read-only callee can't mutate the caller's array through the copy). Codegen separately proves,
+    // via the call sites, which of these it may actually UNBOX (`native_arr_param_fns`); a fn it
+    // can't prove simply stays a fully boxed closure. Runs pre-`si_block`, so it must not rely on
+    // `number[]` stamps — `arr_param_readonly_fns` only inspects each fn's own body.
+    if std::env::var("TISH_NATIVE_ARR_PARAM").map(|v| v != "0").unwrap_or(false) {
+        for (fname, flags) in crate::codegen::Codegen::arr_param_readonly_fns(&program) {
+            ctx.native_vec_array_params.insert(fname, flags);
+        }
+    }
     let mut stmts = si_block(program.statements, &mut reg, &mut ctx);
     // Prepend the generated struct `type` aliases so codegen synthesizes them.
     let mut out: Vec<Statement> = Vec::with_capacity(stmts.len() + reg.decls.len());
