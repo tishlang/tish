@@ -37,11 +37,15 @@ TYPED_FLAGS=(
   TISH_PACKED_ARRAYS=1   # packed Float64Array-backed number arrays (native Vec<f64>, boxed-fallback)
 )
 
-RUNS=3; NO_BUILD=0; ONLY=()
+RUNS=3; NO_BUILD=0; STRICT=0; ONLY=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --runs) RUNS="$2"; shift 2 ;;
     --no-build) NO_BUILD=1; shift ;;
+    # --strict: exit non-zero if ANY fixture has a SOUNDNESS failure (build error, run error, or a
+    # checksum divergence typed≠boxed / typed≠node). A fixture merely being slower than node does NOT
+    # fail — timing is noisy on shared CI runners; correctness is the gate. Used by the gauntlet CI.
+    --strict) STRICT=1; shift ;;
     *) ONLY+=("$1"); shift ;;
   esac
 done
@@ -64,7 +68,7 @@ run_min() {
 printf 'PERF GAUNTLET — typed-native A/B: boxed(flags-off) vs typed(flags-on) vs node V8, min of %d runs\n' "$RUNS"
 printf 'typing-speedup = boxed/typed (the win from the typing work);  PASS = typed <= node AND typed == boxed.\n\n'
 
-rows=(); pass=0; total=0
+rows=(); pass=0; total=0; sound_fail=0
 for tish_src in tests/perf/*.tish; do
   name=$(basename "$tish_src" .tish)
   if [[ ${#ONLY[@]} -gt 0 ]] && ! printf '%s\n' "${ONLY[@]}" | grep -qx "$name"; then continue; fi
@@ -74,14 +78,14 @@ for tish_src in tests/perf/*.tish; do
     # typed(on): all typed-native flags set.
     if ! env "${TYPED_FLAGS[@]}" "$TISH" build "$tish_src" -o "$bin_on" \
         --target native --native-backend rust >/dev/null 2>&1; then
-      rows+=("${name}|-|BUILD-FAIL|-|-|-"); total=$((total + 1)); continue
+      rows+=("${name}|-|BUILD-FAIL|-|-|-"); total=$((total + 1)); sound_fail=$((sound_fail + 1)); continue
     fi
     # boxed(off): same source + backend, every typing flag unset (the dynamic Value baseline).
     if ! env -u TISH_PARAM_NATIVE -u TISH_PARAM_INFER -u TISH_NATIVE_FN -u TISH_STRUCT_INFER \
             -u TISH_FUSED_HOF -u TISH_NATIVE_HOF -u TISH_AGGREGATE_INFER -u TISH_REC_STRUCT \
             -u TISH_NATIVE_ARR_PARAM -u TISH_PACKED_ARRAYS "$TISH" build "$tish_src" -o "$bin_off" \
         --target native --native-backend rust >/dev/null 2>&1; then
-      rows+=("${name}|BUILD-FAIL|-|-|-|-"); total=$((total + 1)); continue
+      rows+=("${name}|BUILD-FAIL|-|-|-|-"); total=$((total + 1)); sound_fail=$((sound_fail + 1)); continue
     fi
   fi
   read -r on_ms on_ck < <(run_min "$name" "$bin_on")
@@ -90,12 +94,12 @@ for tish_src in tests/perf/*.tish; do
   read -r node_ms node_ck < <(run_min "$name" node "$node_src")
   total=$((total + 1))
   if [[ "$on_ms" == "ERR" || "$off_ms" == "ERR" || "$node_ms" == "ERR" ]]; then
-    rows+=("${name}|${off_ms}|${on_ms}|-|${node_ms}|RUN-ERR")
+    rows+=("${name}|${off_ms}|${on_ms}|-|${node_ms}|RUN-ERR"); sound_fail=$((sound_fail + 1))
   elif [[ "$off_ck" != "$on_ck" ]]; then
     # The typing flags changed the computed result — a soundness regression, not a perf one.
-    rows+=("${name}|${off_ms}ms|${on_ms}ms|-|${node_ms}ms|TYPED≠BOXED")
+    rows+=("${name}|${off_ms}ms|${on_ms}ms|-|${node_ms}ms|TYPED≠BOXED"); sound_fail=$((sound_fail + 1))
   elif [[ "$on_ck" != "$node_ck" ]]; then
-    rows+=("${name}|${off_ms}ms|${on_ms}ms|-|${node_ms}ms|≠NODE")
+    rows+=("${name}|${off_ms}ms|${on_ms}ms|-|${node_ms}ms|≠NODE"); sound_fail=$((sound_fail + 1))
   else
     speedup=$(awk "BEGIN{printf \"%.2f\", ${off_ms}/(${on_ms}+0.001)}")
     ratio=$(awk "BEGIN{printf \"%.2f\", ${on_ms}/(${node_ms}+0.001)}")
@@ -115,3 +119,13 @@ done
 echo ""
 echo "SUMMARY: ${pass}/${total} typed-native beating V8."
 echo "  typing-speedup = boxed(flags-off) / typed(flags-on) — the speedup the typing work delivers."
+if [[ "$sound_fail" -gt 0 ]]; then
+  echo "  SOUNDNESS: ${sound_fail} fixture(s) with a build/run/checksum failure (typed≠boxed or ≠node)."
+else
+  echo "  SOUNDNESS: all fixtures typed==boxed==node (no build/run/checksum failures)."
+fi
+# In --strict (CI) mode a soundness failure is fatal; a slower-than-node fixture is NOT.
+if [[ "$STRICT" -eq 1 && "$sound_fail" -gt 0 ]]; then
+  exit 1
+fi
+exit 0
