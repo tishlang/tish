@@ -22,6 +22,10 @@ pub struct InferCtx {
     /// the mutable-array co-inference treat `f(arr)` as a native use (the callee takes `&/&mut Vec`),
     /// not a boxing escape, so the caller's array stays an unboxed `Vec`.
     native_vec_array_params: HashMap<String, Vec<bool>>,
+    /// #320: fns PROVEN to always return a `number` (every return is numeric and the body can't fall
+    /// through to an implicit `undefined`). Lets `infer_expr_type(f(...))` be `number`, so
+    /// `a.push(f(...))` infers `a: number[]` (e.g. k_nucleotide's `seq.push(nextBase())`).
+    number_returning_fns: std::collections::HashSet<String>,
 }
 
 impl InferCtx {
@@ -29,6 +33,7 @@ impl InferCtx {
         Self {
             scopes: vec![HashMap::new()],
             native_vec_array_params: HashMap::new(),
+            number_returning_fns: std::collections::HashSet::new(),
         }
     }
 
@@ -171,6 +176,14 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
         // Index of a typed array yields its element type (`a[i]` where `a: T[]` → `T`).
         Expr::Index { object, .. } => match infer_expr_type(object, ctx) {
             Some(TypeAnnotation::Array(elem)) => Some(*elem),
+            _ => None,
+        },
+        // #320: a call to a fn PROVEN to always return a number is itself a number — so
+        // `a.push(f(...))` can infer `a: number[]` (e.g. `seq.push(nextBase())`).
+        Expr::Call { callee, .. } => match callee.as_ref() {
+            Expr::Ident { name, .. } if ctx.number_returning_fns.contains(name.as_ref()) => {
+                Some(number_ann())
+            }
             _ => None,
         },
         _ => None,
@@ -938,9 +951,153 @@ fn infer_object_shape(
     Some(fields)
 }
 
+/// #320: the set of top-level fns PROVEN to ALWAYS return a `number` — every `return` carries a
+/// numeric value and the body can't fall through to an implicit `undefined`. Lets `infer_expr_type`
+/// type a call `f(...)` as `number`, so `seq.push(nextBase())` infers `seq: number[]` (native key
+/// arithmetic over a `Vec<f64>` instead of a boxed `Value[]`). Conservative + sound: any fn we
+/// can't prove is left out, and the Call arm then declines to type its calls. Small fixpoint so a
+/// number-fn may call another already-accepted number-fn.
+fn collect_number_returning_fns(
+    stmts: &[Statement],
+    base: &InferCtx,
+) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let mut accepted: HashSet<String> = HashSet::new();
+    loop {
+        let mut changed = false;
+        for s in stmts {
+            if let Statement::FunDecl {
+                async_: false,
+                name,
+                params,
+                rest_param: None,
+                body,
+                ..
+            } = s
+            {
+                if accepted.contains(name.as_ref()) {
+                    continue;
+                }
+                // Fn-local ctx: numeric params (param-infer already annotated them), numeric locals,
+                // and the number-fns accepted so far (so a numeric call inside resolves).
+                let mut fctx = base.clone();
+                fctx.number_returning_fns = accepted.clone();
+                fctx.push_scope();
+                for p in params {
+                    if let FunParam::Simple(tp) = p {
+                        if tp.type_ann.as_ref().is_some_and(is_number) {
+                            fctx.define(&tp.name, number_ann());
+                        }
+                    }
+                }
+                // A few passes so chained numeric locals settle (`let a = 0; let b = a * 2`).
+                for _ in 0..4 {
+                    seed_numeric_locals(body, &mut fctx);
+                }
+                if fn_always_returns_number(body, &fctx) {
+                    accepted.insert(name.to_string());
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    accepted
+}
+
+/// A fn always returns a number iff EVERY `return` in its body carries a value that infers to
+/// `number` AND the body can't fall through to an implicit `undefined` (conservatively: its last
+/// statement is an unconditional `return <value>`).
+fn fn_always_returns_number(body: &Statement, ctx: &InferCtx) -> bool {
+    let mut ok = true;
+    check_returns_numeric(body, ctx, &mut ok);
+    ok && body_ends_in_return(body)
+}
+
+/// Visit EVERY `return` reachable in THIS fn (descends all statement-nesting constructs but NOT
+/// nested fn bodies, whose returns belong to the closure). Sets `ok = false` on a bare `return;` or
+/// a `return <e>` whose value doesn't provably infer to `number`. Missing a construct here would be
+/// unsound, so every statement-nesting variant is enumerated explicitly.
+fn check_returns_numeric(s: &Statement, ctx: &InferCtx, ok: &mut bool) {
+    use Statement::*;
+    if !*ok {
+        return;
+    }
+    match s {
+        Return { value, .. } => match value {
+            Some(e) => {
+                if infer_expr_type(e, ctx).as_ref().map_or(true, |t| !is_number(t)) {
+                    *ok = false;
+                }
+            }
+            None => *ok = false,
+        },
+        FunDecl { .. } => {} // nested fn: its returns are not this fn's
+        Block { statements, .. } | Multi { statements, .. } => {
+            for c in statements {
+                check_returns_numeric(c, ctx, ok);
+            }
+        }
+        If { then_branch, else_branch, .. } => {
+            check_returns_numeric(then_branch, ctx, ok);
+            if let Some(e) = else_branch {
+                check_returns_numeric(e, ctx, ok);
+            }
+        }
+        While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+            check_returns_numeric(body, ctx, ok);
+        }
+        For { init, body, .. } => {
+            if let Some(i) = init {
+                check_returns_numeric(i, ctx, ok);
+            }
+            check_returns_numeric(body, ctx, ok);
+        }
+        Switch { cases, default_body, .. } => {
+            for (_, body) in cases {
+                for c in body {
+                    check_returns_numeric(c, ctx, ok);
+                }
+            }
+            if let Some(d) = default_body {
+                for c in d {
+                    check_returns_numeric(c, ctx, ok);
+                }
+            }
+        }
+        Try { body, catch_body, finally_body, .. } => {
+            check_returns_numeric(body, ctx, ok);
+            if let Some(c) = catch_body {
+                check_returns_numeric(c, ctx, ok);
+            }
+            if let Some(f) = finally_body {
+                check_returns_numeric(f, ctx, ok);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Conservative "the body always reaches a return": the last statement is an unconditional
+/// `return <value>` (or a nested block that itself ends in one). Anything else (trailing `if`,
+/// loop, fall-off) is treated as a possible implicit-`undefined` exit and rejects the fn.
+fn body_ends_in_return(s: &Statement) -> bool {
+    match s {
+        Statement::Return { value: Some(_), .. } => true,
+        Statement::Block { statements, .. } => statements.last().is_some_and(body_ends_in_return),
+        _ => false,
+    }
+}
+
 fn struct_infer_program(program: Program) -> Program {
     let mut reg = StructRegistry::default();
     let mut ctx = InferCtx::new();
+    // #320: fns proven to always return a number, so `infer_expr_type(f(...))` is `number` and a
+    // `seq.push(nextBase())` keeps `seq` a native `number[]`. Computed off the param-inferred
+    // program so numeric params are already typed.
+    ctx.number_returning_fns = collect_number_returning_fns(&program.statements, &ctx);
     // #175: tell the mutable-array co-inference which fns take native `&/&mut Vec` array params, so
     // forwarding an array into one isn't treated as a boxing escape (lets the caller's array stay
     // unboxed). Same AST-only detection codegen uses, so the two never disagree.

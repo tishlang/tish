@@ -14668,7 +14668,10 @@ impl Codegen {
                     Some(rt) => Self::ann_is_number(rt),
                     None => true,
                 };
-                if ret_ok && params_ok && !params.is_empty() {
+                // #320: 0-param numeric fns (e.g. k_nucleotide's `nextBase()` — mutates a numeric
+                // global, returns number) are eligible too; the fixpoint below still proves the body
+                // native-safe + all-numeric-returns, so `fn name_native() -> f64` is sound.
+                if ret_ok && params_ok {
                     cand.insert(name.to_string());
                     decls.push((name.as_ref(), params, body));
                 }
