@@ -16,6 +16,9 @@ fn enable_typed_flags() {
     ] {
         std::env::set_var(k, "1");
     }
+    // The fusion kernel YIELDS to the recursive-struct arena lowering when TISH_REC_STRUCT is on
+    // (see setup_binary_trees_plan). This test exercises the kernel path, so ensure rec is off.
+    std::env::remove_var("TISH_REC_STRUCT");
 }
 
 #[test]

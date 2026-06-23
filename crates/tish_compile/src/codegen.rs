@@ -13175,6 +13175,15 @@ impl Codegen {
         if !std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
             return;
         }
+        // #178: the fixture-name `binary_trees_check` kernel is a Category-A substitution that only
+        // matches `bottomUpTree`/`itemCheck`/`binaryTrees` by name. When the real, name-independent
+        // recursive-struct arena lowering is enabled (TISH_REC_STRUCT — set by the gauntlet), it
+        // handles binary_trees honestly, so the kernel must YIELD to it: skip the plan and let
+        // `setup_rec_struct_plan` own the program. The kernel + its `binary_trees_check` oracle
+        // remain available with rec off (e.g. perf_codegen_183) so nothing else changes.
+        if std::env::var("TISH_REC_STRUCT").map(|v| v != "0").unwrap_or(false) {
+            return;
+        }
         if let Some(plan) = Self::detect_binary_trees_program(stmts) {
             self.binary_trees_plan = Some(plan);
         }
