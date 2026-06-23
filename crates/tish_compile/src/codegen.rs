@@ -607,13 +607,6 @@ pub fn compile_project_full_emit(
                 span: None,
             },
         )?;
-    if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false)
-        && Codegen::program_matches_json_doc_roundtrip(&merged.program.statements)
-    {
-        native_build.rust_dependencies_toml.push_str(
-            "serde = { version = \"1\", features = [\"derive\"] }\nserde_json = \"1\"\n",
-        );
-    }
     let mut all_features: Vec<String> = features.to_vec();
     for f in resolve::extract_native_import_features(&merged.program) {
         if !all_features.contains(&f) {
@@ -782,8 +775,7 @@ struct AggFnSig {
 /// #178 (behind `TISH_REC_STRUCT`): a recursive struct shape inferred *structurally* (no name
 /// matching) from object literals whose fields are either scalars or recursive self-references.
 /// Drives native lowering of tree/list builders and consumers to `Option<Box<T>>` + native fns —
-/// the real fix that retires the fixture-name `binary_trees_check` kernel. See
-/// docs/recursive-struct-native.md.
+/// the real, name-independent binary_trees lowering. See docs/recursive-struct-native.md.
 #[derive(Debug, Clone)]
 struct RecStructPlan {
     /// Synthesised Tish alias name (the Rust struct is `TishStruct_<alias>`).
@@ -922,17 +914,6 @@ pub(crate) struct Codegen {
     module_const_f64_cum: std::collections::HashMap<String, String>,
     /// Locals aliased to a module const array (`cum` → `G_probs_cum` after `let cum = cumulative(probs)`).
     module_const_f64_aliases: std::collections::HashMap<String, String>,
-    /// #179: `let objs = makeObjs()` where `makeObjs` only pushes object literals with a numeric
-    /// `value` field — megamorphic.tish. Hot `.value` reads route through `G_objs_MEGA_VALUES`.
-    megamorphic_value_tables: std::collections::HashMap<String, Vec<f64>>,
-    /// Sum locals updated only via `sum = sum + objs[…].value` in the megamorphic loop — keep `f64`.
-    megamorphic_native_sums: std::collections::HashSet<String>,
-    /// #180: json_roundtrip `buildDoc` → native `TishJsonDoc` + fast stringify/parse/read path.
-    json_doc_plan: Option<JsonDocPlan>,
-    /// GAUNTLET `k_nucleotide.tish`: fused LCG + i32 k-mer count kernel (`tish_k_nucleotide_check`).
-    k_nucleotide_plan: Option<KMerPlan>,
-    /// GAUNTLET `binary_trees.tish`: arena-backed tree kernel (`tish_binary_trees_check`).
-    binary_trees_plan: Option<BinaryTreesPlan>,
     /// #181: locals initialized with `new Map()` — direct `map_has`/`get`/`set`/`values` dispatch.
     map_instance_locals: std::collections::HashSet<String>,
     /// M5 (dark-shipped behind `TISH_NATIVE_FN`): top-level functions eligible for a parallel
@@ -1094,37 +1075,8 @@ pub(crate) struct Codegen {
     program_uses_document: bool,
 }
 
-/// Registered shapes for the json_roundtrip `buildDoc` factory (compile-time only).
-#[derive(Clone)]
-struct JsonDocPlan {
-    factory: String,
-    doc_local: String,
-    s_local: String,
-    parsed_local: String,
-    acc_local: String,
-    doc_ty: RustType,
-}
 
-/// Fused GAUNTLET kernel for `tests/perf/k_nucleotide.tish`.
-#[derive(Clone)]
-struct KMerPlan {
-    len: usize,
-    seed: i32,
-    k: usize,
-    seq_local: String,
-    m_local: String,
-    sum_local: String,
-    check_local: String,
-    len_local: String,
-    next_base_fn: String,
-}
 
-/// Fused GAUNTLET kernel for `tests/perf/binary_trees.tish`.
-#[derive(Clone)]
-struct BinaryTreesPlan {
-    max_depth: u32,
-    check_local: String,
-}
 
 impl Codegen {
     fn new_with_native_modules(
@@ -1154,11 +1106,6 @@ impl Codegen {
             module_const_f64_arrays: std::collections::HashMap::new(),
             module_const_f64_cum: std::collections::HashMap::new(),
             module_const_f64_aliases: std::collections::HashMap::new(),
-            megamorphic_value_tables: std::collections::HashMap::new(),
-            megamorphic_native_sums: std::collections::HashSet::new(),
-            json_doc_plan: None,
-            k_nucleotide_plan: None,
-            binary_trees_plan: None,
             map_instance_locals: std::collections::HashSet::new(),
             native_fns: std::collections::HashSet::new(),
             native_fn_body_emit: false,
@@ -1313,13 +1260,7 @@ impl Codegen {
                 = &ty
             {
                 let struct_name = crate::types::named_struct_ident(&name);
-                let json_serde = self.json_doc_plan.is_some()
-                    && matches!(name.as_str(), "TishJsonDoc" | "TishJsonDocItem" | "TishJsonDocMeta");
-                if json_serde {
-                    self.write("#[derive(Clone, Debug, Default, serde::Deserialize)]\n");
-                } else {
-                    self.write("#[derive(Clone, Debug, Default)]\n");
-                }
+                self.write("#[derive(Clone, Debug, Default)]\n");
                 self.write("#[allow(non_snake_case, non_camel_case_types)]\n");
                 self.write(&format!("pub struct {} {{\n", struct_name));
                 for (k, t) in fields {
@@ -1330,96 +1271,6 @@ impl Codegen {
                     ));
                 }
                 self.write("}\n\n");
-
-                // Emit a hand-rolled JSON serialiser per struct so
-                // `JSON.stringify(typed_value)` (and `Vec<TishStruct_X>`)
-                // can bypass the `Value::Object` allocation entirely —
-                // we walk the struct's fields by name and write directly
-                // into the response buffer. ASCII-fast string escape is
-                // shared with the `Value` path via the
-                // `escape_json_string_into` helper that the runtime
-                // re-exports from `tishlang_core::json`.
-                self.write(&format!("impl {} {{\n", struct_name));
-                self.write("    pub fn _tish_write_json(&self, buf: &mut String) {\n");
-                self.write("        use std::fmt::Write as _;\n");
-                self.write("        buf.push('{');\n");
-                for (i, (k, t)) in fields.iter().enumerate() {
-                    let sep = if i == 0 { "{" } else { ",{" };
-                    let prefix = if i == 0 {
-                        format!("\"\\\"{}\\\":\"", k.as_ref())
-                    } else {
-                        format!("\",\\\"{}\\\":\"", k.as_ref())
-                    };
-                    let _ = sep; // (lint silence; we built `prefix` above directly)
-                    self.write(&format!("        buf.push_str({});\n", prefix));
-                    let access = format!("self.{}", crate::types::field_ident(k));
-                    match t {
-                        crate::types::RustType::F64 => {
-                            self.write(&format!(
-                                "        if {a}.is_nan() || {a}.is_infinite() {{ buf.push_str(\"null\"); }} else {{ let _ = write!(buf, \"{{}}\", {a}); }}\n",
-                                a = access
-                            ));
-                        }
-                        crate::types::RustType::Bool => {
-                            self.write(&format!(
-                                "        buf.push_str(if {} {{ \"true\" }} else {{ \"false\" }});\n",
-                                access
-                            ));
-                        }
-                        crate::types::RustType::String => {
-                            self.write(&format!(
-                                "        buf.push('\"'); tishlang_runtime::json::escape_into(buf, {}.as_str()); buf.push('\"');\n",
-                                access
-                            ));
-                        }
-                        crate::types::RustType::Named { .. } => {
-                            self.write(&format!(
-                                "        {}._tish_write_json(buf);\n",
-                                access
-                            ));
-                        }
-                        crate::types::RustType::Vec(inner) if matches!(
-                            inner.as_ref(),
-                            crate::types::RustType::Named { .. }
-                        ) => {
-                            self.write("        buf.push('[');\n");
-                            self.write(&format!(
-                                "        for (i, item) in {}.iter().enumerate() {{ if i > 0 {{ buf.push(','); }} item._tish_write_json(buf); }}\n",
-                                access
-                            ));
-                            self.write("        buf.push(']');\n");
-                        }
-                        crate::types::RustType::Vec(inner) if matches!(inner.as_ref(), RustType::F64) => {
-                            self.write("        buf.push('[');\n");
-                            self.write(&format!(
-                                "        for (i, n) in {}.iter().enumerate() {{ if i > 0 {{ buf.push(','); }} let _ = write!(buf, \"{{}}\", *n); }}\n",
-                                access
-                            ));
-                            self.write("        buf.push(']');\n");
-                        }
-                        _ => {
-                            // Fallback: convert the field to a Value and delegate to the dynamic
-                            // stringifier. A `Value` field (e.g. a generic struct's `Box<T>` field)
-                            // is behind `&self` and not `Copy`, so clone it.
-                            let v_expr = if matches!(t, crate::types::RustType::Value) {
-                                format!("{}.clone()", access)
-                            } else {
-                                t.to_value_expr(&access)
-                            };
-                            self.write(&format!(
-                                "        let _v: Value = {}; tishlang_runtime::json::stringify_into(buf, &_v);\n",
-                                v_expr
-                            ));
-                        }
-                    }
-                }
-                self.write("        buf.push('}');\n");
-                self.write("    }\n");
-                self.emit_struct_from_value_method(&struct_name, fields);
-                if name == "TishJsonDoc" && self.json_doc_plan.is_some() {
-                    self.emit_struct_parse_json_method(&struct_name);
-                }
-                self.write("}\n\n");
                 emitted_any = true;
             }
         }
@@ -1428,18 +1279,7 @@ impl Codegen {
         }
     }
 
-    fn emit_struct_parse_json_method(&mut self, struct_name: &str) {
-        self.write(&format!(
-            "    pub fn _tish_parse_json(s: &str) -> Self {{\n\
-                serde_json::from_str(s).unwrap_or_default()\n\
-            }}\n"
-        ));
-    }
 
-    /// Whether `stmts` match the json_roundtrip gauntlet shape (used to pull in serde deps).
-    pub fn program_matches_json_doc_roundtrip(stmts: &[Statement]) -> bool {
-        Self::detect_json_doc_program(stmts).is_some()
-    }
 
     fn rc_cell_storage_contains(&self, name: &str) -> bool {
         self.rc_cell_storage_scopes
@@ -1568,9 +1408,6 @@ impl Codegen {
             .iter()
             .filter_map(|s| {
                 if let Statement::FunDecl { name, .. } = s {
-                    if self.is_fused_gauntlet_fn(name.as_ref()) {
-                        return None;
-                    }
                     Some(name.to_string())
                 } else {
                     None
@@ -1579,17 +1416,6 @@ impl Codegen {
             .collect()
     }
 
-    fn is_fused_gauntlet_fn(&self, name: &str) -> bool {
-        if self.binary_trees_plan.is_some()
-            && matches!(name, "bottomUpTree" | "itemCheck" | "binaryTrees")
-        {
-            return true;
-        }
-        if self.k_nucleotide_plan.is_some() && matches!(name, "nextBase" | "kNucleotide") {
-            return true;
-        }
-        false
-    }
 
     /// Escape Rust reserved keywords by prefixing with r#
     /// Binding keyword that stays valid for the wildcard `_`. A `_` binding cannot be `mut`
@@ -1848,7 +1674,7 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, k_nucleotide_check as tish_k_nucleotide_check, binary_trees_check as tish_binary_trees_check, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -1889,11 +1715,6 @@ impl Codegen {
         // are stored too, so later annotations like `let x: N = 0` still
         // pick up the right native type.
         self.collect_type_aliases(&program.statements);
-        if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
-            self.setup_json_doc_plan(&program.statements);
-            self.setup_k_nucleotide_plan(&program.statements);
-            self.setup_binary_trees_plan(&program.statements);
-        }
         // Emit a Rust `struct` for every alias whose RHS is an object
         // shape. Subsequent `let x: Foo = ...` literals lower to plain
         // struct moves (no `VmRef::new(ObjectMap::from(..))` allocation),
@@ -1939,21 +1760,6 @@ impl Codegen {
                 Self::collect_module_const_aliases(&program.statements, &self.module_const_f64_cum);
             if !self.module_const_f64_arrays.is_empty() {
                 self.emit_module_const_f64_arrays()?;
-                self.writeln("");
-            }
-            self.megamorphic_value_tables =
-                Self::collect_megamorphic_value_tables(&program.statements);
-            self.megamorphic_native_sums =
-                Self::collect_megamorphic_native_sums(
-                    &program.statements,
-                    &self.megamorphic_value_tables,
-                );
-            if !self.megamorphic_value_tables.is_empty() {
-                self.emit_megamorphic_value_tables()?;
-                self.writeln("");
-            }
-            if self.json_doc_plan.is_some() {
-                self.emit_json_doc_factory_nv()?;
                 self.writeln("");
             }
             let native_vec_names: std::collections::HashSet<String> =
@@ -2015,12 +1821,6 @@ impl Codegen {
         // and panics on a JS string-concat result like `s = s + arr[i]`). See
         // `collect_demoted_numeric_locals` / `demoted_numeric_locals`.
         self.demoted_numeric_locals = self.collect_demoted_numeric_locals(&program.statements);
-        for s in &self.megamorphic_native_sums {
-            self.demoted_numeric_locals.remove(s);
-        }
-        if let Some(plan) = &self.json_doc_plan {
-            self.demoted_numeric_locals.remove(&plan.acc_local);
-        }
         self.int_valued_locals = Self::collect_int_valued_locals(&program.statements);
         self.int_range_locals = self.collect_int_range_locals(&program.statements);
         self.array_elem_ranges = Self::collect_array_elem_ranges(&program.statements);
@@ -4029,196 +3829,6 @@ impl Codegen {
                     })
                     .unwrap_or(RustType::Value);
 
-                // #182: fused k_nucleotide GAUNTLET kernel (replaces seq/m/sum loops).
-                if let Some(plan) = self.k_nucleotide_plan.clone() {
-                    if name.as_ref() == plan.check_local.as_str() {
-                        if Self::is_k_nucleotide_check_init(init.as_ref(), &plan) {
-                            let escaped_name = Self::escape_ident(name.as_ref());
-                            self.type_context.define(name.as_ref(), RustType::F64);
-                            self.writeln("let mut t0 = ({");
-                            self.indent += 1;
-                            self.writeln(
-                                "let _callee = (tishlang_runtime::get_prop(&Date, \"now\")).clone();",
-                            );
-                            self.writeln("tishlang_runtime::value_call(&_callee, &[])");
-                            self.indent -= 1;
-                            self.writeln("});");
-                            self.writeln(&format!(
-                                "let mut {}: f64 = tish_k_nucleotide_check({}, {}, {});",
-                                escaped_name,
-                                plan.len,
-                                plan.seed,
-                                plan.k
-                            ));
-                            if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                scope.push(name.to_string());
-                            }
-                            return Ok(());
-                        }
-                    }
-                }
-
-                // #178: fused binary_trees GAUNTLET kernel (replaces recursive boxed node alloc).
-                if let Some(plan) = self.binary_trees_plan.clone() {
-                    if name.as_ref() == plan.check_local.as_str() {
-                        if Self::is_binary_trees_check_init(init.as_ref(), &plan) {
-                            let escaped_name = Self::escape_ident(name.as_ref());
-                            self.type_context.define(name.as_ref(), RustType::F64);
-                            self.writeln("let mut t0 = ({");
-                            self.indent += 1;
-                            self.writeln(
-                                "let _callee = (tishlang_runtime::get_prop(&Date, \"now\")).clone();",
-                            );
-                            self.writeln("tishlang_runtime::value_call(&_callee, &[])");
-                            self.indent -= 1;
-                            self.writeln("});");
-                            self.writeln(&format!(
-                                "let mut {}: f64 = tish_binary_trees_check({});",
-                                escaped_name,
-                                plan.max_depth
-                            ));
-                            if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                scope.push(name.to_string());
-                            }
-                            return Ok(());
-                        }
-                    }
-                }
-
-                // #180: native json_roundtrip doc factory / parse / acc (before demote gate).
-                if let Some(plan) = self.json_doc_plan.clone() {
-                    if name.as_ref() == plan.doc_local.as_str() {
-                        if let Some(init_e) = init.as_ref() {
-                            if Self::is_call_to_ident(init_e, &plan.factory) {
-                                let n_code = if let [CallArg::Expr(n_expr)] =
-                                    match init_e {
-                                        Expr::Call { args, .. } => args.as_slice(),
-                                        _ => &[],
-                                    }
-                                {
-                                    self.emit_f64(n_expr)?
-                                } else {
-                                    return Ok(());
-                                };
-                                let escaped_name = Self::escape_ident(name.as_ref());
-                                self.type_context
-                                    .define(name.as_ref(), plan.doc_ty.clone());
-                                self.writeln(&format!(
-                                    "let mut {} = buildDoc_nv({});",
-                                    escaped_name, n_code
-                                ));
-                                if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                    scope.push(name.to_string());
-                                }
-                                return Ok(());
-                            }
-                        }
-                    }
-                    if name.as_ref() == plan.parsed_local.as_str() {
-                        if let Some(init_e) = init.as_ref() {
-                            if Self::is_json_parse_call(init_e) {
-                                let doc_struct =
-                                    crate::types::named_struct_ident("TishJsonDoc");
-                                let escaped_name = Self::escape_ident(name.as_ref());
-                                self.type_context
-                                    .define(name.as_ref(), plan.doc_ty.clone());
-                                if let Expr::Call { args, .. } = init_e {
-                                    if let Some(CallArg::Expr(Expr::Ident { name: s_name, .. })) =
-                                        args.first()
-                                    {
-                                        if s_name.as_ref() == plan.s_local.as_str() {
-                                            let s_esc =
-                                                Self::escape_ident(s_name.as_ref()).into_owned();
-                                            self.writeln(&format!(
-                                                "let mut {} = {}::_tish_parse_json(&{});",
-                                                escaped_name, doc_struct, s_esc
-                                            ));
-                                            if let Some(scope) =
-                                                self.outer_vars_stack.last_mut()
-                                            {
-                                                scope.push(name.to_string());
-                                            }
-                                            return Ok(());
-                                        }
-                                    }
-                                }
-                                let arg_code = if let Expr::Call { args, .. } = init_e {
-                                    if let Some(CallArg::Expr(a)) = args.first() {
-                                        self.emit_expr(a)?
-                                    } else {
-                                        return Ok(());
-                                    }
-                                } else {
-                                    return Ok(());
-                                };
-                                self.writeln(&format!(
-                                    "let mut {} = {}::_tish_from_value(&tish_json_parse(&[({}).clone()]));",
-                                    escaped_name, doc_struct, arg_code
-                                ));
-                                if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                    scope.push(name.to_string());
-                                }
-                                return Ok(());
-                            }
-                        }
-                    }
-                    if name.as_ref() == plan.s_local.as_str() {
-                        if let Some(init_e) = init.as_ref() {
-                            if Self::is_json_stringify_doc(init_e, &plan.doc_local) {
-                                let doc_esc =
-                                    Self::escape_ident(&plan.doc_local).into_owned();
-                                let escaped_name = Self::escape_ident(name.as_ref());
-                                self.type_context.define(name.as_ref(), RustType::String);
-                                self.writeln(&format!(
-                                    "let mut {} = String::with_capacity(({}.items.len() as usize).saturating_mul(96).max(128));",
-                                    escaped_name, doc_esc
-                                ));
-                                self.writeln(&format!(
-                                    "{}._tish_write_json(&mut {});",
-                                    doc_esc, escaped_name
-                                ));
-                                if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                    scope.push(name.to_string());
-                                }
-                                return Ok(());
-                            }
-                        }
-                    }
-                    if name.as_ref() == plan.acc_local.as_str() {
-                        if init
-                            .as_ref()
-                            .is_some_and(|e| Self::int_literal_value_of(e) == Some(0))
-                        {
-                            let escaped_name = Self::escape_ident(name.as_ref());
-                            self.type_context.define(name.as_ref(), RustType::F64);
-                            self.writeln(&format!("let mut {}: f64 = 0_f64;", escaped_name));
-                            if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                scope.push(name.to_string());
-                            }
-                            return Ok(());
-                        }
-                    }
-                    if let Some(init_e) = init.as_ref() {
-                        if let Some(index) =
-                            Self::parse_json_doc_items_index(init_e, &plan.parsed_local)
-                        {
-                            let parsed_esc = Self::escape_ident(&plan.parsed_local).into_owned();
-                            let idx_usize = self.emit_json_doc_index_usize(index)?;
-                            let item_ty = Self::json_doc_item_ty();
-                            let escaped_name = Self::escape_ident(name.as_ref());
-                            self.type_context.define(name.as_ref(), item_ty);
-                            self.writeln(&format!(
-                                "let {} = &{}.items[{}];",
-                                escaped_name, parsed_esc, idx_usize
-                            ));
-                            if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                scope.push(name.to_string());
-                            }
-                            return Ok(());
-                        }
-                    }
-                }
-
                 // M5 native-fn body: `let r = genRandom(1)` without a `: number` annotation.
                 if self.native_fn_body_emit && rust_type == RustType::Value {
                     if let Some(Expr::Call { callee, .. }) = init.as_ref() {
@@ -5845,58 +5455,6 @@ impl Codegen {
                         return Ok(code);
                     }
                 }
-                // Typed-struct shortcut for `JSON.stringify(typedValue)`.
-                // When the single arg has a known native type that owns a
-                // hand-rolled `_tish_write_json` (struct or `Vec<struct>`),
-                // emit a direct write into a String buffer and skip the
-                // entire `Value::Object` / `Value::Array` allocation
-                // round-trip + the dynamic stringifier walk. Wraps the
-                // result in `Value::String` for the caller, which is what
-                // the existing `JSON.stringify` returned anyway.
-                if let Expr::Member {
-                    object,
-                    prop: MemberProp::Name { name: method_name, .. },
-                    ..
-                } = callee.as_ref()
-                {
-                    if method_name.as_ref() == "stringify"
-                        && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "JSON")
-                        && args.len() == 1 {
-                            if let CallArg::Expr(arg) = &args[0] {
-                                let (arg_code, arg_ty) = self.emit_typed_expr(arg)?;
-                                match &arg_ty {
-                                    crate::types::RustType::Named { name: ty_name, .. } => {
-                                        let cap = if ty_name.as_ref() == "TishJsonDoc" {
-                                            format!(
-                                                "(({}).items.len() as usize).saturating_mul(96).max(128)",
-                                                arg_code
-                                            )
-                                        } else {
-                                            "128".to_string()
-                                        };
-                                        return Ok(format!(
-                                            "{{ let mut _buf = String::with_capacity({cap}); ({ac})._tish_write_json(&mut _buf); Value::String(_buf.into()) }}",
-                                            cap = cap,
-                                            ac = arg_code
-                                        ));
-                                    }
-                                    crate::types::RustType::Vec(inner)
-                                        if matches!(
-                                            inner.as_ref(),
-                                            crate::types::RustType::Named { .. }
-                                        ) =>
-                                    {
-                                        return Ok(format!(
-                                            "{{ let mut _buf = String::with_capacity(256); _buf.push('['); for (i, item) in ({}).iter().enumerate() {{ if i > 0 {{ _buf.push(','); }} item._tish_write_json(&mut _buf); }} _buf.push(']'); Value::String(_buf.into()) }}",
-                                            arg_code
-                                        ));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                }
-
                 // Check for built-in method calls on arrays/strings
                 if let Expr::Member {
                     object,
@@ -12512,18 +12070,6 @@ impl Codegen {
     fn emit_statements_with_folds(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
         let mut i = 0;
         while i < statements.len() {
-            if let Some(plan) = &self.k_nucleotide_plan {
-                if self.is_k_nucleotide_fused_stmt(&statements[i], plan) {
-                    i += 1;
-                    continue;
-                }
-            }
-            if let Some(plan) = &self.binary_trees_plan {
-                if self.is_binary_trees_fused_stmt(&statements[i], plan) {
-                    i += 1;
-                    continue;
-                }
-            }
             if let Some(skip) = self.try_emit_const_cum_search_fold(&statements[i..])? {
                 i += skip;
                 continue;
@@ -13069,754 +12615,29 @@ impl Codegen {
         Ok(())
     }
 
-    fn json_doc_item_ty() -> RustType {
-        RustType::Named {
-            name: std::sync::Arc::from("TishJsonDocItem"),
-            fields: Self::json_doc_item_fields(),
-        }
-    }
 
-    /// `parsed.items[i]` where `parsed` is the json_roundtrip parse local.
-    fn parse_json_doc_items_index<'a>(expr: &'a Expr, parsed_local: &str) -> Option<&'a Expr> {
-        let Expr::Index {
-            object,
-            index,
-            optional: false,
-            ..
-        } = expr
-        else {
-            return None;
-        };
-        let Expr::Member {
-            object: o,
-            prop: MemberProp::Name { name, .. },
-            optional: false,
-            ..
-        } = object.as_ref()
-        else {
-            return None;
-        };
-        if name.as_ref() != "items" {
-            return None;
-        }
-        match o.as_ref() {
-            Expr::Ident { name: n, .. } if n.as_ref() == parsed_local => Some(index.as_ref()),
-            _ => None,
-        }
-    }
 
-    fn emit_json_doc_index_usize(
-        &mut self,
-        index: &Expr,
-    ) -> Result<String, CompileError> {
-        if let Expr::Ident { name: idx_name, .. } = index {
-            if let Some(uv) = self.usize_var_subst.get(idx_name.as_ref()) {
-                return Ok(uv.clone());
-            }
-        }
-        let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-        if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
-            Ok(format!("({}) as usize", idx_code))
-        } else {
-            let iv = if idx_ty.is_native() {
-                idx_ty.to_value_expr(&idx_code)
-            } else {
-                idx_code
-            };
-            Ok(format!(
-                "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
-                iv
-            ))
-        }
-    }
 
-    fn json_doc_item_fields() -> Vec<(std::sync::Arc<str>, RustType)> {
-        vec![
-            (std::sync::Arc::from("id"), RustType::F64),
-            (std::sync::Arc::from("name"), RustType::String),
-            (std::sync::Arc::from("value"), RustType::F64),
-            (std::sync::Arc::from("active"), RustType::Bool),
-            (
-                std::sync::Arc::from("tags"),
-                RustType::Vec(Box::new(RustType::F64)),
-            ),
-        ]
-    }
 
-    fn json_doc_meta_fields() -> Vec<(std::sync::Arc<str>, RustType)> {
-        vec![
-            (std::sync::Arc::from("version"), RustType::F64),
-            (std::sync::Arc::from("ok"), RustType::Bool),
-        ]
-    }
 
-    fn json_doc_doc_fields(
-        item_ty: RustType,
-        meta_ty: RustType,
-    ) -> Vec<(std::sync::Arc<str>, RustType)> {
-        vec![
-            (std::sync::Arc::from("count"), RustType::F64),
-            (
-                std::sync::Arc::from("items"),
-                RustType::Vec(Box::new(item_ty)),
-            ),
-            (std::sync::Arc::from("meta"), meta_ty),
-        ]
-    }
 
-    fn setup_json_doc_plan(&mut self, stmts: &[Statement]) {
-        if !Self::gauntlet_fusion_enabled() {
-            return; // fixture-shape-bound TishJsonDoc fold — off unless TISH_GAUNTLET_FUSION
-        }
-        if let Some((factory, doc_local, s_local, parsed_local, acc_local)) =
-            Self::detect_json_doc_program(stmts)
-        {
-            let item_fields = Self::json_doc_item_fields();
-            let meta_fields = Self::json_doc_meta_fields();
-            let item_ty = RustType::Named {
-                name: std::sync::Arc::from("TishJsonDocItem"),
-                fields: item_fields.clone(),
-            };
-            let meta_ty = RustType::Named {
-                name: std::sync::Arc::from("TishJsonDocMeta"),
-                fields: meta_fields.clone(),
-            };
-            let doc_fields = Self::json_doc_doc_fields(item_ty.clone(), meta_ty.clone());
-            let doc_ty = RustType::Named {
-                name: std::sync::Arc::from("TishJsonDoc"),
-                fields: doc_fields.clone(),
-            };
-            let _ = (item_fields, meta_fields, doc_fields);
-            self.type_aliases.insert(
-                "TishJsonDocItem".to_string(),
-                RustType::Object(Self::json_doc_item_fields()),
-            );
-            self.type_aliases.insert(
-                "TishJsonDocMeta".to_string(),
-                RustType::Object(Self::json_doc_meta_fields()),
-            );
-            self.type_aliases.insert(
-                "TishJsonDoc".to_string(),
-                RustType::Object(
-                    Self::json_doc_doc_fields(item_ty.clone(), meta_ty.clone()),
-                ),
-            );
-            self.json_doc_plan = Some(JsonDocPlan {
-                factory,
-                doc_local,
-                s_local,
-                parsed_local,
-                acc_local,
-                doc_ty,
-            });
-        }
-    }
 
-    /// #203: the fixture-substitution / sidestep folds — the k_nucleotide & binary_trees substitution
-    /// kernels, the megamorphic literal const-fold, and the TishJsonDoc shape-bound path — are FAKE
-    /// gauntlet wins: each detects a specific fixture (by identifier names / exact shape) and either
-    /// substitutes a hardcoded answer or sidesteps the operation the benchmark measures. They are OFF
-    /// by default so the gauntlet reports honest, inference-driven numbers, and only fire under
-    /// `TISH_GAUNTLET_FUSION=1` (their unit tests opt in). The GENERAL inference (param/aggregate/
-    /// struct/native-vec/int-lattice/rec-arena) and the algebraic mandel/fasta folds are NOT gated —
-    /// those do the real computation and transfer to developer code under any names.
-    fn gauntlet_fusion_enabled() -> bool {
-        std::env::var("TISH_GAUNTLET_FUSION").map(|v| v != "0").unwrap_or(false)
-    }
 
-    fn setup_k_nucleotide_plan(&mut self, stmts: &[Statement]) {
-        if !std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
-            return;
-        }
-        if !Self::gauntlet_fusion_enabled() {
-            return; // fake substitution kernel — off unless TISH_GAUNTLET_FUSION
-        }
-        if let Some(plan) = Self::detect_k_nucleotide_program(stmts) {
-            self.k_nucleotide_plan = Some(plan);
-        }
-    }
 
-    fn setup_binary_trees_plan(&mut self, stmts: &[Statement]) {
-        if !std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
-            return;
-        }
-        // #178: the `binary_trees_check` kernel is a Category-A fixture substitution (matches the
-        // fixture fns by name → hardcoded answer). Off unless TISH_GAUNTLET_FUSION; in the gauntlet
-        // the real recursive-struct arena lowering (#178, TISH_REC_STRUCT) owns binary_trees honestly.
-        if !Self::gauntlet_fusion_enabled() {
-            return;
-        }
-        if let Some(plan) = Self::detect_binary_trees_program(stmts) {
-            self.binary_trees_plan = Some(plan);
-        }
-    }
 
-    fn detect_binary_trees_program(stmts: &[Statement]) -> Option<BinaryTreesPlan> {
-        let has_bt = stmts
-            .iter()
-            .any(|s| matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "binaryTrees"));
-        let has_bottom = stmts
-            .iter()
-            .any(|s| matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "bottomUpTree"));
-        let has_item = stmts
-            .iter()
-            .any(|s| matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "itemCheck"));
-        if !has_bt || !has_bottom || !has_item {
-            return None;
-        }
-        for s in stmts {
-            if let Statement::VarDecl { name, init, .. } = s {
-                if Self::is_binary_trees_check_init(init.as_ref(), &BinaryTreesPlan {
-                    max_depth: 15,
-                    check_local: name.to_string(),
-                }) {
-                    return Some(BinaryTreesPlan {
-                        max_depth: 15,
-                        check_local: name.to_string(),
-                    });
-                }
-            }
-        }
-        None
-    }
 
-    fn is_binary_trees_check_init(init: Option<&Expr>, plan: &BinaryTreesPlan) -> bool {
-        let Some(Expr::Call { callee, args, .. }) = init else {
-            return false;
-        };
-        if !matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "binaryTrees") {
-            return false;
-        }
-        let [CallArg::Expr(depth_e)] = args.as_slice() else {
-            return false;
-        };
-        matches!(
-            depth_e,
-            Expr::Literal {
-                value: Literal::Number(n),
-                ..
-            } if *n as u32 == plan.max_depth
-        )
-    }
 
-    fn is_binary_trees_fused_stmt(&self, stmt: &Statement, _plan: &BinaryTreesPlan) -> bool {
-        match stmt {
-            Statement::FunDecl { name, .. } => self.is_fused_gauntlet_fn(name.as_ref()),
-            Statement::VarDecl { name, init, .. } => {
-                if name.as_ref() == "t0" {
-                    if let Some(Expr::Call { callee, .. }) = init.as_ref() {
-                        return Self::expr_is_date_now_call(callee);
-                    }
-                }
-                false
-            }
-            _ => false,
-        }
-    }
 
-    fn detect_k_nucleotide_program(stmts: &[Statement]) -> Option<KMerPlan> {
-        let has_k_fn = stmts.iter().any(|s| {
-            matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "kNucleotide")
-        });
-        if !has_k_fn {
-            return None;
-        }
-        let mut len: Option<usize> = None;
-        let mut seed: Option<i32> = None;
-        let mut k: Option<usize> = None;
-        let mut seq_local: Option<String> = None;
-        let mut m_local: Option<String> = None;
-        let mut sum_local: Option<String> = None;
-        let mut check_local: Option<String> = None;
-        let mut len_local: Option<String> = None;
-        let mut next_base_fn: Option<String> = None;
-        for s in stmts {
-            match s {
-                Statement::FunDecl { name, .. } if name.as_ref() == "nextBase" => {
-                    next_base_fn = Some(name.to_string());
-                }
-                Statement::VarDecl { name, init, .. } => {
-                    if name.as_ref() == "seed" {
-                        if let Some(Expr::Literal {
-                            value: Literal::Number(n),
-                            ..
-                        }) = init.as_ref()
-                        {
-                            seed = Some(*n as i32);
-                        }
-                    }
-                    if let Some(Expr::Literal {
-                        value: Literal::Number(n),
-                        ..
-                    }) = init.as_ref()
-                    {
-                        if *n == 100000.0 {
-                            len = Some(100000);
-                            len_local = Some(name.to_string());
-                        }
-                    }
-                    if let Some(init_e) = init.as_ref() {
-                        if let Expr::Call { callee, args, .. } = init_e {
-                            if let Expr::Ident { name: fnname, .. } = callee.as_ref() {
-                                if fnname.as_ref() == "kNucleotide" && args.len() == 2 {
-                                    let (CallArg::Expr(seq_e), CallArg::Expr(k_e)) =
-                                        (&args[0], &args[1])
-                                    else {
-                                        continue;
-                                    };
-                                    if let Expr::Ident { name: sn, .. } = seq_e {
-                                        if let Expr::Literal {
-                                            value: Literal::Number(kn),
-                                            ..
-                                        } = k_e
-                                        {
-                                            m_local = Some(name.to_string());
-                                            seq_local = Some(sn.to_string());
-                                            k = Some(*kn as usize);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if let Some(init_e) = init.as_ref() {
-                        if let Expr::Literal {
-                            value: Literal::Number(n),
-                            ..
-                        } = init_e
-                        {
-                            if *n == 0.0 {
-                                sum_local = Some(name.to_string());
-                            }
-                        }
-                        if let Expr::Binary {
-                            op: BinOp::Add,
-                            left,
-                            right,
-                            ..
-                        } = init_e
-                        {
-                            if let Expr::Ident { name: sumn, .. } = left.as_ref() {
-                                if let Some(ml) = m_local.as_ref() {
-                                    if Self::expr_is_map_size(right, ml) {
-                                        check_local = Some(name.to_string());
-                                        sum_local = Some(sumn.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        let (len, seed, k, seq_local, m_local, sum_local, check_local, next_base_fn) = (
-            len?,
-            seed?,
-            k?,
-            seq_local?,
-            m_local?,
-            sum_local?,
-            check_local?,
-            next_base_fn?,
-        );
-        Some(KMerPlan {
-            len,
-            seed,
-            k,
-            seq_local,
-            m_local,
-            sum_local,
-            check_local,
-            len_local: len_local.unwrap_or_default(),
-            next_base_fn,
-        })
-    }
 
-    fn expr_is_map_size(expr: &Expr, m_name: &str) -> bool {
-        matches!(
-            expr,
-            Expr::Member {
-                object,
-                prop: MemberProp::Name { name, .. },
-                ..
-            } if name.as_ref() == "size"
-                && matches!(object.as_ref(), Expr::Ident { name: on, .. } if on.as_ref() == m_name)
-        )
-    }
 
-    fn expr_is_date_now_call(callee: &Expr) -> bool {
-        matches!(
-            callee,
-            Expr::Member {
-                object,
-                prop: MemberProp::Name { name, .. },
-                ..
-            } if name.as_ref() == "now"
-                && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Date")
-        )
-    }
 
-    fn expr_is_map_values_on(iterable: &Expr, m_name: &str) -> bool {
-        let Expr::Call { callee, args, .. } = iterable else {
-            return false;
-        };
-        if !args.is_empty() {
-            return false;
-        }
-        let Expr::Member {
-            object,
-            prop: MemberProp::Name { name, .. },
-            ..
-        } = callee.as_ref()
-        else {
-            return false;
-        };
-        name.as_ref() == "values"
-            && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == m_name)
-    }
 
-    fn is_k_nucleotide_check_init(init: Option<&Expr>, plan: &KMerPlan) -> bool {
-        let Some(Expr::Binary {
-            op: BinOp::Add,
-            left,
-            right,
-            ..
-        }) = init
-        else {
-            return false;
-        };
-        matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == plan.sum_local.as_str())
-            && Self::expr_is_map_size(right, &plan.m_local)
-    }
 
-    fn is_k_nucleotide_fused_stmt(&self, stmt: &Statement, plan: &KMerPlan) -> bool {
-        match stmt {
-            Statement::VarDecl { name, init, .. } => {
-                if name.as_ref() == "t0" {
-                    if let Some(Expr::Call { callee, .. }) = init.as_ref() {
-                        if Self::expr_is_date_now_call(callee) {
-                            return true;
-                        }
-                    }
-                }
-                if name.as_ref() == plan.seq_local
-                    || name.as_ref() == plan.m_local
-                    || name.as_ref() == plan.sum_local
-                {
-                    return true;
-                }
-                if plan.len_local.is_empty() {
-                    return false;
-                }
-                name.as_ref() == plan.len_local.as_str()
-                    && matches!(
-                        init.as_ref(),
-                        Some(Expr::Literal {
-                            value: Literal::Number(n),
-                            ..
-                        }) if *n as usize == plan.len
-                    )
-            }
-            Statement::ForOf { iterable, .. } => Self::expr_is_map_values_on(iterable, &plan.m_local),
-            Statement::For { body, .. } => {
-                Self::for_body_pushes_next_base(body, &plan.seq_local, &plan.next_base_fn)
-            }
-            _ => false,
-        }
-    }
 
-    fn for_body_pushes_next_base(body: &Statement, seq_name: &str, next_base: &str) -> bool {
-        let mut found = false;
-        Self::for_each_stmt_expr(body, &mut |e| {
-            if let Expr::Call { callee, args, .. } = e {
-                let Expr::Member {
-                    object,
-                    prop: MemberProp::Name { name, .. },
-                    ..
-                } = callee.as_ref()
-                else {
-                    return;
-                };
-                if name.as_ref() == "push"
-                    && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == seq_name)
-                    && args.len() == 1
-                {
-                    if let CallArg::Expr(Expr::Call { callee, .. }) = &args[0] {
-                        if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == next_base) {
-                            found = true;
-                        }
-                    }
-                }
-            }
-        });
-        found
-    }
 
-    fn is_json_doc_item_push(expr: &Expr) -> bool {
-        let Expr::Call { callee, args, .. } = expr else {
-            return false;
-        };
-        let Expr::Member {
-            object,
-            prop: MemberProp::Name { name: method, .. },
-            ..
-        } = callee.as_ref()
-        else {
-            return false;
-        };
-        if method.as_ref() != "push" {
-            return false;
-        }
-        if !matches!(object.as_ref(), Expr::Ident { .. }) {
-            return false;
-        }
-        let [CallArg::Expr(obj)] = args.as_slice() else {
-            return false;
-        };
-        let Expr::Object { props, .. } = obj else {
-            return false;
-        };
-        let keys: HashSet<&str> = props
-            .iter()
-            .filter_map(|p| match p {
-                ObjectProp::KeyValue(k, _, _) => Some(k.as_ref()),
-                _ => None,
-            })
-            .collect();
-        ["id", "name", "value", "active", "tags"]
-            .into_iter()
-            .all(|k| keys.contains(k))
-    }
 
-    fn is_json_doc_factory_body(body: &Statement) -> bool {
-        let stmts = Self::stmt_block_slice(body);
-        let mut items_local: Option<&str> = None;
-        let mut saw_push = false;
-        let mut saw_return = false;
-        for s in stmts {
-            match s {
-                Statement::VarDecl { name, init, .. } => {
-                    if matches!(init, Some(Expr::Array { elements, .. }) if elements.is_empty()) {
-                        items_local = Some(name.as_ref());
-                    }
-                }
-                Statement::For { body, .. } => {
-                    if let Some(il) = items_local {
-                        if Self::for_body_only_item_pushes(body, il) {
-                            saw_push = true;
-                        } else {
-                            return false;
-                        }
-                    } else {
-                        return false;
-                    }
-                }
-                Statement::Return { value: Some(ret), .. } => {
-                    let Expr::Object { props, .. } = ret else {
-                        return false;
-                    };
-                    let keys: HashSet<&str> = props
-                        .iter()
-                        .filter_map(|p| match p {
-                            ObjectProp::KeyValue(k, _, _) => Some(k.as_ref()),
-                            _ => None,
-                        })
-                        .collect();
-                    if !keys.contains("count") || !keys.contains("items") || !keys.contains("meta") {
-                        return false;
-                    }
-                    saw_return = true;
-                }
-                _ => {}
-            }
-        }
-        items_local.is_some() && saw_push && saw_return
-    }
 
-    fn for_body_only_item_pushes(body: &Statement, items_local: &str) -> bool {
-        let stmts = Self::stmt_block_slice(body);
-        stmts.iter().all(|s| match s {
-            Statement::ExprStmt { expr, .. } => Self::is_json_doc_item_push(expr)
-                || matches!(
-                    expr,
-                    Expr::Assign { .. } | Expr::Binary { .. }
-                ),
-            _ => true,
-        }) && stmts.iter().any(|s| {
-            matches!(s, Statement::ExprStmt { expr, .. } if Self::is_json_doc_item_push(expr))
-        })
-    }
 
-    fn detect_json_doc_program(
-        stmts: &[Statement],
-    ) -> Option<(String, String, String, String, String)> {
-        let factory = stmts.iter().find_map(|s| {
-            if let Statement::FunDecl {
-                name,
-                params,
-                rest_param: None,
-                body,
-                ..
-            } = s
-            {
-                if params.len() == 1 && Self::is_json_doc_factory_body(body) {
-                    return Some(name.to_string());
-                }
-            }
-            None
-        })?;
-        let doc_local = stmts.iter().find_map(|s| {
-            if let Statement::VarDecl {
-                name,
-                init: Some(init),
-                ..
-            } = s
-            {
-                if Self::is_call_to_ident(init, &factory) {
-                    return Some(name.to_string());
-                }
-            }
-            None
-        })?;
-        let acc_local = stmts.iter().find_map(|s| {
-            if let Statement::VarDecl {
-                name,
-                init: Some(Expr::Literal {
-                    value: Literal::Number(n),
-                    ..
-                }),
-                ..
-            } = s
-            {
-                if *n == 0.0 {
-                    return Some(name.to_string());
-                }
-            }
-            None
-        })?;
-        let parsed_local = stmts.iter().find_map(|s| {
-            if let Statement::For { body, .. } = s {
-                return Self::find_json_parse_local(body);
-            }
-            None
-        })?;
-        let s_local = stmts.iter().find_map(|s| {
-            if let Statement::For { body, .. } = s {
-                return Self::find_json_stringify_local(body, &doc_local);
-            }
-            None
-        })?;
-        Some((factory, doc_local, s_local, parsed_local, acc_local))
-    }
-
-    fn is_json_stringify_doc(expr: &Expr, doc_local: &str) -> bool {
-        let Expr::Call { callee, args, .. } = expr else {
-            return false;
-        };
-        let Expr::Member {
-            object,
-            prop: MemberProp::Name { name: method, .. },
-            ..
-        } = callee.as_ref()
-        else {
-            return false;
-        };
-        method.as_ref() == "stringify"
-            && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "JSON")
-            && matches!(
-                args.as_slice(),
-                [CallArg::Expr(Expr::Ident { name: id, .. })]
-                    if id.as_ref() == doc_local
-            )
-    }
-
-    fn find_json_stringify_local(stmt: &Statement, doc_local: &str) -> Option<String> {
-        match stmt {
-            Statement::VarDecl {
-                name,
-                init: Some(init),
-                ..
-            } => {
-                if Self::is_json_stringify_doc(init, doc_local) {
-                    return Some(name.to_string());
-                }
-            }
-            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                for s in statements {
-                    if let Some(n) = Self::find_json_stringify_local(s, doc_local) {
-                        return Some(n);
-                    }
-                }
-            }
-            Statement::For { body, .. }
-            | Statement::While { body, .. }
-            | Statement::DoWhile { body, .. }
-            | Statement::ForOf { body, .. } => return Self::find_json_stringify_local(body, doc_local),
-            Statement::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                if let Some(n) = Self::find_json_stringify_local(then_branch, doc_local) {
-                    return Some(n);
-                }
-                if let Some(e) = else_branch {
-                    return Self::find_json_stringify_local(e, doc_local);
-                }
-            }
-            _ => {}
-        }
-        None
-    }
-
-    fn find_json_parse_local(stmt: &Statement) -> Option<String> {
-        match stmt {
-            Statement::VarDecl {
-                name,
-                init: Some(init),
-                ..
-            } => {
-                if Self::is_json_parse_call(init) {
-                    return Some(name.to_string());
-                }
-            }
-            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                for s in statements {
-                    if let Some(n) = Self::find_json_parse_local(s) {
-                        return Some(n);
-                    }
-                }
-            }
-            Statement::For { body, .. }
-            | Statement::While { body, .. }
-            | Statement::DoWhile { body, .. }
-            | Statement::ForOf { body, .. } => return Self::find_json_parse_local(body),
-            Statement::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                if let Some(n) = Self::find_json_parse_local(then_branch) {
-                    return Some(n);
-                }
-                if let Some(e) = else_branch {
-                    return Self::find_json_parse_local(e);
-                }
-            }
-            _ => {}
-        }
-        None
-    }
-
-    fn is_call_to_ident(expr: &Expr, name: &str) -> bool {
-        if let Expr::Call { callee, .. } = expr {
-            if let Expr::Ident { name: id, .. } = callee.as_ref() {
-                return id.as_ref() == name;
-            }
-        }
-        false
-    }
 
     fn expr_is_map_construct(expr: &Expr) -> bool {
         matches!(
@@ -13826,405 +12647,6 @@ impl Codegen {
                 ..
             } if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Map")
         )
-    }
-
-    fn is_json_parse_call(expr: &Expr) -> bool {
-        let Expr::Call { callee, args, .. } = expr else {
-            return false;
-        };
-        let Expr::Member {
-            object,
-            prop: MemberProp::Name { name: method, .. },
-            ..
-        } = callee.as_ref()
-        else {
-            return false;
-        };
-        method.as_ref() == "parse"
-            && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "JSON")
-            && args.len() == 1
-    }
-
-    fn emit_json_doc_factory_nv(&mut self) -> Result<(), CompileError> {
-        let item = crate::types::named_struct_ident("TishJsonDocItem");
-        let meta = crate::types::named_struct_ident("TishJsonDocMeta");
-        let doc = crate::types::named_struct_ident("TishJsonDoc");
-        self.writeln(&format!("fn buildDoc_nv(n: f64) -> {} {{", doc));
-        self.writeln("    let n_usize = n as usize;");
-        self.writeln(&format!("    let mut items: Vec<{}> = Vec::with_capacity(n_usize);", item));
-        self.writeln("    for i in 0..n_usize {");
-        self.writeln("        let fi = i as f64;");
-        self.writeln(&format!("        items.push({} {{", item));
-        self.writeln("            id: fi,");
-        self.writeln("            name: format!(\"item{}\", i),");
-        self.writeln("            value: fi * 1.5_f64,");
-        self.writeln("            active: (i % 2) == 0,");
-        self.writeln("            tags: vec![fi, fi + 1.0_f64, fi + 2.0_f64],");
-        self.writeln("        });");
-        self.writeln("    }");
-        self.writeln(&format!(
-            "    {} {{ count: n, items, meta: {} {{ version: 1_f64, ok: true }} }}",
-            doc, meta
-        ));
-        self.writeln("}");
-        Ok(())
-    }
-
-    fn emit_struct_from_value_method(
-        &mut self,
-        struct_name: &str,
-        fields: &[(std::sync::Arc<str>, RustType)],
-    ) {
-        self.write(&format!("    pub fn _tish_from_value(v: &Value) -> Self {{\n"));
-        self.write("        match v {\n");
-        self.write("            Value::Object(obj) => {\n");
-        self.write("                let o = obj.borrow();\n");
-        self.write("                Self {\n");
-        for (k, t) in fields {
-            let field = crate::types::field_ident(k);
-            let read = Self::json_from_value_field_expr(t, k.as_ref());
-            self.writeln(&format!("                    {}: {},", field, read));
-        }
-        self.write("                }\n");
-        self.write("            }\n");
-        self.write("            _ => Self::default(),\n");
-        self.write("        }\n");
-        self.write("    }\n");
-    }
-
-    fn json_from_value_field_expr(ty: &RustType, key: &str) -> String {
-        let key_lit = format!("Arc::from(\"{}\")", key);
-        match ty {
-            RustType::F64 => format!(
-                "o.strings.get(&{k}).map(|v| match v {{ Value::Number(n) => *n, _ => 0.0 }}).unwrap_or(0.0)",
-                k = key_lit
-            ),
-            RustType::Bool => format!(
-                "o.strings.get(&{k}).map(|v| matches!(v, Value::Bool(true))).unwrap_or(false)",
-                k = key_lit
-            ),
-            RustType::String => format!(
-                "o.strings.get(&{k}).map(|v| match v {{ Value::String(s) => s.to_string(), _ => String::new() }}).unwrap_or_default()",
-                k = key_lit
-            ),
-            RustType::Named { name, .. } => {
-                let sn = crate::types::named_struct_ident(name.as_ref());
-                format!(
-                    "o.strings.get(&{k}).map(|v| {sn}::_tish_from_value(v)).unwrap_or_default()",
-                    k = key_lit,
-                    sn = sn
-                )
-            }
-            RustType::Vec(inner) => match inner.as_ref() {
-                RustType::Named { name, .. } => {
-                    let sn = crate::types::named_struct_ident(name.as_ref());
-                    format!(
-                        "match o.strings.get(&{k}) {{ Some(Value::Array(a)) => a.borrow().iter().map(|v| {sn}::_tish_from_value(v)).collect(), _ => Vec::new() }}",
-                        k = key_lit,
-                        sn = sn
-                    )
-                }
-                RustType::F64 => format!(
-                    "match o.strings.get(&{k}) {{ Some(Value::Array(a)) => a.borrow().iter().map(|v| match v {{ Value::Number(n) => *n, _ => 0.0 }}).collect(), _ => Vec::new() }}",
-                    k = key_lit
-                ),
-                _ => "Vec::new()".to_string(),
-            },
-            _ => "Default::default()".to_string(),
-        }
-    }
-
-    fn megamorphic_value_static(name: &str) -> String {
-        format!("G_{}_MEGA_VALUES", Self::escape_ident(name).to_uppercase())
-    }
-
-    fn emit_megamorphic_value_tables(&mut self) -> Result<(), CompileError> {
-        for (name, vals) in self.megamorphic_value_tables.clone() {
-            let lit = vals
-                .iter()
-                .map(|v| Self::f64_lit(*v))
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.writeln(&format!(
-                "const {}: [f64; {}] = [{}];",
-                Self::megamorphic_value_static(name.as_str()),
-                vals.len(),
-                lit
-            ));
-        }
-        Ok(())
-    }
-
-    fn extract_value_field_literal(expr: &Expr) -> Option<f64> {
-        match expr {
-            Expr::Object { props, .. } => {
-                for p in props {
-                    if let ObjectProp::KeyValue(key, val, _) = p {
-                        if key.as_ref() == "value" {
-                            if let Expr::Literal {
-                                value: Literal::Number(n),
-                                ..
-                            } = val
-                            {
-                                return Some(*n);
-                            }
-                        }
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn mega_push_value_literal(expr: &Expr, arr_local: &str) -> Option<f64> {
-        let Expr::Call { callee, args, .. } = expr else {
-            return None;
-        };
-        let Expr::Member {
-            object,
-            prop: MemberProp::Name { name: method, .. },
-            ..
-        } = callee.as_ref()
-        else {
-            return None;
-        };
-        if method.as_ref() != "push" {
-            return None;
-        }
-        if !matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == arr_local) {
-            return None;
-        }
-        let [CallArg::Expr(obj)] = args.as_slice() else {
-            return None;
-        };
-        Self::extract_value_field_literal(obj)
-    }
-
-    fn stmt_block_slice(s: &Statement) -> Vec<&Statement> {
-        match s {
-            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                statements.iter().collect()
-            }
-            other => vec![other],
-        }
-    }
-
-    /// `function makeObjs() { let objs = []; objs.push({ value: 1, … }); … return objs }`.
-    fn extract_mega_push_value_table(body: &Statement) -> Option<Vec<f64>> {
-        let block_stmts = Self::stmt_block_slice(body);
-        let arr_local = block_stmts.iter().find_map(|s| {
-            if let Statement::VarDecl { name, init, .. } = s {
-                if matches!(init, Some(Expr::Array { elements, .. }) if elements.is_empty()) {
-                    return Some(name.to_string());
-                }
-            }
-            None
-        })?;
-        let mut values = Vec::new();
-        let mut saw_return = false;
-        for s in block_stmts {
-            match s {
-                Statement::VarDecl { name, .. } if name.as_ref() == arr_local => {}
-                Statement::ExprStmt { expr, .. } => {
-                    if let Some(v) = Self::mega_push_value_literal(expr, &arr_local) {
-                        values.push(v);
-                    } else {
-                        return None;
-                    }
-                }
-                Statement::Return { value: Some(ret), .. } => {
-                    if !matches!(ret, Expr::Ident { name, .. } if name.as_ref() == arr_local) {
-                        return None;
-                    }
-                    saw_return = true;
-                }
-                _ => return None,
-            }
-        }
-        if !saw_return || values.len() < 2 {
-            return None;
-        }
-        Some(values)
-    }
-
-    /// Link `let objs = makeObjs()` at module scope to a compile-time `.value` table.
-    fn collect_megamorphic_value_tables(stmts: &[Statement]) -> HashMap<String, Vec<f64>> {
-        if !Self::gauntlet_fusion_enabled() {
-            // Fake: const-folds literal `.value` fields and replaces the megamorphic property read
-            // with a flat array index, sidestepping the access the benchmark measures. Off unless
-            // TISH_GAUNTLET_FUSION.
-            return HashMap::new();
-        }
-        let mut fn_tables: HashMap<String, Vec<f64>> = HashMap::new();
-        for s in stmts {
-            if let Statement::FunDecl {
-                name,
-                params,
-                rest_param: None,
-                body,
-                ..
-            } = s
-            {
-                if !params.is_empty() {
-                    continue;
-                }
-                if let Some(vals) = Self::extract_mega_push_value_table(body) {
-                    fn_tables.insert(name.to_string(), vals);
-                }
-            }
-        }
-        if fn_tables.is_empty() {
-            return HashMap::new();
-        }
-        let mut out: HashMap<String, Vec<f64>> = HashMap::new();
-        for s in stmts {
-            if let Statement::VarDecl {
-                name,
-                init: Some(init),
-                ..
-            } = s
-            {
-                if let Expr::Call { callee, args, .. } = init {
-                    if args.is_empty() {
-                        if let Expr::Ident { name: fname, .. } = callee.as_ref() {
-                            if let Some(vals) = fn_tables.get(fname.as_ref()) {
-                                out.insert(name.to_string(), vals.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if out.is_empty() {
-            return HashMap::new();
-        }
-        let globals: HashSet<String> = out.keys().cloned().collect();
-        let mut reassigns: Vec<(String, &Expr)> = Vec::new();
-        Self::collect_reassignments_stmts(stmts, &mut reassigns);
-        for (n, _) in reassigns {
-            if globals.contains(&n) {
-                out.remove(&n);
-            }
-        }
-        out
-    }
-
-    fn is_megamorphic_value_read(expr: &Expr, objs: &str) -> bool {
-        let Expr::Member {
-            object,
-            prop: MemberProp::Name { name: prop, .. },
-            optional: false,
-            ..
-        } = expr
-        else {
-            return false;
-        };
-        if prop.as_ref() != "value" {
-            return false;
-        }
-        let Expr::Index {
-            object: arr_obj,
-            optional: false,
-            ..
-        } = object.as_ref()
-        else {
-            return false;
-        };
-        matches!(arr_obj.as_ref(), Expr::Ident { name, .. } if name.as_ref() == objs)
-    }
-
-    fn find_megamorphic_sum_in_stmt(stmt: &Statement, objs: &str) -> Option<String> {
-        match stmt {
-            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                for s in statements {
-                    if let Some(sum) = Self::find_megamorphic_sum_in_stmt(s, objs) {
-                        return Some(sum);
-                    }
-                }
-                None
-            }
-            Statement::For { body, .. } | Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
-                Self::find_megamorphic_sum_in_stmt(body, objs)
-            }
-            Statement::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                Self::find_megamorphic_sum_in_stmt(then_branch, objs).or_else(|| {
-                    else_branch
-                        .as_ref()
-                        .and_then(|b| Self::find_megamorphic_sum_in_stmt(b, objs))
-                })
-            }
-            Statement::ExprStmt { expr, .. } => {
-                let Expr::Assign { name, value, .. } = expr else {
-                    return None;
-                };
-                let Expr::Binary {
-                    left,
-                    op: BinOp::Add,
-                    right,
-                    ..
-                } = value.as_ref()
-                else {
-                    return None;
-                };
-                if !matches!(left.as_ref(), Expr::Ident { name: l, .. } if l.as_ref() == name.as_ref()) {
-                    return None;
-                }
-                if Self::is_megamorphic_value_read(right, objs) {
-                    return Some(name.to_string());
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn collect_megamorphic_native_sums(
-        stmts: &[Statement],
-        tables: &HashMap<String, Vec<f64>>,
-    ) -> HashSet<String> {
-        let mut out = HashSet::new();
-        for objs in tables.keys() {
-            for s in stmts {
-                if let Some(sum) = Self::find_megamorphic_sum_in_stmt(s, objs) {
-                    out.insert(sum);
-                }
-            }
-        }
-        out
-    }
-
-    fn emit_megamorphic_index_code(
-        &mut self,
-        index: &Expr,
-        table_len: usize,
-    ) -> Result<String, CompileError> {
-        if let Expr::Binary {
-            left,
-            op: BinOp::Mod,
-            ..
-        } = index
-        {
-            if let Expr::Ident { name, .. } = left.as_ref() {
-                let esc = Self::escape_ident(name.as_ref());
-                return Ok(format!("(({}) as usize) % {}", esc, table_len));
-            }
-        }
-        let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-        let idx_f64 = if idx_ty == RustType::F64 {
-            idx_code
-        } else if idx_ty == RustType::I32 {
-            format!("({} as f64)", idx_code)
-        } else if idx_ty == RustType::Value {
-            RustType::F64.from_value_expr(&idx_code)
-        } else {
-            idx_code
-        };
-        Ok(format!("(({}) as usize) % {}", idx_f64, table_len))
     }
 
     /// #176 — classify top-level `let x = <number-literal>` bindings whose every use is a numeric
@@ -16923,8 +15345,8 @@ impl Codegen {
     // Infers a recursive struct shape STRUCTURALLY (no identifier matching) from object literals
     // whose fields are scalars or recursive self-references, and emits native builders
     // (`name_rec(..) -> TishStruct_X`) + consumers (`name_rec(&TishStruct_X) -> f64`) over
-    // `Option<Box<T>>` children. This is the real binary_trees fix (retires the `binary_trees_check`
-    // fixture kernel) — it transfers to any developer code with the same shape. v1 scope: leaf
+    // `Option<Box<T>>` children. This is the real, name-independent binary_trees fix — it transfers
+    // to any developer code with the same shape. v1 scope: leaf
     // builder/consumer fns (if / return) + top-level `consumer(builder(literals))` routing; the
     // loop-bearing orchestrator (binaryTrees) is future work. SAFE: the boxed closures are left
     // intact as a fallback, native fns are emitted with rollback, and only fully-native-emittable
@@ -19756,44 +18178,6 @@ impl Codegen {
                 }
                 // Native fast path: `vec[i]` where vec is Vec<T> and i is numeric.
                 if !optional {
-                    if let Some(plan) = &self.json_doc_plan {
-                        if let Some(index_only) =
-                            Self::parse_json_doc_items_index(expr, &plan.parsed_local)
-                        {
-                            let parsed_esc =
-                                Self::escape_ident(&plan.parsed_local).into_owned();
-                            let idx_usize = self.emit_json_doc_index_usize(index_only)?;
-                            return Ok((
-                                format!("{}.items[{}]", parsed_esc, idx_usize),
-                                Self::json_doc_item_ty(),
-                            ));
-                        }
-                    }
-                    if let Expr::Member {
-                        object: mobj,
-                        prop: MemberProp::Name { name: field, .. },
-                        optional: false,
-                        ..
-                    } = object.as_ref()
-                    {
-                        if field.as_ref() == "tags" {
-                            if let Expr::Ident { name: var, .. } = mobj.as_ref() {
-                                let vt = self.type_context.get_type(var.as_ref());
-                                if matches!(
-                                    vt,
-                                    RustType::Named { name, .. }
-                                        if name.as_ref() == "TishJsonDocItem"
-                                ) {
-                                    let esc = Self::escape_ident(var.as_ref()).into_owned();
-                                    let idx_usize = self.emit_json_doc_index_usize(index)?;
-                                    return Ok((
-                                        format!("{}.tags[{}]", esc, idx_usize),
-                                        RustType::F64,
-                                    ));
-                                }
-                            }
-                        }
-                    }
                     if let Expr::Ident { name, .. } = object.as_ref() {
                         if !self.refcell_wrapped_vars.contains(name.as_ref()) {
                             let obj_type = self.type_context.get_type(name.as_ref());
@@ -20042,29 +18426,6 @@ impl Codegen {
                 optional: false,
                 ..
             } => {
-                // #179: megamorphic `.value` on `objs[i]` / `objs[r % n]` → const f64 table
-                // (compile-time polymorphic inline cache — Bun/JSC specialize the one hot site).
-                if prop_name.as_ref() == "value" {
-                    if let Expr::Index {
-                        object: arr_obj,
-                        index,
-                        optional: false,
-                        ..
-                    } = object.as_ref()
-                    {
-                        if let Expr::Ident { name: arr_name, .. } = arr_obj.as_ref() {
-                            if let Some(vals) =
-                                self.megamorphic_value_tables.get(arr_name.as_ref())
-                            {
-                                let static_name =
-                                    Self::megamorphic_value_static(arr_name.as_ref());
-                                let idx =
-                                    self.emit_megamorphic_index_code(index, vals.len())?;
-                                return Ok((format!("{}[{}]", static_name, idx), RustType::F64));
-                            }
-                        }
-                    }
-                }
                 if let Expr::Ident { name: var_name, .. } = object.as_ref() {
                     let var_type = self.type_context.get_type(var_name.as_ref());
                     // #173: `vec.length` on a native `Vec<_>` → `(vec.len() as f64)`, so the length

@@ -1,6 +1,6 @@
 //! #320 — honest native-array lowering for fn-call-built numeric arrays.
 //!
-//! Two sound, name-independent inference fixes (NO `TISH_GAUNTLET_FUSION`):
+//! Two sound, name-independent inference fixes:
 //!   fix1: a 0-param numeric fn (`nextBase`, mutates a numeric global, returns number) is eligible
 //!         for native `-> f64` promotion (`collect_native_fns` no longer requires ≥1 param).
 //!   fix2: a fn PROVEN to always return a number lets `infer_expr_type(f(...))` be `number`, so
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use tishlang_compile::compile_project_full;
 
-/// Honest typed flags — the fixture-substitution kernels stay OFF.
+/// The general typed-native inference flags.
 fn enable_typed_flags() {
     for k in [
         "TISH_PARAM_NATIVE",
@@ -23,7 +23,6 @@ fn enable_typed_flags() {
     ] {
         std::env::set_var(k, "1");
     }
-    std::env::remove_var("TISH_GAUNTLET_FUSION");
 }
 
 /// Write `src` under the workspace `target/` (scratch lives there, per repo convention) and compile.

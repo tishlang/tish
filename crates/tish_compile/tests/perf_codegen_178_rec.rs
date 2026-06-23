@@ -4,8 +4,8 @@
 //! bottomUpTree/itemCheck/binaryTrees) must lower to a native arena: an `i32`-indexed struct,
 //! native `build`/`check` free fns threading `&mut Vec<Node>` / `&Vec<Node>`, and a top-level
 //! routed call — with NO `object_from_pairs` / `get_prop` / `value_call` on the hot path. This is
-//! the real fix that makes the boxed `binary_trees` path fast under any names (retiring the
-//! `binary_trees_check` fixture kernel). See docs/recursive-struct-native.md.
+//! the real, name-independent fix that makes the boxed `binary_trees` path fast under any names.
+//! See docs/recursive-struct-native.md.
 
 use std::path::PathBuf;
 

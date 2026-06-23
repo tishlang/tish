@@ -53,8 +53,7 @@ pub use tishlang_builtins::typedarrays::{
 };
 pub use tishlang_builtins::date::date_constructor_value as tish_date_constructor;
 pub use tishlang_builtins::collections::{
-    collection_size, binary_trees_check, k_nucleotide_check,
-    map_constructor_value as tish_map_constructor, map_get,
+    collection_size, map_constructor_value as tish_map_constructor, map_get,
     map_has, map_set, map_values, set_constructor_value as tish_set_constructor,
 };
 
