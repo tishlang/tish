@@ -242,12 +242,22 @@ pub fn infer_program(program: &Program) -> Program {
 // ---------------------------------------------------------------------------
 
 fn param_infer_program(program: Program) -> Program {
+    // Soundness: a fn called ANYWHERE with a provably-non-numeric arg (a string/bool/null literal,
+    // template, array, or object) must NOT get a `: number` param shadow — the body may "look
+    // numeric" (`return SHARED`) yet the caller passes e.g. `"arg"`, which the f64 coercion would
+    // panic on / turn to NaN where JS keeps the value. Skip those fns (they stay fully boxed). Same
+    // set `collect_native_fns` uses to refuse the M5 native form.
+    let nonnumeric = crate::codegen::Codegen::fns_called_with_nonnumeric_arg(&program.statements);
     Program {
-        statements: program.statements.into_iter().map(pi_stmt).collect(),
+        statements: program
+            .statements
+            .into_iter()
+            .map(|s| pi_stmt(s, &nonnumeric))
+            .collect(),
     }
 }
 
-fn pi_stmt(s: Statement) -> Statement {
+fn pi_stmt(s: Statement, nonnumeric: &HashSet<String>) -> Statement {
     if let Statement::FunDecl {
         async_,
         name,
@@ -259,6 +269,19 @@ fn pi_stmt(s: Statement) -> Statement {
         span,
     } = s
     {
+        // A fn reached with a non-numeric arg somewhere: leave its params dynamic (boxed).
+        if nonnumeric.contains(name.as_ref()) {
+            return Statement::FunDecl {
+                async_,
+                name,
+                name_span,
+                params,
+                rest_param,
+                return_type,
+                body,
+                span,
+            };
+        }
         // Locals provably numeric in this body (annotated, incl. base-inferred `let i = 0`), so a
         // bare loop counter `i` counts as a numeric operand and `i < n` can prove the param `n`.
         // Fixpoint-closed so copy-chains of numeric literals (`let a = 0; let b = a`) propagate.
@@ -1188,7 +1211,11 @@ fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx)
         {
             // (a) Read-only typed array: uniform scalar literals, every later use read-only.
             if let Some(elem) = infer_array_elem(elements, ctx) {
-                if uses_are_array_safe(name.as_ref(), &stmts[i + 1..]) {
+                // A constant OOB read (`let a=[1,2,3]; a[5]`) yields NaN under Vec<f64> but `null`
+                // boxed, so disqualify it even though the use is "read-only".
+                if uses_are_array_safe(name.as_ref(), &stmts[i + 1..])
+                    && !array_oob_const_access(&stmts[i + 1..], name.as_ref(), elements.len())
+                {
                     let arr_ann = TypeAnnotation::Array(Box::new(elem));
                     ctx.define(name.as_ref(), arr_ann.clone());
                     out.push(Statement::VarDecl {
@@ -1479,7 +1506,12 @@ fn block_native_arrays(
             // Empty `[]` is a candidate for either element type; literal elements must match `elem`.
             let lit_ok = elements.is_empty()
                 || matches!(infer_array_elem(elements, outer_ctx), Some(t) if &t == elem);
-            if lit_ok {
+            // Soundness: a non-empty literal array accessed at a constant index past its initial
+            // length is sparse (`let arr=[1,2,3]; arr[5]=100`) — the native Vec pads holes with NaN
+            // and OOB reads yield NaN, diverging from boxed `null`. Keep it boxed.
+            let sparse = !elements.is_empty()
+                && array_oob_const_access(&stmts[i + 1..], name.as_ref(), elements.len());
+            if lit_ok && !sparse {
                 cands.push((i, name.to_string()));
             }
         }
@@ -1515,6 +1547,40 @@ fn block_native_arrays(
         }
     }
     accepted
+}
+
+/// True if `stmts` access `name` at a **constant** non-negative integer index `>= init_len`
+/// (`name[K]` read or `name[K] = v`). For a non-empty literal-initialized array, such an index is
+/// out of the initial bounds: the native `Vec<elem>` representation pads sparse writes with
+/// `NaN`/`0`/`false` and yields those on OOB reads, whereas the boxed array grows with `null` holes
+/// and reads `null`. So an array with such an access must stay boxed to preserve semantics. Only
+/// meaningful for non-empty literal inits — an empty `[]` grows dynamically (length unknown here),
+/// and its holes are typically only truth-tested (`NaN`/`null` are both falsy), so it is left alone.
+fn array_oob_const_access(stmts: &[Statement], name: &str, init_len: usize) -> bool {
+    let mut found = false;
+    for s in stmts {
+        walk_exprs_stmt(s, &mut |e| {
+            let idx = match e {
+                Expr::Index { object, index, .. } | Expr::IndexAssign { object, index, .. } => {
+                    if matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == name) {
+                        index
+                    } else {
+                        return;
+                    }
+                }
+                _ => return,
+            };
+            if let Expr::Literal { value: Literal::Number(k), .. } = idx.as_ref() {
+                if *k >= 0.0 && k.fract() == 0.0 && (*k as usize) >= init_len {
+                    found = true;
+                }
+            }
+        });
+        if found {
+            return true;
+        }
+    }
+    found
 }
 
 /// A value written into / pushed onto `name` must have the array's element type `elem`: a `name[_]`
@@ -2356,6 +2422,11 @@ fn collect_return_shapes(
 pub fn analyze_aggregate(program: &Program) -> AggregateAnalysis {
     let mut analysis = AggregateAnalysis::default();
     let mut reg = StructRegistry::default();
+    // Soundness: a fn called ANYWHERE with a provably-non-numeric arg must not get S-0 `: number`
+    // params either — `fn makeRecord(id, name){ return {id, name} }` called `makeRecord(1, "Alice")`
+    // would otherwise emit a `match … panic!("expected number")` coercion on the String. Same set the
+    // M4 `param_infer` path uses (infer.rs:273).
+    let nonnumeric = crate::codegen::Codegen::fns_called_with_nonnumeric_arg(&program.statements);
 
     // ---- S-0 + S-A: per top-level function, find numeric params and a return shape.
     for s in &program.statements {
@@ -2407,7 +2478,7 @@ pub fn analyze_aggregate(program: &Program) -> AggregateAnalysis {
                     }
                 }
             }
-            if !numeric_params.is_empty() {
+            if !numeric_params.is_empty() && !nonnumeric.contains(name.as_ref()) {
                 analysis.fn_numeric_params.insert(name.to_string(), numeric_params);
             }
             // S-A: a single all-f64 object-literal return shape ⇒ a struct alias.

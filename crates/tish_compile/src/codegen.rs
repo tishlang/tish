@@ -7520,6 +7520,157 @@ impl Codegen {
         }
     }
 
+    /// Names bound by a fn/arrow PARAMETER, a `for…of` loop var, or a `catch` param anywhere in `s`
+    /// (recursively, incl. nested fns, control flow, and arrow exprs). Complements
+    /// `collect_local_var_names` (`let`/`const`); together they are every name that can shadow a
+    /// top-level numeric global.
+    fn collect_binding_names(s: &Statement, out: &mut HashSet<String>) {
+        use Statement::*;
+        let mut ce = |x: &Expr, out: &mut HashSet<String>| Self::collect_arrow_params_expr(x, out);
+        match s {
+            FunDecl { params, body, .. } => {
+                for p in params {
+                    for n in p.bound_names() {
+                        out.insert(n.to_string());
+                    }
+                }
+                Self::collect_binding_names(body, out);
+            }
+            ForOf { name, iterable, body, .. } => {
+                out.insert(name.to_string());
+                ce(iterable, out);
+                Self::collect_binding_names(body, out);
+            }
+            Try { body, catch_param, catch_body, finally_body, .. } => {
+                if let Some(cp) = catch_param {
+                    out.insert(cp.to_string());
+                }
+                Self::collect_binding_names(body, out);
+                if let Some(c) = catch_body {
+                    Self::collect_binding_names(c, out);
+                }
+                if let Some(f) = finally_body {
+                    Self::collect_binding_names(f, out);
+                }
+            }
+            Block { statements, .. } | Multi { statements, .. } => {
+                statements.iter().for_each(|x| Self::collect_binding_names(x, out))
+            }
+            If { cond, then_branch, else_branch, .. } => {
+                ce(cond, out);
+                Self::collect_binding_names(then_branch, out);
+                if let Some(eb) = else_branch {
+                    Self::collect_binding_names(eb, out);
+                }
+            }
+            While { cond, body, .. } | DoWhile { body, cond, .. } => {
+                ce(cond, out);
+                Self::collect_binding_names(body, out);
+            }
+            For { init, cond, update, body, .. } => {
+                if let Some(i) = init {
+                    Self::collect_binding_names(i, out);
+                }
+                if let Some(c) = cond {
+                    ce(c, out);
+                }
+                if let Some(u) = update {
+                    ce(u, out);
+                }
+                Self::collect_binding_names(body, out);
+            }
+            VarDecl { init: Some(i), .. } => ce(i, out),
+            VarDeclDestructure { init, .. } => ce(init, out),
+            ExprStmt { expr, .. } => ce(expr, out),
+            Return { value: Some(v), .. } => ce(v, out),
+            Throw { value, .. } => ce(value, out),
+            Switch { expr, cases, default_body, .. } => {
+                ce(expr, out);
+                for (g, b) in cases {
+                    if let Some(ge) = g {
+                        ce(ge, out);
+                    }
+                    b.iter().for_each(|x| Self::collect_binding_names(x, out));
+                }
+                if let Some(d) = default_body {
+                    d.iter().for_each(|x| Self::collect_binding_names(x, out));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Collect arrow-function parameter names anywhere in an expression (recursively), so an arrow
+    /// param that shadows a top-level numeric global also disqualifies the global.
+    fn collect_arrow_params_expr(e: &Expr, out: &mut HashSet<String>) {
+        match e {
+            Expr::ArrowFunction { params, body, .. } => {
+                for p in params {
+                    for n in p.bound_names() {
+                        out.insert(n.to_string());
+                    }
+                }
+                match body {
+                    ArrowBody::Expr(x) => Self::collect_arrow_params_expr(x, out),
+                    ArrowBody::Block(b) => Self::collect_binding_names(b, out),
+                }
+            }
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                Self::collect_arrow_params_expr(callee, out);
+                for a in args {
+                    if let CallArg::Expr(x) | CallArg::Spread(x) = a {
+                        Self::collect_arrow_params_expr(x, out);
+                    }
+                }
+            }
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                Self::collect_arrow_params_expr(left, out);
+                Self::collect_arrow_params_expr(right, out);
+            }
+            Expr::Unary { operand, .. } => Self::collect_arrow_params_expr(operand, out),
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                Self::collect_arrow_params_expr(cond, out);
+                Self::collect_arrow_params_expr(then_branch, out);
+                Self::collect_arrow_params_expr(else_branch, out);
+            }
+            Expr::Index { object, index, .. } => {
+                Self::collect_arrow_params_expr(object, out);
+                Self::collect_arrow_params_expr(index, out);
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::collect_arrow_params_expr(object, out);
+                if let MemberProp::Expr(pe) = prop {
+                    Self::collect_arrow_params_expr(pe, out);
+                }
+            }
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. } => Self::collect_arrow_params_expr(value, out),
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(x) | ArrayElement::Spread(x) => {
+                            Self::collect_arrow_params_expr(x, out)
+                        }
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for pr in props {
+                    match pr {
+                        ObjectProp::KeyValue(_, x, _) | ObjectProp::Spread(x) => {
+                            Self::collect_arrow_params_expr(x, out)
+                        }
+                    }
+                }
+            }
+            Expr::TemplateLiteral { exprs, .. } => {
+                exprs.iter().for_each(|x| Self::collect_arrow_params_expr(x, out))
+            }
+            _ => {}
+        }
+    }
+
     fn collect_destruct_names(pattern: &DestructPattern, names: &mut HashSet<String>) {
         match pattern {
             DestructPattern::Array(elements) => {
@@ -11592,8 +11743,21 @@ impl Codegen {
     }
 
     /// #176 — `thread_local` static name for a native numeric global (`seed` → `G_SEED`).
+    /// A token-safe `G_*` static identifier for a tish global/module-const. `escape_ident` may return
+    /// a raw identifier (`r#fn` for the keyword `fn`), and `#` is NOT valid inside a larger identifier
+    /// (`G_R#FN` won't tokenize) — so strip the `r#` and scrub any non-word char before prefixing.
+    fn global_static_name(name: &str) -> String {
+        let esc = Self::escape_ident(name);
+        let raw = esc.strip_prefix("r#").unwrap_or(&esc);
+        let safe: String = raw
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+            .collect();
+        format!("G_{}", safe.to_uppercase())
+    }
+
     fn native_global_static(name: &str) -> String {
-        format!("G_{}", Self::escape_ident(name).to_uppercase())
+        Self::global_static_name(name)
     }
 
     /// Read a native numeric global from its `thread_local Cell<f64>`.
@@ -12542,7 +12706,7 @@ impl Codegen {
     }
 
     fn module_const_static(name: &str) -> String {
-        format!("G_{}", Self::escape_ident(name).to_uppercase())
+        Self::global_static_name(name)
     }
 
     fn module_const_array_static(
@@ -12561,7 +12725,17 @@ impl Codegen {
 
     /// Top-level `let xs = [1,2,3]` hoisted to `const G_XS` — resolve the Rust static name.
     fn module_const_f64_array_rust_ref(&self, name: &str) -> Option<String> {
-        if self.outer_vars_stack.len() != 1 {
+        // A module-level const f64 array is hoisted to a top-level `static`, so it resolves at ANY scope
+        // depth — including from inside a loop/block body (e.g. `[...srcArr]` nested in a for-loop). The
+        // old `depth == 1` guard wrongly returned None at depth > 1, leaving the name undeclared (build
+        // fail). The only case where the const must NOT win is when an inner local binding shadows the
+        // name; the candidate set already drops fn-local and reassigned names, and this checks the
+        // remaining case — a currently-live block-scoped local of the same name.
+        if self
+            .outer_vars_stack
+            .iter()
+            .any(|scope| scope.iter().any(|v| v == name))
+        {
             return None;
         }
         Self::module_const_array_static(
@@ -12679,15 +12853,23 @@ impl Codegen {
         if candidates.is_empty() {
             return HashMap::new();
         }
-        // Inner `let`/`const` with the same name disqualifies the global (shadowing).
+        // A top-level numeric global is hoisted to a `thread_local Cell`, and every read of that
+        // NAME lowers to the global cell. So ANY shadowing binding of the same name — a `let`/`const`
+        // in a nested scope (bare block, loop/if body, fn body), a fn/arrow PARAMETER, or a `for…of`
+        // loop var — would be mis-read as the global. Disqualify such names (the binding stays a
+        // normal scoped local). Earlier this only scanned `FunDecl` bodies, so block-shadows and
+        // params silently read the global (scopes.tish / control_flow_nested / nested_complex).
+        let mut shadow: HashSet<String> = HashSet::new();
         for s in stmts {
-            if let Statement::FunDecl { body, .. } = s {
-                let mut inner = HashSet::new();
-                Self::collect_local_var_names(body, &mut inner);
-                for n in inner {
-                    candidates.remove(&n);
-                }
+            // Skip the top-level candidate decls themselves; everything else's bindings shadow.
+            match s {
+                Statement::VarDecl { .. } | Statement::VarDeclDestructure { .. } => {}
+                _ => Self::collect_local_var_names(s, &mut shadow),
             }
+            Self::collect_binding_names(s, &mut shadow);
+        }
+        for n in &shadow {
+            candidates.remove(n);
         }
         let globals: HashSet<String> = candidates.keys().cloned().collect();
         let empty_p = HashSet::new();
@@ -13146,6 +13328,15 @@ impl Codegen {
                 }
             }
         }
+        // Soundness: a candidate called ANYWHERE with a provably-non-numeric argument (a
+        // string/bool/null literal, a template literal, or an array/object literal) cannot be a
+        // native `f64`-param fn — the generated Rust would mistype the arg (a `String` is not an
+        // `f64`), and even coerced it would compute on NaN where JS keeps the value or does string
+        // `+`. E.g. `fn shadowParam(SHARED){return SHARED}` called as `shadowParam("arg")` must stay
+        // boxed. Drop such candidates BEFORE the fixpoint so it cascades to their native callers.
+        for f in Self::fns_called_with_nonnumeric_arg(statements) {
+            cand.remove(&f);
+        }
         loop {
             let mut remove: Vec<String> = Vec::new();
             for &(name, params, body) in &decls {
@@ -13175,6 +13366,186 @@ impl Codegen {
             }
         }
         cand
+    }
+
+    /// Fns called ANYWHERE in the program with a provably-non-numeric argument (a `String`/`Bool`/
+    /// `Null` literal, a template literal, or an array/object literal). Such a fn cannot be soundly
+    /// native-promoted to `f64` params — not as an M5 native free fn (`collect_native_fns`) NOR via
+    /// an M4/M1 `: number` param shadow (`infer::param_infer`). Walks every statement (incl. nested
+    /// fn bodies) and expression.
+    pub(crate) fn fns_called_with_nonnumeric_arg(
+        statements: &[Statement],
+    ) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        for s in statements {
+            Self::scan_stmt_nonnum_calls(s, &mut out);
+        }
+        out
+    }
+
+    fn arg_is_nonnumeric(e: &Expr) -> bool {
+        match e {
+            Expr::Literal {
+                value: Literal::String(_) | Literal::Bool(_) | Literal::Null,
+                ..
+            }
+            | Expr::TemplateLiteral { .. }
+            | Expr::Array { .. }
+            | Expr::Object { .. } => true,
+            // A `+` with a string/template operand is JS string concatenation → a string result
+            // (e.g. `"user" + i`). Conservatively treat such a call arg as non-numeric.
+            Expr::Binary { op: BinOp::Add, left, right, .. } => {
+                Self::arg_is_nonnumeric(left) || Self::arg_is_nonnumeric(right)
+            }
+            _ => false,
+        }
+    }
+
+    fn scan_stmt_nonnum_calls(s: &Statement, out: &mut std::collections::HashSet<String>) {
+        use Statement::*;
+        match s {
+            Block { statements, .. } | Multi { statements, .. } => {
+                statements.iter().for_each(|x| Self::scan_stmt_nonnum_calls(x, out))
+            }
+            VarDecl { init: Some(i), .. } => Self::scan_expr_nonnum_calls(i, out),
+            VarDeclDestructure { init, .. } => Self::scan_expr_nonnum_calls(init, out),
+            ExprStmt { expr, .. } => Self::scan_expr_nonnum_calls(expr, out),
+            If { cond, then_branch, else_branch, .. } => {
+                Self::scan_expr_nonnum_calls(cond, out);
+                Self::scan_stmt_nonnum_calls(then_branch, out);
+                if let Some(eb) = else_branch {
+                    Self::scan_stmt_nonnum_calls(eb, out);
+                }
+            }
+            While { cond, body, .. } | DoWhile { body, cond, .. } => {
+                Self::scan_expr_nonnum_calls(cond, out);
+                Self::scan_stmt_nonnum_calls(body, out);
+            }
+            For { init, cond, update, body, .. } => {
+                if let Some(i) = init {
+                    Self::scan_stmt_nonnum_calls(i, out);
+                }
+                if let Some(c) = cond {
+                    Self::scan_expr_nonnum_calls(c, out);
+                }
+                if let Some(u) = update {
+                    Self::scan_expr_nonnum_calls(u, out);
+                }
+                Self::scan_stmt_nonnum_calls(body, out);
+            }
+            ForOf { iterable, body, .. } => {
+                Self::scan_expr_nonnum_calls(iterable, out);
+                Self::scan_stmt_nonnum_calls(body, out);
+            }
+            Return { value: Some(v), .. } => Self::scan_expr_nonnum_calls(v, out),
+            Throw { value, .. } => Self::scan_expr_nonnum_calls(value, out),
+            Switch { expr, cases, default_body, .. } => {
+                Self::scan_expr_nonnum_calls(expr, out);
+                for (g, body) in cases {
+                    if let Some(ge) = g {
+                        Self::scan_expr_nonnum_calls(ge, out);
+                    }
+                    body.iter().for_each(|x| Self::scan_stmt_nonnum_calls(x, out));
+                }
+                if let Some(d) = default_body {
+                    d.iter().for_each(|x| Self::scan_stmt_nonnum_calls(x, out));
+                }
+            }
+            Try { body, catch_body, finally_body, .. } => {
+                Self::scan_stmt_nonnum_calls(body, out);
+                if let Some(c) = catch_body {
+                    Self::scan_stmt_nonnum_calls(c, out);
+                }
+                if let Some(f) = finally_body {
+                    Self::scan_stmt_nonnum_calls(f, out);
+                }
+            }
+            FunDecl { body, .. } => Self::scan_stmt_nonnum_calls(body, out),
+            Export { declaration, .. } => match declaration.as_ref() {
+                tishlang_ast::ExportDeclaration::Named(inner) => {
+                    Self::scan_stmt_nonnum_calls(inner, out)
+                }
+                tishlang_ast::ExportDeclaration::Default(ex) => {
+                    Self::scan_expr_nonnum_calls(ex, out)
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn scan_expr_nonnum_calls(e: &Expr, out: &mut std::collections::HashSet<String>) {
+        match e {
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    if args
+                        .iter()
+                        .any(|a| matches!(a, CallArg::Expr(ae) if Self::arg_is_nonnumeric(ae)))
+                    {
+                        out.insert(name.to_string());
+                    }
+                }
+                Self::scan_expr_nonnum_calls(callee, out);
+                for a in args {
+                    if let CallArg::Expr(x) | CallArg::Spread(x) = a {
+                        Self::scan_expr_nonnum_calls(x, out);
+                    }
+                }
+            }
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                Self::scan_expr_nonnum_calls(left, out);
+                Self::scan_expr_nonnum_calls(right, out);
+            }
+            Expr::Unary { operand, .. } => Self::scan_expr_nonnum_calls(operand, out),
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                Self::scan_expr_nonnum_calls(cond, out);
+                Self::scan_expr_nonnum_calls(then_branch, out);
+                Self::scan_expr_nonnum_calls(else_branch, out);
+            }
+            Expr::Index { object, index, .. } => {
+                Self::scan_expr_nonnum_calls(object, out);
+                Self::scan_expr_nonnum_calls(index, out);
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                Self::scan_expr_nonnum_calls(object, out);
+                Self::scan_expr_nonnum_calls(index, out);
+                Self::scan_expr_nonnum_calls(value, out);
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::scan_expr_nonnum_calls(object, out);
+                if let MemberProp::Expr(pe) = prop {
+                    Self::scan_expr_nonnum_calls(pe, out);
+                }
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                Self::scan_expr_nonnum_calls(object, out);
+                Self::scan_expr_nonnum_calls(value, out);
+            }
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. } => Self::scan_expr_nonnum_calls(value, out),
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(x) | ArrayElement::Spread(x) => {
+                            Self::scan_expr_nonnum_calls(x, out)
+                        }
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for pr in props {
+                    match pr {
+                        ObjectProp::KeyValue(_, x, _) | ObjectProp::Spread(x) => {
+                            Self::scan_expr_nonnum_calls(x, out)
+                        }
+                    }
+                }
+            }
+            Expr::TemplateLiteral { exprs, .. } => {
+                exprs.iter().for_each(|x| Self::scan_expr_nonnum_calls(x, out))
+            }
+            _ => {}
+        }
     }
 
     /// Numeric locals in an M5-eligible fn body (params + fixpoint literal/copy seeds).
@@ -14244,6 +14615,10 @@ impl Codegen {
     ) -> std::collections::HashMap<String, NativeVecFnSig> {
         use std::collections::HashMap;
         let mut sigs: HashMap<String, NativeVecFnSig> = HashMap::new();
+        // Soundness: a fn called anywhere with a provably-non-numeric arg must not become a native-vec
+        // fn either — its scalar params would be typed `f64` and mistype the arg (e.g. `fn rec(m){
+        // log.push(m) }` called `rec("ran")`). Same gate the M4/M5/S-0 paths use.
+        let nonnumeric = Self::fns_called_with_nonnumeric_arg(&program.statements);
         for s in &program.statements {
             if let Statement::FunDecl {
                 async_: false,
@@ -14254,6 +14629,9 @@ impl Codegen {
                 ..
             } = s
             {
+                if nonnumeric.contains(name.as_ref()) {
+                    continue;
+                }
                 if let Some(sig) = Self::infer_vec_fn_sig(params, body) {
                     let has_array_param = sig
                         .params
@@ -14297,6 +14675,12 @@ impl Codegen {
                 } = s
                 {
                     if sigs.contains_key(name.as_ref()) {
+                        continue;
+                    }
+                    // Same soundness gate as the initial pass: the forwarding fixpoint must also refuse
+                    // a fn called with a non-numeric arg, or `body_uses_local_vec_ops` re-adds it here
+                    // (e.g. `fn rec(m){ log.push(m) }` called `rec("ran")`).
+                    if nonnumeric.contains(name.as_ref()) {
                         continue;
                     }
                     if let Some(sig) = Self::infer_vec_fn_sig_forwarding(params, body, &sigs) {
@@ -15179,20 +15563,13 @@ impl Codegen {
         let saved_array_elem = self.array_elem_ranges.clone();
         let saved_int_valued = self.int_valued_locals.clone();
         let body_slice = Self::fn_body_stmt_slice(body);
-        if let Some(lp) = sig.params.iter().find_map(|(name, kind)| {
-            matches!(kind, VecParamKind::Scalar).then(|| name.clone())
-        }) {
-            for (pname, kind) in &sig.params {
-                if matches!(kind, VecParamKind::Array { .. }) {
-                    let bound = if pname.starts_with("diag") {
-                        BoundKey::TwiceVar(lp.clone())
-                    } else {
-                        BoundKey::Var(lp.clone())
-                    };
-                    self.vec_fixed_len.insert(pname.clone(), bound);
-                }
-            }
-        }
+        // Soundness (#203): we must NOT assume an array param's length equals the first scalar param.
+        // That blind `vec_fixed_len[arr] = Var(lp)` made `index_in_bounds(i<lp)` trust raw `arr[i]`,
+        // which panics when a caller passes a shorter array than the scalar (`sumArr([10,20,30], 5)`).
+        // Without a registered bound, array-param reads fall to the OOB-safe `.get().unwrap_or(NAN)`
+        // path — same bounds check, NaN instead of panic, matching the boxed null→NaN semantics. The
+        // length relationship is only sound when proven at every call site, which the generic native-vec
+        // path cannot establish, so we leave array params unbounded here.
         self.merge_fn_body_inference(body_slice);
         let saved_i32_vec = self.int_i32_vec_locals.clone();
         self.int_i32_vec_locals = Self::detect_fannkuch_i32_vec_locals(body_slice);

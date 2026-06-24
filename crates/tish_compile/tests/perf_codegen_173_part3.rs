@@ -33,10 +33,12 @@ fn nsieve_inbounds_store_and_read_elide_their_guards() {
         "in-bounds read should be a direct index:\n{}",
         rust.lines().filter(|l| l.contains("isPrime")).take(8).collect::<Vec<_>>().join("\n")
     );
-    // Store: direct index, NO `resize` grow branch.
+    // Store: direct index, NO `resize` grow branch. The strided `isPrime[k] = false` is a discarded
+    // statement, so it lowers to the bare side-effect form (no `{ …; Value::Null }` value wrapper);
+    // the point is it is a direct indexed store, not a resize-grow.
     assert!(
-        rust.contains("{ isPrime[(k) as usize] = false; Value::Null }"),
-        "in-bounds store should skip the resize-grow branch:\n{}",
+        rust.contains("isPrime[(k) as usize] = false;"),
+        "in-bounds store should be a direct indexed store (no resize-grow branch):\n{}",
         rust.lines().filter(|l| l.contains("isPrime")).take(8).collect::<Vec<_>>().join("\n")
     );
     assert!(
