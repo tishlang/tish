@@ -11,17 +11,6 @@ use tishlang_parser::parse;
 
 /// Enable every dark-shipped typed-native flag, matching `scripts/run_perf_gauntlet.sh`.
 fn enable_typed_flags() {
-    for k in [
-        "TISH_PARAM_NATIVE",
-        "TISH_PARAM_INFER",
-        "TISH_NATIVE_FN",
-        "TISH_STRUCT_INFER",
-        "TISH_FUSED_HOF",
-        "TISH_NATIVE_HOF",
-        "TISH_AGGREGATE_INFER",
-    ] {
-        std::env::set_var(k, "1");
-    }
 }
 
 fn compile_typed(src: &str) -> String {

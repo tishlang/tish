@@ -23,19 +23,10 @@ command -v node >/dev/null 2>&1 || { echo "missing node"; exit 1; }
 TISH="${TISH_BIN:-target/release/tish}"
 [[ -x "$TISH" ]] || { echo "no tish at $TISH (cargo build -p tishlang --release)"; exit 1; }
 
-# Every dark-shipped typed-native flag — keep this in lockstep with docs/type-system-roadmap.md.
-TYPED_FLAGS=(
-  TISH_PARAM_NATIVE=1   # M1 annotated scalar params
-  TISH_PARAM_INFER=1    # M4 numeric param inference
-  TISH_NATIVE_FN=1      # M5 native monomorphic fns
-  TISH_STRUCT_INFER=1   # struct / array-literal inference
-  TISH_FUSED_HOF=1      # fused reduce over a boxed array
-  TISH_NATIVE_HOF=1     # native reduce/map/filter/some/every over a `number[]` (Vec<f64>)
-  TISH_AGGREGATE_INFER=1 # #177 S-0..S-C aggregate (interprocedural struct) inference front-end
-  TISH_REC_STRUCT=1      # #178 recursive-struct arena lowering (binary_trees native, no fixture kernel)
-  TISH_NATIVE_ARR_PARAM=1 # #320 read-only number[] params unboxed to native Vec<f64> (k_nucleotide)
-  TISH_PACKED_ARRAYS=1   # packed Float64Array-backed number arrays (native Vec<f64>, boxed-fallback)
-)
+# The native typed-codegen optimizations are ON BY DEFAULT now (no per-pass flags). So `typed` is
+# just a plain `tish build`, and `boxed` is the SAME build with the whole stack disabled via the one
+# escape hatch `TISH_NATIVE_OPT=0`. This A/B (typed vs boxed vs node) is the soundness differential.
+BOXED_ENV=(TISH_NATIVE_OPT=0)
 
 RUNS=3; NO_BUILD=0; STRICT=0; ONLY=()
 while [[ $# -gt 0 ]]; do
@@ -75,15 +66,13 @@ for tish_src in tests/perf/*.tish; do
   bin_on="/tmp/gauntlet_${name}_typed"
   bin_off="/tmp/gauntlet_${name}_boxed"
   if [[ "$NO_BUILD" -eq 0 ]]; then
-    # typed(on): all typed-native flags set.
-    if ! env "${TYPED_FLAGS[@]}" "$TISH" build "$tish_src" -o "$bin_on" \
+    # typed(on): the default build — native typed-codegen optimizations are on by default, no env.
+    if ! "$TISH" build "$tish_src" -o "$bin_on" \
         --target native --native-backend rust >/dev/null 2>&1; then
       rows+=("${name}|-|BUILD-FAIL|-|-|-"); total=$((total + 1)); sound_fail=$((sound_fail + 1)); continue
     fi
-    # boxed(off): same source + backend, every typing flag unset (the dynamic Value baseline).
-    if ! env -u TISH_PARAM_NATIVE -u TISH_PARAM_INFER -u TISH_NATIVE_FN -u TISH_STRUCT_INFER \
-            -u TISH_FUSED_HOF -u TISH_NATIVE_HOF -u TISH_AGGREGATE_INFER -u TISH_REC_STRUCT \
-            -u TISH_NATIVE_ARR_PARAM -u TISH_PACKED_ARRAYS "$TISH" build "$tish_src" -o "$bin_off" \
+    # boxed(off): same source + backend, whole native-opt stack disabled (the dynamic Value baseline).
+    if ! env "${BOXED_ENV[@]}" "$TISH" build "$tish_src" -o "$bin_off" \
         --target native --native-backend rust >/dev/null 2>&1; then
       rows+=("${name}|BUILD-FAIL|-|-|-|-"); total=$((total + 1)); sound_fail=$((sound_fail + 1)); continue
     fi

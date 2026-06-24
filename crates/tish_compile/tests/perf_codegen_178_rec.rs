@@ -1,4 +1,4 @@
-//! #178 — recursive-struct native lowering (behind `TISH_REC_STRUCT`).
+//! #178 — recursive-struct native lowering.
 //!
 //! A developer-shaped recursive binary tree (arbitrary identifiers, NOT the fixture names
 //! bottomUpTree/itemCheck/binaryTrees) must lower to a native arena: an `i32`-indexed struct,
@@ -12,18 +12,6 @@ use std::path::PathBuf;
 use tishlang_compile::compile_project_full;
 
 fn enable_flags() {
-    for k in [
-        "TISH_PARAM_NATIVE",
-        "TISH_PARAM_INFER",
-        "TISH_NATIVE_FN",
-        "TISH_STRUCT_INFER",
-        "TISH_FUSED_HOF",
-        "TISH_NATIVE_HOF",
-        "TISH_AGGREGATE_INFER",
-        "TISH_REC_STRUCT",
-    ] {
-        std::env::set_var(k, "1");
-    }
 }
 
 const SRC: &str = r#"

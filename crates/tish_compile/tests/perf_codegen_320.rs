@@ -12,17 +12,6 @@ use tishlang_compile::compile_project_full;
 
 /// The general typed-native inference flags.
 fn enable_typed_flags() {
-    for k in [
-        "TISH_PARAM_NATIVE",
-        "TISH_PARAM_INFER",
-        "TISH_NATIVE_FN",
-        "TISH_STRUCT_INFER",
-        "TISH_FUSED_HOF",
-        "TISH_NATIVE_HOF",
-        "TISH_AGGREGATE_INFER",
-    ] {
-        std::env::set_var(k, "1");
-    }
 }
 
 /// Write `src` under the workspace `target/` (scratch lives there, per repo convention) and compile.
@@ -104,14 +93,11 @@ console.log("R " + sum)
     );
 }
 
-/// #320 part 2 (TISH_NATIVE_ARR_PARAM): a read-only `number[]` param of a normal (boxed-body,
-/// boxed-return) fn is unboxed once into an owned native `Vec<f64>`, so the body indexes it
-/// natively. This is the cross-fn-boundary lever — `kNucleotide(seq, k)` indexes `seq` but builds
-/// & returns a boxed Map, so it is NOT a native-vec fn.
-fn enable_arr_param() {
-    enable_typed_flags();
-    std::env::set_var("TISH_NATIVE_ARR_PARAM", "1");
-}
+/// #320 part 2: a read-only `number[]` param of a normal (boxed-body, boxed-return) fn is unboxed
+/// once into an owned native `Vec<f64>`, so the body indexes it natively. This is the
+/// cross-fn-boundary lever — `kNucleotide(seq, k)` indexes `seq` but builds & returns a boxed Map,
+/// so it is NOT a native-vec fn.
+fn enable_arr_param() {}
 
 const ARR_PARAM: &str = r#"
 let seed = 7

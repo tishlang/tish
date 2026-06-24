@@ -12,17 +12,6 @@ use tishlang_compile::compile;
 use tishlang_parser::parse;
 
 fn enable_typed_flags() {
-    for k in [
-        "TISH_PARAM_NATIVE",
-        "TISH_PARAM_INFER",
-        "TISH_NATIVE_FN",
-        "TISH_STRUCT_INFER",
-        "TISH_FUSED_HOF",
-        "TISH_NATIVE_HOF",
-        "TISH_AGGREGATE_INFER",
-    ] {
-        std::env::set_var(k, "1");
-    }
 }
 
 /// FNV-style hash loop: the canonical bitwise hot loop. The accumulator `h` lives in an i32 register

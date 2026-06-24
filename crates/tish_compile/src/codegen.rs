@@ -1745,7 +1745,7 @@ impl Codegen {
         }
         // M5 (dark-shipped behind TISH_NATIVE_FN): emit a parallel native `fn f_native` for each
         // eligible top-level numeric fn at top level; direct calls route to it in emit_typed_expr.
-        if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+        if crate::native_opts_enabled() {
             self.native_numeric_globals =
                 Self::collect_native_numeric_globals(&program.statements);
             if !self.native_numeric_globals.is_empty() {
@@ -1787,21 +1787,21 @@ impl Codegen {
         // aggregate fns into native Rust free fns operating on an unboxed `Vec<TishStruct_alias>`
         // threaded by reference. Computed + emitted here (before `run()`); if any fn can't be
         // lowered the whole path is disabled and we fall back to the boxed closures unchanged.
-        if std::env::var("TISH_AGGREGATE_INFER").map(|v| v != "0").unwrap_or(false) {
+        if crate::native_opts_enabled() {
             self.setup_aggregate_fns(program);
         }
         // #178 (behind TISH_REC_STRUCT): de-virtualize recursive-struct builders/consumers into
         // native free fns over `Option<Box<T>>` structs (the real binary_trees fix). Structural,
         // name-independent; emits before `run()` with scratch-buffer rollback so any unsupported
         // construct cleanly disables the path and falls back to the boxed closures unchanged.
-        if std::env::var("TISH_REC_STRUCT").map(|v| v != "0").unwrap_or(false) {
+        if crate::native_opts_enabled() {
             self.setup_rec_struct_plan(program);
         }
         // #175 (behind TISH_NATIVE_FN): de-virtualize fns over plain `number[]`/`boolean[]` params
         // into native free fns threaded by `&/&mut Vec<T>` (spectral_norm / queens). Runs after the
         // aggregate path so it can skip any fn that path already claimed; emits before `run()` with
         // its own scratch-buffer rollback so a failure leaves the boxed closures untouched.
-        if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+        if crate::native_opts_enabled() {
             // #175 inline: numeric leaf fns (e.g. spectral_norm's `evalA`) inlined at native-f64 call
             // sites. Detect before native-vec so a native-vec body's call to one inlines (no boxed
             // reference). The boxed closure is left intact for any non-f64 callers.
@@ -1812,7 +1812,7 @@ impl Codegen {
         // those params unboxed to native owned `Vec<f64>` (boxed body + boxed return otherwise), so
         // `seq[i+j]` indexes natively. The SAME pure detection infer reads to keep the caller's array
         // `number[]`, so the two never disagree about which args pass as native arrays.
-        if std::env::var("TISH_NATIVE_ARR_PARAM").map(|v| v != "0").unwrap_or(false) {
+        if crate::native_opts_enabled() {
             self.native_arr_param_fns = Self::native_arr_param_fns(program);
         }
         // Soundness pass — must run after type aliases + `native_fns` are known (both feed the
@@ -4944,7 +4944,7 @@ impl Codegen {
                 // bool/String — so the body lowers it like a native local. Conservative: only
                 // simple params, native-scalar annotation, no default value.
                 let param_native =
-                    std::env::var("TISH_PARAM_NATIVE").map(|v| v != "0").unwrap_or(false);
+                    crate::native_opts_enabled();
                 // A param referenced by ANY sibling default expr (e.g. `(a, b = a + 1)`) must NOT
                 // get a native f64 shadow: the default binding is emitted on the boxed Value path
                 // (`ops::add(&a, …)` expects `&Value`), so a native `a: f64` would mistype the
@@ -5790,7 +5790,7 @@ impl Codegen {
                             // runtime Value op the closure body would, eliminating the per-element
                             // `value_call`. Sound (identical Value semantics, incl. string `+`).
                             // Requires an explicit init; anything else falls back to array_reduce.
-                            if std::env::var("TISH_FUSED_HOF").is_ok() && args.len() == 2 {
+                            if crate::native_opts_enabled() && args.len() == 2 {
                                 if let Some(fold) =
                                     self.try_fused_reduce(args, &obj_expr, &initial)?
                                 {
@@ -11527,7 +11527,7 @@ impl Codegen {
         args: &[CallArg],
         env: &HashMap<String, RustType>,
     ) -> Option<RustType> {
-        if std::env::var("TISH_NATIVE_HOF").is_err() {
+        if !crate::native_opts_enabled() {
             return None;
         }
         let Expr::Member {
@@ -18598,7 +18598,7 @@ impl Codegen {
         callee: &Expr,
         args: &[CallArg],
     ) -> Result<Option<(String, RustType)>, CompileError> {
-        if std::env::var("TISH_NATIVE_HOF").is_err() {
+        if !crate::native_opts_enabled() {
             return Ok(None);
         }
         let Expr::Member {

@@ -10,6 +10,16 @@ mod types;
 
 pub use check::{check_program, TypeDiagnostic};
 
+/// The native typed-codegen optimizations — numeric param inference, struct/aggregate inference,
+/// native (monomorphic) free fns, native-vec params, recursive-struct arena lowering, fused/native
+/// higher-order fns, and native `number[]` params — are **ON BY DEFAULT**. There are no per-pass
+/// flags anymore: that per-flag gating caused repeated "did I set all of them?" drift between the
+/// gauntlet, manual builds, and CI. The single escape hatch `TISH_NATIVE_OPT=0` turns the whole
+/// stack off — used only by the gauntlet's boxed A/B baseline and to bisect a suspected miscompile.
+pub(crate) fn native_opts_enabled() -> bool {
+    std::env::var("TISH_NATIVE_OPT").map(|v| v != "0").unwrap_or(true)
+}
+
 /// How generated Rust is linked (desktop binary vs embedded iOS staticlib).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NativeEmitMode {

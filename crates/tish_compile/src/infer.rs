@@ -199,7 +199,7 @@ pub fn infer_program(program: &Program) -> Program {
     // param types — otherwise they fall back to boxed `Value` and the whole hot loop boxes with
     // them (the difference between an idiomatic numeric fn going native vs staying boxed).
     // Conservative — any non-numeric / write / escape use bails (param stays boxed Value).
-    let p = if std::env::var("TISH_PARAM_INFER").map(|v| v != "0").unwrap_or(false) {
+    let p = if crate::native_opts_enabled() {
         param_infer_program(program.clone())
     } else {
         program.clone()
@@ -214,7 +214,7 @@ pub fn infer_program(program: &Program) -> Program {
     // backend emits unboxed structs with direct field access. Conservative —
     // only applies when every use of the binding is a literal-key field read,
     // so it can never miscompile (any uncertainty falls back to boxed Value).
-    let p = if std::env::var("TISH_STRUCT_INFER").map(|v| v != "0").unwrap_or(false) {
+    let p = if crate::native_opts_enabled() {
         struct_infer_program(p)
     } else {
         p
@@ -230,7 +230,7 @@ pub fn infer_program(program: &Program) -> Program {
     // until those land this pass only emits the annotations the existing codegen backs SOUNDLY
     // (the S-0 scalar `: number` params, identical to the M4 mechanism) plus the inert struct
     // alias decls. See `aggregate_infer_program`.
-    if std::env::var("TISH_AGGREGATE_INFER").map(|v| v != "0").unwrap_or(false) {
+    if crate::native_opts_enabled() {
         aggregate_infer_program(p)
     } else {
         p
@@ -1101,7 +1101,7 @@ fn struct_infer_program(program: Program) -> Program {
     // #175: tell the mutable-array co-inference which fns take native `&/&mut Vec` array params, so
     // forwarding an array into one isn't treated as a boxing escape (lets the caller's array stay
     // unboxed). Same AST-only detection codegen uses, so the two never disagree.
-    if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+    if crate::native_opts_enabled() {
         for (fname, sig) in crate::codegen::Codegen::detect_native_vec_fns(&program) {
             let flags: Vec<bool> = sig
                 .params
@@ -1118,7 +1118,7 @@ fn struct_infer_program(program: Program) -> Program {
     // via the call sites, which of these it may actually UNBOX (`native_arr_param_fns`); a fn it
     // can't prove simply stays a fully boxed closure. Runs pre-`si_block`, so it must not rely on
     // `number[]` stamps — `arr_param_readonly_fns` only inspects each fn's own body.
-    if std::env::var("TISH_NATIVE_ARR_PARAM").map(|v| v != "0").unwrap_or(false) {
+    if crate::native_opts_enabled() {
         for (fname, flags) in crate::codegen::Codegen::arr_param_readonly_fns(&program) {
             ctx.native_vec_array_params.insert(fname, flags);
         }
