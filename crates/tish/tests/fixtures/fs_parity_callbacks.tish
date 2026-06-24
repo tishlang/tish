@@ -1,0 +1,22 @@
+// Issue #122: Node callback form on the VM — `fs.writeFile(path, data, (err) => …)` and
+// `fs.readFile(path, (err, data) => …)`, with (err, data) semantics and a non-null err on a
+// missing file. Operates under $FS_TMP.
+import { writeFile, readFile, stat, unlink } from "node:fs"
+import { process } from "tish:process"
+
+let d = process.env.FS_TMP
+writeFile(d + "/cb.txt", "callback data", (err) => {
+  console.log("write-err-null=" + String(err === null))
+  readFile(d + "/cb.txt", (err2, data) => {
+    console.log("read=" + data)
+    stat(d + "/cb.txt", (err3, st) => {
+      console.log("size=" + String(st.size) + ",file=" + String(st.isFile()))
+      unlink(d + "/cb.txt", (err4) => {
+        console.log("unlink-err-null=" + String(err4 === null))
+      })
+    })
+  })
+})
+readFile(d + "/missing.txt", (err, data) => {
+  console.log("missing-err-set=" + String(!(err === null)) + ",data-null=" + String(data === null))
+})

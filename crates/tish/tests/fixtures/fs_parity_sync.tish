@@ -1,0 +1,20 @@
+// Issue #122: Node-compatible fs sync surface via `node:fs`. Operates under $FS_TMP.
+import { writeFileSync, readFileSync, existsSync, statSync, mkdirSync, readdirSync, renameSync, rmSync, appendFileSync, copyFileSync, constants } from "node:fs"
+import { process } from "tish:process"
+
+let d = process.env.FS_TMP
+writeFileSync(d + "/a.txt", "hi")
+appendFileSync(d + "/a.txt", "!")
+console.log("read=" + readFileSync(d + "/a.txt"))
+console.log("exists=" + String(existsSync(d + "/a.txt")) + "," + String(existsSync(d + "/no")))
+let st = statSync(d + "/a.txt")
+console.log("size=" + String(st.size) + ",file=" + String(st.isFile()) + ",dir=" + String(st.isDirectory()))
+mkdirSync(d + "/sub")
+copyFileSync(d + "/a.txt", d + "/sub/x.txt")
+console.log("dir=" + readdirSync(d + "/sub").join(","))
+renameSync(d + "/a.txt", d + "/b.txt")
+console.log("renamed=" + String(existsSync(d + "/a.txt")) + "," + String(existsSync(d + "/b.txt")))
+rmSync(d + "/sub", { recursive: true })
+console.log("rm=" + String(existsSync(d + "/sub")))
+console.log("const=" + String(constants.R_OK))
+console.log("done")
