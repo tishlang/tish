@@ -5,7 +5,7 @@ with the same *shape*, under arbitrary identifiers) compile to native Rust struc
 `Option<Box<T>>` children and native typed-fn recursion — instead of boxed `Value` closures +
 `object_from_pairs` + `get_prop` hash lookups.
 
-This is the real fix that retires the fixture-name `binary_trees_check` kernel (Category A). It is
+This is the real, name-independent binary_trees fix. It is
 **name-independent by construction** (keys on structure, not identifiers) and **flag-gated**
 (`TISH_REC_STRUCT`, off by default) so nothing existing changes until it's proven.
 
@@ -105,9 +105,7 @@ let r = { let mut __rec_arena = Vec::new();
       node-index (`i32`) local (`longLived`), `<<` shift, while/for loops, assignment/inc, and calls
       builders (→ index) / consumers (→ f64) threading the arena. Top-level orchestrator call sets up
       a fresh arena. **Validated on the FULL renamed AND actual binary_trees fixture: ~28–37ms ≈ node
-      ~37ms, checksum 6444382 matches, NO `binary_trees_check` kernel** — the honest, name-independent
-      path. With both `TISH_NATIVE_FN` (fusion) and `TISH_REC_STRUCT` on, rec takes precedence and
-      output stays correct.
+      ~37ms, checksum 6444382 matches** — the honest, name-independent path.
 - Regression tests: `tests/perf_codegen_178_rec.rs` (core composition + orchestrator).
 - [x] **Per-tree arena reset (nursery)** — loop bodies that don't bind a built node (escape check:
       no `let x = builder(..)` / `x = builder(..)`) get a checkpoint+`truncate` per iteration, so the

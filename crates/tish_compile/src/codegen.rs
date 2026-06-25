@@ -607,13 +607,6 @@ pub fn compile_project_full_emit(
                 span: None,
             },
         )?;
-    if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false)
-        && Codegen::program_matches_json_doc_roundtrip(&merged.program.statements)
-    {
-        native_build.rust_dependencies_toml.push_str(
-            "serde = { version = \"1\", features = [\"derive\"] }\nserde_json = \"1\"\n",
-        );
-    }
     let mut all_features: Vec<String> = features.to_vec();
     for f in resolve::extract_native_import_features(&merged.program) {
         if !all_features.contains(&f) {
@@ -782,8 +775,7 @@ struct AggFnSig {
 /// #178 (behind `TISH_REC_STRUCT`): a recursive struct shape inferred *structurally* (no name
 /// matching) from object literals whose fields are either scalars or recursive self-references.
 /// Drives native lowering of tree/list builders and consumers to `Option<Box<T>>` + native fns —
-/// the real fix that retires the fixture-name `binary_trees_check` kernel. See
-/// docs/recursive-struct-native.md.
+/// the real, name-independent binary_trees lowering. See docs/recursive-struct-native.md.
 #[derive(Debug, Clone)]
 struct RecStructPlan {
     /// Synthesised Tish alias name (the Rust struct is `TishStruct_<alias>`).
@@ -818,6 +810,11 @@ struct ParamUse {
     elem_bool: bool,
     numeric: bool,
     escaped: bool,
+    /// #320 — the bare param was passed as a direct call argument (`f(p)`). The native-vec path
+    /// allows this (re-borrow into a callee), but the arr-param owned-copy path must NOT: the callee
+    /// could mutate the array, and a write to the caller's array would be lost on the owned copy.
+    /// `classify_vec_param` ignores this field; only `native_arr_param_fns` reads it.
+    forwarded: bool,
 }
 
 /// #175 — kind of one parameter of a native-vec free fn (spectral_norm/queens shape).
@@ -917,17 +914,6 @@ pub(crate) struct Codegen {
     module_const_f64_cum: std::collections::HashMap<String, String>,
     /// Locals aliased to a module const array (`cum` → `G_probs_cum` after `let cum = cumulative(probs)`).
     module_const_f64_aliases: std::collections::HashMap<String, String>,
-    /// #179: `let objs = makeObjs()` where `makeObjs` only pushes object literals with a numeric
-    /// `value` field — megamorphic.tish. Hot `.value` reads route through `G_objs_MEGA_VALUES`.
-    megamorphic_value_tables: std::collections::HashMap<String, Vec<f64>>,
-    /// Sum locals updated only via `sum = sum + objs[…].value` in the megamorphic loop — keep `f64`.
-    megamorphic_native_sums: std::collections::HashSet<String>,
-    /// #180: json_roundtrip `buildDoc` → native `TishJsonDoc` + fast stringify/parse/read path.
-    json_doc_plan: Option<JsonDocPlan>,
-    /// GAUNTLET `k_nucleotide.tish`: fused LCG + i32 k-mer count kernel (`tish_k_nucleotide_check`).
-    k_nucleotide_plan: Option<KMerPlan>,
-    /// GAUNTLET `binary_trees.tish`: arena-backed tree kernel (`tish_binary_trees_check`).
-    binary_trees_plan: Option<BinaryTreesPlan>,
     /// #181: locals initialized with `new Map()` — direct `map_has`/`get`/`set`/`values` dispatch.
     map_instance_locals: std::collections::HashSet<String>,
     /// M5 (dark-shipped behind `TISH_NATIVE_FN`): top-level functions eligible for a parallel
@@ -956,6 +942,13 @@ pub(crate) struct Codegen {
     /// passing array idents by reference; the boxed closure is suppressed. Empty unless the whole
     /// group lowers cleanly (scratch-buffer rollback), so it can never regress the boxed path.
     native_vec_fns: std::collections::HashMap<String, NativeVecFnSig>,
+    /// #203 follow-up — per native-vec fn, the array params PROVEN (at every call site) to be at least
+    /// as long as the fn's first scalar param. `emit_native_vec_fn` re-registers these as
+    /// `vec_fixed_len[param] = Var(scalar)` so in-bounds index reads drop the OOB-safe `.get()` fallback
+    /// (recovering spectral_norm's raw indexing). Empty unless [`Self::compute_native_vec_param_bounds`]
+    /// can prove the length relationship — otherwise the param keeps its OOB-safe lowering (sound).
+    native_vec_param_bounds:
+        std::collections::HashMap<String, std::collections::HashMap<String, BoundKey>>,
     /// #175 follow-up — top-level numeric "leaf" fns (`fn f(a,…){ return <numeric expr> }`, no other
     /// statements, body built only from params/literals/arithmetic/1-arg `Math`) eligible for INLINING
     /// at a native-f64 call site (`name -> (param names, body expr)`). Inlining at a site whose args
@@ -976,6 +969,14 @@ pub(crate) struct Codegen {
     /// nested call site these are already `&/&mut Vec<T>` references, so they pass through by reborrow
     /// (`&mut *p`) rather than being address-of'd like a local `Vec` (`&mut local`).
     vec_ref_params: std::collections::HashMap<String, bool>,
+    /// #320 (behind TISH_NATIVE_ARR_PARAM): normal boxed-closure fns that take one or more READ-ONLY
+    /// `number[]` params (e.g. k_nucleotide's `kNucleotide(seq, k)` — indexes `seq` but returns a
+    /// boxed Map). Per param: `true` = unbox the boxed arg into an owned native `Vec<f64>` so the
+    /// body indexes it natively (`seq[i+j]` → f64), `false` = leave it on its normal path. The fn
+    /// stays a normal closure (boxed body + boxed return); only the array param's indexing flips
+    /// native. Computed by `Self::native_arr_param_fns`, the SAME pure fn infer reads (agreement
+    /// contract — see `infer::native_vec_array_params`), disjoint from `native_vec_fns`.
+    native_arr_param_fns: std::collections::HashMap<String, Vec<bool>>,
     /// #177 S-E/S-F (dark-shipped behind `TISH_AGGREGATE_INFER`): the unboxed struct alias name
     /// (e.g. `TishAnon_0`) when the interprocedural aggregate path is active for this program,
     /// else `None`. Set in `emit_program` only after the de-virtualized fns emit successfully.
@@ -1081,37 +1082,8 @@ pub(crate) struct Codegen {
     program_uses_document: bool,
 }
 
-/// Registered shapes for the json_roundtrip `buildDoc` factory (compile-time only).
-#[derive(Clone)]
-struct JsonDocPlan {
-    factory: String,
-    doc_local: String,
-    s_local: String,
-    parsed_local: String,
-    acc_local: String,
-    doc_ty: RustType,
-}
 
-/// Fused GAUNTLET kernel for `tests/perf/k_nucleotide.tish`.
-#[derive(Clone)]
-struct KMerPlan {
-    len: usize,
-    seed: i32,
-    k: usize,
-    seq_local: String,
-    m_local: String,
-    sum_local: String,
-    check_local: String,
-    len_local: String,
-    next_base_fn: String,
-}
 
-/// Fused GAUNTLET kernel for `tests/perf/binary_trees.tish`.
-#[derive(Clone)]
-struct BinaryTreesPlan {
-    max_depth: u32,
-    check_local: String,
-}
 
 impl Codegen {
     fn new_with_native_modules(
@@ -1141,11 +1113,6 @@ impl Codegen {
             module_const_f64_arrays: std::collections::HashMap::new(),
             module_const_f64_cum: std::collections::HashMap::new(),
             module_const_f64_aliases: std::collections::HashMap::new(),
-            megamorphic_value_tables: std::collections::HashMap::new(),
-            megamorphic_native_sums: std::collections::HashSet::new(),
-            json_doc_plan: None,
-            k_nucleotide_plan: None,
-            binary_trees_plan: None,
             map_instance_locals: std::collections::HashSet::new(),
             native_fns: std::collections::HashSet::new(),
             native_fn_body_emit: false,
@@ -1158,12 +1125,14 @@ impl Codegen {
             native_fn_body_returned: false,
             native_lcg_fns: std::collections::HashMap::new(),
             native_vec_fns: std::collections::HashMap::new(),
+            native_vec_param_bounds: std::collections::HashMap::new(),
             inline_fns: std::collections::HashMap::new(),
             inline_subst: Vec::new(),
             inlining_now: std::collections::HashSet::new(),
             inline_depth: 0,
             native_vec_ret: None,
             vec_ref_params: std::collections::HashMap::new(),
+            native_arr_param_fns: std::collections::HashMap::new(),
             rec_struct_plan: None,
             aggregate_alias: None,
             aggregate_fns: std::collections::HashMap::new(),
@@ -1299,13 +1268,7 @@ impl Codegen {
                 = &ty
             {
                 let struct_name = crate::types::named_struct_ident(&name);
-                let json_serde = self.json_doc_plan.is_some()
-                    && matches!(name.as_str(), "TishJsonDoc" | "TishJsonDocItem" | "TishJsonDocMeta");
-                if json_serde {
-                    self.write("#[derive(Clone, Debug, Default, serde::Deserialize)]\n");
-                } else {
-                    self.write("#[derive(Clone, Debug, Default)]\n");
-                }
+                self.write("#[derive(Clone, Debug, Default)]\n");
                 self.write("#[allow(non_snake_case, non_camel_case_types)]\n");
                 self.write(&format!("pub struct {} {{\n", struct_name));
                 for (k, t) in fields {
@@ -1316,96 +1279,6 @@ impl Codegen {
                     ));
                 }
                 self.write("}\n\n");
-
-                // Emit a hand-rolled JSON serialiser per struct so
-                // `JSON.stringify(typed_value)` (and `Vec<TishStruct_X>`)
-                // can bypass the `Value::Object` allocation entirely —
-                // we walk the struct's fields by name and write directly
-                // into the response buffer. ASCII-fast string escape is
-                // shared with the `Value` path via the
-                // `escape_json_string_into` helper that the runtime
-                // re-exports from `tishlang_core::json`.
-                self.write(&format!("impl {} {{\n", struct_name));
-                self.write("    pub fn _tish_write_json(&self, buf: &mut String) {\n");
-                self.write("        use std::fmt::Write as _;\n");
-                self.write("        buf.push('{');\n");
-                for (i, (k, t)) in fields.iter().enumerate() {
-                    let sep = if i == 0 { "{" } else { ",{" };
-                    let prefix = if i == 0 {
-                        format!("\"\\\"{}\\\":\"", k.as_ref())
-                    } else {
-                        format!("\",\\\"{}\\\":\"", k.as_ref())
-                    };
-                    let _ = sep; // (lint silence; we built `prefix` above directly)
-                    self.write(&format!("        buf.push_str({});\n", prefix));
-                    let access = format!("self.{}", crate::types::field_ident(k));
-                    match t {
-                        crate::types::RustType::F64 => {
-                            self.write(&format!(
-                                "        if {a}.is_nan() || {a}.is_infinite() {{ buf.push_str(\"null\"); }} else {{ let _ = write!(buf, \"{{}}\", {a}); }}\n",
-                                a = access
-                            ));
-                        }
-                        crate::types::RustType::Bool => {
-                            self.write(&format!(
-                                "        buf.push_str(if {} {{ \"true\" }} else {{ \"false\" }});\n",
-                                access
-                            ));
-                        }
-                        crate::types::RustType::String => {
-                            self.write(&format!(
-                                "        buf.push('\"'); tishlang_runtime::json::escape_into(buf, {}.as_str()); buf.push('\"');\n",
-                                access
-                            ));
-                        }
-                        crate::types::RustType::Named { .. } => {
-                            self.write(&format!(
-                                "        {}._tish_write_json(buf);\n",
-                                access
-                            ));
-                        }
-                        crate::types::RustType::Vec(inner) if matches!(
-                            inner.as_ref(),
-                            crate::types::RustType::Named { .. }
-                        ) => {
-                            self.write("        buf.push('[');\n");
-                            self.write(&format!(
-                                "        for (i, item) in {}.iter().enumerate() {{ if i > 0 {{ buf.push(','); }} item._tish_write_json(buf); }}\n",
-                                access
-                            ));
-                            self.write("        buf.push(']');\n");
-                        }
-                        crate::types::RustType::Vec(inner) if matches!(inner.as_ref(), RustType::F64) => {
-                            self.write("        buf.push('[');\n");
-                            self.write(&format!(
-                                "        for (i, n) in {}.iter().enumerate() {{ if i > 0 {{ buf.push(','); }} let _ = write!(buf, \"{{}}\", *n); }}\n",
-                                access
-                            ));
-                            self.write("        buf.push(']');\n");
-                        }
-                        _ => {
-                            // Fallback: convert the field to a Value and delegate to the dynamic
-                            // stringifier. A `Value` field (e.g. a generic struct's `Box<T>` field)
-                            // is behind `&self` and not `Copy`, so clone it.
-                            let v_expr = if matches!(t, crate::types::RustType::Value) {
-                                format!("{}.clone()", access)
-                            } else {
-                                t.to_value_expr(&access)
-                            };
-                            self.write(&format!(
-                                "        let _v: Value = {}; tishlang_runtime::json::stringify_into(buf, &_v);\n",
-                                v_expr
-                            ));
-                        }
-                    }
-                }
-                self.write("        buf.push('}');\n");
-                self.write("    }\n");
-                self.emit_struct_from_value_method(&struct_name, fields);
-                if name == "TishJsonDoc" && self.json_doc_plan.is_some() {
-                    self.emit_struct_parse_json_method(&struct_name);
-                }
-                self.write("}\n\n");
                 emitted_any = true;
             }
         }
@@ -1414,18 +1287,7 @@ impl Codegen {
         }
     }
 
-    fn emit_struct_parse_json_method(&mut self, struct_name: &str) {
-        self.write(&format!(
-            "    pub fn _tish_parse_json(s: &str) -> Self {{\n\
-                serde_json::from_str(s).unwrap_or_default()\n\
-            }}\n"
-        ));
-    }
 
-    /// Whether `stmts` match the json_roundtrip gauntlet shape (used to pull in serde deps).
-    pub fn program_matches_json_doc_roundtrip(stmts: &[Statement]) -> bool {
-        Self::detect_json_doc_program(stmts).is_some()
-    }
 
     fn rc_cell_storage_contains(&self, name: &str) -> bool {
         self.rc_cell_storage_scopes
@@ -1554,9 +1416,6 @@ impl Codegen {
             .iter()
             .filter_map(|s| {
                 if let Statement::FunDecl { name, .. } = s {
-                    if self.is_fused_gauntlet_fn(name.as_ref()) {
-                        return None;
-                    }
                     Some(name.to_string())
                 } else {
                     None
@@ -1565,17 +1424,6 @@ impl Codegen {
             .collect()
     }
 
-    fn is_fused_gauntlet_fn(&self, name: &str) -> bool {
-        if self.binary_trees_plan.is_some()
-            && matches!(name, "bottomUpTree" | "itemCheck" | "binaryTrees")
-        {
-            return true;
-        }
-        if self.k_nucleotide_plan.is_some() && matches!(name, "nextBase" | "kNucleotide") {
-            return true;
-        }
-        false
-    }
 
     /// Escape Rust reserved keywords by prefixing with r#
     /// Binding keyword that stays valid for the wildcard `_`. A `_` binding cannot be `mut`
@@ -1834,7 +1682,7 @@ impl Codegen {
         self.write("use std::cell::RefCell;\n");
         self.write("use std::rc::Rc;\n");
         self.write("use std::sync::Arc;\n");
-        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, k_nucleotide_check as tish_k_nucleotide_check, binary_trees_check as tish_binary_trees_check, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
+        self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, object_assign as tish_object_assign, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
@@ -1875,11 +1723,6 @@ impl Codegen {
         // are stored too, so later annotations like `let x: N = 0` still
         // pick up the right native type.
         self.collect_type_aliases(&program.statements);
-        if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
-            self.setup_json_doc_plan(&program.statements);
-            self.setup_k_nucleotide_plan(&program.statements);
-            self.setup_binary_trees_plan(&program.statements);
-        }
         // Emit a Rust `struct` for every alias whose RHS is an object
         // shape. Subsequent `let x: Foo = ...` literals lower to plain
         // struct moves (no `VmRef::new(ObjectMap::from(..))` allocation),
@@ -1910,7 +1753,7 @@ impl Codegen {
         }
         // M5 (dark-shipped behind TISH_NATIVE_FN): emit a parallel native `fn f_native` for each
         // eligible top-level numeric fn at top level; direct calls route to it in emit_typed_expr.
-        if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+        if crate::native_opts_enabled() {
             self.native_numeric_globals =
                 Self::collect_native_numeric_globals(&program.statements);
             if !self.native_numeric_globals.is_empty() {
@@ -1925,21 +1768,6 @@ impl Codegen {
                 Self::collect_module_const_aliases(&program.statements, &self.module_const_f64_cum);
             if !self.module_const_f64_arrays.is_empty() {
                 self.emit_module_const_f64_arrays()?;
-                self.writeln("");
-            }
-            self.megamorphic_value_tables =
-                Self::collect_megamorphic_value_tables(&program.statements);
-            self.megamorphic_native_sums =
-                Self::collect_megamorphic_native_sums(
-                    &program.statements,
-                    &self.megamorphic_value_tables,
-                );
-            if !self.megamorphic_value_tables.is_empty() {
-                self.emit_megamorphic_value_tables()?;
-                self.writeln("");
-            }
-            if self.json_doc_plan.is_some() {
-                self.emit_json_doc_factory_nv()?;
                 self.writeln("");
             }
             let native_vec_names: std::collections::HashSet<String> =
@@ -1967,26 +1795,33 @@ impl Codegen {
         // aggregate fns into native Rust free fns operating on an unboxed `Vec<TishStruct_alias>`
         // threaded by reference. Computed + emitted here (before `run()`); if any fn can't be
         // lowered the whole path is disabled and we fall back to the boxed closures unchanged.
-        if std::env::var("TISH_AGGREGATE_INFER").map(|v| v != "0").unwrap_or(false) {
+        if crate::native_opts_enabled() {
             self.setup_aggregate_fns(program);
         }
         // #178 (behind TISH_REC_STRUCT): de-virtualize recursive-struct builders/consumers into
         // native free fns over `Option<Box<T>>` structs (the real binary_trees fix). Structural,
         // name-independent; emits before `run()` with scratch-buffer rollback so any unsupported
         // construct cleanly disables the path and falls back to the boxed closures unchanged.
-        if std::env::var("TISH_REC_STRUCT").map(|v| v != "0").unwrap_or(false) {
+        if crate::native_opts_enabled() {
             self.setup_rec_struct_plan(program);
         }
         // #175 (behind TISH_NATIVE_FN): de-virtualize fns over plain `number[]`/`boolean[]` params
         // into native free fns threaded by `&/&mut Vec<T>` (spectral_norm / queens). Runs after the
         // aggregate path so it can skip any fn that path already claimed; emits before `run()` with
         // its own scratch-buffer rollback so a failure leaves the boxed closures untouched.
-        if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+        if crate::native_opts_enabled() {
             // #175 inline: numeric leaf fns (e.g. spectral_norm's `evalA`) inlined at native-f64 call
             // sites. Detect before native-vec so a native-vec body's call to one inlines (no boxed
             // reference). The boxed closure is left intact for any non-f64 callers.
             self.inline_fns = Self::collect_inline_fns(program);
             self.setup_native_vec_fns(program);
+        }
+        // #320 (behind TISH_NATIVE_ARR_PARAM): normal fns taking read-only `number[]` params get
+        // those params unboxed to native owned `Vec<f64>` (boxed body + boxed return otherwise), so
+        // `seq[i+j]` indexes natively. The SAME pure detection infer reads to keep the caller's array
+        // `number[]`, so the two never disagree about which args pass as native arrays.
+        if crate::native_opts_enabled() {
+            self.native_arr_param_fns = Self::native_arr_param_fns(program);
         }
         // Soundness pass — must run after type aliases + `native_fns` are known (both feed the
         // native-type oracle): find `number`-typed locals a reassignment can turn non-numeric so
@@ -1994,12 +1829,6 @@ impl Codegen {
         // and panics on a JS string-concat result like `s = s + arr[i]`). See
         // `collect_demoted_numeric_locals` / `demoted_numeric_locals`.
         self.demoted_numeric_locals = self.collect_demoted_numeric_locals(&program.statements);
-        for s in &self.megamorphic_native_sums {
-            self.demoted_numeric_locals.remove(s);
-        }
-        if let Some(plan) = &self.json_doc_plan {
-            self.demoted_numeric_locals.remove(&plan.acc_local);
-        }
         self.int_valued_locals = Self::collect_int_valued_locals(&program.statements);
         self.int_range_locals = self.collect_int_range_locals(&program.statements);
         self.array_elem_ranges = Self::collect_array_elem_ranges(&program.statements);
@@ -4008,196 +3837,6 @@ impl Codegen {
                     })
                     .unwrap_or(RustType::Value);
 
-                // #182: fused k_nucleotide GAUNTLET kernel (replaces seq/m/sum loops).
-                if let Some(plan) = self.k_nucleotide_plan.clone() {
-                    if name.as_ref() == plan.check_local.as_str() {
-                        if Self::is_k_nucleotide_check_init(init.as_ref(), &plan) {
-                            let escaped_name = Self::escape_ident(name.as_ref());
-                            self.type_context.define(name.as_ref(), RustType::F64);
-                            self.writeln("let mut t0 = ({");
-                            self.indent += 1;
-                            self.writeln(
-                                "let _callee = (tishlang_runtime::get_prop(&Date, \"now\")).clone();",
-                            );
-                            self.writeln("tishlang_runtime::value_call(&_callee, &[])");
-                            self.indent -= 1;
-                            self.writeln("});");
-                            self.writeln(&format!(
-                                "let mut {}: f64 = tish_k_nucleotide_check({}, {}, {});",
-                                escaped_name,
-                                plan.len,
-                                plan.seed,
-                                plan.k
-                            ));
-                            if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                scope.push(name.to_string());
-                            }
-                            return Ok(());
-                        }
-                    }
-                }
-
-                // #178: fused binary_trees GAUNTLET kernel (replaces recursive boxed node alloc).
-                if let Some(plan) = self.binary_trees_plan.clone() {
-                    if name.as_ref() == plan.check_local.as_str() {
-                        if Self::is_binary_trees_check_init(init.as_ref(), &plan) {
-                            let escaped_name = Self::escape_ident(name.as_ref());
-                            self.type_context.define(name.as_ref(), RustType::F64);
-                            self.writeln("let mut t0 = ({");
-                            self.indent += 1;
-                            self.writeln(
-                                "let _callee = (tishlang_runtime::get_prop(&Date, \"now\")).clone();",
-                            );
-                            self.writeln("tishlang_runtime::value_call(&_callee, &[])");
-                            self.indent -= 1;
-                            self.writeln("});");
-                            self.writeln(&format!(
-                                "let mut {}: f64 = tish_binary_trees_check({});",
-                                escaped_name,
-                                plan.max_depth
-                            ));
-                            if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                scope.push(name.to_string());
-                            }
-                            return Ok(());
-                        }
-                    }
-                }
-
-                // #180: native json_roundtrip doc factory / parse / acc (before demote gate).
-                if let Some(plan) = self.json_doc_plan.clone() {
-                    if name.as_ref() == plan.doc_local.as_str() {
-                        if let Some(init_e) = init.as_ref() {
-                            if Self::is_call_to_ident(init_e, &plan.factory) {
-                                let n_code = if let [CallArg::Expr(n_expr)] =
-                                    match init_e {
-                                        Expr::Call { args, .. } => args.as_slice(),
-                                        _ => &[],
-                                    }
-                                {
-                                    self.emit_f64(n_expr)?
-                                } else {
-                                    return Ok(());
-                                };
-                                let escaped_name = Self::escape_ident(name.as_ref());
-                                self.type_context
-                                    .define(name.as_ref(), plan.doc_ty.clone());
-                                self.writeln(&format!(
-                                    "let mut {} = buildDoc_nv({});",
-                                    escaped_name, n_code
-                                ));
-                                if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                    scope.push(name.to_string());
-                                }
-                                return Ok(());
-                            }
-                        }
-                    }
-                    if name.as_ref() == plan.parsed_local.as_str() {
-                        if let Some(init_e) = init.as_ref() {
-                            if Self::is_json_parse_call(init_e) {
-                                let doc_struct =
-                                    crate::types::named_struct_ident("TishJsonDoc");
-                                let escaped_name = Self::escape_ident(name.as_ref());
-                                self.type_context
-                                    .define(name.as_ref(), plan.doc_ty.clone());
-                                if let Expr::Call { args, .. } = init_e {
-                                    if let Some(CallArg::Expr(Expr::Ident { name: s_name, .. })) =
-                                        args.first()
-                                    {
-                                        if s_name.as_ref() == plan.s_local.as_str() {
-                                            let s_esc =
-                                                Self::escape_ident(s_name.as_ref()).into_owned();
-                                            self.writeln(&format!(
-                                                "let mut {} = {}::_tish_parse_json(&{});",
-                                                escaped_name, doc_struct, s_esc
-                                            ));
-                                            if let Some(scope) =
-                                                self.outer_vars_stack.last_mut()
-                                            {
-                                                scope.push(name.to_string());
-                                            }
-                                            return Ok(());
-                                        }
-                                    }
-                                }
-                                let arg_code = if let Expr::Call { args, .. } = init_e {
-                                    if let Some(CallArg::Expr(a)) = args.first() {
-                                        self.emit_expr(a)?
-                                    } else {
-                                        return Ok(());
-                                    }
-                                } else {
-                                    return Ok(());
-                                };
-                                self.writeln(&format!(
-                                    "let mut {} = {}::_tish_from_value(&tish_json_parse(&[({}).clone()]));",
-                                    escaped_name, doc_struct, arg_code
-                                ));
-                                if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                    scope.push(name.to_string());
-                                }
-                                return Ok(());
-                            }
-                        }
-                    }
-                    if name.as_ref() == plan.s_local.as_str() {
-                        if let Some(init_e) = init.as_ref() {
-                            if Self::is_json_stringify_doc(init_e, &plan.doc_local) {
-                                let doc_esc =
-                                    Self::escape_ident(&plan.doc_local).into_owned();
-                                let escaped_name = Self::escape_ident(name.as_ref());
-                                self.type_context.define(name.as_ref(), RustType::String);
-                                self.writeln(&format!(
-                                    "let mut {} = String::with_capacity(({}.items.len() as usize).saturating_mul(96).max(128));",
-                                    escaped_name, doc_esc
-                                ));
-                                self.writeln(&format!(
-                                    "{}._tish_write_json(&mut {});",
-                                    doc_esc, escaped_name
-                                ));
-                                if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                    scope.push(name.to_string());
-                                }
-                                return Ok(());
-                            }
-                        }
-                    }
-                    if name.as_ref() == plan.acc_local.as_str() {
-                        if init
-                            .as_ref()
-                            .is_some_and(|e| Self::int_literal_value_of(e) == Some(0))
-                        {
-                            let escaped_name = Self::escape_ident(name.as_ref());
-                            self.type_context.define(name.as_ref(), RustType::F64);
-                            self.writeln(&format!("let mut {}: f64 = 0_f64;", escaped_name));
-                            if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                scope.push(name.to_string());
-                            }
-                            return Ok(());
-                        }
-                    }
-                    if let Some(init_e) = init.as_ref() {
-                        if let Some(index) =
-                            Self::parse_json_doc_items_index(init_e, &plan.parsed_local)
-                        {
-                            let parsed_esc = Self::escape_ident(&plan.parsed_local).into_owned();
-                            let idx_usize = self.emit_json_doc_index_usize(index)?;
-                            let item_ty = Self::json_doc_item_ty();
-                            let escaped_name = Self::escape_ident(name.as_ref());
-                            self.type_context.define(name.as_ref(), item_ty);
-                            self.writeln(&format!(
-                                "let {} = &{}.items[{}];",
-                                escaped_name, parsed_esc, idx_usize
-                            ));
-                            if let Some(scope) = self.outer_vars_stack.last_mut() {
-                                scope.push(name.to_string());
-                            }
-                            return Ok(());
-                        }
-                    }
-                }
-
                 // M5 native-fn body: `let r = genRandom(1)` without a `: number` annotation.
                 if self.native_fn_body_emit && rust_type == RustType::Value {
                     if let Some(Expr::Call { callee, .. }) = init.as_ref() {
@@ -5313,7 +4952,7 @@ impl Codegen {
                 // bool/String — so the body lowers it like a native local. Conservative: only
                 // simple params, native-scalar annotation, no default value.
                 let param_native =
-                    std::env::var("TISH_PARAM_NATIVE").map(|v| v != "0").unwrap_or(false);
+                    crate::native_opts_enabled();
                 // A param referenced by ANY sibling default expr (e.g. `(a, b = a + 1)`) must NOT
                 // get a native f64 shadow: the default binding is emitted on the boxed Value path
                 // (`ops::add(&a, …)` expects `&Value`), so a native `a: f64` would mistype the
@@ -5330,9 +4969,35 @@ impl Codegen {
                     }
                 }
                 let mut native_params: Vec<(String, RustType)> = Vec::new();
+                let arr_param_flags = self.native_arr_param_fns.get(name.as_ref()).cloned();
                 for (i, p) in params.iter().enumerate() {
                     match p {
                         FunParam::Simple(tp) => {
+                            // #320: a READ-ONLY `number[]` param — unbox the boxed arg once into an
+                            // owned native `Vec<f64>` so `seq[i+j]` lowers to a native f64 index (the
+                            // shared `Expr::Index` fast-path fires on the `Vec` type). The rest of the
+                            // body stays boxed (Map ops, boxed return) — only this param flips native.
+                            if arr_param_flags
+                                .as_ref()
+                                .and_then(|f| f.get(i).copied())
+                                .unwrap_or(false)
+                            {
+                                let vt = RustType::Vec(Box::new(RustType::F64));
+                                // Unbox once: a packed `NumberArray` is already a `Vec<f64>` (clone
+                                // the backing), a boxed `Array` is mapped element-wise. A `number[]`
+                                // is all-numbers by inference, so the `_ => NaN` fallback (JS
+                                // `arr[oob]`→NaN) is unreachable for sound inputs but never panics.
+                                self.writeln(&format!(
+                                    "let mut {}: Vec<f64> = match args.get({}) {{ \
+                                       Some(Value::NumberArray(a)) => a.borrow().clone(), \
+                                       Some(Value::Array(arr)) => arr.borrow().iter().map(|v| match v {{ Value::Number(n) => *n, _ => f64::NAN }}).collect(), \
+                                       _ => Vec::new() }};",
+                                    Self::escape_ident(tp.name.as_ref()),
+                                    i,
+                                ));
+                                native_params.push((tp.name.to_string(), vt));
+                                continue;
+                            }
                             let native_ty = if param_native
                                 && tp.default.is_none()
                                 && !default_referenced.contains(tp.name.as_ref())
@@ -5798,58 +5463,6 @@ impl Codegen {
                         return Ok(code);
                     }
                 }
-                // Typed-struct shortcut for `JSON.stringify(typedValue)`.
-                // When the single arg has a known native type that owns a
-                // hand-rolled `_tish_write_json` (struct or `Vec<struct>`),
-                // emit a direct write into a String buffer and skip the
-                // entire `Value::Object` / `Value::Array` allocation
-                // round-trip + the dynamic stringifier walk. Wraps the
-                // result in `Value::String` for the caller, which is what
-                // the existing `JSON.stringify` returned anyway.
-                if let Expr::Member {
-                    object,
-                    prop: MemberProp::Name { name: method_name, .. },
-                    ..
-                } = callee.as_ref()
-                {
-                    if method_name.as_ref() == "stringify"
-                        && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "JSON")
-                        && args.len() == 1 {
-                            if let CallArg::Expr(arg) = &args[0] {
-                                let (arg_code, arg_ty) = self.emit_typed_expr(arg)?;
-                                match &arg_ty {
-                                    crate::types::RustType::Named { name: ty_name, .. } => {
-                                        let cap = if ty_name.as_ref() == "TishJsonDoc" {
-                                            format!(
-                                                "(({}).items.len() as usize).saturating_mul(96).max(128)",
-                                                arg_code
-                                            )
-                                        } else {
-                                            "128".to_string()
-                                        };
-                                        return Ok(format!(
-                                            "{{ let mut _buf = String::with_capacity({cap}); ({ac})._tish_write_json(&mut _buf); Value::String(_buf.into()) }}",
-                                            cap = cap,
-                                            ac = arg_code
-                                        ));
-                                    }
-                                    crate::types::RustType::Vec(inner)
-                                        if matches!(
-                                            inner.as_ref(),
-                                            crate::types::RustType::Named { .. }
-                                        ) =>
-                                    {
-                                        return Ok(format!(
-                                            "{{ let mut _buf = String::with_capacity(256); _buf.push('['); for (i, item) in ({}).iter().enumerate() {{ if i > 0 {{ _buf.push(','); }} item._tish_write_json(&mut _buf); }} _buf.push(']'); Value::String(_buf.into()) }}",
-                                            arg_code
-                                        ));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                }
-
                 // Check for built-in method calls on arrays/strings
                 if let Expr::Member {
                     object,
@@ -6185,7 +5798,7 @@ impl Codegen {
                             // runtime Value op the closure body would, eliminating the per-element
                             // `value_call`. Sound (identical Value semantics, incl. string `+`).
                             // Requires an explicit init; anything else falls back to array_reduce.
-                            if std::env::var("TISH_FUSED_HOF").is_ok() && args.len() == 2 {
+                            if crate::native_opts_enabled() && args.len() == 2 {
                                 if let Some(fold) =
                                     self.try_fused_reduce(args, &obj_expr, &initial)?
                                 {
@@ -7911,6 +7524,157 @@ impl Codegen {
                 }
             }
             Statement::FunDecl { body, .. } => Self::collect_local_var_names(body, names),
+            _ => {}
+        }
+    }
+
+    /// Names bound by a fn/arrow PARAMETER, a `for…of` loop var, or a `catch` param anywhere in `s`
+    /// (recursively, incl. nested fns, control flow, and arrow exprs). Complements
+    /// `collect_local_var_names` (`let`/`const`); together they are every name that can shadow a
+    /// top-level numeric global.
+    fn collect_binding_names(s: &Statement, out: &mut HashSet<String>) {
+        use Statement::*;
+        let mut ce = |x: &Expr, out: &mut HashSet<String>| Self::collect_arrow_params_expr(x, out);
+        match s {
+            FunDecl { params, body, .. } => {
+                for p in params {
+                    for n in p.bound_names() {
+                        out.insert(n.to_string());
+                    }
+                }
+                Self::collect_binding_names(body, out);
+            }
+            ForOf { name, iterable, body, .. } => {
+                out.insert(name.to_string());
+                ce(iterable, out);
+                Self::collect_binding_names(body, out);
+            }
+            Try { body, catch_param, catch_body, finally_body, .. } => {
+                if let Some(cp) = catch_param {
+                    out.insert(cp.to_string());
+                }
+                Self::collect_binding_names(body, out);
+                if let Some(c) = catch_body {
+                    Self::collect_binding_names(c, out);
+                }
+                if let Some(f) = finally_body {
+                    Self::collect_binding_names(f, out);
+                }
+            }
+            Block { statements, .. } | Multi { statements, .. } => {
+                statements.iter().for_each(|x| Self::collect_binding_names(x, out))
+            }
+            If { cond, then_branch, else_branch, .. } => {
+                ce(cond, out);
+                Self::collect_binding_names(then_branch, out);
+                if let Some(eb) = else_branch {
+                    Self::collect_binding_names(eb, out);
+                }
+            }
+            While { cond, body, .. } | DoWhile { body, cond, .. } => {
+                ce(cond, out);
+                Self::collect_binding_names(body, out);
+            }
+            For { init, cond, update, body, .. } => {
+                if let Some(i) = init {
+                    Self::collect_binding_names(i, out);
+                }
+                if let Some(c) = cond {
+                    ce(c, out);
+                }
+                if let Some(u) = update {
+                    ce(u, out);
+                }
+                Self::collect_binding_names(body, out);
+            }
+            VarDecl { init: Some(i), .. } => ce(i, out),
+            VarDeclDestructure { init, .. } => ce(init, out),
+            ExprStmt { expr, .. } => ce(expr, out),
+            Return { value: Some(v), .. } => ce(v, out),
+            Throw { value, .. } => ce(value, out),
+            Switch { expr, cases, default_body, .. } => {
+                ce(expr, out);
+                for (g, b) in cases {
+                    if let Some(ge) = g {
+                        ce(ge, out);
+                    }
+                    b.iter().for_each(|x| Self::collect_binding_names(x, out));
+                }
+                if let Some(d) = default_body {
+                    d.iter().for_each(|x| Self::collect_binding_names(x, out));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Collect arrow-function parameter names anywhere in an expression (recursively), so an arrow
+    /// param that shadows a top-level numeric global also disqualifies the global.
+    fn collect_arrow_params_expr(e: &Expr, out: &mut HashSet<String>) {
+        match e {
+            Expr::ArrowFunction { params, body, .. } => {
+                for p in params {
+                    for n in p.bound_names() {
+                        out.insert(n.to_string());
+                    }
+                }
+                match body {
+                    ArrowBody::Expr(x) => Self::collect_arrow_params_expr(x, out),
+                    ArrowBody::Block(b) => Self::collect_binding_names(b, out),
+                }
+            }
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                Self::collect_arrow_params_expr(callee, out);
+                for a in args {
+                    if let CallArg::Expr(x) | CallArg::Spread(x) = a {
+                        Self::collect_arrow_params_expr(x, out);
+                    }
+                }
+            }
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                Self::collect_arrow_params_expr(left, out);
+                Self::collect_arrow_params_expr(right, out);
+            }
+            Expr::Unary { operand, .. } => Self::collect_arrow_params_expr(operand, out),
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                Self::collect_arrow_params_expr(cond, out);
+                Self::collect_arrow_params_expr(then_branch, out);
+                Self::collect_arrow_params_expr(else_branch, out);
+            }
+            Expr::Index { object, index, .. } => {
+                Self::collect_arrow_params_expr(object, out);
+                Self::collect_arrow_params_expr(index, out);
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::collect_arrow_params_expr(object, out);
+                if let MemberProp::Expr(pe) = prop {
+                    Self::collect_arrow_params_expr(pe, out);
+                }
+            }
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. } => Self::collect_arrow_params_expr(value, out),
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(x) | ArrayElement::Spread(x) => {
+                            Self::collect_arrow_params_expr(x, out)
+                        }
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for pr in props {
+                    match pr {
+                        ObjectProp::KeyValue(_, x, _) | ObjectProp::Spread(x) => {
+                            Self::collect_arrow_params_expr(x, out)
+                        }
+                    }
+                }
+            }
+            Expr::TemplateLiteral { exprs, .. } => {
+                exprs.iter().for_each(|x| Self::collect_arrow_params_expr(x, out))
+            }
             _ => {}
         }
     }
@@ -11922,7 +11686,7 @@ impl Codegen {
         args: &[CallArg],
         env: &HashMap<String, RustType>,
     ) -> Option<RustType> {
-        if std::env::var("TISH_NATIVE_HOF").is_err() {
+        if !crate::native_opts_enabled() {
             return None;
         }
         let Expr::Member {
@@ -11987,8 +11751,21 @@ impl Codegen {
     }
 
     /// #176 — `thread_local` static name for a native numeric global (`seed` → `G_SEED`).
+    /// A token-safe `G_*` static identifier for a tish global/module-const. `escape_ident` may return
+    /// a raw identifier (`r#fn` for the keyword `fn`), and `#` is NOT valid inside a larger identifier
+    /// (`G_R#FN` won't tokenize) — so strip the `r#` and scrub any non-word char before prefixing.
+    fn global_static_name(name: &str) -> String {
+        let esc = Self::escape_ident(name);
+        let raw = esc.strip_prefix("r#").unwrap_or(&esc);
+        let safe: String = raw
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+            .collect();
+        format!("G_{}", safe.to_uppercase())
+    }
+
     fn native_global_static(name: &str) -> String {
-        format!("G_{}", Self::escape_ident(name).to_uppercase())
+        Self::global_static_name(name)
     }
 
     /// Read a native numeric global from its `thread_local Cell<f64>`.
@@ -12465,18 +12242,6 @@ impl Codegen {
     fn emit_statements_with_folds(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
         let mut i = 0;
         while i < statements.len() {
-            if let Some(plan) = &self.k_nucleotide_plan {
-                if self.is_k_nucleotide_fused_stmt(&statements[i], plan) {
-                    i += 1;
-                    continue;
-                }
-            }
-            if let Some(plan) = &self.binary_trees_plan {
-                if self.is_binary_trees_fused_stmt(&statements[i], plan) {
-                    i += 1;
-                    continue;
-                }
-            }
             if let Some(skip) = self.try_emit_const_cum_search_fold(&statements[i..])? {
                 i += skip;
                 continue;
@@ -12949,7 +12714,7 @@ impl Codegen {
     }
 
     fn module_const_static(name: &str) -> String {
-        format!("G_{}", Self::escape_ident(name).to_uppercase())
+        Self::global_static_name(name)
     }
 
     fn module_const_array_static(
@@ -12968,7 +12733,17 @@ impl Codegen {
 
     /// Top-level `let xs = [1,2,3]` hoisted to `const G_XS` — resolve the Rust static name.
     fn module_const_f64_array_rust_ref(&self, name: &str) -> Option<String> {
-        if self.outer_vars_stack.len() != 1 {
+        // A module-level const f64 array is hoisted to a top-level `static`, so it resolves at ANY scope
+        // depth — including from inside a loop/block body (e.g. `[...srcArr]` nested in a for-loop). The
+        // old `depth == 1` guard wrongly returned None at depth > 1, leaving the name undeclared (build
+        // fail). The only case where the const must NOT win is when an inner local binding shadows the
+        // name; the candidate set already drops fn-local and reassigned names, and this checks the
+        // remaining case — a currently-live block-scoped local of the same name.
+        if self
+            .outer_vars_stack
+            .iter()
+            .any(|scope| scope.iter().any(|v| v == name))
+        {
             return None;
         }
         Self::module_const_array_static(
@@ -13022,754 +12797,29 @@ impl Codegen {
         Ok(())
     }
 
-    fn json_doc_item_ty() -> RustType {
-        RustType::Named {
-            name: std::sync::Arc::from("TishJsonDocItem"),
-            fields: Self::json_doc_item_fields(),
-        }
-    }
 
-    /// `parsed.items[i]` where `parsed` is the json_roundtrip parse local.
-    fn parse_json_doc_items_index<'a>(expr: &'a Expr, parsed_local: &str) -> Option<&'a Expr> {
-        let Expr::Index {
-            object,
-            index,
-            optional: false,
-            ..
-        } = expr
-        else {
-            return None;
-        };
-        let Expr::Member {
-            object: o,
-            prop: MemberProp::Name { name, .. },
-            optional: false,
-            ..
-        } = object.as_ref()
-        else {
-            return None;
-        };
-        if name.as_ref() != "items" {
-            return None;
-        }
-        match o.as_ref() {
-            Expr::Ident { name: n, .. } if n.as_ref() == parsed_local => Some(index.as_ref()),
-            _ => None,
-        }
-    }
 
-    fn emit_json_doc_index_usize(
-        &mut self,
-        index: &Expr,
-    ) -> Result<String, CompileError> {
-        if let Expr::Ident { name: idx_name, .. } = index {
-            if let Some(uv) = self.usize_var_subst.get(idx_name.as_ref()) {
-                return Ok(uv.clone());
-            }
-        }
-        let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-        if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
-            Ok(format!("({}) as usize", idx_code))
-        } else {
-            let iv = if idx_ty.is_native() {
-                idx_ty.to_value_expr(&idx_code)
-            } else {
-                idx_code
-            };
-            Ok(format!(
-                "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
-                iv
-            ))
-        }
-    }
 
-    fn json_doc_item_fields() -> Vec<(std::sync::Arc<str>, RustType)> {
-        vec![
-            (std::sync::Arc::from("id"), RustType::F64),
-            (std::sync::Arc::from("name"), RustType::String),
-            (std::sync::Arc::from("value"), RustType::F64),
-            (std::sync::Arc::from("active"), RustType::Bool),
-            (
-                std::sync::Arc::from("tags"),
-                RustType::Vec(Box::new(RustType::F64)),
-            ),
-        ]
-    }
 
-    fn json_doc_meta_fields() -> Vec<(std::sync::Arc<str>, RustType)> {
-        vec![
-            (std::sync::Arc::from("version"), RustType::F64),
-            (std::sync::Arc::from("ok"), RustType::Bool),
-        ]
-    }
 
-    fn json_doc_doc_fields(
-        item_ty: RustType,
-        meta_ty: RustType,
-    ) -> Vec<(std::sync::Arc<str>, RustType)> {
-        vec![
-            (std::sync::Arc::from("count"), RustType::F64),
-            (
-                std::sync::Arc::from("items"),
-                RustType::Vec(Box::new(item_ty)),
-            ),
-            (std::sync::Arc::from("meta"), meta_ty),
-        ]
-    }
 
-    fn setup_json_doc_plan(&mut self, stmts: &[Statement]) {
-        if !Self::gauntlet_fusion_enabled() {
-            return; // fixture-shape-bound TishJsonDoc fold — off unless TISH_GAUNTLET_FUSION
-        }
-        if let Some((factory, doc_local, s_local, parsed_local, acc_local)) =
-            Self::detect_json_doc_program(stmts)
-        {
-            let item_fields = Self::json_doc_item_fields();
-            let meta_fields = Self::json_doc_meta_fields();
-            let item_ty = RustType::Named {
-                name: std::sync::Arc::from("TishJsonDocItem"),
-                fields: item_fields.clone(),
-            };
-            let meta_ty = RustType::Named {
-                name: std::sync::Arc::from("TishJsonDocMeta"),
-                fields: meta_fields.clone(),
-            };
-            let doc_fields = Self::json_doc_doc_fields(item_ty.clone(), meta_ty.clone());
-            let doc_ty = RustType::Named {
-                name: std::sync::Arc::from("TishJsonDoc"),
-                fields: doc_fields.clone(),
-            };
-            let _ = (item_fields, meta_fields, doc_fields);
-            self.type_aliases.insert(
-                "TishJsonDocItem".to_string(),
-                RustType::Object(Self::json_doc_item_fields()),
-            );
-            self.type_aliases.insert(
-                "TishJsonDocMeta".to_string(),
-                RustType::Object(Self::json_doc_meta_fields()),
-            );
-            self.type_aliases.insert(
-                "TishJsonDoc".to_string(),
-                RustType::Object(
-                    Self::json_doc_doc_fields(item_ty.clone(), meta_ty.clone()),
-                ),
-            );
-            self.json_doc_plan = Some(JsonDocPlan {
-                factory,
-                doc_local,
-                s_local,
-                parsed_local,
-                acc_local,
-                doc_ty,
-            });
-        }
-    }
 
-    /// #203: the fixture-substitution / sidestep folds — the k_nucleotide & binary_trees substitution
-    /// kernels, the megamorphic literal const-fold, and the TishJsonDoc shape-bound path — are FAKE
-    /// gauntlet wins: each detects a specific fixture (by identifier names / exact shape) and either
-    /// substitutes a hardcoded answer or sidesteps the operation the benchmark measures. They are OFF
-    /// by default so the gauntlet reports honest, inference-driven numbers, and only fire under
-    /// `TISH_GAUNTLET_FUSION=1` (their unit tests opt in). The GENERAL inference (param/aggregate/
-    /// struct/native-vec/int-lattice/rec-arena) and the algebraic mandel/fasta folds are NOT gated —
-    /// those do the real computation and transfer to developer code under any names.
-    fn gauntlet_fusion_enabled() -> bool {
-        std::env::var("TISH_GAUNTLET_FUSION").map(|v| v != "0").unwrap_or(false)
-    }
 
-    fn setup_k_nucleotide_plan(&mut self, stmts: &[Statement]) {
-        if !std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
-            return;
-        }
-        if !Self::gauntlet_fusion_enabled() {
-            return; // fake substitution kernel — off unless TISH_GAUNTLET_FUSION
-        }
-        if let Some(plan) = Self::detect_k_nucleotide_program(stmts) {
-            self.k_nucleotide_plan = Some(plan);
-        }
-    }
 
-    fn setup_binary_trees_plan(&mut self, stmts: &[Statement]) {
-        if !std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
-            return;
-        }
-        // #178: the `binary_trees_check` kernel is a Category-A fixture substitution (matches the
-        // fixture fns by name → hardcoded answer). Off unless TISH_GAUNTLET_FUSION; in the gauntlet
-        // the real recursive-struct arena lowering (#178, TISH_REC_STRUCT) owns binary_trees honestly.
-        if !Self::gauntlet_fusion_enabled() {
-            return;
-        }
-        if let Some(plan) = Self::detect_binary_trees_program(stmts) {
-            self.binary_trees_plan = Some(plan);
-        }
-    }
 
-    fn detect_binary_trees_program(stmts: &[Statement]) -> Option<BinaryTreesPlan> {
-        let has_bt = stmts
-            .iter()
-            .any(|s| matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "binaryTrees"));
-        let has_bottom = stmts
-            .iter()
-            .any(|s| matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "bottomUpTree"));
-        let has_item = stmts
-            .iter()
-            .any(|s| matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "itemCheck"));
-        if !has_bt || !has_bottom || !has_item {
-            return None;
-        }
-        for s in stmts {
-            if let Statement::VarDecl { name, init, .. } = s {
-                if Self::is_binary_trees_check_init(init.as_ref(), &BinaryTreesPlan {
-                    max_depth: 15,
-                    check_local: name.to_string(),
-                }) {
-                    return Some(BinaryTreesPlan {
-                        max_depth: 15,
-                        check_local: name.to_string(),
-                    });
-                }
-            }
-        }
-        None
-    }
 
-    fn is_binary_trees_check_init(init: Option<&Expr>, plan: &BinaryTreesPlan) -> bool {
-        let Some(Expr::Call { callee, args, .. }) = init else {
-            return false;
-        };
-        if !matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "binaryTrees") {
-            return false;
-        }
-        let [CallArg::Expr(depth_e)] = args.as_slice() else {
-            return false;
-        };
-        matches!(
-            depth_e,
-            Expr::Literal {
-                value: Literal::Number(n),
-                ..
-            } if *n as u32 == plan.max_depth
-        )
-    }
 
-    fn is_binary_trees_fused_stmt(&self, stmt: &Statement, _plan: &BinaryTreesPlan) -> bool {
-        match stmt {
-            Statement::FunDecl { name, .. } => self.is_fused_gauntlet_fn(name.as_ref()),
-            Statement::VarDecl { name, init, .. } => {
-                if name.as_ref() == "t0" {
-                    if let Some(Expr::Call { callee, .. }) = init.as_ref() {
-                        return Self::expr_is_date_now_call(callee);
-                    }
-                }
-                false
-            }
-            _ => false,
-        }
-    }
 
-    fn detect_k_nucleotide_program(stmts: &[Statement]) -> Option<KMerPlan> {
-        let has_k_fn = stmts.iter().any(|s| {
-            matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "kNucleotide")
-        });
-        if !has_k_fn {
-            return None;
-        }
-        let mut len: Option<usize> = None;
-        let mut seed: Option<i32> = None;
-        let mut k: Option<usize> = None;
-        let mut seq_local: Option<String> = None;
-        let mut m_local: Option<String> = None;
-        let mut sum_local: Option<String> = None;
-        let mut check_local: Option<String> = None;
-        let mut len_local: Option<String> = None;
-        let mut next_base_fn: Option<String> = None;
-        for s in stmts {
-            match s {
-                Statement::FunDecl { name, .. } if name.as_ref() == "nextBase" => {
-                    next_base_fn = Some(name.to_string());
-                }
-                Statement::VarDecl { name, init, .. } => {
-                    if name.as_ref() == "seed" {
-                        if let Some(Expr::Literal {
-                            value: Literal::Number(n),
-                            ..
-                        }) = init.as_ref()
-                        {
-                            seed = Some(*n as i32);
-                        }
-                    }
-                    if let Some(Expr::Literal {
-                        value: Literal::Number(n),
-                        ..
-                    }) = init.as_ref()
-                    {
-                        if *n == 100000.0 {
-                            len = Some(100000);
-                            len_local = Some(name.to_string());
-                        }
-                    }
-                    if let Some(init_e) = init.as_ref() {
-                        if let Expr::Call { callee, args, .. } = init_e {
-                            if let Expr::Ident { name: fnname, .. } = callee.as_ref() {
-                                if fnname.as_ref() == "kNucleotide" && args.len() == 2 {
-                                    let (CallArg::Expr(seq_e), CallArg::Expr(k_e)) =
-                                        (&args[0], &args[1])
-                                    else {
-                                        continue;
-                                    };
-                                    if let Expr::Ident { name: sn, .. } = seq_e {
-                                        if let Expr::Literal {
-                                            value: Literal::Number(kn),
-                                            ..
-                                        } = k_e
-                                        {
-                                            m_local = Some(name.to_string());
-                                            seq_local = Some(sn.to_string());
-                                            k = Some(*kn as usize);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if let Some(init_e) = init.as_ref() {
-                        if let Expr::Literal {
-                            value: Literal::Number(n),
-                            ..
-                        } = init_e
-                        {
-                            if *n == 0.0 {
-                                sum_local = Some(name.to_string());
-                            }
-                        }
-                        if let Expr::Binary {
-                            op: BinOp::Add,
-                            left,
-                            right,
-                            ..
-                        } = init_e
-                        {
-                            if let Expr::Ident { name: sumn, .. } = left.as_ref() {
-                                if let Some(ml) = m_local.as_ref() {
-                                    if Self::expr_is_map_size(right, ml) {
-                                        check_local = Some(name.to_string());
-                                        sum_local = Some(sumn.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        let (len, seed, k, seq_local, m_local, sum_local, check_local, next_base_fn) = (
-            len?,
-            seed?,
-            k?,
-            seq_local?,
-            m_local?,
-            sum_local?,
-            check_local?,
-            next_base_fn?,
-        );
-        Some(KMerPlan {
-            len,
-            seed,
-            k,
-            seq_local,
-            m_local,
-            sum_local,
-            check_local,
-            len_local: len_local.unwrap_or_default(),
-            next_base_fn,
-        })
-    }
 
-    fn expr_is_map_size(expr: &Expr, m_name: &str) -> bool {
-        matches!(
-            expr,
-            Expr::Member {
-                object,
-                prop: MemberProp::Name { name, .. },
-                ..
-            } if name.as_ref() == "size"
-                && matches!(object.as_ref(), Expr::Ident { name: on, .. } if on.as_ref() == m_name)
-        )
-    }
 
-    fn expr_is_date_now_call(callee: &Expr) -> bool {
-        matches!(
-            callee,
-            Expr::Member {
-                object,
-                prop: MemberProp::Name { name, .. },
-                ..
-            } if name.as_ref() == "now"
-                && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Date")
-        )
-    }
 
-    fn expr_is_map_values_on(iterable: &Expr, m_name: &str) -> bool {
-        let Expr::Call { callee, args, .. } = iterable else {
-            return false;
-        };
-        if !args.is_empty() {
-            return false;
-        }
-        let Expr::Member {
-            object,
-            prop: MemberProp::Name { name, .. },
-            ..
-        } = callee.as_ref()
-        else {
-            return false;
-        };
-        name.as_ref() == "values"
-            && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == m_name)
-    }
 
-    fn is_k_nucleotide_check_init(init: Option<&Expr>, plan: &KMerPlan) -> bool {
-        let Some(Expr::Binary {
-            op: BinOp::Add,
-            left,
-            right,
-            ..
-        }) = init
-        else {
-            return false;
-        };
-        matches!(left.as_ref(), Expr::Ident { name, .. } if name.as_ref() == plan.sum_local.as_str())
-            && Self::expr_is_map_size(right, &plan.m_local)
-    }
 
-    fn is_k_nucleotide_fused_stmt(&self, stmt: &Statement, plan: &KMerPlan) -> bool {
-        match stmt {
-            Statement::VarDecl { name, init, .. } => {
-                if name.as_ref() == "t0" {
-                    if let Some(Expr::Call { callee, .. }) = init.as_ref() {
-                        if Self::expr_is_date_now_call(callee) {
-                            return true;
-                        }
-                    }
-                }
-                if name.as_ref() == plan.seq_local
-                    || name.as_ref() == plan.m_local
-                    || name.as_ref() == plan.sum_local
-                {
-                    return true;
-                }
-                if plan.len_local.is_empty() {
-                    return false;
-                }
-                name.as_ref() == plan.len_local.as_str()
-                    && matches!(
-                        init.as_ref(),
-                        Some(Expr::Literal {
-                            value: Literal::Number(n),
-                            ..
-                        }) if *n as usize == plan.len
-                    )
-            }
-            Statement::ForOf { iterable, .. } => Self::expr_is_map_values_on(iterable, &plan.m_local),
-            Statement::For { body, .. } => {
-                Self::for_body_pushes_next_base(body, &plan.seq_local, &plan.next_base_fn)
-            }
-            _ => false,
-        }
-    }
 
-    fn for_body_pushes_next_base(body: &Statement, seq_name: &str, next_base: &str) -> bool {
-        let mut found = false;
-        Self::for_each_stmt_expr(body, &mut |e| {
-            if let Expr::Call { callee, args, .. } = e {
-                let Expr::Member {
-                    object,
-                    prop: MemberProp::Name { name, .. },
-                    ..
-                } = callee.as_ref()
-                else {
-                    return;
-                };
-                if name.as_ref() == "push"
-                    && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == seq_name)
-                    && args.len() == 1
-                {
-                    if let CallArg::Expr(Expr::Call { callee, .. }) = &args[0] {
-                        if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == next_base) {
-                            found = true;
-                        }
-                    }
-                }
-            }
-        });
-        found
-    }
 
-    fn is_json_doc_item_push(expr: &Expr) -> bool {
-        let Expr::Call { callee, args, .. } = expr else {
-            return false;
-        };
-        let Expr::Member {
-            object,
-            prop: MemberProp::Name { name: method, .. },
-            ..
-        } = callee.as_ref()
-        else {
-            return false;
-        };
-        if method.as_ref() != "push" {
-            return false;
-        }
-        if !matches!(object.as_ref(), Expr::Ident { .. }) {
-            return false;
-        }
-        let [CallArg::Expr(obj)] = args.as_slice() else {
-            return false;
-        };
-        let Expr::Object { props, .. } = obj else {
-            return false;
-        };
-        let keys: HashSet<&str> = props
-            .iter()
-            .filter_map(|p| match p {
-                ObjectProp::KeyValue(k, _, _) => Some(k.as_ref()),
-                _ => None,
-            })
-            .collect();
-        ["id", "name", "value", "active", "tags"]
-            .into_iter()
-            .all(|k| keys.contains(k))
-    }
 
-    fn is_json_doc_factory_body(body: &Statement) -> bool {
-        let stmts = Self::stmt_block_slice(body);
-        let mut items_local: Option<&str> = None;
-        let mut saw_push = false;
-        let mut saw_return = false;
-        for s in stmts {
-            match s {
-                Statement::VarDecl { name, init, .. } => {
-                    if matches!(init, Some(Expr::Array { elements, .. }) if elements.is_empty()) {
-                        items_local = Some(name.as_ref());
-                    }
-                }
-                Statement::For { body, .. } => {
-                    if let Some(il) = items_local {
-                        if Self::for_body_only_item_pushes(body, il) {
-                            saw_push = true;
-                        } else {
-                            return false;
-                        }
-                    } else {
-                        return false;
-                    }
-                }
-                Statement::Return { value: Some(ret), .. } => {
-                    let Expr::Object { props, .. } = ret else {
-                        return false;
-                    };
-                    let keys: HashSet<&str> = props
-                        .iter()
-                        .filter_map(|p| match p {
-                            ObjectProp::KeyValue(k, _, _) => Some(k.as_ref()),
-                            _ => None,
-                        })
-                        .collect();
-                    if !keys.contains("count") || !keys.contains("items") || !keys.contains("meta") {
-                        return false;
-                    }
-                    saw_return = true;
-                }
-                _ => {}
-            }
-        }
-        items_local.is_some() && saw_push && saw_return
-    }
 
-    fn for_body_only_item_pushes(body: &Statement, items_local: &str) -> bool {
-        let stmts = Self::stmt_block_slice(body);
-        stmts.iter().all(|s| match s {
-            Statement::ExprStmt { expr, .. } => Self::is_json_doc_item_push(expr)
-                || matches!(
-                    expr,
-                    Expr::Assign { .. } | Expr::Binary { .. }
-                ),
-            _ => true,
-        }) && stmts.iter().any(|s| {
-            matches!(s, Statement::ExprStmt { expr, .. } if Self::is_json_doc_item_push(expr))
-        })
-    }
 
-    fn detect_json_doc_program(
-        stmts: &[Statement],
-    ) -> Option<(String, String, String, String, String)> {
-        let factory = stmts.iter().find_map(|s| {
-            if let Statement::FunDecl {
-                name,
-                params,
-                rest_param: None,
-                body,
-                ..
-            } = s
-            {
-                if params.len() == 1 && Self::is_json_doc_factory_body(body) {
-                    return Some(name.to_string());
-                }
-            }
-            None
-        })?;
-        let doc_local = stmts.iter().find_map(|s| {
-            if let Statement::VarDecl {
-                name,
-                init: Some(init),
-                ..
-            } = s
-            {
-                if Self::is_call_to_ident(init, &factory) {
-                    return Some(name.to_string());
-                }
-            }
-            None
-        })?;
-        let acc_local = stmts.iter().find_map(|s| {
-            if let Statement::VarDecl {
-                name,
-                init: Some(Expr::Literal {
-                    value: Literal::Number(n),
-                    ..
-                }),
-                ..
-            } = s
-            {
-                if *n == 0.0 {
-                    return Some(name.to_string());
-                }
-            }
-            None
-        })?;
-        let parsed_local = stmts.iter().find_map(|s| {
-            if let Statement::For { body, .. } = s {
-                return Self::find_json_parse_local(body);
-            }
-            None
-        })?;
-        let s_local = stmts.iter().find_map(|s| {
-            if let Statement::For { body, .. } = s {
-                return Self::find_json_stringify_local(body, &doc_local);
-            }
-            None
-        })?;
-        Some((factory, doc_local, s_local, parsed_local, acc_local))
-    }
-
-    fn is_json_stringify_doc(expr: &Expr, doc_local: &str) -> bool {
-        let Expr::Call { callee, args, .. } = expr else {
-            return false;
-        };
-        let Expr::Member {
-            object,
-            prop: MemberProp::Name { name: method, .. },
-            ..
-        } = callee.as_ref()
-        else {
-            return false;
-        };
-        method.as_ref() == "stringify"
-            && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "JSON")
-            && matches!(
-                args.as_slice(),
-                [CallArg::Expr(Expr::Ident { name: id, .. })]
-                    if id.as_ref() == doc_local
-            )
-    }
-
-    fn find_json_stringify_local(stmt: &Statement, doc_local: &str) -> Option<String> {
-        match stmt {
-            Statement::VarDecl {
-                name,
-                init: Some(init),
-                ..
-            } => {
-                if Self::is_json_stringify_doc(init, doc_local) {
-                    return Some(name.to_string());
-                }
-            }
-            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                for s in statements {
-                    if let Some(n) = Self::find_json_stringify_local(s, doc_local) {
-                        return Some(n);
-                    }
-                }
-            }
-            Statement::For { body, .. }
-            | Statement::While { body, .. }
-            | Statement::DoWhile { body, .. }
-            | Statement::ForOf { body, .. } => return Self::find_json_stringify_local(body, doc_local),
-            Statement::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                if let Some(n) = Self::find_json_stringify_local(then_branch, doc_local) {
-                    return Some(n);
-                }
-                if let Some(e) = else_branch {
-                    return Self::find_json_stringify_local(e, doc_local);
-                }
-            }
-            _ => {}
-        }
-        None
-    }
-
-    fn find_json_parse_local(stmt: &Statement) -> Option<String> {
-        match stmt {
-            Statement::VarDecl {
-                name,
-                init: Some(init),
-                ..
-            } => {
-                if Self::is_json_parse_call(init) {
-                    return Some(name.to_string());
-                }
-            }
-            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                for s in statements {
-                    if let Some(n) = Self::find_json_parse_local(s) {
-                        return Some(n);
-                    }
-                }
-            }
-            Statement::For { body, .. }
-            | Statement::While { body, .. }
-            | Statement::DoWhile { body, .. }
-            | Statement::ForOf { body, .. } => return Self::find_json_parse_local(body),
-            Statement::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                if let Some(n) = Self::find_json_parse_local(then_branch) {
-                    return Some(n);
-                }
-                if let Some(e) = else_branch {
-                    return Self::find_json_parse_local(e);
-                }
-            }
-            _ => {}
-        }
-        None
-    }
-
-    fn is_call_to_ident(expr: &Expr, name: &str) -> bool {
-        if let Expr::Call { callee, .. } = expr {
-            if let Expr::Ident { name: id, .. } = callee.as_ref() {
-                return id.as_ref() == name;
-            }
-        }
-        false
-    }
 
     fn expr_is_map_construct(expr: &Expr) -> bool {
         matches!(
@@ -13779,405 +12829,6 @@ impl Codegen {
                 ..
             } if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Map")
         )
-    }
-
-    fn is_json_parse_call(expr: &Expr) -> bool {
-        let Expr::Call { callee, args, .. } = expr else {
-            return false;
-        };
-        let Expr::Member {
-            object,
-            prop: MemberProp::Name { name: method, .. },
-            ..
-        } = callee.as_ref()
-        else {
-            return false;
-        };
-        method.as_ref() == "parse"
-            && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "JSON")
-            && args.len() == 1
-    }
-
-    fn emit_json_doc_factory_nv(&mut self) -> Result<(), CompileError> {
-        let item = crate::types::named_struct_ident("TishJsonDocItem");
-        let meta = crate::types::named_struct_ident("TishJsonDocMeta");
-        let doc = crate::types::named_struct_ident("TishJsonDoc");
-        self.writeln(&format!("fn buildDoc_nv(n: f64) -> {} {{", doc));
-        self.writeln("    let n_usize = n as usize;");
-        self.writeln(&format!("    let mut items: Vec<{}> = Vec::with_capacity(n_usize);", item));
-        self.writeln("    for i in 0..n_usize {");
-        self.writeln("        let fi = i as f64;");
-        self.writeln(&format!("        items.push({} {{", item));
-        self.writeln("            id: fi,");
-        self.writeln("            name: format!(\"item{}\", i),");
-        self.writeln("            value: fi * 1.5_f64,");
-        self.writeln("            active: (i % 2) == 0,");
-        self.writeln("            tags: vec![fi, fi + 1.0_f64, fi + 2.0_f64],");
-        self.writeln("        });");
-        self.writeln("    }");
-        self.writeln(&format!(
-            "    {} {{ count: n, items, meta: {} {{ version: 1_f64, ok: true }} }}",
-            doc, meta
-        ));
-        self.writeln("}");
-        Ok(())
-    }
-
-    fn emit_struct_from_value_method(
-        &mut self,
-        struct_name: &str,
-        fields: &[(std::sync::Arc<str>, RustType)],
-    ) {
-        self.write(&format!("    pub fn _tish_from_value(v: &Value) -> Self {{\n"));
-        self.write("        match v {\n");
-        self.write("            Value::Object(obj) => {\n");
-        self.write("                let o = obj.borrow();\n");
-        self.write("                Self {\n");
-        for (k, t) in fields {
-            let field = crate::types::field_ident(k);
-            let read = Self::json_from_value_field_expr(t, k.as_ref());
-            self.writeln(&format!("                    {}: {},", field, read));
-        }
-        self.write("                }\n");
-        self.write("            }\n");
-        self.write("            _ => Self::default(),\n");
-        self.write("        }\n");
-        self.write("    }\n");
-    }
-
-    fn json_from_value_field_expr(ty: &RustType, key: &str) -> String {
-        let key_lit = format!("Arc::from(\"{}\")", key);
-        match ty {
-            RustType::F64 => format!(
-                "o.strings.get(&{k}).map(|v| match v {{ Value::Number(n) => *n, _ => 0.0 }}).unwrap_or(0.0)",
-                k = key_lit
-            ),
-            RustType::Bool => format!(
-                "o.strings.get(&{k}).map(|v| matches!(v, Value::Bool(true))).unwrap_or(false)",
-                k = key_lit
-            ),
-            RustType::String => format!(
-                "o.strings.get(&{k}).map(|v| match v {{ Value::String(s) => s.to_string(), _ => String::new() }}).unwrap_or_default()",
-                k = key_lit
-            ),
-            RustType::Named { name, .. } => {
-                let sn = crate::types::named_struct_ident(name.as_ref());
-                format!(
-                    "o.strings.get(&{k}).map(|v| {sn}::_tish_from_value(v)).unwrap_or_default()",
-                    k = key_lit,
-                    sn = sn
-                )
-            }
-            RustType::Vec(inner) => match inner.as_ref() {
-                RustType::Named { name, .. } => {
-                    let sn = crate::types::named_struct_ident(name.as_ref());
-                    format!(
-                        "match o.strings.get(&{k}) {{ Some(Value::Array(a)) => a.borrow().iter().map(|v| {sn}::_tish_from_value(v)).collect(), _ => Vec::new() }}",
-                        k = key_lit,
-                        sn = sn
-                    )
-                }
-                RustType::F64 => format!(
-                    "match o.strings.get(&{k}) {{ Some(Value::Array(a)) => a.borrow().iter().map(|v| match v {{ Value::Number(n) => *n, _ => 0.0 }}).collect(), _ => Vec::new() }}",
-                    k = key_lit
-                ),
-                _ => "Vec::new()".to_string(),
-            },
-            _ => "Default::default()".to_string(),
-        }
-    }
-
-    fn megamorphic_value_static(name: &str) -> String {
-        format!("G_{}_MEGA_VALUES", Self::escape_ident(name).to_uppercase())
-    }
-
-    fn emit_megamorphic_value_tables(&mut self) -> Result<(), CompileError> {
-        for (name, vals) in self.megamorphic_value_tables.clone() {
-            let lit = vals
-                .iter()
-                .map(|v| Self::f64_lit(*v))
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.writeln(&format!(
-                "const {}: [f64; {}] = [{}];",
-                Self::megamorphic_value_static(name.as_str()),
-                vals.len(),
-                lit
-            ));
-        }
-        Ok(())
-    }
-
-    fn extract_value_field_literal(expr: &Expr) -> Option<f64> {
-        match expr {
-            Expr::Object { props, .. } => {
-                for p in props {
-                    if let ObjectProp::KeyValue(key, val, _) = p {
-                        if key.as_ref() == "value" {
-                            if let Expr::Literal {
-                                value: Literal::Number(n),
-                                ..
-                            } = val
-                            {
-                                return Some(*n);
-                            }
-                        }
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn mega_push_value_literal(expr: &Expr, arr_local: &str) -> Option<f64> {
-        let Expr::Call { callee, args, .. } = expr else {
-            return None;
-        };
-        let Expr::Member {
-            object,
-            prop: MemberProp::Name { name: method, .. },
-            ..
-        } = callee.as_ref()
-        else {
-            return None;
-        };
-        if method.as_ref() != "push" {
-            return None;
-        }
-        if !matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == arr_local) {
-            return None;
-        }
-        let [CallArg::Expr(obj)] = args.as_slice() else {
-            return None;
-        };
-        Self::extract_value_field_literal(obj)
-    }
-
-    fn stmt_block_slice(s: &Statement) -> Vec<&Statement> {
-        match s {
-            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                statements.iter().collect()
-            }
-            other => vec![other],
-        }
-    }
-
-    /// `function makeObjs() { let objs = []; objs.push({ value: 1, … }); … return objs }`.
-    fn extract_mega_push_value_table(body: &Statement) -> Option<Vec<f64>> {
-        let block_stmts = Self::stmt_block_slice(body);
-        let arr_local = block_stmts.iter().find_map(|s| {
-            if let Statement::VarDecl { name, init, .. } = s {
-                if matches!(init, Some(Expr::Array { elements, .. }) if elements.is_empty()) {
-                    return Some(name.to_string());
-                }
-            }
-            None
-        })?;
-        let mut values = Vec::new();
-        let mut saw_return = false;
-        for s in block_stmts {
-            match s {
-                Statement::VarDecl { name, .. } if name.as_ref() == arr_local => {}
-                Statement::ExprStmt { expr, .. } => {
-                    if let Some(v) = Self::mega_push_value_literal(expr, &arr_local) {
-                        values.push(v);
-                    } else {
-                        return None;
-                    }
-                }
-                Statement::Return { value: Some(ret), .. } => {
-                    if !matches!(ret, Expr::Ident { name, .. } if name.as_ref() == arr_local) {
-                        return None;
-                    }
-                    saw_return = true;
-                }
-                _ => return None,
-            }
-        }
-        if !saw_return || values.len() < 2 {
-            return None;
-        }
-        Some(values)
-    }
-
-    /// Link `let objs = makeObjs()` at module scope to a compile-time `.value` table.
-    fn collect_megamorphic_value_tables(stmts: &[Statement]) -> HashMap<String, Vec<f64>> {
-        if !Self::gauntlet_fusion_enabled() {
-            // Fake: const-folds literal `.value` fields and replaces the megamorphic property read
-            // with a flat array index, sidestepping the access the benchmark measures. Off unless
-            // TISH_GAUNTLET_FUSION.
-            return HashMap::new();
-        }
-        let mut fn_tables: HashMap<String, Vec<f64>> = HashMap::new();
-        for s in stmts {
-            if let Statement::FunDecl {
-                name,
-                params,
-                rest_param: None,
-                body,
-                ..
-            } = s
-            {
-                if !params.is_empty() {
-                    continue;
-                }
-                if let Some(vals) = Self::extract_mega_push_value_table(body) {
-                    fn_tables.insert(name.to_string(), vals);
-                }
-            }
-        }
-        if fn_tables.is_empty() {
-            return HashMap::new();
-        }
-        let mut out: HashMap<String, Vec<f64>> = HashMap::new();
-        for s in stmts {
-            if let Statement::VarDecl {
-                name,
-                init: Some(init),
-                ..
-            } = s
-            {
-                if let Expr::Call { callee, args, .. } = init {
-                    if args.is_empty() {
-                        if let Expr::Ident { name: fname, .. } = callee.as_ref() {
-                            if let Some(vals) = fn_tables.get(fname.as_ref()) {
-                                out.insert(name.to_string(), vals.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if out.is_empty() {
-            return HashMap::new();
-        }
-        let globals: HashSet<String> = out.keys().cloned().collect();
-        let mut reassigns: Vec<(String, &Expr)> = Vec::new();
-        Self::collect_reassignments_stmts(stmts, &mut reassigns);
-        for (n, _) in reassigns {
-            if globals.contains(&n) {
-                out.remove(&n);
-            }
-        }
-        out
-    }
-
-    fn is_megamorphic_value_read(expr: &Expr, objs: &str) -> bool {
-        let Expr::Member {
-            object,
-            prop: MemberProp::Name { name: prop, .. },
-            optional: false,
-            ..
-        } = expr
-        else {
-            return false;
-        };
-        if prop.as_ref() != "value" {
-            return false;
-        }
-        let Expr::Index {
-            object: arr_obj,
-            optional: false,
-            ..
-        } = object.as_ref()
-        else {
-            return false;
-        };
-        matches!(arr_obj.as_ref(), Expr::Ident { name, .. } if name.as_ref() == objs)
-    }
-
-    fn find_megamorphic_sum_in_stmt(stmt: &Statement, objs: &str) -> Option<String> {
-        match stmt {
-            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                for s in statements {
-                    if let Some(sum) = Self::find_megamorphic_sum_in_stmt(s, objs) {
-                        return Some(sum);
-                    }
-                }
-                None
-            }
-            Statement::For { body, .. } | Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
-                Self::find_megamorphic_sum_in_stmt(body, objs)
-            }
-            Statement::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                Self::find_megamorphic_sum_in_stmt(then_branch, objs).or_else(|| {
-                    else_branch
-                        .as_ref()
-                        .and_then(|b| Self::find_megamorphic_sum_in_stmt(b, objs))
-                })
-            }
-            Statement::ExprStmt { expr, .. } => {
-                let Expr::Assign { name, value, .. } = expr else {
-                    return None;
-                };
-                let Expr::Binary {
-                    left,
-                    op: BinOp::Add,
-                    right,
-                    ..
-                } = value.as_ref()
-                else {
-                    return None;
-                };
-                if !matches!(left.as_ref(), Expr::Ident { name: l, .. } if l.as_ref() == name.as_ref()) {
-                    return None;
-                }
-                if Self::is_megamorphic_value_read(right, objs) {
-                    return Some(name.to_string());
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn collect_megamorphic_native_sums(
-        stmts: &[Statement],
-        tables: &HashMap<String, Vec<f64>>,
-    ) -> HashSet<String> {
-        let mut out = HashSet::new();
-        for objs in tables.keys() {
-            for s in stmts {
-                if let Some(sum) = Self::find_megamorphic_sum_in_stmt(s, objs) {
-                    out.insert(sum);
-                }
-            }
-        }
-        out
-    }
-
-    fn emit_megamorphic_index_code(
-        &mut self,
-        index: &Expr,
-        table_len: usize,
-    ) -> Result<String, CompileError> {
-        if let Expr::Binary {
-            left,
-            op: BinOp::Mod,
-            ..
-        } = index
-        {
-            if let Expr::Ident { name, .. } = left.as_ref() {
-                let esc = Self::escape_ident(name.as_ref());
-                return Ok(format!("(({}) as usize) % {}", esc, table_len));
-            }
-        }
-        let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-        let idx_f64 = if idx_ty == RustType::F64 {
-            idx_code
-        } else if idx_ty == RustType::I32 {
-            format!("({} as f64)", idx_code)
-        } else if idx_ty == RustType::Value {
-            RustType::F64.from_value_expr(&idx_code)
-        } else {
-            idx_code
-        };
-        Ok(format!("(({}) as usize) % {}", idx_f64, table_len))
     }
 
     /// #176 — classify top-level `let x = <number-literal>` bindings whose every use is a numeric
@@ -14210,15 +12861,23 @@ impl Codegen {
         if candidates.is_empty() {
             return HashMap::new();
         }
-        // Inner `let`/`const` with the same name disqualifies the global (shadowing).
+        // A top-level numeric global is hoisted to a `thread_local Cell`, and every read of that
+        // NAME lowers to the global cell. So ANY shadowing binding of the same name — a `let`/`const`
+        // in a nested scope (bare block, loop/if body, fn body), a fn/arrow PARAMETER, or a `for…of`
+        // loop var — would be mis-read as the global. Disqualify such names (the binding stays a
+        // normal scoped local). Earlier this only scanned `FunDecl` bodies, so block-shadows and
+        // params silently read the global (scopes.tish / control_flow_nested / nested_complex).
+        let mut shadow: HashSet<String> = HashSet::new();
         for s in stmts {
-            if let Statement::FunDecl { body, .. } = s {
-                let mut inner = HashSet::new();
-                Self::collect_local_var_names(body, &mut inner);
-                for n in inner {
-                    candidates.remove(&n);
-                }
+            // Skip the top-level candidate decls themselves; everything else's bindings shadow.
+            match s {
+                Statement::VarDecl { .. } | Statement::VarDeclDestructure { .. } => {}
+                _ => Self::collect_local_var_names(s, &mut shadow),
             }
+            Self::collect_binding_names(s, &mut shadow);
+        }
+        for n in &shadow {
+            candidates.remove(n);
         }
         let globals: HashSet<String> = candidates.keys().cloned().collect();
         let empty_p = HashSet::new();
@@ -14668,11 +13327,23 @@ impl Codegen {
                     Some(rt) => Self::ann_is_number(rt),
                     None => true,
                 };
-                if ret_ok && params_ok && !params.is_empty() {
+                // #320: 0-param numeric fns (e.g. k_nucleotide's `nextBase()` — mutates a numeric
+                // global, returns number) are eligible too; the fixpoint below still proves the body
+                // native-safe + all-numeric-returns, so `fn name_native() -> f64` is sound.
+                if ret_ok && params_ok {
                     cand.insert(name.to_string());
                     decls.push((name.as_ref(), params, body));
                 }
             }
+        }
+        // Soundness: a candidate called ANYWHERE with a provably-non-numeric argument (a
+        // string/bool/null literal, a template literal, or an array/object literal) cannot be a
+        // native `f64`-param fn — the generated Rust would mistype the arg (a `String` is not an
+        // `f64`), and even coerced it would compute on NaN where JS keeps the value or does string
+        // `+`. E.g. `fn shadowParam(SHARED){return SHARED}` called as `shadowParam("arg")` must stay
+        // boxed. Drop such candidates BEFORE the fixpoint so it cascades to their native callers.
+        for f in Self::fns_called_with_nonnumeric_arg(statements) {
+            cand.remove(&f);
         }
         loop {
             let mut remove: Vec<String> = Vec::new();
@@ -14703,6 +13374,186 @@ impl Codegen {
             }
         }
         cand
+    }
+
+    /// Fns called ANYWHERE in the program with a provably-non-numeric argument (a `String`/`Bool`/
+    /// `Null` literal, a template literal, or an array/object literal). Such a fn cannot be soundly
+    /// native-promoted to `f64` params — not as an M5 native free fn (`collect_native_fns`) NOR via
+    /// an M4/M1 `: number` param shadow (`infer::param_infer`). Walks every statement (incl. nested
+    /// fn bodies) and expression.
+    pub(crate) fn fns_called_with_nonnumeric_arg(
+        statements: &[Statement],
+    ) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        for s in statements {
+            Self::scan_stmt_nonnum_calls(s, &mut out);
+        }
+        out
+    }
+
+    fn arg_is_nonnumeric(e: &Expr) -> bool {
+        match e {
+            Expr::Literal {
+                value: Literal::String(_) | Literal::Bool(_) | Literal::Null,
+                ..
+            }
+            | Expr::TemplateLiteral { .. }
+            | Expr::Array { .. }
+            | Expr::Object { .. } => true,
+            // A `+` with a string/template operand is JS string concatenation → a string result
+            // (e.g. `"user" + i`). Conservatively treat such a call arg as non-numeric.
+            Expr::Binary { op: BinOp::Add, left, right, .. } => {
+                Self::arg_is_nonnumeric(left) || Self::arg_is_nonnumeric(right)
+            }
+            _ => false,
+        }
+    }
+
+    fn scan_stmt_nonnum_calls(s: &Statement, out: &mut std::collections::HashSet<String>) {
+        use Statement::*;
+        match s {
+            Block { statements, .. } | Multi { statements, .. } => {
+                statements.iter().for_each(|x| Self::scan_stmt_nonnum_calls(x, out))
+            }
+            VarDecl { init: Some(i), .. } => Self::scan_expr_nonnum_calls(i, out),
+            VarDeclDestructure { init, .. } => Self::scan_expr_nonnum_calls(init, out),
+            ExprStmt { expr, .. } => Self::scan_expr_nonnum_calls(expr, out),
+            If { cond, then_branch, else_branch, .. } => {
+                Self::scan_expr_nonnum_calls(cond, out);
+                Self::scan_stmt_nonnum_calls(then_branch, out);
+                if let Some(eb) = else_branch {
+                    Self::scan_stmt_nonnum_calls(eb, out);
+                }
+            }
+            While { cond, body, .. } | DoWhile { body, cond, .. } => {
+                Self::scan_expr_nonnum_calls(cond, out);
+                Self::scan_stmt_nonnum_calls(body, out);
+            }
+            For { init, cond, update, body, .. } => {
+                if let Some(i) = init {
+                    Self::scan_stmt_nonnum_calls(i, out);
+                }
+                if let Some(c) = cond {
+                    Self::scan_expr_nonnum_calls(c, out);
+                }
+                if let Some(u) = update {
+                    Self::scan_expr_nonnum_calls(u, out);
+                }
+                Self::scan_stmt_nonnum_calls(body, out);
+            }
+            ForOf { iterable, body, .. } => {
+                Self::scan_expr_nonnum_calls(iterable, out);
+                Self::scan_stmt_nonnum_calls(body, out);
+            }
+            Return { value: Some(v), .. } => Self::scan_expr_nonnum_calls(v, out),
+            Throw { value, .. } => Self::scan_expr_nonnum_calls(value, out),
+            Switch { expr, cases, default_body, .. } => {
+                Self::scan_expr_nonnum_calls(expr, out);
+                for (g, body) in cases {
+                    if let Some(ge) = g {
+                        Self::scan_expr_nonnum_calls(ge, out);
+                    }
+                    body.iter().for_each(|x| Self::scan_stmt_nonnum_calls(x, out));
+                }
+                if let Some(d) = default_body {
+                    d.iter().for_each(|x| Self::scan_stmt_nonnum_calls(x, out));
+                }
+            }
+            Try { body, catch_body, finally_body, .. } => {
+                Self::scan_stmt_nonnum_calls(body, out);
+                if let Some(c) = catch_body {
+                    Self::scan_stmt_nonnum_calls(c, out);
+                }
+                if let Some(f) = finally_body {
+                    Self::scan_stmt_nonnum_calls(f, out);
+                }
+            }
+            FunDecl { body, .. } => Self::scan_stmt_nonnum_calls(body, out),
+            Export { declaration, .. } => match declaration.as_ref() {
+                tishlang_ast::ExportDeclaration::Named(inner) => {
+                    Self::scan_stmt_nonnum_calls(inner, out)
+                }
+                tishlang_ast::ExportDeclaration::Default(ex) => {
+                    Self::scan_expr_nonnum_calls(ex, out)
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn scan_expr_nonnum_calls(e: &Expr, out: &mut std::collections::HashSet<String>) {
+        match e {
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    if args
+                        .iter()
+                        .any(|a| matches!(a, CallArg::Expr(ae) if Self::arg_is_nonnumeric(ae)))
+                    {
+                        out.insert(name.to_string());
+                    }
+                }
+                Self::scan_expr_nonnum_calls(callee, out);
+                for a in args {
+                    if let CallArg::Expr(x) | CallArg::Spread(x) = a {
+                        Self::scan_expr_nonnum_calls(x, out);
+                    }
+                }
+            }
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                Self::scan_expr_nonnum_calls(left, out);
+                Self::scan_expr_nonnum_calls(right, out);
+            }
+            Expr::Unary { operand, .. } => Self::scan_expr_nonnum_calls(operand, out),
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                Self::scan_expr_nonnum_calls(cond, out);
+                Self::scan_expr_nonnum_calls(then_branch, out);
+                Self::scan_expr_nonnum_calls(else_branch, out);
+            }
+            Expr::Index { object, index, .. } => {
+                Self::scan_expr_nonnum_calls(object, out);
+                Self::scan_expr_nonnum_calls(index, out);
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                Self::scan_expr_nonnum_calls(object, out);
+                Self::scan_expr_nonnum_calls(index, out);
+                Self::scan_expr_nonnum_calls(value, out);
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::scan_expr_nonnum_calls(object, out);
+                if let MemberProp::Expr(pe) = prop {
+                    Self::scan_expr_nonnum_calls(pe, out);
+                }
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                Self::scan_expr_nonnum_calls(object, out);
+                Self::scan_expr_nonnum_calls(value, out);
+            }
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. } => Self::scan_expr_nonnum_calls(value, out),
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(x) | ArrayElement::Spread(x) => {
+                            Self::scan_expr_nonnum_calls(x, out)
+                        }
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for pr in props {
+                    match pr {
+                        ObjectProp::KeyValue(_, x, _) | ObjectProp::Spread(x) => {
+                            Self::scan_expr_nonnum_calls(x, out)
+                        }
+                    }
+                }
+            }
+            Expr::TemplateLiteral { exprs, .. } => {
+                exprs.iter().for_each(|x| Self::scan_expr_nonnum_calls(x, out))
+            }
+            _ => {}
+        }
     }
 
     /// Numeric locals in an M5-eligible fn body (params + fixpoint literal/copy seeds).
@@ -15426,11 +14277,22 @@ impl Codegen {
         found
     }
 
-    pub(crate) fn detect_native_vec_fns(
+    /// #320: candidate fns by BODY shape alone — a normal (boxed-closure) fn whose every param is
+    /// `Simple`/no-default, each used as either a plain scalar or a PURELY read-only `number[]` index
+    /// (no mutation, no escape, no forwarding — an owned `Vec<f64>` copy would otherwise lose a
+    /// caller-visible write/alias), with ≥1 array param, and which is NOT a native-vec (`_nv`) fn.
+    /// Returns per-param flags (`true` = array param). This is the READ-ONLY criterion only; INFER
+    /// reads it to mark `F(arr)` a non-escape (so `arr` stays `number[]`) — sound regardless of the
+    /// arg type because passing a native `Vec` to a boxed closure copies it. CODEGEN does NOT unbox
+    /// off this set directly (a caller could still pass a non-`number[]` array → NaN divergence); it
+    /// uses [`Self::native_arr_param_fns`], which additionally proves every call site passes a
+    /// `number[]`. Runs pre-`si_block` in infer, so it must not depend on `number[]` stamps.
+    pub(crate) fn arr_param_readonly_fns(
         program: &Program,
-    ) -> std::collections::HashMap<String, NativeVecFnSig> {
+    ) -> std::collections::HashMap<String, Vec<bool>> {
         use std::collections::HashMap;
-        let mut sigs: HashMap<String, NativeVecFnSig> = HashMap::new();
+        let native_vec = Self::detect_native_vec_fns(program);
+        let mut out: HashMap<String, Vec<bool>> = HashMap::new();
         for s in &program.statements {
             if let Statement::FunDecl {
                 async_: false,
@@ -15441,6 +14303,343 @@ impl Codegen {
                 ..
             } = s
             {
+                if native_vec.contains_key(name.as_ref()) {
+                    continue; // the native-vec `_nv` path already handles this fn
+                }
+                let mut flags: Vec<bool> = Vec::with_capacity(params.len());
+                let mut ok = true;
+                let mut has_arr = false;
+                for p in params {
+                    let FunParam::Simple(tp) = p else {
+                        ok = false;
+                        break;
+                    };
+                    if tp.default.is_some() {
+                        ok = false;
+                        break;
+                    }
+                    // Raw use-facts (NOT `classify_vec_param`, which returns `Array` whenever a param
+                    // is indexed even if it also escapes/forwards — too permissive for an owned copy).
+                    let mut f = ParamUse::default();
+                    Self::for_each_stmt_expr(body, &mut |e| {
+                        Self::scan_param_use(e, tp.name.as_ref(), false, &mut f)
+                    });
+                    if f.indexed {
+                        // An owned `Vec<f64>` copy is sound ONLY if the param is a pure read-only
+                        // numeric array: no element write (`is_mut`), no bare/escaping use, no
+                        // forward into a callee, no bool elements. Any of these would make a
+                        // mutation/aliasing observable to the caller that the copy can't reflect.
+                        if f.is_mut || f.escaped || f.forwarded || f.elem_bool || f.numeric {
+                            ok = false;
+                            break;
+                        }
+                        flags.push(true);
+                        has_arr = true;
+                    } else {
+                        // Non-indexed (scalar / object) param → leave it on its normal path.
+                        flags.push(false);
+                    }
+                }
+                if ok && has_arr {
+                    out.insert(name.to_string(), flags);
+                }
+            }
+        }
+        out
+    }
+
+    /// #320 (CODEGEN unbox set): the read-only candidates ([`Self::arr_param_readonly_fns`]) further
+    /// restricted to fns where EVERY call site passes a provably-`number[]` argument in each array
+    /// position — so unboxing the param to an owned `Vec<f64>` can never see a non-number element
+    /// (which would diverge from JS: `n + "x"` is string concat, not NaN arithmetic). Runs on the
+    /// FULLY-INFERRED program (so `number[]` stamps are present). A fn is dropped if it is used as a
+    /// non-call value, called indirectly, called with the wrong arity, or any array-position arg is
+    /// not an identifier bound to a `number[]`. If a fn is in the read-only set but dropped here, it
+    /// simply stays a fully boxed closure (sound, just unoptimized).
+    pub(crate) fn native_arr_param_fns(
+        program: &Program,
+    ) -> std::collections::HashMap<String, Vec<bool>> {
+        use std::collections::HashMap;
+        let readonly = Self::arr_param_readonly_fns(program);
+        if readonly.is_empty() {
+            return readonly;
+        }
+        let num_arrays = Self::collect_number_array_bindings(program);
+        let mut out: HashMap<String, Vec<bool>> = HashMap::new();
+        for (fname, flags) in &readonly {
+            if Self::all_callsites_pass_number_arrays(program, fname, flags, &num_arrays) {
+                out.insert(fname.clone(), flags.clone());
+            }
+        }
+        out
+    }
+
+    /// TOP-LEVEL names bound to a `number[]` (a top-level `VarDecl` annotated `Array<number>`). Only
+    /// top-level bindings: a fn param/local of the same name lives in another SCOPE, so conflating
+    /// them would be wrong — `all_callsites_pass_number_arrays` correspondingly only accepts calls at
+    /// top level, where an argument identifier resolves unambiguously to one of these. A top-level
+    /// name re-bound to a non-`number[]` value is conservatively dropped.
+    fn collect_number_array_bindings(program: &Program) -> std::collections::HashSet<String> {
+        use std::collections::HashSet;
+        let mut out: HashSet<String> = HashSet::new();
+        let mut conflict: HashSet<String> = HashSet::new();
+        for s in &program.statements {
+            if let Statement::VarDecl { name, type_ann, .. } = s {
+                let is_num_arr = matches!(type_ann, Some(TypeAnnotation::Array(inner)) if Self::ann_is_number(inner));
+                if is_num_arr && !conflict.contains(name.as_ref()) {
+                    out.insert(name.to_string());
+                } else if !is_num_arr {
+                    out.remove(name.as_ref());
+                    conflict.insert(name.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// True iff EVERY reference to `fname` in the WHOLE program (including nested fn bodies and
+    /// exports) is a direct call `fname(args)` whose array positions (per `flags`) are identifiers
+    /// bound to a `number[]`, with matching arity. Any other use — bare value, indirect/aliased
+    /// call, wrong arity, or a non-`number[]` array arg — makes it `false` (so the param stays boxed).
+    fn all_callsites_pass_number_arrays(
+        program: &Program,
+        fname: &str,
+        flags: &[bool],
+        num_arrays: &std::collections::HashSet<String>,
+    ) -> bool {
+        let mut ok = true;
+        for s in &program.statements {
+            Self::scan_stmt_for_fname(s, fname, flags, num_arrays, false, &mut ok);
+            if !ok {
+                return false;
+            }
+        }
+        ok
+    }
+
+    /// Recurse every statement (incl. nested `FunDecl` bodies and `export`ed declarations), applying
+    /// [`Self::scan_expr_for_fname`] to each statement-level expression.
+    fn scan_stmt_for_fname(
+        s: &Statement,
+        fname: &str,
+        flags: &[bool],
+        num_arrays: &std::collections::HashSet<String>,
+        in_fn: bool,
+        ok: &mut bool,
+    ) {
+        use Statement::*;
+        if !*ok {
+            return;
+        }
+        let mut e = |x: &Expr, ok: &mut bool| {
+            Self::scan_expr_for_fname(x, fname, flags, num_arrays, in_fn, ok)
+        };
+        let mut st = |x: &Statement, ok: &mut bool| {
+            Self::scan_stmt_for_fname(x, fname, flags, num_arrays, in_fn, ok)
+        };
+        match s {
+            Block { statements, .. } | Multi { statements, .. } => {
+                statements.iter().for_each(|x| st(x, ok))
+            }
+            VarDecl { init: Some(i), .. } => e(i, ok),
+            VarDeclDestructure { init, .. } => e(init, ok),
+            ExprStmt { expr, .. } => e(expr, ok),
+            If { cond, then_branch, else_branch, .. } => {
+                e(cond, ok);
+                st(then_branch, ok);
+                if let Some(eb) = else_branch {
+                    st(eb, ok);
+                }
+            }
+            While { cond, body, .. } | DoWhile { body, cond, .. } => {
+                e(cond, ok);
+                st(body, ok);
+            }
+            For { init, cond, update, body, .. } => {
+                if let Some(i) = init {
+                    st(i, ok);
+                }
+                if let Some(c) = cond {
+                    e(c, ok);
+                }
+                if let Some(u) = update {
+                    e(u, ok);
+                }
+                st(body, ok);
+            }
+            ForOf { iterable, body, .. } => {
+                e(iterable, ok);
+                st(body, ok);
+            }
+            Return { value: Some(v), .. } => e(v, ok),
+            Throw { value, .. } => e(value, ok),
+            Switch { expr, cases, default_body, .. } => {
+                e(expr, ok);
+                for (g, body) in cases {
+                    if let Some(ge) = g {
+                        e(ge, ok);
+                    }
+                    body.iter().for_each(|x| st(x, ok));
+                }
+                if let Some(d) = default_body {
+                    d.iter().for_each(|x| st(x, ok));
+                }
+            }
+            Try { body, catch_body, finally_body, .. } => {
+                st(body, ok);
+                if let Some(c) = catch_body {
+                    st(c, ok);
+                }
+                if let Some(fb) = finally_body {
+                    st(fb, ok);
+                }
+            }
+            // A nested fn body is a new scope: an array arg there could be a (shadowing) param/local,
+            // which `num_arrays` (top-level only) can't resolve — so flag `in_fn` and let any call to
+            // `fname` inside it disqualify the optimization.
+            FunDecl { body, .. } => {
+                Self::scan_stmt_for_fname(body, fname, flags, num_arrays, true, ok)
+            }
+            Export { declaration, .. } => match declaration.as_ref() {
+                tishlang_ast::ExportDeclaration::Named(inner) => st(inner, ok),
+                tishlang_ast::ExportDeclaration::Default(ex) => e(ex, ok),
+            },
+            // Break / Continue / Import / TypeAlias / DeclareVar / DeclareFun — no user-fn calls.
+            _ => {}
+        }
+    }
+
+    /// Recurse one expression: a direct `fname(args)` call is checked (arity + `number[]` array
+    /// args), other sub-expressions are recursed, and ANY bare `fname` identifier fails. Unhandled
+    /// expr forms fall to a conservative `collect_idents_of` net: if `fname` appears there, fail.
+    fn scan_expr_for_fname(
+        e: &Expr,
+        fname: &str,
+        flags: &[bool],
+        num_arrays: &std::collections::HashSet<String>,
+        in_fn: bool,
+        ok: &mut bool,
+    ) {
+        if !*ok {
+            return;
+        }
+        let mut rec = |x: &Expr, ok: &mut bool| {
+            Self::scan_expr_for_fname(x, fname, flags, num_arrays, in_fn, ok)
+        };
+        let mut rec_args = |args: &[CallArg], ok: &mut bool| {
+            for a in args {
+                if let CallArg::Expr(x) | CallArg::Spread(x) = a {
+                    rec(x, ok);
+                }
+            }
+        };
+        match e {
+            // A direct call to `fname`: validate it, then recurse into the ARGS only (the callee
+            // identifier is the consumed `fname`, not a bare use).
+            Expr::Call { callee, args, .. }
+                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == fname) =>
+            {
+                // A call inside a fn body can't have its array arg resolved against top-level-only
+                // `num_arrays` (the arg may be a shadowing param/local) — conservatively disqualify.
+                if in_fn || args.len() != flags.len() {
+                    *ok = false;
+                    return;
+                }
+                for (i, want_arr) in flags.iter().enumerate() {
+                    if *want_arr
+                        && !matches!(&args[i], CallArg::Expr(Expr::Ident { name, .. }) if num_arrays.contains(name.as_ref()))
+                    {
+                        *ok = false;
+                        return;
+                    }
+                }
+                rec_args(args, ok);
+            }
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                rec(callee, ok);
+                rec_args(args, ok);
+            }
+            // A bare `fname` (not the callee of a direct call handled above) → can't prove safety.
+            Expr::Ident { name, .. } if name.as_ref() == fname => *ok = false,
+            Expr::Ident { .. } | Expr::Literal { .. } => {}
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                rec(left, ok);
+                rec(right, ok);
+            }
+            Expr::Unary { operand, .. } => rec(operand, ok),
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                rec(cond, ok);
+                rec(then_branch, ok);
+                rec(else_branch, ok);
+            }
+            Expr::Index { object, index, .. } => {
+                rec(object, ok);
+                rec(index, ok);
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                rec(object, ok);
+                rec(index, ok);
+                rec(value, ok);
+            }
+            Expr::Member { object, prop, .. } => {
+                rec(object, ok);
+                if let MemberProp::Expr(pe) = prop {
+                    rec(pe, ok);
+                }
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                rec(object, ok);
+                rec(value, ok);
+            }
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. } => rec(value, ok),
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(x) | ArrayElement::Spread(x) => rec(x, ok),
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for pr in props {
+                    match pr {
+                        ObjectProp::KeyValue(_, x, _) | ObjectProp::Spread(x) => rec(x, ok),
+                    }
+                }
+            }
+            Expr::TemplateLiteral { exprs, .. } => exprs.iter().for_each(|x| rec(x, ok)),
+            // Unhandled form (closures, await, etc.): conservatively fail if `fname` appears at all.
+            other => {
+                if Self::collect_idents_of(other).contains(fname) {
+                    *ok = false;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn detect_native_vec_fns(
+        program: &Program,
+    ) -> std::collections::HashMap<String, NativeVecFnSig> {
+        use std::collections::HashMap;
+        let mut sigs: HashMap<String, NativeVecFnSig> = HashMap::new();
+        // Soundness: a fn called anywhere with a provably-non-numeric arg must not become a native-vec
+        // fn either — its scalar params would be typed `f64` and mistype the arg (e.g. `fn rec(m){
+        // log.push(m) }` called `rec("ran")`). Same gate the M4/M5/S-0 paths use.
+        let nonnumeric = Self::fns_called_with_nonnumeric_arg(&program.statements);
+        for s in &program.statements {
+            if let Statement::FunDecl {
+                async_: false,
+                name,
+                params,
+                rest_param: None,
+                body,
+                ..
+            } = s
+            {
+                if nonnumeric.contains(name.as_ref()) {
+                    continue;
+                }
                 if let Some(sig) = Self::infer_vec_fn_sig(params, body) {
                     let has_array_param = sig
                         .params
@@ -15486,6 +14685,12 @@ impl Codegen {
                     if sigs.contains_key(name.as_ref()) {
                         continue;
                     }
+                    // Same soundness gate as the initial pass: the forwarding fixpoint must also refuse
+                    // a fn called with a non-numeric arg, or `body_uses_local_vec_ops` re-adds it here
+                    // (e.g. `fn rec(m){ log.push(m) }` called `rec("ran")`).
+                    if nonnumeric.contains(name.as_ref()) {
+                        continue;
+                    }
                     if let Some(sig) = Self::infer_vec_fn_sig_forwarding(params, body, &sigs) {
                         let has_array_param = sig
                             .params
@@ -15523,6 +14728,374 @@ impl Codegen {
             }
         }
         sigs
+    }
+
+    /// Pre-order visit of `e` and every sub-expression (incl. arrow-function bodies). Used by the
+    /// native-vec param-bound proof to find call sites and variable mutations anywhere in a scope.
+    fn nv_for_each_subexpr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+        f(e);
+        let mut rec = |x: &Expr| Self::nv_for_each_subexpr(x, f);
+        match e {
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                rec(left);
+                rec(right);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::TypeOf { operand, .. }
+            | Expr::Await { operand, .. }
+            | Expr::Delete { target: operand, .. } => rec(operand),
+            // `Assign`/`CompoundAssign`/`LogicalAssign` target a bare `name` (not a sub-expr); only the
+            // value is an expression to recurse.
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. } => rec(value),
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                rec(cond);
+                rec(then_branch);
+                rec(else_branch);
+            }
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                rec(callee);
+                for a in args {
+                    if let CallArg::Expr(x) | CallArg::Spread(x) = a {
+                        rec(x);
+                    }
+                }
+            }
+            Expr::Member { object, prop, .. } => {
+                rec(object);
+                if let MemberProp::Expr(p) = prop {
+                    rec(p);
+                }
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                rec(object);
+                rec(value);
+            }
+            Expr::Index { object, index, .. } => {
+                rec(object);
+                rec(index);
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                rec(object);
+                rec(index);
+                rec(value);
+            }
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    if let ArrayElement::Expr(x) | ArrayElement::Spread(x) = el {
+                        rec(x);
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for p in props {
+                    match p {
+                        ObjectProp::KeyValue(_, v, _) | ObjectProp::Spread(v) => rec(v),
+                    }
+                }
+            }
+            Expr::ArrowFunction { body, .. } => match body {
+                ArrowBody::Expr(x) => rec(x),
+                ArrowBody::Block(s) => {
+                    Self::for_each_stmt_expr(s, &mut |x| Self::nv_for_each_subexpr(x, f))
+                }
+            },
+            Expr::TemplateLiteral { exprs, .. } => exprs.iter().for_each(rec),
+            _ => {}
+        }
+    }
+
+    /// Every identifier that is the TARGET of a mutation (`=`, `+=`, `||=`, `++`, `--`) anywhere in
+    /// `stmts` — descending through nested statements, fn-decl bodies, and arrow bodies. Used to find
+    /// which params are stable (never reassigned), so a scalar arg naming one is a constant length
+    /// bound. Conservative: a deeper-scope local of the same name also marks the name (rejects → the
+    /// param-bound proof keeps the OOB-safe lowering, which is always sound).
+    fn nv_collect_mutated_idents(stmts: &[Statement]) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        fn go(stmts: &[Statement], out: &mut std::collections::HashSet<String>) {
+            for s in stmts {
+                Codegen::for_each_stmt_expr(s, &mut |e| {
+                    Codegen::nv_for_each_subexpr(e, &mut |x| match x {
+                        Expr::Assign { name, .. }
+                        | Expr::CompoundAssign { name, .. }
+                        | Expr::LogicalAssign { name, .. }
+                        | Expr::PostfixInc { name, .. }
+                        | Expr::PostfixDec { name, .. }
+                        | Expr::PrefixInc { name, .. }
+                        | Expr::PrefixDec { name, .. } => {
+                            out.insert(name.to_string());
+                        }
+                        _ => {}
+                    })
+                });
+                Codegen::for_each_child_stmt_list(s, &mut |list| go(list, out));
+            }
+        }
+        go(stmts, &mut out);
+        out
+    }
+
+    /// Record every direct call to a native-vec fn as `(caller-scope, callee, positional-args)`. The
+    /// caller scope is `None` at top level and `Some(fn)` inside that fn's body (nested fns switch
+    /// scope). A call with a spread arg is recorded with EMPTY args so the arity check fails and the
+    /// callee stays unproven (positions aren't statically known). Soundness depends on recording EVERY
+    /// call site — a missed one could pass a short array — so the walk covers control-flow and arrows.
+    fn nv_collect_callsites(
+        &self,
+        program: &Program,
+        sigs: &std::collections::HashMap<String, NativeVecFnSig>,
+    ) -> Vec<(Option<String>, String, Vec<Expr>)> {
+        let mut out: Vec<(Option<String>, String, Vec<Expr>)> = Vec::new();
+        let mut record = |caller: &Option<String>, e: &Expr, out: &mut Vec<_>| {
+            Self::nv_for_each_subexpr(e, &mut |x| {
+                if let Expr::Call { callee, args, .. } = x {
+                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                        if sigs.contains_key(name.as_ref()) {
+                            let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
+                            let argv: Vec<Expr> = if has_spread {
+                                Vec::new()
+                            } else {
+                                args.iter()
+                                    .filter_map(|a| match a {
+                                        CallArg::Expr(x) => Some(x.clone()),
+                                        CallArg::Spread(_) => None,
+                                    })
+                                    .collect()
+                            };
+                            out.push((caller.clone(), name.to_string(), argv));
+                        }
+                    }
+                }
+            });
+        };
+        // Top-level scope (caller None) — `for_each_stmt_expr` does not enter fn bodies.
+        for s in &program.statements {
+            Self::for_each_stmt_expr(s, &mut |e| record(&None, e, &mut out));
+        }
+        // Each fn scope (any nesting depth), caller = that fn.
+        Self::nv_for_each_fundecl(&program.statements, &mut |name, body| {
+            let caller = Some(name.to_string());
+            for s in Self::fn_body_stmt_slice(body) {
+                Self::for_each_stmt_expr(s, &mut |e| record(&caller, e, &mut out));
+            }
+        });
+        // Param-default exprs are evaluated at a fn's call sites, not in any body scanned above. A
+        // native-vec call there would route to `_nv` with args we cannot place in a known scope —
+        // POISON the callee (an empty-arg record fails the arity check ⇒ it is never proven), keeping
+        // it OOB-safe. Cheap and conservative; spectral_norm has no defaulted params.
+        Self::nv_for_each_param_default(&program.statements, &mut |d| {
+            Self::nv_for_each_subexpr(d, &mut |x| {
+                if let Expr::Call { callee, .. } = x {
+                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                        if sigs.contains_key(name.as_ref()) {
+                            out.push((None, name.to_string(), Vec::new()));
+                        }
+                    }
+                }
+            });
+        });
+        out
+    }
+
+    /// Visit every `FunParam::Simple` default-value expression at any nesting depth.
+    fn nv_for_each_param_default(stmts: &[Statement], f: &mut dyn FnMut(&Expr)) {
+        for s in stmts {
+            if let Statement::FunDecl { params, .. } = s {
+                for p in params {
+                    if let FunParam::Simple(tp) = p {
+                        if let Some(d) = &tp.default {
+                            f(d);
+                        }
+                    }
+                }
+            }
+            Self::for_each_child_stmt_list(s, &mut |list| Self::nv_for_each_param_default(list, f));
+        }
+    }
+
+    /// Visit every `FunDecl` at any nesting depth as `(name, body)`.
+    fn nv_for_each_fundecl(stmts: &[Statement], f: &mut dyn FnMut(&str, &Statement)) {
+        for s in stmts {
+            if let Statement::FunDecl { name, body, .. } = s {
+                f(name.as_ref(), body);
+            }
+            Self::for_each_child_stmt_list(s, &mut |list| Self::nv_for_each_fundecl(list, f));
+        }
+    }
+
+    /// #203 follow-up — SOUND recovery of the native-vec array-param length bound the unsound blind
+    /// assumption used to provide. Returns, per native-vec fn, the array params PROVEN at EVERY call
+    /// site to be at least as long as the fn's first scalar param, so `emit_native_vec_fn` re-registers
+    /// `vec_fixed_len[param] = Var(scalar)` and drops the OOB-safe `.get()` fallback for in-bounds reads.
+    ///
+    /// Soundness rests on three facts:
+    ///  1. A native-vec array param's length never changes inside the body — `classify_vec_param`
+    ///     rejects `push`/`pop`/`splice`/`.length =` (they escape), leaving only `arr[i]`, `arr[i]=v`,
+    ///     `.length`, and forwarding to another native-vec fn. So a bound proven at entry holds.
+    ///  2. `collect_vec_fixed_len` proves a caller LOCAL's exact fill length (`for i<m {a.push(_)}` → m)
+    ///     and its escape filter drops any local that could be shrunk.
+    ///  3. The bound variable `m` (a scalar arg that names the array's fill-length var) is a caller
+    ///     PARAMETER never reassigned in the caller body — so `length(a) == m` still holds at the call.
+    ///
+    /// A monotone fixpoint propagates the fact across the call graph: spectral_norm threads length-`n`
+    /// locals through `multiplyAtAv` into `multiplyAv`. Anything not provable keeps the OOB-safe path.
+    fn compute_native_vec_param_bounds(
+        &self,
+        program: &Program,
+    ) -> std::collections::HashMap<String, std::collections::HashMap<String, BoundKey>> {
+        use std::collections::{HashMap, HashSet};
+        let sigs = &self.native_vec_fns;
+        if sigs.is_empty() {
+            return HashMap::new();
+        }
+        // Per-caller context (None = top-level). `params`: Simple param names. `stable`: params never
+        // mutated in the body. `fixed`: local arrays with a proven fill length.
+        let mut params: HashMap<Option<String>, HashSet<String>> = HashMap::new();
+        let mut stable: HashMap<Option<String>, HashSet<String>> = HashMap::new();
+        let mut fixed: HashMap<Option<String>, HashMap<String, BoundKey>> = HashMap::new();
+        params.insert(None, HashSet::new());
+        stable.insert(None, HashSet::new());
+        fixed.insert(None, self.collect_vec_fixed_len(&program.statements));
+        for s in &program.statements {
+            if let Statement::FunDecl { name, params: ps, body, .. } = s {
+                let pnames: HashSet<String> = ps
+                    .iter()
+                    .filter_map(|p| match p {
+                        FunParam::Simple(tp) => Some(tp.name.to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                let body_stmts = Self::fn_body_stmt_slice(body);
+                let mutated = Self::nv_collect_mutated_idents(body_stmts);
+                let stable_ps: HashSet<String> =
+                    pnames.iter().filter(|p| !mutated.contains(*p)).cloned().collect();
+                let key = Some(name.to_string());
+                params.insert(key.clone(), pnames);
+                stable.insert(key.clone(), stable_ps);
+                fixed.insert(key, self.collect_vec_fixed_len(body_stmts));
+            }
+        }
+        let calls = self.nv_collect_callsites(program, sigs);
+        // Monotone fixpoint: a newly-proven param bound can enable a callee's bound (param-flow).
+        let mut proven: HashMap<String, HashMap<String, BoundKey>> = HashMap::new();
+        loop {
+            let mut changed = false;
+            for (fname, sig) in sigs {
+                let Some(si) = sig
+                    .params
+                    .iter()
+                    .position(|(_, k)| matches!(k, VecParamKind::Scalar))
+                else {
+                    continue; // no scalar param ⇒ nothing to bound the array length against.
+                };
+                let s_name = sig.params[si].0.clone();
+                let sites: Vec<&(Option<String>, String, Vec<Expr>)> =
+                    calls.iter().filter(|(_, callee, _)| callee == fname).collect();
+                if sites.is_empty() {
+                    continue; // uncalled ⇒ no evidence of caller array lengths; stay OOB-safe.
+                }
+                for (pi, (p_name, kind)) in sig.params.iter().enumerate() {
+                    if !matches!(kind, VecParamKind::Array { .. }) {
+                        continue;
+                    }
+                    if proven.get(fname).is_some_and(|m| m.contains_key(p_name)) {
+                        continue;
+                    }
+                    let all_ok = sites.iter().all(|(caller, _, args)| {
+                        args.len() == sig.params.len()
+                            && Self::nv_callsite_arg_len_ge(
+                                caller,
+                                args.get(pi),
+                                args.get(si),
+                                &params,
+                                &stable,
+                                &fixed,
+                                &proven,
+                            )
+                    });
+                    if all_ok {
+                        proven
+                            .entry(fname.clone())
+                            .or_default()
+                            .insert(p_name.clone(), BoundKey::Var(s_name.clone()));
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        proven
+    }
+
+    /// Does the array argument `arr_arg` (in scope `caller`) provably have length >= the value of the
+    /// scalar argument `scalar_arg`? Sound cases only — anything else returns false (param stays
+    /// OOB-safe). See [`Self::compute_native_vec_param_bounds`] for the soundness argument.
+    #[allow(clippy::too_many_arguments)]
+    fn nv_callsite_arg_len_ge(
+        caller: &Option<String>,
+        arr_arg: Option<&Expr>,
+        scalar_arg: Option<&Expr>,
+        params: &std::collections::HashMap<Option<String>, std::collections::HashSet<String>>,
+        stable: &std::collections::HashMap<Option<String>, std::collections::HashSet<String>>,
+        fixed: &std::collections::HashMap<Option<String>, std::collections::HashMap<String, BoundKey>>,
+        proven: &std::collections::HashMap<String, std::collections::HashMap<String, BoundKey>>,
+    ) -> bool {
+        let (Some(arr_arg), Some(scalar_arg)) = (arr_arg, scalar_arg) else {
+            return false;
+        };
+        // The array argument must be a bare identifier (the native-vec call ABI requires this anyway).
+        let Expr::Ident { name: a, .. } = arr_arg else {
+            return false;
+        };
+        let a = a.as_ref();
+        // (1) scalar arg is `a.length` — exact equality, always >=.
+        if let Expr::Member { object, prop, .. } = scalar_arg {
+            if matches!(prop, MemberProp::Name { name, .. } if name.as_ref() == "length")
+                && matches!(object.as_ref(), Expr::Ident { name: o, .. } if o.as_ref() == a)
+            {
+                return true;
+            }
+        }
+        // A scalar arg that NAMES a variable is only a sound bound if that variable is a STABLE param
+        // of the caller (never reassigned) — otherwise its value at the call may exceed the length the
+        // array was filled to.
+        let scalar_is_stable_var = |m: &str| {
+            matches!(scalar_arg, Expr::Ident { name: s, .. } if s.as_ref() == m)
+                && stable.get(caller).is_some_and(|s| s.contains(m))
+        };
+        let caller_fixed = fixed.get(caller);
+        // (2) `a` is a caller LOCAL filled to length `Var(m)` and the scalar arg is that stable `m`.
+        if let Some(BoundKey::Var(m)) = caller_fixed.and_then(|f| f.get(a)) {
+            if scalar_is_stable_var(m) {
+                return true;
+            }
+        }
+        // (2b) `a` is a caller LOCAL of proven Const length `k` and the scalar arg is the int literal
+        // `k` EXACTLY. Exact (not `<= k`) so every proven bound means `length == scalar`, identical to
+        // the trusted local-array `Var(n)` bounds — a strictly-longer array could otherwise make a
+        // `.length`-folding read disagree with the boxed path. (Inductively keeps case (3) exact too.)
+        if let Some(BoundKey::Const(k)) = caller_fixed.and_then(|f| f.get(a)) {
+            if let Expr::Literal { value: Literal::Number(n), .. } = scalar_arg {
+                if *n >= 0.0 && n.fract() == 0.0 && (*n as i64) == *k {
+                    return true;
+                }
+            }
+        }
+        // (3) param-flow: `a` is the caller's OWN array param with an already-proven bound `Var(m)`, and
+        // the scalar arg is that same stable `m` (the caller's scalar that bounds `a`).
+        if let Some(cname) = caller {
+            if params.get(caller).is_some_and(|p| p.contains(a)) {
+                if let Some(BoundKey::Var(m)) = proven.get(cname).and_then(|m| m.get(a)) {
+                    if scalar_is_stable_var(m) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Detect, validate, and emit the native-vec fn group. On any gap the group is left empty.
@@ -15581,6 +15154,8 @@ impl Codegen {
             .collect();
         // Emit into a scratch buffer; roll back on any failure.
         self.native_vec_fns = sigs;
+        // #203 follow-up: prove (where sound) that array params are long enough to drop bounds guards.
+        self.native_vec_param_bounds = self.compute_native_vec_param_bounds(program);
         let body_of: HashMap<&str, &Statement> =
             decls.iter().map(|(n, b)| (n.as_str(), b)).collect();
         for (name, sig) in &self.native_vec_fns {
@@ -15847,7 +15422,10 @@ impl Codegen {
                 Self::scan_param_use(callee, p, false, f);
                 for a in args {
                     match a {
-                        CallArg::Expr(Expr::Ident { name, .. }) if name.as_ref() == p => {}
+                        CallArg::Expr(Expr::Ident { name, .. }) if name.as_ref() == p => {
+                            // forward (native-vec re-borrows; arr-param owned-copy must reject).
+                            f.forwarded = true;
+                        }
                         CallArg::Expr(e) | CallArg::Spread(e) => {
                             Self::scan_param_use(e, p, false, f)
                         }
@@ -16363,18 +15941,15 @@ impl Codegen {
         let saved_array_elem = self.array_elem_ranges.clone();
         let saved_int_valued = self.int_valued_locals.clone();
         let body_slice = Self::fn_body_stmt_slice(body);
-        if let Some(lp) = sig.params.iter().find_map(|(name, kind)| {
-            matches!(kind, VecParamKind::Scalar).then(|| name.clone())
-        }) {
-            for (pname, kind) in &sig.params {
-                if matches!(kind, VecParamKind::Array { .. }) {
-                    let bound = if pname.starts_with("diag") {
-                        BoundKey::TwiceVar(lp.clone())
-                    } else {
-                        BoundKey::Var(lp.clone())
-                    };
-                    self.vec_fixed_len.insert(pname.clone(), bound);
-                }
+        // #203 follow-up: register the array-param length bound ONLY where the whole-program proof
+        // ([`Self::compute_native_vec_param_bounds`]) established that every call site passes an array
+        // at least as long as this fn's first scalar param. Then `index_in_bounds(i < scalar)` soundly
+        // proves `arr[i]`, dropping the OOB-safe `.get().unwrap_or(NaN)` fallback (recovers
+        // spectral_norm's raw indexing). The blind `vec_fixed_len[arr] = Var(lp)` this replaces was
+        // UNSOUND — it panicked on `sumArr([10,20,30], 5)`. Unproven params stay OOB-safe.
+        if let Some(bounds) = self.native_vec_param_bounds.get(name) {
+            for (pname, bound) in bounds {
+                self.vec_fixed_len.insert(pname.clone(), bound.clone());
             }
         }
         self.merge_fn_body_inference(body_slice);
@@ -16529,8 +16104,8 @@ impl Codegen {
     // Infers a recursive struct shape STRUCTURALLY (no identifier matching) from object literals
     // whose fields are scalars or recursive self-references, and emits native builders
     // (`name_rec(..) -> TishStruct_X`) + consumers (`name_rec(&TishStruct_X) -> f64`) over
-    // `Option<Box<T>>` children. This is the real binary_trees fix (retires the `binary_trees_check`
-    // fixture kernel) — it transfers to any developer code with the same shape. v1 scope: leaf
+    // `Option<Box<T>>` children. This is the real, name-independent binary_trees fix — it transfers
+    // to any developer code with the same shape. v1 scope: leaf
     // builder/consumer fns (if / return) + top-level `consumer(builder(literals))` routing; the
     // loop-bearing orchestrator (binaryTrees) is future work. SAFE: the boxed closures are left
     // intact as a fallback, native fns are emitted with rollback, and only fully-native-emittable
@@ -19362,44 +18937,6 @@ impl Codegen {
                 }
                 // Native fast path: `vec[i]` where vec is Vec<T> and i is numeric.
                 if !optional {
-                    if let Some(plan) = &self.json_doc_plan {
-                        if let Some(index_only) =
-                            Self::parse_json_doc_items_index(expr, &plan.parsed_local)
-                        {
-                            let parsed_esc =
-                                Self::escape_ident(&plan.parsed_local).into_owned();
-                            let idx_usize = self.emit_json_doc_index_usize(index_only)?;
-                            return Ok((
-                                format!("{}.items[{}]", parsed_esc, idx_usize),
-                                Self::json_doc_item_ty(),
-                            ));
-                        }
-                    }
-                    if let Expr::Member {
-                        object: mobj,
-                        prop: MemberProp::Name { name: field, .. },
-                        optional: false,
-                        ..
-                    } = object.as_ref()
-                    {
-                        if field.as_ref() == "tags" {
-                            if let Expr::Ident { name: var, .. } = mobj.as_ref() {
-                                let vt = self.type_context.get_type(var.as_ref());
-                                if matches!(
-                                    vt,
-                                    RustType::Named { name, .. }
-                                        if name.as_ref() == "TishJsonDocItem"
-                                ) {
-                                    let esc = Self::escape_ident(var.as_ref()).into_owned();
-                                    let idx_usize = self.emit_json_doc_index_usize(index)?;
-                                    return Ok((
-                                        format!("{}.tags[{}]", esc, idx_usize),
-                                        RustType::F64,
-                                    ));
-                                }
-                            }
-                        }
-                    }
                     if let Expr::Ident { name, .. } = object.as_ref() {
                         if !self.refcell_wrapped_vars.contains(name.as_ref()) {
                             let obj_type = self.type_context.get_type(name.as_ref());
@@ -19648,29 +19185,6 @@ impl Codegen {
                 optional: false,
                 ..
             } => {
-                // #179: megamorphic `.value` on `objs[i]` / `objs[r % n]` → const f64 table
-                // (compile-time polymorphic inline cache — Bun/JSC specialize the one hot site).
-                if prop_name.as_ref() == "value" {
-                    if let Expr::Index {
-                        object: arr_obj,
-                        index,
-                        optional: false,
-                        ..
-                    } = object.as_ref()
-                    {
-                        if let Expr::Ident { name: arr_name, .. } = arr_obj.as_ref() {
-                            if let Some(vals) =
-                                self.megamorphic_value_tables.get(arr_name.as_ref())
-                            {
-                                let static_name =
-                                    Self::megamorphic_value_static(arr_name.as_ref());
-                                let idx =
-                                    self.emit_megamorphic_index_code(index, vals.len())?;
-                                return Ok((format!("{}[{}]", static_name, idx), RustType::F64));
-                            }
-                        }
-                    }
-                }
                 if let Expr::Ident { name: var_name, .. } = object.as_ref() {
                     let var_type = self.type_context.get_type(var_name.as_ref());
                     // #173: `vec.length` on a native `Vec<_>` → `(vec.len() as f64)`, so the length
@@ -19843,7 +19357,7 @@ impl Codegen {
         callee: &Expr,
         args: &[CallArg],
     ) -> Result<Option<(String, RustType)>, CompileError> {
-        if std::env::var("TISH_NATIVE_HOF").is_err() {
+        if !crate::native_opts_enabled() {
             return Ok(None);
         }
         let Expr::Member {

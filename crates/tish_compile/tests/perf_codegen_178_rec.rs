@@ -1,29 +1,17 @@
-//! #178 — recursive-struct native lowering (behind `TISH_REC_STRUCT`).
+//! #178 — recursive-struct native lowering.
 //!
 //! A developer-shaped recursive binary tree (arbitrary identifiers, NOT the fixture names
 //! bottomUpTree/itemCheck/binaryTrees) must lower to a native arena: an `i32`-indexed struct,
 //! native `build`/`check` free fns threading `&mut Vec<Node>` / `&Vec<Node>`, and a top-level
 //! routed call — with NO `object_from_pairs` / `get_prop` / `value_call` on the hot path. This is
-//! the real fix that makes the boxed `binary_trees` path fast under any names (retiring the
-//! `binary_trees_check` fixture kernel). See docs/recursive-struct-native.md.
+//! the real, name-independent fix that makes the boxed `binary_trees` path fast under any names.
+//! See docs/recursive-struct-native.md.
 
 use std::path::PathBuf;
 
 use tishlang_compile::compile_project_full;
 
 fn enable_flags() {
-    for k in [
-        "TISH_PARAM_NATIVE",
-        "TISH_PARAM_INFER",
-        "TISH_NATIVE_FN",
-        "TISH_STRUCT_INFER",
-        "TISH_FUSED_HOF",
-        "TISH_NATIVE_HOF",
-        "TISH_AGGREGATE_INFER",
-        "TISH_REC_STRUCT",
-    ] {
-        std::env::set_var(k, "1");
-    }
 }
 
 const SRC: &str = r#"

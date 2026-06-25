@@ -1,0 +1,73 @@
+# Native perf gauntlet — SOUNDNESS gate for the typed-native optimization stack.
+#
+# Builds every tests/perf/*.tish fixture twice (typed = ALL native perf flags on; boxed = all off)
+# plus the node control, and asserts the computed checksum is identical across all three. A flag (or
+# a cross-flag interaction) that changes the result shows up as `typed≠boxed` / `≠node` and fails the
+# job (`--strict`). Timing is NOT gated — shared CI runners are too noisy, and the perf signal lives
+# in perf-history.yml / perf-release.yml. This is purely "do all the optimization flags still produce
+# the SAME answer as the dynamic baseline and V8, together".
+name: Perf gauntlet (soundness)
+
+on:
+  pull_request:
+    paths:
+      - "crates/tish_compile/**"
+      - "crates/tish_runtime/**"
+      - "crates/tish_builtins/**"
+      - "crates/tish_core/**"
+      - "crates/tish_native/**"
+      - "tests/perf/**"
+      - "scripts/run_perf_gauntlet.sh"
+      - ".github/workflows/perf-gauntlet.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/tish_compile/**"
+      - "crates/tish_runtime/**"
+      - "crates/tish_builtins/**"
+      - "crates/tish_core/**"
+      - "crates/tish_native/**"
+      - "tests/perf/**"
+      - "scripts/run_perf_gauntlet.sh"
+  workflow_dispatch:
+
+concurrency:
+  group: perf-gauntlet-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gauntlet:
+    name: Native gauntlet — all perf flags, soundness gate
+    runs-on: blacksmith-8vcpu-ubuntu-2204
+    timeout-minutes: 60
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # Fleet-safe target-cpu. The nested `tish build` native compiles inherit RUSTFLAGS and, because
+      # it already names a target-cpu, will NOT append the default `-C target-cpu=native` — which
+      # SIGILLs on the virtualized fleet (the hypervisor advertises instructions it doesn't honor).
+      # See perf-history.yml / #223.
+      RUSTFLAGS: "-C target-cpu=x86-64-v3"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build tish (release)
+        run: cargo build --release --bin tish
+
+      - name: Gauntlet (all native perf flags, strict soundness)
+        run: bash scripts/run_perf_gauntlet.sh --strict

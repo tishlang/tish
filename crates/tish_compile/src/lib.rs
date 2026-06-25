@@ -10,6 +10,16 @@ mod types;
 
 pub use check::{check_program, TypeDiagnostic};
 
+/// The native typed-codegen optimizations — numeric param inference, struct/aggregate inference,
+/// native (monomorphic) free fns, native-vec params, recursive-struct arena lowering, fused/native
+/// higher-order fns, and native `number[]` params — are **ON BY DEFAULT**. There are no per-pass
+/// flags anymore: that per-flag gating caused repeated "did I set all of them?" drift between the
+/// gauntlet, manual builds, and CI. The single escape hatch `TISH_NATIVE_OPT=0` turns the whole
+/// stack off — used only by the gauntlet's boxed A/B baseline and to bisect a suspected miscompile.
+pub(crate) fn native_opts_enabled() -> bool {
+    std::env::var("TISH_NATIVE_OPT").map(|v| v != "0").unwrap_or(true)
+}
+
 /// How generated Rust is linked (desktop binary vs embedded iOS staticlib).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NativeEmitMode {
@@ -88,8 +98,10 @@ fn count(): number {
 
     #[test]
     fn loop_var_decl_clone_outer_var() {
-        // With inference, outerVar = 42 gets inferred as f64. f64 is Copy, so no clone is
-        // needed — direct assignment is correct. The test verifies compilation succeeds.
+        // outerVar = 42 is inferred as f64. With the native typed-codegen optimizations on by
+        // default, a top-level numeric global lives in a `thread_local Cell<f64>` (#176) rather than
+        // a `run()`-local slot; the read `let x = outerVar` loads it as a Copy f64 (no clone). The
+        // test verifies compilation succeeds with both lowered natively.
         let src = r#"
 let outerVar = 42
 for (let i = 0; i < 5; i = i + 1) {
@@ -98,10 +110,10 @@ for (let i = 0; i < 5; i = i + 1) {
 "#;
         let program = parse(src).unwrap();
         let rust = compile(&program).unwrap();
-        // outerVar and x are f64 (inferred) — Copy assignment, no .clone() needed.
+        // outerVar is a native numeric global (Cell<f64>); x reads it as a Copy f64.
         assert!(
-            rust.contains("let mut outerVar: f64"),
-            "expected outerVar: f64"
+            rust.contains("G_OUTERVAR") && rust.contains("Cell<f64>"),
+            "expected outerVar as a native Cell<f64> global"
         );
         assert!(rust.contains("let mut x: f64"), "expected x: f64");
     }

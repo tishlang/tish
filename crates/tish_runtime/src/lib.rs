@@ -28,6 +28,13 @@ pub use tishlang_core::{VmReadGuard, VmRef, VmWriteGuard};
 /// callable `next()` returning `{ value, done }`, e.g. a `Map`/`Set` `.values()` result) is
 /// drained into a `Value::Array`; arrays, strings, and everything else pass through unchanged.
 pub fn normalize_for_of(v: Value) -> Value {
+    // A packed `NumberArray` (e.g. a module-const f64 array) must box to a plain `Value::Array` so the
+    // single-variant `if let Value::Array` in the spread / for-of codegen binds — otherwise it spreads
+    // to zero elements.
+    if let Value::NumberArray(arr) = &v {
+        let items: Vec<Value> = arr.borrow().iter().map(|n| Value::Number(*n)).collect();
+        return Value::Array(VmRef::new(items));
+    }
     match tishlang_core::drain_iterator(&v) {
         Some(items) => Value::Array(VmRef::new(items)),
         None => v,
@@ -53,8 +60,7 @@ pub use tishlang_builtins::typedarrays::{
 };
 pub use tishlang_builtins::date::date_constructor_value as tish_date_constructor;
 pub use tishlang_builtins::collections::{
-    collection_size, binary_trees_check, k_nucleotide_check,
-    map_constructor_value as tish_map_constructor, map_get,
+    collection_size, map_constructor_value as tish_map_constructor, map_get,
     map_has, map_set, map_values, set_constructor_value as tish_set_constructor,
 };
 

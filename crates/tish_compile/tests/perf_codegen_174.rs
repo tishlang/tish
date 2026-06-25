@@ -12,17 +12,6 @@ use tishlang_compile::compile;
 use tishlang_parser::parse;
 
 fn enable_typed_flags() {
-    for k in [
-        "TISH_PARAM_NATIVE",
-        "TISH_PARAM_INFER",
-        "TISH_NATIVE_FN",
-        "TISH_STRUCT_INFER",
-        "TISH_FUSED_HOF",
-        "TISH_NATIVE_HOF",
-        "TISH_AGGREGATE_INFER",
-    ] {
-        std::env::set_var(k, "1");
-    }
 }
 
 /// FNV-style hash loop: the canonical bitwise hot loop. The accumulator `h` lives in an i32 register
@@ -142,9 +131,12 @@ let m = n & 7
 console.log(m >>> 0)
 "#;
     let rust = compile(&parse(src).unwrap()).unwrap();
+    // `n` is a top-level numeric global, so with the typing stack on by default its read lowers to a
+    // `Cell<f64>` load `G_N.with(|c| c.get())`. The unproven fractional value must STILL pass through
+    // the guarded `to_int32` (not an unchecked truncation) before the `& 7` mask.
     assert!(
-        rust.contains("tishlang_runtime::to_int32(n)"),
-        "an unproven f64 leaf must keep the guarded to_int32 (non-integer/NaN/Inf -> JS ToInt32):\n{}",
+        rust.contains("tishlang_runtime::to_int32(G_N.with(|c| c.get())) & 7i32"),
+        "an unproven f64 global leaf must keep the guarded to_int32 before the mask:\n{}",
         rust.lines().filter(|l| l.contains("& ") || l.contains("to_int")).take(6).collect::<Vec<_>>().join("\n")
     );
     // The literal `7` still folds; only the unproven `n` keeps the guard.

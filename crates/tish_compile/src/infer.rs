@@ -22,6 +22,10 @@ pub struct InferCtx {
     /// the mutable-array co-inference treat `f(arr)` as a native use (the callee takes `&/&mut Vec`),
     /// not a boxing escape, so the caller's array stays an unboxed `Vec`.
     native_vec_array_params: HashMap<String, Vec<bool>>,
+    /// #320: fns PROVEN to always return a `number` (every return is numeric and the body can't fall
+    /// through to an implicit `undefined`). Lets `infer_expr_type(f(...))` be `number`, so
+    /// `a.push(f(...))` infers `a: number[]` (e.g. k_nucleotide's `seq.push(nextBase())`).
+    number_returning_fns: std::collections::HashSet<String>,
 }
 
 impl InferCtx {
@@ -29,6 +33,7 @@ impl InferCtx {
         Self {
             scopes: vec![HashMap::new()],
             native_vec_array_params: HashMap::new(),
+            number_returning_fns: std::collections::HashSet::new(),
         }
     }
 
@@ -173,6 +178,14 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
             Some(TypeAnnotation::Array(elem)) => Some(*elem),
             _ => None,
         },
+        // #320: a call to a fn PROVEN to always return a number is itself a number — so
+        // `a.push(f(...))` can infer `a: number[]` (e.g. `seq.push(nextBase())`).
+        Expr::Call { callee, .. } => match callee.as_ref() {
+            Expr::Ident { name, .. } if ctx.number_returning_fns.contains(name.as_ref()) => {
+                Some(number_ann())
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -186,7 +199,7 @@ pub fn infer_program(program: &Program) -> Program {
     // param types — otherwise they fall back to boxed `Value` and the whole hot loop boxes with
     // them (the difference between an idiomatic numeric fn going native vs staying boxed).
     // Conservative — any non-numeric / write / escape use bails (param stays boxed Value).
-    let p = if std::env::var("TISH_PARAM_INFER").map(|v| v != "0").unwrap_or(false) {
+    let p = if crate::native_opts_enabled() {
         param_infer_program(program.clone())
     } else {
         program.clone()
@@ -201,7 +214,7 @@ pub fn infer_program(program: &Program) -> Program {
     // backend emits unboxed structs with direct field access. Conservative —
     // only applies when every use of the binding is a literal-key field read,
     // so it can never miscompile (any uncertainty falls back to boxed Value).
-    let p = if std::env::var("TISH_STRUCT_INFER").map(|v| v != "0").unwrap_or(false) {
+    let p = if crate::native_opts_enabled() {
         struct_infer_program(p)
     } else {
         p
@@ -217,7 +230,7 @@ pub fn infer_program(program: &Program) -> Program {
     // until those land this pass only emits the annotations the existing codegen backs SOUNDLY
     // (the S-0 scalar `: number` params, identical to the M4 mechanism) plus the inert struct
     // alias decls. See `aggregate_infer_program`.
-    if std::env::var("TISH_AGGREGATE_INFER").map(|v| v != "0").unwrap_or(false) {
+    if crate::native_opts_enabled() {
         aggregate_infer_program(p)
     } else {
         p
@@ -229,12 +242,22 @@ pub fn infer_program(program: &Program) -> Program {
 // ---------------------------------------------------------------------------
 
 fn param_infer_program(program: Program) -> Program {
+    // Soundness: a fn called ANYWHERE with a provably-non-numeric arg (a string/bool/null literal,
+    // template, array, or object) must NOT get a `: number` param shadow — the body may "look
+    // numeric" (`return SHARED`) yet the caller passes e.g. `"arg"`, which the f64 coercion would
+    // panic on / turn to NaN where JS keeps the value. Skip those fns (they stay fully boxed). Same
+    // set `collect_native_fns` uses to refuse the M5 native form.
+    let nonnumeric = crate::codegen::Codegen::fns_called_with_nonnumeric_arg(&program.statements);
     Program {
-        statements: program.statements.into_iter().map(pi_stmt).collect(),
+        statements: program
+            .statements
+            .into_iter()
+            .map(|s| pi_stmt(s, &nonnumeric))
+            .collect(),
     }
 }
 
-fn pi_stmt(s: Statement) -> Statement {
+fn pi_stmt(s: Statement, nonnumeric: &HashSet<String>) -> Statement {
     if let Statement::FunDecl {
         async_,
         name,
@@ -246,6 +269,19 @@ fn pi_stmt(s: Statement) -> Statement {
         span,
     } = s
     {
+        // A fn reached with a non-numeric arg somewhere: leave its params dynamic (boxed).
+        if nonnumeric.contains(name.as_ref()) {
+            return Statement::FunDecl {
+                async_,
+                name,
+                name_span,
+                params,
+                rest_param,
+                return_type,
+                body,
+                span,
+            };
+        }
         // Locals provably numeric in this body (annotated, incl. base-inferred `let i = 0`), so a
         // bare loop counter `i` counts as a numeric operand and `i < n` can prove the param `n`.
         // Fixpoint-closed so copy-chains of numeric literals (`let a = 0; let b = a`) propagate.
@@ -938,19 +974,175 @@ fn infer_object_shape(
     Some(fields)
 }
 
+/// #320: the set of top-level fns PROVEN to ALWAYS return a `number` — every `return` carries a
+/// numeric value and the body can't fall through to an implicit `undefined`. Lets `infer_expr_type`
+/// type a call `f(...)` as `number`, so `seq.push(nextBase())` infers `seq: number[]` (native key
+/// arithmetic over a `Vec<f64>` instead of a boxed `Value[]`). Conservative + sound: any fn we
+/// can't prove is left out, and the Call arm then declines to type its calls. Small fixpoint so a
+/// number-fn may call another already-accepted number-fn.
+fn collect_number_returning_fns(
+    stmts: &[Statement],
+    base: &InferCtx,
+) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let mut accepted: HashSet<String> = HashSet::new();
+    loop {
+        let mut changed = false;
+        for s in stmts {
+            if let Statement::FunDecl {
+                async_: false,
+                name,
+                params,
+                rest_param: None,
+                body,
+                ..
+            } = s
+            {
+                if accepted.contains(name.as_ref()) {
+                    continue;
+                }
+                // Fn-local ctx: numeric params (param-infer already annotated them), numeric locals,
+                // and the number-fns accepted so far (so a numeric call inside resolves).
+                let mut fctx = base.clone();
+                fctx.number_returning_fns = accepted.clone();
+                fctx.push_scope();
+                for p in params {
+                    if let FunParam::Simple(tp) = p {
+                        if tp.type_ann.as_ref().is_some_and(is_number) {
+                            fctx.define(&tp.name, number_ann());
+                        }
+                    }
+                }
+                // A few passes so chained numeric locals settle (`let a = 0; let b = a * 2`).
+                for _ in 0..4 {
+                    seed_numeric_locals(body, &mut fctx);
+                }
+                if fn_always_returns_number(body, &fctx) {
+                    accepted.insert(name.to_string());
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    accepted
+}
+
+/// A fn always returns a number iff EVERY `return` in its body carries a value that infers to
+/// `number` AND the body can't fall through to an implicit `undefined` (conservatively: its last
+/// statement is an unconditional `return <value>`).
+fn fn_always_returns_number(body: &Statement, ctx: &InferCtx) -> bool {
+    let mut ok = true;
+    check_returns_numeric(body, ctx, &mut ok);
+    ok && body_ends_in_return(body)
+}
+
+/// Visit EVERY `return` reachable in THIS fn (descends all statement-nesting constructs but NOT
+/// nested fn bodies, whose returns belong to the closure). Sets `ok = false` on a bare `return;` or
+/// a `return <e>` whose value doesn't provably infer to `number`. Missing a construct here would be
+/// unsound, so every statement-nesting variant is enumerated explicitly.
+fn check_returns_numeric(s: &Statement, ctx: &InferCtx, ok: &mut bool) {
+    use Statement::*;
+    if !*ok {
+        return;
+    }
+    match s {
+        Return { value, .. } => match value {
+            Some(e) => {
+                if infer_expr_type(e, ctx).as_ref().map_or(true, |t| !is_number(t)) {
+                    *ok = false;
+                }
+            }
+            None => *ok = false,
+        },
+        FunDecl { .. } => {} // nested fn: its returns are not this fn's
+        Block { statements, .. } | Multi { statements, .. } => {
+            for c in statements {
+                check_returns_numeric(c, ctx, ok);
+            }
+        }
+        If { then_branch, else_branch, .. } => {
+            check_returns_numeric(then_branch, ctx, ok);
+            if let Some(e) = else_branch {
+                check_returns_numeric(e, ctx, ok);
+            }
+        }
+        While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+            check_returns_numeric(body, ctx, ok);
+        }
+        For { init, body, .. } => {
+            if let Some(i) = init {
+                check_returns_numeric(i, ctx, ok);
+            }
+            check_returns_numeric(body, ctx, ok);
+        }
+        Switch { cases, default_body, .. } => {
+            for (_, body) in cases {
+                for c in body {
+                    check_returns_numeric(c, ctx, ok);
+                }
+            }
+            if let Some(d) = default_body {
+                for c in d {
+                    check_returns_numeric(c, ctx, ok);
+                }
+            }
+        }
+        Try { body, catch_body, finally_body, .. } => {
+            check_returns_numeric(body, ctx, ok);
+            if let Some(c) = catch_body {
+                check_returns_numeric(c, ctx, ok);
+            }
+            if let Some(f) = finally_body {
+                check_returns_numeric(f, ctx, ok);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Conservative "the body always reaches a return": the last statement is an unconditional
+/// `return <value>` (or a nested block that itself ends in one). Anything else (trailing `if`,
+/// loop, fall-off) is treated as a possible implicit-`undefined` exit and rejects the fn.
+fn body_ends_in_return(s: &Statement) -> bool {
+    match s {
+        Statement::Return { value: Some(_), .. } => true,
+        Statement::Block { statements, .. } => statements.last().is_some_and(body_ends_in_return),
+        _ => false,
+    }
+}
+
 fn struct_infer_program(program: Program) -> Program {
     let mut reg = StructRegistry::default();
     let mut ctx = InferCtx::new();
+    // #320: fns proven to always return a number, so `infer_expr_type(f(...))` is `number` and a
+    // `seq.push(nextBase())` keeps `seq` a native `number[]`. Computed off the param-inferred
+    // program so numeric params are already typed.
+    ctx.number_returning_fns = collect_number_returning_fns(&program.statements, &ctx);
     // #175: tell the mutable-array co-inference which fns take native `&/&mut Vec` array params, so
     // forwarding an array into one isn't treated as a boxing escape (lets the caller's array stay
     // unboxed). Same AST-only detection codegen uses, so the two never disagree.
-    if std::env::var("TISH_NATIVE_FN").map(|v| v != "0").unwrap_or(false) {
+    if crate::native_opts_enabled() {
         for (fname, sig) in crate::codegen::Codegen::detect_native_vec_fns(&program) {
             let flags: Vec<bool> = sig
                 .params
                 .iter()
                 .map(|(_, k)| matches!(k, crate::codegen::VecParamKind::Array { .. }))
                 .collect();
+            ctx.native_vec_array_params.insert(fname, flags);
+        }
+    }
+    // #320: mark a read-only `number[]`-param fn's array args as non-escapes so the caller's array
+    // stays `number[]` (e.g. `kNucleotide(seq, k)`). This uses the READ-ONLY criterion only — sound
+    // regardless of the arg type, since passing a native `Vec` to a boxed closure copies it (a
+    // read-only callee can't mutate the caller's array through the copy). Codegen separately proves,
+    // via the call sites, which of these it may actually UNBOX (`native_arr_param_fns`); a fn it
+    // can't prove simply stays a fully boxed closure. Runs pre-`si_block`, so it must not rely on
+    // `number[]` stamps — `arr_param_readonly_fns` only inspects each fn's own body.
+    if crate::native_opts_enabled() {
+        for (fname, flags) in crate::codegen::Codegen::arr_param_readonly_fns(&program) {
             ctx.native_vec_array_params.insert(fname, flags);
         }
     }
@@ -1019,7 +1211,11 @@ fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx)
         {
             // (a) Read-only typed array: uniform scalar literals, every later use read-only.
             if let Some(elem) = infer_array_elem(elements, ctx) {
-                if uses_are_array_safe(name.as_ref(), &stmts[i + 1..]) {
+                // A constant OOB read (`let a=[1,2,3]; a[5]`) yields NaN under Vec<f64> but `null`
+                // boxed, so disqualify it even though the use is "read-only".
+                if uses_are_array_safe(name.as_ref(), &stmts[i + 1..])
+                    && !array_oob_const_access(&stmts[i + 1..], name.as_ref(), elements.len())
+                {
                     let arr_ann = TypeAnnotation::Array(Box::new(elem));
                     ctx.define(name.as_ref(), arr_ann.clone());
                     out.push(Statement::VarDecl {
@@ -1310,7 +1506,12 @@ fn block_native_arrays(
             // Empty `[]` is a candidate for either element type; literal elements must match `elem`.
             let lit_ok = elements.is_empty()
                 || matches!(infer_array_elem(elements, outer_ctx), Some(t) if &t == elem);
-            if lit_ok {
+            // Soundness: a non-empty literal array accessed at a constant index past its initial
+            // length is sparse (`let arr=[1,2,3]; arr[5]=100`) — the native Vec pads holes with NaN
+            // and OOB reads yield NaN, diverging from boxed `null`. Keep it boxed.
+            let sparse = !elements.is_empty()
+                && array_oob_const_access(&stmts[i + 1..], name.as_ref(), elements.len());
+            if lit_ok && !sparse {
                 cands.push((i, name.to_string()));
             }
         }
@@ -1346,6 +1547,40 @@ fn block_native_arrays(
         }
     }
     accepted
+}
+
+/// True if `stmts` access `name` at a **constant** non-negative integer index `>= init_len`
+/// (`name[K]` read or `name[K] = v`). For a non-empty literal-initialized array, such an index is
+/// out of the initial bounds: the native `Vec<elem>` representation pads sparse writes with
+/// `NaN`/`0`/`false` and yields those on OOB reads, whereas the boxed array grows with `null` holes
+/// and reads `null`. So an array with such an access must stay boxed to preserve semantics. Only
+/// meaningful for non-empty literal inits — an empty `[]` grows dynamically (length unknown here),
+/// and its holes are typically only truth-tested (`NaN`/`null` are both falsy), so it is left alone.
+fn array_oob_const_access(stmts: &[Statement], name: &str, init_len: usize) -> bool {
+    let mut found = false;
+    for s in stmts {
+        walk_exprs_stmt(s, &mut |e| {
+            let idx = match e {
+                Expr::Index { object, index, .. } | Expr::IndexAssign { object, index, .. } => {
+                    if matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == name) {
+                        index
+                    } else {
+                        return;
+                    }
+                }
+                _ => return,
+            };
+            if let Expr::Literal { value: Literal::Number(k), .. } = idx.as_ref() {
+                if *k >= 0.0 && k.fract() == 0.0 && (*k as usize) >= init_len {
+                    found = true;
+                }
+            }
+        });
+        if found {
+            return true;
+        }
+    }
+    found
 }
 
 /// A value written into / pushed onto `name` must have the array's element type `elem`: a `name[_]`
@@ -2187,6 +2422,11 @@ fn collect_return_shapes(
 pub fn analyze_aggregate(program: &Program) -> AggregateAnalysis {
     let mut analysis = AggregateAnalysis::default();
     let mut reg = StructRegistry::default();
+    // Soundness: a fn called ANYWHERE with a provably-non-numeric arg must not get S-0 `: number`
+    // params either — `fn makeRecord(id, name){ return {id, name} }` called `makeRecord(1, "Alice")`
+    // would otherwise emit a `match … panic!("expected number")` coercion on the String. Same set the
+    // M4 `param_infer` path uses (infer.rs:273).
+    let nonnumeric = crate::codegen::Codegen::fns_called_with_nonnumeric_arg(&program.statements);
 
     // ---- S-0 + S-A: per top-level function, find numeric params and a return shape.
     for s in &program.statements {
@@ -2238,7 +2478,7 @@ pub fn analyze_aggregate(program: &Program) -> AggregateAnalysis {
                     }
                 }
             }
-            if !numeric_params.is_empty() {
+            if !numeric_params.is_empty() && !nonnumeric.contains(name.as_ref()) {
                 analysis.fn_numeric_params.insert(name.to_string(), numeric_params);
             }
             // S-A: a single all-f64 object-literal return shape ⇒ a struct alias.
