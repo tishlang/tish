@@ -1617,6 +1617,73 @@ impl<'a> Parser<'a> {
         self.parse_assign()
     }
 
+    /// #304 — is `e` a side-effect-free l-value whose object/index sub-expressions can be safely
+    /// DUPLICATED by a compound/inc-dec desugar (no Call/New/assignment/inc-dec inside)? The desugar
+    /// reads and writes the same target, so duplicating a side-effecting sub-expression would run it
+    /// twice; those targets keep the existing parse error rather than mis-evaluate.
+    fn is_simple_lvalue(e: &Expr) -> bool {
+        match e {
+            Expr::Ident { .. } | Expr::Literal { .. } => true,
+            Expr::Member { object, prop, .. } => {
+                Self::is_simple_lvalue(object)
+                    && match prop {
+                        MemberProp::Name { .. } => true,
+                        MemberProp::Expr(pe) => Self::is_simple_lvalue(pe),
+                    }
+            }
+            Expr::Index { object, index, .. } => {
+                Self::is_simple_lvalue(object) && Self::is_simple_lvalue(index)
+            }
+            _ => false,
+        }
+    }
+
+    /// #304 — does `e` name a member (`obj.x`) or index (`arr[i]`) target the read-modify-write
+    /// desugar can handle (a simple l-value)?
+    fn is_desugarable_member_target(e: &Expr) -> bool {
+        Self::is_simple_lvalue(e)
+            && matches!(
+                e,
+                Expr::Member { prop: MemberProp::Name { .. }, .. } | Expr::Index { .. }
+            )
+    }
+
+    fn compound_op_to_binop(op: CompoundOp) -> BinOp {
+        match op {
+            CompoundOp::Add => BinOp::Add,
+            CompoundOp::Sub => BinOp::Sub,
+            CompoundOp::Mul => BinOp::Mul,
+            CompoundOp::Div => BinOp::Div,
+            CompoundOp::Mod => BinOp::Mod,
+        }
+    }
+
+    /// #304 — desugar a read-modify-write on a member/index target into the existing
+    /// `MemberAssign`/`IndexAssign` node (so every backend handles it for free). `make_value(read)`
+    /// builds the stored value from a clone of the target read (e.g. `read + 1`, `read || rhs`).
+    /// Caller must have checked [`Self::is_desugarable_member_target`].
+    fn desugar_member_rmw(left: &Expr, span: Span, make_value: impl FnOnce(Expr) -> Expr) -> Expr {
+        match left {
+            Expr::Member {
+                object,
+                prop: MemberProp::Name { name, .. },
+                ..
+            } => Expr::MemberAssign {
+                object: object.clone(),
+                prop: Arc::clone(name),
+                value: Box::new(make_value(left.clone())),
+                span,
+            },
+            Expr::Index { object, index, .. } => Expr::IndexAssign {
+                object: object.clone(),
+                index: index.clone(),
+                value: Box::new(make_value(left.clone())),
+                span,
+            },
+            _ => unreachable!("desugar_member_rmw on non-member/index target"),
+        }
+    }
+
     fn parse_assign(&mut self) -> Result<Expr, String> {
         let left = self.parse_conditional()?;
 
@@ -1686,18 +1753,29 @@ impl<'a> Parser<'a> {
         };
 
         if let Some(op) = compound_op {
-            if let Expr::Ident { name, span } = &left {
-                let name = Arc::clone(name);
-                let start = span.start;
+            let is_ident = matches!(&left, Expr::Ident { .. });
+            if is_ident || Self::is_desugarable_member_target(&left) {
+                let start = left.span().start;
                 self.advance(); // consume the compound operator
                 let value = self.parse_assign()?;
                 let end = value.span().end;
-                return Ok(Expr::CompoundAssign {
-                    name,
-                    op,
-                    value: Box::new(value),
-                    span: Span { start, end },
-                });
+                let span = Span { start, end };
+                if let Expr::Ident { name, .. } = &left {
+                    return Ok(Expr::CompoundAssign {
+                        name: Arc::clone(name),
+                        op,
+                        value: Box::new(value),
+                        span,
+                    });
+                }
+                // #304: `obj.x += e` / `arr[i] *= e` -> MemberAssign/IndexAssign(read <op> e).
+                let binop = Self::compound_op_to_binop(op);
+                return Ok(Self::desugar_member_rmw(&left, span, move |read| Expr::Binary {
+                    left: Box::new(read),
+                    op: binop,
+                    right: Box::new(value),
+                    span,
+                }));
             }
         }
 
@@ -1710,18 +1788,42 @@ impl<'a> Parser<'a> {
         };
 
         if let Some(op) = logical_op {
-            if let Expr::Ident { name, span } = &left {
-                let name = Arc::clone(name);
-                let start = span.start;
+            let is_ident = matches!(&left, Expr::Ident { .. });
+            if is_ident || Self::is_desugarable_member_target(&left) {
+                let start = left.span().start;
                 self.advance(); // consume the logical assign operator
                 let value = self.parse_assign()?;
                 let end = value.span().end;
-                return Ok(Expr::LogicalAssign {
-                    name,
-                    op,
-                    value: Box::new(value),
-                    span: Span { start, end },
-                });
+                let span = Span { start, end };
+                if let Expr::Ident { name, .. } = &left {
+                    return Ok(Expr::LogicalAssign {
+                        name: Arc::clone(name),
+                        op,
+                        value: Box::new(value),
+                        span,
+                    });
+                }
+                // #304: `obj.x ||= e` -> MemberAssign/IndexAssign(read || e) (short-circuit preserved,
+                // since `||`/`&&`/`??` evaluate the RHS lazily).
+                return Ok(Self::desugar_member_rmw(&left, span, move |read| match op {
+                    LogicalAssignOp::OrOr => Expr::Binary {
+                        left: Box::new(read),
+                        op: BinOp::Or,
+                        right: Box::new(value),
+                        span,
+                    },
+                    LogicalAssignOp::AndAnd => Expr::Binary {
+                        left: Box::new(read),
+                        op: BinOp::And,
+                        right: Box::new(value),
+                        span,
+                    },
+                    LogicalAssignOp::Nullish => Expr::NullishCoalesce {
+                        left: Box::new(read),
+                        right: Box::new(value),
+                        span,
+                    },
+                }));
             }
         }
 
@@ -1818,6 +1920,24 @@ impl<'a> Parser<'a> {
                 } else {
                     Expr::PrefixDec { name, span }
                 });
+            }
+            // #304: prefix `++obj.x` / `--arr[i]` on a member/index target. Desugars to a
+            // read-modify-write, which yields the NEW value — exactly prefix semantics.
+            if Self::is_desugarable_member_target(&operand) {
+                let span = Span {
+                    start: span_start,
+                    end: operand.span().end,
+                };
+                let binop = if is_inc { BinOp::Add } else { BinOp::Sub };
+                return Ok(Self::desugar_member_rmw(&operand, span, |read| Expr::Binary {
+                    left: Box::new(read),
+                    op: binop,
+                    right: Box::new(Expr::Literal {
+                        value: Literal::Number(1.0),
+                        span,
+                    }),
+                    span,
+                }));
             }
             return Err(format!(
                 "Prefix {} requires an identifier",
@@ -2049,13 +2169,13 @@ impl<'a> Parser<'a> {
                     };
                 }
                 TokenKind::PlusPlus | TokenKind::MinusMinus => {
+                    let is_inc = kind == TokenKind::PlusPlus;
                     if let Expr::Ident {
                         name,
                         span: ident_span,
                     } = &expr
                     {
                         let name = Arc::clone(name);
-                        let is_inc = kind == TokenKind::PlusPlus;
                         let tok = self.advance().ok_or("Unexpected EOF")?;
                         let span = Span {
                             start: ident_span.start,
@@ -2066,6 +2186,26 @@ impl<'a> Parser<'a> {
                         } else {
                             Expr::PostfixDec { name, span }
                         };
+                    } else if Self::is_desugarable_member_target(&expr) {
+                        // #304: postfix `obj.x++` / `arr[i]--` on a member/index target. Desugars to a
+                        // read-modify-write (statement-position semantics: yields the NEW value; the
+                        // old-value result in expression position is a documented follow-up).
+                        let start = expr.span().start;
+                        let tok = self.advance().ok_or("Unexpected EOF")?;
+                        let span = Span {
+                            start,
+                            end: tok.span.end,
+                        };
+                        let binop = if is_inc { BinOp::Add } else { BinOp::Sub };
+                        expr = Self::desugar_member_rmw(&expr, span, |read| Expr::Binary {
+                            left: Box::new(read),
+                            op: binop,
+                            right: Box::new(Expr::Literal {
+                                value: Literal::Number(1.0),
+                                span,
+                            }),
+                            span,
+                        });
                     } else {
                         break;
                     }
