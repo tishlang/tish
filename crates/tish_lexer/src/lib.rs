@@ -878,10 +878,15 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     self.skip_block_comment()?;
                     return self.next_token();
-                } else if !self.prev_ends_value() && !self.jsx_in_opening_tag {
+                } else if !self.prev_ends_value()
+                    && !self.jsx_in_opening_tag
+                    && !self.jsx_in_closing_tag
+                {
                     // #299: regex literal — the previous token does not end a value, so `/` starts a
                     // regex (`let re = /\d+/g`, `f(/x/)`, `return /x/`), not division. `//` and `/*`
-                    // (handled above) stay comments even here. Desugared to `new RegExp(...)` by the parser.
+                    // (handled above) stay comments even here. JSX tag contexts keep `/` as a tag
+                    // slash, not a regex: `<div />` (jsx_in_opening_tag) and `</div>` (the `<` sets
+                    // jsx_in_closing_tag). Desugared to `new RegExp(...)` by the parser.
                     let (pat, flags) = self.read_regex()?;
                     let end = self.span_start();
                     let lit = format!("{}\u{0}{}", pat, flags);
