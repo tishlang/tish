@@ -20115,8 +20115,13 @@ impl Codegen {
             // coerced boolean (`five() && 7` is `7`, not `true`). The right operand sits inside the
             // branch, so its side effects only run when reached. (Typed `bool && bool` uses Rust's
             // own `&&`/`||` above, where returning the bool already IS the operand.)
-            BinOp::And => format!("{{ let __l = {}; if __l.is_truthy() {{ {} }} else {{ __l }} }}", l, r),
-            BinOp::Or => format!("{{ let __l = {}; if __l.is_truthy() {{ __l }} else {{ {} }} }}", l, r),
+            //
+            // #328: bind the left operand by `.clone()`, NOT by move — the right operand commonly reuses
+            // the same local (`aid && out.indexOf(aid)`), and a bare `let __l = aid;` moves the non-`Copy`
+            // `Value` so the reuse is a borrow-after-move (E0382). The left operand is still evaluated
+            // exactly once (its side effects don't double-run); only its value is cloned for the test.
+            BinOp::And => format!("{{ let __l = ({}).clone(); if __l.is_truthy() {{ {} }} else {{ __l }} }}", l, r),
+            BinOp::Or => format!("{{ let __l = ({}).clone(); if __l.is_truthy() {{ __l }} else {{ {} }} }}", l, r),
             BinOp::BitAnd => Self::emit_bitwise_binop(l, r, "&"),
             BinOp::BitOr => Self::emit_bitwise_binop(l, r, "|"),
             BinOp::BitXor => Self::emit_bitwise_binop(l, r, "^"),

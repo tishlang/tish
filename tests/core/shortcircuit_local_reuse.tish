@@ -1,0 +1,21 @@
+// Regression (#328): a `let` local used as the LEFT (truthiness) operand of `&&`/`||` and REUSED in
+// the right operand must not be MOVED by the short-circuit lowering — the native rust backend emitted
+// `let __l = aid;` (a move) then borrowed `aid` again (E0382). Valid in tish + node; deterministic.
+function dedupeCount(items) {
+  let out = []
+  let i = 0
+  while (i < items.length) {
+    let aid = items[i]
+    if (aid && out.indexOf(aid) === -1) { out.push(aid) }   // aid reused across the && operands
+    i = i + 1
+  }
+  return out.length
+}
+// `||` form with a reused local too.
+function firstTruthyLen(a, b) {
+  let x = a
+  let pick = (x || b)
+  return ("" + x + pick).length
+}
+console.log("dedupe:" + dedupeCount(["a", "b", "a", "", "b"]))
+console.log("pick:" + firstTruthyLen("hi", "yo"))
