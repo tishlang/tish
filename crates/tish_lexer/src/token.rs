@@ -123,6 +123,10 @@ pub enum TokenKind {
     TemplateMiddle, // }text${  (middle part)
     TemplateTail,   // }text`   (end part)
 
+    /// Regex literal `/pattern/flags` (#299). The token's `literal` carries `pattern\0flags`
+    /// (NUL-separated); the parser desugars it to `new RegExp(pattern, flags)`.
+    Regex,
+
     JsxText, // Raw text in JSX children (emojis, etc.); only {}<> are special
 }
 

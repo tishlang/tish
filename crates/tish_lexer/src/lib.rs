@@ -125,6 +125,65 @@ impl<'a> Lexer<'a> {
         )
     }
 
+    /// #299 — true when the previous significant token ends a value, so a following `/` is DIVISION,
+    /// not the start of a regex literal. Superset of `last_is_value` (adds postfix `++`/`--` and
+    /// template-end tokens, which also end a value). When false, `/` begins a regex.
+    fn prev_ends_value(&self) -> bool {
+        self.last_is_value()
+            || matches!(
+                self.last_significant_kind,
+                Some(
+                    TokenKind::PlusPlus
+                        | TokenKind::MinusMinus
+                        | TokenKind::TemplateNoSub
+                        | TokenKind::TemplateTail
+                )
+            )
+    }
+
+    /// #299 — scan a regex literal body. The opening `/` is already consumed. Reads the pattern
+    /// VERBATIM (no escape processing — `\d` must stay `\d`), honoring `\`-escapes (`\/` is literal)
+    /// and `[...]` character classes (a `/` inside a class is literal), until the closing `/`, then
+    /// the trailing ascii-alpha flags. A newline inside the body or EOF is an unterminated-regex error.
+    fn read_regex(&mut self) -> Result<(String, String), String> {
+        let mut pat = String::with_capacity(16);
+        let mut in_class = false;
+        loop {
+            match self.advance() {
+                None | Some('\n') => return Err("Unterminated regex literal".to_string()),
+                Some('\\') => {
+                    pat.push('\\');
+                    match self.advance() {
+                        None | Some('\n') => {
+                            return Err("Unterminated regex literal".to_string())
+                        }
+                        Some(c) => pat.push(c),
+                    }
+                }
+                Some('[') => {
+                    in_class = true;
+                    pat.push('[');
+                }
+                Some(']') => {
+                    in_class = false;
+                    pat.push(']');
+                }
+                Some('/') if !in_class => break,
+                Some(c) => pat.push(c),
+            }
+        }
+        let mut flags = String::new();
+        while let Some(c) = self.peek() {
+            if c.is_ascii_alphabetic() {
+                flags.push(c);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        Ok((pat, flags))
+    }
+
     #[inline]
     fn jsx_sync_in_opening_tag(&mut self) {
         self.jsx_in_opening_tag = self.jsx_stack.last().map(|e| e.in_opener).unwrap_or(false);
@@ -819,6 +878,23 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     self.skip_block_comment()?;
                     return self.next_token();
+                } else if !self.prev_ends_value()
+                    && !self.jsx_in_opening_tag
+                    && !self.jsx_in_closing_tag
+                {
+                    // #299: regex literal — the previous token does not end a value, so `/` starts a
+                    // regex (`let re = /\d+/g`, `f(/x/)`, `return /x/`), not division. `//` and `/*`
+                    // (handled above) stay comments even here. JSX tag contexts keep `/` as a tag
+                    // slash, not a regex: `<div />` (jsx_in_opening_tag) and `</div>` (the `<` sets
+                    // jsx_in_closing_tag). Desugared to `new RegExp(...)` by the parser.
+                    let (pat, flags) = self.read_regex()?;
+                    let end = self.span_start();
+                    let lit = format!("{}\u{0}{}", pat, flags);
+                    return Ok(Some(Token {
+                        kind: TokenKind::Regex,
+                        span: Span { start, end },
+                        literal: Some(lit.into()),
+                    }));
                 } else if self.peek() == Some('=') {
                     self.advance();
                     TokenKind::SlashAssign

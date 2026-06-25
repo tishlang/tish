@@ -2242,6 +2242,33 @@ impl<'a> Parser<'a> {
                     span,
                 })
             }
+            TokenKind::Regex => {
+                // #299: `/pattern/flags` desugars to `new RegExp("pattern", "flags")`. Every backend
+                // already lowers `new RegExp(str, str)`, so no codegen change is needed. The lexer
+                // encodes the literal as `pattern\0flags`; the pattern is kept verbatim (e.g. `\d+`).
+                let lit = t.literal.clone().ok_or("Expected regex literal")?;
+                let (pat, flags) = match lit.split_once('\u{0}') {
+                    Some((p, f)) => (Arc::from(p), Arc::from(f)),
+                    None => (Arc::clone(&lit), Arc::from("")),
+                };
+                Ok(Expr::New {
+                    callee: Box::new(Expr::Ident {
+                        name: Arc::from("RegExp"),
+                        span,
+                    }),
+                    args: vec![
+                        CallArg::Expr(Expr::Literal {
+                            value: Literal::String(pat),
+                            span,
+                        }),
+                        CallArg::Expr(Expr::Literal {
+                            value: Literal::String(flags),
+                            span,
+                        }),
+                    ],
+                    span,
+                })
+            }
             TokenKind::True => Ok(Expr::Literal {
                 value: Literal::Bool(true),
                 span,

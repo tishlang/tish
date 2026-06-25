@@ -1,0 +1,11 @@
+// #299: regex literals /pattern/flags — lexed context-sensitively, desugared to new RegExp(...).
+let re = /ab+c/i
+console.log(re.test("xABBBCx"))                       // true (i flag)
+console.log(re.test("xyz"))                           // false
+let d = /\d+/
+console.log(d.test("a1b"))                            // true (\d kept verbatim)
+console.log("foo123bar".replace(/\d+/g, "#"))         // foo#bar
+console.log("a,b;c".split(/[,;]/).join("|"))          // a|b|c  ([...] class with / not needed, but ; , )
+let x = 10
+let y = 2
+console.log(x / y)                                    // 5  (division still works after a value)
