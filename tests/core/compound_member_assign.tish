@@ -1,0 +1,17 @@
+// #304: compound assignment (+=,-=,*=,/=,%=), ++/--, and logical-assign (||=) on member/index targets.
+let obj = { x: 1 }
+obj.x += 5        // 6
+obj.x -= 2        // 4
+obj.x *= 3        // 12
+++obj.x           // 13 (prefix; member target)
+let arr = [10, 20, 30]
+arr[0]++          // 11 (postfix, statement position)
+arr[1]--          // 19
+arr[2] += 5       // 35
+let i = 2
+arr[i] *= 2       // arr[2]: 70 (index target with a variable index)
+let m = { a: { b: 2 } }
+m.a.b *= 4        // 8 (nested member target)
+let cfg = { v: 0 }
+cfg.v ||= 7       // 7 (logical-assign on member)
+console.log(obj.x + " " + arr[0] + " " + arr[1] + " " + arr[2] + " " + m.a.b + " " + cfg.v)
