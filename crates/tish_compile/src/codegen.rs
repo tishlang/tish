@@ -942,6 +942,13 @@ pub(crate) struct Codegen {
     /// passing array idents by reference; the boxed closure is suppressed. Empty unless the whole
     /// group lowers cleanly (scratch-buffer rollback), so it can never regress the boxed path.
     native_vec_fns: std::collections::HashMap<String, NativeVecFnSig>,
+    /// #203 follow-up — per native-vec fn, the array params PROVEN (at every call site) to be at least
+    /// as long as the fn's first scalar param. `emit_native_vec_fn` re-registers these as
+    /// `vec_fixed_len[param] = Var(scalar)` so in-bounds index reads drop the OOB-safe `.get()` fallback
+    /// (recovering spectral_norm's raw indexing). Empty unless [`Self::compute_native_vec_param_bounds`]
+    /// can prove the length relationship — otherwise the param keeps its OOB-safe lowering (sound).
+    native_vec_param_bounds:
+        std::collections::HashMap<String, std::collections::HashMap<String, BoundKey>>,
     /// #175 follow-up — top-level numeric "leaf" fns (`fn f(a,…){ return <numeric expr> }`, no other
     /// statements, body built only from params/literals/arithmetic/1-arg `Math`) eligible for INLINING
     /// at a native-f64 call site (`name -> (param names, body expr)`). Inlining at a site whose args
@@ -1118,6 +1125,7 @@ impl Codegen {
             native_fn_body_returned: false,
             native_lcg_fns: std::collections::HashMap::new(),
             native_vec_fns: std::collections::HashMap::new(),
+            native_vec_param_bounds: std::collections::HashMap::new(),
             inline_fns: std::collections::HashMap::new(),
             inline_subst: Vec::new(),
             inlining_now: std::collections::HashSet::new(),
@@ -14722,6 +14730,374 @@ impl Codegen {
         sigs
     }
 
+    /// Pre-order visit of `e` and every sub-expression (incl. arrow-function bodies). Used by the
+    /// native-vec param-bound proof to find call sites and variable mutations anywhere in a scope.
+    fn nv_for_each_subexpr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+        f(e);
+        let mut rec = |x: &Expr| Self::nv_for_each_subexpr(x, f);
+        match e {
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                rec(left);
+                rec(right);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::TypeOf { operand, .. }
+            | Expr::Await { operand, .. }
+            | Expr::Delete { target: operand, .. } => rec(operand),
+            // `Assign`/`CompoundAssign`/`LogicalAssign` target a bare `name` (not a sub-expr); only the
+            // value is an expression to recurse.
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. } => rec(value),
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                rec(cond);
+                rec(then_branch);
+                rec(else_branch);
+            }
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                rec(callee);
+                for a in args {
+                    if let CallArg::Expr(x) | CallArg::Spread(x) = a {
+                        rec(x);
+                    }
+                }
+            }
+            Expr::Member { object, prop, .. } => {
+                rec(object);
+                if let MemberProp::Expr(p) = prop {
+                    rec(p);
+                }
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                rec(object);
+                rec(value);
+            }
+            Expr::Index { object, index, .. } => {
+                rec(object);
+                rec(index);
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                rec(object);
+                rec(index);
+                rec(value);
+            }
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    if let ArrayElement::Expr(x) | ArrayElement::Spread(x) = el {
+                        rec(x);
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for p in props {
+                    match p {
+                        ObjectProp::KeyValue(_, v, _) | ObjectProp::Spread(v) => rec(v),
+                    }
+                }
+            }
+            Expr::ArrowFunction { body, .. } => match body {
+                ArrowBody::Expr(x) => rec(x),
+                ArrowBody::Block(s) => {
+                    Self::for_each_stmt_expr(s, &mut |x| Self::nv_for_each_subexpr(x, f))
+                }
+            },
+            Expr::TemplateLiteral { exprs, .. } => exprs.iter().for_each(rec),
+            _ => {}
+        }
+    }
+
+    /// Every identifier that is the TARGET of a mutation (`=`, `+=`, `||=`, `++`, `--`) anywhere in
+    /// `stmts` — descending through nested statements, fn-decl bodies, and arrow bodies. Used to find
+    /// which params are stable (never reassigned), so a scalar arg naming one is a constant length
+    /// bound. Conservative: a deeper-scope local of the same name also marks the name (rejects → the
+    /// param-bound proof keeps the OOB-safe lowering, which is always sound).
+    fn nv_collect_mutated_idents(stmts: &[Statement]) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        fn go(stmts: &[Statement], out: &mut std::collections::HashSet<String>) {
+            for s in stmts {
+                Codegen::for_each_stmt_expr(s, &mut |e| {
+                    Codegen::nv_for_each_subexpr(e, &mut |x| match x {
+                        Expr::Assign { name, .. }
+                        | Expr::CompoundAssign { name, .. }
+                        | Expr::LogicalAssign { name, .. }
+                        | Expr::PostfixInc { name, .. }
+                        | Expr::PostfixDec { name, .. }
+                        | Expr::PrefixInc { name, .. }
+                        | Expr::PrefixDec { name, .. } => {
+                            out.insert(name.to_string());
+                        }
+                        _ => {}
+                    })
+                });
+                Codegen::for_each_child_stmt_list(s, &mut |list| go(list, out));
+            }
+        }
+        go(stmts, &mut out);
+        out
+    }
+
+    /// Record every direct call to a native-vec fn as `(caller-scope, callee, positional-args)`. The
+    /// caller scope is `None` at top level and `Some(fn)` inside that fn's body (nested fns switch
+    /// scope). A call with a spread arg is recorded with EMPTY args so the arity check fails and the
+    /// callee stays unproven (positions aren't statically known). Soundness depends on recording EVERY
+    /// call site — a missed one could pass a short array — so the walk covers control-flow and arrows.
+    fn nv_collect_callsites(
+        &self,
+        program: &Program,
+        sigs: &std::collections::HashMap<String, NativeVecFnSig>,
+    ) -> Vec<(Option<String>, String, Vec<Expr>)> {
+        let mut out: Vec<(Option<String>, String, Vec<Expr>)> = Vec::new();
+        let mut record = |caller: &Option<String>, e: &Expr, out: &mut Vec<_>| {
+            Self::nv_for_each_subexpr(e, &mut |x| {
+                if let Expr::Call { callee, args, .. } = x {
+                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                        if sigs.contains_key(name.as_ref()) {
+                            let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
+                            let argv: Vec<Expr> = if has_spread {
+                                Vec::new()
+                            } else {
+                                args.iter()
+                                    .filter_map(|a| match a {
+                                        CallArg::Expr(x) => Some(x.clone()),
+                                        CallArg::Spread(_) => None,
+                                    })
+                                    .collect()
+                            };
+                            out.push((caller.clone(), name.to_string(), argv));
+                        }
+                    }
+                }
+            });
+        };
+        // Top-level scope (caller None) — `for_each_stmt_expr` does not enter fn bodies.
+        for s in &program.statements {
+            Self::for_each_stmt_expr(s, &mut |e| record(&None, e, &mut out));
+        }
+        // Each fn scope (any nesting depth), caller = that fn.
+        Self::nv_for_each_fundecl(&program.statements, &mut |name, body| {
+            let caller = Some(name.to_string());
+            for s in Self::fn_body_stmt_slice(body) {
+                Self::for_each_stmt_expr(s, &mut |e| record(&caller, e, &mut out));
+            }
+        });
+        // Param-default exprs are evaluated at a fn's call sites, not in any body scanned above. A
+        // native-vec call there would route to `_nv` with args we cannot place in a known scope —
+        // POISON the callee (an empty-arg record fails the arity check ⇒ it is never proven), keeping
+        // it OOB-safe. Cheap and conservative; spectral_norm has no defaulted params.
+        Self::nv_for_each_param_default(&program.statements, &mut |d| {
+            Self::nv_for_each_subexpr(d, &mut |x| {
+                if let Expr::Call { callee, .. } = x {
+                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                        if sigs.contains_key(name.as_ref()) {
+                            out.push((None, name.to_string(), Vec::new()));
+                        }
+                    }
+                }
+            });
+        });
+        out
+    }
+
+    /// Visit every `FunParam::Simple` default-value expression at any nesting depth.
+    fn nv_for_each_param_default(stmts: &[Statement], f: &mut dyn FnMut(&Expr)) {
+        for s in stmts {
+            if let Statement::FunDecl { params, .. } = s {
+                for p in params {
+                    if let FunParam::Simple(tp) = p {
+                        if let Some(d) = &tp.default {
+                            f(d);
+                        }
+                    }
+                }
+            }
+            Self::for_each_child_stmt_list(s, &mut |list| Self::nv_for_each_param_default(list, f));
+        }
+    }
+
+    /// Visit every `FunDecl` at any nesting depth as `(name, body)`.
+    fn nv_for_each_fundecl(stmts: &[Statement], f: &mut dyn FnMut(&str, &Statement)) {
+        for s in stmts {
+            if let Statement::FunDecl { name, body, .. } = s {
+                f(name.as_ref(), body);
+            }
+            Self::for_each_child_stmt_list(s, &mut |list| Self::nv_for_each_fundecl(list, f));
+        }
+    }
+
+    /// #203 follow-up — SOUND recovery of the native-vec array-param length bound the unsound blind
+    /// assumption used to provide. Returns, per native-vec fn, the array params PROVEN at EVERY call
+    /// site to be at least as long as the fn's first scalar param, so `emit_native_vec_fn` re-registers
+    /// `vec_fixed_len[param] = Var(scalar)` and drops the OOB-safe `.get()` fallback for in-bounds reads.
+    ///
+    /// Soundness rests on three facts:
+    ///  1. A native-vec array param's length never changes inside the body — `classify_vec_param`
+    ///     rejects `push`/`pop`/`splice`/`.length =` (they escape), leaving only `arr[i]`, `arr[i]=v`,
+    ///     `.length`, and forwarding to another native-vec fn. So a bound proven at entry holds.
+    ///  2. `collect_vec_fixed_len` proves a caller LOCAL's exact fill length (`for i<m {a.push(_)}` → m)
+    ///     and its escape filter drops any local that could be shrunk.
+    ///  3. The bound variable `m` (a scalar arg that names the array's fill-length var) is a caller
+    ///     PARAMETER never reassigned in the caller body — so `length(a) == m` still holds at the call.
+    ///
+    /// A monotone fixpoint propagates the fact across the call graph: spectral_norm threads length-`n`
+    /// locals through `multiplyAtAv` into `multiplyAv`. Anything not provable keeps the OOB-safe path.
+    fn compute_native_vec_param_bounds(
+        &self,
+        program: &Program,
+    ) -> std::collections::HashMap<String, std::collections::HashMap<String, BoundKey>> {
+        use std::collections::{HashMap, HashSet};
+        let sigs = &self.native_vec_fns;
+        if sigs.is_empty() {
+            return HashMap::new();
+        }
+        // Per-caller context (None = top-level). `params`: Simple param names. `stable`: params never
+        // mutated in the body. `fixed`: local arrays with a proven fill length.
+        let mut params: HashMap<Option<String>, HashSet<String>> = HashMap::new();
+        let mut stable: HashMap<Option<String>, HashSet<String>> = HashMap::new();
+        let mut fixed: HashMap<Option<String>, HashMap<String, BoundKey>> = HashMap::new();
+        params.insert(None, HashSet::new());
+        stable.insert(None, HashSet::new());
+        fixed.insert(None, self.collect_vec_fixed_len(&program.statements));
+        for s in &program.statements {
+            if let Statement::FunDecl { name, params: ps, body, .. } = s {
+                let pnames: HashSet<String> = ps
+                    .iter()
+                    .filter_map(|p| match p {
+                        FunParam::Simple(tp) => Some(tp.name.to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                let body_stmts = Self::fn_body_stmt_slice(body);
+                let mutated = Self::nv_collect_mutated_idents(body_stmts);
+                let stable_ps: HashSet<String> =
+                    pnames.iter().filter(|p| !mutated.contains(*p)).cloned().collect();
+                let key = Some(name.to_string());
+                params.insert(key.clone(), pnames);
+                stable.insert(key.clone(), stable_ps);
+                fixed.insert(key, self.collect_vec_fixed_len(body_stmts));
+            }
+        }
+        let calls = self.nv_collect_callsites(program, sigs);
+        // Monotone fixpoint: a newly-proven param bound can enable a callee's bound (param-flow).
+        let mut proven: HashMap<String, HashMap<String, BoundKey>> = HashMap::new();
+        loop {
+            let mut changed = false;
+            for (fname, sig) in sigs {
+                let Some(si) = sig
+                    .params
+                    .iter()
+                    .position(|(_, k)| matches!(k, VecParamKind::Scalar))
+                else {
+                    continue; // no scalar param ⇒ nothing to bound the array length against.
+                };
+                let s_name = sig.params[si].0.clone();
+                let sites: Vec<&(Option<String>, String, Vec<Expr>)> =
+                    calls.iter().filter(|(_, callee, _)| callee == fname).collect();
+                if sites.is_empty() {
+                    continue; // uncalled ⇒ no evidence of caller array lengths; stay OOB-safe.
+                }
+                for (pi, (p_name, kind)) in sig.params.iter().enumerate() {
+                    if !matches!(kind, VecParamKind::Array { .. }) {
+                        continue;
+                    }
+                    if proven.get(fname).is_some_and(|m| m.contains_key(p_name)) {
+                        continue;
+                    }
+                    let all_ok = sites.iter().all(|(caller, _, args)| {
+                        args.len() == sig.params.len()
+                            && Self::nv_callsite_arg_len_ge(
+                                caller,
+                                args.get(pi),
+                                args.get(si),
+                                &params,
+                                &stable,
+                                &fixed,
+                                &proven,
+                            )
+                    });
+                    if all_ok {
+                        proven
+                            .entry(fname.clone())
+                            .or_default()
+                            .insert(p_name.clone(), BoundKey::Var(s_name.clone()));
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        proven
+    }
+
+    /// Does the array argument `arr_arg` (in scope `caller`) provably have length >= the value of the
+    /// scalar argument `scalar_arg`? Sound cases only — anything else returns false (param stays
+    /// OOB-safe). See [`Self::compute_native_vec_param_bounds`] for the soundness argument.
+    #[allow(clippy::too_many_arguments)]
+    fn nv_callsite_arg_len_ge(
+        caller: &Option<String>,
+        arr_arg: Option<&Expr>,
+        scalar_arg: Option<&Expr>,
+        params: &std::collections::HashMap<Option<String>, std::collections::HashSet<String>>,
+        stable: &std::collections::HashMap<Option<String>, std::collections::HashSet<String>>,
+        fixed: &std::collections::HashMap<Option<String>, std::collections::HashMap<String, BoundKey>>,
+        proven: &std::collections::HashMap<String, std::collections::HashMap<String, BoundKey>>,
+    ) -> bool {
+        let (Some(arr_arg), Some(scalar_arg)) = (arr_arg, scalar_arg) else {
+            return false;
+        };
+        // The array argument must be a bare identifier (the native-vec call ABI requires this anyway).
+        let Expr::Ident { name: a, .. } = arr_arg else {
+            return false;
+        };
+        let a = a.as_ref();
+        // (1) scalar arg is `a.length` — exact equality, always >=.
+        if let Expr::Member { object, prop, .. } = scalar_arg {
+            if matches!(prop, MemberProp::Name { name, .. } if name.as_ref() == "length")
+                && matches!(object.as_ref(), Expr::Ident { name: o, .. } if o.as_ref() == a)
+            {
+                return true;
+            }
+        }
+        // A scalar arg that NAMES a variable is only a sound bound if that variable is a STABLE param
+        // of the caller (never reassigned) — otherwise its value at the call may exceed the length the
+        // array was filled to.
+        let scalar_is_stable_var = |m: &str| {
+            matches!(scalar_arg, Expr::Ident { name: s, .. } if s.as_ref() == m)
+                && stable.get(caller).is_some_and(|s| s.contains(m))
+        };
+        let caller_fixed = fixed.get(caller);
+        // (2) `a` is a caller LOCAL filled to length `Var(m)` and the scalar arg is that stable `m`.
+        if let Some(BoundKey::Var(m)) = caller_fixed.and_then(|f| f.get(a)) {
+            if scalar_is_stable_var(m) {
+                return true;
+            }
+        }
+        // (2b) `a` is a caller LOCAL of proven Const length `k` and the scalar arg is the int literal
+        // `k` EXACTLY. Exact (not `<= k`) so every proven bound means `length == scalar`, identical to
+        // the trusted local-array `Var(n)` bounds — a strictly-longer array could otherwise make a
+        // `.length`-folding read disagree with the boxed path. (Inductively keeps case (3) exact too.)
+        if let Some(BoundKey::Const(k)) = caller_fixed.and_then(|f| f.get(a)) {
+            if let Expr::Literal { value: Literal::Number(n), .. } = scalar_arg {
+                if *n >= 0.0 && n.fract() == 0.0 && (*n as i64) == *k {
+                    return true;
+                }
+            }
+        }
+        // (3) param-flow: `a` is the caller's OWN array param with an already-proven bound `Var(m)`, and
+        // the scalar arg is that same stable `m` (the caller's scalar that bounds `a`).
+        if let Some(cname) = caller {
+            if params.get(caller).is_some_and(|p| p.contains(a)) {
+                if let Some(BoundKey::Var(m)) = proven.get(cname).and_then(|m| m.get(a)) {
+                    if scalar_is_stable_var(m) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Detect, validate, and emit the native-vec fn group. On any gap the group is left empty.
     fn setup_native_vec_fns(&mut self, program: &Program) {
         use std::collections::HashMap;
@@ -14778,6 +15154,8 @@ impl Codegen {
             .collect();
         // Emit into a scratch buffer; roll back on any failure.
         self.native_vec_fns = sigs;
+        // #203 follow-up: prove (where sound) that array params are long enough to drop bounds guards.
+        self.native_vec_param_bounds = self.compute_native_vec_param_bounds(program);
         let body_of: HashMap<&str, &Statement> =
             decls.iter().map(|(n, b)| (n.as_str(), b)).collect();
         for (name, sig) in &self.native_vec_fns {
@@ -15563,13 +15941,17 @@ impl Codegen {
         let saved_array_elem = self.array_elem_ranges.clone();
         let saved_int_valued = self.int_valued_locals.clone();
         let body_slice = Self::fn_body_stmt_slice(body);
-        // Soundness (#203): we must NOT assume an array param's length equals the first scalar param.
-        // That blind `vec_fixed_len[arr] = Var(lp)` made `index_in_bounds(i<lp)` trust raw `arr[i]`,
-        // which panics when a caller passes a shorter array than the scalar (`sumArr([10,20,30], 5)`).
-        // Without a registered bound, array-param reads fall to the OOB-safe `.get().unwrap_or(NAN)`
-        // path — same bounds check, NaN instead of panic, matching the boxed null→NaN semantics. The
-        // length relationship is only sound when proven at every call site, which the generic native-vec
-        // path cannot establish, so we leave array params unbounded here.
+        // #203 follow-up: register the array-param length bound ONLY where the whole-program proof
+        // ([`Self::compute_native_vec_param_bounds`]) established that every call site passes an array
+        // at least as long as this fn's first scalar param. Then `index_in_bounds(i < scalar)` soundly
+        // proves `arr[i]`, dropping the OOB-safe `.get().unwrap_or(NaN)` fallback (recovers
+        // spectral_norm's raw indexing). The blind `vec_fixed_len[arr] = Var(lp)` this replaces was
+        // UNSOUND — it panicked on `sumArr([10,20,30], 5)`. Unproven params stay OOB-safe.
+        if let Some(bounds) = self.native_vec_param_bounds.get(name) {
+            for (pname, bound) in bounds {
+                self.vec_fixed_len.insert(pname.clone(), bound.clone());
+            }
+        }
         self.merge_fn_body_inference(body_slice);
         let saved_i32_vec = self.int_i32_vec_locals.clone();
         self.int_i32_vec_locals = Self::detect_fannkuch_i32_vec_locals(body_slice);
