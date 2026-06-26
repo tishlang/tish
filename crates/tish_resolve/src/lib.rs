@@ -286,6 +286,7 @@ fn collect_stmt(
                 collect_stmt(inner, source, lsp_line, lsp_char, best)
             }
             ExportDeclaration::Default(e) => collect_expr(e, source, lsp_line, lsp_char, best),
+            ExportDeclaration::ReExport { .. } => {}
         },
         Statement::TypeAlias {
             name, name_span, ..
@@ -1009,6 +1010,7 @@ fn member_chain_collect_stmt(
             ExportDeclaration::Default(e) => {
                 member_chain_collect_expr(e, source, lsp_line, lsp_char, best)
             }
+            ExportDeclaration::ReExport { .. } => {}
         },
         Statement::Import { .. }
         | Statement::Break { .. }
@@ -1598,6 +1600,7 @@ fn walk_stmt_resolve(
         Statement::Export { declaration, .. } => match declaration.as_ref() {
             ExportDeclaration::Named(inner) => walk_stmt_resolve(inner, scopes, target),
             ExportDeclaration::Default(e) => walk_expr_resolve(e, scopes, target),
+            ExportDeclaration::ReExport { .. } => None,
         },
         Statement::TypeAlias {
             name, name_span, ..
@@ -2156,6 +2159,7 @@ fn check_unresolved_stmt(
         Statement::Export { declaration, .. } => match declaration.as_ref() {
             ExportDeclaration::Named(inner) => check_unresolved_stmt(inner, scopes, out),
             ExportDeclaration::Default(e) => check_unresolved_expr(e, scopes, out),
+            ExportDeclaration::ReExport { .. } => {}
         },
         Statement::TypeAlias {
             name, name_span, ..
@@ -2489,6 +2493,7 @@ fn enumerate_stmt(stmt: &Statement, exported: bool, out: &mut Vec<BindingSite>) 
         Statement::Export { declaration, .. } => match declaration.as_ref() {
             ExportDeclaration::Named(inner) => enumerate_stmt(inner, true, out),
             ExportDeclaration::Default(e) => enumerate_expr(e, exported, out),
+            ExportDeclaration::ReExport { .. } => {}
         },
         Statement::VarDecl {
             name,
@@ -2788,6 +2793,7 @@ fn jsx_tags_stmt(s: &Statement, out: &mut std::collections::HashSet<Arc<str>>) {
         Statement::Export { declaration, .. } => match declaration.as_ref() {
             ExportDeclaration::Named(inner) => jsx_tags_stmt(inner, out),
             ExportDeclaration::Default(e) => jsx_tags_expr(e, out),
+            ExportDeclaration::ReExport { .. } => {}
         },
         Statement::Import { .. }
         | Statement::Break { .. }
@@ -3532,6 +3538,7 @@ fn walk_stmt_completion(
             ExportDeclaration::Default(e) => {
                 walk_expr_completion(e, source, lsp_line, lsp_char, stack, best);
             }
+            ExportDeclaration::ReExport { .. } => {}
         },
     }
 }
@@ -3945,6 +3952,7 @@ fn tref_stmt(stmt: &Statement, out: &mut Vec<TypeOcc>) {
         Statement::Export { declaration, .. } => match declaration.as_ref() {
             ExportDeclaration::Named(inner) => tref_stmt(inner, out),
             ExportDeclaration::Default(e) => tref_expr(e, out),
+            ExportDeclaration::ReExport { .. } => {}
         },
         _ => {}
     }
@@ -4132,6 +4140,7 @@ fn refs_stmt(
                 refs_stmt(inner, program, source, name, def_span, out)
             }
             ExportDeclaration::Default(e) => refs_expr(e, program, source, name, def_span, out),
+            ExportDeclaration::ReExport { .. } => {}
         },
         Statement::Import { .. }
         | Statement::Break { .. }

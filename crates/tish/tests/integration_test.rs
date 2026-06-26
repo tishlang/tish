@@ -588,6 +588,46 @@ fn test_import_alias() {
     }
 }
 
+/// #305: re-export — `export { foo, bar as inc } from "./dep"` and `export * from "./dep"` in a
+/// middle module, consumed by a named import and a namespace import in the entry. Identical across
+/// the interpreter and the VM (native/cranelift/js verified via the bundle path).
+#[test]
+fn test_reexport() {
+    let bin = tish_bin();
+    if !bin.exists() {
+        return;
+    }
+    let path = workspace_root()
+        .join("tests")
+        .join("modules")
+        .join("reexport.tish");
+    if !path.exists() {
+        return;
+    }
+    let expected = "42\n42\n1.0\n42\n";
+    for backend_args in [vec!["run"], vec!["run", "--backend", "vm"]] {
+        let mut args = backend_args.clone();
+        args.push(path.to_string_lossy().to_string().leak());
+        let out = Command::new(&bin)
+            .args(&args)
+            .current_dir(workspace_root())
+            .output()
+            .expect("run tish binary");
+        assert!(
+            out.status.success(),
+            "reexport.tish ({:?}) failed: stderr={}",
+            backend_args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected,
+            "reexport output mismatch on backend {:?}",
+            backend_args
+        );
+    }
+}
+
 /// Combined validation: async/await + Promise + setTimeout + multiple HTTP requests.
 /// #97: a module's non-exported top-level bindings stay private — a same-named binding in
 /// another module must not overwrite them (runtime), and the `--target js` bundle must not

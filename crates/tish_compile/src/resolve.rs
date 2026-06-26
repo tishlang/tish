@@ -854,7 +854,7 @@ pub fn resolve_project_from_stdin(
     let from_dir = stdin_path.parent().unwrap_or_else(|| Path::new("."));
 
     for stmt in &program.statements {
-        if let Statement::Import { from, .. } = stmt {
+        if let Some(from) = stmt_module_dep(stmt) {
             if is_native_import(from.as_ref()) {
                 continue;
             }
@@ -883,6 +883,20 @@ pub fn resolve_project_from_stdin(
         .collect())
 }
 
+/// #305 — the module path a statement depends on: an `import ... from "p"` or a re-export
+/// `export ... from "p"`. Used by dependency discovery + cycle detection so a module reached ONLY
+/// through a re-export is still loaded. None for non-module statements.
+fn stmt_module_dep(stmt: &Statement) -> Option<&std::sync::Arc<str>> {
+    match stmt {
+        Statement::Import { from, .. } => Some(from),
+        Statement::Export { declaration, .. } => match declaration.as_ref() {
+            ExportDeclaration::ReExport { from, .. } => Some(from),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn load_module_recursive(
     module_path: &Path,
     project_root: &Path,
@@ -907,7 +921,7 @@ fn load_module_recursive(
     // Collect imports and load dependencies first (skip native imports)
     let dir = canonical.parent().unwrap_or(Path::new("."));
     for stmt in &program.statements {
-        if let Statement::Import { from, .. } = stmt {
+        if let Some(from) = stmt_module_dep(stmt) {
             if is_native_import(from.as_ref()) {
                 continue; // Native imports don't load files
             }
@@ -1113,7 +1127,7 @@ fn has_cycle_from(
     visiting: &mut HashSet<usize>,
 ) -> Result<bool, String> {
     for stmt in &program.statements {
-        if let Statement::Import { from, .. } = stmt {
+        if let Some(from) = stmt_module_dep(stmt) {
             if is_native_import(from.as_ref()) {
                 continue;
             }
@@ -1522,6 +1536,9 @@ fn rewrite_stmt_scope(
             // body can still reference module-private names that were renamed.
             ExportDeclaration::Named(inner) => rewrite_stmt_scope(inner, active, top_level),
             ExportDeclaration::Default(e) => rewrite_expr_scope(e, active),
+            // #305: a re-export has no inner statement/expr to scope-rewrite; names are resolved by
+            // the export-table merge against the dep's (already-rewritten) bindings.
+            ExportDeclaration::ReExport { .. } => {}
         },
         Statement::Import { .. }
         | Statement::TypeAlias { .. }
@@ -1700,6 +1717,41 @@ pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, 
                     ExportDeclaration::Default(_) => {
                         let default_name = format!("__default_{}", idx);
                         module_exports[idx].insert("default".to_string(), default_name);
+                    }
+                    // #305: re-export — map each re-exported name to the DEP's binding (the dep is
+                    // earlier in load order, so its export table is already built). `export *` copies
+                    // every dep export (without overriding an explicit one); `export { a as b }` maps
+                    // b -> dep's binding for a. Downstream imports then resolve straight to the dep.
+                    ExportDeclaration::ReExport {
+                        specifiers,
+                        all,
+                        from,
+                        ..
+                    } => {
+                        let dir = module.path.parent().unwrap_or_else(|| Path::new("."));
+                        let dep = resolve_import_path(from.as_ref(), dir, Path::new("."))
+                            .ok()
+                            .map(|p| p.canonicalize().unwrap_or(p))
+                            .and_then(|p| path_to_idx.get(&p).copied())
+                            .map(|dep_idx| module_exports[dep_idx].clone());
+                        if let Some(dep) = dep {
+                            if *all {
+                                for (k, v) in &dep {
+                                    module_exports[idx]
+                                        .entry(k.clone())
+                                        .or_insert_with(|| v.clone());
+                                }
+                            }
+                            for spec in specifiers {
+                                if let ImportSpecifier::Named { name, alias, .. } = spec {
+                                    if let Some(binding) = dep.get(name.as_ref()) {
+                                        let export_name =
+                                            alias.as_deref().unwrap_or(name.as_ref()).to_string();
+                                        module_exports[idx].insert(export_name, binding.clone());
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1885,6 +1937,10 @@ pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, 
                             src_path.clone(),
                         );
                     }
+                    // #305: re-export emits no code — `module_exports` already maps the re-exported
+                    // names to the dep's bindings (in scope in the flattened bundle), so downstream
+                    // imports resolve directly. Nothing to push here.
+                    ExportDeclaration::ReExport { .. } => {}
                 },
                 _ => merge_push(
                     &mut statements,

@@ -156,6 +156,16 @@ pub enum ExportDeclaration {
     Named(Box<Statement>),
     /// export default expr
     Default(Expr),
+    /// Re-export from another module (#305):
+    ///   `export { foo, bar as inc } from "./m"`  -> specifiers, all=false
+    ///   `export * from "./m"`                    -> specifiers=[], all=true
+    /// Specifiers reuse `ImportSpecifier::Named` (`{ a as b }`).
+    ReExport {
+        specifiers: Vec<ImportSpecifier>,
+        all: bool,
+        from: Arc<str>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]

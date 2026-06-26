@@ -13476,6 +13476,7 @@ impl Codegen {
                 tishlang_ast::ExportDeclaration::Default(ex) => {
                     Self::scan_expr_nonnum_calls(ex, out)
                 }
+                tishlang_ast::ExportDeclaration::ReExport { .. } => {}
             },
             _ => {}
         }
@@ -14503,6 +14504,7 @@ impl Codegen {
             Export { declaration, .. } => match declaration.as_ref() {
                 tishlang_ast::ExportDeclaration::Named(inner) => st(inner, ok),
                 tishlang_ast::ExportDeclaration::Default(ex) => e(ex, ok),
+                tishlang_ast::ExportDeclaration::ReExport { .. } => {}
             },
             // Break / Continue / Import / TypeAlias / DeclareVar / DeclareFun — no user-fn calls.
             _ => {}
