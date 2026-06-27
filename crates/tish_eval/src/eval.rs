@@ -815,6 +815,33 @@ impl Evaluator {
                         let v = self.eval_expr(e)?;
                         self.scope.borrow_mut().set(Arc::from("default"), v, false);
                     }
+                    // #305: re-export in the running program — load the dep and bind the names locally.
+                    ExportDeclaration::ReExport {
+                        specifiers,
+                        all,
+                        from,
+                        ..
+                    } => {
+                        let dep_val = self.load_module(from.as_ref())?;
+                        let dep = match &dep_val {
+                            Value::Object(m) => m.borrow().clone(),
+                            _ => return Err(EvalError::Error("Module exports must be object".to_string())),
+                        };
+                        if *all {
+                            for (k, v) in dep.strings.iter() {
+                                self.scope.borrow_mut().set(Arc::from(k.as_ref()), v.clone(), false);
+                            }
+                        }
+                        for spec in specifiers {
+                            if let ImportSpecifier::Named { name, alias, .. } = spec {
+                                let v = dep.strings.get(name.as_ref()).ok_or_else(|| {
+                                    EvalError::Error(format!("Module does not export '{}'", name))
+                                })?;
+                                let bind = alias.as_deref().unwrap_or(name.as_ref());
+                                self.scope.borrow_mut().set(Arc::from(bind), v.clone(), false);
+                            }
+                        }
+                    }
                 }
                 Ok(Value::Null)
             }
@@ -879,6 +906,36 @@ impl Evaluator {
                         let v = self.eval_expr(e)?;
                         self.scope.borrow_mut().set(Arc::from("default"), v, false);
                         export_names.push("default".to_string());
+                    }
+                    // #305: re-export — load the dep, pull the requested (or all) exports into this
+                    // module's scope, and re-expose them in `export_names`.
+                    ExportDeclaration::ReExport {
+                        specifiers,
+                        all,
+                        from,
+                        ..
+                    } => {
+                        let dep_val = self.load_module(from.as_ref())?;
+                        let dep = match &dep_val {
+                            Value::Object(m) => m.borrow().clone(),
+                            _ => return Err(EvalError::Error("Module exports must be object".to_string())),
+                        };
+                        if *all {
+                            for (k, v) in dep.strings.iter() {
+                                self.scope.borrow_mut().set(Arc::from(k.as_ref()), v.clone(), false);
+                                export_names.push(k.to_string());
+                            }
+                        }
+                        for spec in specifiers {
+                            if let ImportSpecifier::Named { name, alias, .. } = spec {
+                                let v = dep.strings.get(name.as_ref()).ok_or_else(|| {
+                                    EvalError::Error(format!("Module does not export '{}'", name))
+                                })?;
+                                let bind = alias.as_deref().unwrap_or(name.as_ref());
+                                self.scope.borrow_mut().set(Arc::from(bind), v.clone(), false);
+                                export_names.push(bind.to_string());
+                            }
+                        }
                     }
                 }
             } else {

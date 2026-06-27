@@ -1579,9 +1579,78 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// #305 — consume a `from "..."` clause (`from` is a soft keyword: an `Ident` whose spelling is
+    /// "from"), returning the module path string.
+    fn parse_from_clause(&mut self) -> Result<Arc<str>, String> {
+        let from_tok = self.expect(TokenKind::Ident)?;
+        if from_tok.literal.as_deref() != Some("from") {
+            return Err("Expected 'from' in re-export statement".to_string());
+        }
+        self.expect(TokenKind::String)?
+            .literal
+            .clone()
+            .ok_or_else(|| "Expected string path in re-export".to_string())
+    }
+
     fn parse_export(&mut self) -> Result<Statement, String> {
         let span_start = self.expect(TokenKind::Export)?.span.start;
-        let declaration = if matches!(self.peek_kind(), Some(TokenKind::Default)) {
+        let declaration = if matches!(self.peek_kind(), Some(TokenKind::LBrace)) {
+            // #305: re-export named — `export { foo, bar as inc } from "./m"`
+            self.advance(); // {
+            let mut specifiers = Vec::new();
+            while !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
+                let name_tok = self.expect(TokenKind::Ident)?;
+                let name_span = Span {
+                    start: name_tok.span.start,
+                    end: name_tok.span.end,
+                };
+                let name = name_tok
+                    .literal
+                    .clone()
+                    .ok_or("Expected identifier in export")?;
+                let (alias, alias_span) = if matches!(self.peek_kind(), Some(TokenKind::As)) {
+                    self.advance(); // as
+                    let alias_tok = self.expect(TokenKind::Ident)?;
+                    let asp = Span {
+                        start: alias_tok.span.start,
+                        end: alias_tok.span.end,
+                    };
+                    (
+                        Some(alias_tok.literal.clone().ok_or("Expected alias after 'as'")?),
+                        Some(asp),
+                    )
+                } else {
+                    (None, None)
+                };
+                specifiers.push(ImportSpecifier::Named {
+                    name,
+                    name_span,
+                    alias,
+                    alias_span,
+                });
+                if !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
+                    self.expect(TokenKind::Comma)?;
+                }
+            }
+            self.expect(TokenKind::RBrace)?;
+            let from = self.parse_from_clause()?;
+            ExportDeclaration::ReExport {
+                specifiers,
+                all: false,
+                from,
+                span: self.span_end(span_start),
+            }
+        } else if matches!(self.peek_kind(), Some(TokenKind::Star)) {
+            // #305: re-export all — `export * from "./m"`
+            self.advance(); // *
+            let from = self.parse_from_clause()?;
+            ExportDeclaration::ReExport {
+                specifiers: Vec::new(),
+                all: true,
+                from,
+                span: self.span_end(span_start),
+            }
+        } else if matches!(self.peek_kind(), Some(TokenKind::Default)) {
             self.advance();
             let expr = self.parse_expr()?;
             ExportDeclaration::Default(expr)

@@ -240,6 +240,7 @@ fn collect_fun_decl_names_stmt(stmt: &Statement, names: &mut HashSet<String>) {
         Statement::Export { declaration, .. } => match declaration.as_ref() {
             ExportDeclaration::Named(inner) => collect_fun_decl_names_stmt(inner, names),
             ExportDeclaration::Default(e) => collect_fun_decl_names_expr(e, names),
+            ExportDeclaration::ReExport { .. } => {}
         },
         Statement::Import { .. }
         | Statement::Break { .. }
@@ -682,6 +683,7 @@ fn stmt_contains_jsx_fragment(stmt: &tishlang_ast::Statement) -> bool {
         Statement::Export { declaration, .. } => match declaration.as_ref() {
             ExportDeclaration::Named(inner) => stmt_contains_jsx_fragment(inner),
             ExportDeclaration::Default(e) => expr_contains_jsx_fragment(e),
+            ExportDeclaration::ReExport { .. } => false,
         },
         Statement::Import { .. }
         | Statement::Break { .. }
@@ -857,6 +859,7 @@ fn stmt_contains_jsx(stmt: &tishlang_ast::Statement) -> bool {
         Statement::Export { declaration, .. } => match declaration.as_ref() {
             ExportDeclaration::Named(inner) => stmt_contains_jsx(inner),
             ExportDeclaration::Default(e) => expr_contains_jsx(e),
+            ExportDeclaration::ReExport { .. } => false,
         },
         Statement::Import { .. }
         | Statement::Break { .. }

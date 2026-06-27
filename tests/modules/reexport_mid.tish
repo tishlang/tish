@@ -1,0 +1,2 @@
+export { foo, bar as inc } from "./reexport_dep.tish"
+export * from "./reexport_dep.tish"

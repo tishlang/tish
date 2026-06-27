@@ -817,6 +817,38 @@ impl Printer {
                         self.buf.push_str("default ");
                         self.expr(e);
                     }
+                    // #305: re-export round-trip — `export { a, b as c } from "m"` / `export * from "m"`
+                    ExportDeclaration::ReExport {
+                        specifiers,
+                        all,
+                        from,
+                        ..
+                    } => {
+                        if *all {
+                            self.buf.push_str("* from \"");
+                            self.buf.push_str(from);
+                            self.buf.push('"');
+                        } else {
+                            self.buf.push_str("{ ");
+                            for (i, spec) in specifiers.iter().enumerate() {
+                                if i > 0 {
+                                    self.buf.push_str(", ");
+                                }
+                                if let tishlang_ast::ImportSpecifier::Named { name, alias, .. } =
+                                    spec
+                                {
+                                    self.buf.push_str(name);
+                                    if let Some(a) = alias {
+                                        self.buf.push_str(" as ");
+                                        self.buf.push_str(a);
+                                    }
+                                }
+                            }
+                            self.buf.push_str(" } from \"");
+                            self.buf.push_str(from);
+                            self.buf.push('"');
+                        }
+                    }
                 }
             }
         }

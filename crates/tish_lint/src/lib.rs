@@ -177,6 +177,7 @@ fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
             // Walk `export default <expr>` too — its subtree was previously never linted, so e.g.
             // `export default { a: 1, a: 2 }` produced no tish-duplicate-key warning (#151).
             tishlang_ast::ExportDeclaration::Default(expr) => lint_expr(expr, out),
+            tishlang_ast::ExportDeclaration::ReExport { .. } => {}
         },
         Statement::ExprStmt { expr, .. } => lint_expr(expr, out),
         Statement::VarDecl { init: Some(e), .. } => lint_expr(e, out),

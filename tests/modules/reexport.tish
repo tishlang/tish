@@ -1,0 +1,6 @@
+import { foo, inc } from "./reexport_mid.tish"
+import * as M from "./reexport_mid.tish"
+console.log(foo)
+console.log(inc(41))
+console.log(M.VERSION)
+console.log(M.foo)

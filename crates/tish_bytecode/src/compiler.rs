@@ -1792,6 +1792,7 @@ impl<'a> Compiler<'a> {
                         message: "export default is not supported in bytecode".to_string(),
                     });
                 }
+                ExportDeclaration::ReExport { .. } => {}
             },
             Statement::TypeAlias { .. }
             | Statement::DeclareVar { .. }

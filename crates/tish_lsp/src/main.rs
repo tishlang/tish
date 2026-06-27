@@ -1617,6 +1617,9 @@ fn value_completion_kind_stmt(
                 value_completion_kind_stmt(inner, name)
             }
             tishlang_ast::ExportDeclaration::Default(_) => None,
+            // A re-exported name (`export { x } from "./m"` / `export * from`) is bound from another
+            // module, not declared here, so there is no local completion-kind to report.
+            tishlang_ast::ExportDeclaration::ReExport { .. } => None,
         },
         _ => None,
     }
