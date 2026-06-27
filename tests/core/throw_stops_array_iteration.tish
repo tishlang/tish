@@ -32,4 +32,7 @@ console.log("findLast:" + fL.join(","))
 let fX = []
 try { [1, 2, 3, 4].findLastIndex(x => { fX.push(x); if (x === 3) { throw "s" } return false }) } catch (e) {}
 console.log("findLastIndex:" + fX.join(","))
+let fm = []
+try { [1, 2, 3, 4].flatMap(x => { fm.push(x); if (x === 2) { throw "s" } return [x] }) } catch (e) {}
+console.log("flatMap:" + fm.join(","))
 console.log("done")

@@ -8,4 +8,5 @@ some:1,2
 every:1,2
 findLast:4,3
 findLastIndex:4,3
+flatMap:1,2
 done
