@@ -1,0 +1,65 @@
+// GAUNTLET: regex_redux-lite (#198) — regex match/replace over a synthetic DNA text. Builds a
+// deterministic ACGT string from a fasta-style LCG, then counts occurrences of several variant
+// k-mer patterns with global RegExp `match` and performs IUB-style `replace` passes that change the
+// text length. Stresses the regex engine (alternation, character classes, quantifiers), global
+// scanning, and string building/substitution — the real-world "scan and rewrite text" workload.
+// Uses only regex features tish supports; integer math throughout so interp/vm/native/node agree.
+// Valid in both tish and node; integer check (variant matches + final replaced length).
+
+// Deterministic fasta-style LCG over {a,c,g,t}. High-quality even distribution, no Math.random/Date.
+let seed = 42
+function nextBase() {
+  seed = (seed * 3877 + 29573) % 139968
+  let idx = Math.floor((4 * seed) / 139968)
+  if (idx === 0) return "a"
+  if (idx === 1) return "c"
+  if (idx === 2) return "g"
+  return "t"
+}
+
+function buildDna(n) {
+  let arr = []
+  for (let i = 0; i < n; i++) { arr.push(nextBase()) }
+  return arr.join("")
+}
+
+// Count global matches of a pattern; returns 0 when there is no match (tish uses null, not undefined).
+function countMatches(text, pattern) {
+  let re = new RegExp(pattern, "g")
+  let m = text.match(re)
+  if (m === null) return 0
+  return m.length
+}
+
+// Classic regex_redux variant patterns: alternation of class-bearing k-mers.
+let variants = [
+  "agggtaaa|tttaccct",
+  "[cgt]gggtaaa|tttaccc[acg]",
+  "a[act]ggtaaa|tttacc[agt]t",
+  "ag[act]gtaaa|tttac[agt]ct",
+  "agg[act]taaa|ttta[agt]cct",
+  "aggg[acg]aaa|ttt[cgt]ccct",
+  "agggt[cgt]aa|tt[acg]accct",
+  "agggta[cgt]a|t[acg]taccct",
+  "agggtaa[cgt]|[acg]ttaccct"
+]
+
+let t0 = Date.now()
+
+let dna = buildDna(200000)
+
+let matchTotal = 0
+for (let i = 0; i < variants.length; i++) {
+  matchTotal = (matchTotal + countMatches(dna, variants[i])) % 2147483647
+}
+
+// IUB-style substitution passes that change the text length, then a normalizing collapse.
+let sub = dna
+sub = sub.replace(/c/g, "TG")
+sub = sub.replace(/g/g, "CAA")
+sub = sub.replace(/[at]/g, "N")
+let subLen = sub.length % 2147483647
+
+let check = (matchTotal * 31 + subLen) % 2147483647
+
+console.log("GAUNTLET regex_redux " + (Date.now() - t0) + " " + check)

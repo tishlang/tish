@@ -1,0 +1,53 @@
+// GAUNTLET: Array.sort with a comparator over records — the canonical "sort a list of objects by a
+// field" shape that shows up in nearly every real program (sort rows by score, users by id, events by
+// time). Build N records { key, idx } with keys from a seeded LCG, sort by a comparator that orders by
+// key and breaks ties by idx, then fold a position-sensitive checksum over the sorted array. The idx
+// tiebreaker makes the comparator a strict total order, so the result is identical across interp / vm /
+// native / node regardless of sort stability. Stresses the comparator-call hot path (closure
+// invocation per compare, boxed record field reads) — a struct-aware engine reads .key by fixed
+// offset; a boxed engine hashes the property name on every comparator call. All arithmetic stays well
+// within exact-integer (2^53) range so there is no float rounding to diverge on. Valid in both tish and
+// node; deterministic integer check.
+let n = 200000
+
+// Seeded LCG, masked to a 16-bit key so many records share a key value — that exercises the comparator
+// tiebreaker AND keeps key * (position+1) far below 2^53 (key < 65536, position < n, so the product is
+// well under 1.4e10).
+let seed = 123456789
+function nextRand() {
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  return seed
+}
+
+// Build the records once. key is the low 16 bits of the LCG output; idx is the unique original index.
+let base = []
+for (let i = 0; i < n; i++) {
+  let r = nextRand()
+  base.push({ key: r % 65536, idx: i })
+}
+
+let t0 = Date.now()
+
+let CHECK = 0
+for (let pass = 0; pass < 4; pass++) {
+  // Fresh copy each pass so every pass sorts the same unsorted input (sort mutates in place).
+  let rows = []
+  for (let i = 0; i < base.length; i++) {
+    rows.push({ key: base[i].key, idx: base[i].idx })
+  }
+  // Order by key; break ties by the unique idx so the comparator is a STRICT TOTAL ORDER (no tie
+  // nondeterminism, stable or not).
+  rows.sort((a, b) => {
+    if (a.key !== b.key) { return a.key - b.key }
+    return a.idx - b.idx
+  })
+  // Position-sensitive checksum: weight each key by (position + 1). Reordering changes the result, so
+  // this verifies the sort actually happened in the expected total order.
+  let acc = 0
+  for (let i = 0; i < rows.length; i++) {
+    acc = (acc + rows[i].key * (i + 1)) % 2147483647
+  }
+  CHECK = (CHECK + acc) % 2147483647
+}
+
+console.log("GAUNTLET sort_comparator " + (Date.now() - t0) + " " + CHECK)

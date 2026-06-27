@@ -1,0 +1,50 @@
+// GAUNTLET: realistic string building — the serialization/templating pattern. Assemble many small
+// rows ("row" + i + ":" + v + ";") into a buffer two ways: (1) push each piece onto an array and
+// `.join("")`, and (2) repeated `+=` onto an accumulator. This is how real code emits CSV/HTML/log
+// output, and it stresses the engine's string-builder path (V8 uses cons-strings/ropes; a naive
+// builder is O(n^2)). Distinct from string_concat, which only does `s + "x"` with no structure.
+// Valid in both tish and node; deterministic integer check (total built length + a char-code
+// checksum over a strided sample — no string/array printing, no floats).
+let n = 100000
+
+// Seeded LCG so the per-row values vary but stay identical across backends (no Math.random/Date).
+let seed = 12345
+function nextVal() {
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  return seed % 1000
+}
+
+let t0 = Date.now()
+
+// Pass 1: array push + join("") — the buffer-then-join idiom.
+let parts = []
+for (let i = 0; i < n; i++) {
+  let v = nextVal()
+  parts.push("row")
+  parts.push(i)
+  parts.push(":")
+  parts.push(v)
+  parts.push(";")
+}
+let joined = parts.join("")
+
+// Pass 2: repeated += — the same rows accumulated onto a single growing string.
+let acc = ""
+for (let i = 0; i < n; i++) {
+  let v = nextVal()
+  acc += "row"
+  acc += i
+  acc += ":"
+  acc += v
+  acc += ";"
+}
+
+// Deterministic integer check: total length + strided char-code checksum (sample every 37th char of
+// each buffer). Integer math only, kept under 2^31 with a modulo so all backends agree exactly.
+let check = (joined.length + acc.length) % 2147483647
+let sum = 0
+for (let i = 0; i < joined.length; i += 37) { sum = (sum + joined.charCodeAt(i)) % 2147483647 }
+for (let i = 0; i < acc.length; i += 37) { sum = (sum + acc.charCodeAt(i)) % 2147483647 }
+check = (check + sum) % 2147483647
+
+console.log("GAUNTLET string_build " + (Date.now() - t0) + " " + check)

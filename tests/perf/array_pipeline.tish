@@ -1,0 +1,30 @@
+// GAUNTLET: higher-order data pipeline — the canonical real-world data-processing chain. Build an
+// array of N numbers from a seeded LCG, then per timed pass run `.filter(...).map(...).reduce(...)`:
+// a chained filter -> map -> reduce of closures. Each stage allocates an intermediate array and makes
+// one boxed closure call per element through value_call; a fused/native HOF lowering avoids both. This
+// is the #1 functional-pipeline perf signal for real code and is NOT covered by the single-method HOF
+// fixtures. Valid in both tish and node; deterministic integer check (reduced total mod 2147483647).
+let n = 1000000
+
+// Deterministic input: the fasta-style linear-congruential generator (no Math.random / Date). Its
+// product stays well under 2^53, so every backend does identical exact integer arithmetic with no
+// float-precision drift; values are small ints so there is no float formatting in the check either.
+let data = []
+let seed = 42
+for (let i = 0; i < n; i++) {
+  seed = (seed * 3877 + 29573) % 139968
+  data.push(seed % 1000)
+}
+
+let t0 = Date.now()
+let check = 0
+for (let pass = 0; pass < 10; pass++) {
+  // Keep every multiple of 3, double it, then sum. The pass index perturbs the seed of the reduce so
+  // no stage is loop-invariant (an optimizer cannot hoist the whole pipeline out of the loop).
+  let total = data
+    .filter(x => x % 3 === 0)
+    .map(x => x * 2)
+    .reduce((a, x) => (a + x) % 2147483647, pass)
+  check = (check + total) % 2147483647
+}
+console.log("GAUNTLET array_pipeline " + (Date.now() - t0) + " " + check)

@@ -1,0 +1,22 @@
+// GAUNTLET: word-count over STRING keys — the canonical hash-map-on-strings workload (tallying tokens
+// in a stream). k_nucleotide stresses INTEGER Map keys; this exercises STRING keys end-to-end, which
+// drives a different code path: string hashing + string key comparison on every has/get/set. Keys are
+// generated deterministically from a seeded LCG ("w" + (lcg % 1000), ~1000 distinct buckets), so the
+// data is identical on every run and every backend. Valid in both tish and node; integer check
+// (sum of squared counts mod 2^31-1, plus map.size). tish's Map is O(n) per op (linear scan), so the
+// gap vs V8's real hash table grows with N — the super-linear tell.
+let N = 500000
+let seed = 12345
+let m = new Map()
+let t0 = Date.now()
+for (let i = 0; i < N; i++) {
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  let key = "w" + (seed % 1000)
+  if (m.has(key)) { m.set(key, m.get(key) + 1) } else { m.set(key, 1) }
+}
+let sum = 0
+// `for…of m.values()` is the portable idiom — tish returns an array, node an iterator, but both
+// iterate identically (indexing `.values()[i]` would diverge: node iterators have no `.length`).
+for (let v of m.values()) { sum = (sum + v * v) % 2147483647 }
+let check = sum + m.size
+console.log("GAUNTLET map_string_keys " + (Date.now() - t0) + " " + check)
