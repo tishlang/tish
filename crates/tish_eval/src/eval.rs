@@ -1370,27 +1370,45 @@ impl Evaluator {
                                         let len = arr_mut.len();
                                         let mut indices: Vec<usize> = (0..len).collect();
                                         let arr_values: Vec<Value> = std::mem::take(&mut *arr_mut);
+                                        // A `throw` from the comparator must propagate (be catchable) and
+                                        // must NOT corrupt the array. Previously the `_ => Equal` arm
+                                        // swallowed the `Err` and wrote a bogus reordering back; now we
+                                        // capture the throw, stop comparing, and restore the original order
+                                        // — matching the vm/native backends and node.
+                                        let mut pending: Option<EvalError> = None;
 
                                         if let Some((scope, params, body)) = self.create_callback_scope(&cmp_fn) {
                                             indices.sort_by(|&i, &j| {
-                                                let result = self.call_with_scope(&scope, &params, &body, &[arr_values[i].clone(), arr_values[j].clone()]);
-                                                match result {
+                                                if pending.is_some() {
+                                                    return std::cmp::Ordering::Equal;
+                                                }
+                                                match self.call_with_scope(&scope, &params, &body, &[arr_values[i].clone(), arr_values[j].clone()]) {
                                                     Ok(Value::Number(n)) if n < 0.0 => std::cmp::Ordering::Less,
                                                     Ok(Value::Number(n)) if n > 0.0 => std::cmp::Ordering::Greater,
-                                                    _ => std::cmp::Ordering::Equal,
+                                                    Ok(_) => std::cmp::Ordering::Equal,
+                                                    Err(e) => { pending = Some(e); std::cmp::Ordering::Equal }
                                                 }
                                             });
                                         } else {
                                             indices.sort_by(|&i, &j| {
-                                                let result = self.call_func(&cmp_fn, &[arr_values[i].clone(), arr_values[j].clone()]);
-                                                match result {
+                                                if pending.is_some() {
+                                                    return std::cmp::Ordering::Equal;
+                                                }
+                                                match self.call_func(&cmp_fn, &[arr_values[i].clone(), arr_values[j].clone()]) {
                                                     Ok(Value::Number(n)) if n < 0.0 => std::cmp::Ordering::Less,
                                                     Ok(Value::Number(n)) if n > 0.0 => std::cmp::Ordering::Greater,
-                                                    _ => std::cmp::Ordering::Equal,
+                                                    Ok(_) => std::cmp::Ordering::Equal,
+                                                    Err(e) => { pending = Some(e); std::cmp::Ordering::Equal }
                                                 }
                                             });
                                         }
 
+                                        if let Some(e) = pending {
+                                            // Comparator threw: leave the array untouched and re-raise.
+                                            *arr_mut = arr_values;
+                                            drop(arr_mut);
+                                            return Err(e);
+                                        }
                                         *arr_mut = indices.into_iter().map(|i| arr_values[i].clone()).collect();
                                     }
                                 } else {
@@ -1498,6 +1516,32 @@ impl Evaluator {
                                     for (i, v) in arr_borrow.iter().enumerate() {
                                         let mapped = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
                                         result.push(mapped);
+                                    }
+                                }
+                                return Ok(Value::Array(Rc::new(RefCell::new(result))));
+                            }
+                            "flatMap" => {
+                                // map + flatten one level (Array.prototype.flatMap). A callback `throw`
+                                // propagates via `?` (catchable), matching vm/native/node — previously
+                                // interp lacked flatMap entirely ("Not a function").
+                                let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                let mut result: Vec<Value> = Vec::with_capacity(arr_borrow.len());
+                                if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let mapped = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        match mapped {
+                                            Value::Array(inner) => result.extend(inner.borrow().iter().cloned()),
+                                            other => result.push(other),
+                                        }
+                                    }
+                                } else {
+                                    for (i, v) in arr_borrow.iter().enumerate() {
+                                        let mapped = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        match mapped {
+                                            Value::Array(inner) => result.extend(inner.borrow().iter().cloned()),
+                                            other => result.push(other),
+                                        }
                                     }
                                 }
                                 return Ok(Value::Array(Rc::new(RefCell::new(result))));

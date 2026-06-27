@@ -439,14 +439,24 @@ impl fmt::Display for TishError {
 
 impl std::error::Error for TishError {}
 
+// #303 — the pending-throw slot lives in `tishlang_core` so the shared array builtins
+// (`tishlang_builtins::array`) can poll it without a `builtins -> runtime` dependency cycle, and so
+// the VM shares the same slot. Re-export the accessors so the Rust emitted by `tishlang_compile`
+// keeps calling `tishlang_runtime::{set,has,take}_pending_throw`. See `tishlang_core` for the docs.
+pub use tishlang_core::{has_pending_throw, set_pending_throw, take_pending_throw};
+
 /// Function-boundary unwind: convert a completion that escaped a function body's `Result`-closure
-/// back into the function's `Value`. A `return v` yields `v`; an uncaught `throw` panics (matching
-/// the behavior of a throw with no enclosing `try`); any other error panics.
+/// back into the function's `Value`. A `return v` yields `v`; an uncaught `throw` is stored in the
+/// pending-throw slot and the fn escapes with a dummy `Value` so the throw keeps propagating to the
+/// caller's post-call check (#303); any other error panics.
 pub fn fn_unwind(e: Box<dyn std::error::Error>) -> Value {
     match e.downcast::<TishError>() {
         Ok(te) => match *te {
             TishError::Return(v) => v,
-            TishError::Throw(v) => panic!("uncaught throw: {}", v.to_display_string()),
+            TishError::Throw(v) => {
+                set_pending_throw(v);
+                Value::Null
+            }
         },
         Err(orig) => panic!("error in native Tish: {:?}", orig),
     }

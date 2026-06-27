@@ -1,0 +1,13 @@
+// #303 follow-up: a `throw` from an Array.sort comparator must be catchable on every backend (it
+// used to be swallowed by the interpreter, and corrupted the array on native/vm). We assert only the
+// catch + that the array is intact (length preserved) — the exact element order after a throwing
+// comparator is implementation-defined in JS, so the deterministic "original order is restored"
+// guarantee is covered by a Rust unit test (tish_builtins::array) instead. Backend-identical.
+let arr = [5, 4, 3, 2, 1]
+let caught = "no"
+try {
+  arr.sort((a, b) => { if (a === 3 || b === 3) { throw "cmp" } return a - b })
+} catch (e) { caught = e }
+console.log("caught:" + caught)
+console.log("len:" + arr.length)
+console.log("done")

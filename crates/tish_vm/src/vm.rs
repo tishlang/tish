@@ -27,19 +27,18 @@ use tishlang_core::{
 /// instead and is picked up at the next call site (or the top-level boundary).
 const PENDING_THROW_SENTINEL: &str = "\u{1}__tish_pending_throw__";
 
-thread_local! {
-    static VM_PENDING_THROW: std::cell::RefCell<Option<Value>> =
-        const { std::cell::RefCell::new(None) };
-}
-
+// #303 — the VM shares the one pending-throw slot defined in `tishlang_core`, so the array builtins
+// it calls (`tishlang_builtins::array`) can poll the same slot and so native + VM agree. These thin
+// wrappers keep every VM call site unchanged. `core::set_pending_throw` is first-throw-wins, but the
+// VM only sets (one site) after draining at a try boundary, so behavior is unchanged.
 fn set_pending_throw(v: Value) {
-    VM_PENDING_THROW.with(|c| *c.borrow_mut() = Some(v));
+    tishlang_core::set_pending_throw(v);
 }
 fn take_pending_throw() -> Option<Value> {
-    VM_PENDING_THROW.with(|c| c.borrow_mut().take())
+    tishlang_core::take_pending_throw()
 }
 fn pending_throw_is_set() -> bool {
-    VM_PENDING_THROW.with(|c| c.borrow().is_some())
+    tishlang_core::has_pending_throw()
 }
 
 /// Append the source location of the instruction at `off` to a runtime-error message, e.g.
