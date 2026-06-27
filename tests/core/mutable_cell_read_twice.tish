@@ -1,0 +1,12 @@
+// Regression (#218): a reassigned top-level binding becomes a shared VmRef cell; reading it MORE THAN
+// ONCE in a single expression must not deadlock the native backend. Under `send-values` a VmRef is an
+// Arc<Mutex>, and the old `(*cell.borrow()).clone()` form held two non-reentrant Mutex guards on the
+// same cell across one call → self-deadlock (the process hung at 0% CPU). Each read now goes through
+// `vm_read`, which releases the lock before returning. Backend-identical; deterministic.
+let theme = { dim: 5, fg: 9, bg: 1 }
+function setTheme(t) { theme = t }                          // reassignment ⇒ `theme` is a mutable cell
+function mix(a, b, c) { return a + b + c }
+function helpKey() { return mix(theme.dim, theme.fg, theme.bg) }   // 3 reads of `theme` in one call
+function sum2() { return theme.dim + theme.fg }            // 2 reads in one expression
+console.log("k:" + helpKey())
+console.log("s:" + sum2())

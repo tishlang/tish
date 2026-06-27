@@ -5427,7 +5427,7 @@ impl Codegen {
                     if var_type.is_native() {
                         var_type.to_value_expr(&format!("(*{}.borrow())", escaped))
                     } else {
-                        format!("(*{}.borrow()).clone()", escaped)
+                        format!("tishlang_runtime::vm_read(&{})", escaped)
                     }
                 } else {
                     // Check if this is a typed variable that needs conversion to Value
@@ -6582,17 +6582,17 @@ impl Codegen {
                         LogicalAssignOp::AndAnd => (
                             format!("{}.borrow().is_truthy()", n),
                             format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, n),
-                            format!("(*{}.borrow()).clone()", n),
+                            format!("tishlang_runtime::vm_read(&{})", n),
                         ),
                         LogicalAssignOp::OrOr => (
                             format!("!{}.borrow().is_truthy()", n),
                             format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, n),
-                            format!("(*{}.borrow()).clone()", n),
+                            format!("tishlang_runtime::vm_read(&{})", n),
                         ),
                         LogicalAssignOp::Nullish => (
                             format!("matches!(*{}.borrow(), Value::Null)", n),
                             format!("{{ let _v = ({}).clone(); *{}.borrow_mut() = _v.clone(); _v }}", val, n),
-                            format!("(*{}.borrow()).clone()", n),
+                            format!("tishlang_runtime::vm_read(&{})", n),
                         ),
                     }
                 } else {
@@ -8371,7 +8371,7 @@ impl Codegen {
             if &var_type == target_type {
                 let esc = Self::escape_ident(name.as_ref()).into_owned();
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    return Ok(format!("(*{}.borrow()).clone()", esc));
+                    return Ok(format!("tishlang_runtime::vm_read(&{})", esc));
                 }
                 return Ok(esc);
             }
@@ -18806,9 +18806,9 @@ impl Codegen {
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     let var_type = self.type_context.get_type(name.as_ref());
                     if var_type.is_native() {
-                        Ok((format!("(*{}.borrow()).clone()", escaped), var_type))
+                        Ok((format!("tishlang_runtime::vm_read(&{})", escaped), var_type))
                     } else {
-                        Ok((format!("(*{}.borrow()).clone()", escaped), RustType::Value))
+                        Ok((format!("tishlang_runtime::vm_read(&{})", escaped), RustType::Value))
                     }
                 } else {
                     let var_type = self.type_context.get_type(name.as_ref());
