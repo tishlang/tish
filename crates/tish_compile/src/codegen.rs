@@ -14349,6 +14349,14 @@ impl Codegen {
     /// disqualify a caller). M5 / #177 fns are auto-excluded — M5 has no array params, and the param
     /// classifier rejects struct-element arrays (`p[i].field`), which is the aggregate path's shape.
     fn body_uses_local_vec_ops(body: &Statement) -> bool {
+        // Only a `.push` onto a var DECLARED LOCALLY in this body counts: the `_nv` lowering emits
+        // such a var as an owned `Vec`. A `.push` onto a CAPTURED outer var (e.g. a top-level
+        // `let seen = []` closed over by `function dbl(x){ seen.push(x); return x*2 }`) is NOT a
+        // local vec op — the free `fn dbl_nv(..)` has no closure environment, so emitting it would
+        // reference an unbound `seen` and fail to compile. Such a fn must stay a boxed closure
+        // (which captures correctly). Array *params* are handled separately via `has_array_param`.
+        let mut locals = std::collections::HashSet::new();
+        Self::collect_local_var_names(body, &mut locals);
         let mut found = false;
         Self::for_each_stmt_expr(body, &mut |e| {
             if let Expr::Call { callee, .. } = e {
@@ -14358,10 +14366,12 @@ impl Codegen {
                     ..
                 } = callee.as_ref()
                 {
-                    if method.as_ref() == "push"
-                        && matches!(object.as_ref(), Expr::Ident { .. })
-                    {
-                        found = true;
+                    if method.as_ref() == "push" {
+                        if let Expr::Ident { name, .. } = object.as_ref() {
+                            if locals.contains(name.as_ref()) {
+                                found = true;
+                            }
+                        }
                     }
                 }
             }

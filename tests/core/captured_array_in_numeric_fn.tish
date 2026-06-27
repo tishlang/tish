@@ -1,0 +1,11 @@
+// native codegen: a NAMED numeric-returning fn that CAPTURES an outer array must stay a boxed closure
+// (capturing it correctly) — it must NOT be lowered to a free native `_nv`/`-> f64` fn, which has no
+// closure environment and would reference the captured var unbound. Backend-identical; deterministic.
+let seen = []
+function dbl(x) { seen.push(x); return x * 2 }      // captures `seen`, returns numeric
+let doubled = [10, 20, 30].map(dbl)
+console.log("seen:" + seen.join(","))
+console.log("doubled:" + doubled.join(","))
+function inc(x) { return x + 1 }                     // non-capturing numeric fn still fine
+console.log("inc:" + [5, 6].map(inc).join(","))
+console.log("done")
