@@ -24,6 +24,21 @@ pub use tishlang_core::{
 // a direct dependency on `tishlang_core` from the generated crate.
 pub use tishlang_core::{VmReadGuard, VmRef, VmWriteGuard};
 
+/// #218 — read a captured `VmRef` cell's value, releasing the lock guard BEFORE returning.
+///
+/// Generated native code reads captured cells in *expression position* (e.g. `current.dim +
+/// current.fg` lowers to two reads of `current` inside one `+`). The old inline form
+/// `(*cell.borrow()).clone()` puts the `borrow()` guard in a *temporary*, whose lifetime extends to
+/// the end of the enclosing statement — so two reads of the SAME cell in one expression hold two
+/// guards at once. Under the `send-values` build a `VmRef` is an `Arc<Mutex<T>>` and `borrow()` is a
+/// non-reentrant `Mutex::lock()`, so that second lock self-deadlocks (the process sleeps at 0% CPU).
+/// Cloning inside this fn drops the guard at the `return`, so repeated reads of one cell lock
+/// strictly sequentially. Behaviour is identical to `(*cell.borrow()).clone()` otherwise.
+#[inline]
+pub fn vm_read<T: Clone>(cell: &VmRef<T>) -> T {
+    (*cell.borrow()).clone()
+}
+
 /// `for…of` iterable normalization for the native backend: a JS iterator object (one with a
 /// callable `next()` returning `{ value, done }`, e.g. a `Map`/`Set` `.values()` result) is
 /// drained into a `Value::Array`; arrays, strings, and everything else pass through unchanged.
