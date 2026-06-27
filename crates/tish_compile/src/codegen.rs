@@ -4566,18 +4566,38 @@ impl Codegen {
             }
             Statement::Throw { value, .. } => {
                 let v = self.emit_expr(value)?;
-                if self.try_closure_depth > 0 || self.value_fn_depth == 0 {
-                    // Inside a try-body closure (so `catch`/`finally` can see it) or at top level
-                    // (run() returns a Result): a catchable error completion.
+                if self.try_closure_depth > 0 {
+                    // Inside a try-body closure (so `catch`/`finally` can see it): a catchable error
+                    // completion. A try-closure returns `Result` even when nested in a native-typed
+                    // fn, so this stays well-typed.
+                    self.writeln(&format!(
+                        "return Err(Box::new(tishlang_runtime::TishError::Throw({})) as Box<dyn std::error::Error>);",
+                        v
+                    ));
+                } else if self.in_native_typed_frame() {
+                    // #303: native-typed frame (`-> f64`/`-> Vec<..>`/`-> ()`) with no enclosing try.
+                    // There is no `Value` or `Result` channel here, so neither the dummy-`Value`
+                    // escape nor a `return Err(..)` would type-check. Fall back to the pre-#303 abort
+                    // (a native numeric kernel hitting an uncaught throw is already a degenerate path;
+                    // `panic!` coerces to any return type via `!`).
+                    self.writeln(&format!(
+                        "{{ let _th = {}; panic!(\"uncaught throw: {{}}\", _th.to_display_string()); }}",
+                        v
+                    ));
+                } else if self.value_fn_depth == 0 {
+                    // Top level (run() returns a Result): a catchable error completion.
                     self.writeln(&format!(
                         "return Err(Box::new(tishlang_runtime::TishError::Throw({})) as Box<dyn std::error::Error>);",
                         v
                     ));
                 } else {
-                    // Top of a value-fn body with no enclosing try: there is no error channel
-                    // across the native-fn ABI, so an uncaught throw aborts (matches prior behavior).
+                    // #303: value-fn body with no enclosing try — the native-fn ABI (`-> Value`) has
+                    // no error channel, so store the throw in the pending slot and escape with a dummy
+                    // `Value`. The caller's post-call pending-throw check (emitted after each call)
+                    // propagates it: re-raised as `TishError::Throw` in a try-closure / at top level,
+                    // or escaped again to climb past another value-fn.
                     self.writeln(&format!(
-                        "{{ let _th = {}; panic!(\"uncaught throw: {{}}\", _th.to_display_string()); }}",
+                        "{{ tishlang_runtime::set_pending_throw({}); return Value::Null; }}",
                         v
                     ));
                 }
@@ -4907,6 +4927,13 @@ impl Codegen {
                 }
                 self.writeln("Value::native(move |args: &[Value]| {");
                 self.value_fn_depth += 1;
+                // #303: a nested value-fn is its own `-> Value` frame; the enclosing `try`'s
+                // `Result` channel is NOT reachable via `return Err` from inside it (a throw here
+                // returns to the fn's caller, not the outer try). Reset the try-closure depth so
+                // throws / `emit_pending_throw_check` inside this body use the pending-throw slot,
+                // not a mis-typed `return Err`. Restored at every exit below.
+                let saved_try_depth = self.try_closure_depth;
+                self.try_closure_depth = 0;
                 self.indent += 1;
                 // Mutable outer vars: capture the RefCell so assignments use borrow_mut
                 for outer_var in &mutable_outer_vars {
@@ -5177,6 +5204,7 @@ impl Codegen {
                 self.type_context.pop_scope();
                 if let Err(e) = fun_body_res {
                     self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
+                    self.try_closure_depth = saved_try_depth;
                     return Err(e);
                 }
 
@@ -5184,6 +5212,7 @@ impl Codegen {
                 self.indent -= 1;
                 self.writeln("})");
                 self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
+                self.try_closure_depth = saved_try_depth;
                 self.indent -= 1;
                 self.writeln("};");
                 // Update the cell with the actual function value
@@ -8022,6 +8051,10 @@ impl Codegen {
 
         code.push_str("    Value::native(move |args: &[Value]| {\n");
         self.value_fn_depth += 1;
+        // #303: like the FunDecl closure above, a nested arrow is its own `-> Value` frame, so the
+        // enclosing `try`'s `Result` channel must not leak in. Reset + restore at every exit.
+        let saved_try_depth = self.try_closure_depth;
+        self.try_closure_depth = 0;
 
         // Make captured outer params available as plain Values (from _ref RefCells)
         for outer_param in &outer_params {
@@ -8170,10 +8203,12 @@ impl Codegen {
         self.type_context.pop_scope();
         if let Err(e) = arrow_body_res {
             self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
+            self.try_closure_depth = saved_try_depth;
             return Err(e);
         }
 
         self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
+        self.try_closure_depth = saved_try_depth;
 
         // Restore state
         self.refcell_wrapped_vars = saved_refcell_vars;
@@ -12239,6 +12274,54 @@ impl Codegen {
         }
     }
 
+    /// #303 — does `stmt` contain a call (so it may set the pending-throw slot)? Conservative: any
+    /// `Call`/`New` anywhere in the statement's expressions.
+    fn stmt_may_throw(stmt: &Statement) -> bool {
+        let mut found = false;
+        Self::for_each_stmt_expr(stmt, &mut |e| {
+            Self::walk_subexprs(e, &mut |x| {
+                if matches!(x, Expr::Call { .. } | Expr::New { .. }) {
+                    found = true;
+                }
+            });
+        });
+        found
+    }
+
+    /// #303 — a statement that already transfers control, so a pending-throw check after it would be
+    /// dead code (the throw propagates via the dummy-return + the caller's own check instead).
+    fn is_terminator_stmt(stmt: &Statement) -> bool {
+        matches!(
+            stmt,
+            Statement::Return { .. }
+                | Statement::Throw { .. }
+                | Statement::Break { .. }
+                | Statement::Continue { .. }
+        )
+    }
+
+    /// #303 — emit the post-call pending-throw check in the form the current frame expects: a
+    /// `Result`-returning frame (a `try`-closure, or `run()` at top level) re-raises it as
+    /// `TishError::Throw`; a value-fn frame escapes with a dummy `Value`, leaving the slot set so the
+    /// throw keeps climbing the call chain.
+    fn emit_pending_throw_check(&mut self) {
+        if self.try_closure_depth > 0 || self.value_fn_depth == 0 {
+            self.writeln("if tishlang_runtime::has_pending_throw() { return Err(Box::new(tishlang_runtime::TishError::Throw(tishlang_runtime::take_pending_throw().unwrap_or(Value::Null))) as Box<dyn std::error::Error>); }");
+        } else {
+            self.writeln("if tishlang_runtime::has_pending_throw() { return Value::Null; }");
+        }
+    }
+
+    /// #303 — are we emitting the body of a native-typed fn (`fn name_native(..) -> f64` /
+    /// `fn name_nv(..) -> Vec<..> | ()`)? Such a frame has no `Value`/`Result` return channel, so the
+    /// pending-throw check (which returns `Err`/`Value::Null`) cannot be typed there and must be
+    /// suppressed — the throw still propagates: it stays in the slot and surfaces at the first
+    /// `Value`/`Result` frame up the call chain. `native_fn_emit_name` is `Some` for the whole body
+    /// of both native emitters and `None` everywhere else.
+    fn in_native_typed_frame(&self) -> bool {
+        self.native_fn_emit_name.is_some() || self.native_vec_ret.is_some()
+    }
+
     fn emit_statements_with_folds(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
         let mut i = 0;
         while i < statements.len() {
@@ -12268,6 +12351,12 @@ impl Codegen {
                 self.emit_native_fn_body(&statements[i])?;
             } else {
                 self.emit_statement(&statements[i])?;
+                if Self::stmt_may_throw(&statements[i])
+                    && !Self::is_terminator_stmt(&statements[i])
+                    && (self.try_closure_depth > 0 || !self.in_native_typed_frame())
+                {
+                    self.emit_pending_throw_check();
+                }
             }
             if let Some((lv, rv)) = promote_strict_lt {
                 self.strict_lt_bounds.push((lv.clone(), rv.clone()));
@@ -12282,6 +12371,9 @@ impl Codegen {
                         self.emit_native_fn_body(&statements[i])?;
                     } else {
                         self.emit_statement(&statements[i])?;
+                        if Self::stmt_may_throw(&statements[i]) && !Self::is_terminator_stmt(&statements[i]) {
+                            self.emit_pending_throw_check();
+                        }
                     }
                     i += 1;
                 }

@@ -1,0 +1,22 @@
+// #303: a `throw` from a CALLED function must be catchable by an enclosing try/catch on the native
+// backend (it used to panic instead of propagating). Backend-identical; deterministic.
+function boom() { throw "kaboom" }
+try { boom() } catch (e) { console.log("caught:" + e) }
+function inner() { throw "deep" }
+function outer() { inner() }                 // throw propagates across two call frames
+try { outer() } catch (e) { console.log("caught2:" + e) }
+function fail(n) { if (n > 0) { throw "n=" + n } return 0 }
+let r = "ok"
+try { fail(5) } catch (e) { r = e }          // thrown value bound in catch
+console.log(r)
+function safe(n) { if (n < 0) { throw "neg" } return n + 1 }
+console.log("safe:" + safe(9))               // non-throwing path still works
+// #303: a throw from a value-fn/arrow defined INSIDE a try is catchable too — the nested closure is
+// its own `-> Value` frame, so its body (incl. the call below) must use the pending-throw slot, not
+// a `return Err` into the outer try (which used to mis-compile / panic).
+function helper(x) { return x + 1 }
+try {
+  let f = () => { console.log("inside-arrow:" + helper(9)); throw "arrow" }
+  f()
+} catch (e) { console.log("a:" + e) }
+console.log("after")
