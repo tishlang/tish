@@ -52,6 +52,28 @@ fn integration_compile_cache_dir() -> PathBuf {
     target_dir().join("integration_compile_cache")
 }
 
+/// Remove cache entries under `dir` whose name starts with `prefix` but is not part of the current
+/// generation `keep_leaf` (the current artifact may have an extension appended, e.g. `<leaf>.wasm`,
+/// so we keep anything that *starts with* `keep_leaf`). Best-effort: caps the per-fixture compile
+/// cache so a `tish` rebuild doesn't leave the previous generation behind forever. Parallel-safe —
+/// see the call site in `compile_cached`.
+fn prune_stale_cache_generations(dir: &Path, prefix: &str, keep_leaf: &str) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for ent in rd.flatten() {
+            let name = ent.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(prefix) && !name.starts_with(keep_leaf) {
+                let p = ent.path();
+                if p.is_dir() {
+                    let _ = std::fs::remove_dir_all(&p);
+                } else {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+    }
+}
+
 /// Match `tish build` with no `--feature`: link every capability compiled into this `tish` binary.
 fn native_build_features_for_integration_test() -> Vec<String> {
     let mut v: Vec<String> = tishlang_vm::all_compiled_capabilities()
@@ -169,6 +191,14 @@ fn compile_cached(bin: &Path, path: &Path, backend: &str) -> PathBuf {
     let _ = std::fs::create_dir_all(&cache_base);
     // Include `backend` in the leaf name so nested cargo bin names never collide across backends.
     let leaf = format!("{}__{}__{}", stem, backend, hash8);
+
+    // Cap the cache: `hash8` mixes in the `tish` binary's mtime, so every recompile of `tish`
+    // orphans the previous generation of THIS (stem, backend). Drop those stale siblings now, so the
+    // cache holds ~one generation per fixture instead of growing without bound across rebuilds
+    // (it reached 14 GB in one session and exhausted the disk). Safe under parallel `nextest`: every
+    // live process for this (stem, backend) computes the SAME `hash8`, so only genuinely-stale
+    // generations (a different hash) are removed, never an artifact a concurrent run is using.
+    prune_stale_cache_generations(&cache_base, &format!("{}__{}__", stem, backend), &leaf);
 
     let (artifact_path, compile_args): (PathBuf, Vec<OsString>) = match backend {
         "native" => {
@@ -1416,6 +1446,16 @@ fn test_mvp_programs_native() {
     let combined = combined_mvp_native_inputs_hash(&paths);
     let cache_dir = mvp_native_batch_cache_dir(combined);
     let _ = std::fs::create_dir_all(&cache_dir);
+    // Cap the native batch cache: a new combined hash (a codegen / inference / source change) orphans
+    // the previous `native_many/<hash>` directory, each of which holds a full nested Cargo `target/`
+    // (~GBs). Drop the stale siblings, keeping only the current generation. Only `test_mvp_programs_
+    // native` builds here, so there is no cross-process race.
+    if let (Some(parent), Some(keep)) = (
+        cache_dir.parent(),
+        cache_dir.file_name().map(|n| n.to_string_lossy().into_owned()),
+    ) {
+        prune_stale_cache_generations(parent, "", &keep);
+    }
 
     let ext = if cfg!(target_os = "windows") {
         ".exe"
