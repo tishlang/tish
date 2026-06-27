@@ -1,0 +1,8 @@
+// Regression (#330): a param used ONLY as a forwarded call argument (never numerically) is NOT
+// provably f64 — `thread`'s `arr` flows into `sumN`'s array position. The M5 native-fn path used to
+// promote `thread` to `thread_native(n: f64, arr: f64)` and the caller passed a real array into the
+// f64 slot → panic "expected number". Must stay boxed. Valid in tish + node; deterministic.
+function sumN(n, arr) { let s = 0.0; for (let j = 0; j < n; j++) { s = s + arr[j] } return s }
+function thread(n, arr) { return sumN(n, arr) }       // forwards arr (array) + returns the result
+function top(n) { let a = []; for (let i = 0; i < n; i++) { a.push(2.0) } return thread(n, a) }
+console.log("r:" + top(4))
