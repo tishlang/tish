@@ -1,0 +1,7 @@
+console.log((2.5).toFixed(0));
+console.log((-0).toString());
+console.log([1, NaN].includes(NaN));
+console.log(parseInt("0x1F", 16));
+console.log(Math.round(-2.5));
+console.log(Math.min());
+console.log(Math.max());

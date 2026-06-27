@@ -1,0 +1,6 @@
+const x = () => {
+  return <div>
+    hello
+    world
+  </div>
+}

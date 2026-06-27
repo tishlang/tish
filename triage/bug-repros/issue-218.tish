@@ -1,0 +1,12 @@
+import { viewLines } from "./layout.tish"
+import { setTheme } from "./theme.tish"
+
+fn paint() {
+  return viewLines()
+}
+
+let i = 0
+while (i < 3) {
+  console.log(paint())
+  i = i + 1
+}
