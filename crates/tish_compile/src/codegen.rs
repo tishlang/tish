@@ -13437,6 +13437,33 @@ impl Codegen {
         for f in Self::fns_called_with_nonnumeric_arg(statements) {
             cand.remove(&f);
         }
+        // #330: M5 promotes every param to `f64`, so a candidate is only sound when EVERY param is
+        // provably a numeric scalar. Two param shapes break that and must disqualify the fn:
+        //   (a) an INDEXED param (`arr[j]`) is an array, not an f64 — `fn sumN(n, arr) { … arr[j] … }`
+        //       was emitted as `sumN_native(n: f64, arr: f64)` whose body does `get_index(Number(arr))`
+        //       → reads null → `panic!("expected number")`. (Such a fn is the native-vec path's job.)
+        //   (b) a param used ONLY as a forwarded call argument (a bare `f(p)` arg), never numerically,
+        //       has the callee's type — which may be an array: `fn thread(n, arr){ return sumN(n,arr) }`
+        //       forwards `arr` into `sumN`'s array slot; `thread_native(arr: f64)` then mistypes the
+        //       array argument at the caller. A param also used numerically (e.g. a loop bound) is
+        //       provably f64 and kept.
+        // Drop such candidates BEFORE the fixpoint so it cascades to their callers; they stay boxed
+        // (or native-vec), which is sound.
+        for &(name, params, body) in &decls {
+            if !cand.contains(name) {
+                continue;
+            }
+            let has_non_scalar_param = params.iter().flat_map(|p| p.bound_names()).any(|pn| {
+                let mut u = ParamUse::default();
+                Self::for_each_stmt_expr(body, &mut |e| {
+                    Self::scan_param_use(e, pn.as_ref(), false, &mut u)
+                });
+                u.indexed || (u.forwarded && !u.numeric)
+            });
+            if has_non_scalar_param {
+                cand.remove(name);
+            }
+        }
         loop {
             let mut remove: Vec<String> = Vec::new();
             for &(name, params, body) in &decls {
