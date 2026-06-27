@@ -1,0 +1,11 @@
+forEach:1,2
+map:1,2
+filter:1,2
+reduce:1,2
+find:1,2
+findIndex:1,2
+some:1,2
+every:1,2
+findLast:4,3
+findLastIndex:4,3
+done

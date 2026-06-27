@@ -439,40 +439,11 @@ impl fmt::Display for TishError {
 
 impl std::error::Error for TishError {}
 
-thread_local! {
-    /// #303 — a pending JS `throw` that escaped a value-returning native fn. The native fn ABI is
-    /// `Fn(&[Value]) -> Value` with no error channel, so a `throw` inside a CALLED fn cannot be
-    /// returned as a `Result`. Instead the throw codegen stores the thrown value here and escapes the
-    /// closure with a dummy `Value`; every call site checks this slot immediately after the call and
-    /// either re-raises it as `TishError::Throw` (in a `try`-closure or at `run()` top level) or
-    /// escapes the current value-fn with a dummy (leaving the slot set so it keeps propagating up the
-    /// call chain). Drained exactly once, at the frame that converts it back into a `Result`.
-    static PENDING_THROW: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
-}
-
-/// #303 — record a thrown value that must propagate across a value-fn call boundary. First-throw-
-/// wins: if a throw is already pending (an erroneous continuation reached a second throw before the
-/// slot was drained — e.g. a braceless loop body that re-fires), keep the FIRST one, since that is
-/// the throw JS would have propagated. The slot is drained by `take_pending_throw` at the frame that
-/// converts it back into a `Result`.
-pub fn set_pending_throw(v: Value) {
-    PENDING_THROW.with(|c| {
-        let mut slot = c.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(v);
-        }
-    });
-}
-
-/// #303 — is a thrown value waiting to propagate? (Checked after every native fn call.)
-pub fn has_pending_throw() -> bool {
-    PENDING_THROW.with(|c| c.borrow().is_some())
-}
-
-/// #303 — take the pending thrown value, clearing the slot (drains it exactly once).
-pub fn take_pending_throw() -> Option<Value> {
-    PENDING_THROW.with(|c| c.borrow_mut().take())
-}
+// #303 — the pending-throw slot lives in `tishlang_core` so the shared array builtins
+// (`tishlang_builtins::array`) can poll it without a `builtins -> runtime` dependency cycle, and so
+// the VM shares the same slot. Re-export the accessors so the Rust emitted by `tishlang_compile`
+// keeps calling `tishlang_runtime::{set,has,take}_pending_throw`. See `tishlang_core` for the docs.
+pub use tishlang_core::{has_pending_throw, set_pending_throw, take_pending_throw};
 
 /// Function-boundary unwind: convert a completion that escaped a function body's `Result`-closure
 /// back into the function's `Value`. A `return v` yields `v`; an uncaught `throw` is stored in the

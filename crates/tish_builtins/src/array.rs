@@ -309,12 +309,14 @@ pub fn map(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
         let mut nums: Vec<f64> = Vec::with_capacity(data.len());
         for (i, &n) in data.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { return packed_or_empty(nums); } // #303
             match cb.call(&[Value::Number(n), Value::Number(i as f64)]) {
                 Value::Number(r) => nums.push(r),
                 other => {
                     let mut boxed: Vec<Value> = nums.into_iter().map(Value::Number).collect();
                     boxed.push(other);
                     for (j, &m) in data.iter().enumerate().skip(i + 1) {
+                        if tishlang_core::has_pending_throw() { break; } // #303
                         boxed.push(cb.call(&[Value::Number(m), Value::Number(j as f64)]));
                     }
                     return Value::Array(VmRef::new(boxed));
@@ -326,11 +328,12 @@ pub fn map(arr: &Value, callback: &Value) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
-        let result: Vec<Value> = arr_borrow
-            .iter()
-            .enumerate()
-            .map(|(i, v)| cb.call(&[v.clone(), Value::Number(i as f64)]))
-            .collect();
+        // #303: stop on a pending throw from the callback (don't map the rest of the array).
+        let mut result: Vec<Value> = Vec::with_capacity(arr_borrow.len());
+        for (i, v) in arr_borrow.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { break; }
+            result.push(cb.call(&[v.clone(), Value::Number(i as f64)]));
+        }
         Value::Array(VmRef::new(result))
     } else {
         Value::Null
@@ -343,6 +346,7 @@ pub fn filter(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
         let mut out: Vec<f64> = Vec::new();
         for (i, &n) in data.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             if cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
                 out.push(n);
             }
@@ -352,18 +356,14 @@ pub fn filter(arr: &Value, callback: &Value) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
-        let result: Vec<Value> = arr_borrow
-            .iter()
-            .enumerate()
-            .filter_map(|(i, v)| {
-                let keep = cb.call(&[v.clone(), Value::Number(i as f64)]);
-                if keep.is_truthy() {
-                    Some(v.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // #303: stop on a pending throw from the predicate (don't test the rest of the array).
+        let mut result: Vec<Value> = Vec::new();
+        for (i, v) in arr_borrow.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { break; }
+            if cb.call(&[v.clone(), Value::Number(i as f64)]).is_truthy() {
+                result.push(v.clone());
+            }
+        }
         Value::Array(VmRef::new(result))
     } else {
         Value::Null
@@ -381,6 +381,7 @@ pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
         };
         // `skip(start_idx)` preserves the true element index for the callback's 3rd arg.
         for (i, &x) in data.iter().enumerate().skip(start_idx) {
+            if tishlang_core::has_pending_throw() { return acc; } // #303
             acc = cb.call(&[acc, Value::Number(x), Value::Number(i as f64)]);
         }
         return acc;
@@ -396,6 +397,7 @@ pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
             (0, initial.clone())
         };
         for i in start_idx..len {
+            if tishlang_core::has_pending_throw() { return acc; } // #303
             let v = arr_borrow[i].clone();
             acc = cb.call(&[acc, v.clone(), Value::Number(i as f64)]);
         }
@@ -408,6 +410,7 @@ pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
 pub fn for_each(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
         for (i, &n) in data.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { return Value::Null; } // #303
             cb.call(&[Value::Number(n), Value::Number(i as f64)]);
         }
         return Value::Null;
@@ -416,6 +419,7 @@ pub fn for_each(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             cb.call(&[v.clone(), Value::Number(i as f64)]);
         }
     }
@@ -425,6 +429,7 @@ pub fn for_each(arr: &Value, callback: &Value) -> Value {
 pub fn find(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
         for (i, &n) in data.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             if cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
                 return Value::Number(n);
             }
@@ -435,6 +440,7 @@ pub fn find(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
             if result.is_truthy() {
                 return v.clone();
@@ -447,6 +453,7 @@ pub fn find(arr: &Value, callback: &Value) -> Value {
 pub fn find_index(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
         for (i, &n) in data.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             if cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
                 return Value::Number(i as f64);
             }
@@ -457,6 +464,7 @@ pub fn find_index(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
             if result.is_truthy() {
                 return Value::Number(i as f64);
@@ -471,6 +479,7 @@ pub fn find_index(arr: &Value, callback: &Value) -> Value {
 pub fn find_last(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
         for i in (0..data.len()).rev() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             if cb
                 .call(&[Value::Number(data[i]), Value::Number(i as f64)])
                 .is_truthy()
@@ -485,6 +494,7 @@ pub fn find_last(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for i in (0..arr_borrow.len()).rev() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             let v = &arr_borrow[i];
             if cb.call(&[v.clone(), Value::Number(i as f64)]).is_truthy() {
                 return v.clone();
@@ -498,6 +508,7 @@ pub fn find_last(arr: &Value, callback: &Value) -> Value {
 pub fn find_last_index(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
         for i in (0..data.len()).rev() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             if cb
                 .call(&[Value::Number(data[i]), Value::Number(i as f64)])
                 .is_truthy()
@@ -512,6 +523,7 @@ pub fn find_last_index(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for i in (0..arr_borrow.len()).rev() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             if cb
                 .call(&[arr_borrow[i].clone(), Value::Number(i as f64)])
                 .is_truthy()
@@ -546,6 +558,7 @@ pub fn at(arr: &Value, index: &Value) -> Value {
 pub fn some(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
         for (i, &n) in data.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             if cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
                 return Value::Bool(true);
             }
@@ -556,6 +569,7 @@ pub fn some(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
             if result.is_truthy() {
                 return Value::Bool(true);
@@ -568,6 +582,7 @@ pub fn some(arr: &Value, callback: &Value) -> Value {
 pub fn every(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
         for (i, &n) in data.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             if !cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
                 return Value::Bool(false);
             }
@@ -578,6 +593,7 @@ pub fn every(arr: &Value, callback: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow();
         for (i, v) in arr_borrow.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
             if !result.is_truthy() {
                 return Value::Bool(false);
@@ -595,6 +611,7 @@ pub fn flat_map(arr: &Value, callback: &Value) -> Value {
         let arr_borrow = arr.borrow();
         let mut result: Vec<Value> = Vec::new();
         for (i, v) in arr_borrow.iter().enumerate() {
+            if tishlang_core::has_pending_throw() { break; } // #303
             let mapped = cb.call(&[v.clone(), Value::Number(i as f64)]);
             if let Value::Array(inner) = mapped {
                 result.extend(inner.borrow().iter().cloned());
@@ -635,6 +652,11 @@ pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
         let mut args_buf: [Value; 2] = [Value::Null, Value::Null];
 
         indices.sort_by(|&a, &b| {
+            // #303: once the comparator has thrown, stop invoking it — return Equal so the sort can
+            // unwind. Avoids extra comparator calls (and their side effects) after the throw.
+            if tishlang_core::has_pending_throw() {
+                return std::cmp::Ordering::Equal;
+            }
             args_buf[0] = elements[a].clone();
             args_buf[1] = elements[b].clone();
             match cmp_fn.call(&args_buf) {
@@ -644,10 +666,16 @@ pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
             }
         });
 
-        *arr_mut = indices
-            .into_iter()
-            .map(|i| std::mem::replace(&mut elements[i], Value::Null))
-            .collect();
+        if tishlang_core::has_pending_throw() {
+            // #303: the comparator threw — do NOT write the partial/bogus reordering back. Restore the
+            // original element order (leave the array unmodified) and let the caller re-raise the throw.
+            *arr_mut = elements;
+        } else {
+            *arr_mut = indices
+                .into_iter()
+                .map(|i| std::mem::replace(&mut elements[i], Value::Null))
+                .collect();
+        }
         drop(arr_mut);
         Value::Array(arr.clone())
     } else {
@@ -880,5 +908,72 @@ mod packed_hof_tests {
         let n = na(&[1.0, 2.0]);
         assert!(matches!(map(&n, &Value::Number(1.0)), Value::Null));
         assert!(matches!(filter(&n, &Value::Null), Value::Null));
+    }
+
+    #[test]
+    fn for_each_stops_on_pending_throw() {
+        use std::sync::{Arc, Mutex};
+        // #303: once the callback parks a throw, for_each must stop invoking it (no extra iterations).
+        let _ = tishlang_core::take_pending_throw(); // start with a clean slot
+        let arr = from_vec(vec![
+            Value::Number(1.0),
+            Value::Number(2.0),
+            Value::Number(3.0),
+            Value::Number(4.0),
+        ]);
+        let calls = Arc::new(Mutex::new(0usize));
+        let c2 = calls.clone();
+        let cb = Value::native(move |a: &[Value]| {
+            *c2.lock().unwrap() += 1;
+            if a[0].as_number() == Some(2.0) {
+                tishlang_core::set_pending_throw(Value::Null);
+            }
+            Value::Null
+        });
+        for_each(&arr, &cb);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            2,
+            "for_each should stop after the throwing element, not run all 4"
+        );
+        let _ = tishlang_core::take_pending_throw(); // drain so it doesn't leak into other tests
+    }
+
+    #[test]
+    fn sort_with_comparator_throw_restores_original_order() {
+        // #303: a comparator that throws must NOT corrupt the array — sort_with_comparator restores the
+        // original order and leaves the throw parked for the caller to re-raise.
+        let _ = tishlang_core::take_pending_throw();
+        let arr = from_vec(vec![
+            Value::Number(5.0),
+            Value::Number(4.0),
+            Value::Number(3.0),
+            Value::Number(2.0),
+            Value::Number(1.0),
+        ]);
+        // Park a throw on the first comparison and return a dummy ordering value.
+        let cmp = Value::native(|_a: &[Value]| {
+            tishlang_core::set_pending_throw(Value::String("cmp".into()));
+            Value::Null
+        });
+        let _ = sort_with_comparator(&arr, &cmp);
+        if let Value::Array(a) = &arr {
+            let got: Vec<f64> = a
+                .borrow()
+                .iter()
+                .map(|v| v.as_number().unwrap_or(f64::NAN))
+                .collect();
+            assert_eq!(
+                got,
+                vec![5.0, 4.0, 3.0, 2.0, 1.0],
+                "array must be left in its original order after a comparator throw"
+            );
+        } else {
+            panic!("expected a boxed array");
+        }
+        assert!(
+            tishlang_core::take_pending_throw().is_some(),
+            "the parked throw must survive for the caller to re-raise"
+        );
     }
 }

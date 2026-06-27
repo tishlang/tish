@@ -1,0 +1,35 @@
+// #303 follow-up: a `throw` from an array-iteration callback must be catchable AND must stop the
+// iteration immediately — the shared builtins poll the pending-throw slot between elements instead
+// of running the callback for the rest of the array. Each tracker shows how far the callback ran;
+// it must stop at the throwing element. Backend-identical; deterministic.
+let fe = []
+try { [1, 2, 3, 4].forEach(x => { fe.push(x); if (x === 2) { throw "s" } }) } catch (e) {}
+console.log("forEach:" + fe.join(","))
+let mp = []
+try { [1, 2, 3, 4].map(x => { mp.push(x); if (x === 2) { throw "s" } return x * 2 }) } catch (e) {}
+console.log("map:" + mp.join(","))
+let fl = []
+try { [1, 2, 3, 4].filter(x => { fl.push(x); if (x === 2) { throw "s" } return true }) } catch (e) {}
+console.log("filter:" + fl.join(","))
+let rd = []
+try { [1, 2, 3, 4].reduce((a, x) => { rd.push(x); if (x === 2) { throw "s" } return a + x }, 0) } catch (e) {}
+console.log("reduce:" + rd.join(","))
+let fd = []
+try { [1, 2, 3, 4].find(x => { fd.push(x); if (x === 2) { throw "s" } return false }) } catch (e) {}
+console.log("find:" + fd.join(","))
+let fi = []
+try { [1, 2, 3, 4].findIndex(x => { fi.push(x); if (x === 2) { throw "s" } return false }) } catch (e) {}
+console.log("findIndex:" + fi.join(","))
+let sm = []
+try { [1, 2, 3, 4].some(x => { sm.push(x); if (x === 2) { throw "s" } return false }) } catch (e) {}
+console.log("some:" + sm.join(","))
+let ev = []
+try { [1, 2, 3, 4].every(x => { ev.push(x); if (x === 2) { throw "s" } return true }) } catch (e) {}
+console.log("every:" + ev.join(","))
+let fL = []
+try { [1, 2, 3, 4].findLast(x => { fL.push(x); if (x === 3) { throw "s" } return false }) } catch (e) {}
+console.log("findLast:" + fL.join(","))
+let fX = []
+try { [1, 2, 3, 4].findLastIndex(x => { fX.push(x); if (x === 3) { throw "s" } return false }) } catch (e) {}
+console.log("findLastIndex:" + fX.join(","))
+console.log("done")

@@ -40,3 +40,40 @@ pub fn process_argv() -> Vec<String> {
         None => std::env::args().collect(),
     }
 }
+
+/// #303 — a thrown JS value parked while it unwinds across a boundary that can't carry a `Result`.
+///
+/// The native value-fn ABI is `Fn(&[Value]) -> Value`, and `Callable::call` likewise returns a bare
+/// `Value`, so a `throw` crossing such a boundary can't ride a `Result`. It is parked here and picked
+/// up at the next checkpoint: native codegen checks it after each call; the VM checks it after each
+/// `Callable::call`; and the shared array builtins (`forEach`/`map`/`sort`/…) check it between
+/// elements so they stop iterating promptly instead of running the callback for the rest of the
+/// array. The slot lives in `tishlang_core` (rather than `tishlang_runtime`) so `tishlang_builtins`
+/// can poll it without a `builtins -> runtime` dependency cycle; `tishlang_runtime` and `tishlang_vm`
+/// share this one slot. First-throw-wins; drained exactly once by [`take_pending_throw`] at the frame
+/// that converts it back into a `Result`.
+thread_local! {
+    static PENDING_THROW: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Park a thrown value to propagate across a non-`Result` boundary. First-throw-wins: if one is
+/// already pending (an erroneous continuation reached a second throw before the slot was drained),
+/// keep the first — that is the throw JS would have raised.
+pub fn set_pending_throw(v: Value) {
+    PENDING_THROW.with(|c| {
+        let mut slot = c.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(v);
+        }
+    });
+}
+
+/// Is a thrown value waiting to propagate?
+pub fn has_pending_throw() -> bool {
+    PENDING_THROW.with(|c| c.borrow().is_some())
+}
+
+/// Take the parked thrown value, clearing the slot (drains it exactly once).
+pub fn take_pending_throw() -> Option<Value> {
+    PENDING_THROW.with(|c| c.borrow_mut().take())
+}
