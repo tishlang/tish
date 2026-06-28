@@ -133,13 +133,19 @@ pub enum Opcode {
     /// `delete obj[key]` / `delete obj.prop`. Pops `[obj, key]`, removes the property
     /// (objects: drop the key; arrays: set the index to a null hole), pushes `true`.
     DeleteIndex = 53,
+    /// String-builder append for statement-position `acc += rhs` where `acc` is a frame slot local
+    /// (operand: u16 slot index). Pops `rhs`; appends it to the accumulator in amortized O(1) by
+    /// keeping a growable buffer for the slot (see the frame-local builder in `run_chunk`). Leaves
+    /// nothing on the stack — only emitted where the assignment's result is discarded. Slots are
+    /// frame-private (never captured), so the buffer needs no cross-frame sharing.
+    AppendLocal = 54,
 }
 
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=53 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=54 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 53 {
+        if b <= 54 {
             Some(unsafe { std::mem::transmute::<u8, Opcode>(b) })
         } else {
             None

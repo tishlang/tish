@@ -4,9 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tishlang_ast::{
-    ArrayElement, ArrowBody, BinOp, CallArg, DestructElement, DestructPattern, ExportDeclaration,
-    Expr, FunParam, JsxAttrValue, JsxChild, JsxProp, Literal, LogicalAssignOp, MemberProp,
-    ObjectProp, Program, Span, Statement,
+    ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern,
+    ExportDeclaration, Expr, FunParam, JsxAttrValue, JsxChild, JsxProp, Literal, LogicalAssignOp,
+    MemberProp, ObjectProp, Program, Span, Statement,
 };
 
 use crate::chunk::{Chunk, Constant};
@@ -1232,6 +1232,24 @@ impl<'a> Compiler<'a> {
                 self.compile_destructure(pattern, false, false)?;
             }
             Statement::ExprStmt { expr, .. } => {
+                // String-builder fast path: statement-position `acc += rhs` on a frame-slot local
+                // compiles to `<rhs>; AppendLocal slot` (no LoadLocal/Dup/StoreLocal/Pop), letting
+                // the VM append in amortized O(1) without materializing the discarded result. Only
+                // for a simple slot-resolved identifier with the `+` compound op; everything else
+                // (name-based vars, other ops) keeps the generic path.
+                if let Expr::CompoundAssign {
+                    name,
+                    op: CompoundOp::Add,
+                    value,
+                    ..
+                } = expr
+                {
+                    if let Some(slot) = self.resolve_slot(name) {
+                        self.compile_expr(value)?;
+                        self.emit_u16(Opcode::AppendLocal, slot);
+                        return Ok(());
+                    }
+                }
                 self.compile_expr(expr)?;
                 self.emit(Opcode::Pop);
             }
