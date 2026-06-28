@@ -21,6 +21,74 @@ use crate::value::{
     eval_object_get, eval_object_has, eval_object_set, EvalObjectData, PropMap, Value,
 };
 
+// #203: cursor cache for O(1)/near-O(1) character indexing in the interpreter. Twin of the one in
+// `tishlang_builtins::string` (used by the native/VM backends); duplicated here because the
+// interpreter has its own `Value`/`Arc<str>` string type rather than `tishlang_core`'s `ArcStr`. tish
+// strings are UTF-8, so `chars().nth(i)` is O(i) — turning indexed/strided scans into O(n^2). For each
+// recently-indexed string we cache whether it is all-ASCII (then a character index equals a byte index
+// → O(1)) plus a forward cursor (so non-ASCII sequential/strided scans advance from the last position).
+// Safety: the entry holds an `Arc<str>` CLONE, keeping the allocation alive so its data pointer can't
+// be reused while cached (no ABA), and since strings are immutable the cached ASCII flag stays valid.
+struct EvalCharCursor {
+    s: Arc<str>,
+    ascii: bool,
+    len_chars: usize,
+    char_idx: usize,
+    byte_off: usize,
+}
+
+thread_local! {
+    static EVAL_INDEX_CURSOR: RefCell<Option<EvalCharCursor>> = const { RefCell::new(None) };
+}
+
+fn with_eval_cursor<R>(s: &Arc<str>, f: impl FnOnce(&mut EvalCharCursor, &Arc<str>) -> R) -> R {
+    EVAL_INDEX_CURSOR.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let hit = matches!(slot.as_ref(), Some(c)
+            if std::ptr::eq(c.s.as_bytes().as_ptr(), s.as_bytes().as_ptr()) && c.s.len() == s.len());
+        if !hit {
+            let ascii = s.as_bytes().is_ascii();
+            let len_chars = if ascii { s.len() } else { s.chars().count() };
+            *slot = Some(EvalCharCursor {
+                s: Arc::clone(s),
+                ascii,
+                len_chars,
+                char_idx: 0,
+                byte_off: 0,
+            });
+        }
+        f(slot.as_mut().unwrap(), s)
+    })
+}
+
+/// Character (Unicode scalar) at index `idx` via the cursor cache. Identical results to
+/// `s.chars().nth(idx)`, but O(1) for ASCII and near-O(1) for forward/strided scans.
+fn nth_char_cached(s: &Arc<str>, idx: usize) -> Option<char> {
+    with_eval_cursor(s, |c, s| {
+        if c.ascii {
+            return s.as_bytes().get(idx).map(|&b| b as char);
+        }
+        let (base_idx, base_off) = if idx >= c.char_idx {
+            (c.char_idx, c.byte_off)
+        } else {
+            (0, 0)
+        };
+        match s[base_off..].char_indices().nth(idx - base_idx) {
+            Some((rel_off, ch)) => {
+                c.char_idx = idx;
+                c.byte_off = base_off + rel_off;
+                Some(ch)
+            }
+            None => None,
+        }
+    })
+}
+
+/// Character (Unicode scalar) count via the cursor cache — O(1) after the first call on a string.
+fn char_count_cached(s: &Arc<str>) -> usize {
+    with_eval_cursor(s, |c, _| c.len_chars)
+}
+
 pub struct Scope {
     // Scope vars: order is never observed (no Object.keys over a scope), so use a fast
     // unordered aHash map — NOT the object-strings PropMap (an insertion-ordered IndexMap),
@@ -1983,12 +2051,12 @@ impl Evaluator {
                                 return Ok(Value::String(s.replace(&search, &replacement).into()));
                             }
                             "charAt" => {
+                                // Cursor cache instead of collecting a fresh Vec<char> each call (#203).
                                 let idx = match arg_vals.first() {
                                     Some(Value::Number(n)) => *n as usize,
                                     _ => 0,
                                 };
-                                let chars: Vec<char> = s.chars().collect();
-                                return Ok(chars.get(idx)
+                                return Ok(nth_char_cached(s, idx)
                                     .map(|c| Value::String(c.to_string().into()))
                                     .unwrap_or(Value::String("".into())));
                             }
@@ -1998,11 +2066,11 @@ impl Evaluator {
                                     Some(Value::Number(n)) => *n as i64,
                                     _ => 0,
                                 };
-                                let chars: Vec<char> = s.chars().collect();
-                                let len = chars.len() as i64;
-                                let idx = if i < 0 { len + i } else { i };
-                                if idx >= 0 && idx < len {
-                                    return Ok(Value::String(chars[idx as usize].to_string().into()));
+                                let idx = if i < 0 { s.chars().count() as i64 + i } else { i };
+                                if idx >= 0 {
+                                    if let Some(c) = nth_char_cached(s, idx as usize) {
+                                        return Ok(Value::String(c.to_string().into()));
+                                    }
                                 }
                                 return Ok(Value::Null);
                             }
@@ -2011,9 +2079,8 @@ impl Evaluator {
                                     Some(Value::Number(n)) => *n as usize,
                                     _ => 0,
                                 };
-                                let chars: Vec<char> = s.chars().collect();
-                                return Ok(chars.get(idx)
-                                    .map(|c| Value::Number(*c as u32 as f64))
+                                return Ok(nth_char_cached(s, idx)
+                                    .map(|c| Value::Number(c as u32 as f64))
                                     .unwrap_or(Value::Number(f64::NAN)));
                             }
                             "repeat" => {
@@ -3667,7 +3734,7 @@ impl Evaluator {
             }
             Value::String(s) => {
                 if key == "length" {
-                    Ok(Value::Number(s.chars().count() as f64))
+                    Ok(Value::Number(char_count_cached(s) as f64))
                 } else {
                     Ok(Value::Null)
                 }
@@ -3745,9 +3812,7 @@ impl Evaluator {
                     Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => *n as usize,
                     _ => return Ok(Value::Null),
                 };
-                Ok(s
-                    .chars()
-                    .nth(idx)
+                Ok(nth_char_cached(s, idx)
                     .map(|c| Value::String(c.to_string().into()))
                     .unwrap_or(Value::Null))
             }

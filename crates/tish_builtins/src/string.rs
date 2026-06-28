@@ -4,8 +4,63 @@
 //! JavaScript, matching .length and .charAt(). Byte offsets are never exposed.
 
 use crate::helpers::normalize_index;
+use std::cell::RefCell;
+use tishlang_core::ArcStr;
 use tishlang_core::Value;
 use tishlang_core::VmRef;
+
+// #203: a per-thread cursor cache that makes repeated character indexing (`charCodeAt(i)`, `s[i]`,
+// `charAt(i)`) O(1)/near-O(1) instead of O(i). tish strings are UTF-8, so `chars().nth(i)` scans from
+// the start — turning indexed/strided scans into O(n^2) (a strided checksum over a 1.3 MB string was
+// 4939ms vs node 1ms). For each recently-indexed string we cache whether it is all-ASCII (then a
+// character index equals a byte index → O(1) byte lookup) plus a forward cursor (so non-ASCII
+// sequential/strided scans advance from the last position, not from 0). Safety: the entry holds an
+// `ArcStr` CLONE, which keeps the backing allocation alive — so its data pointer can't be freed and
+// reused by another string while cached (no ABA), and since strings are immutable the cached ASCII
+// flag stays valid. Backends share this via `char_at_idx` (native + VM route through the builtin).
+// Semantics are unchanged: still character (Unicode scalar) indexing, identical to `chars().nth(i)`.
+struct CharCursor {
+    s: ArcStr,
+    ascii: bool,
+    /// Character (Unicode scalar) count, cached so `.length` is O(1) too — `for (i=0;i<s.length;i++)`
+    /// re-evaluates the bound every iteration, so an O(n) `chars().count()` there is itself O(n^2).
+    len_chars: usize,
+    char_idx: usize,
+    byte_off: usize,
+}
+
+thread_local! {
+    static INDEX_CURSOR: RefCell<Option<CharCursor>> = const { RefCell::new(None) };
+}
+
+/// Borrow the cursor entry for `s`, reseeding (compute ASCII flag + character count) if it currently
+/// caches a different backing allocation, then run `f` against it. Centralises the pointer-keyed
+/// reseed shared by [`char_at_idx`] and [`char_count`].
+fn with_cursor<R>(s: &ArcStr, f: impl FnOnce(&mut CharCursor, &ArcStr) -> R) -> R {
+    INDEX_CURSOR.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let hit = matches!(slot.as_ref(), Some(c)
+            if std::ptr::eq(c.s.as_bytes().as_ptr(), s.as_bytes().as_ptr()) && c.s.len() == s.len());
+        if !hit {
+            let ascii = s.as_bytes().is_ascii();
+            // ASCII → character count equals byte length (free); otherwise count once.
+            let len_chars = if ascii { s.len() } else { s.chars().count() };
+            *slot = Some(CharCursor {
+                s: s.clone(),
+                ascii,
+                len_chars,
+                char_idx: 0,
+                byte_off: 0,
+            });
+        }
+        f(slot.as_mut().unwrap(), s)
+    })
+}
+
+/// Character (Unicode scalar) count of `s`, O(1) after the first call on a given string.
+pub fn char_count(s: &ArcStr) -> usize {
+    with_cursor(s, |c, _| c.len_chars)
+}
 
 /// Byte offset -> character index.
 fn byte_to_char_index(s: &str, byte_offset: usize) -> usize {
@@ -30,7 +85,7 @@ pub fn from_str(s: &str) -> Value {
 /// Get the length of a string (character count).
 pub fn len(s: &Value) -> Option<usize> {
     match s {
-        Value::String(str) => Some(str.chars().count()),
+        Value::String(str) => Some(char_count(str)),
         _ => None,
     }
 }
@@ -370,8 +425,38 @@ pub fn escape_html(s: &Value) -> Value {
     Value::String(tishlang_core::ArcStr::from(out))
 }
 
-fn char_at_idx(s: &str, idx: usize) -> Option<char> {
-    s.chars().nth(idx)
+/// Character (Unicode scalar) at index `idx`, using the cursor cache (see [`CharCursor`]).
+/// Equivalent to `s.chars().nth(idx)` but O(1) for ASCII strings and near-O(1) for forward/strided
+/// scans of non-ASCII strings, instead of O(idx) every call.
+fn char_at_idx(s: &ArcStr, idx: usize) -> Option<char> {
+    with_cursor(s, |c, s| {
+        if c.ascii {
+            // ASCII: character index == byte index, and every byte is its own scalar.
+            return s.as_bytes().get(idx).map(|&b| b as char);
+        }
+        // Non-ASCII: advance from the nearest known position (forward fast path); restart from 0 only
+        // when indexing backwards relative to the cursor.
+        let (base_idx, base_off) = if idx >= c.char_idx {
+            (c.char_idx, c.byte_off)
+        } else {
+            (0, 0)
+        };
+        match s[base_off..].char_indices().nth(idx - base_idx) {
+            Some((rel_off, ch)) => {
+                c.char_idx = idx;
+                c.byte_off = base_off + rel_off;
+                Some(ch)
+            }
+            None => None,
+        }
+    })
+}
+
+/// Character (Unicode scalar) at index `idx` via the cursor cache — the O(1)/near-O(1) primitive
+/// behind `s[i]`. Returns `None` for an out-of-range index; each backend maps that to its own
+/// out-of-bounds behaviour (interpreter/native → null, VM → error).
+pub fn nth_char(s: &ArcStr, idx: usize) -> Option<char> {
+    char_at_idx(s, idx)
 }
 
 pub fn char_at(s: &Value, idx: &Value) -> Value {
@@ -396,11 +481,13 @@ pub fn at(s: &Value, index: &Value) -> Value {
             Value::Number(n) => *n as i64,
             _ => 0,
         };
-        let chars: Vec<char> = s.chars().collect();
-        let len = chars.len() as i64;
-        let idx = if i < 0 { len + i } else { i };
-        if idx >= 0 && idx < len {
-            return Value::String(chars[idx as usize].to_string().into());
+        // Non-negative indices use the cursor cache directly; a negative index counts from the end,
+        // which needs the character length first (inherently O(n)).
+        let idx = if i < 0 { s.chars().count() as i64 + i } else { i };
+        if idx >= 0 {
+            if let Some(c) = char_at_idx(s, idx as usize) {
+                return Value::String(c.to_string().into());
+            }
         }
     }
     Value::Null

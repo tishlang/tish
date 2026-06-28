@@ -3125,13 +3125,13 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
         Value::String(s) => {
             let key_s = key.as_ref();
             if let Ok(idx) = key_s.parse::<usize>() {
-                return match s.chars().nth(idx) {
+                return match str_builtins::nth_char(s, idx) {
                     Some(c) => Ok(Value::String(tishlang_core::ArcStr::from(c.to_string()))),
                     None => Err("Index out of bounds".to_string()),
                 };
             }
             if key_s == "length" {
-                return Ok(Value::Number(s.chars().count() as f64));
+                return Ok(Value::Number(str_builtins::char_count(s) as f64));
             }
             let s_clone: tishlang_core::ArcStr = s.clone();
             let method: ArrayMethodFn = match key_s {
@@ -3420,12 +3420,7 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
                             n
                         ));
                     }
-                    let i = n as usize;
-                    let len = s.chars().count();
-                    if i >= len {
-                        return Err("Index out of bounds".to_string());
-                    }
-                    i
+                    n as usize
                 }
                 _ => {
                     return Err(format!(
@@ -3434,7 +3429,9 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
                     ));
                 }
             };
-            match s.chars().nth(i) {
+            // `nth_char` returns None past the end, so the cursor cache handles bounds — no separate
+            // O(n) `chars().count()` pre-check (#203).
+            match str_builtins::nth_char(s, i) {
                 Some(c) => Ok(Value::String(tishlang_core::ArcStr::from(c.to_string()))),
                 None => Err("Index out of bounds".to_string()),
             }
