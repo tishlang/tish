@@ -1,0 +1,35 @@
+// GAUNTLET: Set add / has / dedup — the canonical hash-set workload. Build a Set from N integers
+// drawn (with collisions) from a seeded LCG, then probe a second generated stream for membership.
+// Stresses Set insert throughput + the dedup path (repeat keys are no-ops) and Set membership lookup
+// at scale — the real-world "unique-ify a stream, then test set inclusion" pattern. The backing store
+// is an O(1) hash (IndexMap), so this measures per-op Set throughput, not algorithmic blowup. Valid in
+// both tish and node; integer check (set.size + membership hit count).
+
+// LCG over [0, 2^31): seed = (seed*1103515245 + 12345) mod 2^31. Pure integer f64 arithmetic, so
+// every backend (interp / vm / native) and node compute bit-identical values.
+//
+// Keys are bucketed into [0, RANGE) so the stream has genuine duplicates (dedup pressure) and the
+// probe stream lands real membership hits. RANGE < N guarantees both.
+let N = 1000000
+let RANGE = 500000
+
+let t0 = Date.now()
+
+// ── Build phase: insert N generated keys into the Set (duplicates collapse to one member). ──
+let s = new Set()
+let seed = 12345
+for (let i = 0; i < N; i++) {
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  s.add(seed % RANGE)
+}
+
+// ── Probe phase: generate a second stream and count how many keys are members. ──
+let probe = 67890
+let hits = 0
+for (let i = 0; i < N; i++) {
+  probe = (probe * 1103515245 + 12345) % 2147483648
+  if (s.has(probe % RANGE)) { hits = hits + 1 }
+}
+
+let CHECK = (s.size + hits) % 2147483647
+console.log("GAUNTLET set_ops " + (Date.now() - t0) + " " + CHECK)

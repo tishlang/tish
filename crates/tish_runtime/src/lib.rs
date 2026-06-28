@@ -865,7 +865,7 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
         }
         Value::String(s) => {
             if key == "length" {
-                Value::Number(s.chars().count() as f64)
+                Value::Number(tishlang_builtins::string::char_count(s) as f64)
             } else {
                 Value::Null
             }
@@ -943,11 +943,11 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
         // `str[i]` returns the character at index `i` (issue #17) — matches the VM /
         // interpreter; out-of-bounds / negative / non-integer indices yield null.
         Value::String(s) => match index {
-            Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => s
-                .chars()
-                .nth(*n as usize)
-                .map(|c| Value::String(c.to_string().into()))
-                .unwrap_or(Value::Null),
+            Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => {
+                tishlang_builtins::string::nth_char(s, *n as usize)
+                    .map(|c| Value::String(c.to_string().into()))
+                    .unwrap_or(Value::Null)
+            }
             _ => Value::Null,
         },
         Value::Object(_) => tishlang_core::object_get(obj, index).unwrap_or(Value::Null),

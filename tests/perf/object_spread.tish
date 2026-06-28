@@ -1,0 +1,20 @@
+// GAUNTLET: object spread / immutable update — the config-merge pattern. In a hot loop, build a new
+// object from a fixed `base` via spread (`{ ...base, id, v, w }`) and accumulate over its fields. This
+// is how real code does immutable state updates / option-merging (Redux reducers, React props, config
+// overlays): clone-with-overrides on every step. A struct-aware engine copies a fixed shape by offset;
+// a boxed engine re-hashes every property name and re-allocates a PropMap per iteration. Seeded fasta-
+// style LCG so the data is deterministic and every product stays well inside the f64 safe-integer range;
+// integer-only accumulation mod 2147483647 so the check is backend-identical (interp/vm/native) and
+// equal to node. Valid in both tish and node.
+let base = { a: 1, b: 2, c: 3 }
+let n = 2000000
+let seed = 42
+let acc = 0
+let t0 = Date.now()
+for (let i = 0; i < n; i++) {
+  seed = (seed * 3877 + 29573) % 139968
+  let o = { ...base, id: i, v: i * 2, w: seed }
+  acc = (acc + o.v + o.a + o.b + o.c + o.id + o.w) % 2147483647
+}
+let CHECK = acc % 2147483647
+console.log("GAUNTLET object_spread " + (Date.now() - t0) + " " + CHECK)

@@ -1527,6 +1527,25 @@ impl Vm {
         // frame indexed by slot — no per-call hashmap, no name lookups. Args bind
         // to slots 0..param_count. Empty for name-based chunks.
         let mut slot_locals: Vec<Value> = Vec::new();
+        // Frame-local string builder for `acc += x` on a slot local (Opcode::AppendLocal): keeps the
+        // accumulator in a growable `sb_buf` so appends are amortized O(1) instead of reallocating the
+        // whole string each time. `sb_slot` is the slot currently buffered (at most one). The slot's
+        // own value is stale while buffered; `sb_flush!()` writes the buffer back. Slots are
+        // frame-private (never captured by closures and invisible to callees), and every read of a
+        // slot goes through `LoadLocal`, so flushing there is sufficient for soundness — no
+        // cross-frame state. JS string immutability is preserved: reads always see the full string.
+        let mut sb_slot: Option<usize> = None;
+        let mut sb_buf = String::new();
+        macro_rules! sb_flush {
+            () => {{
+                if let Some(s) = sb_slot.take() {
+                    if let Some(dst) = slot_locals.get_mut(s) {
+                        *dst = Value::String(std::mem::take(&mut sb_buf).into());
+                    }
+                    sb_buf.clear();
+                }
+            }};
+        }
         if chunk.slot_based {
             slot_locals = vec![Value::Null; chunk.num_slots as usize];
             let param_count = chunk.param_count as usize;
@@ -1619,6 +1638,10 @@ impl Vm {
                 Opcode::Nop => {}
                 Opcode::LoadLocal => {
                     let slot = Self::read_u16(code, &mut ip) as usize;
+                    // Flush a pending string-builder for this slot so the read sees the full string.
+                    if sb_slot == Some(slot) {
+                        sb_flush!();
+                    }
                     let v = slot_locals
                         .get(slot)
                         .cloned()
@@ -1627,6 +1650,11 @@ impl Vm {
                 }
                 Opcode::StoreLocal => {
                     let slot = Self::read_u16(code, &mut ip) as usize;
+                    // A plain store overwrites the slot — drop any builder buffering it.
+                    if sb_slot == Some(slot) {
+                        sb_slot = None;
+                        sb_buf.clear();
+                    }
                     let v = self
                         .stack
                         .pop()
@@ -1634,6 +1662,42 @@ impl Vm {
                     match slot_locals.get_mut(slot) {
                         Some(dst) => *dst = v,
                         None => return Err(format!("Local slot out of bounds: {}", slot)),
+                    }
+                }
+                Opcode::AppendLocal => {
+                    let slot = Self::read_u16(code, &mut ip) as usize;
+                    let rhs = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow in AppendLocal".to_string())?;
+                    if sb_slot == Some(slot) {
+                        // Continue the active builder for this slot — amortized O(1) append.
+                        append_value_for_string_concat(&mut sb_buf, &rhs);
+                    } else {
+                        // Switching slots: flush the previous builder, then (re)start for this one.
+                        sb_flush!();
+                        match slot_locals.get(slot) {
+                            Some(Value::String(a)) => {
+                                sb_buf.clear();
+                                sb_buf.reserve(a.len() + estimate_string_concat_len(&rhs));
+                                sb_buf.push_str(a);
+                                append_value_for_string_concat(&mut sb_buf, &rhs);
+                                sb_slot = Some(slot);
+                            }
+                            _ => {
+                                // Non-string (or absent) accumulator: generic `+=` in place,
+                                // identical to LoadLocal; BinOp Add; StoreLocal.
+                                let current =
+                                    slot_locals.get(slot).cloned().unwrap_or(Value::Null);
+                                let result = eval_binop(BinOp::Add, &current, &rhs)?;
+                                match slot_locals.get_mut(slot) {
+                                    Some(dst) => *dst = result,
+                                    None => {
+                                        return Err(format!("Local slot out of bounds: {}", slot))
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 Opcode::LoadUpvalue | Opcode::StoreUpvalue => {
@@ -3125,13 +3189,13 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
         Value::String(s) => {
             let key_s = key.as_ref();
             if let Ok(idx) = key_s.parse::<usize>() {
-                return match s.chars().nth(idx) {
+                return match str_builtins::nth_char(s, idx) {
                     Some(c) => Ok(Value::String(tishlang_core::ArcStr::from(c.to_string()))),
                     None => Err("Index out of bounds".to_string()),
                 };
             }
             if key_s == "length" {
-                return Ok(Value::Number(s.chars().count() as f64));
+                return Ok(Value::Number(str_builtins::char_count(s) as f64));
             }
             let s_clone: tishlang_core::ArcStr = s.clone();
             let method: ArrayMethodFn = match key_s {
@@ -3420,12 +3484,7 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
                             n
                         ));
                     }
-                    let i = n as usize;
-                    let len = s.chars().count();
-                    if i >= len {
-                        return Err("Index out of bounds".to_string());
-                    }
-                    i
+                    n as usize
                 }
                 _ => {
                     return Err(format!(
@@ -3434,7 +3493,9 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
                     ));
                 }
             };
-            match s.chars().nth(i) {
+            // `nth_char` returns None past the end, so the cursor cache handles bounds — no separate
+            // O(n) `chars().count()` pre-check (#203).
+            match str_builtins::nth_char(s, i) {
                 Some(c) => Ok(Value::String(tishlang_core::ArcStr::from(c.to_string()))),
                 None => Err("Index out of bounds".to_string()),
             }

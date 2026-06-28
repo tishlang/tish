@@ -2204,6 +2204,32 @@ impl Codegen {
     /// `Drop` (other variants hold `Rc`/`Arc`) LLVM couldn't prove it dead — so it could not
     /// vectorize/fold the loop. Falls back to `emit_expr` for everything else (whose trailing
     /// value is simply dropped by the `;`).
+    /// #203/string_build: emit the rhs of a string `+=`/`s = s + rhs` as a Rust `String`-producing
+    /// expression, matching JS `String(x)` coercion of the appended value (a number prints without a
+    /// trailing `.0`, bool/null as text, anything else via `to_js_string`). Shared by the
+    /// statement-position no-clone append (`emit_expr_discard`) and the expression-position fast path,
+    /// so both coerce identically.
+    fn emit_string_append_rhs(&mut self, value: &Expr) -> Result<String, CompileError> {
+        let (rhs_code, rhs_ty) = self.emit_typed_expr(value)?;
+        if rhs_ty == RustType::String {
+            return Ok(rhs_code);
+        }
+        let rhs_val = if rhs_ty.is_native() {
+            rhs_ty.to_value_expr(&rhs_code)
+        } else {
+            rhs_code
+        };
+        Ok(format!(
+            "match &({}) {{ \
+             Value::String(s) => s.to_string(), \
+             Value::Number(n) => {{ let i = *n as i64; if (*n - i as f64).abs() < f64::EPSILON {{ i.to_string() }} else {{ n.to_string() }} }}, \
+             Value::Bool(b) => b.to_string(), \
+             Value::Null => \"null\".to_string(), \
+             other => other.to_js_string() }}",
+            rhs_val
+        ))
+    }
+
     fn emit_expr_discard(&mut self, expr: &Expr) -> Result<String, CompileError> {
         // #173 part 3: a statement-position reassignment of a guarded loop counter ends that guard's
         // bound for everything emitted after it (flow-sensitive). Every statement (at any nesting)
@@ -2373,6 +2399,25 @@ impl Codegen {
                         ));
                     }
                     return Ok(format!("{} {} {}", n, op_str, rhs_f64));
+                }
+                // #203/string_build: `s += rhs` on a native String in STATEMENT position → in-place
+                // `push_str` with NO result clone (the `+=` value is discarded). The expression-
+                // position fast path must clone `s` to yield a `Value`; cloning the whole growing
+                // string on every append is the O(n^2) trap. Skipping it here makes string building
+                // amortized O(1) (the common CSV/HTML/log builder loop).
+                if matches!(op, CompoundOp::Add)
+                    && self.type_context.get_type(name.as_ref()) == RustType::String
+                    && !self.native_numeric_globals.contains_key(name.as_ref())
+                {
+                    let n = Self::escape_ident(name.as_ref());
+                    let rhs_str = self.emit_string_append_rhs(value)?;
+                    if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                        return Ok(format!(
+                            "{{ let _r = {}; {}.borrow_mut().push_str(&_r); }}",
+                            rhs_str, n
+                        ));
+                    }
+                    return Ok(format!("{{ let _r = {}; {}.push_str(&_r); }}", rhs_str, n));
                 }
             }
             _ => {}
@@ -6456,27 +6501,10 @@ impl Codegen {
                 }
 
                 // ── native String += fast path: push_str ─────────────────────
+                // Expression position: must still clone `n` to yield the `+=` Value. The hot
+                // statement-position form (no clone) is handled earlier in `emit_expr_discard`.
                 if !is_refcell && var_type == RustType::String && matches!(op, CompoundOp::Add) {
-                    let (rhs_code, rhs_ty) = self.emit_typed_expr(value)?;
-                    let rhs_str = if rhs_ty == RustType::String {
-                        rhs_code
-                    } else {
-                        // Convert rhs Value to display string inline
-                        let rhs_val = if rhs_ty.is_native() {
-                            rhs_ty.to_value_expr(&rhs_code)
-                        } else {
-                            rhs_code
-                        };
-                        format!(
-                            "match &({}) {{ \
-                             Value::String(s) => s.to_string(), \
-                             Value::Number(n) => {{ let i = *n as i64; if (*n - i as f64).abs() < f64::EPSILON {{ i.to_string() }} else {{ n.to_string() }} }}, \
-                             Value::Bool(b) => b.to_string(), \
-                             Value::Null => \"null\".to_string(), \
-                             other => other.to_js_string() }}",
-                            rhs_val
-                        )
-                    };
+                    let rhs_str = self.emit_string_append_rhs(value)?;
                     // Wrap in Value::String so the expression is a valid Value
                     return Ok(format!("{{ {}.push_str(&({})); Value::String({}.clone().into()) }}", n, rhs_str, n));
                 }

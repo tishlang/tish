@@ -1,0 +1,17 @@
+// GAUNTLET: array of records — the canonical real-world data-processing shape. Build an array of
+// uniform objects with numeric fields, then aggregate over their fields in a hot loop. A struct-aware
+// engine (V8 hidden classes; a Vec<struct> native lowering) reads each field by a fixed offset; a
+// boxed engine clones the element + hashes each property name per access. This is the #1 object-perf
+// signal for real code (arrays of records) and is NOT covered by the number[]-only fixtures. Valid in
+// both tish and node; deterministic integer check.
+let n = 2000000
+let rows = []
+for (let i = 0; i < n; i++) { rows.push({ id: i, x: i * 2, y: i + 1, w: (i % 7) + 1 }) }
+let t0 = Date.now()
+let acc = 0
+for (let pass = 0; pass < 10; pass++) {
+  for (let i = 0; i < rows.length; i++) {
+    acc = (acc + rows[i].x * rows[i].w + rows[i].y) % 2147483647
+  }
+}
+console.log("GAUNTLET array_records " + (Date.now() - t0) + " " + acc)
