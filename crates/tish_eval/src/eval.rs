@@ -2,6 +2,7 @@
 
 #![allow(clippy::type_complexity, clippy::cloned_ref_to_slice_refs)]
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +22,74 @@ use crate::value::{
     eval_object_get, eval_object_has, eval_object_set, EvalObjectData, PropMap, Value,
 };
 
+// #203: cursor cache for O(1)/near-O(1) character indexing in the interpreter. Twin of the one in
+// `tishlang_builtins::string` (used by the native/VM backends); duplicated here because the
+// interpreter has its own `Value`/`Arc<str>` string type rather than `tishlang_core`'s `ArcStr`. tish
+// strings are UTF-8, so `chars().nth(i)` is O(i) — turning indexed/strided scans into O(n^2). For each
+// recently-indexed string we cache whether it is all-ASCII (then a character index equals a byte index
+// → O(1)) plus a forward cursor (so non-ASCII sequential/strided scans advance from the last position).
+// Safety: the entry holds an `Arc<str>` CLONE, keeping the allocation alive so its data pointer can't
+// be reused while cached (no ABA), and since strings are immutable the cached ASCII flag stays valid.
+struct EvalCharCursor {
+    s: Arc<str>,
+    ascii: bool,
+    len_chars: usize,
+    char_idx: usize,
+    byte_off: usize,
+}
+
+thread_local! {
+    static EVAL_INDEX_CURSOR: RefCell<Option<EvalCharCursor>> = const { RefCell::new(None) };
+}
+
+fn with_eval_cursor<R>(s: &Arc<str>, f: impl FnOnce(&mut EvalCharCursor, &Arc<str>) -> R) -> R {
+    EVAL_INDEX_CURSOR.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let hit = matches!(slot.as_ref(), Some(c)
+            if std::ptr::eq(c.s.as_bytes().as_ptr(), s.as_bytes().as_ptr()) && c.s.len() == s.len());
+        if !hit {
+            let ascii = s.as_bytes().is_ascii();
+            let len_chars = if ascii { s.len() } else { s.chars().count() };
+            *slot = Some(EvalCharCursor {
+                s: Arc::clone(s),
+                ascii,
+                len_chars,
+                char_idx: 0,
+                byte_off: 0,
+            });
+        }
+        f(slot.as_mut().unwrap(), s)
+    })
+}
+
+/// Character (Unicode scalar) at index `idx` via the cursor cache. Identical results to
+/// `s.chars().nth(idx)`, but O(1) for ASCII and near-O(1) for forward/strided scans.
+fn nth_char_cached(s: &Arc<str>, idx: usize) -> Option<char> {
+    with_eval_cursor(s, |c, s| {
+        if c.ascii {
+            return s.as_bytes().get(idx).map(|&b| b as char);
+        }
+        let (base_idx, base_off) = if idx >= c.char_idx {
+            (c.char_idx, c.byte_off)
+        } else {
+            (0, 0)
+        };
+        match s[base_off..].char_indices().nth(idx - base_idx) {
+            Some((rel_off, ch)) => {
+                c.char_idx = idx;
+                c.byte_off = base_off + rel_off;
+                Some(ch)
+            }
+            None => None,
+        }
+    })
+}
+
+/// Character (Unicode scalar) count via the cursor cache — O(1) after the first call on a string.
+fn char_count_cached(s: &Arc<str>) -> usize {
+    with_eval_cursor(s, |c, _| c.len_chars)
+}
+
 pub struct Scope {
     // Scope vars: order is never observed (no Object.keys over a scope), so use a fast
     // unordered aHash map — NOT the object-strings PropMap (an insertion-ordered IndexMap),
@@ -28,6 +97,31 @@ pub struct Scope {
     vars: AHashMap<Arc<str>, Value>,
     consts: ahash::AHashSet<Arc<str>>,
     parent: Option<Rc<std::cell::RefCell<Scope>>>,
+}
+
+// #186 / string_build: amortized O(1) `acc += x`. tish strings are an immutable `Arc<str>`, so the
+// generic `acc = acc + x` allocates a fresh String and copies the whole accumulator each time → O(n^2)
+// over a build loop. Instead we keep the accumulator in a growable `String` ("the pending builder")
+// and `push_str` onto it in O(1), writing it back to the scope slot ("flushing") the moment the
+// variable is observed. JS strings are immutable VALUES, so soundness requires that any read sees the
+// full current string: every read flushes first (see `flush_pending_for` at `Expr::Ident` and the
+// other read sites). The builder is keyed by the EXACT owning scope (captured `Rc`) plus name, so a
+// shadowing inner `acc` never appends onto an outer `acc`'s buffer. Shared across nested evaluators
+// (function calls / closures) via `Rc` so a callee that reads the variable flushes the same buffer.
+struct PendingAppend {
+    /// The exact scope that owns the accumulator variable (not necessarily the current scope).
+    scope: Rc<std::cell::RefCell<Scope>>,
+    name: Arc<str>,
+    /// The true current value of the accumulator while buffered; the scope slot is stale until flush.
+    buf: String,
+}
+
+#[derive(Default)]
+struct StringBuilderState {
+    /// Fast-path guard: a single `Cell<bool>` load lets the hot identifier-read path skip the
+    /// `RefCell` borrow entirely when no builder is active (the case for all non-building programs).
+    active: Cell<bool>,
+    pending: RefCell<Option<PendingAppend>>,
 }
 
 /// A reference-counted lexical scope. A `Value::Function` captures one of these at creation
@@ -91,6 +185,9 @@ pub struct Evaluator {
     current_dir: RefCell<Option<PathBuf>>,
     /// Extra `tish:*` builtins from `TishNativeModule::virtual_builtin_modules` (shared across nested evaluators).
     virtual_builtins: Rc<RefCell<HashMap<Arc<str>, Value>>>,
+    /// String-builder state for amortized O(1) `acc += x` (see [`StringBuilderState`]). Shared across
+    /// nested evaluators so a called function/closure that reads the accumulator flushes the buffer.
+    string_builder: Rc<StringBuilderState>,
 }
 
 impl Evaluator {
@@ -367,6 +464,7 @@ impl Evaluator {
             module_cache: Rc::new(RefCell::new(HashMap::new())),
             current_dir: RefCell::new(None),
             virtual_builtins: Rc::new(RefCell::new(HashMap::new())),
+            string_builder: Rc::new(StringBuilderState::default()),
         }
     }
 
@@ -401,6 +499,9 @@ impl Evaluator {
         for stmt in &program.statements {
             last = self.eval_statement(stmt).map_err(|e| e.to_string())?;
         }
+        // Flush any still-buffered string accumulator so the variable's slot is correct for any
+        // post-run observation (timers, REPL, embedders reading scope state).
+        self.flush_pending();
         Ok(last)
     }
 
@@ -451,7 +552,11 @@ impl Evaluator {
                 self.bind_destruct_pattern(pattern, &value, *mutable)?;
                 Ok(Value::Null)
             }
-            Statement::ExprStmt { expr, .. } => self.eval_expr(expr),
+            Statement::ExprStmt { expr, .. } => {
+                // Statement position: route through the path that keeps statement-position
+                // `acc += x` O(1) (no result materialization) while preserving values otherwise.
+                self.eval_expr_discard(expr)
+            }
             Statement::If {
                 cond,
                 then_branch,
@@ -1172,6 +1277,177 @@ impl Evaluator {
             })
     }
 
+    // --- string-builder helpers (#186 / string_build): amortized O(1) `acc += x` ---
+
+    /// Append a value to a builder buffer using the exact JS coercion of `eval_binop`'s `+` (string
+    /// operands push their raw chars; everything else goes through `to_js_string`).
+    fn append_value_to_buf(buf: &mut String, v: &Value) {
+        match v {
+            Value::String(s) => buf.push_str(s),
+            other => buf.push_str(&other.to_js_string()),
+        }
+    }
+
+    /// Walk the scope chain from the current scope and return the exact scope that owns `name`.
+    fn find_var_scope(&self, name: &str) -> Option<Rc<std::cell::RefCell<Scope>>> {
+        let mut cur = Rc::clone(&self.scope);
+        loop {
+            if cur.borrow().vars.contains_key(name) {
+                return Some(cur);
+            }
+            let parent = cur.borrow().parent.clone();
+            match parent {
+                Some(p) => cur = p,
+                None => return None,
+            }
+        }
+    }
+
+    /// Flush the active builder (if any) back into its owning scope slot, restoring the invariant
+    /// that the slot holds the variable's true value. No-op when no builder is active.
+    fn flush_pending(&self) {
+        if !self.string_builder.active.get() {
+            return;
+        }
+        if let Some(p) = self.string_builder.pending.borrow_mut().take() {
+            p.scope
+                .borrow_mut()
+                .vars
+                .insert(Arc::clone(&p.name), Value::String(p.buf.into()));
+        }
+        self.string_builder.active.set(false);
+    }
+
+    /// Flush the builder iff it is buffering `name` (which is about to be read). The `active` guard
+    /// keeps this ~free on the hot identifier-read path when no builder exists.
+    #[inline]
+    fn flush_pending_for(&self, name: &str) {
+        if !self.string_builder.active.get() {
+            return;
+        }
+        let hit = self
+            .string_builder
+            .pending
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| p.name.as_ref() == name);
+        if hit {
+            self.flush_pending();
+        }
+    }
+
+    /// Discard the builder iff it is buffering `name` (which is about to be overwritten by a plain
+    /// assignment) — avoids an unnecessary O(n) flush of a value that is about to be replaced.
+    #[inline]
+    fn discard_pending_for(&self, name: &str) {
+        if !self.string_builder.active.get() {
+            return;
+        }
+        let hit = self
+            .string_builder
+            .pending
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| p.name.as_ref() == name);
+        if hit {
+            *self.string_builder.pending.borrow_mut() = None;
+            self.string_builder.active.set(false);
+        }
+    }
+
+    /// Try to handle `name += rhs` as an amortized-O(1) string append. Returns `true` if it was a
+    /// string append (buffer updated); `false` if `name` is not a (mutable) string accumulator, so
+    /// the caller falls back to the generic `+=`. Any builder for a DIFFERENT slot is flushed first;
+    /// keying by the exact owning scope means a shadowing inner `name` never appends onto an outer
+    /// `name`'s buffer.
+    fn try_string_append(&self, name: &Arc<str>, rhs: &Value) -> bool {
+        let owner = match self.find_var_scope(name) {
+            Some(s) => s,
+            None => return false, // undefined → let the generic path raise the error
+        };
+        // Continue an existing builder for this exact slot.
+        if self.string_builder.active.get() {
+            let same = self
+                .string_builder
+                .pending
+                .borrow()
+                .as_ref()
+                .is_some_and(|p| p.name == *name && Rc::ptr_eq(&p.scope, &owner));
+            if same {
+                if let Some(p) = self.string_builder.pending.borrow_mut().as_mut() {
+                    Self::append_value_to_buf(&mut p.buf, rhs);
+                }
+                return true;
+            }
+            // A different slot is buffered — flush it before starting a new one.
+            self.flush_pending();
+        }
+        // Start a new builder only if the accumulator currently holds a mutable string.
+        let start = {
+            let owner_ref = owner.borrow();
+            if owner_ref.consts.contains(name.as_ref()) {
+                return false; // `const acc += x` must raise the same error as the generic path
+            }
+            match owner_ref.vars.get(name.as_ref()) {
+                Some(Value::String(a)) => Some(a.clone()),
+                _ => None, // non-string accumulator → numeric/other `+=`
+            }
+        };
+        match start {
+            Some(a) => {
+                let mut buf = String::with_capacity(a.len() + 16);
+                buf.push_str(&a);
+                Self::append_value_to_buf(&mut buf, rhs);
+                *self.string_builder.pending.borrow_mut() = Some(PendingAppend {
+                    scope: owner,
+                    name: Arc::clone(name),
+                    buf,
+                });
+                self.string_builder.active.set(true);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Evaluate `expr` in statement position. Special-cases `acc += rhs` so the string-builder never
+    /// has to materialize the assignment's result value — the key to keeping the append O(1). In that
+    /// one case the (discarded) statement value is `null`; every other expression returns its real
+    /// value, preserving block/program last-value semantics.
+    fn eval_expr_discard(&self, expr: &Expr) -> Result<Value, EvalError> {
+        if let Expr::CompoundAssign {
+            name,
+            op: tishlang_ast::CompoundOp::Add,
+            value,
+            ..
+        } = expr
+        {
+            // Evaluate rhs FIRST — it may read `name`, which flushes any active builder.
+            let rhs = self.eval_expr(value)?;
+            if self.try_string_append(name, &rhs) {
+                // Statement-position result is discarded; returning null avoids the O(n) flatten.
+                return Ok(Value::Null);
+            }
+            // Not a string accumulator: generic `+=` (numeric/other) — return its real value.
+            self.flush_pending_for(name);
+            let current = self
+                .scope
+                .borrow()
+                .get(name.as_ref())
+                .ok_or_else(|| EvalError::Error(format!("Undefined variable: {}", name)))?;
+            let result = self
+                .eval_binop(&current, BinOp::Add, &rhs)
+                .map_err(EvalError::Error)?;
+            match self.scope.borrow_mut().assign(name.as_ref(), result.clone()) {
+                Ok(true) => Ok(result),
+                Ok(false) => Err(EvalError::Error(format!("Undefined variable: {}", name))),
+                Err(e) => Err(EvalError::Error(e)),
+            }
+        } else {
+            self.eval_expr(expr)
+        }
+    }
+
     fn eval_expr(&self, expr: &Expr) -> Result<Value, EvalError> {
         match expr {
             Expr::Literal { value, .. } => Ok(match value {
@@ -1180,11 +1456,14 @@ impl Evaluator {
                 Literal::Bool(b) => Value::Bool(*b),
                 Literal::Null => Value::Null,
             }),
-            Expr::Ident { name, .. } => self
-                .scope
-                .borrow()
-                .get(name.as_ref())
-                .ok_or_else(|| EvalError::Error(format!("Undefined variable: {}", name))),
+            Expr::Ident { name, .. } => {
+                // Flush any string-builder buffering this variable so the read sees the full string.
+                self.flush_pending_for(name.as_ref());
+                self.scope
+                    .borrow()
+                    .get(name.as_ref())
+                    .ok_or_else(|| EvalError::Error(format!("Undefined variable: {}", name)))
+            }
             Expr::Binary {
                 left,
                 op,
@@ -1983,12 +2262,12 @@ impl Evaluator {
                                 return Ok(Value::String(s.replace(&search, &replacement).into()));
                             }
                             "charAt" => {
+                                // Cursor cache instead of collecting a fresh Vec<char> each call (#203).
                                 let idx = match arg_vals.first() {
                                     Some(Value::Number(n)) => *n as usize,
                                     _ => 0,
                                 };
-                                let chars: Vec<char> = s.chars().collect();
-                                return Ok(chars.get(idx)
+                                return Ok(nth_char_cached(s, idx)
                                     .map(|c| Value::String(c.to_string().into()))
                                     .unwrap_or(Value::String("".into())));
                             }
@@ -1998,11 +2277,11 @@ impl Evaluator {
                                     Some(Value::Number(n)) => *n as i64,
                                     _ => 0,
                                 };
-                                let chars: Vec<char> = s.chars().collect();
-                                let len = chars.len() as i64;
-                                let idx = if i < 0 { len + i } else { i };
-                                if idx >= 0 && idx < len {
-                                    return Ok(Value::String(chars[idx as usize].to_string().into()));
+                                let idx = if i < 0 { s.chars().count() as i64 + i } else { i };
+                                if idx >= 0 {
+                                    if let Some(c) = nth_char_cached(s, idx as usize) {
+                                        return Ok(Value::String(c.to_string().into()));
+                                    }
                                 }
                                 return Ok(Value::Null);
                             }
@@ -2011,9 +2290,8 @@ impl Evaluator {
                                     Some(Value::Number(n)) => *n as usize,
                                     _ => 0,
                                 };
-                                let chars: Vec<char> = s.chars().collect();
-                                return Ok(chars.get(idx)
-                                    .map(|c| Value::Number(*c as u32 as f64))
+                                return Ok(nth_char_cached(s, idx)
+                                    .map(|c| Value::Number(c as u32 as f64))
                                     .unwrap_or(Value::Number(f64::NAN)));
                             }
                             "repeat" => {
@@ -2259,6 +2537,9 @@ impl Evaluator {
             }
             Expr::Assign { name, value, .. } => {
                 let v = self.eval_expr(value)?;
+                // A plain assignment overwrites the variable, so drop any builder buffering it (the
+                // buffered value is about to be replaced). `value` may itself have read+flushed it.
+                self.discard_pending_for(name.as_ref());
                 match self.scope.borrow_mut().assign(name.as_ref(), v.clone()) {
                     Ok(true) => Ok(v),
                     Ok(false) => Err(EvalError::Error(format!("Undefined variable: {}", name))),
@@ -2407,6 +2688,10 @@ impl Evaluator {
                 }
             }
             Expr::CompoundAssign { name, op, value, .. } => {
+                // Expression-position `+=` (result is used): flush any builder so `current` is the
+                // full string, then take the generic path. The O(1) builder fast path is reserved
+                // for statement position (see `eval_expr_discard`).
+                self.flush_pending_for(name.as_ref());
                 let current = self.scope.borrow().get(name.as_ref())
                     .ok_or_else(|| EvalError::Error(format!("Undefined variable: {}", name)))?;
                 let rhs = self.eval_expr(value)?;
@@ -2425,6 +2710,7 @@ impl Evaluator {
                 }
             }
             Expr::LogicalAssign { name, op, value, .. } => {
+                self.flush_pending_for(name.as_ref());
                 let current = self.scope.borrow().get(name.as_ref())
                     .ok_or_else(|| EvalError::Error(format!("Undefined variable: {}", name)))?;
                 let result = match op {
@@ -2851,6 +3137,7 @@ impl Evaluator {
             module_cache: Rc::clone(&self.module_cache),
             current_dir: RefCell::new(self.current_dir.borrow().clone()),
             virtual_builtins: Rc::clone(&self.virtual_builtins),
+            string_builder: Rc::clone(&self.string_builder),
         };
         match eval.eval_statement(body) {
             Ok(v) => Ok(v),
@@ -3119,6 +3406,7 @@ impl Evaluator {
                     module_cache: Rc::clone(&self.module_cache),
                     current_dir: RefCell::new(self.current_dir.borrow().clone()),
                     virtual_builtins: Rc::clone(&self.virtual_builtins),
+            string_builder: Rc::clone(&self.string_builder),
                 };
                 {
                     let mut s = scope.borrow_mut();
@@ -3667,7 +3955,7 @@ impl Evaluator {
             }
             Value::String(s) => {
                 if key == "length" {
-                    Ok(Value::Number(s.chars().count() as f64))
+                    Ok(Value::Number(char_count_cached(s) as f64))
                 } else {
                     Ok(Value::Null)
                 }
@@ -3745,9 +4033,7 @@ impl Evaluator {
                     Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => *n as usize,
                     _ => return Ok(Value::Null),
                 };
-                Ok(s
-                    .chars()
-                    .nth(idx)
+                Ok(nth_char_cached(s, idx)
                     .map(|c| Value::String(c.to_string().into()))
                     .unwrap_or(Value::Null))
             }
