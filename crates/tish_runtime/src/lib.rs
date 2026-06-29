@@ -824,6 +824,92 @@ pub fn mkdir(args: &[Value]) -> Value {
 
 use std::sync::Arc;
 
+/// Per-site polymorphic inline cache for `obj.<literal key>` reads in generated native code (#179).
+///
+/// The native backend otherwise pays a full dynamic lookup (RefCell/Mutex borrow + linear key scan)
+/// for every member read, even at sites that only ever see a few object shapes. `PropMap` already
+/// tracks a hidden-class [`ShapeId`] per object and exposes slot-indexed access, so once a
+/// `(shape, slot)` pair is observed at a site, a later object of the same shape resolves the property
+/// with one integer compare + a direct slot load instead of a key scan.
+///
+/// Each of the 8 entries packs `(shape: u32) << 32 | (slot: u32)` into a single `AtomicU64`, so the
+/// pair is read and written atomically — no torn `(shape, slot)` under concurrent access (e.g. an
+/// HTTP handler shared across worker threads). A 9th distinct shape evicts an entry round-robin. An
+/// empty entry is `0`; a real object never has `EMPTY_SHAPE` (0), so `0` can't be a false hit.
+pub struct PropIC {
+    entries: [std::sync::atomic::AtomicU64; 8],
+    next: std::sync::atomic::AtomicU32,
+}
+
+impl PropIC {
+    #[allow(clippy::declare_interior_mutable_const)] // each `static IC: PropIC = PropIC::new()` site needs its own cell
+    pub const fn new() -> Self {
+        use std::sync::atomic::{AtomicU32, AtomicU64};
+        PropIC {
+            entries: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
+            next: AtomicU32::new(0),
+        }
+    }
+}
+
+impl Default for PropIC {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Cached `obj.key` read — see [`PropIC`]. Behaviour is identical to [`get_prop`]: only objects with
+/// a stable hidden class (non-empty, non-dictionary) take the cached fast path; empty/dictionary
+/// objects, non-objects, and the special `size` key all fall through to `get_prop` (the borrow is
+/// released first, so the fallback's re-borrow can't self-deadlock the send-values `Mutex`). The
+/// caller (codegen) never emits this for the `size` key, but the fallback covers it regardless.
+#[inline]
+pub fn get_prop_ic(obj: &Value, key: &str, ic: &PropIC) -> Value {
+    use std::sync::atomic::Ordering;
+    if key != "size" {
+        if let Value::Object(map) = obj {
+            // Scope the borrow so it is released before the `get_prop` fallback below.
+            {
+                let b = map.borrow();
+                let shape = b.strings.shape();
+                if shape != tishlang_core::EMPTY_SHAPE && shape != tishlang_core::DICT_SHAPE {
+                    let shape_hi = (shape as u64) << 32;
+                    // Fast path: a cached entry whose shape matches gives the slot directly.
+                    for e in ic.entries.iter() {
+                        let packed = e.load(Ordering::Relaxed);
+                        if packed >> 32 == shape as u64 {
+                            if let Some(v) = b.strings.value_at_index((packed & 0xFFFF_FFFF) as usize)
+                            {
+                                return v.clone();
+                            }
+                        }
+                    }
+                    // Miss: resolve once, fill an entry round-robin with the packed (shape, slot).
+                    return match b.strings.get_with_index(key) {
+                        Some((v, i)) => {
+                            let k = (ic.next.fetch_add(1, Ordering::Relaxed) % 8) as usize;
+                            ic.entries[k].store(shape_hi | i as u64, Ordering::Relaxed);
+                            v.clone()
+                        }
+                        None => Value::Null,
+                    };
+                }
+                // empty / dictionary object → fall through (borrow dropped here)
+            }
+        }
+    }
+    get_prop(obj, key)
+}
+
 #[inline]
 pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
     let key = key.as_ref();
