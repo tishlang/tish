@@ -23,6 +23,30 @@ pub fn snapshot_values(arr: &Value) -> Vec<Value> {
     }
 }
 
+/// If `arr` is an array whose every element is a `Value::Number`, return an owned `Vec<f64>`
+/// snapshot; otherwise return `None`. Packed [`Value::NumberArray`] is all-numeric by construction
+/// (one clone, no scan). A boxed [`Value::Array`] is scanned once — built by `[].push(n)`, the
+/// dominant numeric-pipeline source stays a boxed `Array`, so the scan unlocks the fused HOF chain's
+/// unboxed f64 fast path for it too. The `None` result drives the fused lowering back to its boxed
+/// loop, so any non-numeric element is handled with identical `Value` semantics.
+pub fn as_f64_snapshot(arr: &Value) -> Option<Vec<f64>> {
+    match arr {
+        Value::NumberArray(a) => Some(a.borrow().clone()),
+        Value::Array(a) => {
+            let b = a.borrow();
+            let mut out: Vec<f64> = Vec::with_capacity(b.len());
+            for v in b.iter() {
+                match v {
+                    Value::Number(n) => out.push(*n),
+                    _ => return None,
+                }
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
 /// Get the length of an array.
 pub fn len(arr: &Value) -> Option<usize> {
     match arr {

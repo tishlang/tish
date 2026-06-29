@@ -1091,8 +1091,15 @@ pub(crate) struct Codegen {
     cse_temp_counter: usize,
 }
 
-
-
+/// One `map`/`filter` stage of a fused HOF chain (#317): the single-element-param closure's
+/// parameter name and expression body, plus whether it is a `filter` (predicate) vs `map`
+/// (transform). Collected by `try_fused_hof_chain` and consumed by both the boxed-`Value` and
+/// native-numeric emitters.
+struct HofStage<'a> {
+    is_filter: bool,
+    param: Arc<str>,
+    body: &'a Expr,
+}
 
 impl Codegen {
     fn new_with_native_modules(
@@ -20363,16 +20370,9 @@ impl Codegen {
             Some((names, be.as_ref()))
         }
 
-        // A `map`/`filter` stage: (is_filter, param, body).
-        struct Stage<'a> {
-            is_filter: bool,
-            param: Arc<str>,
-            body: &'a Expr,
-        }
-
         // Walk the receiver chain inward, collecting `map`/`filter` stages (outermost first; we
         // reverse to source order below). Stop at the first non-`map`/`filter` receiver: the root.
-        let mut stages: Vec<Stage> = Vec::new();
+        let mut stages: Vec<HofStage> = Vec::new();
         let mut cur = receiver;
         let root: &Expr = loop {
             let Expr::Call { callee, args, .. } = cur else {
@@ -20397,7 +20397,7 @@ impl Codegen {
             let Some((names, body)) = simple_arrow(args.first(), 1) else {
                 return Ok(None);
             };
-            stages.push(Stage {
+            stages.push(HofStage {
                 is_filter,
                 param: Arc::clone(&names[0]),
                 body,
@@ -20466,6 +20466,22 @@ impl Codegen {
 
         // ── Emit ────────────────────────────────────────────────────────────────────────────────
         let root_code = self.emit_expr(root)?;
+
+        // ── Native-numeric fast path ──────────────────────────────────────────────────────────────
+        // When the runtime source is a packed `NumberArray` (every element an f64) AND every stage +
+        // terminal body lowers to native arithmetic (filter→bool, map→f64, reduce f64→f64, etc.),
+        // run the fused loop entirely UNBOXED — no `Value` per element, no Result-returning `ops::*`
+        // per node. f64 `%`/`+`/`*` are bit-identical to the boxed `ops::*` on numbers (same fmod /
+        // IEEE add), so this is sound; any non-numeric source falls through to the boxed fused loop
+        // below. Generalises to any all-numeric chain.
+        let numeric_code = self.try_fused_hof_chain_numeric(
+            terminal,
+            &stages,
+            &term_param,
+            term_acc.as_ref(),
+            term_body,
+            term_init,
+        )?;
 
         // Emit a body with `param` (and optional `acc`) bound as `Value` locals. `emit_expr` resolves
         // the param ident through normal scope lookup (a plain non-typed local → clone-on-read).
@@ -20626,6 +20642,172 @@ impl Codegen {
             _ => return Ok(None),
         };
 
+        // If a native-numeric variant was emitted, run it when the runtime source is all-numeric
+        // (packed `NumberArray`, or a boxed `Array` of numbers — scanned once); otherwise run the
+        // boxed fused loop. The scan is one O(n) pass, amortised against the whole pipeline.
+        if let Some(numeric) = numeric_code {
+            return Ok(Some(format!(
+                "{{ match tishlang_runtime::array_as_f64_snapshot(&({root})) {{ \
+                 Some(__na) => {{ {numeric} }} \
+                 None => {{ {boxed} }} }} }}",
+                root = root_code,
+                numeric = numeric,
+                boxed = code
+            )));
+        }
+
+        Ok(Some(code))
+    }
+
+    /// Native-numeric variant of a fused HOF chain (#317). Emits the chain over a packed
+    /// `Vec<f64>` (`__na`, already borrowed by the caller) entirely unboxed when every stage and the
+    /// terminal lower to native arithmetic. Returns `None` (→ boxed fused loop) if any body isn't
+    /// purely numeric. f64 ops are bit-identical to the boxed `ops::*` on numbers.
+    fn try_fused_hof_chain_numeric(
+        &mut self,
+        terminal: &str,
+        stages: &[HofStage],
+        term_param: &Arc<str>,
+        term_acc: Option<&Arc<str>>,
+        term_body: &Expr,
+        term_init: Option<&Expr>,
+    ) -> Result<Option<String>, CompileError> {
+        // Emit `body` with the given (name → f64) param binds, requiring the result to be `want`.
+        let emit_native = |this: &mut Self,
+                           binds: &[&Arc<str>],
+                           body: &Expr,
+                           want: RustType|
+         -> Result<Option<String>, CompileError> {
+            this.type_context.push_scope();
+            for n in binds {
+                this.type_context.define(n.as_ref(), RustType::F64);
+            }
+            let res = this.emit_typed_expr(body);
+            this.type_context.pop_scope();
+            let (code, ty) = res?;
+            Ok(if ty == want { Some(code) } else { None })
+        };
+
+        // Per-element stage chain over the threaded `__f: f64`.
+        let mut inner = String::new();
+        for s in stages {
+            let pesc = Self::escape_ident(s.param.as_ref()).into_owned();
+            if s.is_filter {
+                let Some(b) = emit_native(self, &[&s.param], s.body, RustType::Bool)? else {
+                    return Ok(None);
+                };
+                inner.push_str(&format!(
+                    "let {p}: f64 = __f; if !({b}) {{ continue; }} ",
+                    p = pesc,
+                    b = b
+                ));
+            } else {
+                let Some(b) = emit_native(self, &[&s.param], s.body, RustType::F64)? else {
+                    return Ok(None);
+                };
+                inner.push_str(&format!("let {p}: f64 = __f; __f = {b}; ", p = pesc, b = b));
+            }
+        }
+
+        let pesc = Self::escape_ident(term_param.as_ref()).into_owned();
+        let code = match terminal {
+            "reduce" => {
+                let acc = term_acc.unwrap();
+                let aesc = Self::escape_ident(acc.as_ref()).into_owned();
+                let init_e = term_init.unwrap();
+                let (init_code, init_ty) = self.emit_typed_expr(init_e)?;
+                let init_f64 = match init_ty {
+                    RustType::F64 => init_code,
+                    RustType::Value => RustType::F64.from_value_expr(&init_code),
+                    _ => return Ok(None),
+                };
+                let Some(term) = emit_native(self, &[acc, term_param], term_body, RustType::F64)?
+                else {
+                    return Ok(None);
+                };
+                format!(
+                    "let mut {acc}: f64 = {init}; \
+                     for &__f0 in __na.iter() {{ let mut __f = __f0; {inner} \
+                     let {p}: f64 = __f; {acc} = {term}; }} Value::Number({acc})",
+                    acc = aesc, init = init_f64, inner = inner, p = pesc, term = term
+                )
+            }
+            "forEach" => {
+                let Some(term) = emit_native(self, &[term_param], term_body, RustType::F64)?
+                    .or(emit_native(self, &[term_param], term_body, RustType::Bool)?)
+                else {
+                    return Ok(None);
+                };
+                format!(
+                    "for &__f0 in __na.iter() {{ let mut __f = __f0; {inner} \
+                     let {p}: f64 = __f; let _ = {term}; }} Value::Null",
+                    inner = inner, p = pesc, term = term
+                )
+            }
+            "some" | "every" => {
+                let Some(pred) = emit_native(self, &[term_param], term_body, RustType::Bool)? else {
+                    return Ok(None);
+                };
+                let (seed, test) = if terminal == "some" {
+                    ("false", format!("if {pred} {{ __res = true; break; }}", pred = pred))
+                } else {
+                    ("true", format!("if !{pred} {{ __res = false; break; }}", pred = pred))
+                };
+                format!(
+                    "let mut __res = {seed}; \
+                     for &__f0 in __na.iter() {{ let mut __f = __f0; {inner} \
+                     let {p}: f64 = __f; {test} }} Value::Bool(__res)",
+                    seed = seed, inner = inner, p = pesc, test = test
+                )
+            }
+            "find" => {
+                let Some(pred) = emit_native(self, &[term_param], term_body, RustType::Bool)? else {
+                    return Ok(None);
+                };
+                format!(
+                    "let mut __res = Value::Null; \
+                     for &__f0 in __na.iter() {{ let mut __f = __f0; {inner} \
+                     let {p}: f64 = __f; if {pred} {{ __res = Value::Number({p}); break; }} }} __res",
+                    inner = inner, p = pesc, pred = pred
+                )
+            }
+            "findIndex" => {
+                let Some(pred) = emit_native(self, &[term_param], term_body, RustType::Bool)? else {
+                    return Ok(None);
+                };
+                format!(
+                    "let mut __res = -1.0_f64; let mut __i = 0.0_f64; \
+                     for &__f0 in __na.iter() {{ let mut __f = __f0; {inner} \
+                     let {p}: f64 = __f; if {pred} {{ __res = __i; break; }} __i += 1.0; }} Value::Number(__res)",
+                    inner = inner, p = pesc, pred = pred
+                )
+            }
+            "map" => {
+                let Some(term) = emit_native(self, &[term_param], term_body, RustType::F64)? else {
+                    return Ok(None);
+                };
+                format!(
+                    "let mut __out: Vec<f64> = Vec::new(); \
+                     for &__f0 in __na.iter() {{ let mut __f = __f0; {inner} \
+                     let {p}: f64 = __f; __out.push({term}); }} \
+                     Value::NumberArray(VmRef::new(__out))",
+                    inner = inner, p = pesc, term = term
+                )
+            }
+            "filter" => {
+                let Some(pred) = emit_native(self, &[term_param], term_body, RustType::Bool)? else {
+                    return Ok(None);
+                };
+                format!(
+                    "let mut __out: Vec<f64> = Vec::new(); \
+                     for &__f0 in __na.iter() {{ let mut __f = __f0; {inner} \
+                     let {p}: f64 = __f; if {pred} {{ __out.push({p}); }} }} \
+                     Value::NumberArray(VmRef::new(__out))",
+                    inner = inner, p = pesc, pred = pred
+                )
+            }
+            _ => return Ok(None),
+        };
         Ok(Some(code))
     }
 
