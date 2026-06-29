@@ -785,6 +785,89 @@ fn get_prop_number(v: &Value, prop: &std::sync::Arc<str>) -> f64 {
     }
 }
 
+/// Read a numeric key from an element following a (possibly empty) property path.
+/// An empty path means the element itself is the numeric key (`(a,b)=>a-b`).
+/// `["k"]` reads `el.k`; `["a","b"]` reads `el.a.b`. Missing fields collapse to
+/// NaN, mirroring what `el.k - el.k` would produce in the boxed comparator, so the
+/// decorate-sort path stays order-identical to the dynamic comparator path.
+fn read_key_number(el: &Value, path: &[&str]) -> f64 {
+    if path.is_empty() {
+        return el.as_number().unwrap_or(f64::NAN);
+    }
+    let mut cur = el.clone();
+    for (i, seg) in path.iter().enumerate() {
+        let is_last = i + 1 == path.len();
+        match &cur {
+            Value::Object(o) => {
+                let next = o.borrow().strings.get(*seg).cloned();
+                match next {
+                    Some(v) if is_last => return v.as_number().unwrap_or(f64::NAN),
+                    Some(v) => cur = v,
+                    None => return f64::NAN,
+                }
+            }
+            // `.length` is computed (not stored) for strings/arrays — mirror get_member.
+            Value::String(s) if *seg == "length" && is_last => return s.chars().count() as f64,
+            Value::Array(a) if *seg == "length" && is_last => return a.borrow().len() as f64,
+            _ => return f64::NAN,
+        }
+    }
+    f64::NAN
+}
+
+/// GENERAL multi-key numeric sort (decorate-sort-undecorate / Schwartzian transform).
+///
+/// The native codegen fuses any comparator that reduces to a lexicographic comparison
+/// of numeric keys — `(a,b)=>a.k-b.k`, `(a,b)=>b.k-a.k`, or the canonical multi-key
+/// `(a,b)=>{ if(a.k!==b.k) return a.k-b.k; return a.j-b.j }` — into a call here, with
+/// `keys` describing each `(property-path, ascending)` key in priority order.
+///
+/// Each element's keys are extracted ONCE into an unboxed `f64` vector, then the index
+/// permutation is sorted by plain `f64` comparison: no per-comparison hash lookups, no
+/// `Value` boxing, no closure dispatch. The boxed comparator path does `key_a - key_b`
+/// and returns its sign, so a lexicographic `partial_cmp` over the same keys (NaN →
+/// Equal) yields the IDENTICAL ordering — backend-identical with the dynamic path.
+pub fn sort_by_keys(arr: &Value, keys: &[(&[&str], bool)]) -> Value {
+    let arr = as_boxed_array(arr);
+    if let Value::Array(a) = &*arr {
+        let k = keys.len();
+        let mut g = a.borrow_mut();
+        let len = g.len();
+        // Decorate: pull every numeric key out of the boxed element exactly once.
+        let mut decorated: Vec<(usize, Vec<f64>)> = Vec::with_capacity(len);
+        for (idx, el) in g.iter().enumerate() {
+            let mut row = Vec::with_capacity(k);
+            for (path, _) in keys {
+                row.push(read_key_number(el, path));
+            }
+            decorated.push((idx, row));
+        }
+        // Sort the permutation by lexicographic f64 comparison of the extracted keys.
+        decorated.sort_by(|(_, ka), (_, kb)| {
+            for (col, (_, asc)) in keys.iter().enumerate() {
+                let ord = ka[col]
+                    .partial_cmp(&kb[col])
+                    .unwrap_or(std::cmp::Ordering::Equal);
+                let ord = if *asc { ord } else { ord.reverse() };
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        // Undecorate: apply the permutation in place.
+        let mut elements: Vec<Value> = std::mem::take(&mut *g);
+        *g = decorated
+            .into_iter()
+            .map(|(i, _)| std::mem::replace(&mut elements[i], Value::Null))
+            .collect();
+        drop(g);
+        Value::Array(a.clone())
+    } else {
+        Value::Null
+    }
+}
+
 #[cfg(test)]
 mod packed_hof_tests {
     //! The packed (`NumberArray`) HOF fast paths must be observably IDENTICAL to the boxed path —
@@ -975,5 +1058,149 @@ mod packed_hof_tests {
             tishlang_core::take_pending_throw().is_some(),
             "the parked throw must survive for the caller to re-raise"
         );
+    }
+}
+
+#[cfg(test)]
+mod sort_by_keys_tests {
+    //! `sort_by_keys` (the fused multi-key numeric comparator path) must produce the
+    //! EXACT same order as running the equivalent boxed comparator through
+    //! `sort_with_comparator`, since cross-backend parity depends on it.
+    use super::*;
+    use std::sync::Arc;
+    use tishlang_core::Value;
+
+    fn rec(key: f64, idx: f64) -> Value {
+        Value::object_from_pairs([
+            (Arc::from("key"), Value::Number(key)),
+            (Arc::from("idx"), Value::Number(idx)),
+        ])
+    }
+
+    fn keys_of(arr: &Value) -> Vec<(f64, f64)> {
+        match arr {
+            Value::Array(a) => a
+                .borrow()
+                .iter()
+                .map(|v| match v {
+                    Value::Object(o) => {
+                        let b = o.borrow();
+                        let k = b.strings.get("key").and_then(|x| x.as_number()).unwrap();
+                        let i = b.strings.get("idx").and_then(|x| x.as_number()).unwrap();
+                        (k, i)
+                    }
+                    _ => panic!("expected object element"),
+                })
+                .collect(),
+            _ => panic!("expected array"),
+        }
+    }
+
+    /// A reference boxed comparator with the canonical `key then idx` total order.
+    fn boxed_key_then_idx() -> Value {
+        Value::native(|args: &[Value]| {
+            let a = &args[0];
+            let b = &args[1];
+            let read = |v: &Value, p: &str| match v {
+                Value::Object(o) => o.borrow().strings.get(p).and_then(|x| x.as_number()).unwrap(),
+                _ => f64::NAN,
+            };
+            let (ak, bk) = (read(a, "key"), read(b, "key"));
+            if ak != bk {
+                Value::Number(ak - bk)
+            } else {
+                Value::Number(read(a, "idx") - read(b, "idx"))
+            }
+        })
+    }
+
+    #[test]
+    fn multi_key_matches_boxed_comparator() {
+        // Same unsorted input through both paths; the orders must be identical.
+        let input = || {
+            from_vec(vec![
+                rec(7.0, 0.0),
+                rec(3.0, 1.0),
+                rec(7.0, 2.0),
+                rec(1.0, 3.0),
+                rec(3.0, 4.0),
+                rec(7.0, 5.0),
+            ])
+        };
+        let fused = input();
+        sort_by_keys(
+            &fused,
+            &[(&["key"] as &[&str], true), (&["idx"] as &[&str], true)],
+        );
+        let boxed = input();
+        sort_with_comparator(&boxed, &boxed_key_then_idx());
+        assert_eq!(
+            keys_of(&fused),
+            keys_of(&boxed),
+            "fused multi-key sort must match the boxed comparator order exactly"
+        );
+        // And it is the expected total order.
+        assert_eq!(
+            keys_of(&fused),
+            vec![(1.0, 3.0), (3.0, 1.0), (3.0, 4.0), (7.0, 0.0), (7.0, 2.0), (7.0, 5.0)]
+        );
+    }
+
+    #[test]
+    fn single_key_descending() {
+        let arr = from_vec(vec![rec(2.0, 0.0), rec(9.0, 1.0), rec(5.0, 2.0)]);
+        sort_by_keys(&arr, &[(&["key"] as &[&str], false)]);
+        let ks: Vec<f64> = keys_of(&arr).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(ks, vec![9.0, 5.0, 2.0]);
+    }
+
+    #[test]
+    fn bare_element_key_sorts_numbers() {
+        // Empty path = the element itself is the numeric key (`(a,b)=>a-b`).
+        let arr = from_vec(vec![
+            Value::Number(4.0),
+            Value::Number(1.0),
+            Value::Number(3.0),
+            Value::Number(2.0),
+        ]);
+        sort_by_keys(&arr, &[(&[] as &[&str], true)]);
+        let got: Vec<f64> = match &arr {
+            Value::Array(a) => a.borrow().iter().map(|v| v.as_number().unwrap()).collect(),
+            _ => panic!(),
+        };
+        assert_eq!(got, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn missing_field_reads_nan_and_does_not_panic() {
+        // An element missing the primary key reads NaN; NaN comparisons collapse to
+        // Equal (`partial_cmp -> None -> Equal`), mirroring `a.key - b.key == NaN`
+        // (sign neither <0 nor >0) in the boxed path. The sort must still complete
+        // and return a valid permutation of the input (length + idx-set preserved).
+        let arr = from_vec(vec![
+            rec(5.0, 0.0),
+            Value::object_from_pairs([(Arc::from("idx"), Value::Number(1.0))]), // no "key"
+            rec(2.0, 2.0),
+        ]);
+        sort_by_keys(
+            &arr,
+            &[(&["key"] as &[&str], true), (&["idx"] as &[&str], true)],
+        );
+        let idxs: Vec<f64> = match &arr {
+            Value::Array(a) => a
+                .borrow()
+                .iter()
+                .map(|e| match e {
+                    Value::Object(o) => {
+                        o.borrow().strings.get("idx").and_then(|x| x.as_number()).unwrap()
+                    }
+                    _ => f64::NAN,
+                })
+                .collect(),
+            _ => panic!(),
+        };
+        let mut sorted = idxs.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(sorted, vec![0.0, 1.0, 2.0], "no element lost or duplicated");
     }
 }
