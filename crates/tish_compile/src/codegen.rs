@@ -1080,6 +1080,14 @@ pub(crate) struct Codegen {
     has_native_ui_host: bool,
     /// Program references browser global `document` — inject tish-canvas.
     program_uses_document: bool,
+    /// Active local common-subexpression-elimination substitutions, innermost last. When
+    /// `emit_expr` is about to lower an expression that is structurally equal (modulo spans) to a
+    /// registered candidate, it returns `<temp>.clone()` instead of re-emitting the (cloning,
+    /// bounds-checking) runtime access. Bindings are emitted once per statement and the
+    /// substitutions pushed/popped around that statement's body — see `emit_expr_stmt_with_cse`.
+    cse_subst: Vec<(Expr, String)>,
+    /// Monotonic counter for unique CSE temp names (`_cse0`, `_cse1`, …).
+    cse_temp_counter: usize,
 }
 
 
@@ -1164,6 +1172,8 @@ impl Codegen {
             emit_mode: crate::NativeEmitMode::DesktopBin,
             has_native_ui_host: false,
             program_uses_document: false,
+            cse_subst: Vec::new(),
+            cse_temp_counter: 0,
         }
     }
 
@@ -4170,8 +4180,7 @@ impl Codegen {
                 self.register_destruct_pattern_outer_vars(pattern);
             }
             Statement::ExprStmt { expr, .. } => {
-                let e = self.emit_expr_discard(expr)?;
-                self.writeln(&format!("{};", e));
+                self.emit_expr_stmt_with_cse(expr)?;
             }
             Statement::If {
                 cond,
@@ -4432,10 +4441,58 @@ impl Codegen {
                 }
                 let label = format!("'for_loop_{}", self.loop_label_index);
                 self.loop_label_index += 1;
-                let cond_expr = cond
-                    .as_ref()
-                    .map(|c| self.emit_cond_expr(c).unwrap())
-                    .unwrap_or_else(|| "true".to_string());
+                // Loop-invariant `arr.length` hoist (#317): when the condition is `i < arr.length`
+                // over a boxed array whose length the body provably cannot change, bind the length
+                // once before the loop and compare against it — dropping a per-iteration boxed
+                // `get_prop(&arr.clone(), "length")`.
+                let mut hoisted_cond: Option<String> = None;
+                if crate::native_opts_enabled() {
+                    if let Some(c) = cond.as_ref() {
+                        if let Some((counter, base)) = Self::match_counter_lt_length(c) {
+                            // Only worth it for the boxed `Value` path; a typed `Vec` already lowers
+                            // `.length` to a cheap `.len()`.
+                            let base_ty = self.type_context.get_type(base);
+                            let is_boxed = matches!(base_ty, RustType::Value)
+                                && self.module_const_f64_array_rust_ref(base).is_none()
+                                && !self.refcell_wrapped_vars.contains(base);
+                            if is_boxed && !Self::stmt_has_length_changer(body) {
+                                let mut assigned = HashSet::new();
+                                Self::collect_assigned_idents_in_stmt(body, &mut assigned);
+                                if !assigned.contains(base) {
+                                    let base_esc = Self::escape_ident(base).into_owned();
+                                    let len_tmp = format!("_len{}", self.loop_label_index);
+                                    self.writeln(&format!(
+                                        "let {} = (tishlang_runtime::get_prop(&({}).clone(), \"length\")).as_number().unwrap_or(f64::NAN);",
+                                        len_tmp, base_esc
+                                    ));
+                                    let (ctr_code, ctr_ty) = self.emit_typed_expr(counter)?;
+                                    let lhs = if ctr_ty == RustType::F64 {
+                                        ctr_code
+                                    } else {
+                                        // Coerce a boxed counter to f64 for the comparison (rare).
+                                        let v = if ctr_ty.is_native() {
+                                            ctr_ty.to_value_expr(&ctr_code)
+                                        } else {
+                                            ctr_code
+                                        };
+                                        format!("({}).as_number().unwrap_or(f64::NAN)", v)
+                                    };
+                                    let cmp = if matches!(c, Expr::Binary { op: BinOp::Le, .. }) {
+                                        "<="
+                                    } else {
+                                        "<"
+                                    };
+                                    hoisted_cond = Some(format!("({} {} {})", lhs, cmp, len_tmp));
+                                }
+                            }
+                        }
+                    }
+                }
+                let cond_expr = hoisted_cond.unwrap_or_else(|| {
+                    cond.as_ref()
+                        .map(|c| self.emit_cond_expr(c).unwrap())
+                        .unwrap_or_else(|| "true".to_string())
+                });
                 let update_code = update.as_ref().map(|u| {
                     let ue = self.emit_expr_discard(u).unwrap();
                     format!("{};", ue)
@@ -5440,7 +5497,305 @@ impl Codegen {
         }
     }
 
+    // ---- Local common-subexpression elimination (issue #317) -------------------------------
+    //
+    // Within a SINGLE statement, the same pure index/member access (e.g. `rows[i]`) is often
+    // re-emitted several times. On the dynamic `Value` path each occurrence lowers to a
+    // `get_index`/`get_prop` that borrows the container, bounds-checks, and clones the element —
+    // pure waste when the value provably cannot change between occurrences. This pass binds each
+    // repeated candidate to a temp once and reuses it. It is fully general (driven by structural
+    // repetition, never variable names) and only fires when the statement is conservatively free
+    // of effects that could invalidate the candidate.
+
+    /// Span-agnostic structural equality over the pure expression subset CSE cares about. Two
+    /// occurrences of `rows[i]` compare equal even though their source spans differ (per the AST
+    /// convention spans participate in `PartialEq`, so `==` would reject them).
+    fn cse_expr_eq(a: &Expr, b: &Expr) -> bool {
+        match (a, b) {
+            (Expr::Ident { name: x, .. }, Expr::Ident { name: y, .. }) => x == y,
+            (Expr::Literal { value: x, .. }, Expr::Literal { value: y, .. }) => x == y,
+            (
+                Expr::Index { object: ao, index: ai, optional: aopt, .. },
+                Expr::Index { object: bo, index: bi, optional: bopt, .. },
+            ) => aopt == bopt && Self::cse_expr_eq(ao, bo) && Self::cse_expr_eq(ai, bi),
+            (
+                Expr::Member { object: ao, prop: ap, optional: aopt, .. },
+                Expr::Member { object: bo, prop: bp, optional: bopt, .. },
+            ) => {
+                aopt == bopt
+                    && Self::cse_expr_eq(ao, bo)
+                    && match (ap, bp) {
+                        (
+                            MemberProp::Name { name: x, .. },
+                            MemberProp::Name { name: y, .. },
+                        ) => x == y,
+                        (MemberProp::Expr(x), MemberProp::Expr(y)) => Self::cse_expr_eq(x, y),
+                        _ => false,
+                    }
+            }
+            (
+                Expr::Binary { left: al, op: aop, right: ar, .. },
+                Expr::Binary { left: bl, op: bop, right: br, .. },
+            ) => aop == bop && Self::cse_expr_eq(al, bl) && Self::cse_expr_eq(ar, br),
+            (
+                Expr::Unary { op: aop, operand: ax, .. },
+                Expr::Unary { op: bop, operand: bx, .. },
+            ) => aop == bop && Self::cse_expr_eq(ax, bx),
+            _ => false,
+        }
+    }
+
+    /// True if `e` is a leaf safe to appear inside a CSE candidate: a bare identifier or a literal.
+    /// (Numeric-typed locals, refcell-wrapped captures, etc. are all fine here — they still lower
+    /// to the same Rust text at every occurrence, which is exactly what makes the temp valid.)
+    fn cse_is_leaf(e: &Expr) -> bool {
+        matches!(e, Expr::Ident { .. } | Expr::Literal { .. })
+    }
+
+    /// True if `e` is a CSE *candidate*: a non-optional index/member access whose base and key are
+    /// themselves built only from leaves and other candidates — i.e. a pure, side-effect-free read
+    /// whose Rust lowering is deterministic and re-evaluable.
+    fn cse_is_candidate(e: &Expr) -> bool {
+        match e {
+            Expr::Index { object, index, optional: false, .. } => {
+                Self::cse_subexpr_ok(object) && Self::cse_subexpr_ok(index)
+            }
+            Expr::Member { object, prop, optional: false, .. } => {
+                Self::cse_subexpr_ok(object)
+                    && match prop {
+                        MemberProp::Name { .. } => true,
+                        MemberProp::Expr(k) => Self::cse_subexpr_ok(k),
+                    }
+            }
+            _ => false,
+        }
+    }
+
+    /// A subexpression that may appear *inside* a candidate: a leaf, another candidate, or a pure
+    /// arithmetic combination thereof (so `rows[i + 1]` and `m[i][j]` are candidates too).
+    fn cse_subexpr_ok(e: &Expr) -> bool {
+        match e {
+            _ if Self::cse_is_leaf(e) => true,
+            Expr::Index { .. } | Expr::Member { .. } => Self::cse_is_candidate(e),
+            Expr::Binary { left, right, op, .. } => {
+                // Arithmetic/comparison only — no `in` (membership, not a pure scalar op here).
+                !matches!(op, BinOp::In)
+                    && Self::cse_subexpr_ok(left)
+                    && Self::cse_subexpr_ok(right)
+            }
+            Expr::Unary { operand, .. } => Self::cse_subexpr_ok(operand),
+            _ => false,
+        }
+    }
+
+    /// Number of AST nodes in a candidate, used to order bindings innermost-first so a nested
+    /// candidate (`rows[i]`) is bound before the larger candidate that contains it (`rows[i].x`).
+    fn cse_size(e: &Expr) -> usize {
+        match e {
+            Expr::Index { object, index, .. } => 1 + Self::cse_size(object) + Self::cse_size(index),
+            Expr::Member { object, prop, .. } => {
+                1 + Self::cse_size(object)
+                    + match prop {
+                        MemberProp::Expr(k) => Self::cse_size(k),
+                        MemberProp::Name { .. } => 0,
+                    }
+            }
+            Expr::Binary { left, right, .. } => 1 + Self::cse_size(left) + Self::cse_size(right),
+            Expr::Unary { operand, .. } => 1 + Self::cse_size(operand),
+            _ => 1,
+        }
+    }
+
+    /// Walk `e`, recording every candidate occurrence into `acc` (representative expr + count).
+    /// Sub-candidates inside a candidate are counted too (so `rows[i]` accrues a hit from each of
+    /// `rows[i].x`, `rows[i].w`, `rows[i].y`).
+    fn cse_collect<'a>(e: &'a Expr, acc: &mut Vec<(&'a Expr, usize)>) {
+        if Self::cse_is_candidate(e) {
+            if let Some(slot) = acc.iter_mut().find(|(c, _)| Self::cse_expr_eq(c, e)) {
+                slot.1 += 1;
+            } else {
+                acc.push((e, 1));
+            }
+        }
+        match e {
+            Expr::Index { object, index, .. } => {
+                Self::cse_collect(object, acc);
+                Self::cse_collect(index, acc);
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::cse_collect(object, acc);
+                if let MemberProp::Expr(k) = prop {
+                    Self::cse_collect(k, acc);
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::cse_collect(left, acc);
+                Self::cse_collect(right, acc);
+            }
+            Expr::Unary { operand, .. } => Self::cse_collect(operand, acc),
+            Expr::Conditional { cond, .. } => {
+                // Only the unconditionally-evaluated part (the test) is safe to hoist; both arms
+                // are conditional, so we don't descend into them.
+                Self::cse_collect(cond, acc);
+            }
+            Expr::Assign { value, .. } => Self::cse_collect(value, acc),
+            Expr::CompoundAssign { value, .. } => Self::cse_collect(value, acc),
+            _ => {}
+        }
+    }
+
+    /// Collect every identifier a candidate *reads* (base array, index var, nested keys). Used to
+    /// prove the statement does not write any of them between occurrences.
+    fn cse_referenced_idents(e: &Expr, out: &mut HashSet<String>) {
+        match e {
+            Expr::Ident { name, .. } => {
+                out.insert(name.to_string());
+            }
+            Expr::Index { object, index, .. } => {
+                Self::cse_referenced_idents(object, out);
+                Self::cse_referenced_idents(index, out);
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::cse_referenced_idents(object, out);
+                if let MemberProp::Expr(k) = prop {
+                    Self::cse_referenced_idents(k, out);
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::cse_referenced_idents(left, out);
+                Self::cse_referenced_idents(right, out);
+            }
+            Expr::Unary { operand, .. } => Self::cse_referenced_idents(operand, out),
+            _ => {}
+        }
+    }
+
+    /// True if `e` (anywhere) contains a call/new/await — anything that could mutate the container a
+    /// CSE candidate reads (or otherwise have an observable effect we must not duplicate/skip).
+    fn cse_has_call(e: &Expr) -> bool {
+        match e {
+            Expr::Call { .. } | Expr::New { .. } | Expr::Await { .. } => true,
+            Expr::Binary { left, right, .. } => {
+                Self::cse_has_call(left) || Self::cse_has_call(right)
+            }
+            Expr::Unary { operand, .. } => Self::cse_has_call(operand),
+            Expr::Index { object, index, .. } => {
+                Self::cse_has_call(object) || Self::cse_has_call(index)
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::cse_has_call(object)
+                    || matches!(prop, MemberProp::Expr(k) if Self::cse_has_call(k))
+            }
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                Self::cse_has_call(cond)
+                    || Self::cse_has_call(then_branch)
+                    || Self::cse_has_call(else_branch)
+            }
+            Expr::NullishCoalesce { left, right, .. } => {
+                Self::cse_has_call(left) || Self::cse_has_call(right)
+            }
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. } => Self::cse_has_call(value),
+            Expr::MemberAssign { object, value, .. } => {
+                Self::cse_has_call(object) || Self::cse_has_call(value)
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                Self::cse_has_call(object)
+                    || Self::cse_has_call(index)
+                    || Self::cse_has_call(value)
+            }
+            Expr::TemplateLiteral { exprs, .. } => exprs.iter().any(Self::cse_has_call),
+            _ => false,
+        }
+    }
+
+    /// Compute the CSE bindings to apply to `stmt_expr`: pairs of (candidate, temp-name), ordered
+    /// innermost-first. Returns empty when CSE is disabled, not beneficial, or not provably safe.
+    fn cse_plan_for_expr(&mut self, stmt_expr: &Expr) -> Vec<(Expr, String)> {
+        if !crate::native_opts_enabled() {
+            return Vec::new();
+        }
+        // Conservative effect gate: any call/new/await in the statement could mutate a container,
+        // so we bail entirely rather than reason about aliasing.
+        if Self::cse_has_call(stmt_expr) {
+            return Vec::new();
+        }
+        // Identifiers written anywhere in the statement (the LHS of `acc = …`, `i++`, etc.).
+        let mut assigned = HashSet::new();
+        Self::collect_assigned_idents_in_expr(stmt_expr, &mut assigned);
+
+        let mut counts: Vec<(&Expr, usize)> = Vec::new();
+        Self::cse_collect(stmt_expr, &mut counts);
+
+        let mut chosen: Vec<&Expr> = counts
+            .into_iter()
+            .filter(|(_, n)| *n >= 2)
+            .filter(|(cand, _)| {
+                // None of the identifiers the candidate reads may be written in this statement,
+                // else its value could legitimately differ between occurrences.
+                let mut refs = HashSet::new();
+                Self::cse_referenced_idents(cand, &mut refs);
+                refs.is_disjoint(&assigned)
+            })
+            .map(|(c, _)| c)
+            .collect();
+        // Innermost-first so nested candidates bind before the ones that contain them.
+        chosen.sort_by_key(|c| Self::cse_size(c));
+
+        chosen
+            .into_iter()
+            .map(|c| {
+                let name = format!("_cse{}", self.cse_temp_counter);
+                self.cse_temp_counter += 1;
+                (c.clone(), name)
+            })
+            .collect()
+    }
+
+    /// Emit an expression statement, applying local CSE when profitable. Falls back to the plain
+    /// `emit_expr_discard` path when there is nothing to hoist.
+    fn emit_expr_stmt_with_cse(&mut self, expr: &Expr) -> Result<(), CompileError> {
+        let plan = self.cse_plan_for_expr(expr);
+        if plan.is_empty() {
+            let e = self.emit_expr_discard(expr)?;
+            self.writeln(&format!("{};", e));
+            return Ok(());
+        }
+        self.writeln("{");
+        self.indent += 1;
+        let pushed = plan.len();
+        for (cand, tmp) in plan {
+            // Emit the binding with the substitutions registered SO FAR active, so a larger
+            // candidate reuses the temps of the smaller ones nested inside it.
+            let code = self.emit_expr(&cand)?;
+            self.writeln(&format!("let {} = {};", tmp, code));
+            self.cse_subst.push((cand, tmp));
+        }
+        let e = self.emit_expr_discard(expr)?;
+        self.writeln(&format!("{};", e));
+        for _ in 0..pushed {
+            self.cse_subst.pop();
+        }
+        self.indent -= 1;
+        self.writeln("}");
+        Ok(())
+    }
+
     fn emit_expr(&mut self, expr: &Expr) -> Result<String, CompileError> {
+        // Local CSE: a subexpression registered by `emit_expr_stmt_with_cse` lowers to its
+        // precomputed temp instead of being re-emitted (re-fetched/re-cloned). The temp is a
+        // `Value`, so hand back a (cheap, Rc-bumping) clone for universal by-value safety.
+        if !self.cse_subst.is_empty() {
+            if let Some((_, tmp)) = self
+                .cse_subst
+                .iter()
+                .rev()
+                .find(|(cand, _)| Self::cse_expr_eq(cand, expr))
+            {
+                return Ok(format!("{}.clone()", tmp));
+            }
+        }
         Ok(match expr {
             Expr::Literal { value, .. } => match value {
                 Literal::Number(n) => format!("Value::Number({})", Self::f64_lit(*n)),
@@ -7039,6 +7394,121 @@ impl Codegen {
             | Statement::DeclareVar { .. }
             | Statement::DeclareFun { .. } => {}
         }
+    }
+
+    // ---- Loop-invariant `arr.length` hoist (issue #317) -------------------------------------
+    //
+    // `for (…; i < arr.length; …)` recomputes `arr.length` every iteration — on the boxed path a
+    // `get_prop(&arr.clone(), "length")` that bumps the array's Rc, hashes the key, and re-reads the
+    // length. When the loop body provably cannot change `arr`'s length, bind it once before the loop.
+
+    /// True if any expression in `e` could change an array's length elsewhere (a call/new/await) or
+    /// mutate a container in place (index/member assignment). Used to gate the length hoist: if the
+    /// body has none of these, no array's length can change inside it.
+    fn expr_has_length_changer(e: &Expr) -> bool {
+        match e {
+            Expr::Call { .. }
+            | Expr::New { .. }
+            | Expr::Await { .. }
+            | Expr::IndexAssign { .. }
+            | Expr::MemberAssign { .. } => true,
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                Self::expr_has_length_changer(left) || Self::expr_has_length_changer(right)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::TypeOf { operand, .. }
+            | Expr::Delete { target: operand, .. } => Self::expr_has_length_changer(operand),
+            Expr::Index { object, index, .. } => {
+                Self::expr_has_length_changer(object) || Self::expr_has_length_changer(index)
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::expr_has_length_changer(object)
+                    || matches!(prop, MemberProp::Expr(k) if Self::expr_has_length_changer(k))
+            }
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                Self::expr_has_length_changer(cond)
+                    || Self::expr_has_length_changer(then_branch)
+                    || Self::expr_has_length_changer(else_branch)
+            }
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. } => Self::expr_has_length_changer(value),
+            Expr::TemplateLiteral { exprs, .. } => {
+                exprs.iter().any(Self::expr_has_length_changer)
+            }
+            Expr::Array { elements, .. } => elements.iter().any(|el| match el {
+                ArrayElement::Expr(x) | ArrayElement::Spread(x) => Self::expr_has_length_changer(x),
+            }),
+            Expr::Object { props, .. } => props.iter().any(|p| match p {
+                ObjectProp::KeyValue(_, x, _) | ObjectProp::Spread(x) => {
+                    Self::expr_has_length_changer(x)
+                }
+            }),
+            // An arrow stores a closure that could be called later; treat as opaque (conservative).
+            Expr::ArrowFunction { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// True if any statement in `stmt` could change an array's length (see `expr_has_length_changer`)
+    /// — conservatively also bails on nested loops/branches that themselves contain a length changer.
+    fn stmt_has_length_changer(stmt: &Statement) -> bool {
+        match stmt {
+            Statement::ExprStmt { expr, .. } => Self::expr_has_length_changer(expr),
+            Statement::VarDecl { init: Some(e), .. } => Self::expr_has_length_changer(e),
+            Statement::VarDecl { init: None, .. } => false,
+            Statement::VarDeclDestructure { init, .. } => Self::expr_has_length_changer(init),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().any(Self::stmt_has_length_changer)
+            }
+            Statement::If { cond, then_branch, else_branch, .. } => {
+                Self::expr_has_length_changer(cond)
+                    || Self::stmt_has_length_changer(then_branch)
+                    || else_branch.as_ref().is_some_and(|b| Self::stmt_has_length_changer(b))
+            }
+            Statement::For { init, cond, update, body, .. } => {
+                init.as_ref().is_some_and(|i| Self::stmt_has_length_changer(i))
+                    || cond.as_ref().is_some_and(|c| Self::expr_has_length_changer(c))
+                    || update.as_ref().is_some_and(|u| Self::expr_has_length_changer(u))
+                    || Self::stmt_has_length_changer(body)
+            }
+            Statement::ForOf { iterable, body, .. } => {
+                Self::expr_has_length_changer(iterable) || Self::stmt_has_length_changer(body)
+            }
+            Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
+                Self::expr_has_length_changer(cond) || Self::stmt_has_length_changer(body)
+            }
+            Statement::Return { value: Some(e), .. } | Statement::Throw { value: e, .. } => {
+                Self::expr_has_length_changer(e)
+            }
+            // Anything else (switch/try/funct decl/break/continue/…) — be conservative.
+            _ => true,
+        }
+    }
+
+    /// If `cond` is `<counter> < <base>.length` (or `<=`) over a plain identifier counter and an
+    /// identifier array base, return `(counter, base)`. The hoist only matters when `base` is a boxed
+    /// `Value` (the typed `Vec` path already turns `.length` into a cheap `.len()`); callers verify.
+    fn match_counter_lt_length(cond: &Expr) -> Option<(&Expr, &str)> {
+        let Expr::Binary { left, op, right, .. } = cond else {
+            return None;
+        };
+        if !matches!(op, BinOp::Lt | BinOp::Le) {
+            return None;
+        }
+        if !matches!(left.as_ref(), Expr::Ident { .. }) {
+            return None;
+        }
+        if let Expr::Member { object, prop: MemberProp::Name { name, .. }, optional: false, .. } =
+            right.as_ref()
+        {
+            if name.as_ref() == "length" {
+                if let Expr::Ident { name: base, .. } = object.as_ref() {
+                    return Some((left.as_ref(), base.as_ref()));
+                }
+            }
+        }
+        None
     }
 
     fn collect_assigned_idents_in_expr(expr: &Expr, names: &mut HashSet<String>) {
