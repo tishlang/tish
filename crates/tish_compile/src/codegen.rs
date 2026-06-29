@@ -5545,6 +5545,33 @@ impl Codegen {
         self.emit_expr(e)
     }
 
+    /// Emit a `&Value` expression for a read-only (borrow-only) call argument, avoiding the
+    /// by-value `.clone()` that `emit_expr` adds for loop-carried locals. Used by `Map.has`/`Map.get`
+    /// whose runtime entry points take `&Value` and only read the key — a loop-carried key shouldn't
+    /// be re-cloned every iteration just to be looked up. A plain `Value`-typed local lowers to a
+    /// borrow of the place (`&name`); anything else borrows the (possibly temporary) emitted value
+    /// (`&(<expr>)`), which is still a no-op refcount-wise for the duration of the call.
+    fn emit_borrowed_arg(&mut self, arg: &CallArg) -> Result<String, CompileError> {
+        let e = match arg {
+            CallArg::Expr(e) | CallArg::Spread(e) => e,
+        };
+        // Only a plain `Value`-typed, non-refcell local can be borrowed as a place without a clone;
+        // native-typed (f64/…) and refcell-wrapped idents must go through `emit_expr` (which builds a
+        // fresh `Value`), so we borrow that temporary instead.
+        if let Expr::Ident { name, .. } = e {
+            let n = name.as_ref();
+            let is_plain_value = !self.refcell_wrapped_vars.contains(n)
+                && !self.native_numeric_globals.contains_key(n)
+                && self.module_const_f64_array_rust_ref(n).is_none()
+                && !self.usize_var_subst.contains_key(n)
+                && !self.type_context.get_type(n).is_native();
+            if is_plain_value {
+                return Ok(format!("&{}", Self::escape_ident(n)));
+            }
+        }
+        Ok(format!("&({})", self.emit_expr(e)?))
+    }
+
     /// #317: if `expr` lowers to a native Rust `String` (`RustType::String`), return a borrowed
     /// `&str` expression (`(<code>).as_str()`) so string char/index/length ops can BORROW it rather
     /// than deep-clone it into a fresh `Value::String` per call. Returns `None` for any other type
@@ -6190,16 +6217,15 @@ impl Codegen {
                             let map_ref = format!("&{}", Self::escape_ident(map_name.as_ref()));
                             match method_name.as_ref() {
                                 "has" if args.len() == 1 => {
-                                    return Ok(format!(
-                                        "tish_map_has({}, &{})",
-                                        map_ref, arg_exprs[0]
-                                    ));
+                                    // `map_has` borrows the key (`&Value`) — pass a borrow of the
+                                    // place rather than `&(key).clone()`, so a loop-carried key isn't
+                                    // re-cloned every iteration just to be read.
+                                    let key_ref = self.emit_borrowed_arg(&args[0])?;
+                                    return Ok(format!("tish_map_has({}, {})", map_ref, key_ref));
                                 }
                                 "get" if args.len() == 1 => {
-                                    return Ok(format!(
-                                        "tish_map_get({}, &{})",
-                                        map_ref, arg_exprs[0]
-                                    ));
+                                    let key_ref = self.emit_borrowed_arg(&args[0])?;
+                                    return Ok(format!("tish_map_get({}, {})", map_ref, key_ref));
                                 }
                                 "set" if args.len() == 2 => {
                                     return Ok(format!(
@@ -19558,6 +19584,25 @@ impl Codegen {
         }
     }
 
+    /// Box a typed operand back into a `Value` for a runtime call (`ops::add` etc.), avoiding the
+    /// generic `to_value_expr` round-trip when the operand is a constant. A string literal lowers to
+    /// `Value::String("w".into())` — a single `ArcStr` allocation — instead of
+    /// `Value::String("w".to_string().clone().into())`, which allocates a `String`, clones it, and
+    /// then converts to `ArcStr` (three allocations) on every evaluation. In a hot loop (e.g.
+    /// `key = "w" + (seed % 1000)`), the literal is re-evaluated each iteration, so this is the
+    /// difference between three allocations per iteration and one. Numeric literals stay
+    /// `Value::Number(..)` (no allocation either way). Everything else falls back to `to_value_expr`.
+    fn box_operand_for_runtime(orig: &Expr, native_code: &str, ty: &RustType) -> String {
+        if let Expr::Literal { value: Literal::String(s), .. } = orig {
+            return format!("Value::String({:?}.into())", s.as_ref());
+        }
+        if ty.is_native() {
+            ty.to_value_expr(native_code)
+        } else {
+            native_code.to_string()
+        }
+    }
+
     fn emit_typed_expr(&mut self, expr: &Expr) -> Result<(String, RustType), CompileError> {
         match expr {
             // ── literals ─────────────────────────────────────────────────────────
@@ -19769,16 +19814,8 @@ impl Codegen {
                 }
 
                 // Fall back: convert both sides to Value and use the runtime.
-                let lv = if lt.is_native() {
-                    lt.to_value_expr(&l)
-                } else {
-                    l
-                };
-                let rv = if rt.is_native() {
-                    rt.to_value_expr(&r)
-                } else {
-                    r
-                };
+                let lv = Self::box_operand_for_runtime(left, &l, &lt);
+                let rv = Self::box_operand_for_runtime(right, &r, &rt);
                 let result = self.emit_binop(&lv, *op, &rv, *span)?;
                 Ok((result, RustType::Value))
             }
