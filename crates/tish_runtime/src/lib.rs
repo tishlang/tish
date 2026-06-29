@@ -88,8 +88,8 @@ pub use tishlang_builtins::array::{
     join as array_join_impl, map as array_map, pop as array_pop, push as array_push_impl,
     fill as array_fill, reduce as array_reduce, reverse as array_reverse, shift as array_shift,
     shuffle as array_shuffle, slice as array_slice_impl, some as array_some,
-    sort_default as array_sort_default, sort_numeric_asc as array_sort_numeric_asc,
-    sort_numeric_desc as array_sort_numeric_desc,
+    sort_by_keys as array_sort_by_keys, sort_default as array_sort_default,
+    sort_numeric_asc as array_sort_numeric_asc, sort_numeric_desc as array_sort_numeric_desc,
     sort_with_comparator as array_sort_with_comparator, splice as array_splice_impl,
     unshift as array_unshift_impl,
 };

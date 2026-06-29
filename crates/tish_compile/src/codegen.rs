@@ -5,6 +5,7 @@ use crate::types::{RustType, TypeContext};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr,
     FunParam, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement,
@@ -1671,6 +1672,216 @@ impl Codegen {
             }
         }
         None
+    }
+
+    /// If `expr` is a reference rooted at the parameter `param` — either the bare
+    /// `param` itself or a chain of `.field` accesses (`param.a.b`) — return the
+    /// property path (empty Vec for the bare param). Computed/optional members and
+    /// any other shape return `None`. Used to recognise numeric sort keys.
+    fn sort_key_path(expr: &Expr, param: &str) -> Option<Vec<Arc<str>>> {
+        match expr {
+            Expr::Ident { name, .. } if name.as_ref() == param => Some(Vec::new()),
+            Expr::Member {
+                object,
+                prop: MemberProp::Name { name, .. },
+                optional: false,
+                ..
+            } => {
+                let mut path = Self::sort_key_path(object, param)?;
+                path.push(Arc::clone(name));
+                Some(path)
+            }
+            _ => None,
+        }
+    }
+
+    /// Recognise a single numeric difference `a.K - b.K` (ascending) or `b.K - a.K`
+    /// (descending) where both sides read the SAME key path `K` from the two
+    /// comparator params. Returns `(path, ascending)`.
+    fn sort_diff_key(
+        expr: &Expr,
+        param_a: &str,
+        param_b: &str,
+    ) -> Option<(Vec<Arc<str>>, bool)> {
+        if let Expr::Binary {
+            left,
+            op: BinOp::Sub,
+            right,
+            ..
+        } = expr
+        {
+            // ascending: a.K - b.K
+            if let (Some(la), Some(rb)) = (
+                Self::sort_key_path(left, param_a),
+                Self::sort_key_path(right, param_b),
+            ) {
+                if la == rb {
+                    return Some((la, true));
+                }
+            }
+            // descending: b.K - a.K
+            if let (Some(lb), Some(ra)) = (
+                Self::sort_key_path(left, param_b),
+                Self::sort_key_path(right, param_a),
+            ) {
+                if lb == ra {
+                    return Some((lb, false));
+                }
+            }
+        }
+        None
+    }
+
+    /// Recognise an inequality guard `a.K !== b.K` / `a.K != b.K` (order-insensitive)
+    /// that compares the SAME key path on both params. Returns the path `K`.
+    fn sort_neq_guard_key(
+        expr: &Expr,
+        param_a: &str,
+        param_b: &str,
+    ) -> Option<Vec<Arc<str>>> {
+        if let Expr::Binary {
+            left,
+            op: BinOp::Ne | BinOp::StrictNe,
+            right,
+            ..
+        } = expr
+        {
+            for (lp, rp) in [(param_a, param_b), (param_b, param_a)] {
+                if let (Some(l), Some(r)) =
+                    (Self::sort_key_path(left, lp), Self::sort_key_path(right, rp))
+                {
+                    if l == r {
+                        return Some(l);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Unwrap a statement that is a single `return <expr>;` — looking through a
+    /// one-statement block wrapper — yielding the returned expression.
+    fn sort_lone_return(stmt: &Statement) -> Option<&Expr> {
+        match stmt {
+            Statement::Return { value: Some(e), .. } => Some(e),
+            Statement::Block { statements, .. } if statements.len() == 1 => {
+                Self::sort_lone_return(&statements[0])
+            }
+            _ => None,
+        }
+    }
+
+    /// GENERAL detector for a lexicographic numeric-key comparator. Recognises any
+    /// comparator that reduces to "compare key 1, then key 2, … then key m" where
+    /// each key is a numeric `param.path` (or the bare param) read identically from
+    /// both arguments, ascending or descending per key. Covers:
+    ///
+    ///   (a,b) => a.k - b.k                                  // single key
+    ///   (a,b) => b.k - a.k                                  // descending
+    ///   (a,b) => { if (a.k !== b.k) return a.k - b.k;       // multi-key with
+    ///              return a.idx - b.idx }                   //   tiebreaker(s)
+    ///
+    /// Returns the ordered list of `(path, ascending)` keys, or `None` if the body
+    /// is anything else (falls back to the boxed comparator path). Generalises to
+    /// any field names / key count — it is NOT specialised to a particular fixture.
+    fn detect_lexicographic_key_comparator(expr: &Expr) -> Option<Vec<(Vec<Arc<str>>, bool)>> {
+        use tishlang_ast::ArrowBody;
+
+        let Expr::ArrowFunction { params, body, .. } = expr else {
+            return None;
+        };
+        if params.len() != 2 {
+            return None;
+        }
+        let (param_a, param_b) = match (&params[0], &params[1]) {
+            (FunParam::Simple(a), FunParam::Simple(b))
+                if a.default.is_none() && b.default.is_none() =>
+            {
+                (a.name.as_ref(), b.name.as_ref())
+            }
+            _ => return None,
+        };
+
+        // Single-expression body: `a.K - b.K` → one key.
+        if let ArrowBody::Expr(e) = body {
+            let (path, asc) = Self::sort_diff_key(e, param_a, param_b)?;
+            return Some(vec![(path, asc)]);
+        }
+
+        // Block body: a chain of `if (a.Ki !== b.Ki) return a.Ki - b.Ki;` guards
+        // followed by a final `return a.Km - b.Km;`. Each guard must compare the
+        // SAME key it then returns the difference of, so the lexicographic key list
+        // it lowers to is exactly equivalent to the dynamic comparator.
+        let ArrowBody::Block(block) = body else {
+            return None;
+        };
+        let stmts: &[Statement] = match block.as_ref() {
+            Statement::Block { statements, .. } => statements,
+            single => std::slice::from_ref(single),
+        };
+        if stmts.is_empty() {
+            return None;
+        }
+
+        let mut keys: Vec<(Vec<Arc<str>>, bool)> = Vec::new();
+        for (i, stmt) in stmts.iter().enumerate() {
+            let is_last = i + 1 == stmts.len();
+            match stmt {
+                Statement::If {
+                    cond,
+                    then_branch,
+                    else_branch: None,
+                    ..
+                } => {
+                    // `if (a.K !== b.K) return a.K - b.K`
+                    let guard_key = Self::sort_neq_guard_key(cond, param_a, param_b)?;
+                    let ret = Self::sort_lone_return(then_branch)?;
+                    let (diff_key, asc) = Self::sort_diff_key(ret, param_a, param_b)?;
+                    if diff_key != guard_key {
+                        return None;
+                    }
+                    keys.push((diff_key, asc));
+                }
+                Statement::Return { value: Some(e), .. } if is_last => {
+                    // Final unconditional tiebreaker `return a.K - b.K`.
+                    let (path, asc) = Self::sort_diff_key(e, param_a, param_b)?;
+                    keys.push((path, asc));
+                }
+                _ => return None,
+            }
+        }
+
+        // The body MUST end in an unconditional return (a total comparator). If the
+        // last statement was a guarded `if`, there is no final fallthrough key and
+        // the shape is not a pure lexicographic comparator we can fuse soundly.
+        if !matches!(stmts.last(), Some(Statement::Return { value: Some(_), .. })) {
+            return None;
+        }
+        if keys.is_empty() {
+            return None;
+        }
+        Some(keys)
+    }
+
+    /// Render a detected key list as a Rust `&[(&[&str], bool)]` literal for the
+    /// `array_sort_by_keys` call.
+    fn render_sort_keys(keys: &[(Vec<Arc<str>>, bool)]) -> String {
+        let mut out = String::from("&[");
+        for (i, (path, asc)) in keys.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str("(&[");
+            for (j, seg) in path.iter().enumerate() {
+                if j > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("{:?}", seg.as_ref()));
+            }
+            out.push_str(&format!("] as &[&str], {})", asc));
+        }
+        out.push(']');
+        out
     }
 
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
@@ -5949,6 +6160,20 @@ impl Codegen {
                                             obj_expr
                                         ));
                                     }
+                                }
+                                // GENERAL multi-key numeric comparator: `(a,b)=>a.k-b.k`,
+                                // `(a,b)=>b.k-a.k`, or the lexicographic multi-key shape with
+                                // `!==` tiebreaker guards. Lower to a decorate-sort-undecorate
+                                // that reads each key once (no per-comparison boxed closure call,
+                                // no hash lookup) — order-identical to the boxed comparator.
+                                if let Some(keys) =
+                                    Self::detect_lexicographic_key_comparator(comparator_expr)
+                                {
+                                    return Ok(format!(
+                                        "tishlang_runtime::array_sort_by_keys(&{}, {})",
+                                        obj_expr,
+                                        Self::render_sort_keys(&keys)
+                                    ));
                                 }
                             }
                             // General case: use the callback
