@@ -9338,8 +9338,9 @@ impl Codegen {
         Some((name.to_string(), Self::bound_key_of(right)?, strict))
     }
 
-    /// A symbolic bound from an integer literal, a bare variable, or an `a.length` member read;
-    /// richer forms (`2 * n`, `a.length - 1`, …) are not modeled.
+    /// A symbolic bound from an integer literal, a bare variable, an `a.length` member read, or the
+    /// queens diagonal length `2 * n` / `n * 2` (`TwiceVar`); richer forms (`a.length - 1`, …) are not
+    /// modeled.
     fn bound_key_of(e: &Expr) -> Option<BoundKey> {
         match e {
             Expr::Literal {
@@ -9347,6 +9348,24 @@ impl Codegen {
                 ..
             } => Self::int_literal_value(*n).map(BoundKey::Const),
             Expr::Ident { name, .. } => Some(BoundKey::Var(name.to_string())),
+            // `2 * n` / `n * 2` — the fixed length of the queens occupancy diagonals (`diag1`/`diag2`
+            // are `2n` bools). As a fill bound it pins length `2n`; as a guard it bounds `i < 2n`.
+            Expr::Binary {
+                left,
+                op: BinOp::Mul,
+                right,
+                ..
+            } => {
+                let twice = |lit: &Expr, var: &Expr| -> Option<BoundKey> {
+                    if Self::int_literal_value_of(lit) == Some(2) {
+                        if let Expr::Ident { name, .. } = var {
+                            return Some(BoundKey::TwiceVar(name.to_string()));
+                        }
+                    }
+                    None
+                };
+                twice(left, right).or_else(|| twice(right, left))
+            }
             Expr::Member {
                 object,
                 prop: MemberProp::Name { name: p, .. },
@@ -15973,10 +15992,35 @@ impl Codegen {
                     if proven.get(fname).is_some_and(|m| m.contains_key(p_name)) {
                         continue;
                     }
-                    let all_ok = sites.iter().all(|(caller, _, args)| {
-                        args.len() == sig.params.len()
-                            && Self::nv_callsite_arg_len_ge(
+                    // A self-recursive call `f(.., p, ..)` that forwards `f`'s OWN array param `p_name`
+                    // (at the same position) together with `f`'s OWN stable scalar `s_name` (at the
+                    // bound position) preserves the length relation under the inductive hypothesis
+                    // (the proven length holds at entry; the body never shrinks `p` —
+                    // `classify_vec_param` rejects shrinking ops — and `s` is stable). Such a site
+                    // neither proves nor disproves the bound on its own, so it must NOT block the
+                    // non-recursive sites that do; otherwise the `.all()` short-circuits on the
+                    // recursive site and the fact can never bootstrap. We require >=1 NON-recursive
+                    // site so the bound rests on real caller evidence, never the hypothesis alone.
+                    let is_inductive_self_fwd = |caller: &Option<String>, args: &[Expr]| -> bool {
+                        caller.as_deref() == Some(fname.as_str())
+                            && matches!(args.get(pi), Some(Expr::Ident { name, .. }) if name.as_ref() == p_name)
+                            && matches!(args.get(si), Some(Expr::Ident { name, .. }) if name.as_ref() == s_name)
+                            && stable.get(caller).is_some_and(|s| s.contains(s_name.as_str()))
+                    };
+                    // Every non-recursive site must yield the SAME exact length key (in callee terms),
+                    // else the param has an ambiguous/unprovable length and stays OOB-safe.
+                    let mut agreed: Option<BoundKey> = None;
+                    let mut has_real_site = false;
+                    let mut all_ok = true;
+                    for (caller, _, args) in &sites {
+                        if is_inductive_self_fwd(caller, args) {
+                            continue;
+                        }
+                        has_real_site = true;
+                        let key = if args.len() == sig.params.len() {
+                            Self::nv_callsite_arg_len_key(
                                 caller,
+                                &s_name,
                                 args.get(pi),
                                 args.get(si),
                                 &params,
@@ -15984,13 +16028,26 @@ impl Codegen {
                                 &fixed,
                                 &proven,
                             )
-                    });
-                    if all_ok {
-                        proven
-                            .entry(fname.clone())
-                            .or_default()
-                            .insert(p_name.clone(), BoundKey::Var(s_name.clone()));
-                        changed = true;
+                        } else {
+                            None
+                        };
+                        match (key, &agreed) {
+                            (Some(k), None) => agreed = Some(k),
+                            (Some(k), Some(prev)) if k == *prev => {}
+                            _ => {
+                                all_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_ok && has_real_site {
+                        if let Some(bound) = agreed {
+                            proven
+                                .entry(fname.clone())
+                                .or_default()
+                                .insert(p_name.clone(), bound);
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -16001,33 +16058,38 @@ impl Codegen {
         proven
     }
 
-    /// Does the array argument `arr_arg` (in scope `caller`) provably have length >= the value of the
-    /// scalar argument `scalar_arg`? Sound cases only — anything else returns false (param stays
-    /// OOB-safe). See [`Self::compute_native_vec_param_bounds`] for the soundness argument.
+    /// The EXACT fixed length of the array argument `arr_arg` (in scope `caller`), expressed in terms
+    /// of the CALLEE's first scalar param `s_name` — the value the scalar argument `scalar_arg` binds
+    /// it to. Returns `Some(Var(s_name))` for a length-`n` array passed with scalar `n`, or
+    /// `Some(TwiceVar(s_name))` for a length-`2n` array (queens diagonals) passed with that same `n`,
+    /// and `None` when no sound exact relationship is provable (param then stays OOB-safe). Sound cases
+    /// only — see [`Self::compute_native_vec_param_bounds`] for the argument. The length is always
+    /// EXACT (never merely `>=`): a strictly-longer array could make a `.length`-folding read disagree
+    /// with the boxed path, and an exact key keeps the `2n`-diagonal proof (`d2 = row - col + n < 2n`)
+    /// distinguishable from the `n`-column proof.
     #[allow(clippy::too_many_arguments)]
-    fn nv_callsite_arg_len_ge(
+    fn nv_callsite_arg_len_key(
         caller: &Option<String>,
+        s_name: &str,
         arr_arg: Option<&Expr>,
         scalar_arg: Option<&Expr>,
         params: &std::collections::HashMap<Option<String>, std::collections::HashSet<String>>,
         stable: &std::collections::HashMap<Option<String>, std::collections::HashSet<String>>,
         fixed: &std::collections::HashMap<Option<String>, std::collections::HashMap<String, BoundKey>>,
         proven: &std::collections::HashMap<String, std::collections::HashMap<String, BoundKey>>,
-    ) -> bool {
-        let (Some(arr_arg), Some(scalar_arg)) = (arr_arg, scalar_arg) else {
-            return false;
-        };
+    ) -> Option<BoundKey> {
+        let (arr_arg, scalar_arg) = (arr_arg?, scalar_arg?);
         // The array argument must be a bare identifier (the native-vec call ABI requires this anyway).
         let Expr::Ident { name: a, .. } = arr_arg else {
-            return false;
+            return None;
         };
         let a = a.as_ref();
-        // (1) scalar arg is `a.length` — exact equality, always >=.
+        // (1) scalar arg is `a.length` — exact equality `length == s_name`.
         if let Expr::Member { object, prop, .. } = scalar_arg {
             if matches!(prop, MemberProp::Name { name, .. } if name.as_ref() == "length")
                 && matches!(object.as_ref(), Expr::Ident { name: o, .. } if o.as_ref() == a)
             {
-                return true;
+                return Some(BoundKey::Var(s_name.to_string()));
             }
         }
         // A scalar arg that NAMES a variable is only a sound bound if that variable is a STABLE param
@@ -16037,36 +16099,46 @@ impl Codegen {
             matches!(scalar_arg, Expr::Ident { name: s, .. } if s.as_ref() == m)
                 && stable.get(caller).is_some_and(|s| s.contains(m))
         };
+        // Re-base a caller-side length key (in terms of the caller's `m`) to callee terms (`s_name`),
+        // valid only when the scalar arg passed for `s_name` is exactly that stable `m`.
+        let rebase = |len: &BoundKey| -> Option<BoundKey> {
+            match len {
+                BoundKey::Var(m) if scalar_is_stable_var(m) => Some(BoundKey::Var(s_name.to_string())),
+                BoundKey::TwiceVar(m) if scalar_is_stable_var(m) => {
+                    Some(BoundKey::TwiceVar(s_name.to_string()))
+                }
+                _ => None,
+            }
+        };
         let caller_fixed = fixed.get(caller);
-        // (2) `a` is a caller LOCAL filled to length `Var(m)` and the scalar arg is that stable `m`.
-        if let Some(BoundKey::Var(m)) = caller_fixed.and_then(|f| f.get(a)) {
-            if scalar_is_stable_var(m) {
-                return true;
+        // (2) `a` is a caller LOCAL filled to a length keyed on a stable scalar — `Var(m)` (length n) or
+        // `TwiceVar(m)` (length 2n, the queens diagonals) — and the scalar arg is that stable `m`.
+        if let Some(len) = caller_fixed.and_then(|f| f.get(a)) {
+            if let Some(k) = rebase(len) {
+                return Some(k);
             }
         }
         // (2b) `a` is a caller LOCAL of proven Const length `k` and the scalar arg is the int literal
-        // `k` EXACTLY. Exact (not `<= k`) so every proven bound means `length == scalar`, identical to
-        // the trusted local-array `Var(n)` bounds — a strictly-longer array could otherwise make a
-        // `.length`-folding read disagree with the boxed path. (Inductively keeps case (3) exact too.)
+        // `k` EXACTLY. `length == scalar` so the callee bound is `Var(s_name)`.
         if let Some(BoundKey::Const(k)) = caller_fixed.and_then(|f| f.get(a)) {
             if let Expr::Literal { value: Literal::Number(n), .. } = scalar_arg {
                 if *n >= 0.0 && n.fract() == 0.0 && (*n as i64) == *k {
-                    return true;
+                    return Some(BoundKey::Var(s_name.to_string()));
                 }
             }
         }
-        // (3) param-flow: `a` is the caller's OWN array param with an already-proven bound `Var(m)`, and
-        // the scalar arg is that same stable `m` (the caller's scalar that bounds `a`).
+        // (3) param-flow: `a` is the caller's OWN array param with an already-proven bound, and the
+        // scalar arg is that same stable scalar — re-base it onto the callee's `s_name`.
         if let Some(cname) = caller {
             if params.get(caller).is_some_and(|p| p.contains(a)) {
-                if let Some(BoundKey::Var(m)) = proven.get(cname).and_then(|m| m.get(a)) {
-                    if scalar_is_stable_var(m) {
-                        return true;
+                if let Some(len) = proven.get(cname).and_then(|m| m.get(a)) {
+                    if let Some(k) = rebase(len) {
+                        return Some(k);
                     }
                 }
             }
         }
-        false
+        None
     }
 
     /// Detect, validate, and emit the native-vec fn group. On any gap the group is left empty.
