@@ -9291,8 +9291,9 @@ impl Codegen {
         Some((name.to_string(), Self::bound_key_of(right)?, strict))
     }
 
-    /// A symbolic bound from an integer literal, a bare variable, or an `a.length` member read;
-    /// richer forms (`2 * n`, `a.length - 1`, …) are not modeled.
+    /// A symbolic bound from an integer literal, a bare variable, an `a.length` member read, or the
+    /// queens diagonal length `2 * n` / `n * 2` (`TwiceVar`); richer forms (`a.length - 1`, …) are not
+    /// modeled.
     fn bound_key_of(e: &Expr) -> Option<BoundKey> {
         match e {
             Expr::Literal {
@@ -9300,6 +9301,24 @@ impl Codegen {
                 ..
             } => Self::int_literal_value(*n).map(BoundKey::Const),
             Expr::Ident { name, .. } => Some(BoundKey::Var(name.to_string())),
+            // `2 * n` / `n * 2` — the fixed length of the queens occupancy diagonals (`diag1`/`diag2`
+            // are `2n` bools). As a fill bound it pins length `2n`; as a guard it bounds `i < 2n`.
+            Expr::Binary {
+                left,
+                op: BinOp::Mul,
+                right,
+                ..
+            } => {
+                let twice = |lit: &Expr, var: &Expr| -> Option<BoundKey> {
+                    if Self::int_literal_value_of(lit) == Some(2) {
+                        if let Expr::Ident { name, .. } = var {
+                            return Some(BoundKey::TwiceVar(name.to_string()));
+                        }
+                    }
+                    None
+                };
+                twice(left, right).or_else(|| twice(right, left))
+            }
             Expr::Member {
                 object,
                 prop: MemberProp::Name { name: p, .. },
@@ -15926,18 +15945,41 @@ impl Codegen {
                     if proven.get(fname).is_some_and(|m| m.contains_key(p_name)) {
                         continue;
                     }
-                    let all_ok = sites.iter().all(|(caller, _, args)| {
-                        args.len() == sig.params.len()
-                            && Self::nv_callsite_arg_len_ge(
-                                caller,
-                                args.get(pi),
-                                args.get(si),
-                                &params,
-                                &stable,
-                                &fixed,
-                                &proven,
-                            )
-                    });
+                    // A self-recursive call `f(.., p, ..)` that forwards `f`'s OWN array param `p_name`
+                    // (at the same position) together with `f`'s OWN stable scalar `s_name` (at the
+                    // bound position) preserves the length relation under the inductive hypothesis
+                    // (length(p) >= s holds at entry; the body never shrinks `p` — `classify_vec_param`
+                    // rejects shrinking ops — and `s` is stable). Such a site neither proves nor
+                    // disproves the bound on its own, so it must NOT block the non-recursive sites that
+                    // do; otherwise the `.all()` short-circuits on the recursive site and the fact can
+                    // never bootstrap. We require >=1 NON-recursive site so the bound rests on real
+                    // caller evidence, never on the inductive hypothesis alone.
+                    let is_inductive_self_fwd = |caller: &Option<String>, args: &[Expr]| -> bool {
+                        caller.as_deref() == Some(fname.as_str())
+                            && matches!(args.get(pi), Some(Expr::Ident { name, .. }) if name.as_ref() == p_name)
+                            && matches!(args.get(si), Some(Expr::Ident { name, .. }) if name.as_ref() == s_name)
+                            && stable.get(caller).is_some_and(|s| s.contains(s_name.as_str()))
+                    };
+                    let has_real_site = sites
+                        .iter()
+                        .any(|(caller, _, args)| !is_inductive_self_fwd(caller, args));
+                    let all_ok = has_real_site
+                        && sites.iter().all(|(caller, _, args)| {
+                            if is_inductive_self_fwd(caller, args) {
+                                return true;
+                            }
+                            let r = args.len() == sig.params.len()
+                                && Self::nv_callsite_arg_len_ge(
+                                    caller,
+                                    args.get(pi),
+                                    args.get(si),
+                                    &params,
+                                    &stable,
+                                    &fixed,
+                                    &proven,
+                                );
+                            r
+                        });
                     if all_ok {
                         proven
                             .entry(fname.clone())
