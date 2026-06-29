@@ -6215,6 +6215,20 @@ impl Codegen {
                         }
                     }
                     
+                    // #317: GENERAL higher-order-function chain fusion. A terminal HOF
+                    // (`reduce`/`forEach`/`find`/…) whose receiver is a chain of
+                    // `.filter(...)/.map(...)` over a boxed `Value` array, with simple inlinable
+                    // single-param closures, lowers to ONE native loop — no per-stage intermediate
+                    // array, no per-element boxed `value_call`. Generalises to any chain length and
+                    // any inlinable closure body (not pattern-matched to a fixture).
+                    if crate::native_opts_enabled() {
+                        if let Some(fused) =
+                            self.try_fused_hof_chain(method_name.as_ref(), object, args)?
+                        {
+                            return Ok(fused);
+                        }
+                    }
+
                     // Array methods
                     match method_name.as_ref() {
                         "push" => {
@@ -20281,6 +20295,338 @@ impl Codegen {
             obj = obj_expr,
             body = body_code
         )))
+    }
+
+    /// GENERAL higher-order-function chain fusion (#317).
+    ///
+    /// A *terminal* HOF (`reduce`/`forEach`/`find`/`findIndex`/`some`/`every`/`map`/`filter`)
+    /// whose receiver is a chain of `.filter(...)`/`.map(...)` calls over a boxed array, where
+    /// every stage's callback is a *simple inlinable closure* (a single-element-param arrow with an
+    /// expression body), lowers to ONE native loop that snapshots the source array once and applies
+    /// each predicate/transform/accumulator inline. This removes BOTH costs the boxed
+    /// `array_filter→array_map→array_reduce` path pays per stage: the intermediate array allocation
+    /// and the per-element boxed `value_call`.
+    ///
+    /// Generalises to any chain length and any inlinable closure body — it is NOT pattern-matched to
+    /// a specific fixture. Soundness (`Ok(None)` → unchanged boxed path) is preserved by declining
+    /// anything whose semantics the single-loop form can't reproduce exactly:
+    /// - a stage callback that is not a single-param simple-arrow with an expression body
+    ///   (block bodies, defaults, rest/destructured params),
+    /// - a callback that uses its **index** or **array** parameter — after a `filter` the element
+    ///   index in JS is the *intermediate* array's index, which a fused loop can't cheaply track, so
+    ///   any index/array use bails the whole chain,
+    /// - a chain with no `map`/`filter` stage (plain single HOFs keep their own fast paths),
+    /// - a `reduce` without an explicit initial value (the no-init "first element as seed" rule
+    ///   interacts with a preceding filter), or with a 3rd (index) callback param.
+    ///
+    /// Each inlined body is emitted with its param bound as a plain `Value` local; references to
+    /// outer free variables (e.g. a `reduce` that closes over a loop counter) resolve to the
+    /// enclosing scope exactly as the boxed closure would. Element values are threaded by `.clone()`,
+    /// matching the by-value `Value` semantics of the boxed path (incl. string `+`, `%`, etc.).
+    fn try_fused_hof_chain(
+        &mut self,
+        terminal: &str,
+        receiver: &Expr,
+        term_args: &[CallArg],
+    ) -> Result<Option<String>, CompileError> {
+        // The terminal must be a fuseable HOF.
+        let is_term = matches!(
+            terminal,
+            "reduce" | "forEach" | "find" | "findIndex" | "some" | "every" | "map" | "filter"
+        );
+        if !is_term {
+            return Ok(None);
+        }
+
+        // A simple inlinable arrow: exactly `arity` plain params (no defaults / rest / destructure)
+        // and an expression body. Returns the param names + the body expression.
+        fn simple_arrow<'a>(
+            arg: Option<&'a CallArg>,
+            arity: usize,
+        ) -> Option<(Vec<Arc<str>>, &'a Expr)> {
+            let CallArg::Expr(Expr::ArrowFunction { params, body, .. }) = arg? else {
+                return None;
+            };
+            if params.len() != arity {
+                return None;
+            }
+            let mut names = Vec::with_capacity(arity);
+            for p in params {
+                match p {
+                    FunParam::Simple(tp) if tp.default.is_none() => names.push(Arc::clone(&tp.name)),
+                    _ => return None,
+                }
+            }
+            let tishlang_ast::ArrowBody::Expr(be) = body else {
+                return None;
+            };
+            Some((names, be.as_ref()))
+        }
+
+        // A `map`/`filter` stage: (is_filter, param, body).
+        struct Stage<'a> {
+            is_filter: bool,
+            param: Arc<str>,
+            body: &'a Expr,
+        }
+
+        // Walk the receiver chain inward, collecting `map`/`filter` stages (outermost first; we
+        // reverse to source order below). Stop at the first non-`map`/`filter` receiver: the root.
+        let mut stages: Vec<Stage> = Vec::new();
+        let mut cur = receiver;
+        let root: &Expr = loop {
+            let Expr::Call { callee, args, .. } = cur else {
+                break cur;
+            };
+            let Expr::Member {
+                object,
+                prop: MemberProp::Name { name: m, .. },
+                optional: false,
+                ..
+            } = callee.as_ref()
+            else {
+                break cur;
+            };
+            let is_filter = match m.as_ref() {
+                "map" => false,
+                "filter" => true,
+                _ => break cur,
+            };
+            // A stage callback must be a single-param simple arrow (element only). Any index/array
+            // param use would change semantics after a filter, so a 2-param arrow bails the chain.
+            let Some((names, body)) = simple_arrow(args.first(), 1) else {
+                return Ok(None);
+            };
+            stages.push(Stage {
+                is_filter,
+                param: Arc::clone(&names[0]),
+                body,
+            });
+            cur = object.as_ref();
+        };
+
+        // Require at least one map/filter stage — a plain single terminal keeps its own fast paths.
+        if stages.is_empty() {
+            return Ok(None);
+        }
+        stages.reverse(); // source order: data.filter().map()...
+
+        // Parse the terminal callback (arity differs for reduce vs the rest).
+        let term_param: Arc<str>;
+        let term_acc: Option<Arc<str>>;
+        let term_body: &Expr;
+        let term_init: Option<&Expr>;
+        if terminal == "reduce" {
+            // `(acc, cur) => body`, plus an explicit initial value (no implicit-seed form).
+            if term_args.len() != 2 {
+                return Ok(None);
+            }
+            let Some((names, body)) = simple_arrow(term_args.first(), 2) else {
+                return Ok(None);
+            };
+            let CallArg::Expr(init_e) = &term_args[1] else {
+                return Ok(None);
+            };
+            term_acc = Some(Arc::clone(&names[0]));
+            term_param = Arc::clone(&names[1]);
+            term_body = body;
+            term_init = Some(init_e);
+        } else if terminal == "map" || terminal == "filter" {
+            let Some((names, body)) = simple_arrow(term_args.first(), 1) else {
+                return Ok(None);
+            };
+            term_param = Arc::clone(&names[0]);
+            term_acc = None;
+            term_body = body;
+            term_init = None;
+        } else {
+            // forEach / find / findIndex / some / every — single element-param predicate/visitor.
+            let Some((names, body)) = simple_arrow(term_args.first(), 1) else {
+                return Ok(None);
+            };
+            term_param = Arc::clone(&names[0]);
+            term_acc = None;
+            term_body = body;
+            term_init = None;
+        }
+
+        // If the root is a bare ident, no stage/terminal body may mention it (aliasing the array
+        // inside a callback could diverge from the boxed snapshot semantics). The typed Vec HOF
+        // path applies the same `pi_mentions` guard.
+        if let Expr::Ident { name: root_name, .. } = root {
+            let mentions = stages.iter().any(|s| crate::infer::pi_mentions(s.body, root_name))
+                || crate::infer::pi_mentions(term_body, root_name)
+                || term_init
+                    .map(|e| crate::infer::pi_mentions(e, root_name))
+                    .unwrap_or(false);
+            if mentions {
+                return Ok(None);
+            }
+        }
+
+        // ── Emit ────────────────────────────────────────────────────────────────────────────────
+        let root_code = self.emit_expr(root)?;
+
+        // Emit a body with `param` (and optional `acc`) bound as `Value` locals. `emit_expr` resolves
+        // the param ident through normal scope lookup (a plain non-typed local → clone-on-read).
+        let emit_inline = |this: &mut Self,
+                           binds: &[&Arc<str>],
+                           body: &Expr|
+         -> Result<String, CompileError> {
+            this.type_context.push_scope();
+            for n in binds {
+                // Bind as a `Value` local (default type) so reads emit `name.clone()`.
+                this.type_context.define(n.as_ref(), RustType::Value);
+            }
+            let r = this.emit_expr(body);
+            this.type_context.pop_scope();
+            r
+        };
+
+        // Build the per-element stage chain over the threaded element `__e: Value`.
+        let mut inner = String::new();
+        for s in &stages {
+            let pesc = Self::escape_ident(s.param.as_ref()).into_owned();
+            let body_code = emit_inline(self, &[&s.param], s.body)?;
+            if s.is_filter {
+                inner.push_str(&format!(
+                    "let {p}: Value = __e.clone(); if !({b}).is_truthy() {{ continue; }} ",
+                    p = pesc,
+                    b = body_code
+                ));
+            } else {
+                inner.push_str(&format!(
+                    "let {p}: Value = __e.clone(); __e = {b}; ",
+                    p = pesc,
+                    b = body_code
+                ));
+            }
+        }
+
+        // Wrap the stage chain + terminal into the final loop. `__snap` is the one-clone snapshot.
+        let prelude = format!(
+            "let __snap = tishlang_runtime::array_snapshot_values(&({root}));",
+            root = root_code
+        );
+
+        let code = match terminal {
+            "reduce" => {
+                let acc = term_acc.unwrap();
+                let aesc = Self::escape_ident(acc.as_ref()).into_owned();
+                let pesc = Self::escape_ident(term_param.as_ref()).into_owned();
+                let init_code = self.emit_expr(term_init.unwrap())?;
+                let term_code = emit_inline(self, &[&acc, &term_param], term_body)?;
+                format!(
+                    "{{ {prelude} let mut {acc}: Value = {init}; \
+                     for mut __e in __snap.into_iter() {{ {inner} \
+                     let {p}: Value = __e; {acc} = {term}; }} {acc} }}",
+                    prelude = prelude,
+                    acc = aesc,
+                    init = init_code,
+                    inner = inner,
+                    p = pesc,
+                    term = term_code
+                )
+            }
+            "forEach" => {
+                let pesc = Self::escape_ident(term_param.as_ref()).into_owned();
+                let term_code = emit_inline(self, &[&term_param], term_body)?;
+                format!(
+                    "{{ {prelude} for mut __e in __snap.into_iter() {{ {inner} \
+                     let {p}: Value = __e; let _ = {term}; }} Value::Null }}",
+                    prelude = prelude,
+                    inner = inner,
+                    p = pesc,
+                    term = term_code
+                )
+            }
+            "some" | "every" => {
+                let pesc = Self::escape_ident(term_param.as_ref()).into_owned();
+                let term_code = emit_inline(self, &[&term_param], term_body)?;
+                // `some`: false until a truthy predicate; `every`: true until a falsy one.
+                let (seed, test) = if terminal == "some" {
+                    (
+                        "false",
+                        format!("if ({pred}).is_truthy() {{ __res = true; break; }}", pred = term_code),
+                    )
+                } else {
+                    (
+                        "true",
+                        format!("if !({pred}).is_truthy() {{ __res = false; break; }}", pred = term_code),
+                    )
+                };
+                format!(
+                    "{{ {prelude} let mut __res = {seed}; \
+                     for mut __e in __snap.into_iter() {{ {inner} \
+                     let {p}: Value = __e; {test} }} Value::Bool(__res) }}",
+                    prelude = prelude,
+                    seed = seed,
+                    inner = inner,
+                    p = pesc,
+                    test = test
+                )
+            }
+            "find" => {
+                let pesc = Self::escape_ident(term_param.as_ref()).into_owned();
+                let term_code = emit_inline(self, &[&term_param], term_body)?;
+                format!(
+                    "{{ {prelude} let mut __res = Value::Null; \
+                     for mut __e in __snap.into_iter() {{ {inner} \
+                     let {p}: Value = __e; if ({pred}).is_truthy() {{ __res = {p}; break; }} }} __res }}",
+                    prelude = prelude,
+                    inner = inner,
+                    p = pesc,
+                    pred = term_code
+                )
+            }
+            "findIndex" => {
+                let pesc = Self::escape_ident(term_param.as_ref()).into_owned();
+                let term_code = emit_inline(self, &[&term_param], term_body)?;
+                // The index here is over the POST-chain element stream (matches JS: findIndex runs on
+                // the array produced by the preceding filter/map chain).
+                format!(
+                    "{{ {prelude} let mut __res = -1.0_f64; let mut __i = 0.0_f64; \
+                     for mut __e in __snap.into_iter() {{ {inner} \
+                     let {p}: Value = __e; if ({pred}).is_truthy() {{ __res = __i; break; }} __i += 1.0; }} \
+                     Value::Number(__res) }}",
+                    prelude = prelude,
+                    inner = inner,
+                    p = pesc,
+                    pred = term_code
+                )
+            }
+            "map" => {
+                let pesc = Self::escape_ident(term_param.as_ref()).into_owned();
+                let term_code = emit_inline(self, &[&term_param], term_body)?;
+                format!(
+                    "{{ {prelude} let mut __out: Vec<Value> = Vec::new(); \
+                     for mut __e in __snap.into_iter() {{ {inner} \
+                     let {p}: Value = __e; __out.push({term}); }} \
+                     Value::Array(VmRef::new(__out)) }}",
+                    prelude = prelude,
+                    inner = inner,
+                    p = pesc,
+                    term = term_code
+                )
+            }
+            "filter" => {
+                let pesc = Self::escape_ident(term_param.as_ref()).into_owned();
+                let term_code = emit_inline(self, &[&term_param], term_body)?;
+                format!(
+                    "{{ {prelude} let mut __out: Vec<Value> = Vec::new(); \
+                     for mut __e in __snap.into_iter() {{ {inner} \
+                     let {p}: Value = __e; if ({pred}).is_truthy() {{ __out.push({p}); }} }} \
+                     Value::Array(VmRef::new(__out)) }}",
+                    prelude = prelude,
+                    inner = inner,
+                    p = pesc,
+                    pred = term_code
+                )
+            }
+            _ => return Ok(None),
+        };
+
+        Ok(Some(code))
     }
 
     /// If `callee(args)` is `<Vec<f64>-ident>.reduce/map/filter/some/every(<arrow>)` and the

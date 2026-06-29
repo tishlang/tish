@@ -9,6 +9,20 @@ pub fn from_vec(v: Vec<Value>) -> Value {
     Value::Array(VmRef::new(v))
 }
 
+/// Snapshot an array `Value` into an owned `Vec<Value>` (one clone of the backing store),
+/// handling both the boxed [`Value::Array`] and packed [`Value::NumberArray`] reps. Non-array
+/// values snapshot as empty. Used by the fused HOF-chain lowering (#317): the chain iterates this
+/// snapshot once, so a `.filter(...).map(...).reduce(...)` runs as a single native loop with no
+/// per-stage intermediate array and no per-element boxed `value_call`. Cloning up front (rather
+/// than holding a borrow) keeps the fused body free to read the source array safely.
+pub fn snapshot_values(arr: &Value) -> Vec<Value> {
+    match arr {
+        Value::Array(a) => a.borrow().clone(),
+        Value::NumberArray(a) => a.borrow().iter().map(|&n| Value::Number(n)).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Get the length of an array.
 pub fn len(arr: &Value) -> Option<usize> {
     match arr {
