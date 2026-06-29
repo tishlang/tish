@@ -54,38 +54,65 @@ impl PartialEq for Key {
 }
 impl Eq for Key {}
 
+/// The single source of truth for hashing a key `Value`. Both [`Key`] (owned, the stored key) and
+/// [`KeyRef`] (borrowed, the lookup probe) delegate here so an owned key and a borrowed probe of an
+/// equal value hash identically — the invariant that makes the zero-clone borrow lookup sound.
+#[inline]
+fn hash_key_value<H: Hasher>(v: &Value, state: &mut H) {
+    match v {
+        Value::Number(n) => {
+            0u8.hash(state);
+            // Canonicalize so `Eq` partners hash together: `+0` and `-0` share a key, and every
+            // NaN is one key.
+            let bits = if *n == 0.0 {
+                0u64
+            } else if n.is_nan() {
+                0x7ff8_0000_0000_0000
+            } else {
+                n.to_bits()
+            };
+            bits.hash(state);
+        }
+        Value::String(s) => {
+            1u8.hash(state);
+            s.as_str().hash(state);
+        }
+        Value::Bool(b) => {
+            2u8.hash(state);
+            b.hash(state);
+        }
+        Value::Null => 3u8.hash(state),
+        // Reference / identity values: per-variant tag only; `ptr_eq` in `Eq` does the rest.
+        Value::Symbol(_) => 4u8.hash(state),
+        Value::Array(_) => 5u8.hash(state),
+        Value::NumberArray(_) => 6u8.hash(state),
+        Value::Object(_) => 7u8.hash(state),
+        _ => 8u8.hash(state),
+    }
+}
+
 impl Hash for Key {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        match &self.0 {
-            Value::Number(n) => {
-                0u8.hash(state);
-                // Canonicalize so `Eq` partners hash together: `+0` and `-0` share a key, and every
-                // NaN is one key.
-                let bits = if *n == 0.0 {
-                    0u64
-                } else if n.is_nan() {
-                    0x7ff8_0000_0000_0000
-                } else {
-                    n.to_bits()
-                };
-                bits.hash(state);
-            }
-            Value::String(s) => {
-                1u8.hash(state);
-                s.as_str().hash(state);
-            }
-            Value::Bool(b) => {
-                2u8.hash(state);
-                b.hash(state);
-            }
-            Value::Null => 3u8.hash(state),
-            // Reference / identity values: per-variant tag only; `ptr_eq` in `Eq` does the rest.
-            Value::Symbol(_) => 4u8.hash(state),
-            Value::Array(_) => 5u8.hash(state),
-            Value::NumberArray(_) => 6u8.hash(state),
-            Value::Object(_) => 7u8.hash(state),
-            _ => 8u8.hash(state),
-        }
+        hash_key_value(&self.0, state);
+    }
+}
+
+/// Borrowed look-up probe for [`Key`]: wraps `&Value` so `get`/`contains_key`/`shift_remove` can
+/// query the store **without cloning the key into an owned `Key`** (no `Value` clone, no `Arc` bump).
+/// It hashes via [`hash_key_value`] (identical to `Key`) and compares via [`same_value_zero`]
+/// (identical to `Key`'s `Eq`), so it is `Equivalent<Key>` — the lookup is a drop-in for `&Key`.
+/// Only `set`/`add` (which must *store* the key) still build an owned `Key`.
+struct KeyRef<'a>(&'a Value);
+
+impl Hash for KeyRef<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_key_value(self.0, state);
+    }
+}
+
+impl indexmap::Equivalent<Key> for KeyRef<'_> {
+    fn equivalent(&self, key: &Key) -> bool {
+        same_value_zero(self.0, &key.0)
     }
 }
 
@@ -131,17 +158,18 @@ fn map_store(map: &Value) -> Option<Store> {
 }
 
 /// Direct `Map.prototype.has` — skips bound-method `get_prop` + `value_call` (k-nucleotide hot path).
+/// Looks up via a borrowed [`KeyRef`]: no key clone, no owned `Key` allocation.
 pub fn map_has(map: &Value, key: &Value) -> Value {
     match map_store(map) {
-        Some(s) => Value::Bool(s.borrow().contains_key(&Key(key.clone()))),
+        Some(s) => Value::Bool(s.borrow().contains_key(&KeyRef(key))),
         None => Value::Bool(false),
     }
 }
 
-/// Direct `Map.prototype.get`.
+/// Direct `Map.prototype.get`. Looks up via a borrowed [`KeyRef`] (no key clone / no owned `Key`).
 pub fn map_get(map: &Value, key: &Value) -> Value {
     match map_store(map) {
-        Some(s) => s.borrow().get(&Key(key.clone())).cloned().unwrap_or(Value::Null),
+        Some(s) => s.borrow().get(&KeyRef(key)).cloned().unwrap_or(Value::Null),
         None => Value::Null,
     }
 }
@@ -242,8 +270,8 @@ pub fn set_instance(initial: &[Value]) -> Value {
         m.insert(
             Arc::from("has"),
             Value::native(move |args: &[Value]| {
-                let v = args.first().cloned().unwrap_or(Value::Null);
-                Value::Bool(s.borrow().contains_key(&Key(v)))
+                let v = args.first().unwrap_or(&Value::Null);
+                Value::Bool(s.borrow().contains_key(&KeyRef(v)))
             }),
         );
     }
@@ -252,9 +280,9 @@ pub fn set_instance(initial: &[Value]) -> Value {
         m.insert(
             Arc::from("delete"),
             Value::native(move |args: &[Value]| {
-                let v = args.first().cloned().unwrap_or(Value::Null);
+                let v = args.first().unwrap_or(&Value::Null);
                 // `shift_remove` preserves iteration order (vs `swap_remove`).
-                Value::Bool(s.borrow_mut().shift_remove(&Key(v)).is_some())
+                Value::Bool(s.borrow_mut().shift_remove(&KeyRef(v)).is_some())
             }),
         );
     }
@@ -345,8 +373,8 @@ pub fn map_instance(pairs: &[Value]) -> Value {
         m.insert(
             Arc::from("get"),
             Value::native(move |args: &[Value]| {
-                let key = args.first().cloned().unwrap_or(Value::Null);
-                s.borrow().get(&Key(key)).cloned().unwrap_or(Value::Null)
+                let key = args.first().unwrap_or(&Value::Null);
+                s.borrow().get(&KeyRef(key)).cloned().unwrap_or(Value::Null)
             }),
         );
     }
@@ -355,8 +383,8 @@ pub fn map_instance(pairs: &[Value]) -> Value {
         m.insert(
             Arc::from("has"),
             Value::native(move |args: &[Value]| {
-                let key = args.first().cloned().unwrap_or(Value::Null);
-                Value::Bool(s.borrow().contains_key(&Key(key)))
+                let key = args.first().unwrap_or(&Value::Null);
+                Value::Bool(s.borrow().contains_key(&KeyRef(key)))
             }),
         );
     }
@@ -365,8 +393,8 @@ pub fn map_instance(pairs: &[Value]) -> Value {
         m.insert(
             Arc::from("delete"),
             Value::native(move |args: &[Value]| {
-                let key = args.first().cloned().unwrap_or(Value::Null);
-                Value::Bool(s.borrow_mut().shift_remove(&Key(key)).is_some())
+                let key = args.first().unwrap_or(&Value::Null);
+                Value::Bool(s.borrow_mut().shift_remove(&KeyRef(key)).is_some())
             }),
         );
     }

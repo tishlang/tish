@@ -998,6 +998,22 @@ pub fn js_number_to_string_into(out: &mut String, value: f64) {
         return;
     }
 
+    // Fast path for exact integers within ±2^53 (the f64 "safe integer" range). ECMAScript ToString
+    // renders any such integer in plain decimal (no sign-exponent — magnitude < 1e21 ⇒ `point <= 21`
+    // in the general algorithm below), which `itoa` emits directly, bypassing the `format!("{:e}")`
+    // round-trip + intermediate `String`/`char`-filter/`"0".repeat()`. This is the dominant case for
+    // tally/counter/index loops (e.g. map keys like `"w" + (n % 1000)`). Bit-identical to the general
+    // path for every integer it accepts: each such value is exactly representable in both f64 and i64,
+    // so `value as i64` is exact (no saturation — `±2^53` is well inside i64), and the decimal form is
+    // the same digits the general path would emit. Larger integers (where f64 can't represent
+    // consecutive values) fall through to the general path unchanged.
+    const MAX_SAFE_INT: f64 = 9_007_199_254_740_992.0; // 2^53
+    if value.fract() == 0.0 && value.abs() <= MAX_SAFE_INT {
+        let mut buf = itoa::Buffer::new();
+        out.push_str(buf.format(value as i64));
+        return;
+    }
+
     let negative = value < 0.0;
     // Shortest round-trip digits + base-10 exponent, e.g. "6.022e23" → ("6022", 23).
     let sci = format!("{:e}", value.abs());
@@ -1402,6 +1418,14 @@ mod number_to_string_tests {
             (0.5, "0.5"),
             (-123.456, "-123.456"),
             (100000.0, "100000"),
+            (-1000.0, "-1000"),
+            // Integer fast-path boundary (±2^53): the largest safe integer takes the itoa path; the
+            // next decade up (still an exact f64 integer, but > 2^53) takes the general path. Both must
+            // match Node's `String(value)`.
+            (9007199254740992.0, "9007199254740992"), // 2^53
+            (9007199254740991.0, "9007199254740991"), // 2^53 - 1 (Number.MAX_SAFE_INTEGER)
+            (-9007199254740992.0, "-9007199254740992"),
+            (1e16, "10000000000000000"), // > 2^53, exact f64 integer → general path
             // Decimal/exponential boundary on the large side: 1e21 flips to exponential.
             (1e20, "100000000000000000000"),
             (1e21, "1e+21"),
