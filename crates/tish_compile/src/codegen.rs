@@ -6911,8 +6911,17 @@ impl Codegen {
                         .iter()
                         .filter(|p| matches!(p, ObjectProp::KeyValue(..)))
                         .count();
+                    // Shape-preserving spread: when the FIRST property is a spread (the ubiquitous
+                    // `{ ...base, k: v }` immutable-update form — Redux/React/config-merge), seed the
+                    // result by *cloning* the source `PropMap` wholesale. A structural copy carries the
+                    // hidden-class `shape` id across and skips the per-key re-insert that `merge_from`
+                    // pays (each insert does a dedup scan + shape transition). Later props (literals,
+                    // further spreads) apply on top in source order, so override semantics are
+                    // unchanged. A non-object spread (`{ ...null }`, `{ ...5 }`) seeds an empty map,
+                    // matching JS.
+                    let mut init = String::new();
                     let mut parts = Vec::new();
-                    for prop in props {
+                    for (i, prop) in props.iter().enumerate() {
                         match prop {
                             ObjectProp::KeyValue(k, v, _) => {
                                 let val = self.emit_expr(v)?;
@@ -6924,15 +6933,22 @@ impl Codegen {
                             }
                             ObjectProp::Spread(e) => {
                                 let val = self.emit_expr(e)?;
-                                // `merge_from` reserves for the source's len, then inserts in one
-                                // pass (later props still override earlier keys, matching JS order).
-                                parts.push(format!("if let Value::Object(ref _spread) = {} {{ _obj.merge_from(&_spread.borrow().strings); }}", val));
+                                if i == 0 {
+                                    init = format!("let mut _obj: PropMap = if let Value::Object(ref _spread) = {} {{ _spread.borrow().strings.clone() }} else {{ PropMap::with_capacity({}) }};", val, literal_keys);
+                                } else {
+                                    // `merge_from` reserves for the source's len, then inserts in one
+                                    // pass (later props still override earlier keys, matching JS order).
+                                    parts.push(format!("if let Value::Object(ref _spread) = {} {{ _obj.merge_from(&_spread.borrow().strings); }}", val));
+                                }
                             }
                         }
                     }
+                    if init.is_empty() {
+                        init = format!("let mut _obj: PropMap = PropMap::with_capacity({});", literal_keys);
+                    }
                     format!(
-                        "{{ let mut _obj: PropMap = PropMap::with_capacity({}); {} Value::Object(VmRef::new(ObjectData {{ strings: _obj, symbols: None }})) }}",
-                        literal_keys,
+                        "{{ {} {} Value::Object(VmRef::new(ObjectData {{ strings: _obj, symbols: None }})) }}",
+                        init,
                         parts.join(" ")
                     )
                 } else {
