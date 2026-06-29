@@ -5277,6 +5277,23 @@ impl Codegen {
         self.emit_expr(e)
     }
 
+    /// #317: if `expr` lowers to a native Rust `String` (`RustType::String`), return a borrowed
+    /// `&str` expression (`(<code>).as_str()`) so string char/index/length ops can BORROW it rather
+    /// than deep-clone it into a fresh `Value::String` per call. Returns `None` for any other type
+    /// (the caller keeps the boxed path). `emit_typed_expr` is the single evaluation of `expr` on the
+    /// fast path (the boxed `obj_expr` is discarded when this fires), so there's no double-eval.
+    fn typed_string_receiver(
+        &mut self,
+        expr: &Expr,
+    ) -> Result<Option<String>, CompileError> {
+        let (code, ty) = self.emit_typed_expr(expr)?;
+        if ty == RustType::String {
+            Ok(Some(format!("({}).as_str()", code)))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn emit_call_args(&mut self, args: &[CallArg]) -> Result<String, CompileError> {
         let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
         if has_spread {
@@ -5579,6 +5596,27 @@ impl Codegen {
                     let arg_exprs: Result<Vec<_>, _> =
                         args.iter().map(|a| self.emit_call_arg(a)).collect();
                     let arg_exprs = arg_exprs?;
+
+                    // #317: typed-`String` (RustType::String) receiver — borrow the Rust String
+                    // (`s.as_str()`) instead of deep-cloning it into a `Value::String` per call.
+                    // Only `charCodeAt`/`charAt`/`at` with exactly one index argument; everything
+                    // else falls through to the boxed dispatch below (unchanged).
+                    if matches!(method_name.as_ref(), "charCodeAt" | "charAt" | "at")
+                        && args.len() == 1
+                    {
+                        if let Some(str_expr) = self.typed_string_receiver(object)? {
+                            let idx = &arg_exprs[0];
+                            let f = match method_name.as_ref() {
+                                "charCodeAt" => "str_char_code_at",
+                                "charAt" => "str_char_at",
+                                _ => "str_at",
+                            };
+                            return Ok(format!(
+                                "tishlang_runtime::{}({}, &{})",
+                                f, str_expr, idx
+                            ));
+                        }
+                    }
 
                     // #181: `new Map()` locals — direct store access (Bun/JSC-style monomorphic site).
                     if let Expr::Ident { name: map_name, .. } = object.as_ref() {
@@ -19185,6 +19223,17 @@ impl Codegen {
                                 }
                             }
                         }
+                    }
+                }
+                // Typed `String` receiver `s[i]`: borrow the Rust String and index via `&str`, instead
+                // of boxing it into a fresh `Value::String(s.clone().into())` (a full copy per access).
+                if !*optional {
+                    if let Some(str_expr) = self.typed_string_receiver(object)? {
+                        let idx = self.emit_expr(index)?;
+                        return Ok((
+                            format!("tishlang_runtime::str_index({}, &{})", str_expr, idx),
+                            RustType::Value,
+                        ));
                     }
                 }
                 // Value fallback: emit runtime code directly to avoid cycles

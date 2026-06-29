@@ -217,6 +217,84 @@ pub fn value_at(recv: &Value, idx: &Value) -> Value {
 pub fn string_char_code_at(s: &Value, idx: &Value) -> Value {
     string_char_code_at_impl(s, idx)
 }
+
+// ── #317: typed-`String` (RustType::String) receiver fast paths ───────────────────────────────
+//
+// When native codegen knows the receiver of `s.charCodeAt(i)` / `s.charAt(i)` / `s.at(i)` / `s[i]`
+// / `s.length` is a Rust `String` local (the `TISH_NATIVE_OPT` default), it can BORROW the string
+// (`s.as_str()`) instead of deep-cloning it into a fresh `Value::String(ArcStr)` on every call. The
+// boxed path's `s.clone().into()` is an O(n) copy of the whole string per call — O(n²) in a strided
+// scan loop. These `&str` entry points eliminate that per-call copy.
+//
+// Indexing is by Unicode SCALAR (code point), byte-identical to `s.chars().nth(i)` /
+// `s.chars().count()` — the same semantics as the boxed builtins (`tishlang_builtins::string`).
+// `chars().nth(idx)` is O(idx) per call (acceptable: the win is removing the O(n) copy), versus the
+// boxed cursor cache's O(1)-for-ASCII; correctness is identical either way.
+
+#[inline]
+fn idx_as_usize(idx: &Value) -> usize {
+    match idx {
+        Value::Number(n) => *n as usize,
+        _ => 0,
+    }
+}
+
+/// `&str` charCodeAt — code point at `idx` as f64; OOB → NaN. Mirrors `string::char_code_at`.
+#[inline]
+pub fn str_char_code_at(s: &str, idx: &Value) -> Value {
+    match s.chars().nth(idx_as_usize(idx)) {
+        Some(c) => Value::Number(c as u32 as f64),
+        None => Value::Number(f64::NAN),
+    }
+}
+
+/// `&str` charAt — 1-char string at `idx`; OOB → `""`. Mirrors `string::char_at`.
+#[inline]
+pub fn str_char_at(s: &str, idx: &Value) -> Value {
+    match s.chars().nth(idx_as_usize(idx)) {
+        Some(c) => Value::String(c.to_string().into()),
+        None => Value::String("".into()),
+    }
+}
+
+/// `&str` String.prototype.at — negative `idx` counts from the end; OOB → null. Mirrors `string::at`.
+#[inline]
+pub fn str_at(s: &str, idx: &Value) -> Value {
+    let i = match idx {
+        Value::Number(n) => *n as i64,
+        _ => 0,
+    };
+    let resolved = if i < 0 {
+        s.chars().count() as i64 + i
+    } else {
+        i
+    };
+    if resolved >= 0 {
+        if let Some(c) = s.chars().nth(resolved as usize) {
+            return Value::String(c.to_string().into());
+        }
+    }
+    Value::Null
+}
+
+/// `&str` `s[i]` — char at a non-negative integer `idx`; non-int / negative / OOB → null.
+/// Mirrors the `Value::String` arm of [`get_index`].
+#[inline]
+pub fn str_index(s: &str, idx: &Value) -> Value {
+    match idx {
+        Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => match s.chars().nth(*n as usize) {
+            Some(c) => Value::String(c.to_string().into()),
+            None => Value::Null,
+        },
+        _ => Value::Null,
+    }
+}
+
+/// `&str` `.length` — Unicode scalar (code point) count as f64. Mirrors `string::char_count`.
+#[inline]
+pub fn str_char_count(s: &str) -> f64 {
+    s.chars().count() as f64
+}
 pub fn string_repeat(s: &Value, count: &Value) -> Value {
     string_repeat_impl(s, count)
 }
