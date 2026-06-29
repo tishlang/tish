@@ -11,6 +11,10 @@ use tishlang_builtins::helpers::make_error_value;
 
 pub use tishlang_builtins::symbol::symbol_object;
 pub use tishlang_core::ObjectMap;
+// `ObjectData`/`PropMap` are the concrete object representation. Re-exported so the
+// native codegen can build an object literal's `PropMap` directly (pre-sized, single
+// pass) instead of materializing an intermediate `AHashMap` and rebuilding from it.
+pub use tishlang_core::{ObjectData, PropMap};
 pub use tishlang_core::Value;
 pub use tishlang_core::ArcStr;
 /// Used by native codegen for `f()` / `obj()` dispatch (`Value::Function` or `__call` on objects).

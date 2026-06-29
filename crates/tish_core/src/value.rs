@@ -591,6 +591,37 @@ impl PropMap {
             m.reserve(additional);
         }
     }
+
+    /// Merge every entry of `other` into `self`, in `other`'s insertion order.
+    ///
+    /// Existing keys are overwritten (last write wins), so this preserves JS object-spread
+    /// semantics: `{ ...a, ...b }` lets `b` override `a`. The work is pre-sized — if the merge
+    /// would push the result past the inline threshold we promote to an `IndexMap` once, with the
+    /// final capacity, instead of growing/rehashing one key at a time. The native codegen calls
+    /// this for every `{ ...src }` spread, replacing the old "rebuild via AHashMap" path.
+    pub fn merge_from(&mut self, other: &PropMap) {
+        let incoming = other.len();
+        if incoming == 0 {
+            return;
+        }
+        // If the combined worst-case size escapes inline storage, promote once up front so the
+        // per-key inserts below never reallocate or re-promote.
+        if self.map.is_none() && self.inline.len() + incoming > PROPMAP_INLINE {
+            let mut m: IndexMap<Arc<str>, Value, ahash::RandomState> = IndexMap::with_capacity_and_hasher(
+                self.inline.len() + incoming,
+                ahash::RandomState::default(),
+            );
+            for (k, v) in self.inline.drain(..) {
+                m.insert(k, v);
+            }
+            self.map = Some(Box::new(m));
+        } else if let Some(m) = &mut self.map {
+            m.reserve(incoming);
+        }
+        for (k, v) in other.iter() {
+            self.insert(Arc::clone(k), v.clone());
+        }
+    }
 }
 
 impl FromIterator<(Arc<str>, Value)> for PropMap {
@@ -1398,6 +1429,93 @@ mod number_to_string_tests {
         for &(value, expected) in cases {
             assert_eq!(js_number_to_string(value), expected, "for {value:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod propmap_merge_tests {
+    use super::{PropMap, Value, PROPMAP_INLINE};
+    use std::sync::Arc;
+
+    fn pm(pairs: &[(&str, f64)]) -> PropMap {
+        let mut m = PropMap::default();
+        for (k, v) in pairs {
+            m.insert(Arc::from(*k), Value::Number(*v));
+        }
+        m
+    }
+
+    fn keys(m: &PropMap) -> Vec<String> {
+        m.keys().map(|k| k.to_string()).collect()
+    }
+
+    fn num(m: &PropMap, k: &str) -> Option<f64> {
+        match m.get(k) {
+            Some(Value::Number(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn merge_appends_new_keys_in_source_order() {
+        let mut dst = pm(&[("a", 1.0), ("b", 2.0)]);
+        dst.merge_from(&pm(&[("c", 3.0), ("d", 4.0)]));
+        assert_eq!(keys(&dst), ["a", "b", "c", "d"]);
+        assert_eq!(num(&dst, "c"), Some(3.0));
+    }
+
+    #[test]
+    fn merge_overwrites_existing_keys_without_reordering() {
+        // `{ ...{a,b,c}, b: 20 }` — later write wins, key keeps its original slot.
+        let mut dst = pm(&[("a", 1.0), ("b", 2.0), ("c", 3.0)]);
+        dst.merge_from(&pm(&[("b", 20.0), ("d", 4.0)]));
+        assert_eq!(keys(&dst), ["a", "b", "c", "d"]);
+        assert_eq!(num(&dst, "b"), Some(20.0));
+        assert_eq!(num(&dst, "d"), Some(4.0));
+    }
+
+    #[test]
+    fn merge_empty_source_is_noop() {
+        let mut dst = pm(&[("a", 1.0)]);
+        dst.merge_from(&PropMap::default());
+        assert_eq!(keys(&dst), ["a"]);
+    }
+
+    #[test]
+    fn merge_promotes_past_inline_threshold_preserving_order_and_overrides() {
+        // Combined unique key count exceeds the inline cap, forcing the IndexMap promotion path.
+        let mut dst = PropMap::default();
+        for i in 0..PROPMAP_INLINE {
+            dst.insert(Arc::from(format!("k{i}").as_str()), Value::Number(i as f64));
+        }
+        let mut src = PropMap::default();
+        // Overwrite one existing key and add several new ones to cross the threshold.
+        src.insert(Arc::from("k0"), Value::Number(100.0));
+        for i in PROPMAP_INLINE..(PROPMAP_INLINE + 5) {
+            src.insert(Arc::from(format!("k{i}").as_str()), Value::Number(i as f64));
+        }
+        dst.merge_from(&src);
+        assert_eq!(dst.len(), PROPMAP_INLINE + 5);
+        assert_eq!(num(&dst, "k0"), Some(100.0)); // override applied
+        assert_eq!(num(&dst, "k0").is_some(), keys(&dst).first().map(|k| k == "k0").unwrap());
+        // Original keys come first (insertion order), then the new ones.
+        let ks = keys(&dst);
+        assert_eq!(ks[0], "k0");
+        assert_eq!(ks[PROPMAP_INLINE], format!("k{PROPMAP_INLINE}"));
+        // Lookups remain correct after promotion.
+        for i in PROPMAP_INLINE..(PROPMAP_INLINE + 5) {
+            assert_eq!(num(&dst, &format!("k{i}")), Some(i as f64));
+        }
+    }
+
+    #[test]
+    fn merge_into_empty_matches_clone() {
+        let src = pm(&[("x", 7.0), ("y", 8.0)]);
+        let mut dst = PropMap::default();
+        dst.merge_from(&src);
+        assert_eq!(keys(&dst), keys(&src));
+        assert_eq!(num(&dst, "x"), Some(7.0));
+        assert_eq!(num(&dst, "y"), Some(8.0));
     }
 }
 
