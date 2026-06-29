@@ -350,20 +350,25 @@ impl RustType {
                 )
             }
             RustType::Named { name, fields } => {
-                // Each field is fetched out of the Value::Object via
-                // `get_prop` and converted to its native type. Falls back
-                // to the field's `default_value()` if the field is absent
-                // (rare — usually these come from JSON or PG).
+                // Each field is fetched out of the Value::Object via `get_prop` and converted to its
+                // native type. The source Value is bound ONCE to `_src` so a non-trivial `value_expr`
+                // (an object literal, a call, …) is evaluated a single time instead of being textually
+                // re-inlined per field (which would re-allocate the whole object N times). Missing
+                // fields fall back to `default_value()` (rare — usually these come from JSON or PG).
                 let field_assigns = fields
                     .iter()
                     .map(|(k, ty)| {
-                        let fetch =
-                            format!("tishlang_runtime::get_prop(&{}, {:?})", value_expr, k.as_ref());
+                        let fetch = format!("tishlang_runtime::get_prop(&_src, {:?})", k.as_ref());
                         format!("{}: {}", field_ident(k), ty.from_value_expr(&fetch))
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("{} {{ {} }}", named_struct_ident(name), field_assigns)
+                format!(
+                    "{{ let _src = {}; {} {{ {} }} }}",
+                    value_expr,
+                    named_struct_ident(name),
+                    field_assigns
+                )
             }
             _ => value_expr.to_string(), // Fallback
         }

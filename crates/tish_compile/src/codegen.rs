@@ -5972,6 +5972,33 @@ impl Codegen {
         }
     }
 
+    /// True only if a CSE candidate lowers to a boxed `Value` — the case where re-fetching it is
+    /// genuinely expensive (an `Rc` bump + clone, or a hash lookup). A *native* typed access (a
+    /// struct field, an `f64`/`Vec<struct>` element) must NOT be hoisted: the read is already a cheap
+    /// offset load, and materializing it into a `Value` temp would force a boxing round-trip — e.g.
+    /// rebuilding a whole `Value::object` from a `Vec<Struct>` element on every iteration, which made
+    /// typed array-of-records ~13× slower than the boxed build. Conservative: only ident-based index/
+    /// member accesses with a known boxed type are hoisted; anything else is left un-hoisted.
+    fn cse_result_is_boxed(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Index { object, .. } => match object.as_ref() {
+                Expr::Ident { name, .. } => match self.type_context.get_type(name.as_ref()) {
+                    RustType::Vec(inner) => *inner == RustType::Value,
+                    RustType::Value => true,
+                    _ => false,
+                },
+                _ => false,
+            },
+            Expr::Member { object, .. } => match object.as_ref() {
+                Expr::Ident { name, .. } => {
+                    matches!(self.type_context.get_type(name.as_ref()), RustType::Value)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     /// Compute the CSE bindings to apply to `stmt_expr`: pairs of (candidate, temp-name), ordered
     /// innermost-first. Returns empty when CSE is disabled, not beneficial, or not provably safe.
     fn cse_plan_for_expr(&mut self, stmt_expr: &Expr) -> Vec<(Expr, String)> {
@@ -5999,6 +6026,10 @@ impl Codegen {
                 let mut refs = HashSet::new();
                 Self::cse_referenced_idents(cand, &mut refs);
                 refs.is_disjoint(&assigned)
+                    // ...and only hoist boxed-Value accesses. Hoisting a native typed access (struct
+                    // field / Vec<struct> element) would box it into a Value temp — a per-iteration
+                    // round-trip that pessimized typed array-of-records ~13×.
+                    && self.cse_result_is_boxed(cand)
             })
             .map(|(c, _)| c)
             .collect();
@@ -6172,14 +6203,13 @@ impl Codegen {
                                     let mut push_stmts: Vec<String> = Vec::new();
                                     for a in args {
                                         if let CallArg::Expr(e) = a {
-                                            let (val_code, val_ty) = self.emit_typed_expr(e)?;
-                                            let native_val = if val_ty == *elem_type {
-                                                val_code
-                                            } else if val_ty == RustType::Value {
-                                                elem_type.from_value_expr(&val_code)
-                                            } else {
-                                                val_code
-                                            };
+                                            // Emit the element AGAINST the Vec's element type so an object
+                                            // literal hits the struct-literal fast path (direct `Struct { … }`
+                                            // with each field value emitted natively — zero allocations)
+                                            // instead of building a boxed `object_from_pairs` and then
+                                            // `get_prop`-ing every field back out. emit_native_expr falls
+                                            // back to the typed/value path for non-literal args.
+                                            let native_val = self.emit_native_expr(e, elem_type.as_ref())?;
                                             push_stmts.push(format!("{}.push({});", esc_obj, native_val));
                                         }
                                     }
