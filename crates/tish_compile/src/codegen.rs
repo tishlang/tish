@@ -6112,6 +6112,11 @@ impl Codegen {
                     }
                 }
                 let obj = self.emit_expr(object)?;
+                // A literal (non-computed) key other than `size` is eligible for a per-site
+                // polymorphic inline cache (#179). `size` is excluded because `get_prop` special-cases
+                // it (Map/Set computed `.size`); computed keys vary per call so a slot cache can't help.
+                let ic_eligible =
+                    matches!(prop, MemberProp::Name { name, .. } if name.as_ref() != "size");
                 let key = match prop {
                     MemberProp::Name { name, .. } => format!("{:?}", name.as_ref()),
                     MemberProp::Expr(e) => {
@@ -6123,6 +6128,15 @@ impl Codegen {
                     format!(
                         "{{ let o = {}.clone(); if matches!(o, Value::Null) {{ Value::Null }} else {{ \
                          tishlang_runtime::get_prop(&o, {}) }} }}",
+                        obj, key
+                    )
+                } else if ic_eligible {
+                    // Per-site inline cache: a block-scoped `static` cell unique to this member-read
+                    // site (#179). Caches (shape, slot) so repeat reads skip the key scan. Behaviour is
+                    // identical to `get_prop` — non-cacheable objects fall through inside `get_prop_ic`.
+                    format!(
+                        "{{ static IC: tishlang_runtime::PropIC = tishlang_runtime::PropIC::new(); \
+                         tishlang_runtime::get_prop_ic(&{}, {}, &IC) }}",
                         obj, key
                     )
                 } else {
