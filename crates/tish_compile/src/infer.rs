@@ -1253,6 +1253,32 @@ fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx)
                 });
                 continue;
             }
+            // (d) Array of uniform records: `let rows = []` (or `[{lits}]`) built by
+            // `rows.push({uniform primitive object literal})` and used only as `rows[i].field`
+            // reads / `rows.length`. Lower to a native `Vec<struct>` — the struct path emits direct
+            // field access and (post-#350) allocation-free construction. Conservative: any other use
+            // of the binding (escape, element/field write, for-of, bare ref) leaves it boxed.
+            if let Some(fields) = record_array_fields(name.as_ref(), elements, &stmts[i + 1..], ctx) {
+                let keys: std::collections::HashSet<&str> =
+                    fields.iter().map(|(k, _)| k.as_ref()).collect();
+                if rec_arr_uses_safe(name.as_ref(), &keys, &stmts[i + 1..]) {
+                    let alias = reg.intern(&fields);
+                    let arr_ann = TypeAnnotation::Array(Box::new(TypeAnnotation::Simple(
+                        alias.as_str().into(),
+                        tishlang_ast::Span::default(),
+                    )));
+                    ctx.define(name.as_ref(), arr_ann.clone());
+                    out.push(Statement::VarDecl {
+                        name: name.clone(),
+                        name_span: *name_span,
+                        mutable: *mutable,
+                        type_ann: Some(arr_ann),
+                        init: stmt_init_clone(stmt),
+                        span: *span,
+                    });
+                    continue;
+                }
+            }
         }
         // Candidate: `let o = { ...object literal... }` with no annotation.
         if let Statement::VarDecl {
@@ -1439,6 +1465,227 @@ fn si_recurse(stmt: &Statement, reg: &mut StructRegistry, ctx: &mut InferCtx) ->
 /// shapes also return false, so this can never wrongly green-light.
 fn uses_are_struct_safe(name: &str, keys: &std::collections::HashSet<&str>, tail: &[Statement]) -> bool {
     tail.iter().all(|s| stmt_name_safe(s, name, keys))
+}
+
+// ── array-of-records inference (`let rows = []; rows.push({…}); rows[i].field`) ───────────────────
+// Lowers an untyped local array of uniform primitive records to a native `Vec<struct>`, so the
+// struct codegen emits direct field access + (post-#350) allocation-free construction. Conservative:
+// only fires when the binding is used solely as `push({uniform literal})`, `name[i].<key>` reads, and
+// `name.length` — any other use leaves it a boxed `Value[]`.
+
+/// Compare two inferred record shapes for equality, order-independently (same keys + field types).
+fn fields_eq(
+    a: &[(std::sync::Arc<str>, TypeAnnotation)],
+    b: &[(std::sync::Arc<str>, TypeAnnotation)],
+) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut av: Vec<(String, String)> =
+        a.iter().map(|(k, t)| (k.to_string(), type_canon(t))).collect();
+    let mut bv: Vec<(String, String)> =
+        b.iter().map(|(k, t)| (k.to_string(), type_canon(t))).collect();
+    av.sort();
+    bv.sort();
+    av == bv
+}
+
+/// Fold one object literal's shape into the running record shape, flagging `*ok=false` on any
+/// non-uniform or non-primitive literal.
+fn record_shape_consider(
+    shape: &mut Option<Vec<(std::sync::Arc<str>, TypeAnnotation)>>,
+    ok: &mut bool,
+    props: &[tishlang_ast::ObjectProp],
+    ctx: &InferCtx,
+) {
+    match infer_object_shape(props, ctx) {
+        Some(f) => match shape {
+            None => *shape = Some(f),
+            Some(prev) => {
+                if !fields_eq(prev, &f) {
+                    *ok = false;
+                }
+            }
+        },
+        None => *ok = false,
+    }
+}
+
+/// Infer the common record shape of candidate array-of-records `name`: unify the shapes of its
+/// initial object-literal elements and every `name.push({…})` in `tail`. Returns the field list, or
+/// None if there is no object shape, the literals disagree, or a push arg is not a uniform primitive
+/// object literal. Loop vars in the literals (`{ x: i }`) are typed by seeding numeric locals first.
+fn record_array_fields(
+    name: &str,
+    init_elements: &[tishlang_ast::ArrayElement],
+    tail: &[Statement],
+    ctx: &InferCtx,
+) -> Option<Vec<(std::sync::Arc<str>, TypeAnnotation)>> {
+    // Seed numeric block-locals (incl. enclosing loop vars) so `{ x: i, y: i * 2 }` field values type.
+    let mut sctx = ctx.clone();
+    for _ in 0..4 {
+        for s in tail {
+            seed_numeric_locals(s, &mut sctx);
+        }
+    }
+    let mut shape: Option<Vec<(std::sync::Arc<str>, TypeAnnotation)>> = None;
+    let mut ok = true;
+    for el in init_elements {
+        match el {
+            tishlang_ast::ArrayElement::Expr(Expr::Object { props, .. }) => {
+                record_shape_consider(&mut shape, &mut ok, props, &sctx);
+            }
+            _ => return None,
+        }
+        if !ok {
+            return None;
+        }
+    }
+    for s in tail {
+        walk_exprs_stmt(s, &mut |e| {
+            if let Expr::Call { callee, args, .. } = e {
+                if let Expr::Member {
+                    object,
+                    prop: tishlang_ast::MemberProp::Name { name: m, .. },
+                    ..
+                } = callee.as_ref()
+                {
+                    if m.as_ref() == "push"
+                        && matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == name)
+                    {
+                        if let [CallArg::Expr(Expr::Object { props, .. })] = args.as_slice() {
+                            record_shape_consider(&mut shape, &mut ok, props, &sctx);
+                        } else {
+                            ok = false;
+                        }
+                    }
+                }
+            }
+        });
+        if !ok {
+            return None;
+        }
+    }
+    shape
+}
+
+/// True if every use of array-of-records `name` in `tail` is `name.push({uniform literal})`,
+/// `name[i].<key>` (field read, `key` in the shape), or `name.length`. Mirrors the #177 S-D safety
+/// walk; any other use of the binding (bare ref, element/field write, escape into a call / return /
+/// spread, for-of, method other than push) returns false → the array stays boxed.
+fn rec_arr_uses_safe(name: &str, keys: &std::collections::HashSet<&str>, tail: &[Statement]) -> bool {
+    tail.iter().all(|s| ra_stmt(s, name, keys))
+}
+
+fn ra_stmt(s: &Statement, name: &str, keys: &std::collections::HashSet<&str>) -> bool {
+    use Statement::*;
+    match s {
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().all(|x| ra_stmt(x, name, keys))
+        }
+        VarDecl { name: n, init, .. } => {
+            n.as_ref() != name && init.as_ref().is_none_or(|e| ra_expr(e, name, keys))
+        }
+        ExprStmt { expr, .. } => ra_expr(expr, name, keys),
+        Return { value, .. } => value.as_ref().is_none_or(|e| ra_expr(e, name, keys)),
+        If { cond, then_branch, else_branch, .. } => {
+            ra_expr(cond, name, keys)
+                && ra_stmt(then_branch, name, keys)
+                && else_branch.as_ref().is_none_or(|e| ra_stmt(e, name, keys))
+        }
+        While { cond, body, .. } => ra_expr(cond, name, keys) && ra_stmt(body, name, keys),
+        DoWhile { cond, body, .. } => ra_expr(cond, name, keys) && ra_stmt(body, name, keys),
+        For { init, cond, update, body, .. } => {
+            init.as_ref().is_none_or(|x| ra_stmt(x, name, keys))
+                && cond.as_ref().is_none_or(|e| ra_expr(e, name, keys))
+                && update.as_ref().is_none_or(|e| ra_expr(e, name, keys))
+                && ra_stmt(body, name, keys)
+        }
+        Break { .. } | Continue { .. } => true,
+        _ => false,
+    }
+}
+
+fn ra_expr(e: &Expr, name: &str, keys: &std::collections::HashSet<&str>) -> bool {
+    use Expr::*;
+    match e {
+        Literal { .. } => true,
+        Ident { name: n, .. } => n.as_ref() != name,
+        Member { object, prop, optional: false, .. } => {
+            let mname = match prop {
+                tishlang_ast::MemberProp::Name { name: m, .. } => m.as_ref(),
+                tishlang_ast::MemberProp::Expr(_) => return false,
+            };
+            match object.as_ref() {
+                Ident { name: n, .. } if n.as_ref() == name => mname == "length",
+                Index { object: io, index, .. } => {
+                    matches!(io.as_ref(), Ident { name: n, .. } if n.as_ref() == name)
+                        && keys.contains(mname)
+                        && ra_expr(index, name, keys)
+                }
+                _ => ra_expr(object, name, keys),
+            }
+        }
+        Member { .. } => false,
+        Index { object, index, .. } => {
+            if matches!(object.as_ref(), Ident { name: n, .. } if n.as_ref() == name) {
+                return false;
+            }
+            ra_expr(object, name, keys) && ra_expr(index, name, keys)
+        }
+        Binary { left, right, .. } => ra_expr(left, name, keys) && ra_expr(right, name, keys),
+        Unary { operand, .. } => ra_expr(operand, name, keys),
+        Conditional { cond, then_branch, else_branch, .. } => {
+            ra_expr(cond, name, keys)
+                && ra_expr(then_branch, name, keys)
+                && ra_expr(else_branch, name, keys)
+        }
+        Assign { name: n, value, .. } => n.as_ref() != name && ra_expr(value, name, keys),
+        CompoundAssign { name: n, value, .. } => n.as_ref() != name && ra_expr(value, name, keys),
+        LogicalAssign { name: n, value, .. } => n.as_ref() != name && ra_expr(value, name, keys),
+        MemberAssign { object, value, .. } => {
+            ra_expr(object, name, keys) && ra_expr(value, name, keys)
+        }
+        IndexAssign { object, index, value, .. } => {
+            !matches!(object.as_ref(), Ident { name: n, .. } if n.as_ref() == name)
+                && ra_expr(object, name, keys)
+                && ra_expr(index, name, keys)
+                && ra_expr(value, name, keys)
+        }
+        Call { callee, args, .. } => {
+            if let Member { object, prop, optional: false, .. } = callee.as_ref() {
+                if matches!(object.as_ref(), Ident { name: n, .. } if n.as_ref() == name) {
+                    if let tishlang_ast::MemberProp::Name { name: m, .. } = prop {
+                        if m.as_ref() == "push" {
+                            return matches!(
+                                args.as_slice(),
+                                [CallArg::Expr(Object { props, .. })]
+                                    if props.iter().all(|pr| matches!(pr,
+                                        tishlang_ast::ObjectProp::KeyValue(_, v, _) if ra_expr(v, name, keys)))
+                            );
+                        }
+                    }
+                    return false;
+                }
+            }
+            ra_expr(callee, name, keys)
+                && args
+                    .iter()
+                    .all(|a| matches!(a, CallArg::Expr(x) if ra_expr(x, name, keys)))
+        }
+        TemplateLiteral { exprs, .. } => exprs.iter().all(|x| ra_expr(x, name, keys)),
+        PostfixInc { name: n, .. }
+        | PostfixDec { name: n, .. }
+        | PrefixInc { name: n, .. }
+        | PrefixDec { name: n, .. } => n.as_ref() != name,
+        Array { elements, .. } => elements
+            .iter()
+            .all(|el| matches!(el, tishlang_ast::ArrayElement::Expr(x) if ra_expr(x, name, keys))),
+        Object { props, .. } => props
+            .iter()
+            .all(|pr| matches!(pr, tishlang_ast::ObjectProp::KeyValue(_, v, _) if ra_expr(v, name, keys))),
+        _ => false,
+    }
 }
 
 /// Define every provably-numeric block-local into `hyp` (flat across nested scopes): annotated
