@@ -12570,6 +12570,25 @@ impl Codegen {
                         }
                     }
                 }
+                // `arr[i].field` where `arr` is a `Vec<struct>` — the element struct's native field
+                // type. Mirrors the `var.field` case above but for an array-of-records element, so a
+                // numeric accumulator fed by `rows[i].x * rows[i].w + …` stays native f64 instead of
+                // being demoted to a boxed Value (the array_records read loop).
+                if let Expr::Index { object: io, optional: false, .. } = object.as_ref() {
+                    if let Expr::Ident { name: arr_name, .. } = io.as_ref() {
+                        if let Some(RustType::Vec(inner)) = env.get(arr_name.as_ref()) {
+                            if let RustType::Named { fields, .. } = inner.as_ref() {
+                                if let Some((_, field_ty)) =
+                                    fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                                {
+                                    if field_ty.is_native() {
+                                        return field_ty.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 RustType::Value
             }
             Expr::Call { callee, args, .. } => {
@@ -20327,6 +20346,25 @@ impl Codegen {
                                 return Ok((access, field_ty.clone()));
                             }
                             if matches!(field_ty, RustType::Named { .. } | RustType::Vec(_)) {
+                                return Ok((access, field_ty.clone()));
+                            }
+                        }
+                    }
+                }
+                // `arr[i].field` — element of a `Vec<struct>`: native field read (`(rows[i]).x`)
+                // instead of boxing it through `Value::Number`, so a numeric accumulator fed by
+                // `rows[i].x * rows[i].w + rows[i].y` stays native (the array_records read loop).
+                if let Expr::Index { .. } = object.as_ref() {
+                    let (obj_code, obj_ty) = self.emit_typed_expr(object)?;
+                    if let RustType::Named { fields, .. } = &obj_ty {
+                        if let Some((_, field_ty)) =
+                            fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                        {
+                            let field = crate::types::field_ident(prop_name.as_ref());
+                            let access = format!("({}).{}", obj_code, field);
+                            if field_ty.is_native()
+                                || matches!(field_ty, RustType::Named { .. } | RustType::Vec(_))
+                            {
                                 return Ok((access, field_ty.clone()));
                             }
                         }
