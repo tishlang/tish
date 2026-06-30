@@ -12,7 +12,6 @@
 //! `PropMap` on a cache miss). Phase 1b will attach the ordered key list to each shape so objects can
 //! drop per-object key storage entirely (the butterfly representation).
 
-use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
 /// Identity of an object's ordered key-set.
@@ -27,9 +26,12 @@ pub const EMPTY_SHAPE: ShapeId = 0;
 pub const DICT_SHAPE: ShapeId = u32::MAX;
 
 /// One node in the structure-transition tree: from this shape, adding a given key yields a child shape.
+/// Edges are keyed by an `ahash` map, not the default SipHash one: `transition` is on the hot path of
+/// every object construction (and `JSON.parse` — profiled as ~16% of parse, almost all SipHash), and
+/// ahash is ~2–3× faster on short string keys. Random-seeded per process, so no HashDoS regression.
 #[derive(Default)]
 struct ShapeNode {
-    transitions: HashMap<Arc<str>, ShapeId>,
+    transitions: ahash::AHashMap<Arc<str>, ShapeId>,
 }
 
 struct Registry {
