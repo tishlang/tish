@@ -138,29 +138,38 @@ fn spectral_norm_devirtualizes_with_inlined_evala() {
 }
 
 #[test]
-fn spectral_norm_embedded_lib_native_shim_compiles() {
+fn spectral_norm_embedded_lib_devirtualizes_to_native_vec_fns() {
+    // EmbeddedLib mode fully de-virtualizes the `multiply*` group to native-vec (`_nv`) fns over
+    // `Vec<f64>` params (#350-352 native struct-array codegen). Once the whole group de-virtualizes,
+    // the old boxed `*_native` shims this test used to assert are correctly no longer emitted —
+    // matching the typed-mode `spectral_norm_devirtualizes_with_inlined_evala` check above (which
+    // asserts `multiplyAtAv` routes to `_nv`, not the boxed `_native` shim). Cross-backend soundness
+    // of the de-virtualized code is covered by the gauntlet + `tests/core/native_vec_params`.
     let rust = compile_fixture_embedded_lib("tests/perf/spectral_norm.tish");
-    let mav = rust
-        .split("fn multiplyAv_native(")
-        .nth(1)
-        .and_then(|s| s.split("fn multiplyAtv_native").next())
-        .expect("multiplyAv_native");
     assert!(
-        mav.contains("let mut j: f64")
-            || mav.contains("get_index(&Value::Number(v), &Value::Number((_usize_j"),
-        "boxed native shim must bind j from the usize loop counter:\n{}",
-        mav.lines().take(12).collect::<Vec<_>>().join("\n")
+        rust.contains("fn multiplyAv_nv(")
+            && rust.contains("fn multiplyAtv_nv(")
+            && rust.contains("fn multiplyAtAv_nv("),
+        "multiply* should de-virtualize to native-vec fns:\n{}",
+        rust.lines().filter(|l| l.contains("_nv(")).take(6).collect::<Vec<_>>().join("\n")
     );
     assert!(
-        mav.contains("let mut i: f64")
-            || mav.contains("set_index(&(Value::Number(av)), &(Value::Number((_usize_i"),
-        "boxed native shim must bind i from the usize loop counter:\n{}",
-        mav.lines().take(12).collect::<Vec<_>>().join("\n")
+        rust.contains("v: &Vec<f64>") && rust.contains("av: &mut Vec<f64>"),
+        "native-vec fns take Vec<f64> params by &/&mut ref"
+    );
+    assert!(
+        !rust.contains("fn multiplyAv_native(")
+            && !rust.contains("fn multiplyAtv_native(")
+            && !rust.contains("fn multiplyAtAv_native("),
+        "the boxed `*_native` shims must be elided once the group fully de-virtualizes:\n{}",
+        rust.lines().filter(|l| l.contains("_native(")).take(6).collect::<Vec<_>>().join("\n")
     );
 }
 
 #[test]
-fn spectral_norm_embedded_lib_with_runtime_features_native_shim_compiles() {
+fn spectral_norm_embedded_lib_with_runtime_features_devirtualizes() {
+    // The same de-virtualization holds with the runtime features enabled — they swap the embedded
+    // runtime in, but don't change the native-vec lowering of the user fns (still no boxed shims).
     let features: Vec<String> = [
         "http", "timers", "fs", "process", "regex", "ws", "tty",
     ]
@@ -169,14 +178,13 @@ fn spectral_norm_embedded_lib_with_runtime_features_native_shim_compiles() {
     .collect();
     let rust =
         compile_fixture_embedded_lib_with_features("tests/perf/spectral_norm.tish", &features);
-    let mav = rust
-        .split("fn multiplyAv_native(")
-        .nth(1)
-        .and_then(|s| s.split("fn multiplyAtv_native").next())
-        .expect("multiplyAv_native");
     assert!(
-        !mav.contains("Value::Number(j)") && !mav.contains("Value::Number(i)"),
-        "runtime-feature build must not reference bare i/j in boxed shims:\n{}",
-        mav.lines().take(12).collect::<Vec<_>>().join("\n")
+        rust.contains("fn multiplyAv_nv(") && rust.contains("fn multiplyAtAv_nv("),
+        "runtime-feature build still de-virtualizes multiply* to native-vec fns:\n{}",
+        rust.lines().filter(|l| l.contains("_nv(")).take(6).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        !rust.contains("fn multiplyAv_native(") && !rust.contains("fn multiplyAtAv_native("),
+        "no boxed `*_native` shims under runtime features either"
     );
 }
