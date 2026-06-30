@@ -98,6 +98,21 @@ fn resolve_import_to_key(
     ))
 }
 
+/// The module specifier a statement imports/re-exports from, if any — covers both
+/// `import … from "x"` and `export … from "x"` (#305 re-export). Dependency discovery and cycle
+/// detection use this so they follow re-export edges, not just plain imports (otherwise a module
+/// reached only via a re-export would never be loaded).
+fn stmt_module_source(stmt: &Statement) -> Option<&str> {
+    match stmt {
+        Statement::Import { from, .. } => Some(&**from),
+        Statement::Export { declaration, .. } => match declaration.as_ref() {
+            ExportDeclaration::ReExport { from, .. } => Some(&**from),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Resolve all modules starting from the entry file. Returns modules in dependency order.
 pub fn resolve_virtual(
     entry_path: &str,
@@ -163,7 +178,7 @@ fn load_module_recursive(
 
     let from_dir = parent_dir(module_path);
     for stmt in &program.statements {
-        if let Statement::Import { from, .. } = stmt {
+        if let Some(from) = stmt_module_source(stmt) {
             if is_native_import(from) {
                 continue;
             }
@@ -217,7 +232,7 @@ fn has_cycle_from(
     visiting: &mut HashSet<usize>,
 ) -> Result<bool, String> {
     for stmt in &program.statements {
-        if let Statement::Import { from, .. } = stmt {
+        if let Some(from) = stmt_module_source(stmt) {
             if is_native_import(from) {
                 continue;
             }
@@ -291,6 +306,40 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                     ExportDeclaration::Default(_) => {
                         let default_name = format!("__default_{}", idx);
                         module_exports[idx].insert("default".to_string(), default_name);
+                    }
+                    // #305: re-export — map each re-exported name to the DEP's binding (the dep is
+                    // earlier in load order, so its export table is already built). `export *` copies
+                    // every dep export without overriding an explicit one; `export { a as b }` maps
+                    // b -> dep's binding for a. Mirrors `merge_modules` in tish_compile/src/resolve.rs.
+                    ExportDeclaration::ReExport {
+                        specifiers,
+                        all,
+                        from,
+                        ..
+                    } => {
+                        let dir = parent_dir(&module.path);
+                        let dep = resolve_import_to_key_for_cycle(from, dir, &path_to_idx)
+                            .ok()
+                            .and_then(|key| path_to_idx.get(&key).copied())
+                            .map(|dep_idx| module_exports[dep_idx].clone());
+                        if let Some(dep) = dep {
+                            if *all {
+                                for (k, v) in &dep {
+                                    module_exports[idx]
+                                        .entry(k.clone())
+                                        .or_insert_with(|| v.clone());
+                                }
+                            }
+                            for spec in specifiers {
+                                if let ImportSpecifier::Named { name, alias, .. } = spec {
+                                    if let Some(binding) = dep.get(name.as_ref()) {
+                                        let export_name =
+                                            alias.as_deref().unwrap_or(name.as_ref()).to_string();
+                                        module_exports[idx].insert(export_name, binding.clone());
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -440,6 +489,10 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                             span: espan,
                         });
                     }
+                    // #305: re-export emits no code — `module_exports` already maps the re-exported
+                    // names to the dep's bindings (in scope in the flattened bundle), so downstream
+                    // imports resolve directly. Nothing to push here.
+                    ExportDeclaration::ReExport { .. } => {}
                 },
                 _ => statements.push(stmt.clone()),
             }
@@ -470,5 +523,50 @@ mod tests {
         detect_cycles_virtual(&modules).unwrap();
         let program = merge_modules_virtual(modules).unwrap();
         assert!(!program.statements.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_virtual_reexport_alias() {
+        // #305: `export { add as plus } from "./dep"` re-exports dep's `add` as `plus`; a downstream
+        // `import { plus }` must resolve to dep's binding. Regression guard: the merge previously did
+        // not handle `ExportDeclaration::ReExport` (E0004 build failure), and discovery did not follow
+        // the re-export edge (so a dep reached only via re-export was never loaded).
+        let mut files = HashMap::new();
+        files.insert(
+            "dep.tish".to_string(),
+            "export fn add(a, b) { return a + b }".to_string(),
+        );
+        files.insert(
+            "mid.tish".to_string(),
+            "export { add as plus } from \"./dep.tish\"".to_string(),
+        );
+        files.insert(
+            "main.tish".to_string(),
+            "import { plus } from \"./mid.tish\"\nconsole.log(plus(1, 2))".to_string(),
+        );
+        let modules = resolve_virtual("main.tish", &files).unwrap();
+        // dep.tish is reached ONLY via mid's re-export → discovery must have loaded it.
+        assert!(
+            modules.iter().any(|m| m.path == "dep.tish"),
+            "re-exported dep should be discovered and loaded"
+        );
+        detect_cycles_virtual(&modules).unwrap();
+        let program = merge_modules_virtual(modules).unwrap();
+        let has_add_fn = program
+            .statements
+            .iter()
+            .any(|s| matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "add"));
+        let binds_plus_to_add = program.statements.iter().any(|s| {
+            matches!(
+                s,
+                Statement::VarDecl { name, init: Some(Expr::Ident { name: src, .. }), .. }
+                if name.as_ref() == "plus" && src.as_ref() == "add"
+            )
+        });
+        assert!(has_add_fn, "dep's `add` fn should be in the merged bundle");
+        assert!(
+            binds_plus_to_add,
+            "import of re-exported `plus` should bind to dep's `add`"
+        );
     }
 }
