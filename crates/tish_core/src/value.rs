@@ -1015,25 +1015,47 @@ pub fn js_number_to_string_into(out: &mut String, value: f64) {
     }
 
     let negative = value < 0.0;
-    // Shortest round-trip digits + base-10 exponent, e.g. "6.022e23" → ("6022", 23).
-    let sci = format!("{:e}", value.abs());
-    let (mantissa, exp_str) = sci
-        .split_once('e')
-        .expect("LowerExp formatting always contains 'e'");
-    let exp: i32 = exp_str
-        .parse()
-        .expect("LowerExp exponent is a valid integer");
-    let digits: String = mantissa.chars().filter(|&c| c != '.').collect();
-    let k = digits.len() as i32; // significant digit count (≤ 17 for an f64)
-    let point = exp + 1; // ECMAScript's `n`: value = digits × 10^(point − k)
+    // Shortest round-trip digits + base-10 exponent via Rust's `{:e}` (Grisu/Ryu). The `{:e}` text
+    // goes into a reused thread-local buffer and the digit string into a stack buffer, so this hot
+    // path allocates NOTHING — the old version made 3-4 heap allocations per call (`format!`, the
+    // `digits` collect, `"0".repeat()`, `e.to_string()`). number→string is the JSON / template-literal
+    // / logging / `+=` primitive, so this is a broad win. Output is byte-identical to before (same
+    // `{:e}` digits, same ECMAScript point/k formatting).
+    use std::fmt::Write as _;
+    thread_local! {
+        static SCI: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
+    }
+    let mut digits_buf = [0u8; 32];
+    let (dlen, point) = SCI.with(|b| {
+        let mut sci = b.borrow_mut();
+        sci.clear();
+        let _ = write!(sci, "{:e}", value.abs());
+        let (mantissa, exp_str) = sci
+            .split_once('e')
+            .expect("LowerExp formatting always contains 'e'");
+        let exp: i32 = exp_str.parse().expect("LowerExp exponent is a valid integer");
+        // digits = mantissa with the single '.' removed (≤ 17 significant digits for an f64).
+        let mut n = 0usize;
+        for &c in mantissa.as_bytes() {
+            if c != b'.' {
+                digits_buf[n] = c;
+                n += 1;
+            }
+        }
+        (n, exp + 1) // `point` = ECMAScript's `n`: value = digits × 10^(point − k)
+    });
+    let digits = std::str::from_utf8(&digits_buf[..dlen]).expect("ascii digits");
+    let k = dlen as i32; // significant digit count (≤ 17 for an f64)
 
     if negative {
         out.push('-');
     }
     if k <= point && point <= 21 {
         // Integer, zero-padded: digits then (point − k) trailing zeros.
-        out.push_str(&digits);
-        out.push_str(&"0".repeat((point - k) as usize));
+        out.push_str(digits);
+        for _ in 0..(point - k) {
+            out.push('0');
+        }
     } else if 0 < point && point <= 21 {
         // Decimal point inside the digit string.
         out.push_str(&digits[..point as usize]);
@@ -1042,8 +1064,10 @@ pub fn js_number_to_string_into(out: &mut String, value: f64) {
     } else if -6 < point && point <= 0 {
         // Leading-zero fraction: "0." then (−point) zeros then the digits.
         out.push_str("0.");
-        out.push_str(&"0".repeat((-point) as usize));
-        out.push_str(&digits);
+        for _ in 0..(-point) {
+            out.push('0');
+        }
+        out.push_str(digits);
     } else {
         // Exponential: first digit, optional `.rest`, then `e±E`.
         let e = point - 1;
@@ -1054,7 +1078,8 @@ pub fn js_number_to_string_into(out: &mut String, value: f64) {
         }
         out.push('e');
         out.push(if e >= 0 { '+' } else { '-' });
-        out.push_str(&e.abs().to_string());
+        let mut ib = itoa::Buffer::new();
+        out.push_str(ib.format(e.abs()));
     }
 }
 
