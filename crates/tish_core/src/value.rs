@@ -1015,37 +1015,48 @@ pub fn js_number_to_string_into(out: &mut String, value: f64) {
     }
 
     let negative = value < 0.0;
-    // Shortest round-trip digits + base-10 exponent via Rust's `{:e}` (Grisu/Ryu). The `{:e}` text
-    // goes into a reused thread-local buffer and the digit string into a stack buffer, so this hot
-    // path allocates NOTHING — the old version made 3-4 heap allocations per call (`format!`, the
-    // `digits` collect, `"0".repeat()`, `e.to_string()`). number→string is the JSON / template-literal
-    // / logging / `+=` primitive, so this is a broad win. Output is byte-identical to before (same
-    // `{:e}` digits, same ECMAScript point/k formatting).
-    use std::fmt::Write as _;
-    thread_local! {
-        static SCI: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
-    }
+    // Shortest round-trip digits via ryu, then reassembled into ECMAScript `Number::toString` form.
+    // ryu writes the shortest correctly-rounded digits straight into a stack buffer with none of the
+    // `core::fmt` `{:e}` Formatter machinery the previous version paid per call (profiled as ~40% of
+    // JSON.stringify self-time on numeric payloads). number→string is the JSON / template-literal /
+    // logging / `+=` primitive, so this is a broad win. The shortest round-trip digit *sequence* is
+    // unique, so ryu emits the same digits as the old `{:e}` path → output stays byte-identical.
+    let mut ryu_buf = ryu::Buffer::new();
+    // Finite & non-zero here (NaN / ±∞ / ±0 handled above), so `format_finite` is safe and cheaper.
+    let s = ryu_buf.format_finite(value.abs());
+
+    // Parse ryu's `<int>[.<frac>][e<exp>]` into significant digits + ECMAScript decimal point.
+    // `point` = ECMAScript's `n`: value = digits × 10^(point − k), with `k` = significant-digit count.
+    let (mant, exp) = match s.as_bytes().iter().position(|&c| c == b'e' || c == b'E') {
+        Some(i) => (&s[..i], s[i + 1..].parse::<i32>().expect("ryu exponent")),
+        None => (s, 0i32),
+    };
+    let (int_part, frac_part) = match mant.as_bytes().iter().position(|&c| c == b'.') {
+        Some(i) => (&mant[..i], &mant[i + 1..]),
+        None => (mant, ""),
+    };
+    let frac_len = frac_part.len() as i32;
+    // Raw digit run = int_part ++ frac_part (ryu's mantissa, ≤ ~18 chars for an f64).
     let mut digits_buf = [0u8; 32];
-    let (dlen, point) = SCI.with(|b| {
-        let mut sci = b.borrow_mut();
-        sci.clear();
-        let _ = write!(sci, "{:e}", value.abs());
-        let (mantissa, exp_str) = sci
-            .split_once('e')
-            .expect("LowerExp formatting always contains 'e'");
-        let exp: i32 = exp_str.parse().expect("LowerExp exponent is a valid integer");
-        // digits = mantissa with the single '.' removed (≤ 17 significant digits for an f64).
-        let mut n = 0usize;
-        for &c in mantissa.as_bytes() {
-            if c != b'.' {
-                digits_buf[n] = c;
-                n += 1;
-            }
-        }
-        (n, exp + 1) // `point` = ECMAScript's `n`: value = digits × 10^(point − k)
-    });
-    let digits = std::str::from_utf8(&digits_buf[..dlen]).expect("ascii digits");
-    let k = dlen as i32; // significant digit count (≤ 17 for an f64)
+    let mut n = 0usize;
+    for &c in int_part.as_bytes().iter().chain(frac_part.as_bytes()) {
+        digits_buf[n] = c;
+        n += 1;
+    }
+    // Strip leading zeros (e.g. ryu "0.1" → raw "01" → "1") …
+    let mut lead = 0usize;
+    while lead + 1 < n && digits_buf[lead] == b'0' {
+        lead += 1;
+    }
+    // … and trailing zeros (defensive — shortest form has none — folded back via `trail`).
+    let mut end = n;
+    while end - 1 > lead && digits_buf[end - 1] == b'0' {
+        end -= 1;
+    }
+    let trail = (n - end) as i32;
+    let digits = std::str::from_utf8(&digits_buf[lead..end]).expect("ascii digits");
+    let k = digits.len() as i32; // significant digit count (≤ 17 for an f64)
+    let point = k + exp - frac_len + trail;
 
     if negative {
         out.push('-');
@@ -1470,6 +1481,15 @@ mod number_to_string_tests {
             // Shortest round-trip mantissa (not full precision).
             (0.1, "0.1"),
             (0.1 + 0.2, "0.30000000000000004"),
+            // Shortest-representation ties → ECMAScript rounds the final digit to EVEN (spec: "if
+            // there are two such possible values, choose the one that is even"). These large-magnitude
+            // fractionals each have two equally-short round-tripping decimals; Node/V8 emit the even
+            // one. Verified against Node's `String(value)`. (The prior `{:e}`-based path rounded the
+            // other way — ryu does ties-to-even, matching the spec.)
+            (2181495296738027.3, "2181495296738027.2"),
+            (75251554695404.13, "75251554695404.12"),
+            (256006004960902.63, "256006004960902.62"),
+            (-18546578340962.313, "-18546578340962.312"),
             // Non-finite.
             (f64::INFINITY, "Infinity"),
             (f64::NEG_INFINITY, "-Infinity"),
