@@ -917,6 +917,11 @@ pub(crate) struct Codegen {
     module_const_f64_aliases: std::collections::HashMap<String, String>,
     /// #181: locals initialized with `new Map()` — direct `map_has`/`get`/`set`/`values` dispatch.
     map_instance_locals: std::collections::HashSet<String>,
+    /// String-scan hoist: inside a `for (i; i < s.length; …)` loop over an invariant native `String`
+    /// `s`, the loop body's `s.charCodeAt/charAt/at(i)` route to O(1) `Vec<char>` slice ops instead
+    /// of `str_char_code_at`'s `chars().nth(i)` = O(i). Maps the source ident → the hoisted `_scN`
+    /// `Vec<char>` binding; populated for the loop body's extent only.
+    hoisted_string_chars: std::collections::HashMap<String, String>,
     /// M5 (dark-shipped behind `TISH_NATIVE_FN`): top-level functions eligible for a parallel
     /// free `fn f_native(f64,..)->f64` (all params `: number`, returns `number`, native-safe
     /// body). Direct calls to these route to the native fn, bypassing the boxed `value_call`.
@@ -1130,6 +1135,7 @@ impl Codegen {
             module_const_f64_cum: std::collections::HashMap::new(),
             module_const_f64_aliases: std::collections::HashMap::new(),
             map_instance_locals: std::collections::HashSet::new(),
+            hoisted_string_chars: std::collections::HashMap::new(),
             native_fns: std::collections::HashSet::new(),
             native_fn_body_emit: false,
             native_fn_emit_name: None,
@@ -2437,25 +2443,60 @@ impl Codegen {
     /// trailing `.0`, bool/null as text, anything else via `to_js_string`). Shared by the
     /// statement-position no-clone append (`emit_expr_discard`) and the expression-position fast path,
     /// so both coerce identically.
-    fn emit_string_append_rhs(&mut self, value: &Expr) -> Result<String, CompileError> {
-        let (rhs_code, rhs_ty) = self.emit_typed_expr(value)?;
-        if rhs_ty == RustType::String {
-            return Ok(rhs_code);
+    /// Emit a static-interned object key. `Arc::from("k")` allocates a fresh `Arc<str>` on every
+    /// evaluation — a `{ ...base, k: v }` / object-literal in a hot loop pays one heap alloc per key
+    /// per iteration (6M in `tests/perf/object_spread`). A per-site `OnceLock` interns the key once
+    /// and `Arc::clone`s it (a refcount bump) thereafter. Behaviour-identical — the key *text* is
+    /// unchanged, and `PropMap` dedup + hidden-class shapes key by text, not pointer — so shapes,
+    /// insertion order, and `Object.keys` are all unaffected. Same inline-`static` idiom as the
+    /// per-site `PropIC` caches.
+    fn cached_object_key(k: &str) -> String {
+        format!(
+            "{{ static K: ::std::sync::OnceLock<::std::sync::Arc<str>> = \
+             ::std::sync::OnceLock::new(); K.get_or_init(|| ::std::sync::Arc::from({:?})).clone() }}",
+            k
+        )
+    }
+
+    /// Emit a statement appending `value`'s JS string-concatenation form directly into the native
+    /// `String` accumulator `target` (`acc` or `acc.borrow_mut()`) — NO throwaway `String` for the
+    /// common cases: a string literal `push_str`s its `&str` directly, a number formats in place via
+    /// `js_number_to_string_into`, and everything else routes through `push_value_str`. Keeps
+    /// `s += …` / `s = s + …` builder loops allocation-light (the CSV/HTML/log pattern). Numbers are
+    /// also JS-correct here: the prior `match … n.to_string() …` path used Rust's `Display`, which
+    /// diverges from Node for large/small floats (`1e21` → Rust `"1000000000000000000000"`, JS
+    /// `"1e+21"`); `js_number_to_string_into` matches JS.
+    fn emit_string_append_into(
+        &mut self,
+        target: &str,
+        value: &Expr,
+    ) -> Result<String, CompileError> {
+        if let Expr::Literal {
+            value: Literal::String(s),
+            ..
+        } = value
+        {
+            return Ok(format!("{}.push_str({:?});", target, s.as_ref()));
         }
-        let rhs_val = if rhs_ty.is_native() {
-            rhs_ty.to_value_expr(&rhs_code)
-        } else {
-            rhs_code
-        };
-        Ok(format!(
-            "match &({}) {{ \
-             Value::String(s) => s.to_string(), \
-             Value::Number(n) => {{ let i = *n as i64; if (*n - i as f64).abs() < f64::EPSILON {{ i.to_string() }} else {{ n.to_string() }} }}, \
-             Value::Bool(b) => b.to_string(), \
-             Value::Null => \"null\".to_string(), \
-             other => other.to_js_string() }}",
-            rhs_val
-        ))
+        let (rhs_code, rhs_ty) = self.emit_typed_expr(value)?;
+        match rhs_ty {
+            RustType::String => Ok(format!("{}.push_str(&({}));", target, rhs_code)),
+            RustType::F64 => Ok(format!(
+                "tishlang_runtime::js_number_to_string_into(&mut {}, {});",
+                target, rhs_code
+            )),
+            _ => {
+                let v = if rhs_ty.is_native() {
+                    rhs_ty.to_value_expr(&rhs_code)
+                } else {
+                    rhs_code
+                };
+                Ok(format!(
+                    "tishlang_runtime::push_value_str(&mut {}, &({}));",
+                    target, v
+                ))
+            }
+        }
     }
 
     fn emit_expr_discard(&mut self, expr: &Expr) -> Result<String, CompileError> {
@@ -2532,20 +2573,17 @@ impl Codegen {
                     {
                         if matches!(left.as_ref(), Expr::Ident { name: ln, .. } if ln.as_ref() == name.as_ref())
                         {
-                            let (rhs_code, rhs_ty) = self.emit_typed_expr(right.as_ref())?;
-                            if rhs_ty == RustType::String {
-                                let escaped = Self::escape_ident(name.as_ref());
-                                if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                                    return Ok(format!(
-                                        "{{ let _r = {}; {}.borrow_mut().push_str(&_r); }}",
-                                        rhs_code, escaped
-                                    ));
-                                }
-                                return Ok(format!(
-                                    "{{ let _r = {}; {}.push_str(&_r); }}",
-                                    rhs_code, escaped
-                                ));
-                            }
+                            // Self-append `s = s + rhs` → in-place push (amortized O(1)), for ANY rhs
+                            // type. The general path boxes via `ops::add(Value::String(s.clone()), …)`,
+                            // cloning the whole string per concat → O(n²). `emit_string_append_into`
+                            // appends without a throwaway `String` and keeps JS number formatting.
+                            let escaped = Self::escape_ident(name.as_ref());
+                            let target = if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                                format!("{}.borrow_mut()", escaped)
+                            } else {
+                                escaped.into_owned()
+                            };
+                            return self.emit_string_append_into(&target, right.as_ref());
                         }
                     }
                 }
@@ -2638,14 +2676,12 @@ impl Codegen {
                     && !self.native_numeric_globals.contains_key(name.as_ref())
                 {
                     let n = Self::escape_ident(name.as_ref());
-                    let rhs_str = self.emit_string_append_rhs(value)?;
-                    if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                        return Ok(format!(
-                            "{{ let _r = {}; {}.borrow_mut().push_str(&_r); }}",
-                            rhs_str, n
-                        ));
-                    }
-                    return Ok(format!("{{ let _r = {}; {}.push_str(&_r); }}", rhs_str, n));
+                    let target = if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                        format!("{}.borrow_mut()", n)
+                    } else {
+                        n.into_owned()
+                    };
+                    return self.emit_string_append_into(&target, value);
                 }
             }
             _ => {}
@@ -4664,6 +4700,9 @@ impl Codegen {
                 // once before the loop and compare against it — dropping a per-iteration boxed
                 // `get_prop(&arr.clone(), "length")`.
                 let mut hoisted_cond: Option<String> = None;
+                // String-scan hoist bookkeeping: (base ident, previous `_sc` binding to restore on
+                // exit) so nested loops over the same String name restore correctly.
+                let mut hoisted_char_base: Option<(String, Option<String>)> = None;
                 if crate::native_opts_enabled() {
                     if let Some(c) = cond.as_ref() {
                         if let Some((counter, base)) = Self::match_counter_lt_length(c) {
@@ -4689,18 +4728,33 @@ impl Codegen {
                                 if !assigned.contains(base) {
                                     let base_esc = Self::escape_ident(base).into_owned();
                                     let len_tmp = format!("_len{}", self.loop_label_index);
-                                    // For a native `String`, box once (one-time clone) to reuse
-                                    // get_prop's exact length semantics; for a boxed `Value`, clone the
-                                    // handle (cheap Rc bump).
-                                    let len_src = if is_native_string {
-                                        format!("tishlang_runtime::get_prop(&Value::String(({}).clone().into()), \"length\")", base_esc)
+                                    if is_native_string {
+                                        // Collect the invariant String into a `Vec<char>` ONCE. `.length`
+                                        // becomes `_sc.len()` (== `chars().count()`, the exact boxed
+                                        // semantics) and every `charCodeAt/charAt/at(i)` in the body
+                                        // routes to an O(1) slice index — `str_char_code_at` is O(i) via
+                                        // `chars().nth(i)`, i.e. O(n²) over a strided scan. Sound: the
+                                        // gate above proved `base` is neither reassigned nor length-
+                                        // changed in the body, so the collected chars stay valid.
+                                        let sc = format!("_sc{}", self.loop_label_index);
+                                        self.writeln(&format!(
+                                            "let {}: Vec<char> = ({}).chars().collect();",
+                                            sc, base_esc
+                                        ));
+                                        self.writeln(&format!("let {} = {}.len() as f64;", len_tmp, sc));
+                                        let prev =
+                                            self.hoisted_string_chars.insert(base.to_string(), sc);
+                                        hoisted_char_base = Some((base.to_string(), prev));
                                     } else {
-                                        format!("tishlang_runtime::get_prop(&({}).clone(), \"length\")", base_esc)
-                                    };
-                                    self.writeln(&format!(
-                                        "let {} = ({}).as_number().unwrap_or(f64::NAN);",
-                                        len_tmp, len_src
-                                    ));
+                                        let len_src = format!(
+                                            "tishlang_runtime::get_prop(&({}).clone(), \"length\")",
+                                            base_esc
+                                        );
+                                        self.writeln(&format!(
+                                            "let {} = ({}).as_number().unwrap_or(f64::NAN);",
+                                            len_tmp, len_src
+                                        ));
+                                    }
                                     let (ctr_code, ctr_ty) = self.emit_typed_expr(counter)?;
                                     let lhs = if ctr_ty == RustType::F64 {
                                         ctr_code
@@ -4747,6 +4801,18 @@ impl Codegen {
                 if let Some(u) = update {
                     let ue = self.emit_expr_discard(u)?;
                     self.writeln(&format!("{};", ue));
+                }
+                // End the string-scan hoist's extent: restore the shadowed binding (nested loops over
+                // the same String name) or clear it.
+                if let Some((b, prev)) = hoisted_char_base.take() {
+                    match prev {
+                        Some(p) => {
+                            self.hoisted_string_chars.insert(b, p);
+                        }
+                        None => {
+                            self.hoisted_string_chars.remove(&b);
+                        }
+                    }
                 }
                 self.break_stack.pop();
                 self.loop_stack.pop();
@@ -6252,6 +6318,20 @@ impl Codegen {
                     if matches!(method_name.as_ref(), "charCodeAt" | "charAt" | "at")
                         && args.len() == 1
                     {
+                        // O(1) loop-hoisted path: inside a scan loop that collected this invariant
+                        // String into a `Vec<char>`, index the slice instead of re-scanning the UTF-8
+                        // from the start every call (`str_char_code_at` is O(i) → O(n²) per scan).
+                        if let Expr::Ident { name, .. } = object.as_ref() {
+                            if let Some(sc) = self.hoisted_string_chars.get(name.as_ref()).cloned() {
+                                let idx = &arg_exprs[0];
+                                let f = match method_name.as_ref() {
+                                    "charCodeAt" => "slice_char_code_at",
+                                    "charAt" => "slice_char_at",
+                                    _ => "slice_at",
+                                };
+                                return Ok(format!("tishlang_runtime::{}(&{}, &{})", f, sc, idx));
+                            }
+                        }
                         if let Some(str_expr) = self.typed_string_receiver(object)? {
                             let idx = &arg_exprs[0];
                             let f = match method_name.as_ref() {
@@ -6973,10 +7053,11 @@ impl Codegen {
                         match prop {
                             ObjectProp::KeyValue(k, v, _) => {
                                 let val = self.emit_expr(v)?;
+                                let key = Self::cached_object_key(k.as_ref());
                                 if self.should_clone(v) {
-                                    parts.push(format!("_obj.insert(Arc::from({:?}), ({}).clone());", k.as_ref(), val));
+                                    parts.push(format!("_obj.insert({}, ({}).clone());", key, val));
                                 } else {
-                                    parts.push(format!("_obj.insert(Arc::from({:?}), {});", k.as_ref(), val));
+                                    parts.push(format!("_obj.insert({}, {});", key, val));
                                 }
                             }
                             ObjectProp::Spread(e) => {
@@ -7004,10 +7085,11 @@ impl Codegen {
                     for prop in props {
                         if let ObjectProp::KeyValue(k, v, _) = prop {
                             let val = self.emit_expr(v)?;
+                            let key = Self::cached_object_key(k.as_ref());
                             if self.should_clone(v) {
-                                parts.push(format!("(Arc::from({:?}), ({}).clone())", k.as_ref(), val));
+                                parts.push(format!("({}, ({}).clone())", key, val));
                             } else {
-                                parts.push(format!("(Arc::from({:?}), {})", k.as_ref(), val));
+                                parts.push(format!("({}, {})", key, val));
                             }
                         }
                     }
@@ -7237,27 +7319,11 @@ impl Codegen {
 
                 // ── native String += in Rc<RefCell<String>> ───────────────────
                 if is_refcell && var_type == RustType::String && matches!(op, CompoundOp::Add) {
-                    let (rhs_code, rhs_ty) = self.emit_typed_expr(value)?;
-                    let rhs_str = if rhs_ty == RustType::String {
-                        rhs_code
-                    } else {
-                        let rhs_val = if rhs_ty.is_native() {
-                            rhs_ty.to_value_expr(&rhs_code)
-                        } else {
-                            rhs_code
-                        };
-                        format!(
-                            "match &({}) {{ \
-                             Value::String(s) => s.to_string(), \
-                             Value::Number(n) => {{ let i = *n as i64; if (*n - i as f64).abs() < f64::EPSILON {{ i.to_string() }} else {{ n.to_string() }} }}, \
-                             Value::Bool(b) => b.to_string(), \
-                             Value::Null => \"null\".to_string(), \
-                             other => other.to_js_string() }}",
-                            rhs_val
-                        )
-                    };
+                    // Append in place (no throwaway String; JS-correct numbers), then yield the
+                    // `+=` Value by cloning the grown buffer.
+                    let append = self.emit_string_append_into(&format!("(*{}.borrow_mut())", n), value)?;
                     return Ok(format!(
-                        "{{ let _push_rhs = {rhs_str}; (*{n}.borrow_mut()).push_str(&_push_rhs); Value::String((*{n}.borrow()).clone().into()) }}"
+                        "{{ {append} Value::String((*{n}.borrow()).clone().into()) }}"
                     ));
                 }
 
@@ -7265,9 +7331,11 @@ impl Codegen {
                 // Expression position: must still clone `n` to yield the `+=` Value. The hot
                 // statement-position form (no clone) is handled earlier in `emit_expr_discard`.
                 if !is_refcell && var_type == RustType::String && matches!(op, CompoundOp::Add) {
-                    let rhs_str = self.emit_string_append_rhs(value)?;
-                    // Wrap in Value::String so the expression is a valid Value
-                    return Ok(format!("{{ {}.push_str(&({})); Value::String({}.clone().into()) }}", n, rhs_str, n));
+                    let append = self.emit_string_append_into(&n, value)?;
+                    return Ok(format!(
+                        "{{ {} Value::String({}.clone().into()) }}",
+                        append, n
+                    ));
                 }
 
                 // ── fallback: Value path ──────────────────────────────────────

@@ -23,6 +23,25 @@ pub use tishlang_core::value_call;
 pub use tishlang_core::{
     to_int32, to_int32_value, to_number_value, to_uint32, to_uint32_value,
 };
+/// ECMAScript `Number::toString`, appended straight into a buffer — for in-place string building
+/// (`s += n`) in emitted code, so a number append needs no throwaway `String`.
+pub use tishlang_core::js_number_to_string_into;
+
+/// Append `v`'s JS string-concatenation form directly to `buf` (no intermediate `String` for the
+/// common scalar cases). Used by emitted `s += rhs` / `s = s + rhs` so a string-builder loop stays
+/// allocation-light. Numbers go through `js_number_to_string_into` (JS-correct, ryu-backed), so a
+/// concatenated float matches Node (`String(1e21)` → `"1e+21"`), which the old `n.to_string()`
+/// Display path did not.
+#[inline]
+pub fn push_value_str(buf: &mut String, v: &Value) {
+    match v {
+        Value::String(s) => buf.push_str(s),
+        Value::Number(n) => js_number_to_string_into(buf, *n),
+        Value::Bool(b) => buf.push_str(if *b { "true" } else { "false" }),
+        Value::Null => buf.push_str("null"),
+        other => buf.push_str(&other.to_js_string()),
+    }
+}
 // Re-export the shared-mutable wrapper so the Rust code emitted by
 // `tishlang_compile::codegen` can write `VmRef::new(...)` without needing
 // a direct dependency on `tishlang_core` from the generated crate.
@@ -276,6 +295,48 @@ pub fn str_at(s: &str, idx: &Value) -> Value {
     };
     if resolved >= 0 {
         if let Some(c) = s.chars().nth(resolved as usize) {
+            return Value::String(c.to_string().into());
+        }
+    }
+    Value::Null
+}
+
+// ── O(1) char-slice forms: the loop-hoisted scan path ─────────────────────────────────────────
+//
+// `str_char_code_at` & friends index a `&str` via `chars().nth(i)` = O(i), so a strided scan
+// (`for i in 0..s.length { s.charCodeAt(i) }`) is O(n²). When native codegen proves the String is
+// loop-invariant it collects it ONCE into a `Vec<char>` and routes per-iteration accesses here, so
+// each index is O(1) (scan → O(n)). Semantics are byte-identical to the `&str` forms: same
+// `idx_as_usize`, `chars.len()` == `s.chars().count()`, `chars.get(i)` == `s.chars().nth(i)`.
+
+/// O(1) char-slice `charCodeAt` — loop-hoisted [`str_char_code_at`]. OOB → NaN.
+#[inline]
+pub fn slice_char_code_at(chars: &[char], idx: &Value) -> Value {
+    match chars.get(idx_as_usize(idx)) {
+        Some(c) => Value::Number(*c as u32 as f64),
+        None => Value::Number(f64::NAN),
+    }
+}
+
+/// O(1) char-slice `charAt` — loop-hoisted [`str_char_at`]. OOB → `""`.
+#[inline]
+pub fn slice_char_at(chars: &[char], idx: &Value) -> Value {
+    match chars.get(idx_as_usize(idx)) {
+        Some(c) => Value::String(c.to_string().into()),
+        None => Value::String("".into()),
+    }
+}
+
+/// O(1) char-slice `at` (negative-index aware) — loop-hoisted [`str_at`]. OOB → null.
+#[inline]
+pub fn slice_at(chars: &[char], idx: &Value) -> Value {
+    let i = match idx {
+        Value::Number(n) => *n as i64,
+        _ => 0,
+    };
+    let resolved = if i < 0 { chars.len() as i64 + i } else { i };
+    if resolved >= 0 {
+        if let Some(c) = chars.get(resolved as usize) {
             return Value::String(c.to_string().into());
         }
     }
