@@ -4673,15 +4673,33 @@ impl Codegen {
                             let is_boxed = matches!(base_ty, RustType::Value)
                                 && self.module_const_f64_array_rust_ref(base).is_none()
                                 && !self.refcell_wrapped_vars.contains(base);
-                            if is_boxed && !Self::stmt_has_length_changer(body) {
+                            // A native `String` receiver: `.length` is loop-invariant (strings are
+                            // immutable) and otherwise emits a per-iteration deep `clone()` of the
+                            // whole string into a `Value` just to read its length — an O(n²) trap in
+                            // strided `charCodeAt` checksum loops (string_build). Hoist it too.
+                            let is_native_string = matches!(base_ty, RustType::String)
+                                && !self.refcell_wrapped_vars.contains(base);
+                            // Gate is base-specific: only an actual length-mutation of `base`
+                            // (push/splice/`base.length =`/`base[k] =`/delete/passing `base` to a
+                            // callee/reassign) blocks the hoist — a read-only method like
+                            // `base.charCodeAt(i)` does NOT (the old gate bailed on any call).
+                            if (is_boxed || is_native_string) && !Self::stmt_changes_base_len(body, base) {
                                 let mut assigned = HashSet::new();
                                 Self::collect_assigned_idents_in_stmt(body, &mut assigned);
                                 if !assigned.contains(base) {
                                     let base_esc = Self::escape_ident(base).into_owned();
                                     let len_tmp = format!("_len{}", self.loop_label_index);
+                                    // For a native `String`, box once (one-time clone) to reuse
+                                    // get_prop's exact length semantics; for a boxed `Value`, clone the
+                                    // handle (cheap Rc bump).
+                                    let len_src = if is_native_string {
+                                        format!("tishlang_runtime::get_prop(&Value::String(({}).clone().into()), \"length\")", base_esc)
+                                    } else {
+                                        format!("tishlang_runtime::get_prop(&({}).clone(), \"length\")", base_esc)
+                                    };
                                     self.writeln(&format!(
-                                        "let {} = (tishlang_runtime::get_prop(&({}).clone(), \"length\")).as_number().unwrap_or(f64::NAN);",
-                                        len_tmp, base_esc
+                                        "let {} = ({}).as_number().unwrap_or(f64::NAN);",
+                                        len_tmp, len_src
                                     ));
                                     let (ctr_code, ctr_ty) = self.emit_typed_expr(counter)?;
                                     let lhs = if ctr_ty == RustType::F64 {
@@ -7870,6 +7888,146 @@ impl Codegen {
                 Self::expr_has_length_changer(e)
             }
             // Anything else (switch/try/funct decl/break/continue/…) — be conservative.
+            _ => true,
+        }
+    }
+
+    /// Read-only string/array methods that cannot change the receiver's `.length`. Used by
+    /// [`Self::expr_changes_base_len`] so a loop body like `sum += s.charCodeAt(i)` does not block
+    /// hoisting `s.length`. Conservative: an unknown method is NOT here, so it is treated as a mutator.
+    fn is_readonly_len_method(m: &str) -> bool {
+        matches!(
+            m,
+            "charCodeAt" | "charAt" | "codePointAt" | "at" | "slice" | "substring" | "substr"
+                | "indexOf" | "lastIndexOf" | "includes" | "startsWith" | "endsWith"
+                | "toUpperCase" | "toLowerCase" | "toString" | "valueOf" | "concat" | "repeat"
+                | "padStart" | "padEnd" | "trim" | "trimStart" | "trimEnd" | "split" | "search"
+                | "normalize" | "localeCompare" | "map" | "filter" | "reduce" | "reduceRight"
+                | "forEach" | "find" | "findIndex" | "findLast" | "findLastIndex" | "some" | "every"
+                | "join" | "flat" | "flatMap" | "keys" | "values" | "entries"
+        )
+    }
+
+    /// True if evaluating `e` could change `base`'s `.length`: a non-read-only method called ON
+    /// `base`, `base` passed as a call/new argument (the callee could mutate it), a `base.<prop> =`
+    /// / `base[k] =` / `delete base[k]` write, or a reassignment of `base`. Read-only methods on
+    /// `base` (charCodeAt/slice/map/…) and calls not involving `base` do NOT. The base-specific
+    /// refinement of [`Self::expr_has_length_changer`] used by the `.length` hoist.
+    fn expr_changes_base_len(e: &Expr, base: &str) -> bool {
+        let is_base = |x: &Expr| matches!(x, Expr::Ident { name, .. } if name.as_ref() == base);
+        let arg_is_base = |a: &CallArg| matches!(a, CallArg::Expr(x) | CallArg::Spread(x) if is_base(x));
+        match e {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Member { object, prop: MemberProp::Name { name: m, .. }, .. } =
+                    callee.as_ref()
+                {
+                    if is_base(object) && !Self::is_readonly_len_method(m.as_ref()) {
+                        return true;
+                    }
+                }
+                args.iter().any(arg_is_base)
+                    || Self::expr_changes_base_len(callee, base)
+                    || args.iter().any(|a| match a {
+                        CallArg::Expr(x) | CallArg::Spread(x) => Self::expr_changes_base_len(x, base),
+                    })
+            }
+            Expr::New { callee, args, .. } => {
+                args.iter().any(arg_is_base)
+                    || Self::expr_changes_base_len(callee, base)
+                    || args.iter().any(|a| match a {
+                        CallArg::Expr(x) | CallArg::Spread(x) => Self::expr_changes_base_len(x, base),
+                    })
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                is_base(object) || Self::expr_changes_base_len(value, base)
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                is_base(object)
+                    || Self::expr_changes_base_len(index, base)
+                    || Self::expr_changes_base_len(value, base)
+            }
+            Expr::Delete { target, .. } => {
+                matches!(target.as_ref(), Expr::Index { object, .. } if is_base(object))
+                    || Self::expr_changes_base_len(target, base)
+            }
+            Expr::Assign { name, value, .. }
+            | Expr::CompoundAssign { name, value, .. }
+            | Expr::LogicalAssign { name, value, .. } => {
+                name.as_ref() == base || Self::expr_changes_base_len(value, base)
+            }
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                Self::expr_changes_base_len(left, base) || Self::expr_changes_base_len(right, base)
+            }
+            Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } | Expr::Await { operand, .. } => {
+                Self::expr_changes_base_len(operand, base)
+            }
+            Expr::Index { object, index, .. } => {
+                Self::expr_changes_base_len(object, base) || Self::expr_changes_base_len(index, base)
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::expr_changes_base_len(object, base)
+                    || matches!(prop, MemberProp::Expr(k) if Self::expr_changes_base_len(k, base))
+            }
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                Self::expr_changes_base_len(cond, base)
+                    || Self::expr_changes_base_len(then_branch, base)
+                    || Self::expr_changes_base_len(else_branch, base)
+            }
+            Expr::TemplateLiteral { exprs, .. } => {
+                exprs.iter().any(|x| Self::expr_changes_base_len(x, base))
+            }
+            Expr::Array { elements, .. } => elements.iter().any(|el| match el {
+                ArrayElement::Expr(x) | ArrayElement::Spread(x) => Self::expr_changes_base_len(x, base),
+            }),
+            Expr::Object { props, .. } => props.iter().any(|p| match p {
+                ObjectProp::KeyValue(_, x, _) | ObjectProp::Spread(x) => {
+                    Self::expr_changes_base_len(x, base)
+                }
+            }),
+            Expr::PostfixInc { name, .. }
+            | Expr::PostfixDec { name, .. }
+            | Expr::PrefixInc { name, .. }
+            | Expr::PrefixDec { name, .. } => name.as_ref() == base,
+            // An arrow could capture+mutate base; conservative.
+            Expr::ArrowFunction { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// Statement-level [`Self::expr_changes_base_len`] for the `.length` hoist gate.
+    fn stmt_changes_base_len(stmt: &Statement, base: &str) -> bool {
+        match stmt {
+            Statement::ExprStmt { expr, .. } => Self::expr_changes_base_len(expr, base),
+            Statement::VarDecl { init: Some(e), .. } => Self::expr_changes_base_len(e, base),
+            Statement::VarDecl { init: None, .. } => false,
+            Statement::VarDeclDestructure { init, .. } => Self::expr_changes_base_len(init, base),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.iter().any(|s| Self::stmt_changes_base_len(s, base))
+            }
+            Statement::If { cond, then_branch, else_branch, .. } => {
+                Self::expr_changes_base_len(cond, base)
+                    || Self::stmt_changes_base_len(then_branch, base)
+                    || else_branch.as_ref().is_some_and(|b| Self::stmt_changes_base_len(b, base))
+            }
+            Statement::For { init, cond, update, body, .. } => {
+                init.as_ref().is_some_and(|i| Self::stmt_changes_base_len(i, base))
+                    || cond.as_ref().is_some_and(|c| Self::expr_changes_base_len(c, base))
+                    || update.as_ref().is_some_and(|u| Self::expr_changes_base_len(u, base))
+                    || Self::stmt_changes_base_len(body, base)
+            }
+            Statement::ForOf { iterable, body, .. } => {
+                Self::expr_changes_base_len(iterable, base) || Self::stmt_changes_base_len(body, base)
+            }
+            Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
+                Self::expr_changes_base_len(cond, base) || Self::stmt_changes_base_len(body, base)
+            }
+            Statement::Return { value: Some(e), .. } | Statement::Throw { value: e, .. } => {
+                Self::expr_changes_base_len(e, base)
+            }
+            Statement::Return { value: None, .. }
+            | Statement::Break { .. }
+            | Statement::Continue { .. } => false,
+            // switch/try/funcdecl/etc. — conservative (could hide a mutation of base).
             _ => true,
         }
     }
