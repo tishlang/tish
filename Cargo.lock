@@ -3318,6 +3318,7 @@ dependencies = [
  "indexmap",
  "itoa",
  "parking_lot",
+ "ryu",
  "smallvec",
 ]
 
