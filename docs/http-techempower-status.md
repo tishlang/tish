@@ -9,6 +9,32 @@
 > across different machines/days are not comparable — use a same-machine A/B or the noise-floored
 > compare.
 
+## Measured throughput — tish vs Bun vs node (2026-06-30, same-machine single-worker A/B)
+
+`scripts/run_http_perf.sh` + `scripts/perf_http_3way.sh` (oha, 5s, 64 connections, macOS single
+worker — the fair local comparison; multi-worker scaling is a Linux `SO_REUSEPORT` property, see the
+caveat below). Point-in-time; re-run to confirm.
+
+| workload | tish | Bun 1.2 | node 24 |
+|----------|------|---------|---------|
+| HTTP `/plaintext` (req/s, higher=better) | 138,263 | **146,887** | 101,658 |
+| HTTP `/json` (req/s) | 136,628 | **150,609** | 98,396 |
+| `JSON.stringify`, 100-record doc ×50k (ms, lower=better) | 355 | **224** | 409 |
+
+**Reading:** tish beats node comfortably (HTTP ~1.36×, stringify ~1.15×) but **trails Bun** — HTTP by
+~6–10%, and `JSON.stringify` by **~1.6×** (Bun's JSC has a hand-optimized serializer). So the TFB
+serialize-and-serve path is **not yet "beats-everything" optimized — Bun is the bar to clear.**
+
+**Optimization targets (to beat Bun, in order of gap size):**
+1. **`JSON.stringify`** — the biggest gap (1.6×). The per-key escape scan + object iteration are the
+   suspects; Bun caches/fast-paths constant keys and ASCII strings.
+2. **HTTP per-request path** — close the ~6–10% (request-object construction, handler dispatch,
+   response extraction/write).
+
+Separately, the one JSON area where even **node** leads tish is large-payload *parse* (json_roundtrip
+~1.15× node, parse-bound: ~400K boxed-object allocations — the boxed-object-model deep track, distinct
+from the serialize path above).
+
 **Question:** is the multithreaded, non-blocking HTTP server still working as part of the TechEmpower
 (TFB) requirements, after the typing / stdlib-types work?
 
