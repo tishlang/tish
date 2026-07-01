@@ -13,7 +13,7 @@
 # Env: HTTP_WORKERS (default nproc)  HTTP_DURATION (5s)  HTTP_CONNECTIONS (128)
 #      HTTP_PERF_OUT (http-perf-record.txt)
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 WORKERS="${HTTP_WORKERS:-$(nproc 2>/dev/null || echo 4)}"
 DUR="${HTTP_DURATION:-5s}"

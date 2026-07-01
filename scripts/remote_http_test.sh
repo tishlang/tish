@@ -15,6 +15,7 @@ apt-get install -y build-essential git curl jq pkg-config libssl-dev ca-certific
 if ! command -v cargo >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/tmp/rustup.log 2>&1
 fi
+# shellcheck source=/dev/null
 . "$HOME/.cargo/env"
 if ! node --version 2>/dev/null | grep -q '^v24'; then
   # Prefer NodeSource v24; verify the major actually took (Ubuntu's apt otherwise
@@ -64,7 +65,7 @@ if command -v taskset >/dev/null 2>&1 && [[ "$NCPU" -ge 4 && -x /tmp/tish_http_p
   for w in 1 2 "$nsrv"; do
     PORT=8092 TISH_HTTP_WORKERS="$w" taskset -c "$srvcores" /tmp/tish_http_perf_server >/tmp/sw.log 2>&1 &
     sp=$!
-    for i in $(seq 1 60); do curl -s localhost:8092/plaintext >/dev/null 2>&1 && break; sleep 0.1; done
+    for _ in $(seq 1 60); do curl -s localhost:8092/plaintext >/dev/null 2>&1 && break; sleep 0.1; done
     taskset -c "$loadcores" oha --no-tui --output-format json -z 5s -c 128 http://127.0.0.1:8092/json 2>/dev/null \
       | jq -r --arg w "$w" '"  workers="+$w+"  req/s(/json)="+(.summary.requestsPerSec|floor|tostring)+"  p50ms="+((.latencyPercentiles.p50*1000*100|round)/100|tostring)+"  success="+(.summary.successRate|tostring)'
     kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null
@@ -79,7 +80,7 @@ if target/release/tish build tests/http/server.tish -o /tmp/srvh --target native
   for w in 1 "$NCPU"; do
     PORT=8091 TISH_HTTP_BACKEND=hyper TISH_HTTP_WORKERS="$w" /tmp/srvh >/tmp/srvh.log 2>&1 &
     sp=$!
-    for i in $(seq 1 60); do curl -s localhost:8091/plaintext >/dev/null 2>&1 && break; sleep 0.1; done
+    for _ in $(seq 1 60); do curl -s localhost:8091/plaintext >/dev/null 2>&1 && break; sleep 0.1; done
     ok=$(curl -s -o /dev/null -w '%{http_code}' localhost:8091/json 2>/dev/null)
     oha --no-tui --output-format json -z 5s -c 128 http://127.0.0.1:8091/json 2>/dev/null \
       | jq -r --arg w "$w" --arg ok "$ok" '"  hyper workers="+$w+"  http="+$ok+"  req/s(/json)="+(.summary.requestsPerSec|floor|tostring)+"  success="+(.summary.successRate|tostring)'

@@ -66,7 +66,7 @@ echo ">> ip=$IP" | tee -a "$LOG"
 
 echo ">> waiting for ssh ..." | tee -a "$LOG"
 up=0
-for i in $(seq 1 60); do
+for _ in $(seq 1 60); do
   if ssh "${SSH_OPTS[@]}" "root@$IP" true >/dev/null 2>&1; then up=1; break; fi
   sleep 5
 done

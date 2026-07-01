@@ -25,7 +25,7 @@
 #
 # Flags: --duration 5s  --connections 128  --workers N  --port 8080  --no-build
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 DUR="5s"; CONN=128; PORT=8080; NO_BUILD=0
 MODE="compare"; SERVE_ENGINE="tish"; URL=""; WORKERS=""
@@ -72,7 +72,7 @@ bench() {
              (.summary.successRate) ] | @tsv'
 }
 warmup()     { oha --no-tui --output-format json -z 1s -c "$CONN" "${1}${2}" >/dev/null 2>&1; }
-wait_ready() { local i; for i in $(seq 1 100); do curl -s "${1}/plaintext" >/dev/null 2>&1 && return 0; sleep 0.1; done; return 1; }
+wait_ready() { for _ in $(seq 1 100); do curl -s "${1}/plaintext" >/dev/null 2>&1 && return 0; sleep 0.1; done; return 1; }
 
 macos_caveat() {
   [[ "$(uname -s)" == "Darwin" ]] || return 0
