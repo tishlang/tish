@@ -383,6 +383,177 @@ pub enum Value {
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<Value>() == 24);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// #201 Stage A — representation abstraction (behavior-preserving, zero perf effect).
+//
+// `Value` is an enum today. To eventually swap it for a NaN-boxed `struct Value(u64)`
+// (#201 Stage C) WITHOUT thousands of simultaneous edits, call sites should go through
+// this abstraction instead of matching the enum directly:
+//   * construct via the named constructors (`Value::number`, `::boolean`, `::string`, …),
+//   * inspect via `v.unpack()` (a borrowed view) or the `as_*` / `tag` accessors.
+// Once sites are migrated, the representation changes behind these method bodies and the
+// call sites are untouched. Stage B (the 24→16 size-shrink) is intentionally SKIPPED — it
+// was tried and regressed dispatch ~8-10% (see the size-guard note above); only Stage C's
+// branch-free tag test can pay off. This layer is pure enabling: no behavior, no perf.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Cheap type discriminant for a [`Value`]. `match v.tag()` will lower to a branch-free
+/// tag test once `Value` is NaN-boxed (#201). Variant order/values are not part of any ABI.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ValueTag {
+    Number,
+    String,
+    Bool,
+    Null,
+    Array,
+    NumberArray,
+    Object,
+    Symbol,
+    Function,
+    #[cfg(feature = "regex")]
+    RegExp,
+    Promise,
+    Opaque,
+}
+
+/// Borrowed view of a [`Value`]'s payload, mirroring the enum variants. Lets call sites
+/// write `match v.unpack() { ValueRef::Number(n) => … }` instead of matching the enum
+/// directly, so the underlying representation can change (#201) without touching the match
+/// sites. Zero-cost — each arm borrows the existing payload in place.
+pub enum ValueRef<'a> {
+    Number(f64),
+    String(&'a arcstr::ArcStr),
+    Bool(bool),
+    Null,
+    Array(&'a VmRef<Vec<Value>>),
+    NumberArray(&'a VmRef<Vec<f64>>),
+    Object(&'a VmRef<ObjectData>),
+    Symbol(&'a Arc<TishSymbol>),
+    Function(&'a NativeFn),
+    #[cfg(feature = "regex")]
+    RegExp(&'a VmRef<TishRegExp>),
+    Promise(&'a Arc<dyn TishPromise>),
+    Opaque(&'a Arc<dyn TishOpaque>),
+}
+
+impl Value {
+    /// Named constructor for a number (#201 abstraction). Prefer over `Value::Number(n)`.
+    #[inline]
+    pub fn number(n: f64) -> Self {
+        Value::Number(n)
+    }
+
+    /// Named constructor for a boolean (#201 abstraction). Prefer over `Value::Bool(b)`.
+    #[inline]
+    pub fn boolean(b: bool) -> Self {
+        Value::Bool(b)
+    }
+
+    /// Named constructor for a string (#201 abstraction). Accepts anything that converts
+    /// into the interned `ArcStr` (`&str`, `String`, `ArcStr`).
+    #[inline]
+    pub fn string(s: impl Into<arcstr::ArcStr>) -> Self {
+        Value::String(s.into())
+    }
+
+    /// Named constructor for null (#201 abstraction). Prefer over `Value::Null`.
+    #[inline]
+    pub fn null() -> Self {
+        Value::Null
+    }
+
+    /// Borrowed view of the payload — the migration target for `match v { … }`.
+    #[inline]
+    pub fn unpack(&self) -> ValueRef<'_> {
+        match self {
+            Value::Number(n) => ValueRef::Number(*n),
+            Value::String(s) => ValueRef::String(s),
+            Value::Bool(b) => ValueRef::Bool(*b),
+            Value::Null => ValueRef::Null,
+            Value::Array(a) => ValueRef::Array(a),
+            Value::NumberArray(a) => ValueRef::NumberArray(a),
+            Value::Object(o) => ValueRef::Object(o),
+            Value::Symbol(s) => ValueRef::Symbol(s),
+            Value::Function(f) => ValueRef::Function(f),
+            #[cfg(feature = "regex")]
+            Value::RegExp(r) => ValueRef::RegExp(r),
+            Value::Promise(p) => ValueRef::Promise(p),
+            Value::Opaque(o) => ValueRef::Opaque(o),
+        }
+    }
+
+    /// The value's type discriminant (#201 abstraction) — for cheap type checks.
+    #[inline]
+    pub fn tag(&self) -> ValueTag {
+        match self {
+            Value::Number(_) => ValueTag::Number,
+            Value::String(_) => ValueTag::String,
+            Value::Bool(_) => ValueTag::Bool,
+            Value::Null => ValueTag::Null,
+            Value::Array(_) => ValueTag::Array,
+            Value::NumberArray(_) => ValueTag::NumberArray,
+            Value::Object(_) => ValueTag::Object,
+            Value::Symbol(_) => ValueTag::Symbol,
+            Value::Function(_) => ValueTag::Function,
+            #[cfg(feature = "regex")]
+            Value::RegExp(_) => ValueTag::RegExp,
+            Value::Promise(_) => ValueTag::Promise,
+            Value::Opaque(_) => ValueTag::Opaque,
+        }
+    }
+
+    /// Extract the boolean payload, if this is a `Bool`.
+    #[inline]
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// Borrow the string payload as `&str`, if this is a `String`.
+    #[inline]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Borrow the object payload, if this is an `Object`.
+    #[inline]
+    pub fn as_object(&self) -> Option<&VmRef<ObjectData>> {
+        match self {
+            Value::Object(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// Borrow the array payload, if this is an `Array`.
+    #[inline]
+    pub fn as_array(&self) -> Option<&VmRef<Vec<Value>>> {
+        match self {
+            Value::Array(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// Borrow the packed-number-array payload, if this is a `NumberArray`.
+    #[inline]
+    pub fn as_number_array(&self) -> Option<&VmRef<Vec<f64>>> {
+        match self {
+            Value::NumberArray(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// True if this is `Null`.
+    #[inline]
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
+    }
+}
+
 /// Number of properties kept inline (no heap hashmap) before promoting to a map.
 const PROPMAP_INLINE: usize = 8;
 
@@ -1434,6 +1605,46 @@ impl Value {
             ],
             _ => vec![],
         }
+    }
+}
+
+#[cfg(test)]
+mod value_abstraction_tests {
+    // #201 Stage A — the abstraction must exactly mirror the enum it will replace.
+    use super::{Value, ValueRef, ValueTag};
+
+    #[test]
+    fn named_ctors_report_the_right_tag() {
+        assert_eq!(Value::number(1.5).tag(), ValueTag::Number);
+        assert_eq!(Value::boolean(true).tag(), ValueTag::Bool);
+        assert_eq!(Value::string("hi").tag(), ValueTag::String);
+        assert_eq!(Value::null().tag(), ValueTag::Null);
+        assert_eq!(Value::array(vec![]).tag(), ValueTag::Array);
+        assert_eq!(Value::empty_object().tag(), ValueTag::Object);
+    }
+
+    #[test]
+    fn unpack_roundtrips_each_variant() {
+        assert!(matches!(Value::number(3.0).unpack(), ValueRef::Number(n) if n == 3.0));
+        assert!(matches!(Value::boolean(false).unpack(), ValueRef::Bool(false)));
+        assert!(matches!(Value::string("x").unpack(), ValueRef::String(s) if s.as_str() == "x"));
+        assert!(matches!(Value::null().unpack(), ValueRef::Null));
+        assert!(matches!(Value::array(vec![]).unpack(), ValueRef::Array(_)));
+        assert!(matches!(Value::empty_object().unpack(), ValueRef::Object(_)));
+    }
+
+    #[test]
+    fn accessors_extract_or_none() {
+        assert_eq!(Value::number(2.0).as_number(), Some(2.0));
+        assert_eq!(Value::boolean(true).as_bool(), Some(true));
+        assert_eq!(Value::string("abc").as_str(), Some("abc"));
+        assert!(Value::null().is_null());
+        // wrong-variant accessors return None
+        assert_eq!(Value::number(1.0).as_bool(), None);
+        assert_eq!(Value::null().as_str(), None);
+        assert!(!Value::number(0.0).is_null());
+        assert!(Value::array(vec![Value::number(1.0)]).as_array().is_some());
+        assert!(Value::number(1.0).as_array().is_none());
     }
 }
 
