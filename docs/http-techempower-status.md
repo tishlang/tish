@@ -27,9 +27,20 @@ serialize-and-serve path is **not yet "beats-everything" optimized — Bun is th
 
 **Optimization targets (to beat Bun, in order of gap size):**
 1. **`JSON.stringify`** — the biggest gap (1.6×). The per-key escape scan + object iteration are the
-   suspects; Bun caches/fast-paths constant keys and ASCII strings.
-2. **HTTP per-request path** — close the ~6–10% (request-object construction, handler dispatch,
-   response extraction/write).
+   suspects; Bun caches/fast-paths constant keys and ASCII strings. (Partly addressed since: `#357`
+   ryu number→string; `#362` ahash shape registry.)
+2. **HTTP per-request path — INVESTIGATED 2026-06-30: NOT a tish-code lever.** Symbol/image-resolved
+   `sample` of the running server under `oha` load shows the per-request cost is compute in the
+   `tish_http_srv` binary — dominated by **tiny_http's HTTP parse/format**, with **`malloc`
+   negligible** (not even a top image). So the request-object build (`into_value`: method/url/path/
+   query + the headers map + body) is **not** the bottleneck, even though the TFB handler only reads
+   `req.path`. A same-machine single-worker A/B (oha, 48 conns) puts tish's default **tiny_http within
+   ~3.5% of Bun** — `/json` 138.9k vs Bun 143.5k, `/plaintext` 138.9k vs 144.1k (tighter than the
+   ~6–10% first measured; that was variance). The `hyper` backend is **much slower on macOS
+   single-worker** (`/json` ~79k) — it is the Linux per-core + io_uring scaling lever (`#323`), not a
+   macOS win. **Conclusion:** the residual gap is the HTTP framework (tiny_http vs Bun's Zig server),
+   not tish code; there is no tractable per-request tish-code optimization here. The real lever is
+   `#323` (io_uring accept/send batching + hyper-per-core), which is Linux-only.
 
 Separately, the one JSON area where even **node** leads tish is large-payload *parse* (json_roundtrip
 ~1.15× node, parse-bound: ~400K boxed-object allocations — the boxed-object-model deep track, distinct
