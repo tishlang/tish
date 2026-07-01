@@ -929,6 +929,15 @@ impl StructRegistry {
         self.decls.push((name.clone(), fields.to_vec()));
         name
     }
+
+    /// The field list registered under an alias (`TishAnon_N` or a user `type`), for inlining a
+    /// struct-typed spread's fields into a merged object shape.
+    fn fields_of(&self, alias: &str) -> Option<&[(std::sync::Arc<str>, TypeAnnotation)]> {
+        self.decls
+            .iter()
+            .find(|(n, _)| n == alias)
+            .map(|(_, f)| f.as_slice())
+    }
 }
 
 fn type_canon(t: &TypeAnnotation) -> String {
@@ -944,6 +953,79 @@ fn type_canon(t: &TypeAnnotation) -> String {
         ),
         _ => "?".to_string(),
     }
+}
+
+/// If `props` is `{ ...base, <explicit KeyValue props> }` where `base` is a struct-typed local and
+/// the explicit keys don't collide with base's fields, return (merged struct field list, spread-free
+/// rewritten props: `base`'s fields as `base.field` reads, then the explicit props). This lets a
+/// `{ ...base, k: v }` immutable-update / config-merge lower to an unboxed struct via the normal
+/// struct-from-object codegen — no codegen change. Conservative — `None` (stays a boxed PropMap)
+/// unless: exactly one spread, it is the FIRST prop, over a plain struct-typed ident; every explicit
+/// prop is a typeable `KeyValue`; and no explicit key collides with a base field (keeps spread
+/// override-order semantics out of scope). `base` is already a struct ⇒ proven read-only, so
+/// inlining its field reads is sound.
+fn inline_struct_spread(
+    props: &[tishlang_ast::ObjectProp],
+    ctx: &InferCtx,
+    reg: &StructRegistry,
+) -> Option<(
+    Vec<(std::sync::Arc<str>, TypeAnnotation)>,
+    Vec<tishlang_ast::ObjectProp>,
+)> {
+    use tishlang_ast::{Expr, MemberProp, ObjectProp};
+    if props
+        .iter()
+        .filter(|p| matches!(p, ObjectProp::Spread(_)))
+        .count()
+        != 1
+    {
+        return None;
+    }
+    let (base_name, base_span) = match props.first() {
+        Some(ObjectProp::Spread(Expr::Ident { name, span })) => (name.clone(), *span),
+        _ => return None, // spread not first, or not a plain ident
+    };
+    let alias = match ctx.lookup(base_name.as_ref()) {
+        Some(TypeAnnotation::Simple(a, _)) => a.clone(),
+        _ => return None, // base is not a struct-typed local
+    };
+    let base_fields = reg.fields_of(&alias)?.to_vec();
+    let explicit = &props[1..];
+    // Explicit props must be spread-free + all typeable (infer_object_shape bails otherwise).
+    let explicit_fields = infer_object_shape(explicit, ctx)?;
+    let base_keys: std::collections::HashSet<&str> =
+        base_fields.iter().map(|(k, _)| k.as_ref()).collect();
+    if explicit_fields
+        .iter()
+        .any(|(k, _)| base_keys.contains(k.as_ref()))
+    {
+        return None;
+    }
+    let mut merged = base_fields.clone();
+    merged.extend(explicit_fields.iter().cloned());
+    let mut rewritten: Vec<ObjectProp> = base_fields
+        .iter()
+        .map(|(k, _)| {
+            ObjectProp::KeyValue(
+                k.clone(),
+                Expr::Member {
+                    object: Box::new(Expr::Ident {
+                        name: base_name.clone(),
+                        span: base_span,
+                    }),
+                    prop: MemberProp::Name {
+                        name: k.clone(),
+                        span: base_span,
+                    },
+                    optional: false,
+                    span: base_span,
+                },
+                base_span,
+            )
+        })
+        .collect();
+    rewritten.extend_from_slice(explicit);
+    Some((merged, rewritten))
 }
 
 /// Infer a concrete object shape from an object literal, or `None` if any field
@@ -1286,23 +1368,37 @@ fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx)
             name_span,
             mutable,
             type_ann: None,
-            init: Some(Expr::Object { props, .. }),
+            init: Some(Expr::Object { props, span: obj_span }),
             span,
         } = stmt
         {
-            if let Some(fields) = infer_object_shape(props, ctx) {
+            // A struct-typed leading spread (`{ ...base, k: v }`) is inlined to a plain
+            // `{ a: base.a, …, k: v }` literal so it lowers to an unboxed struct; otherwise the plain
+            // literal path applies (a spread it can't inline leaves `infer_object_shape` → None → boxed).
+            let (shape, rewritten_props) = match inline_struct_spread(props, ctx, reg) {
+                Some((f, rp)) => (Some(f), Some(rp)),
+                None => (infer_object_shape(props, ctx), None),
+            };
+            if let Some(fields) = shape {
                 let keys: std::collections::HashSet<&str> =
                     fields.iter().map(|(k, _)| k.as_ref()).collect();
                 // Sound: every later use in this block must be a literal-key read.
                 if uses_are_struct_safe(name.as_ref(), &keys, &stmts[i + 1..]) {
                     let alias = reg.intern(&fields);
                     ctx.define(name.as_ref(), TypeAnnotation::Simple(alias.as_str().into(), tishlang_ast::Span::default()));
+                    let new_init = match rewritten_props {
+                        Some(rp) => Some(Expr::Object {
+                            props: rp,
+                            span: *obj_span,
+                        }),
+                        None => stmt_init_clone(stmt),
+                    };
                     out.push(Statement::VarDecl {
                         name: name.clone(),
                         name_span: *name_span,
                         mutable: *mutable,
                         type_ann: Some(TypeAnnotation::Simple(alias.as_str().into(), tishlang_ast::Span::default())),
-                        init: stmt_init_clone(stmt),
+                        init: new_init,
                         span: *span,
                     });
                     continue;
@@ -2275,10 +2371,33 @@ fn expr_name_safe(e: &Expr, name: &str, keys: &std::collections::HashSet<&str>) 
                 expr_name_safe(e, name, keys)
             }
         }),
-        Object { props, .. } => props.iter().all(|p| match p {
-            tishlang_ast::ObjectProp::KeyValue(_, v, _) => expr_name_safe(v, name, keys),
-            tishlang_ast::ObjectProp::Spread(e) => expr_name_safe(e, name, keys),
-        }),
+        Object { props, .. } => {
+            // A `{ ...name, k: v, … }` immutable-update spreads `name` — a read-only bulk field read,
+            // not an escape — and `inline_struct_spread` will lower it to a plain struct literal
+            // (`{ a: name.a, …, k: v }`). Treat a leading self-spread as SAFE iff it matches that
+            // inlining's eligibility EXACTLY: first prop, the only spread, and every other prop is a
+            // `KeyValue` whose key doesn't collide with `name`'s keys (and whose value is name-safe).
+            // Consistency: `name` then structifies iff the spread is inlined, so there's never a
+            // struct spread into a boxed object (which would miscompile).
+            let leading_self_spread = matches!(
+                props.first(),
+                Some(tishlang_ast::ObjectProp::Spread(Expr::Ident { name: n, .. })) if n.as_ref() == name
+            );
+            if leading_self_spread
+                && props[1..].iter().all(|p| match p {
+                    tishlang_ast::ObjectProp::KeyValue(k, v, _) => {
+                        !keys.contains(k.as_ref()) && expr_name_safe(v, name, keys)
+                    }
+                    tishlang_ast::ObjectProp::Spread(_) => false,
+                })
+            {
+                return true;
+            }
+            props.iter().all(|p| match p {
+                tishlang_ast::ObjectProp::KeyValue(_, v, _) => expr_name_safe(v, name, keys),
+                tishlang_ast::ObjectProp::Spread(e) => expr_name_safe(e, name, keys),
+            })
+        }
         TemplateLiteral { exprs, .. } => exprs.iter().all(|e| expr_name_safe(e, name, keys)),
         // Reassignment / mutation referencing `name` by identifier → unsafe.
         Assign { name: n, value, .. }
