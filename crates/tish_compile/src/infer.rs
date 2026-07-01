@@ -1366,6 +1366,26 @@ fn stmt_init_clone(stmt: &Statement) -> Option<Expr> {
     }
 }
 
+/// Define a `let`/`const` binding's name+type in `ctx` from its annotation or inferred init type, so
+/// inference in an inner scope can resolve references to it. Used to bind `for`-init loop variables
+/// before recursing into the loop body (enables struct inference of loop-local objects that read the
+/// counter). Only the simple `let x = <expr>` shape; anything else is skipped (sound — the body just
+/// keeps today's behavior).
+fn si_bind_decl(stmt: &Statement, ctx: &mut InferCtx) {
+    if let Statement::VarDecl {
+        name,
+        type_ann,
+        init: Some(e),
+        ..
+    } = stmt
+    {
+        let t = type_ann.clone().or_else(|| infer_expr_type(e, ctx));
+        if let Some(t) = t {
+            ctx.define(name.as_ref(), t);
+        }
+    }
+}
+
 /// Recurse struct inference into a statement's nested blocks (function bodies,
 /// loop/if bodies). Non-block statements pass through unchanged.
 fn si_recurse(stmt: &Statement, reg: &mut StructRegistry, ctx: &mut InferCtx) -> Statement {
@@ -1380,13 +1400,26 @@ fn si_recurse(stmt: &Statement, reg: &mut StructRegistry, ctx: &mut InferCtx) ->
             update,
             body,
             span,
-        } => Statement::For {
-            init: init.clone(),
-            cond: cond.clone(),
-            update: update.clone(),
-            body: Box::new(si_recurse(body, reg, ctx)),
-            span: *span,
-        },
+        } => {
+            // Bind the loop variable(s) from `init` into a fresh scope so the body's struct inference
+            // can type object-literal fields that reference the counter — e.g. `{ id: i, v: i * 2 }`
+            // inside `for (let i = 0; …)`. Without this, `infer_object_shape` can't type those fields
+            // and a loop-local object stays a boxed `PropMap`. (A loop-local object that reads only
+            // outer/literal values already lowers to an unboxed struct; this closes the loop-var gap.)
+            ctx.push_scope();
+            if let Some(init_stmt) = init.as_deref() {
+                si_bind_decl(init_stmt, ctx);
+            }
+            let new_body = Box::new(si_recurse(body, reg, ctx));
+            ctx.pop_scope();
+            Statement::For {
+                init: init.clone(),
+                cond: cond.clone(),
+                update: update.clone(),
+                body: new_body,
+                span: *span,
+            }
+        }
         Statement::ForOf {
             name,
             name_span,
