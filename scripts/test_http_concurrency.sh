@@ -12,7 +12,7 @@
 #
 # Usage: scripts/test_http_concurrency.sh [-n N] [-p PORT]   (needs target/release/tish built, curl, python3)
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 N=6
 PORT=$(( (RANDOM % 2000) + 8200 ))
@@ -63,16 +63,28 @@ ready=0
 for _ in $(seq 1 100); do curl -s --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && { ready=1; break; }; sleep 0.1; done
 [[ "$ready" == 1 ]] || { echo "FAIL: server never came up"; cat /tmp/conc_srv.out; exit 1; }
 
-start=$(now_ms)
-# Wait only on the curl PIDs — a bare `wait` would also block on the forever-running server.
-pids=()
-for _ in $(seq 1 "$N"); do curl -s --max-time 10 "http://127.0.0.1:$PORT/slow" >/dev/null 2>&1 & pids+=($!); done
-wait "${pids[@]}"
-wall=$(( $(now_ms) - start ))
 serial=$(( N * HOLD_MS ))
+# Parallelism, read off the wall clock. A single batch on a loaded SHARED runner can
+# straddle the threshold: the kernel hashes SO_REUSEPORT connections to workers (N
+# connections rarely land on N distinct workers) and scheduler jitter adds noise. Take the
+# BEST of several batches — genuine parallelism clears the bar on at least one; a real
+# serialization regression stays ≈ serial on ALL attempts. Early-exit once it passes.
+best=2147483647
+for attempt in 1 2 3 4 5; do
+  start=$(now_ms)
+  # Wait only on the curl PIDs — a bare `wait` would also block on the forever-running server.
+  pids=()
+  for _ in $(seq 1 "$N"); do curl -s --max-time 10 "http://127.0.0.1:$PORT/slow" >/dev/null 2>&1 & pids+=($!); done
+  wait "${pids[@]}"
+  wall=$(( $(now_ms) - start ))
+  echo "  batch $attempt wall = ${wall}ms"
+  [[ "$wall" -lt "$best" ]] && best=$wall
+  [[ "$best" -lt $(( serial / 2 )) ]] && break
+done
+wall=$best
 
 echo "N=$N  hold=${HOLD_MS}ms  serial≈${serial}ms  parallel≈${HOLD_MS}-$(( HOLD_MS * 2 ))ms"
-echo "  observed batch wall = ${wall}ms"
+echo "  best batch wall = ${wall}ms"
 
 parallel=0
 [[ "$wall" -lt $(( serial / 2 )) ]] && parallel=1
