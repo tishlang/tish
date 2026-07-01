@@ -12,14 +12,16 @@
 # Modes:
 #   # 1) Two-process (recommended; cross-terminal / cross-host / CI):
 #   scripts/run_http_perf.sh --serve tish [--workers N]    # process A: the server (blocks)
-#   scripts/run_http_perf.sh --serve node [--workers N]    #   (or the node reference server)
+#   scripts/run_http_perf.sh --serve node [--workers N]    #   (node reference server)
+#   scripts/run_http_perf.sh --serve bun  [--workers N]    #   (bun native Bun.serve server)
 #   scripts/run_http_perf.sh --url http://127.0.0.1:8080   # process B: the external load
 #
 #   # 2) One-shot local comparison (orchestrates the two separate processes for you):
-#   scripts/run_http_perf.sh                               # tish vs node, 1 vs N workers
+#   scripts/run_http_perf.sh                               # tish vs node vs bun, 1 vs N workers
 #
 # Requires: oha, jq, curl (always); node (compare / --serve node); a release tish
-# binary (compare / --serve tish, unless --no-build).
+# binary (compare / --serve tish, unless --no-build). bun is OPTIONAL — its rows are
+# added when `bun` is on PATH, skipped (with a note) otherwise.
 #
 # Flags: --duration 5s  --connections 128  --workers N  --port 8080  --no-build
 set -uo pipefail
@@ -31,6 +33,7 @@ NCPU=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 TISH="${TISH_BIN:-target/release/tish}"
 SERVER_TISH="tests/http/server.tish"
 SERVER_NODE="tests/http/server.mjs"
+SERVER_BUN="tests/http/server.bun.js"
 BIN="/tmp/tish_http_perf_server"
 
 while [[ $# -gt 0 ]]; do
@@ -87,6 +90,10 @@ if [[ "$MODE" == serve ]]; then
     need node
     echo "node server: http://127.0.0.1:$PORT  (WORKERS=$MULTI)  — Ctrl-C to stop" >&2
     exec env PORT="$PORT" WORKERS="$MULTI" node "$SERVER_NODE"
+  elif [[ "$SERVE_ENGINE" == bun ]]; then
+    need bun
+    echo "bun server: http://127.0.0.1:$PORT  (WORKERS=$MULTI)  — Ctrl-C to stop" >&2
+    exec env PORT="$PORT" WORKERS="$MULTI" bun "$SERVER_BUN"
   else
     build_tish_server; macos_caveat
     echo "tish server: http://127.0.0.1:$PORT  (TISH_HTTP_WORKERS=$MULTI)  — Ctrl-C to stop" >&2
@@ -112,7 +119,7 @@ fi
 
 # ---------------------- mode: compare (orchestrate both processes) --------------------
 need oha; need jq; need curl; need node
-killsrv() { pkill -f tish_http_perf_server >/dev/null 2>&1; pkill -f "$SERVER_NODE" >/dev/null 2>&1; sleep 0.3; }
+killsrv() { pkill -f tish_http_perf_server >/dev/null 2>&1; pkill -f "$SERVER_NODE" >/dev/null 2>&1; pkill -f "$SERVER_BUN" >/dev/null 2>&1; sleep 0.3; }
 trap killsrv EXIT
 killsrv
 build_tish_server
@@ -123,6 +130,8 @@ run_case() { # engine workers
   local engine="$1" workers="$2" label
   if [[ "$engine" == tish ]]; then
     label="tish (w=$workers)"; PORT="$PORT" TISH_HTTP_WORKERS="$workers" "$BIN" >/tmp/tish_http_srv.log 2>&1 &
+  elif [[ "$engine" == bun ]]; then
+    label="bun (w=$workers)"; PORT="$PORT" WORKERS="$workers" bun "$SERVER_BUN" >/tmp/tish_http_srv.log 2>&1 &
   else
     label="node (w=$workers)"; PORT="$PORT" WORKERS="$workers" node "$SERVER_NODE" >/tmp/tish_http_srv.log 2>&1 &
   fi
@@ -138,12 +147,18 @@ run_case() { # engine workers
 }
 
 macos_caveat
-echo "HTTP throughput: tish vs node  (duration=$DUR connections=$CONN workers: 1 and $MULTI, ncpu=$NCPU)"
+echo "HTTP throughput: tish vs node vs bun  (duration=$DUR connections=$CONN workers: 1 and $MULTI, ncpu=$NCPU)"
 echo "  engine         endpoint    req/s   p50ms p99ms  success"
 run_case tish 1
 run_case tish "$MULTI"
 run_case node 1
 run_case node "$MULTI"
+if command -v bun >/dev/null 2>&1; then
+  run_case bun 1
+  run_case bun "$MULTI"
+else
+  echo "  (bun not on PATH — skipping bun rows; install: curl -fsSL https://bun.sh/install | bash)"
+fi
 
 echo ""
 echo "=================== HTTP throughput summary ==================="

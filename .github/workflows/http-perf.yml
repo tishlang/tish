@@ -1,0 +1,112 @@
+# Multi-worker HTTP path: correctness gates + throughput record (tish vs node vs bun).
+#
+# This is the ONE place tish's prefork + send-values multi-worker server is exercised on
+# real Linux (where SO_REUSEPORT actually kernel-load-balances — macOS funnels every accept
+# to one worker, so scaling can't be observed there). Runs on an 8-vCPU Linux runner.
+#
+# Two halves (scripts/ci_http_perf.sh):
+#   - CORRECTNESS GATES hard-fail the job (multithread dispatch + shared-counter regression).
+#   - THROUGHPUT is recorded and uploaded as an artifact — never gates. Perf is logged, not
+#     judged (same policy as perf-release.yml). Single-box numbers are load-gen-contended;
+#     the scaling shape (w=N vs w=1) is the signal, not the absolute multiplier.
+#
+# Runs on-demand, on release, and (self-test) only when the HTTP-perf tooling itself changes —
+# NOT on every PR (the native server build makes it too heavy for that).
+name: HTTP perf (multi-worker)
+
+on:
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: "Worker count for the w=N case (default: runner nproc)"
+        required: false
+        type: string
+      duration:
+        description: "oha duration per case (default 5s)"
+        required: false
+        default: "5s"
+        type: string
+      connections:
+        description: "oha concurrent connections (default 128)"
+        required: false
+        default: "128"
+        type: string
+  release:
+    types: [published]
+  pull_request:
+    paths:
+      - .github/workflows/http-perf.yml
+      - scripts/ci_http_perf.sh
+      - scripts/run_http_perf.sh
+      - scripts/test_http_concurrency.sh
+      - tests/http/**
+      - crates/tish_runtime/src/http*.rs
+
+concurrency:
+  group: http-perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  http-perf:
+    name: Multi-worker HTTP (gates + record)
+    runs-on: blacksmith-8vcpu-ubuntu-2204
+    env:
+      # Fleet-safe target-cpu (#223): default `native` SIGILLs the native-backend build on the
+      # virtualized fleet; x86-64-v3 stays near-native and every x86 host here honours it.
+      RUSTFLAGS: "-C target-cpu=x86-64-v3"
+      # No sccache here: it flakes the `tish build --native-backend rust` server compile.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash || true
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Install oha (load generator)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /usr/local/bin/oha https://github.com/hatoo/oha/releases/latest/download/oha-linux-amd64
+          chmod +x /usr/local/bin/oha
+          oha --version
+
+      - name: Runtime availability (logged for transparency)
+        run: |
+          for r in node bun oha jq curl; do
+            printf '%-6s ' "$r"
+            if command -v "$r" >/dev/null; then "$r" --version 2>&1 | head -1; else echo "ABSENT"; fi
+          done
+
+      - name: Gates + throughput record
+        env:
+          HTTP_WORKERS: ${{ github.event.inputs.workers }}
+          HTTP_DURATION: ${{ github.event.inputs.duration || '5s' }}
+          HTTP_CONNECTIONS: ${{ github.event.inputs.connections || '128' }}
+          HTTP_PERF_OUT: http-perf-record.txt
+        run: bash scripts/ci_http_perf.sh
+
+      - name: Show recorded numbers in the job log
+        if: always()
+        run: |
+          echo "=================== HTTP perf record ==================="
+          cat http-perf-record.txt 2>/dev/null || echo "(no record produced — see gate failure above)"
+
+      - name: Upload throughput record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: http-perf-record
+          path: http-perf-record.txt
+          if-no-files-found: ignore
