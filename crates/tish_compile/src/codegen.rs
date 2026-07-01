@@ -1303,6 +1303,13 @@ impl Codegen {
                     ));
                 }
                 self.write("}\n\n");
+                // #315: emit a direct JSON serializer for this struct when every field is
+                // JSON-simple. Emitted for each eligible alias (unused ones are covered by
+                // the generated crate's `#![allow(unused)]`); the JSON.stringify intercept
+                // calls it only where the arg's static type matches.
+                if Self::json_fields_are_simple(fields) {
+                    self.emit_struct_json_serializer(&name, fields);
+                }
                 emitted_any = true;
             }
         }
@@ -1311,7 +1318,148 @@ impl Codegen {
         }
     }
 
+    /// #315: JSON-simple = serializable by a direct per-struct writer that is byte-identical
+    /// to node's `JSON.stringify` (reuses `write_json_number` / `escape_into`). Whitelist, so
+    /// any future RustType variant defaults to the sound Value-path fallback.
+    fn json_struct_is_simple(ty: &crate::types::RustType) -> bool {
+        use crate::types::RustType;
+        match ty {
+            RustType::F64 | RustType::String | RustType::Bool => true,
+            // One level of array of scalars or simple structs (not Vec<Vec<…>> — the element
+            // writer below only handles a single nesting level).
+            RustType::Vec(inner) => matches!(
+                inner.as_ref(),
+                RustType::F64 | RustType::String | RustType::Bool
+            ) || matches!(inner.as_ref(), RustType::Named { .. } if Self::json_struct_is_simple(inner)),
+            RustType::Named { fields, .. } => Self::json_fields_are_simple(fields),
+            _ => false,
+        }
+    }
 
+    /// All fields JSON-simple, and no field key is an array-index-like all-digit string (JS
+    /// enumerates those first in numeric order — bail so we never reorder vs node).
+    fn json_fields_are_simple(fields: &[(std::sync::Arc<str>, crate::types::RustType)]) -> bool {
+        fields.iter().all(|(k, f)| {
+            let numeric_key = !k.is_empty() && k.as_ref().bytes().all(|b| b.is_ascii_digit());
+            !numeric_key && Self::json_struct_is_simple(f)
+        })
+    }
+
+    /// Stable per-alias serializer fn name (mirrors `named_struct_ident`, so it is unique and
+    /// matches at both the emission site and the call site).
+    fn json_helper_fn_ident(tish_name: &str) -> String {
+        format!("__tish_json_{}", crate::types::named_struct_ident(tish_name))
+    }
+
+    /// Rust for writing one JSON value of type `ty` (already JSON-simple) from place `access`.
+    fn json_value_writer(access: &str, ty: &crate::types::RustType) -> String {
+        use crate::types::RustType;
+        match ty {
+            RustType::F64 => {
+                format!("tishlang_runtime::json::write_json_number(out, {});", access)
+            }
+            RustType::String => format!(
+                "out.push('\"'); tishlang_runtime::json::escape_into(out, &{}); out.push('\"');",
+                access
+            ),
+            RustType::Bool => {
+                format!("out.push_str(if {} {{ \"true\" }} else {{ \"false\" }});", access)
+            }
+            RustType::Named { name, .. } => {
+                format!("{}(&{}, out);", Self::json_helper_fn_ident(name), access)
+            }
+            RustType::Vec(inner) => {
+                // Element is a reference from `.iter()`; scalars need a deref.
+                let ew = match inner.as_ref() {
+                    RustType::F64 => {
+                        "tishlang_runtime::json::write_json_number(out, *__e);".to_string()
+                    }
+                    RustType::String => {
+                        "out.push('\"'); tishlang_runtime::json::escape_into(out, __e); out.push('\"');".to_string()
+                    }
+                    RustType::Bool => {
+                        "out.push_str(if *__e { \"true\" } else { \"false\" });".to_string()
+                    }
+                    RustType::Named { name, .. } => {
+                        format!("{}(__e, out);", Self::json_helper_fn_ident(name))
+                    }
+                    _ => "out.push_str(\"null\");".to_string(), // unreachable: gated simple
+                };
+                format!(
+                    "out.push('['); for (__i, __e) in {}.iter().enumerate() {{ if __i > 0 {{ out.push(','); }} {} }} out.push(']');",
+                    access, ew
+                )
+            }
+            _ => "out.push_str(\"null\");".to_string(), // unreachable: gated by json_struct_is_simple
+        }
+    }
+
+    /// Emit `fn __tish_json_<alias>(v: &TishStruct_<alias>, out: &mut String)` writing the
+    /// struct as compact JSON in field-declaration order (== JS insertion order), reusing the
+    /// same `write_json_number` / `escape_into` the Value path uses → byte-identical to node.
+    fn emit_struct_json_serializer(
+        &mut self,
+        tish_name: &str,
+        fields: &[(std::sync::Arc<str>, crate::types::RustType)],
+    ) {
+        let struct_name = crate::types::named_struct_ident(tish_name);
+        let fn_name = Self::json_helper_fn_ident(tish_name);
+        self.write("#[allow(non_snake_case, unused)]\n");
+        self.write(&format!(
+            "fn {}(v: &{}, out: &mut String) {{\n",
+            fn_name, struct_name
+        ));
+        self.write("    out.push('{');\n");
+        for (i, (k, ty)) in fields.iter().enumerate() {
+            if i > 0 {
+                self.write("    out.push(',');\n");
+            }
+            // Key: escape the (constant) key at runtime via the exact same helper the Value
+            // path uses, guaranteeing byte-identity for any key.
+            self.write(&format!(
+                "    out.push('\"'); tishlang_runtime::json::escape_into(out, {:?}); out.push_str(\"\\\":\");\n",
+                k.as_ref()
+            ));
+            let access = format!("v.{}", crate::types::field_ident(k));
+            self.write(&format!("    {}\n", Self::json_value_writer(&access, ty)));
+        }
+        self.write("    out.push('}');\n");
+        self.write("}\n\n");
+    }
+
+    /// #315: direct JSON serializer for `JSON.stringify(arg)` when `arg`'s static type is a
+    /// simple struct (or Vec of one). Returns None → fall through to the generic Value path.
+    fn try_emit_direct_json_stringify(
+        &mut self,
+        arg: &Expr,
+    ) -> Result<Option<String>, CompileError> {
+        use crate::types::RustType;
+        let (code, ty) = self.emit_typed_expr(arg)?;
+        match &ty {
+            RustType::Named { name, .. } if Self::json_struct_is_simple(&ty) => {
+                let fname = Self::json_helper_fn_ident(name);
+                Ok(Some(format!(
+                    "{{ let mut _js = String::new(); {}(&({}), &mut _js); Value::String(_js.into()) }}",
+                    fname, code
+                )))
+            }
+            RustType::Vec(inner)
+                if matches!(inner.as_ref(), RustType::Named { .. })
+                    && Self::json_struct_is_simple(inner) =>
+            {
+                if let RustType::Named { name, .. } = inner.as_ref() {
+                    let fname = Self::json_helper_fn_ident(name);
+                    Ok(Some(format!(
+                        "{{ let mut _js = String::new(); _js.push('['); for (_ji, _je) in ({}).iter().enumerate() {{ if _ji > 0 {{ _js.push(','); }} {}(_je, &mut _js); }} _js.push(']'); Value::String(_js.into()) }}",
+                        code, fname
+                    )))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
+        }
+    }
 
     fn rc_cell_storage_contains(&self, name: &str) -> bool {
         self.rc_cell_storage_scopes
@@ -6248,6 +6396,29 @@ impl Codegen {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                // #315: JSON.stringify(x) where x has a statically-known simple-struct type
+                // → emit a direct per-struct serializer (byte-identical to node) that writes
+                // straight into a String, skipping the per-call ObjectMap/PropMap Value
+                // materialization. Any non-simple arg (or a replacer/space 2nd arg) returns
+                // None and falls through to the generic boxed path — sound.
+                if let Expr::Member {
+                    object,
+                    prop: MemberProp::Name { name: m, .. },
+                    optional: false,
+                    ..
+                } = callee.as_ref()
+                {
+                    if m.as_ref() == "stringify"
+                        && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "JSON")
+                        && args.len() == 1
+                    {
+                        if let CallArg::Expr(arg0) = &args[0] {
+                            if let Some(code) = self.try_emit_direct_json_stringify(arg0)? {
+                                return Ok(code);
+                            }
+                        }
+                    }
+                }
                 // #178: route a boxed-context call to a recursive-struct consumer
                 // (`sum(build(n))` / `sum(node)`) → `Value::Number(sum_rec(&..))`.
                 if self.rec_struct_plan.is_some() {
