@@ -538,6 +538,10 @@ use tishlang_core::{json_parse as core_json_parse, json_stringify as core_json_s
 pub mod json {
     pub use tishlang_core::json_parse;
     pub use tishlang_core::json_stringify_into as stringify_into;
+    /// JS-correct number→JSON writer (NaN/Inf→`null`, integer fast path, else the
+    /// ECMAScript `Number::toString`). Used by codegen-emitted per-struct serialisers
+    /// (#315) for `number` fields, so their output matches `json_stringify_into` exactly.
+    pub use tishlang_core::write_json_number;
     /// Append the JSON-escaped contents of `s` (without surrounding
     /// quotes) to `buf`. Used by typed-struct serialisers for `String`
     /// fields. Falls through to `tishlang_core::json_stringify_into`'s
