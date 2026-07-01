@@ -1194,11 +1194,11 @@ impl Codegen {
     /// In async `run()` bodies, propagate runtime op errors with `?`; in sync
     /// `Value::native` closures use `.unwrap_or(Value::Null)`.
     fn ops_result_suffix(&self) -> &'static str {
-        if self.is_async && self.async_context_stack.last().copied().unwrap_or(false) {
-            "?"
-        } else {
-            ".unwrap_or(Value::Null)"
-        }
+        // Arithmetic ops (`ops::add/sub/mul/div/modulo`) now return a bare `Value` — they never
+        // error (non-number → NaN), so no `?` / `.unwrap_or` consumer suffix is needed. Kept as the
+        // single source of truth for the compound-assign emission sites. (#201 measurement: the old
+        // vestigial `Result` cost ~4× on the boxed arithmetic path.)
+        ""
     }
 
     /// Walk every `Statement::TypeAlias` in the program (including nested
@@ -21648,26 +21648,12 @@ impl Codegen {
 
     fn emit_binop(&self, l: &str, op: BinOp, r: &str, span: Span) -> Result<String, CompileError> {
         Ok(match op {
-            BinOp::Add => format!(
-                "tishlang_runtime::ops::add(&{}, &{}).unwrap_or(Value::Null)",
-                l, r
-            ),
-            BinOp::Sub => format!(
-                "tishlang_runtime::ops::sub(&{}, &{}).unwrap_or(Value::Null)",
-                l, r
-            ),
-            BinOp::Mul => format!(
-                "tishlang_runtime::ops::mul(&{}, &{}).unwrap_or(Value::Null)",
-                l, r
-            ),
-            BinOp::Div => format!(
-                "tishlang_runtime::ops::div(&{}, &{}).unwrap_or(Value::Null)",
-                l, r
-            ),
-            BinOp::Mod => format!(
-                "tishlang_runtime::ops::modulo(&{}, &{}).unwrap_or(Value::Null)",
-                l, r
-            ),
+            // ops::{add,sub,mul,div,modulo} now return a bare `Value` (never error) — no suffix.
+            BinOp::Add => format!("tishlang_runtime::ops::add(&{}, &{})", l, r),
+            BinOp::Sub => format!("tishlang_runtime::ops::sub(&{}, &{})", l, r),
+            BinOp::Mul => format!("tishlang_runtime::ops::mul(&{}, &{})", l, r),
+            BinOp::Div => format!("tishlang_runtime::ops::div(&{}, &{})", l, r),
+            BinOp::Mod => format!("tishlang_runtime::ops::modulo(&{}, &{})", l, r),
             BinOp::Pow => format!(
                 "Value::Number(tishlang_runtime::to_number_value(&({})).powf(tishlang_runtime::to_number_value(&({}))))",
                 l, r
