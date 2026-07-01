@@ -13,14 +13,17 @@ apt-get update -y >/tmp/apt.log 2>&1
 apt-get install -y build-essential git curl jq pkg-config libssl-dev ca-certificates taskset >>/tmp/apt.log 2>&1 \
   || apt-get install -y build-essential git curl jq pkg-config libssl-dev ca-certificates util-linux >>/tmp/apt.log 2>&1
 if ! command -v cargo >/dev/null 2>&1; then
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/tmp/rustup.log 2>&1
+  # Download-then-run (not `curl | sh`) so the fetch and the execution are separable.
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh 2>/tmp/rustup.log \
+    && sh /tmp/rustup.sh -y --profile minimal >>/tmp/rustup.log 2>&1
 fi
 # shellcheck source=/dev/null
 . "$HOME/.cargo/env"
 if ! node --version 2>/dev/null | grep -q '^v24'; then
   # Prefer NodeSource v24; verify the major actually took (Ubuntu's apt otherwise
   # installs its old default nodejs and we'd silently benchmark against node 18).
-  curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/tmp/node.log 2>&1 \
+  curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesource.sh 2>/tmp/node.log \
+    && bash /tmp/nodesource.sh >>/tmp/node.log 2>&1 \
     && apt-get install -y nodejs >>/tmp/node.log 2>&1
   if ! node --version 2>/dev/null | grep -q '^v24'; then
     # Fallback: official prebuilt tarball into /usr/local (no apt).
@@ -35,7 +38,8 @@ if ! command -v oha >/dev/null 2>&1; then
   command -v oha >/dev/null 2>&1 || { echo "oha download failed; cargo install (slow)"; cargo install oha >/tmp/oha_build.log 2>&1; }
 fi
 if ! command -v bun >/dev/null 2>&1; then
-  curl -fsSL https://bun.sh/install | bash >/tmp/bun.log 2>&1 || true
+  curl -fsSL https://bun.sh/install -o /tmp/bun-install.sh 2>/tmp/bun.log \
+    && bash /tmp/bun-install.sh >>/tmp/bun.log 2>&1 || true
 fi
 export BUN_INSTALL="$HOME/.bun"; export PATH="$BUN_INSTALL/bin:$PATH"
 echo "toolchain: $(cargo --version) | node $(node --version 2>&1) | bun $(bun --version 2>&1 | head -1) | oha $(oha --version 2>&1 | head -1)"
@@ -46,7 +50,8 @@ echo "commit under test: $(git rev-parse --short HEAD 2>/dev/null || echo '(arch
 log "BUILD tish (release)"
 t0=$(date +%s)
 cargo build --release --bin tish >/tmp/build.log 2>&1 || { echo "BUILD FAILED"; tail -50 /tmp/build.log; exit 1; }
-echo "built in $(( $(date +%s) - t0 ))s"
+t1=$(date +%s)
+echo "built in $((t1 - t0))s"
 
 log "TEST 1  correctness under threads — concurrent_shared_state (12 threads x 100 calls, send-values)"
 cargo test -p tishlang_vm --features send-values --test concurrent_shared_state -- --nocapture 2>&1 | tail -25 \
