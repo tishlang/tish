@@ -399,69 +399,72 @@ pub mod ops {
     use tishlang_core::Value;
 
     #[inline]
-    pub fn add(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+    // Arithmetic ops return a bare `Value` (not `Result`): they NEVER error — a non-number
+    // operand coerces to NaN, matching the VM's `eval_binop`. The former `Result<Value, Box<dyn
+    // Error>>` was vestigial and cost ~4× on the boxed path (memory-return + caller `.unwrap_or`;
+    // #201 measurement). Callers use the value directly (no suffix — see `ops_result_suffix`).
+    pub fn add(left: &Value, right: &Value) -> Value {
         match (left, right) {
-            (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
+            (Value::Number(a), Value::Number(b)) => Value::Number(a + b),
             (Value::String(a), Value::String(b)) => {
                 let mut s = String::with_capacity(a.len() + b.len());
                 s.push_str(a);
                 s.push_str(b);
-                Ok(Value::String(s.into()))
+                Value::String(s.into())
             }
             (Value::String(a), b) => {
                 let b_str = b.to_js_string();
                 let mut s = String::with_capacity(a.len() + b_str.len());
                 s.push_str(a);
                 s.push_str(&b_str);
-                Ok(Value::String(s.into()))
+                Value::String(s.into())
             }
             (a, Value::String(b)) => {
                 let a_str = a.to_js_string();
                 let mut s = String::with_capacity(a_str.len() + b.len());
                 s.push_str(&a_str);
                 s.push_str(b);
-                Ok(Value::String(s.into()))
+                Value::String(s.into())
             }
-            // Neither operand is a string here ⇒ numeric coercion, matching the VM's `eval_binop`
-            // (`as_number().unwrap_or(NaN)`): a null/bool/object operand (e.g. an out-of-bounds array
-            // read) coerces to NaN, so `number + null` is NaN — NOT an error that the codegen's
-            // `.unwrap_or(Value::Null)` would silently turn into `null` (the old rust-AOT divergence).
-            (a, b) => Ok(Value::Number(
+            // Neither operand is a string ⇒ numeric coercion, matching the VM's `eval_binop`
+            // (`as_number().unwrap_or(NaN)`): a null/bool/object operand (e.g. an out-of-bounds
+            // array read) coerces to NaN, so `number + null` is NaN. Never an error.
+            (a, b) => Value::Number(
                 a.as_number().unwrap_or(f64::NAN) + b.as_number().unwrap_or(f64::NAN),
-            )),
+            ),
         }
     }
 
     #[inline]
-    pub fn sub(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+    pub fn sub(left: &Value, right: &Value) -> Value {
         match (left, right) {
-            (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a - b)),
+            (Value::Number(a), Value::Number(b)) => Value::Number(a - b),
             // VM-parity numeric coercion (null/non-number → NaN), see `add`.
-            (a, b) => Ok(Value::Number(
+            (a, b) => Value::Number(
                 a.as_number().unwrap_or(f64::NAN) - b.as_number().unwrap_or(f64::NAN),
-            )),
+            ),
         }
     }
 
     #[inline]
-    pub fn mul(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+    pub fn mul(left: &Value, right: &Value) -> Value {
         match (left, right) {
-            (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a * b)),
+            (Value::Number(a), Value::Number(b)) => Value::Number(a * b),
             // VM-parity numeric coercion (null/non-number → NaN), see `add`.
-            (a, b) => Ok(Value::Number(
+            (a, b) => Value::Number(
                 a.as_number().unwrap_or(f64::NAN) * b.as_number().unwrap_or(f64::NAN),
-            )),
+            ),
         }
     }
 
     #[inline]
-    pub fn div(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+    pub fn div(left: &Value, right: &Value) -> Value {
         match (left, right) {
-            (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a / b)),
+            (Value::Number(a), Value::Number(b)) => Value::Number(a / b),
             // VM-parity numeric coercion (null/non-number → NaN), see `add`.
-            (a, b) => Ok(Value::Number(
+            (a, b) => Value::Number(
                 a.as_number().unwrap_or(f64::NAN) / b.as_number().unwrap_or(f64::NAN),
-            )),
+            ),
         }
     }
 
@@ -507,13 +510,13 @@ pub mod ops {
     }
 
     #[inline]
-    pub fn modulo(left: &Value, right: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+    pub fn modulo(left: &Value, right: &Value) -> Value {
         match (left, right) {
-            (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a % b)),
+            (Value::Number(a), Value::Number(b)) => Value::Number(a % b),
             // VM-parity numeric coercion (null/non-number → NaN), see `add`.
-            (a, b) => Ok(Value::Number(
+            (a, b) => Value::Number(
                 a.as_number().unwrap_or(f64::NAN) % b.as_number().unwrap_or(f64::NAN),
-            )),
+            ),
         }
     }
 }
