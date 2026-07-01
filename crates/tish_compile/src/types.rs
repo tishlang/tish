@@ -414,12 +414,15 @@ impl RustType {
                 )
             }
             RustType::Named { fields, .. } => {
-                // Walk fields, build an ObjectMap, wrap in Value::Object.
-                // The boundary is paid only when crossing into untyped
-                // Tish (JSON.stringify, calling a Value::Function, etc.);
-                // direct Rust-to-Rust paths between two Named values stay
-                // as plain struct moves.
-                let inserts = fields
+                // Build the boxed Value with an ORDERED PropMap via `object_from_pairs` (no
+                // intermediate `AHashMap`), so key order == field-declaration order == JS
+                // insertion order. The old `ObjectMap::default()` (`AHashMap`) + insert path
+                // scrambled key order NON-DETERMINISTICALLY per run (ahash seed) — a shipped
+                // `JSON.stringify` / `Object.keys` / `for..in` divergence from node whenever a
+                // native struct crosses back into untyped Tish. This boundary is paid only on
+                // that crossing (JSON.stringify, calling a Value::Function, etc.); direct
+                // Rust-to-Rust paths between two Named values stay as plain struct moves.
+                let pairs = fields
                     .iter()
                     .map(|(k, ty)| {
                         let access = format!("{}.{}", native_expr, field_ident(k));
@@ -431,22 +434,13 @@ impl RustType {
                         } else {
                             ty.to_value_expr(&access)
                         };
-                        format!(
-                            "_om.insert(::std::sync::Arc::from({:?}), {});",
-                            k.as_ref(),
-                            v_expr
-                        )
+                        format!("(::std::sync::Arc::from({:?}), {})", k.as_ref(), v_expr)
                     })
                     .collect::<Vec<_>>()
-                    .join(" ");
-                // `Value::object` wraps the `ObjectMap` in an `ObjectData` (what `Value::Object`
-                // actually holds) — emitting `Value::Object(VmRef::new(_om))` directly is a type
-                // error (`ObjectMap` != `ObjectData`); only surfaced once a whole struct is boxed
-                // into a `Value`, e.g. passing it to a function.
-                format!(
-                    "{{ let mut _om = ObjectMap::default(); {} Value::object(_om) }}",
-                    inserts
-                )
+                    .join(", ");
+                // `object_from_pairs::<N>` builds the `PropMap` in one ordered pass (N = field
+                // count, a codegen-time constant) — no AHashMap, so key order is preserved.
+                format!("Value::object_from_pairs([{}])", pairs)
             }
             _ => native_expr.to_string(), // Fallback
         }
