@@ -1,0 +1,8 @@
+// #179 Stage A escape gate: a factory used as a first-class VALUE (`let f = mk`) must NOT be inlined
+// (its closure must survive), and behavior must be unchanged. Exercises HOLE 1 from the design review.
+function mk() { let a = []; a.push({ v: 1 }); a.push({ v: 2 }); return a }
+let f = mk
+let xs = f()
+let s = 0
+for (let i = 0; i < xs.length; i++) { s = s + xs[i].v }
+console.log("escape:" + s)
