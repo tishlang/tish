@@ -98,10 +98,10 @@ fn count(): number {
 
     #[test]
     fn loop_var_decl_clone_outer_var() {
-        // outerVar = 42 is inferred as f64. With the native typed-codegen optimizations on by
-        // default, a top-level numeric global lives in a `thread_local Cell<f64>` (#176) rather than
-        // a `run()`-local slot; the read `let x = outerVar` loads it as a Copy f64 (no clone). The
-        // test verifies compilation succeeds with both lowered natively.
+        // outerVar = 42 is inferred as f64. Per #313, a top-level numeric used ONLY at top level
+        // (never inside a function/closure body) is a native `run()`-local `let mut _: f64`, NOT a
+        // `thread_local Cell<f64>` — the Cell is reserved for globals a function reads across calls
+        // (e.g. fasta's `seed`). The read `let x = outerVar` loads it as a Copy f64.
         let src = r#"
 let outerVar = 42
 for (let i = 0; i < 5; i = i + 1) {
@@ -110,10 +110,14 @@ for (let i = 0; i < 5; i = i + 1) {
 "#;
         let program = parse(src).unwrap();
         let rust = compile(&program).unwrap();
-        // outerVar is a native numeric global (Cell<f64>); x reads it as a Copy f64.
+        // outerVar is a native f64 local (no TLS Cell, since no function references it); x reads it.
         assert!(
-            rust.contains("G_OUTERVAR") && rust.contains("Cell<f64>"),
-            "expected outerVar as a native Cell<f64> global"
+            rust.contains("let mut outerVar: f64"),
+            "expected outerVar as a native f64 local (#313)"
+        );
+        assert!(
+            !rust.contains("G_OUTERVAR"),
+            "outerVar must NOT be a thread_local Cell global — it is top-level-only (#313)"
         );
         assert!(rust.contains("let mut x: f64"), "expected x: f64");
     }

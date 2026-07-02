@@ -14565,7 +14565,234 @@ impl Codegen {
                 candidates.remove(&name);
             }
         }
+        // #313: a candidate referenced ONLY at top level (never inside a function/closure body) does
+        // NOT need the cross-call `thread_local Cell` — it can be a native `let mut` local in `run()`.
+        // Keeping it a TLS global forces every read/write in a tight top-level loop through
+        // `G_X.with(|c| …)` (numeric_loop's `s`/`i` counters). Demote such names so the normal
+        // numeric-local lowering emits `let mut _: f64`. Conservative: a name referenced in ANY fn
+        // body stays a TLS global (a fn can't see a `run()` local). `used_in_fn_body` over-approx.
+        candidates.retain(|name, _| Self::name_used_in_fn_body(stmts, name));
         candidates
+    }
+
+    /// #313: true iff `name` appears (as any identifier reference) inside SOME function or arrow-
+    /// function body. Conservative/over-approximating — used to decide whether a top-level numeric
+    /// binding must stay a `thread_local` global (referenced across calls) or may become a native
+    /// `run()` local (top-level-only). Complete over the AST so a missed fn-reference can't wrongly
+    /// demote a genuinely-shared global.
+    fn name_used_in_fn_body(stmts: &[Statement], name: &str) -> bool {
+        let mut found = false;
+        for s in stmts {
+            Self::scan_name_in_fns_stmt(s, name, false, &mut found);
+            if found {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn scan_name_in_fns_stmt(s: &Statement, name: &str, in_fn: bool, found: &mut bool) {
+        use Statement::*;
+        if *found {
+            return;
+        }
+        match s {
+            FunDecl { body, .. } => Self::scan_name_in_fns_stmt(body, name, true, found),
+            Block { statements, .. } | Multi { statements, .. } => {
+                statements
+                    .iter()
+                    .for_each(|x| Self::scan_name_in_fns_stmt(x, name, in_fn, found));
+            }
+            VarDecl { init: Some(e), .. } => Self::scan_name_in_fns_expr(e, name, in_fn, found),
+            VarDeclDestructure { init, .. } => Self::scan_name_in_fns_expr(init, name, in_fn, found),
+            ExprStmt { expr, .. } => Self::scan_name_in_fns_expr(expr, name, in_fn, found),
+            If { cond, then_branch, else_branch, .. } => {
+                Self::scan_name_in_fns_expr(cond, name, in_fn, found);
+                Self::scan_name_in_fns_stmt(then_branch, name, in_fn, found);
+                if let Some(e) = else_branch {
+                    Self::scan_name_in_fns_stmt(e, name, in_fn, found);
+                }
+            }
+            While { cond, body, .. } | DoWhile { cond, body, .. } => {
+                Self::scan_name_in_fns_expr(cond, name, in_fn, found);
+                Self::scan_name_in_fns_stmt(body, name, in_fn, found);
+            }
+            For { init, cond, update, body, .. } => {
+                if let Some(i) = init {
+                    Self::scan_name_in_fns_stmt(i, name, in_fn, found);
+                }
+                if let Some(c) = cond {
+                    Self::scan_name_in_fns_expr(c, name, in_fn, found);
+                }
+                if let Some(u) = update {
+                    Self::scan_name_in_fns_expr(u, name, in_fn, found);
+                }
+                Self::scan_name_in_fns_stmt(body, name, in_fn, found);
+            }
+            ForOf { iterable, body, .. } => {
+                Self::scan_name_in_fns_expr(iterable, name, in_fn, found);
+                Self::scan_name_in_fns_stmt(body, name, in_fn, found);
+            }
+            Return { value: Some(e), .. } | Throw { value: e, .. } => {
+                Self::scan_name_in_fns_expr(e, name, in_fn, found)
+            }
+            Switch { expr, cases, default_body, .. } => {
+                Self::scan_name_in_fns_expr(expr, name, in_fn, found);
+                for (t, b) in cases {
+                    if let Some(t) = t {
+                        Self::scan_name_in_fns_expr(t, name, in_fn, found);
+                    }
+                    b.iter()
+                        .for_each(|x| Self::scan_name_in_fns_stmt(x, name, in_fn, found));
+                }
+                if let Some(b) = default_body {
+                    b.iter()
+                        .for_each(|x| Self::scan_name_in_fns_stmt(x, name, in_fn, found));
+                }
+            }
+            Try { body, catch_body, finally_body, .. } => {
+                Self::scan_name_in_fns_stmt(body, name, in_fn, found);
+                if let Some(b) = catch_body {
+                    Self::scan_name_in_fns_stmt(b, name, in_fn, found);
+                }
+                if let Some(b) = finally_body {
+                    Self::scan_name_in_fns_stmt(b, name, in_fn, found);
+                }
+            }
+            Export { declaration, .. } => match declaration.as_ref() {
+                tishlang_ast::ExportDeclaration::Named(inner) => {
+                    Self::scan_name_in_fns_stmt(inner, name, in_fn, found)
+                }
+                tishlang_ast::ExportDeclaration::Default(e) => {
+                    Self::scan_name_in_fns_expr(e, name, in_fn, found)
+                }
+                tishlang_ast::ExportDeclaration::ReExport { .. } => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn scan_name_in_fns_expr(e: &Expr, name: &str, in_fn: bool, found: &mut bool) {
+        use Expr::*;
+        if *found {
+            return;
+        }
+        match e {
+            Ident { name: n, .. } => {
+                if in_fn && n.as_ref() == name {
+                    *found = true;
+                }
+            }
+            ArrowFunction { body, .. } => match body {
+                tishlang_ast::ArrowBody::Expr(x) => {
+                    Self::scan_name_in_fns_expr(x, name, true, found)
+                }
+                tishlang_ast::ArrowBody::Block(s) => {
+                    Self::scan_name_in_fns_stmt(s, name, true, found)
+                }
+            },
+            Binary { left, right, .. } | NullishCoalesce { left, right, .. } => {
+                Self::scan_name_in_fns_expr(left, name, in_fn, found);
+                Self::scan_name_in_fns_expr(right, name, in_fn, found);
+            }
+            Unary { operand, .. } | TypeOf { operand, .. } | Await { operand, .. }
+            | Delete { target: operand, .. } => {
+                Self::scan_name_in_fns_expr(operand, name, in_fn, found)
+            }
+            Assign { name: n, value, .. }
+            | CompoundAssign { name: n, value, .. }
+            | LogicalAssign { name: n, value, .. } => {
+                if in_fn && n.as_ref() == name {
+                    *found = true;
+                }
+                Self::scan_name_in_fns_expr(value, name, in_fn, found);
+            }
+            PostfixInc { name: n, .. } | PostfixDec { name: n, .. } | PrefixInc { name: n, .. }
+            | PrefixDec { name: n, .. } => {
+                if in_fn && n.as_ref() == name {
+                    *found = true;
+                }
+            }
+            Call { callee, args, .. } | New { callee, args, .. } => {
+                Self::scan_name_in_fns_expr(callee, name, in_fn, found);
+                for a in args {
+                    if let CallArg::Expr(x) | CallArg::Spread(x) = a {
+                        Self::scan_name_in_fns_expr(x, name, in_fn, found);
+                    }
+                }
+            }
+            Member { object, prop, .. } => {
+                Self::scan_name_in_fns_expr(object, name, in_fn, found);
+                if let MemberProp::Expr(p) = prop {
+                    Self::scan_name_in_fns_expr(p, name, in_fn, found);
+                }
+            }
+            Index { object, index, .. } => {
+                Self::scan_name_in_fns_expr(object, name, in_fn, found);
+                Self::scan_name_in_fns_expr(index, name, in_fn, found);
+            }
+            Conditional { cond, then_branch, else_branch, .. } => {
+                Self::scan_name_in_fns_expr(cond, name, in_fn, found);
+                Self::scan_name_in_fns_expr(then_branch, name, in_fn, found);
+                Self::scan_name_in_fns_expr(else_branch, name, in_fn, found);
+            }
+            Array { elements, .. } => {
+                for el in elements {
+                    if let ArrayElement::Expr(x) | ArrayElement::Spread(x) = el {
+                        Self::scan_name_in_fns_expr(x, name, in_fn, found);
+                    }
+                }
+            }
+            Object { props, .. } => {
+                for p in props {
+                    match p {
+                        ObjectProp::KeyValue(_, v, _) => {
+                            Self::scan_name_in_fns_expr(v, name, in_fn, found)
+                        }
+                        ObjectProp::Spread(x) => Self::scan_name_in_fns_expr(x, name, in_fn, found),
+                    }
+                }
+            }
+            MemberAssign { object, value, .. } => {
+                Self::scan_name_in_fns_expr(object, name, in_fn, found);
+                Self::scan_name_in_fns_expr(value, name, in_fn, found);
+            }
+            IndexAssign { object, index, value, .. } => {
+                Self::scan_name_in_fns_expr(object, name, in_fn, found);
+                Self::scan_name_in_fns_expr(index, name, in_fn, found);
+                Self::scan_name_in_fns_expr(value, name, in_fn, found);
+            }
+            TemplateLiteral { exprs, .. } => exprs
+                .iter()
+                .for_each(|x| Self::scan_name_in_fns_expr(x, name, in_fn, found)),
+            JsxElement { props, children, .. } => {
+                for prop in props {
+                    match prop {
+                        tishlang_ast::JsxProp::Attr { value, .. } => {
+                            if let tishlang_ast::JsxAttrValue::Expr(x) = value {
+                                Self::scan_name_in_fns_expr(x, name, in_fn, found);
+                            }
+                        }
+                        tishlang_ast::JsxProp::Spread(x) => {
+                            Self::scan_name_in_fns_expr(x, name, in_fn, found)
+                        }
+                    }
+                }
+                for c in children {
+                    if let tishlang_ast::JsxChild::Expr(x) = c {
+                        Self::scan_name_in_fns_expr(x, name, in_fn, found);
+                    }
+                }
+            }
+            JsxFragment { children, .. } => {
+                for c in children {
+                    if let tishlang_ast::JsxChild::Expr(x) = c {
+                        Self::scan_name_in_fns_expr(x, name, in_fn, found);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Disqualifying uses: compound/logical assign, inc/dec, member/index/call on the global name.
