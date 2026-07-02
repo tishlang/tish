@@ -1,0 +1,7 @@
+// #179 Stage A: a factory called MORE THAN ONCE is not inlined (the transform only fires for a single
+// call site). Captured-global increments must be observed on every call. Backend-identical.
+let calls = 0
+function mk() { calls = calls + 1; let a = []; a.push({ v: calls }); return a }
+let p = mk()
+let q = mk()
+console.log(p[0].v + " " + q[0].v + " calls:" + calls)

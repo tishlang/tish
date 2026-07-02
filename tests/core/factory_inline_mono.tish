@@ -1,0 +1,14 @@
+// #179 Stage A: a nullary factory that builds and returns a monomorphic record array is inlined at
+// its single call site, so `rows` becomes a native struct vector on the rust backend. Result must be
+// identical across every backend (inlined native == non-inlined interp/vm).
+function makeRows() {
+  let rows = []
+  for (let i = 0; i < 5; i++) { rows.push({ a: i, b: i * 10 }) }
+  return rows
+}
+let rows = makeRows()
+let s = 0
+for (let i = 0; i < rows.length; i++) { s = s + rows[i].a + rows[i].b }
+console.log("sum:" + s)
+console.log("len:" + rows.length)
+console.log("first:" + rows[0].a + "," + rows[0].b)

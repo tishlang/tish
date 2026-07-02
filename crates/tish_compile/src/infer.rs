@@ -10,6 +10,7 @@
 //!   - Already-annotated vars are left unchanged.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tishlang_ast::{
     ArrowBody, BinOp, CallArg, Expr, FunParam, Literal, Program, Statement, TypeAnnotation,
 };
@@ -1231,7 +1232,594 @@ fn body_ends_in_return(s: &Statement) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #179 Stage A: single-call nullary-factory inlining (fail-closed)
+// ---------------------------------------------------------------------------
+
+/// Count uses of function name `f` across `stmts`. Returns `(direct_calls, other_uses)`:
+/// a `direct_call` is `f(...)` (an `Ident(f)` in callee position); `other_uses` is EVERY other
+/// occurrence of the name — as a value, an assignment/inc-dec target, etc. Exhaustive over the
+/// whole AST (walks fn bodies, switch, try — which the shared `walk_exprs_stmt` skips) so it can
+/// back a SOUND escape check: if `other_uses > 0` the function escapes and must not be inlined.
+fn fn_name_uses(stmts: &[Statement], f: &str) -> (usize, usize) {
+    let mut calls = 0usize;
+    let mut others = 0usize;
+    for s in stmts {
+        count_uses_stmt(s, f, &mut calls, &mut others);
+    }
+    (calls, others)
+}
+
+fn count_uses_stmt(s: &Statement, f: &str, calls: &mut usize, others: &mut usize) {
+    use Statement::*;
+    match s {
+        VarDecl { init, .. } => {
+            if let Some(e) = init {
+                count_uses_expr(e, f, calls, others);
+            }
+        }
+        VarDeclDestructure { init, .. } => count_uses_expr(init, f, calls, others),
+        Multi { statements, .. } | Block { statements, .. } => {
+            statements.iter().for_each(|x| count_uses_stmt(x, f, calls, others))
+        }
+        ExprStmt { expr, .. } => count_uses_expr(expr, f, calls, others),
+        If { cond, then_branch, else_branch, .. } => {
+            count_uses_expr(cond, f, calls, others);
+            count_uses_stmt(then_branch, f, calls, others);
+            if let Some(e) = else_branch {
+                count_uses_stmt(e, f, calls, others);
+            }
+        }
+        While { cond, body, .. } | DoWhile { cond, body, .. } => {
+            count_uses_expr(cond, f, calls, others);
+            count_uses_stmt(body, f, calls, others);
+        }
+        For { init, cond, update, body, .. } => {
+            if let Some(i) = init {
+                count_uses_stmt(i, f, calls, others);
+            }
+            if let Some(c) = cond {
+                count_uses_expr(c, f, calls, others);
+            }
+            if let Some(u) = update {
+                count_uses_expr(u, f, calls, others);
+            }
+            count_uses_stmt(body, f, calls, others);
+        }
+        ForOf { iterable, body, .. } => {
+            count_uses_expr(iterable, f, calls, others);
+            count_uses_stmt(body, f, calls, others);
+        }
+        Return { value: Some(e), .. } => count_uses_expr(e, f, calls, others),
+        Throw { value, .. } => count_uses_expr(value, f, calls, others),
+        FunDecl { body, .. } => count_uses_stmt(body, f, calls, others),
+        Switch { expr, cases, default_body, .. } => {
+            count_uses_expr(expr, f, calls, others);
+            for (test, body) in cases {
+                if let Some(t) = test {
+                    count_uses_expr(t, f, calls, others);
+                }
+                body.iter().for_each(|x| count_uses_stmt(x, f, calls, others));
+            }
+            if let Some(body) = default_body {
+                body.iter().for_each(|x| count_uses_stmt(x, f, calls, others));
+            }
+        }
+        Try { body, catch_body, finally_body, .. } => {
+            count_uses_stmt(body, f, calls, others);
+            if let Some(cb) = catch_body {
+                count_uses_stmt(cb, f, calls, others);
+            }
+            if let Some(fb) = finally_body {
+                count_uses_stmt(fb, f, calls, others);
+            }
+        }
+        Export { declaration, .. } => match declaration.as_ref() {
+            tishlang_ast::ExportDeclaration::Named(inner) => {
+                count_uses_stmt(inner, f, calls, others)
+            }
+            tishlang_ast::ExportDeclaration::Default(e) => count_uses_expr(e, f, calls, others),
+            tishlang_ast::ExportDeclaration::ReExport { .. } => {}
+        },
+        Return { value: None, .. }
+        | Break { .. }
+        | Continue { .. }
+        | Import { .. }
+        | TypeAlias { .. }
+        | DeclareVar { .. }
+        | DeclareFun { .. } => {}
+    }
+}
+
+fn count_uses_expr(e: &Expr, f: &str, calls: &mut usize, others: &mut usize) {
+    use Expr::*;
+    match e {
+        Ident { name, .. } => {
+            if name.as_ref() == f {
+                *others += 1;
+            }
+        }
+        Call { callee, args, .. } => {
+            // `f(...)` in callee position is a direct call — do NOT count the callee ident as an
+            // "other use". Any other callee shape (member call, computed) recurses normally.
+            match callee.as_ref() {
+                Ident { name, .. } if name.as_ref() == f => *calls += 1,
+                _ => count_uses_expr(callee, f, calls, others),
+            }
+            for a in args {
+                match a {
+                    CallArg::Expr(x) | CallArg::Spread(x) => count_uses_expr(x, f, calls, others),
+                }
+            }
+        }
+        New { callee, args, .. } => {
+            count_uses_expr(callee, f, calls, others);
+            for a in args {
+                match a {
+                    CallArg::Expr(x) | CallArg::Spread(x) => count_uses_expr(x, f, calls, others),
+                }
+            }
+        }
+        Assign { name, value, .. }
+        | CompoundAssign { name, value, .. }
+        | LogicalAssign { name, value, .. } => {
+            if name.as_ref() == f {
+                *others += 1; // reassigning the function name — an escape
+            }
+            count_uses_expr(value, f, calls, others);
+        }
+        PostfixInc { name, .. } | PostfixDec { name, .. } | PrefixInc { name, .. }
+        | PrefixDec { name, .. } => {
+            if name.as_ref() == f {
+                *others += 1;
+            }
+        }
+        Binary { left, right, .. } | NullishCoalesce { left, right, .. } => {
+            count_uses_expr(left, f, calls, others);
+            count_uses_expr(right, f, calls, others);
+        }
+        Unary { operand, .. } | TypeOf { operand, .. } | Await { operand, .. }
+        | Delete { target: operand, .. } => count_uses_expr(operand, f, calls, others),
+        Member { object, prop, .. } => {
+            count_uses_expr(object, f, calls, others);
+            if let tishlang_ast::MemberProp::Expr(p) = prop {
+                count_uses_expr(p, f, calls, others);
+            }
+        }
+        Index { object, index, .. } => {
+            count_uses_expr(object, f, calls, others);
+            count_uses_expr(index, f, calls, others);
+        }
+        Conditional { cond, then_branch, else_branch, .. } => {
+            count_uses_expr(cond, f, calls, others);
+            count_uses_expr(then_branch, f, calls, others);
+            count_uses_expr(else_branch, f, calls, others);
+        }
+        Array { elements, .. } => {
+            for el in elements {
+                match el {
+                    tishlang_ast::ArrayElement::Expr(x)
+                    | tishlang_ast::ArrayElement::Spread(x) => {
+                        count_uses_expr(x, f, calls, others)
+                    }
+                }
+            }
+        }
+        Object { props, .. } => {
+            for p in props {
+                match p {
+                    tishlang_ast::ObjectProp::KeyValue(_, v, _) => {
+                        count_uses_expr(v, f, calls, others)
+                    }
+                    tishlang_ast::ObjectProp::Spread(x) => count_uses_expr(x, f, calls, others),
+                }
+            }
+        }
+        MemberAssign { object, value, .. } => {
+            count_uses_expr(object, f, calls, others);
+            count_uses_expr(value, f, calls, others);
+        }
+        IndexAssign { object, index, value, .. } => {
+            count_uses_expr(object, f, calls, others);
+            count_uses_expr(index, f, calls, others);
+            count_uses_expr(value, f, calls, others);
+        }
+        ArrowFunction { body, .. } => match body {
+            tishlang_ast::ArrowBody::Expr(x) => count_uses_expr(x, f, calls, others),
+            tishlang_ast::ArrowBody::Block(s) => count_uses_stmt(s, f, calls, others),
+        },
+        TemplateLiteral { exprs, .. } => {
+            exprs.iter().for_each(|x| count_uses_expr(x, f, calls, others))
+        }
+        JsxElement { props, children, .. } => {
+            for prop in props {
+                match prop {
+                    tishlang_ast::JsxProp::Attr { value, .. } => {
+                        if let tishlang_ast::JsxAttrValue::Expr(x) = value {
+                            count_uses_expr(x, f, calls, others);
+                        }
+                    }
+                    tishlang_ast::JsxProp::Spread(x) => count_uses_expr(x, f, calls, others),
+                }
+            }
+            for c in children {
+                if let tishlang_ast::JsxChild::Expr(x) = c {
+                    count_uses_expr(x, f, calls, others);
+                }
+            }
+        }
+        JsxFragment { children, .. } => {
+            for c in children {
+                if let tishlang_ast::JsxChild::Expr(x) = c {
+                    count_uses_expr(x, f, calls, others);
+                }
+            }
+        }
+        Literal { .. } | NativeModuleLoad { .. } => {}
+    }
+}
+
+/// Does statement `s` (or anything nested) contain a closure (`FunDecl`/`ArrowFunction`) or a
+/// `this`/`arguments`/`super` reference? Such a body is NOT safely alpha-renameable by the flat
+/// splice below (a closure could capture a renamed local), so we refuse to inline it.
+fn body_has_closure_or_dynamic(s: &Statement) -> bool {
+    let mut bad = false;
+    walk_exprs_stmt_full(s, &mut |e| {
+        match e {
+            Expr::ArrowFunction { .. } => bad = true,
+            Expr::Ident { name, .. }
+                if matches!(name.as_ref(), "this" | "arguments" | "super") =>
+            {
+                bad = true
+            }
+            _ => {}
+        }
+    });
+    bad || stmt_contains_fundecl(s)
+}
+
+fn stmt_contains_fundecl(s: &Statement) -> bool {
+    use Statement::*;
+    match s {
+        FunDecl { .. } => true,
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().any(stmt_contains_fundecl)
+        }
+        If { then_branch, else_branch, .. } => {
+            stmt_contains_fundecl(then_branch)
+                || else_branch.as_ref().is_some_and(|e| stmt_contains_fundecl(e))
+        }
+        While { body, .. } | DoWhile { body, .. } | For { body, .. } | ForOf { body, .. } => {
+            stmt_contains_fundecl(body)
+        }
+        Try { body, catch_body, finally_body, .. } => {
+            stmt_contains_fundecl(body)
+                || catch_body.as_ref().is_some_and(|b| stmt_contains_fundecl(b))
+                || finally_body.as_ref().is_some_and(|b| stmt_contains_fundecl(b))
+        }
+        Switch { cases, default_body, .. } => {
+            cases.iter().any(|(_, b)| b.iter().any(stmt_contains_fundecl))
+                || default_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(stmt_contains_fundecl))
+        }
+        _ => false,
+    }
+}
+
+/// Exhaustive expr-visitor over a statement (unlike the shared `walk_exprs_stmt`, this also
+/// descends fn bodies, switch, and try). Visits every `Expr` node via `f`.
+fn walk_exprs_stmt_full(s: &Statement, f: &mut impl FnMut(&Expr)) {
+    use Statement::*;
+    match s {
+        VarDecl { init: Some(e), .. } => walk_exprs_expr(e, f),
+        VarDeclDestructure { init, .. } => walk_exprs_expr(init, f),
+        Multi { statements, .. } | Block { statements, .. } => {
+            statements.iter().for_each(|x| walk_exprs_stmt_full(x, f))
+        }
+        ExprStmt { expr, .. } => walk_exprs_expr(expr, f),
+        If { cond, then_branch, else_branch, .. } => {
+            walk_exprs_expr(cond, f);
+            walk_exprs_stmt_full(then_branch, f);
+            if let Some(e) = else_branch {
+                walk_exprs_stmt_full(e, f);
+            }
+        }
+        While { cond, body, .. } | DoWhile { cond, body, .. } => {
+            walk_exprs_expr(cond, f);
+            walk_exprs_stmt_full(body, f);
+        }
+        For { init, cond, update, body, .. } => {
+            if let Some(i) = init {
+                walk_exprs_stmt_full(i, f);
+            }
+            if let Some(c) = cond {
+                walk_exprs_expr(c, f);
+            }
+            if let Some(u) = update {
+                walk_exprs_expr(u, f);
+            }
+            walk_exprs_stmt_full(body, f);
+        }
+        ForOf { iterable, body, .. } => {
+            walk_exprs_expr(iterable, f);
+            walk_exprs_stmt_full(body, f);
+        }
+        Return { value: Some(e), .. } => walk_exprs_expr(e, f),
+        Throw { value, .. } => walk_exprs_expr(value, f),
+        FunDecl { body, .. } => walk_exprs_stmt_full(body, f),
+        Switch { expr, cases, default_body, .. } => {
+            walk_exprs_expr(expr, f);
+            for (test, body) in cases {
+                if let Some(t) = test {
+                    walk_exprs_expr(t, f);
+                }
+                body.iter().for_each(|x| walk_exprs_stmt_full(x, f));
+            }
+            if let Some(body) = default_body {
+                body.iter().for_each(|x| walk_exprs_stmt_full(x, f));
+            }
+        }
+        Try { body, catch_body, finally_body, .. } => {
+            walk_exprs_stmt_full(body, f);
+            if let Some(cb) = catch_body {
+                walk_exprs_stmt_full(cb, f);
+            }
+            if let Some(fb) = finally_body {
+                walk_exprs_stmt_full(fb, f);
+            }
+        }
+        Export { declaration, .. } => match declaration.as_ref() {
+            tishlang_ast::ExportDeclaration::Named(inner) => walk_exprs_stmt_full(inner, f),
+            tishlang_ast::ExportDeclaration::Default(e) => walk_exprs_expr(e, f),
+            tishlang_ast::ExportDeclaration::ReExport { .. } => {}
+        },
+        _ => {}
+    }
+}
+
+/// Collect the names declared by DIRECT (top-level-of-body) `let`/`const` VarDecls in `body_stmts`.
+/// These are the locals that would leak into the caller's scope when the body is spliced there, so
+/// they must be alpha-renamed. Nested-scope declarations (inside loops/blocks) stay properly scoped
+/// after splicing and are left alone. Destructuring decls make the factory ineligible (returns None).
+fn direct_body_locals(body_stmts: &[Statement]) -> Option<Vec<Arc<str>>> {
+    let mut out = Vec::new();
+    for s in body_stmts {
+        match s {
+            Statement::VarDecl { name, .. } => out.push(name.clone()),
+            Statement::VarDeclDestructure { .. } => return None,
+            _ => {}
+        }
+    }
+    Some(out)
+}
+
+/// Count `return` statements anywhere in `s`.
+fn count_returns(s: &Statement) -> usize {
+    use Statement::*;
+    match s {
+        Return { .. } => 1,
+        Block { statements, .. } | Multi { statements, .. } => {
+            statements.iter().map(count_returns).sum()
+        }
+        If { then_branch, else_branch, .. } => {
+            count_returns(then_branch)
+                + else_branch.as_ref().map_or(0, |e| count_returns(e))
+        }
+        While { body, .. } | DoWhile { body, .. } | For { body, .. } | ForOf { body, .. } => {
+            count_returns(body)
+        }
+        Try { body, catch_body, finally_body, .. } => {
+            count_returns(body)
+                + catch_body.as_ref().map_or(0, |b| count_returns(b))
+                + finally_body.as_ref().map_or(0, |b| count_returns(b))
+        }
+        Switch { cases, default_body, .. } => {
+            cases.iter().map(|(_, b)| b.iter().map(count_returns).sum::<usize>()).sum::<usize>()
+                + default_body
+                    .as_ref()
+                    .map_or(0, |b| b.iter().map(count_returns).sum())
+        }
+        _ => 0,
+    }
+}
+
+/// #179 Stage A driver: for each eligible nullary factory, splice its body at its single top-level
+/// call site (alpha-renamed) and drop the FunDecl. Fail-closed: any shape not proven safe is left
+/// untouched.
+fn inline_single_call_factories(stmts: Vec<Statement>) -> Vec<Statement> {
+    // Snapshot eligible (name → FunDecl body, is_mutable-array) candidates. We do at most one
+    // inlining pass over top-level statements; a factory that itself calls another eligible factory
+    // is handled on the next compile-invariant since we only splice direct top-level call sites.
+    let mut result = stmts;
+    // Collect candidate factory names first (immutable borrow), then transform.
+    let candidates: Vec<Arc<str>> = result
+        .iter()
+        .filter_map(|s| match s {
+            Statement::FunDecl {
+                async_: false,
+                name,
+                params,
+                rest_param: None,
+                body,
+                ..
+            } if params.is_empty() => {
+                // body must be a Block/Multi ending in a single tail `return E`.
+                let body_stmts = match body.as_ref() {
+                    Statement::Block { statements, .. }
+                    | Statement::Multi { statements, .. } => statements.as_slice(),
+                    _ => return None,
+                };
+                if count_returns(body) != 1 {
+                    return None;
+                }
+                match body_stmts.last() {
+                    Some(Statement::Return { value: Some(_), .. }) => {}
+                    _ => return None,
+                }
+                if body_has_closure_or_dynamic(body) {
+                    return None;
+                }
+                if direct_body_locals(body_stmts).is_none() {
+                    return None;
+                }
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    for fname in candidates {
+        // Re-check use counts against the CURRENT program (a prior inline may have changed them).
+        let (calls, others) = fn_name_uses(&result, fname.as_ref());
+        if others != 0 || calls != 1 {
+            continue; // escapes, unused, or called more than once → not inlinable
+        }
+        // Find the single top-level call site index + form.
+        let mut site: Option<(usize, Option<Arc<str>>)> = None; // (idx, Some(target)=VarDecl / None=ExprStmt)
+        let mut ambiguous = false;
+        for (i, s) in result.iter().enumerate() {
+            let hit = match s {
+                Statement::VarDecl {
+                    name,
+                    type_ann: None,
+                    init: Some(Expr::Call { callee, args, .. }),
+                    ..
+                } if args.is_empty()
+                    && matches!(callee.as_ref(), Expr::Ident { name: c, .. } if c.as_ref() == fname.as_ref()) =>
+                {
+                    Some(Some(name.clone()))
+                }
+                Statement::ExprStmt { expr: Expr::Call { callee, args, .. }, .. }
+                    if args.is_empty()
+                        && matches!(callee.as_ref(), Expr::Ident { name: c, .. } if c.as_ref() == fname.as_ref()) =>
+                {
+                    Some(None)
+                }
+                _ => None,
+            };
+            if let Some(target) = hit {
+                if site.is_some() {
+                    ambiguous = true;
+                    break;
+                }
+                site = Some((i, target));
+            }
+        }
+        // The single call must be a TOP-LEVEL statement (calls==1 guarantees no other call exists;
+        // if we didn't find it at top level it is nested — skip, fail-closed).
+        let (site_idx, target) = match site {
+            Some(s) if !ambiguous => s,
+            _ => continue,
+        };
+
+        // Pull the factory body out of its FunDecl.
+        let fdecl_idx = result.iter().position(|s| {
+            matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == fname.as_ref())
+        });
+        let Some(fdecl_idx) = fdecl_idx else { continue };
+        let body_stmts: Vec<Statement> = match &result[fdecl_idx] {
+            Statement::FunDecl { body, .. } => match body.as_ref() {
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    statements.clone()
+                }
+                _ => continue,
+            },
+            _ => continue,
+        };
+
+        // Split off the trailing `return E`.
+        let (prefix, ret_expr) = match body_stmts.split_last() {
+            Some((Statement::Return { value: Some(e), .. }, head)) => (head.to_vec(), e.clone()),
+            _ => continue,
+        };
+
+        // Build the alpha-rename map for the leaked (direct) body locals.
+        let Some(leaked) = direct_body_locals(&prefix) else { continue };
+        let mut active: std::collections::HashMap<String, Arc<str>> =
+            std::collections::HashMap::new();
+        // If this is `let X = f()` and the factory returns a leaked array var R directly, map R→X so
+        // the spliced `let R = []` becomes `let X = []` — the record-array machinery then types X.
+        let return_ident = match &ret_expr {
+            Expr::Ident { name, .. } if leaked.iter().any(|l| l.as_ref() == name.as_ref()) => {
+                Some(name.clone())
+            }
+            _ => None,
+        };
+        for (n, l) in leaked.iter().enumerate() {
+            if let (Some(tgt), Some(ri)) = (&target, &return_ident) {
+                if l.as_ref() == ri.as_ref() {
+                    active.insert(l.to_string(), tgt.clone());
+                    continue;
+                }
+            }
+            // Fresh, collision-proof name for every other leaked local.
+            let fresh: Arc<str> = format!("__inl_{}_{}_{}", fname, n, l).into();
+            active.insert(l.to_string(), fresh);
+        }
+
+        // Alpha-rename the prefix (declarations + references) using the resolution-tested renamer.
+        let mut renamed_prefix = prefix;
+        for s in &mut renamed_prefix {
+            let mut a = active.clone();
+            crate::resolve::rewrite_stmt_scope(s, &mut a, true);
+        }
+
+        // Assemble the spliced statements.
+        let mut spliced: Vec<Statement> = renamed_prefix;
+        match (&target, &return_ident) {
+            (Some(tgt), Some(ri)) if active.get(ri.as_ref()).map(|x| x.as_ref()) == Some(tgt.as_ref()) => {
+                // `let X = f()` with `return R` (R leaked) → R was renamed to X in the prefix, and
+                // the array var is already declared as X. Drop the return (nothing else to bind).
+            }
+            (Some(tgt), _) => {
+                // `let X = f()` with a general return expr → bind X to the renamed return value.
+                let mut re = ret_expr.clone();
+                crate::resolve::rewrite_expr_scope(&mut re, &active);
+                spliced.push(Statement::VarDecl {
+                    name: tgt.clone(),
+                    name_span: zero_span(),
+                    mutable: true,
+                    type_ann: None,
+                    init: Some(re),
+                    span: zero_span(),
+                });
+            }
+            (None, _) => {
+                // `f()` as a statement (return value discarded) → nothing to bind.
+            }
+        }
+
+        // Rebuild the program: replace the call site with the spliced body, drop the FunDecl.
+        let mut out: Vec<Statement> = Vec::with_capacity(result.len() + spliced.len());
+        for (i, s) in result.into_iter().enumerate() {
+            if i == fdecl_idx {
+                continue; // drop the now-inlined factory
+            }
+            if i == site_idx {
+                out.extend(spliced.iter().cloned());
+                continue;
+            }
+            out.push(s);
+        }
+        result = out;
+    }
+    result
+}
+
 fn struct_infer_program(program: Program) -> Program {
+    // #179 Stage A: inline a nullary function that is called EXACTLY ONCE (as a top-level
+    // statement) and never used as a value, splicing its body at the call site. This bridges a
+    // build-then-return record-array factory (`function mk(){ let a=[]; a.push({..}); return a }`;
+    // `let xs = mk()`) into a TOP-LEVEL push-built array, which the record-array / ShapeUnion
+    // machinery can then type. Sound by construction: a single-call inline substitutes the whole
+    // call, so evaluation order and side effects are preserved exactly (a captured-global write in
+    // the body becomes an ordinary top-level statement; a factory used as a value is left alone).
+    let program = if crate::native_opts_enabled() {
+        Program { statements: inline_single_call_factories(program.statements) }
+    } else {
+        program
+    };
     let mut reg = StructRegistry::default();
     let mut ctx = InferCtx::new();
     // #320: fns proven to always return a number, so `infer_expr_type(f(...))` is `number` and a

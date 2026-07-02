@@ -1388,7 +1388,11 @@ fn shadow_params(
 }
 
 /// Scope-aware statement rewriter for [`isolate_private_top_level_bindings`].
-fn rewrite_stmt_scope(
+/// Scope-aware statement rewriter: rename declared bindings and their free references
+/// according to `active` (name → new Arc). Exposed `pub(crate)` so the #179 factory inliner
+/// (infer.rs) can reuse this exhaustive, resolution-tested renamer for alpha-renaming a
+/// spliced factory body instead of hand-rolling a completeness-sensitive walker.
+pub(crate) fn rewrite_stmt_scope(
     stmt: &mut Statement,
     active: &mut HashMap<String, Arc<str>>,
     top_level: bool,
@@ -1550,7 +1554,8 @@ fn rewrite_stmt_scope(
 /// Scope-aware expression rewriter: rename every free reference to a name in `active`.
 /// Expressions never declare module-level bindings, so `active` is read-only here; arrow
 /// functions clone it for their own (shadowed) parameter scope.
-fn rewrite_expr_scope(expr: &mut Expr, active: &HashMap<String, Arc<str>>) {
+/// `pub(crate)` so the #179 factory inliner can rename a spliced return expression.
+pub(crate) fn rewrite_expr_scope(expr: &mut Expr, active: &HashMap<String, Arc<str>>) {
     let rename = |name: &mut Arc<str>| {
         if let Some(renamed) = active.get(name.as_ref()) {
             *name = Arc::clone(renamed);

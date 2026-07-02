@@ -1,0 +1,7 @@
+// #179 Stage A: a single-call factory whose body mutates a captured global is inlined; the write must
+// still take effect (the inline substitutes the whole call, so the global write becomes an ordinary
+// top-level statement). Exercises HOLE 2 from the design review — single-call form.
+let calls = 0
+function mk() { calls = calls + 1; let a = []; a.push({ v: calls }); return a }
+let p = mk()
+console.log("v:" + p[0].v + " calls:" + calls)
