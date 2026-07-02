@@ -26,6 +26,10 @@ pub struct InferCtx {
     /// through to an implicit `undefined`). Lets `infer_expr_type(f(...))` be `number`, so
     /// `a.push(f(...))` infers `a: number[]` (e.g. k_nucleotide's `seq.push(nextBase())`).
     number_returning_fns: std::collections::HashSet<String>,
+    /// #373: registered struct-alias shapes (alias → ordered fields), so `infer_expr_type` can
+    /// resolve `<expr: Simple(alias)>.field` → the field's type — needed to type a CROSS-ARRAY
+    /// struct-field read like `base[i].key` when building another record array (`rows`).
+    struct_shapes: HashMap<String, Vec<(std::sync::Arc<str>, TypeAnnotation)>>,
 }
 
 impl InferCtx {
@@ -34,7 +38,20 @@ impl InferCtx {
             scopes: vec![HashMap::new()],
             native_vec_array_params: HashMap::new(),
             number_returning_fns: std::collections::HashSet::new(),
+            struct_shapes: HashMap::new(),
         }
+    }
+
+    fn define_struct(&mut self, alias: &str, fields: Vec<(std::sync::Arc<str>, TypeAnnotation)>) {
+        self.struct_shapes.insert(alias.to_string(), fields);
+    }
+
+    fn struct_field(&self, alias: &str, key: &str) -> Option<&TypeAnnotation> {
+        self.struct_shapes
+            .get(alias)?
+            .iter()
+            .find(|(k, _)| k.as_ref() == key)
+            .map(|(_, t)| t)
     }
 
     fn push_scope(&mut self) {
@@ -125,6 +142,13 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
         Expr::Binary {
             left, op, right, ..
         } => {
+            // Always-numeric ops coerce BOTH operands to Number (JS ToNumber) → result is Number
+            // regardless of operand types, even when an operand type is unknown (e.g. a call result).
+            // Excludes `+` (string concat) and comparisons. Lets `{ key: r % 65536 }` type as number.
+            if matches!(op, BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
+                | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr) {
+                return Some(number_ann());
+            }
             let lt = infer_expr_type(left, ctx)?;
             let rt = infer_expr_type(right, ctx)?;
             if is_number(&lt) && is_number(&rt) {
@@ -174,6 +198,17 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
             }
         }
         // Index of a typed array yields its element type (`a[i]` where `a: T[]` → `T`).
+        // `<expr: Simple(alias)>.field` — struct field read → the field's type (alias shape must be
+        // registered in ctx). Enables cross-array reads like `base[i].key` (#373). Non-struct
+        // receivers (or `Simple("number")` etc.) resolve to None, unchanged.
+        Expr::Member {
+            object,
+            prop: tishlang_ast::MemberProp::Name { name: k, .. },
+            ..
+        } => match infer_expr_type(object, ctx)? {
+            TypeAnnotation::Simple(alias, _) => ctx.struct_field(alias.as_ref(), k.as_ref()).cloned(),
+            _ => None,
+        },
         Expr::Index { object, .. } => match infer_expr_type(object, ctx) {
             Some(TypeAnnotation::Array(elem)) => Some(*elem),
             _ => None,
@@ -1350,6 +1385,7 @@ fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx)
                         tishlang_ast::Span::default(),
                     )));
                     ctx.define(name.as_ref(), arr_ann.clone());
+                    ctx.define_struct(alias.as_str(), fields.clone()); // #373: enable cross-array field reads
                     out.push(Statement::VarDecl {
                         name: name.clone(),
                         name_span: *name_span,
@@ -1747,10 +1783,13 @@ fn ra_expr(e: &Expr, name: &str, keys: &std::collections::HashSet<&str>) -> bool
             };
             match object.as_ref() {
                 Ident { name: n, .. } if n.as_ref() == name => mname == "length",
-                Index { object: io, index, .. } => {
-                    matches!(io.as_ref(), Ident { name: n, .. } if n.as_ref() == name)
-                        && keys.contains(mname)
-                        && ra_expr(index, name, keys)
+                // `name[i].<key>` field read of THIS array. Guard on `io == name` so a DIFFERENT
+                // record array's `other[i].field` falls through to the safe `_` recursion (bug: the
+                // old unguarded arm returned false for it, failing any 2+-record-array program).
+                Index { object: io, index, .. }
+                    if matches!(io.as_ref(), Ident { name: n, .. } if n.as_ref() == name) =>
+                {
+                    keys.contains(mname) && ra_expr(index, name, keys)
                 }
                 _ => ra_expr(object, name, keys),
             }
@@ -1793,6 +1832,13 @@ fn ra_expr(e: &Expr, name: &str, keys: &std::collections::HashSet<&str>) -> bool
                                         tishlang_ast::ObjectProp::KeyValue(_, v, _) if ra_expr(v, name, keys)))
                             );
                         }
+                        // `.sort(cmp)` is an in-place PERMUTATION, not an escape (shape + element
+                        // values unchanged). Safe iff the comparator does not escape `name`.
+                        if m.as_ref() == "sort" {
+                            return args
+                                .iter()
+                                .all(|a| matches!(a, CallArg::Expr(x) if ra_expr(x, name, keys)));
+                        }
                     }
                     return false;
                 }
@@ -1813,6 +1859,12 @@ fn ra_expr(e: &Expr, name: &str, keys: &std::collections::HashSet<&str>) -> bool
         Object { props, .. } => props
             .iter()
             .all(|pr| matches!(pr, tishlang_ast::ObjectProp::KeyValue(_, v, _) if ra_expr(v, name, keys))),
+        // HOF callbacks (e.g. the `.sort` comparator): recurse into the body precisely — a comparator
+        // over `a.key`/`b.key` never touches `name` (pi_mentions is too conservative on closures).
+        ArrowFunction { body, .. } => match body {
+            tishlang_ast::ArrowBody::Expr(e) => ra_expr(e, name, keys),
+            tishlang_ast::ArrowBody::Block(st) => ra_stmt(st, name, keys),
+        },
         _ => false,
     }
 }
