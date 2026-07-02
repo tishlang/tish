@@ -2055,6 +2055,29 @@ impl Codegen {
         out
     }
 
+    /// #373: render a native `sort_by` comparator body for a `Vec<struct>` from a detected key list.
+    /// Each single-segment key compares the struct field via `partial_cmp` (NaN → Equal, matching a
+    /// JS comparator `a-b` yielding NaN→0); descending keys `.reverse()`; keys chain with `then_with`.
+    fn render_struct_sort_chain(keys: &[(Vec<std::sync::Arc<str>>, bool)]) -> String {
+        let term = |path: &[std::sync::Arc<str>], asc: bool| -> String {
+            let f = crate::types::field_ident(&path[0]);
+            let base =
+                format!("a.{f}.partial_cmp(&b.{f}).unwrap_or(std::cmp::Ordering::Equal)");
+            if asc {
+                base
+            } else {
+                format!("{base}.reverse()")
+            }
+        };
+        let mut it = keys.iter();
+        let (p0, a0) = it.next().expect("non-empty key list");
+        let mut out = term(p0, *a0);
+        for (p, a) in it {
+            out = format!("{out}.then_with(|| {})", term(p, *a));
+        }
+        out
+    }
+
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
         self.is_async = program_uses_async(program);
         self.program_has_jsx = tishlang_ui::jsx::program_contains_jsx(program);
@@ -6472,6 +6495,48 @@ impl Codegen {
                                         "{{ {} Value::Null }}",
                                         push_stmts.join(" ")
                                     ));
+                                }
+                            }
+                        }
+                    }
+
+                    // ── #373: native Vec<struct> sort fast path ───────────────────
+                    // A `structArr.sort(cmp)` where the receiver is a native `Vec<Named>`. The boxed
+                    // fallback below would sort a THROWAWAY boxed copy (wrong — the real Vec is left
+                    // unsorted), so we MUST handle it here. Key-comparators lower to a native in-place
+                    // `sort_by` over struct fields (stable, matching JS); any other comparator boxes,
+                    // sorts via the runtime, and writes the result back into the Vec (correct).
+                    if method_name.as_ref() == "sort" {
+                        if let Expr::Ident { name, .. } = object.as_ref() {
+                            if !self.refcell_wrapped_vars.contains(name.as_ref()) {
+                                if let RustType::Vec(elem_type) =
+                                    self.type_context.get_type(name.as_ref())
+                                {
+                                    if matches!(elem_type.as_ref(), RustType::Named { .. }) {
+                                        let esc = Self::escape_ident(name.as_ref()).into_owned();
+                                        if let Some(CallArg::Expr(cmp)) = args.first() {
+                                            if let Some(keys) =
+                                                Self::detect_lexicographic_key_comparator(cmp)
+                                            {
+                                                if keys.iter().all(|(p, _)| p.len() == 1) {
+                                                    let chain = Self::render_struct_sort_chain(&keys);
+                                                    return Ok(format!(
+                                                        "{{ {esc}.sort_by(|a, b| {chain}); Value::Null }}"
+                                                    ));
+                                                }
+                                            }
+                                            // General comparator: box → sort → write back (correct).
+                                            let cmp_code = self.emit_expr(cmp)?;
+                                            let to_v = elem_type.to_value_expr("__e");
+                                            let from_v = elem_type.from_value_expr("__v");
+                                            return Ok(format!(
+                                                "{{ let __sv: Vec<Value> = {esc}.iter().map(|__e| {to_v}).collect(); \
+                                                 let __sorted = tishlang_runtime::array_sort(&Value::Array(VmRef::new(__sv)), Some(&({cmp_code}))); \
+                                                 if let Value::Array(__a) = __sorted {{ {esc} = __a.borrow().iter().map(|__v| {from_v}).collect(); }} \
+                                                 Value::Null }}"
+                                            ));
+                                        }
+                                    }
                                 }
                             }
                         }
