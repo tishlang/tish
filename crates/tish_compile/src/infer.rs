@@ -2398,11 +2398,13 @@ fn rec_arr_uses_safe(name: &str, keys: &std::collections::HashSet<&str>, tail: &
     tail.iter().all(|s| ra_stmt(s, name, keys))
 }
 
-/// #179 Stage B: opt-in flag for shape-union (megamorphic) inference. OFF by default until the
-/// integer-modulo lever (Stage C) lands to make it a net win; on it lets a heterogeneous
-/// closed-shape-set array lower to a `Vec<enum>` instead of staying boxed.
+/// #179 Stage B/C: shape-union (megamorphic) inference — a heterogeneous closed-shape-set array
+/// lowers to a native `Vec<enum>` with direct enum-match field reads. DEFAULT-ON as of Stage C
+/// (the native-length fix made megamorphic beat node: 485→~16ms vs node ~58ms). Part of the native
+/// stack, so `TISH_NATIVE_OPT=0` disables it (the boxed baseline); `TISH_SHAPE_UNION=0` is a
+/// dedicated escape hatch.
 fn shape_union_enabled() -> bool {
-    crate::native_opts_enabled() && std::env::var("TISH_SHAPE_UNION").as_deref() == Ok("1")
+    crate::native_opts_enabled() && std::env::var("TISH_SHAPE_UNION").as_deref() != Ok("0")
 }
 
 /// #179 Stage B: like [`record_array_fields`] but for a HETEROGENEOUS array — accumulate the set of

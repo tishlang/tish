@@ -4447,6 +4447,31 @@ impl Codegen {
                     }
                 }
 
+                // #179 Stage C: `let n = arr.length` on a native `Vec<_>` → a native `f64` local
+                // (`arr.len() as f64`) instead of boxing the whole Vec to call `get_prop`. Keeps `n`
+                // native so `arr[i % n]` can lower to integer modulo (the megamorphic index).
+                if rust_type == RustType::Value {
+                    if let Some(Expr::Member {
+                        object,
+                        prop: MemberProp::Name { name: p, .. },
+                        optional: false,
+                        ..
+                    }) = init.as_ref()
+                    {
+                        if p.as_ref() == "length" {
+                            if let Expr::Ident { name: arr, .. } = object.as_ref() {
+                                if matches!(
+                                    self.type_context.get_type(arr.as_ref()),
+                                    RustType::Vec(_)
+                                ) && !self.refcell_wrapped_vars.contains(arr.as_ref())
+                                {
+                                    rust_type = RustType::F64;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Native-vec fn body: `let k = perm[0]` on `Vec<i32>` → `i32` local.
                 if self.native_vec_ret.is_some()
                     && matches!(rust_type, RustType::Value | RustType::F64)
@@ -9660,6 +9685,30 @@ impl Codegen {
             if let Expr::Call { callee, args, .. } = expr {
                 if let Some((code, _)) = self.try_emit_toplevel_agg_call(callee, args, false)? {
                     return Ok(code);
+                }
+            }
+        }
+
+        // #179 Stage C: `arr.length` on a native `Vec<_>` against an F64 target → native
+        // `(arr.len() as f64)` (no boxing). Lets `let n = arr.length` stay native f64.
+        if let (
+            RustType::F64,
+            Expr::Member {
+                object,
+                prop: MemberProp::Name { name: p, .. },
+                optional: false,
+                ..
+            },
+        ) = (target_type, expr)
+        {
+            if p.as_ref() == "length" {
+                if let Expr::Ident { name: arr, .. } = object.as_ref() {
+                    if matches!(self.type_context.get_type(arr.as_ref()), RustType::Vec(_))
+                        && !self.refcell_wrapped_vars.contains(arr.as_ref())
+                    {
+                        let esc = Self::escape_ident(arr.as_ref());
+                        return Ok(format!("({}.len() as f64)", esc));
+                    }
                 }
             }
         }
