@@ -948,6 +948,11 @@ struct StructRegistry {
     by_shape: HashMap<String, String>,
     /// alias name → field list (for emitting the `type` decls)
     decls: Vec<StructDecl>,
+    /// #179 Stage B: canonical union key ("shape0|shape1|…") → union alias name.
+    by_union: HashMap<String, String>,
+    /// #179 Stage B: union alias → its variant shapes. Emitted as `type TishAnonUnion_N =
+    /// Union([Object(s0), Object(s1), …])`; codegen synthesizes the enum + per-variant structs.
+    union_decls: Vec<(String, Vec<Vec<(std::sync::Arc<str>, TypeAnnotation)>>)>,
 }
 
 impl StructRegistry {
@@ -963,6 +968,28 @@ impl StructRegistry {
         let name = format!("TishAnon_{}", self.decls.len());
         self.by_shape.insert(canon, name.clone());
         self.decls.push((name.clone(), fields.to_vec()));
+        name
+    }
+
+    /// #179 Stage B: register a closed set of distinct record shapes as a shape-union alias
+    /// (`TishAnonUnion_N`). Identical sets (order-insensitive per the caller's dedup) share one alias.
+    fn intern_union(&mut self, shapes: &[Vec<(std::sync::Arc<str>, TypeAnnotation)>]) -> String {
+        let canon = shapes
+            .iter()
+            .map(|s| {
+                s.iter()
+                    .map(|(k, t)| format!("{}:{}", k, type_canon(t)))
+                    .collect::<Vec<_>>()
+                    .join(";")
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        if let Some(name) = self.by_union.get(&canon) {
+            return name.clone();
+        }
+        let name = format!("TishAnonUnion_{}", self.union_decls.len());
+        self.by_union.insert(canon, name.clone());
+        self.union_decls.push((name.clone(), shapes.to_vec()));
         name
     }
 
@@ -1845,6 +1872,20 @@ fn struct_infer_program(program: Program) -> Program {
             span,
         });
     }
+    // #179 Stage B: emit each shape-union alias as `type TishAnonUnion_N = Union([Object(s0), …])`;
+    // codegen recognizes the reserved-prefix alias and synthesizes the enum + per-variant structs.
+    for (name, shapes) in reg.union_decls.drain(..) {
+        let members: Vec<TypeAnnotation> = shapes
+            .into_iter()
+            .map(TypeAnnotation::Object)
+            .collect();
+        out.push(Statement::TypeAlias {
+            name: name.as_str().into(),
+            name_span: span,
+            ty: TypeAnnotation::Union(members),
+            span,
+        });
+    }
     out.append(&mut stmts);
     Program { statements: out }
 }
@@ -1965,6 +2006,51 @@ fn si_block(stmts: Vec<Statement>, reg: &mut StructRegistry, ctx: &mut InferCtx)
                         span: *span,
                     });
                     continue;
+                }
+            }
+            // (e) #179 Stage B — array of a CLOSED SET of heterogeneous record shapes ("megamorphic":
+            // `objs.push({value,a})`, `objs.push({b,value,c})`, … all read as `objs[i].value`). Lower
+            // to a native `Vec<enum>` (ShapeUnion): a `.field` present-and-same-type in EVERY variant
+            // becomes a direct `match` load. Opt-in (TISH_SHAPE_UNION) until Stage C's integer modulo
+            // makes it a net win. The safety walk uses ONLY the common keys, so a read of a
+            // not-in-every-variant field disqualifies (stays boxed → undefined/null preserved).
+            if shape_union_enabled() {
+                if let Some(shapes) =
+                    record_array_shape_set(name.as_ref(), elements, &stmts[i + 1..], ctx)
+                {
+                    let common = shape_set_common_keys(&shapes);
+                    let common_refs: std::collections::HashSet<&str> =
+                        common.iter().map(|k| k.as_ref()).collect();
+                    if !common_refs.is_empty()
+                        && rec_arr_uses_safe(name.as_ref(), &common_refs, &stmts[i + 1..])
+                    {
+                        let union_alias = reg.intern_union(&shapes);
+                        let arr_ann = TypeAnnotation::Array(Box::new(TypeAnnotation::Simple(
+                            union_alias.as_str().into(),
+                            tishlang_ast::Span::default(),
+                        )));
+                        ctx.define(name.as_ref(), arr_ann.clone());
+                        // Register the union's COMMON fields as a struct shape so `infer_expr_type`
+                        // types `objs[i].field` as its (number) type — otherwise a numeric
+                        // accumulator fed by the read (`sum = sum + objs[i].value`) stays boxed.
+                        // All common fields share one type across variants (guaranteed above), so the
+                        // first shape's types are correct.
+                        let common_fields: Vec<(std::sync::Arc<str>, TypeAnnotation)> = shapes[0]
+                            .iter()
+                            .filter(|(k, _)| common.contains(k))
+                            .cloned()
+                            .collect();
+                        ctx.define_struct(union_alias.as_str(), common_fields);
+                        out.push(Statement::VarDecl {
+                            name: name.clone(),
+                            name_span: *name_span,
+                            mutable: *mutable,
+                            type_ann: Some(arr_ann),
+                            init: stmt_init_clone(stmt),
+                            span: *span,
+                        });
+                        continue;
+                    }
                 }
             }
         }
@@ -2310,6 +2396,134 @@ fn record_array_fields(
 /// spread, for-of, method other than push) returns false → the array stays boxed.
 fn rec_arr_uses_safe(name: &str, keys: &std::collections::HashSet<&str>, tail: &[Statement]) -> bool {
     tail.iter().all(|s| ra_stmt(s, name, keys))
+}
+
+/// #179 Stage B: opt-in flag for shape-union (megamorphic) inference. OFF by default until the
+/// integer-modulo lever (Stage C) lands to make it a net win; on it lets a heterogeneous
+/// closed-shape-set array lower to a `Vec<enum>` instead of staying boxed.
+fn shape_union_enabled() -> bool {
+    crate::native_opts_enabled() && std::env::var("TISH_SHAPE_UNION").as_deref() == Ok("1")
+}
+
+/// #179 Stage B: like [`record_array_fields`] but for a HETEROGENEOUS array — accumulate the set of
+/// DISTINCT primitive-record shapes across the initial elements + every `name.push({…})`. Returns
+/// the deduped shapes when there are 2..=8 of them (a genuine union; 1 shape is the existing
+/// single-struct path), or None if a push arg isn't a uniform primitive object literal, a non-object
+/// element appears, or the set exceeds 8 shapes.
+fn record_array_shape_set(
+    name: &str,
+    init_elements: &[tishlang_ast::ArrayElement],
+    tail: &[Statement],
+    ctx: &InferCtx,
+) -> Option<Vec<Vec<(std::sync::Arc<str>, TypeAnnotation)>>> {
+    let mut sctx = ctx.clone();
+    for _ in 0..4 {
+        for s in tail {
+            seed_numeric_locals(s, &mut sctx);
+        }
+    }
+    let mut shapes: Vec<Vec<(std::sync::Arc<str>, TypeAnnotation)>> = Vec::new();
+    let mut ok = true;
+    for el in init_elements {
+        match el {
+            tishlang_ast::ArrayElement::Expr(Expr::Object { props, .. }) => {
+                shape_set_consider(&mut shapes, &mut ok, props, &sctx);
+            }
+            _ => return None,
+        }
+        if !ok {
+            return None;
+        }
+    }
+    for s in tail {
+        walk_exprs_stmt(s, &mut |e| {
+            if let Expr::Call { callee, args, .. } = e {
+                if let Expr::Member {
+                    object,
+                    prop: tishlang_ast::MemberProp::Name { name: m, .. },
+                    ..
+                } = callee.as_ref()
+                {
+                    if m.as_ref() == "push"
+                        && matches!(object.as_ref(), Expr::Ident { name: n, .. } if n.as_ref() == name)
+                    {
+                        if let [CallArg::Expr(Expr::Object { props, .. })] = args.as_slice() {
+                            shape_set_consider(&mut shapes, &mut ok, props, &sctx);
+                        } else {
+                            ok = false;
+                        }
+                    }
+                }
+            }
+        });
+        if !ok {
+            return None;
+        }
+    }
+    if !(2..=8).contains(&shapes.len()) {
+        return None;
+    }
+    // Every variant must have a DISTINCT key set — codegen selects the variant for an object literal
+    // by its key set, so a same-keys/different-types collision would be ambiguous → stay boxed.
+    let mut keysets: Vec<Vec<&str>> = shapes
+        .iter()
+        .map(|s| {
+            let mut k: Vec<&str> = s.iter().map(|(k, _)| k.as_ref()).collect();
+            k.sort_unstable();
+            k
+        })
+        .collect();
+    let n = keysets.len();
+    keysets.sort();
+    keysets.dedup();
+    if keysets.len() != n {
+        return None;
+    }
+    Some(shapes)
+}
+
+/// Accumulate a distinct primitive-record shape into the set (dedup by `fields_eq`). Sets `ok=false`
+/// if the literal is not a primitive record or the set would exceed 8 shapes.
+fn shape_set_consider(
+    shapes: &mut Vec<Vec<(std::sync::Arc<str>, TypeAnnotation)>>,
+    ok: &mut bool,
+    props: &[tishlang_ast::ObjectProp],
+    ctx: &InferCtx,
+) {
+    match infer_object_shape(props, ctx) {
+        Some(f) => {
+            if !shapes.iter().any(|s| fields_eq(s, &f)) {
+                if shapes.len() >= 8 {
+                    *ok = false;
+                    return;
+                }
+                shapes.push(f);
+            }
+        }
+        None => *ok = false,
+    }
+}
+
+/// #179 Stage B: the fields present with an IDENTICAL type in EVERY variant of a shape set — the only
+/// fields a `union[i].field` read may soundly lower to a native `match` (a field missing from, or
+/// type-divergent across, some variant must stay boxed → undefined/null semantics preserved).
+fn shape_set_common_keys(
+    shapes: &[Vec<(std::sync::Arc<str>, TypeAnnotation)>],
+) -> std::collections::HashSet<std::sync::Arc<str>> {
+    let mut common = std::collections::HashSet::new();
+    let Some(first) = shapes.first() else {
+        return common;
+    };
+    'field: for (k, ty) in first {
+        for other in &shapes[1..] {
+            match other.iter().find(|(ok, _)| ok.as_ref() == k.as_ref()) {
+                Some((_, oty)) if type_canon(oty) == type_canon(ty) => {}
+                _ => continue 'field, // absent or type-divergent in some variant
+            }
+        }
+        common.insert(k.clone());
+    }
+    common
 }
 
 fn ra_stmt(s: &Statement, name: &str, keys: &std::collections::HashSet<&str>) -> bool {
