@@ -1217,8 +1217,10 @@ impl Codegen {
         for _ in 0..8 {
             let mut changed = false;
             for (name, ann) in &raw {
-                let resolved =
-                    crate::types::RustType::from_annotation_with_aliases(ann, &self.type_aliases);
+                let resolved = Self::try_shape_union_alias(name, ann, &self.type_aliases)
+                    .unwrap_or_else(|| {
+                        crate::types::RustType::from_annotation_with_aliases(ann, &self.type_aliases)
+                    });
                 let prev: Option<crate::types::RustType> = self.type_aliases.get(name).cloned();
                 if prev.as_ref() != Some(&resolved) {
                     self.type_aliases.insert(name.clone(), resolved);
@@ -1229,6 +1231,47 @@ impl Codegen {
                 break;
             }
         }
+    }
+
+    /// #179 Stage B: a compiler-generated shape-union alias (`TishAnonUnion_N = Union([Object, …])`)
+    /// resolves to a `RustType::ShapeUnion` with deterministic per-variant struct aliases
+    /// (`<alias>_V<i>`). Only the reserved prefix is treated this way, so user object-unions are
+    /// unaffected (they keep the `from_annotation` Option/Value lowering).
+    fn try_shape_union_alias(
+        name: &str,
+        ann: &TypeAnnotation,
+        aliases: &std::collections::HashMap<String, crate::types::RustType>,
+    ) -> Option<crate::types::RustType> {
+        if !name.starts_with("TishAnonUnion_") {
+            return None;
+        }
+        let TypeAnnotation::Union(members) = ann else {
+            return None;
+        };
+        if !(2..=8).contains(&members.len()) {
+            return None;
+        }
+        let mut variants = Vec::with_capacity(members.len());
+        for (i, m) in members.iter().enumerate() {
+            let TypeAnnotation::Object(fields) = m else {
+                return None;
+            };
+            let rfields: Vec<(std::sync::Arc<str>, crate::types::RustType)> = fields
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        crate::types::RustType::from_annotation_with_aliases(v, aliases),
+                    )
+                })
+                .collect();
+            let vname: std::sync::Arc<str> = format!("{}_V{}", name, i).into();
+            variants.push((vname, rfields));
+        }
+        Some(crate::types::RustType::ShapeUnion {
+            name: name.into(),
+            variants,
+        })
     }
 
     fn walk_type_aliases<'p>(
@@ -1310,6 +1353,40 @@ impl Codegen {
                 if Self::json_fields_are_simple(fields) {
                     self.emit_struct_json_serializer(&name, fields);
                 }
+                emitted_any = true;
+            } else if let crate::types::RustType::ShapeUnion { name: uname, variants } = &ty {
+                // #179 Stage B: one struct per variant, then the enum wrapping them.
+                for (valias, vfields) in variants {
+                    let vstruct = crate::types::named_struct_ident(valias);
+                    self.write("#[derive(Clone, Debug, Default)]\n");
+                    self.write("#[allow(non_snake_case, non_camel_case_types)]\n");
+                    self.write(&format!("pub struct {} {{\n", vstruct));
+                    for (k, t) in vfields {
+                        self.write(&format!(
+                            "    pub {}: {},\n",
+                            crate::types::field_ident(k),
+                            t.to_rust_type_str()
+                        ));
+                    }
+                    self.write("}\n\n");
+                }
+                let enum_ident = crate::types::shape_union_enum_ident(uname);
+                self.write("#[derive(Clone, Debug)]\n");
+                self.write("#[allow(non_snake_case, non_camel_case_types)]\n");
+                self.write(&format!("pub enum {} {{\n", enum_ident));
+                for (i, (valias, _)) in variants.iter().enumerate() {
+                    self.write(&format!(
+                        "    {}({}),\n",
+                        crate::types::shape_union_variant_ident(i),
+                        crate::types::named_struct_ident(valias)
+                    ));
+                }
+                self.write("}\n\n");
+                // A Default impl (first variant) so a `Vec<TishUnion_…>` local can be declared with
+                // the type's `default_value()` before the pushes fill it.
+                self.write(&format!("impl Default for {} {{\n", enum_ident));
+                self.write(&format!("    fn default() -> Self {{ {} }}\n", ty.default_value()));
+                self.write("}\n\n");
                 emitted_any = true;
             }
         }
@@ -9647,6 +9724,53 @@ impl Codegen {
             return Ok(target_type.from_value_expr(&value_expr));
         }
 
+        // #179 Stage B: an object literal against a `ShapeUnion` target — select the variant by the
+        // literal's key set (inference guarantees distinct key sets, so the match is unique) and wrap
+        // the variant's struct literal in the enum. Every literal pushed into a union array is one of
+        // the collected shapes by construction, so a valid program always finds its variant.
+        if let (RustType::ShapeUnion { name: uname, variants }, Expr::Object { props, .. }) =
+            (target_type, expr)
+        {
+            let mut lit_keys: Vec<&str> = Vec::new();
+            let mut has_spread = false;
+            for p in props {
+                match p {
+                    ObjectProp::KeyValue(k, _, _) => lit_keys.push(k.as_ref()),
+                    ObjectProp::Spread(_) => has_spread = true,
+                }
+            }
+            if !has_spread {
+                lit_keys.sort_unstable();
+                let hit = variants.iter().enumerate().find(|(_, (_, vf))| {
+                    let mut vk: Vec<&str> = vf.iter().map(|(k, _)| k.as_ref()).collect();
+                    vk.sort_unstable();
+                    vk == lit_keys
+                });
+                if let Some((vi, (valias, vfields))) = hit {
+                    let named = RustType::Named {
+                        name: valias.clone(),
+                        fields: vfields.clone(),
+                    };
+                    let inner = self.emit_native_expr(expr, &named)?;
+                    return Ok(format!(
+                        "{}::{}({})",
+                        crate::types::shape_union_enum_ident(uname),
+                        crate::types::shape_union_variant_ident(vi),
+                        inner
+                    ));
+                }
+            }
+            // Unreachable for a soundly-inferred union (distinct key sets, every literal in the set);
+            // fail loud rather than silently miscompile if that invariant is ever violated.
+            return Err(CompileError::new(
+                format!(
+                    "#179 ShapeUnion {}: object literal matched no variant (keys {:?})",
+                    uname, lit_keys
+                ),
+                None,
+            ));
+        }
+
         // Try to emit object literals directly as a Rust struct literal
         // when the target is a `RustType::Named` (a user `type Foo = {...}`
         // alias). Each property in source order is matched to a struct
@@ -13045,6 +13169,24 @@ impl Codegen {
                                 {
                                     if field_ty.is_native() {
                                         return field_ty.clone();
+                                    }
+                                }
+                            }
+                            // #179 Stage B: `union[i].field` where the field is present-and-native in
+                            // EVERY variant — the enum-match read yields that native type, so a numeric
+                            // accumulator fed by it (`sum = sum + objs[i].value`) stays native f64.
+                            if let RustType::ShapeUnion { variants, .. } = inner.as_ref() {
+                                let field_ty = variants.first().and_then(|(_, vf)| {
+                                    vf.iter()
+                                        .find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                                        .map(|(_, t)| t.clone())
+                                });
+                                let in_all = variants.iter().all(|(_, vf)| {
+                                    vf.iter().any(|(k, _)| k.as_ref() == prop_name.as_ref())
+                                });
+                                if let Some(field_ty) = field_ty {
+                                    if in_all && field_ty.is_native() {
+                                        return field_ty;
                                     }
                                 }
                             }
@@ -20828,6 +20970,45 @@ impl Codegen {
                                 || matches!(field_ty, RustType::Named { .. } | RustType::Vec(_))
                             {
                                 return Ok((access, field_ty.clone()));
+                            }
+                        }
+                    }
+                    // #179 Stage B: `union[i].field` — a field present in EVERY variant lowers to a
+                    // `match` reading it by fixed offset per arm (no hash, no IC). The inference safety
+                    // walk restricts reads to the common keys, so this is always all-variants here.
+                    if let RustType::ShapeUnion { name: uname, variants } = &obj_ty {
+                        let field_ty = variants.first().and_then(|(_, vf)| {
+                            vf.iter()
+                                .find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                                .map(|(_, t)| t.clone())
+                        });
+                        let in_all = variants.iter().all(|(_, vf)| {
+                            vf.iter().any(|(k, _)| k.as_ref() == prop_name.as_ref())
+                        });
+                        if let Some(field_ty) = field_ty {
+                            if in_all
+                                && (field_ty.is_native()
+                                    || matches!(
+                                        field_ty,
+                                        RustType::Named { .. } | RustType::Vec(_)
+                                    ))
+                            {
+                                let field = crate::types::field_ident(prop_name.as_ref());
+                                let arms = variants
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, _)| {
+                                        format!(
+                                            "{}::{}(__s) => __s.{}.clone()",
+                                            crate::types::shape_union_enum_ident(uname),
+                                            crate::types::shape_union_variant_ident(i),
+                                            field
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                let access = format!("(match &{} {{ {} }})", obj_code, arms);
+                                return Ok((access, field_ty));
                             }
                         }
                     }
