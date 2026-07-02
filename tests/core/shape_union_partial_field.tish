@@ -1,0 +1,10 @@
+// #179 Stage B/C soundness: reading a field NOT present in every variant must keep the array BOXED
+// (the union safety walk restricts native reads to the common keys), preserving JS
+// missing-property semantics. Backend-identical.
+let objs = []
+objs.push({ value: 1, a: 5 })
+objs.push({ b: 9, value: 2 })
+let out = ""
+for (let i = 0; i < objs.length; i++) { out = out + "[" + objs[i].value + "]" }
+console.log(out)
+console.log("has_a:" + (objs[0].a === 5))

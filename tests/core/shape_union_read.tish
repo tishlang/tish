@@ -1,0 +1,14 @@
+// #179 Stage B/C: a heterogeneous closed-shape-set array read at one site lowers to a native
+// Vec<enum> (ShapeUnion) on the rust backend; a field present in EVERY variant reads via a direct
+// enum match. Result must be identical across all backends (union native == boxed interp/vm).
+let objs = []
+objs.push({ value: 1, a: 9 })
+objs.push({ b: 9, value: 2, c: 9 })
+objs.push({ value: 3 })
+objs.push({ x: 9, y: 9, value: 4 })
+let n = objs.length
+let sum = 0
+for (let i = 0; i < n; i++) { sum = sum + objs[i % n].value }
+console.log("sum:" + sum)
+console.log("first:" + objs[0].value)
+console.log("len:" + n)
