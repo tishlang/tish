@@ -1736,59 +1736,41 @@ fn inline_single_call_factories(stmts: Vec<Statement>) -> Vec<Statement> {
 
         // Build the alpha-rename map for the leaked (direct) body locals.
         let Some(leaked) = direct_body_locals(&prefix) else { continue };
-        let mut active: std::collections::HashMap<String, Arc<str>> =
-            std::collections::HashMap::new();
-        // If this is `let X = f()` and the factory returns a leaked array var R directly, map R→X so
-        // the spliced `let R = []` becomes `let X = []` — the record-array machinery then types X.
+        // NARROW to the push-built factory shape ONLY: `return R` where R is a leaked (body-top-level)
+        // local built via `let R = []` + pushes, consumed as `let X = f()`. A literal-array return
+        // (`return [a, b]`), a call return, or a discarded `f()` is left intact — those are the #177
+        // aggregate machinery's territory (nbody's `makeBodies` returns `[sun, jupiter, …]`, and
+        // inlining it removes the function the aggregate ABI expects → nbody BUILD-FAIL under
+        // TISH_AGGREGATE_INFER). This keeps the inliner to exactly the Stage A/B bridge target.
         let return_ident = match &ret_expr {
             Expr::Ident { name, .. } if leaked.iter().any(|l| l.as_ref() == name.as_ref()) => {
-                Some(name.clone())
+                name.clone()
             }
-            _ => None,
+            _ => continue,
         };
+        let Some(tgt) = target.clone() else { continue }; // only `let X = f()`, not a discarded call
+        let mut active: std::collections::HashMap<String, Arc<str>> =
+            std::collections::HashMap::new();
+        // Map the returned array var R → the call-site target X, so the spliced `let R = []` becomes
+        // `let X = []` and the record-array/ShapeUnion machinery types X directly. Every other leaked
+        // local gets a fresh, collision-proof name.
         for (n, l) in leaked.iter().enumerate() {
-            if let (Some(tgt), Some(ri)) = (&target, &return_ident) {
-                if l.as_ref() == ri.as_ref() {
-                    active.insert(l.to_string(), tgt.clone());
-                    continue;
-                }
+            if l.as_ref() == return_ident.as_ref() {
+                active.insert(l.to_string(), tgt.clone());
+            } else {
+                let fresh: Arc<str> = format!("__inl_{}_{}_{}", fname, n, l).into();
+                active.insert(l.to_string(), fresh);
             }
-            // Fresh, collision-proof name for every other leaked local.
-            let fresh: Arc<str> = format!("__inl_{}_{}_{}", fname, n, l).into();
-            active.insert(l.to_string(), fresh);
         }
 
         // Alpha-rename the prefix (declarations + references) using the resolution-tested renamer.
+        // The trailing `return R` is dropped: R was renamed to X, so X is already the array binding.
         let mut renamed_prefix = prefix;
         for s in &mut renamed_prefix {
             let mut a = active.clone();
             crate::resolve::rewrite_stmt_scope(s, &mut a, true);
         }
-
-        // Assemble the spliced statements.
-        let mut spliced: Vec<Statement> = renamed_prefix;
-        match (&target, &return_ident) {
-            (Some(tgt), Some(ri)) if active.get(ri.as_ref()).map(|x| x.as_ref()) == Some(tgt.as_ref()) => {
-                // `let X = f()` with `return R` (R leaked) → R was renamed to X in the prefix, and
-                // the array var is already declared as X. Drop the return (nothing else to bind).
-            }
-            (Some(tgt), _) => {
-                // `let X = f()` with a general return expr → bind X to the renamed return value.
-                let mut re = ret_expr.clone();
-                crate::resolve::rewrite_expr_scope(&mut re, &active);
-                spliced.push(Statement::VarDecl {
-                    name: tgt.clone(),
-                    name_span: zero_span(),
-                    mutable: true,
-                    type_ann: None,
-                    init: Some(re),
-                    span: zero_span(),
-                });
-            }
-            (None, _) => {
-                // `f()` as a statement (return value discarded) → nothing to bind.
-            }
-        }
+        let spliced: Vec<Statement> = renamed_prefix;
 
         // Rebuild the program: replace the call site with the spliced body, drop the FunDecl.
         let mut out: Vec<Statement> = Vec::with_capacity(result.len() + spliced.len());
