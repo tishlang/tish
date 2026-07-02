@@ -53,6 +53,15 @@ pub enum RustType {
     },
     /// Tuple `(T0, T1, …)` for `[T0, T1]` tuple types — a native Rust tuple.
     Tuple(Vec<RustType>),
+    /// #179 Stage B: a closed set of 2..=8 distinct primitive-record shapes read at one site — the
+    /// "megamorphic" array-of-heterogeneous-objects pattern. Emitted as a generated Rust enum
+    /// `TishUnion_<name> { V0(TishStruct_<v0>), … }` (one variant per shape); a `.field` read present
+    /// in EVERY variant lowers to a `match` with a direct field load per arm (no hash, no IC). `name`
+    /// is the union alias; each `variants` entry is `(per-variant struct alias, its fields)`.
+    ShapeUnion {
+        name: Arc<str>,
+        variants: Vec<(Arc<str>, Vec<(Arc<str>, RustType)>)>,
+    },
 }
 
 impl RustType {
@@ -254,6 +263,7 @@ impl RustType {
                 )
             }
             RustType::Tuple(elems) => tuple_text(&elems.iter().map(|e| e.to_rust_type_str()).collect::<Vec<_>>()),
+            RustType::ShapeUnion { name, .. } => shape_union_enum_ident(name),
         }
     }
 
@@ -290,6 +300,22 @@ impl RustType {
             RustType::Function { .. } => "Value::Null".to_string(),
             RustType::Tuple(elems) => {
                 tuple_text(&elems.iter().map(|e| e.default_value()).collect::<Vec<_>>())
+            }
+            RustType::ShapeUnion { name, variants } => {
+                // Default = the first variant with each of its fields defaulted.
+                let (v0_alias, v0_fields) = &variants[0];
+                let init = v0_fields
+                    .iter()
+                    .map(|(k, t)| format!("{}: {}", field_ident(k), t.default_value()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "{}::{}({} {{ {} }})",
+                    shape_union_enum_ident(name),
+                    shape_union_variant_ident(0),
+                    named_struct_ident(v0_alias),
+                    init
+                )
             }
         }
     }
@@ -370,6 +396,15 @@ impl RustType {
                     field_assigns
                 )
             }
+            RustType::ShapeUnion { .. } => {
+                // #179 Stage B: converting a boxed Value INTO a ShapeUnion is a boundary the safety
+                // walk forbids (a typed union element never crosses to/from boxed), so codegen must
+                // never emit this. Present for match-completeness; fails loud if gating is violated.
+                format!(
+                    "{{ let _ = {}; unreachable!(\"ShapeUnion from Value is a forbidden boundary\") }}",
+                    value_expr
+                )
+            }
             _ => value_expr.to_string(), // Fallback
         }
     }
@@ -442,6 +477,28 @@ impl RustType {
                 // count, a codegen-time constant) — no AHashMap, so key order is preserved.
                 format!("Value::object_from_pairs([{}])", pairs)
             }
+            RustType::ShapeUnion { name, variants } => {
+                // union → boxed Value::Object: one match arm per variant, delegating to that
+                // variant's Named glue (ordered `object_from_pairs`, preserving JS key order).
+                let arms = variants
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (alias, fields))| {
+                        let named = RustType::Named {
+                            name: alias.clone(),
+                            fields: fields.clone(),
+                        };
+                        format!(
+                            "{}::{}(__u) => {}",
+                            shape_union_enum_ident(name),
+                            shape_union_variant_ident(i),
+                            named.to_value_expr("__u")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("(match &{} {{ {} }})", native_expr, arms)
+            }
             _ => native_expr.to_string(), // Fallback
         }
     }
@@ -460,6 +517,16 @@ fn tuple_text(parts: &[String]) -> String {
 
 pub fn named_struct_ident(tish_name: &str) -> String {
     format!("TishStruct_{}", tish_name)
+}
+
+/// #179 Stage B: map a shape-union alias to the generated Rust enum identifier.
+pub fn shape_union_enum_ident(tish_name: &str) -> String {
+    format!("TishUnion_{}", tish_name)
+}
+
+/// #179 Stage B: the Rust variant identifier for the `idx`-th shape of a union (`V0`, `V1`, …).
+pub fn shape_union_variant_ident(idx: usize) -> String {
+    format!("V{}", idx)
 }
 
 /// Map a Tish field name (`randomNumber`) to a valid Rust identifier
