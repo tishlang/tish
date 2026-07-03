@@ -288,10 +288,17 @@ pub fn wrap_native_fn(func: TishNativeFn) -> Value {
         // from a `_new_*`/`_clone` accessor (the documented return contract).
         unsafe {
             let out = as_value(result).cloned().unwrap_or(Value::Null);
+            // #384: a buggy extension may violate the "return a fresh handle" contract and hand back
+            // one of its INPUT handles. `out` has already been cloned out of it, so the underlying
+            // value is safe — but dropping both `handles[i]` and `result` would then be a double-free
+            // (heap corruption). Drop each input once; drop `result` only if it is not an input alias.
+            let result_aliases_input = handles.iter().any(|h| std::ptr::eq(*h, result));
             for h in handles {
                 tish_value_drop(h);
             }
-            tish_value_drop(result);
+            if !result_aliases_input {
+                tish_value_drop(result);
+            }
             out
         }
     })
@@ -477,6 +484,30 @@ mod tests {
                 assert!(matches!(f.call(&[]), Value::Null));
             }
             other => panic!("expected Value::Function, got {:?}", other),
+        }
+    }
+
+    // #384: a buggy extension that returns one of its INPUT handles (violating the "fresh handle"
+    // contract) must not cause a double-free. The shim clones the value out, drops each input once,
+    // and skips the result drop because it aliases an input.
+    extern "C" fn echo_first(args: *const TishValueRef, argc: usize) -> TishValueRef {
+        if argc == 0 {
+            return std::ptr::null_mut();
+        }
+        unsafe { *args } // returns the caller's input handle verbatim — a contract violation
+    }
+
+    #[test]
+    fn wrap_native_fn_returning_input_handle_is_not_double_free() {
+        let wrapped = wrap_native_fn(echo_first);
+        if let Value::Function(f) = wrapped {
+            // Runs clean (no double-free / heap corruption) and returns the aliased value's clone.
+            match f.call(&[Value::Number(7.0)]) {
+                Value::Number(n) => assert_eq!(n, 7.0),
+                other => panic!("expected Number(7), got {:?}", other),
+            }
+        } else {
+            panic!("expected Value::Function");
         }
     }
 
