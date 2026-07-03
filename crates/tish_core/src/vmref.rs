@@ -91,6 +91,13 @@ mod imp {
             Rc::ptr_eq(&a.0, &b.0)
         }
 
+        /// A stable identity pointer for this cell, for cycle detection (#381) — two `VmRef`s share it
+        /// iff `ptr_eq`. Not for dereference; only for identity comparison / hashing.
+        #[inline]
+        pub fn as_ptr(&self) -> *const () {
+            Rc::as_ptr(&self.0) as *const ()
+        }
+
         #[inline]
         pub fn strong_count(this: &Self) -> usize {
             Rc::strong_count(&this.0)
@@ -150,6 +157,13 @@ mod imp {
         #[inline]
         pub fn ptr_eq(a: &Self, b: &Self) -> bool {
             Arc::ptr_eq(&a.0, &b.0)
+        }
+
+        /// A stable identity pointer for this cell, for cycle detection (#381) — two `VmRef`s share it
+        /// iff `ptr_eq`. Not for dereference; only for identity comparison / hashing.
+        #[inline]
+        pub fn as_ptr(&self) -> *const () {
+            Arc::as_ptr(&self.0) as *const ()
         }
 
         #[inline]

@@ -33,6 +33,33 @@ mod tests {
     use super::*;
     use tishlang_ast::{CallArg, Expr, ObjectProp, Statement};
 
+    /// #381: pathologically nested source must return a catchable `Err`, NOT overflow the native
+    /// stack and abort the process. Exercises expression nesting (`((((…`), array nesting (`[[[[…`),
+    /// and prefix-op nesting (`-!-!…`) — all funnel through the depth-guarded `parse_unary`.
+    #[test]
+    fn deeply_nested_source_errors_instead_of_aborting() {
+        let n = 50_000;
+        for (open, close) in [("(", ")"), ("[", "]")] {
+            let src = format!("let x = {}1{}", open.repeat(n), close.repeat(n));
+            let r = parse(&src);
+            assert!(r.is_err(), "{n}× nested {open} should be a catchable Err, not an abort");
+            assert!(
+                r.unwrap_err().contains("nesting too deep"),
+                "expected a depth-limit error"
+            );
+        }
+        let prefix = format!("let x = {}1", "-".repeat(n));
+        assert!(parse(&prefix).is_err(), "deep prefix-op chain should error, not abort");
+    }
+
+    /// The depth guard must not reject ordinary, modestly-nested code.
+    #[test]
+    fn normal_nesting_still_parses() {
+        assert!(parse("let x = ((((1 + 2))))").is_ok());
+        assert!(parse("let y = [[1, 2], [3, [4, [5]]]]").is_ok());
+        assert!(parse("fn f() { if (a) { if (b) { return 1 } } }").is_ok());
+    }
+
     #[test]
     fn test_async_fn_parse() {
         let program = parse("async fn foo() { }").expect("parse async fn");

@@ -112,7 +112,31 @@ pub fn json_stringify(value: &Value) -> String {
 /// Append a JSON-stringified `value` to `buf`. Used by JSON.stringify for
 /// the recursive case so we don't pay for an intermediate `String` per
 /// node.
+///
+/// Cyclic object graphs (`a.self = a`) are detected and — matching JS, which throws
+/// `TypeError: Converting circular structure to JSON` — set a pending throw and emit `null` for the
+/// back-reference instead of recursing forever (#381: this was an unrecoverable thread hang, directly
+/// reachable from HTTP response serialization).
 pub fn json_stringify_into(buf: &mut String, value: &Value) {
+    // Track the CURRENT ancestor path only (not all-visited): a node repeated across sibling branches
+    // is a legal DAG and must serialize twice; only a back-edge to an ancestor is a cycle.
+    let mut ancestors: Vec<*const ()> = Vec::new();
+    json_stringify_into_guarded(buf, value, &mut ancestors);
+}
+
+/// Set the JS "circular structure" TypeError as the pending throw (once) — mirrors the
+/// `{ error: <msg> }` shape `tish_builtins::helpers::make_error_value` produces (that crate sits above
+/// this one, so the shape is reproduced here rather than imported).
+fn signal_circular_json_throw() {
+    if !crate::has_pending_throw() {
+        crate::set_pending_throw(Value::object_from_pairs([(
+            std::sync::Arc::from("error"),
+            Value::String("TypeError: Converting circular structure to JSON".into()),
+        )]));
+    }
+}
+
+fn json_stringify_into_guarded(buf: &mut String, value: &Value, ancestors: &mut Vec<*const ()>) {
     match value {
         Value::Null => buf.push_str("null"),
         Value::Bool(true) => buf.push_str("true"),
@@ -124,15 +148,24 @@ pub fn json_stringify_into(buf: &mut String, value: &Value) {
             buf.push('"');
         }
         Value::Array(arr) => {
+            let ptr = arr.as_ptr();
+            if ancestors.contains(&ptr) {
+                signal_circular_json_throw();
+                buf.push_str("null");
+                return;
+            }
+            ancestors.push(ptr);
             let borrowed = arr.borrow();
             buf.push('[');
             for (i, item) in borrowed.iter().enumerate() {
                 if i > 0 {
                     buf.push(',');
                 }
-                json_stringify_into(buf, item);
+                json_stringify_into_guarded(buf, item, ancestors);
             }
             buf.push(']');
+            drop(borrowed);
+            ancestors.pop();
         }
         Value::NumberArray(arr) => {
             let borrowed = arr.borrow();
@@ -146,6 +179,13 @@ pub fn json_stringify_into(buf: &mut String, value: &Value) {
             buf.push(']');
         }
         Value::Object(obj) => {
+            let ptr = obj.as_ptr();
+            if ancestors.contains(&ptr) {
+                signal_circular_json_throw();
+                buf.push_str("null");
+                return;
+            }
+            ancestors.push(ptr);
             let borrowed = obj.borrow();
             // Iterate in insertion order (PropMap preserves it) — matches JS/Node
             // and `Object.keys`. No intermediate key Vec, no sort: one fewer
@@ -158,9 +198,11 @@ pub fn json_stringify_into(buf: &mut String, value: &Value) {
                 buf.push('"');
                 escape_json_string_into(buf, key);
                 buf.push_str("\":");
-                json_stringify_into(buf, val);
+                json_stringify_into_guarded(buf, val, ancestors);
             }
             buf.push('}');
+            drop(borrowed);
+            ancestors.pop();
         }
         Value::Function(_) | Value::Promise(_) | Value::Opaque(_) | Value::Symbol(_) => {
             buf.push_str("null");
@@ -497,6 +539,34 @@ fn parse_object<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #381: a self-referential array must NOT loop forever — `JSON.stringify` terminates, emits a
+    /// finite string, and (matching JS) leaves a pending TypeError. The test *completing* is itself
+    /// the assertion that the former infinite hang is gone.
+    #[test]
+    fn json_stringify_cyclic_array_terminates_and_throws() {
+        let _ = crate::take_pending_throw(); // isolate from any prior thread-local throw
+        let a = Value::Array(crate::VmRef::new(Vec::new()));
+        if let Value::Array(inner) = &a {
+            inner.borrow_mut().push(a.clone()); // a = [a]
+        }
+        let s = json_stringify(&a);
+        assert_eq!(s, "[null]", "back-reference serializes as null, finite output");
+        assert!(crate::has_pending_throw(), "cyclic stringify must set a pending TypeError");
+        let _ = crate::take_pending_throw(); // clean up thread-local for other tests
+    }
+
+    /// A shared (non-cyclic) node repeated across sibling branches is a legal DAG and must serialize
+    /// twice — the ancestor-only tracking must NOT misflag it as a cycle.
+    #[test]
+    fn json_stringify_shared_dag_node_is_not_a_cycle() {
+        let _ = crate::take_pending_throw();
+        let shared = Value::Array(crate::VmRef::new(vec![Value::Number(1.0)]));
+        let root = Value::Array(crate::VmRef::new(vec![shared.clone(), shared.clone()]));
+        let s = json_stringify(&root);
+        assert_eq!(s, "[[1],[1]]", "a shared node is a DAG, not a cycle");
+        assert!(!crate::has_pending_throw(), "a DAG must NOT throw");
+    }
 
     #[test]
     fn test_parse_primitives() {

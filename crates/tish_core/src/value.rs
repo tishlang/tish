@@ -1268,6 +1268,14 @@ pub fn js_number_to_string_into(out: &mut String, value: f64) {
 impl Value {
     /// Convert value to display string (for console output).
     pub fn to_display_string(&self) -> String {
+        self.to_display_string_guarded(&mut Vec::new())
+    }
+
+    /// Cycle-safe recursive form (#381): `ancestors` holds the current path's container-cell pointers,
+    /// so a self-referential array/object (`a.self = a`) renders `[Circular]` instead of recursing
+    /// forever and wedging the thread. Ancestor-only (not all-visited), so a shared DAG node still
+    /// renders in full.
+    fn to_display_string_guarded(&self, ancestors: &mut Vec<*const ()>) -> String {
         match self {
             // Inspect form keeps the sign of negative zero (`console.log(-0)` → `-0`), unlike the
             // ECMAScript ToString used by `to_js_string`. See `js_number_to_string`. (#247)
@@ -1277,8 +1285,17 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
             Value::Array(arr) => {
-                let inner: Vec<String> =
-                    arr.borrow().iter().map(|v| v.to_display_string()).collect();
+                let ptr = arr.as_ptr();
+                if ancestors.contains(&ptr) {
+                    return "[Circular]".to_string();
+                }
+                ancestors.push(ptr);
+                let inner: Vec<String> = arr
+                    .borrow()
+                    .iter()
+                    .map(|v| v.to_display_string_guarded(ancestors))
+                    .collect();
+                ancestors.pop();
                 format!("[{}]", inner.join(", "))
             }
             Value::NumberArray(arr) => {
@@ -1290,12 +1307,18 @@ impl Value {
                 format!("[{}]", inner.join(", "))
             }
             Value::Object(obj) => {
+                let ptr = obj.as_ptr();
+                if ancestors.contains(&ptr) {
+                    return "[Circular]".to_string();
+                }
+                ancestors.push(ptr);
                 let inner: Vec<String> = obj
                     .borrow()
                     .strings
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", k.as_ref(), v.to_display_string()))
+                    .map(|(k, v)| format!("{}: {}", k.as_ref(), v.to_display_string_guarded(ancestors)))
                     .collect();
+                ancestors.pop();
                 format!("{{{}}}", inner.join(", "))
             }
             Value::Symbol(s) => {
@@ -1325,16 +1348,32 @@ impl Value {
     /// renders as `"null"` here (matching `String(null)`); `join` itself maps `null`/`undefined`
     /// elements to `""` *before* calling this, per the spec.
     pub fn to_js_string(&self) -> String {
+        self.to_js_string_guarded(&mut Vec::new())
+    }
+
+    /// Cycle-safe `ToString` (#381): only arrays recurse here (objects render `[object Object]`), so a
+    /// cyclic array via `"" + a` would otherwise hang. A back-reference joins as `""` — matching V8's
+    /// `Array.prototype.join`, where a self-referential element contributes the empty string.
+    fn to_js_string_guarded(&self, ancestors: &mut Vec<*const ()>) -> String {
         match self {
-            Value::Array(arr) => arr
-                .borrow()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => String::new(),
-                    other => other.to_js_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(","),
+            Value::Array(arr) => {
+                let ptr = arr.as_ptr();
+                if ancestors.contains(&ptr) {
+                    return String::new();
+                }
+                ancestors.push(ptr);
+                let s = arr
+                    .borrow()
+                    .iter()
+                    .map(|v| match v {
+                        Value::Null => String::new(),
+                        other => other.to_js_string_guarded(ancestors),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                ancestors.pop();
+                s
+            }
             Value::NumberArray(arr) => arr
                 .borrow()
                 .iter()
@@ -1709,6 +1748,50 @@ mod number_to_string_tests {
         for &(value, expected) in cases {
             assert_eq!(js_number_to_string(value), expected, "for {value:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod cycle_coercion_tests_381 {
+    //! #381: string-coercing a cyclic array/object must terminate (was a silent thread hang),
+    //! matching Node — `console.log`/inspect renders `[Circular]`, `"" + a` renders the back-ref as
+    //! the empty string via `Array.prototype.join`.
+    use super::Value;
+    use crate::VmRef;
+
+    #[test]
+    fn display_string_cyclic_array_terminates() {
+        let a = Value::Array(VmRef::new(Vec::new()));
+        if let Value::Array(inner) = &a {
+            inner.borrow_mut().push(a.clone()); // a = [a]
+        }
+        assert_eq!(a.to_display_string(), "[[Circular]]");
+    }
+
+    #[test]
+    fn js_string_cyclic_array_terminates() {
+        let a = Value::Array(VmRef::new(Vec::new()));
+        if let Value::Array(inner) = &a {
+            inner.borrow_mut().push(a.clone());
+        }
+        // Node: `let a=[]; a.push(a); "" + a` === "" (the self-referential element joins as "").
+        assert_eq!(a.to_js_string(), "");
+    }
+
+    #[test]
+    fn display_string_cyclic_object_terminates() {
+        let o = Value::object_from_pairs([]);
+        if let Value::Object(inner) = &o {
+            inner.borrow_mut().strings.insert(std::sync::Arc::from("self"), o.clone());
+        }
+        assert_eq!(o.to_display_string(), "{self: [Circular]}");
+    }
+
+    #[test]
+    fn display_string_shared_dag_is_not_circular() {
+        let shared = Value::Array(VmRef::new(vec![Value::Number(1.0)]));
+        let root = Value::Array(VmRef::new(vec![shared.clone(), shared.clone()]));
+        assert_eq!(root.to_display_string(), "[[1], [1]]", "a shared node is a DAG, not a cycle");
     }
 }
 
