@@ -108,6 +108,12 @@ impl RustType {
                 RustType::Vec(Box::new(Self::from_annotation_with_aliases(elem, aliases)))
             }
             TypeAnnotation::Object(fields) => {
+                // Security #379: a field key that is not a valid Rust identifier must not drive a
+                // native struct (it would be interpolated into generated Rust). Keep the whole object
+                // on the boxed `Value` path — always correct, just unspecialized.
+                if fields.iter().any(|(k, _)| !is_struct_field_safe(k)) {
+                    return RustType::Value;
+                }
                 let typed_fields: Vec<_> = fields
                     .iter()
                     .map(|(k, v)| (k.clone(), Self::from_annotation_with_aliases(v, aliases)))
@@ -529,16 +535,65 @@ pub fn shape_union_variant_ident(idx: usize) -> String {
     format!("V{}", idx)
 }
 
+/// Keywords that cannot be written as a raw identifier (`r#self` etc. are a hard Rust error), so an
+/// object key equal to one of these must NOT drive struct/shape inference — it stays boxed.
+const NON_RAWABLE_KEYWORDS: &[&str] = &["self", "Self", "super", "crate"];
+
+/// True iff `key` can be safely emitted as a generated Rust struct field name via [`field_ident`]:
+/// a plain ASCII identifier (`^[A-Za-z_][A-Za-z0-9_]*$`), excluding the bare wildcard `_` and the
+/// four non-rawable keywords. Any other key — one containing spaces/punctuation, empty, non-ASCII,
+/// etc. — is REJECTED so the object it belongs to falls back to the boxed `Value` path instead of
+/// being lowered to a native struct.
+///
+/// This is the front-line guard for the native-codegen key-injection class (security #379): an
+/// object literal key is arbitrary tish/JS text, and interpolating it verbatim into generated Rust
+/// (`pub {key}: {ty},`) is arbitrary-code injection. Inference/annotation lowering call this to keep
+/// unsafe-keyed objects on the always-correct boxed path; [`field_ident`] additionally sanitizes as a
+/// last-resort choke point so no path can ever emit a non-identifier verbatim.
+pub fn is_struct_field_safe(key: &str) -> bool {
+    if key == "_" || NON_RAWABLE_KEYWORDS.contains(&key) {
+        return false;
+    }
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// FNV-1a 64-bit — a tiny, dependency-free hash used only to synthesize a deterministic safe field
+/// identifier for an (unexpected) non-identifier key. Deterministic so a struct's field definition,
+/// its constructor, its accessors, and its serializer all agree on the same name.
+fn fnv1a_64(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// Map a Tish field name (`randomNumber`) to a valid Rust identifier
 /// (kept identical here — non-snake-case is allowed via
 /// `#[allow(non_snake_case)]` on the struct, so JS-style camelCase keys
 /// stay readable in the generated source).
+///
+/// A key that is not a valid Rust identifier is NEVER emitted verbatim (that would be code injection,
+/// security #379): inference/annotation lowering should already have kept such an object boxed via
+/// [`is_struct_field_safe`], so this is a defense-in-depth choke point — an unsafe key is replaced by
+/// a deterministic `__tish_field_<hash>` name. The worst case if a producer is missed is thus a wrong
+/// field name (a compile error / correctness bug), never injected Rust.
 pub fn field_ident(tish_name: &str) -> String {
-    // Reserve Rust keywords that would otherwise conflict.
+    if !is_struct_field_safe(tish_name) {
+        return format!("__tish_field_{:016x}", fnv1a_64(tish_name));
+    }
+    // Reserve Rust keywords that would otherwise conflict. (The non-rawable keywords are already
+    // excluded by `is_struct_field_safe` above, so every keyword reaching here has a valid `r#` form.)
     match tish_name {
-        "type" | "ref" | "fn" | "match" | "move" | "mod" | "self" | "Self" | "super" | "use"
+        "type" | "ref" | "fn" | "match" | "move" | "mod" | "use"
         | "where" | "loop" | "yield" | "async" | "await" | "dyn" | "impl" | "trait" | "in"
-        | "as" | "box" | "crate" | "const" | "extern" | "let" | "mut" | "pub" | "static"
+        | "as" | "box" | "const" | "extern" | "let" | "mut" | "pub" | "static"
         | "unsafe" | "abstract" | "become" | "do" | "final" | "macro" | "override" | "priv"
         | "typeof" | "unsized" | "virtual" => format!("r#{}", tish_name),
         _ => tish_name.to_string(),
@@ -641,6 +696,75 @@ mod tests {
             RustType::from_annotation(&arr_type),
             RustType::Vec(Box::new(RustType::F64))
         );
+    }
+
+    // ---- security #379: object-literal key injection into generated Rust ----
+
+    #[test]
+    fn is_struct_field_safe_accepts_plain_and_camel_and_keywords() {
+        for k in ["x", "y", "randomNumber", "_priv", "a1", "TishAnon_0", "type", "fn", "match"] {
+            assert!(is_struct_field_safe(k), "{k:?} should be a safe field");
+        }
+    }
+
+    #[test]
+    fn is_struct_field_safe_rejects_injection_and_nonrawable() {
+        for k in [
+            // the #379 injection shapes: anything with punctuation/space/braces
+            "x: i32 } pub fn pwned() {} struct Z { pub y",
+            "a, b",
+            "0abc",
+            "has space",
+            "unicodé",
+            "",
+            // non-rawable keywords would become invalid `r#self` etc.
+            "self", "Self", "super", "crate",
+            // bare wildcard is not a legal field name
+            "_",
+        ] {
+            assert!(!is_struct_field_safe(k), "{k:?} must NOT be a safe field");
+        }
+    }
+
+    #[test]
+    fn field_ident_never_emits_non_identifier_for_unsafe_key() {
+        // The core RCE guarantee: whatever key comes in, field_ident() out is ALWAYS a legal Rust
+        // identifier (ASCII ident chars, or a leading `r#`) — never verbatim injectable text.
+        let malicious = "x: i32 } pub fn PWNED() -> i32 { 1337 } struct S { pub y";
+        let out = field_ident(malicious);
+        assert!(out.starts_with("__tish_field_"), "unsafe key must be sanitized, got {out:?}");
+        let body = out.trim_start_matches("r#");
+        assert!(
+            body.chars().enumerate().all(|(i, c)| {
+                if i == 0 { c == '_' || c.is_ascii_alphabetic() } else { c == '_' || c.is_ascii_alphanumeric() }
+            }),
+            "field_ident output {out:?} is not a legal Rust identifier"
+        );
+        // deterministic: the def, the accessor, and the serializer must agree.
+        assert_eq!(field_ident(malicious), field_ident(malicious));
+    }
+
+    #[test]
+    fn field_ident_preserves_legit_and_raws_keywords() {
+        assert_eq!(field_ident("randomNumber"), "randomNumber");
+        assert_eq!(field_ident("x"), "x");
+        assert_eq!(field_ident("type"), "r#type");
+        // a non-rawable keyword is sanitized, NOT emitted as the invalid `r#self`.
+        assert!(field_ident("self").starts_with("__tish_field_"));
+    }
+
+    #[test]
+    fn annotation_object_with_unsafe_key_stays_boxed() {
+        // A `type` alias whose object shape has a non-identifier key must fall back to boxed Value,
+        // never a native struct with an injected field name.
+        let obj = TypeAnnotation::Object(vec![
+            ("safe".into(), TypeAnnotation::Simple("number".into(), tishlang_ast::Span::default())),
+            (
+                "evil } fn pwned() {".into(),
+                TypeAnnotation::Simple("number".into(), tishlang_ast::Span::default()),
+            ),
+        ]);
+        assert_eq!(RustType::from_annotation(&obj), RustType::Value);
     }
 
     #[test]
