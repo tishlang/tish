@@ -123,7 +123,16 @@ pub struct Parser<'a> {
     generic_specializations: Vec<Statement>,
     /// Names of specializations already generated (dedup).
     generic_done: HashSet<String>,
+    /// Current recursion depth of the expression/statement descent, bounded by [`MAX_PARSE_DEPTH`] so
+    /// pathologically nested untrusted source (`((((…`, `[[[[…`, `{{{{…`, `-!-!…`) returns a CATCHABLE
+    /// parse error instead of overflowing the native stack and aborting the whole process (#381).
+    depth: usize,
 }
+
+/// Maximum expression/statement nesting the parser will descend before returning a catchable error.
+/// Deep enough for any realistic hand-written or generated source; shallow enough that the descent
+/// stays well within the OS thread stack. Mirrors `MAX_JSON_DEPTH` in the JSON parser.
+const MAX_PARSE_DEPTH: usize = 1024;
 
 impl<'a> Parser<'a> {
     pub fn new(tokens: &'a [Token]) -> Self {
@@ -134,7 +143,23 @@ impl<'a> Parser<'a> {
             generic_aliases: HashMap::new(),
             generic_specializations: Vec::new(),
             generic_done: HashSet::new(),
+            depth: 0,
         }
+    }
+
+    /// Enter one level of recursive descent. Returns a catchable `Err` (never a panic/abort) once the
+    /// nesting exceeds [`MAX_PARSE_DEPTH`]. Pair every `Ok(())` return with a matching `self.depth -=
+    /// 1` on the way out (the `parse_unary`/`parse_statement` wrappers do this unconditionally). #381
+    fn enter_depth(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            self.depth -= 1;
+            return Err(format!(
+                "parse error: nesting too deep (exceeded {} levels)",
+                MAX_PARSE_DEPTH
+            ));
+        }
+        Ok(())
     }
 
     /// Close one generic-arg `>`: use a previously-split `>>` debt, consume a `>`, or split a
@@ -259,7 +284,16 @@ impl<'a> Parser<'a> {
         Ok(Program { statements })
     }
 
+    /// Depth-guarded wrapper (#381): bounds block/statement nesting (`{{{{…`, `if(x){if(x){…`) so a
+    /// crafted deeply-nested program returns a catchable error instead of a stack-overflow abort.
     fn parse_statement(&mut self) -> Result<Statement, String> {
+        self.enter_depth()?;
+        let r = stacker::maybe_grow(64 * 1024, 512 * 1024, || self.parse_statement_inner());
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_statement_inner(&mut self) -> Result<Statement, String> {
         let kind = self.peek_kind().ok_or("Unexpected EOF")?;
         let span_start = self.peek().map(|t| t.span.start).unwrap_or((0, 0));
 
@@ -1968,7 +2002,19 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
+    /// Depth-guarded wrapper (#381): every expression operand and every nested `(…)`/`[…]`/`{…}`/
+    /// prefix-op re-enters `parse_unary`, so bounding it here bounds all expression nesting. The
+    /// `-= 1` runs on both the `Ok` and `Err` paths, keeping the counter balanced.
     fn parse_unary(&mut self) -> Result<Expr, String> {
+        self.enter_depth()?;
+        // Grow the stack on demand (each nesting level costs a whole precedence-chain of frames), so
+        // we reach the MAX_PARSE_DEPTH bound and return a catchable error rather than overflowing.
+        let r = stacker::maybe_grow(64 * 1024, 512 * 1024, || self.parse_unary_inner());
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Expr, String> {
         // Handle prefix ++/-- (consolidated)
         if let Some(is_inc) = match self.peek_kind() {
             Some(TokenKind::PlusPlus) => Some(true),

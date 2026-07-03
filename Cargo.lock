@@ -3457,6 +3457,7 @@ dependencies = [
 name = "tishlang_parser"
 version = "0.1.0"
 dependencies = [
+ "stacker",
  "tishlang_ast",
  "tishlang_lexer",
 ]
