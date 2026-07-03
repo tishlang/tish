@@ -1101,6 +1101,12 @@ fn infer_object_shape(
     for p in props {
         match p {
             tishlang_ast::ObjectProp::KeyValue(k, v, _) => {
+                // Security #379: an object key that is not a valid Rust identifier must not become a
+                // native struct field (it would be interpolated verbatim into generated Rust — code
+                // injection). Decline the shape → the object stays on the boxed `Value` path.
+                if !crate::types::is_struct_field_safe(k) {
+                    return None;
+                }
                 let ty = infer_expr_type(v, ctx)?;
                 // Only primitive field types in this conservative version.
                 if !matches!(&ty, TypeAnnotation::Simple(s, _)
