@@ -131,12 +131,13 @@ let m = n & 7
 console.log(m >>> 0)
 "#;
     let rust = compile(&parse(src).unwrap()).unwrap();
-    // `n` is a top-level numeric global, so with the typing stack on by default its read lowers to a
-    // `Cell<f64>` load `G_N.with(|c| c.get())`. The unproven fractional value must STILL pass through
-    // the guarded `to_int32` (not an unchecked truncation) before the `& 7` mask.
+    // `n` is a top-level numeric used only at top level, so per #313 it is a native `let mut n: f64`
+    // local (not a `thread_local Cell` — no function references it). The soundness invariant is
+    // unchanged: the unproven fractional value must STILL pass through the guarded `to_int32` (not an
+    // unchecked truncation) before the `& 7` mask.
     assert!(
-        rust.contains("tishlang_runtime::to_int32(G_N.with(|c| c.get())) & 7i32"),
-        "an unproven f64 global leaf must keep the guarded to_int32 before the mask:\n{}",
+        rust.contains("tishlang_runtime::to_int32(n) & 7i32"),
+        "an unproven f64 leaf must keep the guarded to_int32 before the mask:\n{}",
         rust.lines().filter(|l| l.contains("& ") || l.contains("to_int")).take(6).collect::<Vec<_>>().join("\n")
     );
     // The literal `7` still folds; only the unproven `n` keeps the guard.
