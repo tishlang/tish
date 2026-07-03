@@ -20349,14 +20349,25 @@ impl Codegen {
         if let Some(v) = Self::int_literal_value_of(e) {
             return Ok(Some(format!("{}i32", v as i32)));
         }
+        // Int-valued local read in a `ToInt32` context (`h & 255`, `h >> 1`, …). `int_valued_locals`
+        // proves *integrality* (via `is_int_valued`, which accepts `+`/`-`/`*` of int-valued operands)
+        // but NOT *magnitude* — an int-valued f64 can overflow far past `i64` (e.g. `h = 1; loop h = h *
+        // 7`). This used to emit an UNGUARDED `unsafe { x.to_int_unchecked::<i64>() }`, which is
+        // undefined behavior on a non-finite / out-of-`i64`-range input (security/soundness #380).
+        //
+        // Fixed by the saturating `as` cast: `(x as i64) as i32` is defined for ALL f64 (NaN → 0,
+        // out-of-range saturates — no UB) and is exactly the same instruction cost as the old unchecked
+        // truncation on the hot path (no `is_finite` branch, no `to_int32`/`fmod`). It is also bit-for-bit
+        // JS `ToInt32` for every `|x| < 2^63` (an integer in that range casts losslessly to `i64`, and
+        // `as i32` takes the low 32 bits = `x mod 2^32`), which covers every real bounded accumulator —
+        // so it is strictly safer than the old UB with no fixture regression. (Only a pathological
+        // overflow beyond `2^63` differs from V8, matching the existing `to_int32` limitation, and never
+        // via UB.)
         if let Expr::Ident { name, .. } = e {
             if self.int_valued_locals.contains(name.as_ref()) {
                 let (code, ty) = self.emit_typed_expr(e)?;
                 if ty == RustType::F64 {
-                    return Ok(Some(format!(
-                        "(unsafe {{ ({}).to_int_unchecked::<i64>() }} as i32)",
-                        code
-                    )));
+                    return Ok(Some(format!("(({}) as i64 as i32)", code)));
                 }
             }
         }
@@ -21992,6 +22003,21 @@ mod tests_176 {
     use super::Codegen;
     use std::fs;
     use tishlang_parser::parse;
+
+    /// #380: an int-valued but magnitude-UNBOUNDED local used in a `ToInt32` context must never lower
+    /// to the UB `to_int_unchecked::<i64>()` (that is instant undefined behavior once the value
+    /// overflows past `i64`). The whole program's only `ToInt32` site is `h & 255`, so asserting the
+    /// UB primitive is absent from the generated Rust pins the fix.
+    #[test]
+    fn toint32_of_unbounded_int_valued_local_is_not_ub() {
+        let src = "let h = 1\nfor (let i = 0; i < 200; i = i + 1) { h = h * 7 }\nlet y = h & 255\nconsole.log(y)";
+        let program = parse(src).unwrap();
+        let rust = super::compile(&program).unwrap();
+        assert!(
+            !rust.contains("to_int_unchecked"),
+            "ToInt32 of an unbounded int-valued local must not emit UB `to_int_unchecked`:\n{rust}"
+        );
+    }
 
     #[test]
     fn fasta_collects_seed_global() {
