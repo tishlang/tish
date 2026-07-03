@@ -77,3 +77,27 @@ pub fn has_pending_throw() -> bool {
 pub fn take_pending_throw() -> Option<Value> {
     PENDING_THROW.with(|c| c.borrow_mut().take())
 }
+
+thread_local! {
+    /// Current user-function call depth for the bytecode VM. The VM's recursive path builds a fresh
+    /// `Vm` per call (so no shared struct field can accumulate) and its `Callable::call` signature is
+    /// fixed — a thread-local is the VM's equivalent of the interpreter's shared `Rc<Cell>` counter.
+    /// Lives here (not `tish_vm`) beside `PENDING_THROW` for the same layering reason. #381
+    static CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Enter one VM call frame; returns the new depth. Pair every call with [`dec_call_depth`].
+#[inline]
+pub fn inc_call_depth() -> usize {
+    CALL_DEPTH.with(|c| {
+        let d = c.get() + 1;
+        c.set(d);
+        d
+    })
+}
+
+/// Leave one VM call frame.
+#[inline]
+pub fn dec_call_depth() {
+    CALL_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+}
