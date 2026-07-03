@@ -201,7 +201,7 @@ impl HttpBody {
         };
         Box::pin(async move {
             match resp {
-                Ok(r) => r.text().await.map_err(|e| e.to_string()),
+                Ok(r) => read_text_capped(r, fetch_max_body()).await,
                 Err(e) => Err(e),
             }
         })
@@ -373,6 +373,47 @@ fn fetch_client() -> &'static reqwest::Client {
     })
 }
 
+/// Maximum outbound-`fetch` response body we will buffer, in bytes. `reqwest::Response::text()`
+/// reads the whole body with no bound, so a compromised or hostile upstream (or a
+/// compression-amplified response) could OOM the worker (#383). Override with `TISH_FETCH_MAX_BODY`;
+/// default 100 MiB — generous enough for normal API responses and moderate downloads, low enough to
+/// stop a pathological body. Set it higher for legitimately large downloads.
+fn fetch_max_body() -> usize {
+    use std::sync::OnceLock;
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(|| parse_max_body(std::env::var("TISH_FETCH_MAX_BODY").ok()))
+}
+
+/// Pure `TISH_FETCH_MAX_BODY` parse: a valid byte count, else the 100 MiB default. Split out so it is
+/// testable without touching process-global env / the `OnceLock` cache.
+fn parse_max_body(env: Option<String>) -> usize {
+    env.and_then(|v| v.parse().ok()).unwrap_or(100 * 1024 * 1024)
+}
+
+/// Read a response body to a `String`, streaming with a byte budget so it can never buffer more than
+/// `max` bytes (#383). Rejects early on a `Content-Length` that already exceeds the cap, and again mid
+/// stream for chunked/lying responses. Decodes UTF-8 lossily (matching `reqwest::text()` for the
+/// UTF-8 responses that dominate `fetch`).
+async fn read_text_capped(mut resp: reqwest::Response, max: usize) -> Result<String, String> {
+    if let Some(len) = resp.content_length() {
+        if len as usize > max {
+            return Err(format!(
+                "fetch: response body ({len} bytes, Content-Length) exceeds the {max}-byte cap (set TISH_FETCH_MAX_BODY to raise it)"
+            ));
+        }
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if buf.len() + chunk.len() > max {
+            return Err(format!(
+                "fetch: response body exceeds the {max}-byte cap (set TISH_FETCH_MAX_BODY to raise it)"
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 async fn send_request_parts(
     url: String,
     method: String,
@@ -489,4 +530,21 @@ pub fn fetch_all_promise_from_args(args: Vec<Value>) -> Value {
     Value::Promise(Arc::new(FetchAllResponsesPromise {
         rx: Mutex::new(Some(rx)),
     }))
+}
+
+#[cfg(test)]
+mod fetch_cap_tests_383 {
+    use super::parse_max_body;
+
+    #[test]
+    fn default_cap_is_100_mib() {
+        assert_eq!(parse_max_body(None), 100 * 1024 * 1024);
+        assert_eq!(parse_max_body(Some("not-a-number".into())), 100 * 1024 * 1024);
+    }
+
+    #[test]
+    fn env_override_parses() {
+        assert_eq!(parse_max_body(Some("1048576".into())), 1024 * 1024);
+        assert_eq!(parse_max_body(Some("0".into())), 0);
+    }
 }
