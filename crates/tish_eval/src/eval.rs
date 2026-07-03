@@ -188,6 +188,27 @@ pub struct Evaluator {
     /// String-builder state for amortized O(1) `acc += x` (see [`StringBuilderState`]). Shared across
     /// nested evaluators so a called function/closure that reads the accumulator flushes the buffer.
     string_builder: Rc<StringBuilderState>,
+    /// Current user-function call depth, SHARED (`Rc`) across every nested call-frame evaluator so it
+    /// tracks total recursion. Past [`Evaluator::max_call_depth`] a call throws a catchable
+    /// `RangeError` instead of growing the stack toward OOM/abort (#381).
+    call_depth: Rc<std::cell::Cell<usize>>,
+    /// Recursion ceiling: past this many nested user-function frames a call throws a catchable
+    /// `RangeError('Maximum call stack size exceeded')`, matching JS, rather than aborting the process.
+    /// Defaults to [`DEFAULT_MAX_CALL_DEPTH`], overridable via `TISH_MAX_CALL_DEPTH`.
+    max_call_depth: usize,
+}
+
+/// Default recursion ceiling: far deeper than any real non-pathological recursion, yet below where
+/// `stacker`'s growth would exhaust memory (the accompanying `stacker::maybe_grow` was verified safe
+/// to depth 20000). Override with `TISH_MAX_CALL_DEPTH`.
+const DEFAULT_MAX_CALL_DEPTH: usize = 20_000;
+
+fn env_max_call_depth() -> usize {
+    std::env::var("TISH_MAX_CALL_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_CALL_DEPTH)
 }
 
 impl Evaluator {
@@ -465,6 +486,8 @@ impl Evaluator {
             current_dir: RefCell::new(None),
             virtual_builtins: Rc::new(RefCell::new(HashMap::new())),
             string_builder: Rc::new(StringBuilderState::default()),
+            call_depth: Rc::new(std::cell::Cell::new(0)),
+            max_call_depth: env_max_call_depth(),
         }
     }
 
@@ -3138,6 +3161,8 @@ impl Evaluator {
             current_dir: RefCell::new(self.current_dir.borrow().clone()),
             virtual_builtins: Rc::clone(&self.virtual_builtins),
             string_builder: Rc::clone(&self.string_builder),
+            call_depth: Rc::clone(&self.call_depth),
+            max_call_depth: self.max_call_depth,
         };
         match eval.eval_statement(body) {
             Ok(v) => Ok(v),
@@ -3407,6 +3432,8 @@ impl Evaluator {
                     current_dir: RefCell::new(self.current_dir.borrow().clone()),
                     virtual_builtins: Rc::clone(&self.virtual_builtins),
             string_builder: Rc::clone(&self.string_builder),
+                    call_depth: Rc::clone(&self.call_depth),
+                    max_call_depth: self.max_call_depth,
                 };
                 {
                     let mut s = scope.borrow_mut();
@@ -3463,6 +3490,20 @@ impl Evaluator {
                 // VM's single `run_chunk` re-entry. 128 KiB is smaller than one level's chain, so the
                 // stack overflows BETWEEN checks; 1 MiB comfortably covers a level (verified to depth
                 // 20000 in both debug and release). 16 MiB segments keep grow frequency low.
+                // #381: bound recursion with a catchable `RangeError` instead of letting `stacker`
+                // grow the stack toward OOM/abort. The counter is shared (`Rc`) across every call
+                // frame, so it measures true nesting depth; it is decremented on the way out (both
+                // the Ok and Err paths) via the explicit `set` below so a caught throw doesn't leak
+                // depth.
+                let depth = eval.call_depth.get() + 1;
+                if depth > eval.max_call_depth {
+                    let err = crate::natives::range_error_construct(&[Value::String(
+                        "Maximum call stack size exceeded".into(),
+                    )])
+                    .unwrap_or(Value::Null);
+                    return Err(EvalError::Throw(err));
+                }
+                eval.call_depth.set(depth);
                 let body_result = {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
@@ -3475,6 +3516,7 @@ impl Evaluator {
                         eval.eval_statement(body)
                     }
                 };
+                eval.call_depth.set(depth - 1);
                 match body_result {
                     Ok(v) => Ok(v),
                     Err(EvalError::Return(v)) => Ok(v),
@@ -4601,3 +4643,33 @@ impl std::fmt::Display for EvalError {
 }
 
 impl std::error::Error for EvalError {}
+
+#[cfg(test)]
+mod recursion_limit_tests_381 {
+    use super::Evaluator;
+    use tishlang_parser::parse;
+
+    fn run_with_depth(src: &str, max_depth: usize) -> String {
+        let program = parse(src).unwrap();
+        let mut eval = Evaluator::new();
+        eval.max_call_depth = max_depth;
+        eval.eval_program(&program).unwrap().to_string()
+    }
+
+    #[test]
+    fn deep_recursion_throws_catchable_range_error() {
+        // Infinite (non-tail) recursion past the limit must throw a CATCHABLE RangeError, not abort:
+        // try/catch recovers and the program keeps running.
+        let src = "fn rec(n) { return 1 + rec(n + 1) }\n\
+                   let name = 'none'\n\
+                   try { rec(0) } catch (e) { name = e.name }\n\
+                   name";
+        assert_eq!(run_with_depth(src, 200), "RangeError");
+    }
+
+    #[test]
+    fn normal_recursion_is_unaffected() {
+        let src = "fn fib(n) { if (n < 2) { return n } return fib(n - 1) + fib(n - 2) }\nfib(12)";
+        assert_eq!(run_with_depth(src, 20000), "144");
+    }
+}
