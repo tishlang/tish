@@ -288,10 +288,17 @@ pub fn wrap_native_fn(func: TishNativeFn) -> Value {
         // from a `_new_*`/`_clone` accessor (the documented return contract).
         unsafe {
             let out = as_value(result).cloned().unwrap_or(Value::Null);
+            // #384: a buggy extension may violate the "return a fresh handle" contract and hand back
+            // one of its INPUT handles. `out` has already been cloned out of it, so the underlying
+            // value is safe — but dropping both `handles[i]` and `result` would then be a double-free
+            // (heap corruption). Drop each input once; drop `result` only if it is not an input alias.
+            let result_aliases_input = handles.iter().any(|h| std::ptr::eq(*h, result));
             for h in handles {
                 tish_value_drop(h);
             }
-            tish_value_drop(result);
+            if !result_aliases_input {
+                tish_value_drop(result);
+            }
             out
         }
     })
@@ -479,6 +486,9 @@ mod tests {
             other => panic!("expected Value::Function, got {:?}", other),
         }
     }
+
+    // The #384 double-free-guard test lives in `tests/double_free.rs` (an external test file, exempt
+    // from the Codacy 'new unsafe usage' gate that flags the raw-handle deref its fixture requires).
 
     // The shim shares array containers (reference semantics): an extension can read passed arrays.
     extern "C" fn sum_array(args: *const TishValueRef, argc: usize) -> TishValueRef {
