@@ -14,6 +14,26 @@ fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::SeqCst)
 }
 
+/// Maximum number of LIVE (registered, not-yet-fired) timers per worker thread. A program that keeps
+/// scheduling `setTimeout`/`setInterval` without them draining would otherwise grow the registry (and
+/// its retained callbacks + closed-over data) without bound (#384). Past the cap a new timer is
+/// dropped rather than registered. Override with `TISH_MAX_TIMERS`; default 100k — far above any real
+/// timer workload, low enough to bound memory.
+fn max_live_timers() -> usize {
+    // Read per call (timer registration is not a hot path, and the cap exists precisely to bound the
+    // pathological caller): keeps the limit overridable per test without a process-global cache.
+    std::env::var("TISH_MAX_TIMERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(100_000)
+}
+
+#[cfg(test)]
+fn registry_len() -> usize {
+    REGISTRY.with(|r| r.borrow().len())
+}
+
 struct TimerEntry {
     due: Instant,
     callback: Value,
@@ -114,7 +134,12 @@ pub fn set_timeout(args: &[Value]) -> Value {
     let id = next_id();
     let due = Instant::now() + Duration::from_millis(delay_ms);
     REGISTRY.with(|r| {
-        r.borrow_mut().insert(
+        let mut reg = r.borrow_mut();
+        // #384: bound the live-timer count so a runaway scheduler can't grow the registry unbounded.
+        if reg.len() >= max_live_timers() {
+            return;
+        }
+        reg.insert(
             id,
             TimerEntry {
                 due,
@@ -138,7 +163,12 @@ pub fn set_interval(args: &[Value]) -> Value {
     let id = next_id();
     let due = Instant::now() + Duration::from_millis(interval_ms);
     REGISTRY.with(|r| {
-        r.borrow_mut().insert(
+        let mut reg = r.borrow_mut();
+        // #384: bound the live-timer count (see set_timeout).
+        if reg.len() >= max_live_timers() {
+            return;
+        }
+        reg.insert(
             id,
             TimerEntry {
                 due,
@@ -169,4 +199,21 @@ pub fn clear_timeout(args: &[Value]) -> Value {
 /// clearInterval(id) — same registry as clearTimeout.
 pub fn clear_interval(args: &[Value]) -> Value {
     clear_timeout(args)
+}
+
+#[cfg(test)]
+mod timer_cap_tests_384 {
+    use super::*;
+
+    #[test]
+    fn set_timeout_is_bounded_by_max_timers() {
+        // Each `#[test]` runs on its own thread, so REGISTRY (thread_local) starts empty here.
+        std::env::set_var("TISH_MAX_TIMERS", "5");
+        let cb = tishlang_core::native_fn(|_| Value::Null);
+        for _ in 0..20 {
+            let _ = set_timeout(&[Value::Function(cb.clone()), Value::Number(10_000.0)]);
+        }
+        assert_eq!(registry_len(), 5, "live timers must be capped at TISH_MAX_TIMERS");
+        std::env::remove_var("TISH_MAX_TIMERS");
+    }
 }
