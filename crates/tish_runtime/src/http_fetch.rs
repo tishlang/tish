@@ -414,12 +414,75 @@ async fn read_text_capped(mut resp: reqwest::Response, max: usize) -> Result<Str
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Opt-in SSRF guard (#383): when `TISH_FETCH_BLOCK_PRIVATE_IPS=1`, `fetch()` refuses to connect to a
+/// loopback / private / link-local / unique-local address. Off by default so localhost development is
+/// unaffected; enable it when the request URL can derive from untrusted input (metadata-endpoint /
+/// internal-service pivots). NOTE: this is a pre-flight resolution check, so a DNS-rebinding attacker
+/// could in principle change the record between this check and reqwest's own resolution — a follow-up
+/// could move the filter into a custom `reqwest` resolver to close that window.
+fn fetch_block_private() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("TISH_FETCH_BLOCK_PRIVATE_IPS").as_deref() == Ok("1"))
+}
+
+/// True for addresses a hardened `fetch()` must not reach: loopback, RFC1918 private, link-local
+/// (incl. the `169.254.169.254` cloud-metadata endpoint), unspecified/broadcast, `0.0.0.0/8`, IPv6
+/// unique-local (`fc00::/7`) and link-local (`fe80::/10`), and IPv4-mapped forms of all the above.
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || v4.octets()[0] == 0 // 0.0.0.0/8 "this network"
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|m| is_blocked_ip(IpAddr::V4(m)))
+        }
+    }
+}
+
+/// Reject the request if the URL's host resolves to a blocked address (only when the opt-in policy is
+/// enabled). `tokio::net::lookup_host` handles both literal IPs and hostnames.
+async fn ssrf_preflight(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("fetch: invalid URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "fetch: URL has no host".to_string())?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("fetch: cannot resolve {host}: {e}"))?;
+    for addr in addrs {
+        if is_blocked_ip(addr.ip()) {
+            return Err(format!(
+                "fetch: blocked by SSRF policy — host {host} resolves to internal address {}",
+                addr.ip()
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn send_request_parts(
     url: String,
     method: String,
     headers: Vec<(String, String)>,
     body: Option<String>,
 ) -> Result<reqwest::Response, String> {
+    if fetch_block_private() {
+        ssrf_preflight(&url).await?;
+    }
     let client = fetch_client();
     let mut req = match method.as_str() {
         "GET" => client.get(&url),
@@ -534,7 +597,8 @@ pub fn fetch_all_promise_from_args(args: Vec<Value>) -> Value {
 
 #[cfg(test)]
 mod fetch_cap_tests_383 {
-    use super::parse_max_body;
+    use super::{is_blocked_ip, parse_max_body};
+    use std::net::IpAddr;
 
     #[test]
     fn default_cap_is_100_mib() {
@@ -546,5 +610,32 @@ mod fetch_cap_tests_383 {
     fn env_override_parses() {
         assert_eq!(parse_max_body(Some("1048576".into())), 1024 * 1024);
         assert_eq!(parse_max_body(Some("0".into())), 0);
+    }
+
+    #[test]
+    fn ssrf_blocks_internal_addresses() {
+        for s in [
+            "127.0.0.1",         // loopback
+            "10.0.0.5",          // RFC1918
+            "172.16.9.9",        // RFC1918
+            "192.168.1.1",       // RFC1918
+            "169.254.169.254",   // link-local / cloud metadata
+            "0.0.0.0",           // unspecified
+            "::1",               // IPv6 loopback
+            "fc00::1",           // IPv6 unique-local
+            "fe80::1",           // IPv6 link-local
+            "::ffff:127.0.0.1",  // IPv4-mapped loopback
+        ] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(is_blocked_ip(ip), "{s} must be blocked");
+        }
+    }
+
+    #[test]
+    fn ssrf_allows_public_addresses() {
+        for s in ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:2800:220:1::"] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(!is_blocked_ip(ip), "{s} must be allowed");
+        }
     }
 }
