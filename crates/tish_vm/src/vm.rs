@@ -41,6 +41,46 @@ fn pending_throw_is_set() -> bool {
     tishlang_core::has_pending_throw()
 }
 
+const DEFAULT_MAX_CALL_DEPTH: usize = 20_000;
+
+thread_local! {
+    // The recursion ceiling, lazily initialized from `TISH_MAX_CALL_DEPTH` (0 = uninitialized). A
+    // thread-local (not a process-global `OnceLock`) so each worker thread reads it independently and
+    // — crucially — so tests can lower it on their own thread without a cross-test data race. Read on
+    // the call path, so it's a cheap thread-local `Cell` load after the first init. #381
+    static MAX_CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The catchable-recursion ceiling. Past this depth a VM call throws a `RangeError` instead of
+/// overflowing the native stack. Mirrors the interpreter (`TISH_MAX_CALL_DEPTH`, default 20000).
+#[inline]
+fn max_call_depth() -> usize {
+    MAX_CALL_DEPTH.with(|c| {
+        let v = c.get();
+        if v != 0 {
+            return v;
+        }
+        let init = std::env::var("TISH_MAX_CALL_DEPTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MAX_CALL_DEPTH);
+        c.set(init);
+        init
+    })
+}
+
+#[cfg(test)]
+fn set_max_call_depth_for_test(n: usize) {
+    MAX_CALL_DEPTH.with(|c| c.set(n));
+}
+
+/// Build the catchable `RangeError` thrown when the recursion ceiling is exceeded.
+#[inline]
+fn stack_overflow_error() -> Value {
+    construct_builtin::error_object("RangeError", "Maximum call stack size exceeded")
+}
+
 /// Append the source location of the instruction at `off` to a runtime-error message, e.g.
 /// `Cannot read property 'x' of null (at app.tish:4)` (issue #74). No-ops when the chunk
 /// carries no line table (e.g. deserialized bytecode).
@@ -1059,6 +1099,16 @@ impl tishlang_core::Callable for VmClosure {
                 }
             }
         }
+        // #381: bound recursion so a runaway recursive closure throws a catchable RangeError rather
+        // than overflowing the native stack (this recursive re-entry is the DEFAULT `tish run` path).
+        // The counter is thread-local because each closure call builds a fresh `Vm`; the parked throw
+        // is picked up by the caller's `take_pending_throw()` check (Call/SelfCall post-call).
+        let depth = tishlang_core::inc_call_depth();
+        if depth > max_call_depth() {
+            tishlang_core::dec_call_depth();
+            set_pending_throw(stack_overflow_error());
+            return Value::Null;
+        }
         let mut vm = Vm {
             stack: Vec::new(),
             scope: ObjectMap::default(),
@@ -1068,17 +1118,19 @@ impl tishlang_core::Callable for VmClosure {
             native_modules: self.native_modules.clone(),
         };
         #[cfg(not(target_arch = "wasm32"))]
-        {
+        let result = {
             stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
                 vm.run_chunk(self.chunk.as_ref(), &self.chunk.nested, args, false)
                     .unwrap_or(Value::Null)
             })
-        }
+        };
         #[cfg(target_arch = "wasm32")]
-        {
+        let result = {
             vm.run_chunk(&self.chunk, &self.chunk.nested, args, false)
                 .unwrap_or(Value::Null)
-        }
+        };
+        tishlang_core::dec_call_depth();
+        result
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -1399,6 +1451,12 @@ impl Vm {
                         call_args.push(fpop!());
                     }
                     call_args.reverse();
+                    // #381: bound the heap frame stack (the opt-in frame-VM path grows a Vec instead
+                    // of the native stack, so unbounded recursion here is OOM rather than overflow).
+                    if frames.len() >= max_call_depth() {
+                        set_pending_throw(stack_overflow_error());
+                        return Some(Err(PENDING_THROW_SENTINEL.to_string()));
+                    }
                     frames.push((cur.clone(), ip, slot_base, stack_base, enclosing.clone()));
                     let new_base = slots.len();
                     slots.resize(new_base + cur.num_slots as usize, Value::Null);
@@ -1434,6 +1492,10 @@ impl Vm {
                                 // refcounts are unchanged (the chunk heap data doesn't move, so the
                                 // laundered `code` ptr stays valid until rebind below). Halves the
                                 // per-call Arc traffic vs cloning for the push.
+                                if frames.len() >= max_call_depth() {
+                                    set_pending_throw(stack_overflow_error());
+                                    return Some(Err(PENDING_THROW_SENTINEL.to_string()));
+                                }
                                 frames.push((cur, ip, slot_base, stack_base, enclosing));
                                 cur = next_chunk;
                                 enclosing = next_enc;
@@ -2057,6 +2119,14 @@ impl Vm {
                         );
                     }
                     args.reverse();
+                    // #381: SelfCall is a second native recursive re-entry (a self-recursive function
+                    // re-enters run_chunk directly). Bound it with the same shared counter; `raise!` is
+                    // in scope here, so throw the catchable RangeError directly.
+                    let depth = tishlang_core::inc_call_depth();
+                    if depth > max_call_depth() {
+                        tishlang_core::dec_call_depth();
+                        raise!(stack_overflow_error());
+                    }
                     let mut vm = Vm {
                         stack: Vec::new(),
                         scope: ObjectMap::default(),
@@ -2072,6 +2142,7 @@ impl Vm {
                     });
                     #[cfg(target_arch = "wasm32")]
                     let result = vm.run_chunk(chunk, nested, &args, false).unwrap_or(Value::Null);
+                    tishlang_core::dec_call_depth();
                     if let Some(v) = take_pending_throw() {
                         raise!(v);
                     }
@@ -3617,4 +3688,48 @@ pub fn run(chunk: &Chunk) -> Result<Value, String> {
 pub fn run_with_options(chunk: &Chunk, opts: VmRunOptions) -> Result<Value, String> {
     let mut vm = Vm::with_capabilities(opts.capabilities);
     vm.run_with_options(chunk, opts.repl_mode)
+}
+
+#[cfg(test)]
+mod recursion_limit_tests_381 {
+    use super::{set_max_call_depth_for_test, DEFAULT_MAX_CALL_DEPTH};
+    use tishlang_core::Value;
+
+    fn run_src(src: &str) -> Result<Value, String> {
+        let program = tishlang_parser::parse(src).expect("parse");
+        let chunk = tishlang_bytecode::compile(&program).expect("compile");
+        super::run(&chunk)
+    }
+
+    #[test]
+    fn deep_recursion_is_catchable_not_abort() {
+        // Without the guard this infinite recursion aborts the process (SIGABRT). With it, the throw
+        // is a catchable RangeError: try/catch recovers and the program returns normally.
+        set_max_call_depth_for_test(300);
+        // Object-returning recursion is NOT JIT-eligible, so it takes the guarded VM call path.
+        let src = "let ok = false\n\
+                   fn rec(n) { return { v: rec(n + 1) } }\n\
+                   try { rec(0) } catch (e) { ok = true }\n\
+                   ok";
+        let out = run_src(src);
+        set_max_call_depth_for_test(DEFAULT_MAX_CALL_DEPTH);
+        assert!(out.is_ok(), "deep recursion must be catchable, not abort/error: {out:?}");
+    }
+
+    #[test]
+    fn uncaught_deep_recursion_surfaces_error_not_abort() {
+        // An UNCAUGHT infinite recursion must surface as a returned error, never a SIGABRT.
+        set_max_call_depth_for_test(300);
+        let out = run_src("fn rec(n) { return { v: rec(n + 1) } }\nrec(0)");
+        set_max_call_depth_for_test(DEFAULT_MAX_CALL_DEPTH);
+        assert!(out.is_err(), "uncaught deep recursion must return an error, got {out:?}");
+    }
+
+    #[test]
+    fn normal_recursion_is_unaffected() {
+        set_max_call_depth_for_test(20_000);
+        let out = run_src("fn fib(n) { if (n < 2) { return n } return fib(n - 1) + fib(n - 2) }\nfib(15)");
+        set_max_call_depth_for_test(DEFAULT_MAX_CALL_DEPTH);
+        assert!(out.is_ok(), "normal recursion must not be affected: {out:?}");
+    }
 }
