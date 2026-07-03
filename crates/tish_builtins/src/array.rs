@@ -365,7 +365,10 @@ pub fn map(arr: &Value, callback: &Value) -> Value {
     }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
+        // #382: snapshot the backing store and DROP the borrow before running any callback — a
+        // callback that re-enters this same array (`arr.map(x => arr.length)`) would otherwise
+        // deadlock (Mutex, send-values) or panic (RefCell). Matches the packed path's copy semantics.
+        let arr_borrow = arr.borrow().clone();
         // #303: stop on a pending throw from the callback (don't map the rest of the array).
         let mut result: Vec<Value> = Vec::with_capacity(arr_borrow.len());
         for (i, v) in arr_borrow.iter().enumerate() {
@@ -393,7 +396,7 @@ pub fn filter(arr: &Value, callback: &Value) -> Value {
     }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
+        let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
         // #303: stop on a pending throw from the predicate (don't test the rest of the array).
         let mut result: Vec<Value> = Vec::new();
         for (i, v) in arr_borrow.iter().enumerate() {
@@ -426,7 +429,7 @@ pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
     }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
+        let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
         let len = arr_borrow.len();
         let (start_idx, mut acc) = if matches!(initial, Value::Null) && !arr_borrow.is_empty() {
             // No initial value: use first element as acc, start from index 1
@@ -455,7 +458,7 @@ pub fn for_each(arr: &Value, callback: &Value) -> Value {
     }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
+        let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
             cb.call(&[v.clone(), Value::Number(i as f64)]);
@@ -476,7 +479,7 @@ pub fn find(arr: &Value, callback: &Value) -> Value {
     }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
+        let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
             let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
@@ -500,7 +503,7 @@ pub fn find_index(arr: &Value, callback: &Value) -> Value {
     }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
+        let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
             let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
@@ -530,7 +533,7 @@ pub fn find_last(arr: &Value, callback: &Value) -> Value {
     let arr = as_boxed_array(arr);
     let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
+        let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
         for i in (0..arr_borrow.len()).rev() {
             if tishlang_core::has_pending_throw() { break; } // #303
             let v = &arr_borrow[i];
@@ -559,7 +562,7 @@ pub fn find_last_index(arr: &Value, callback: &Value) -> Value {
     let arr = as_boxed_array(arr);
     let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
+        let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
         for i in (0..arr_borrow.len()).rev() {
             if tishlang_core::has_pending_throw() { break; } // #303
             if cb
@@ -605,7 +608,7 @@ pub fn some(arr: &Value, callback: &Value) -> Value {
     }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
+        let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
             let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
@@ -629,7 +632,7 @@ pub fn every(arr: &Value, callback: &Value) -> Value {
     }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
+        let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
             let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
@@ -646,7 +649,7 @@ pub fn every(arr: &Value, callback: &Value) -> Value {
 pub fn flat_map(arr: &Value, callback: &Value) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
-        let arr_borrow = arr.borrow();
+        let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
         let mut result: Vec<Value> = Vec::new();
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
@@ -683,10 +686,15 @@ pub fn sort_default(arr: &Value) -> Value {
 
 pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
     if let (Value::Array(arr), Value::Function(cmp_fn)) = (arr, comparator) {
-        let mut arr_mut = arr.borrow_mut();
-        let len = arr_mut.len();
+        // #382: move the elements out under a short-lived borrow, then DROP the guard before invoking
+        // the comparator. A comparator that reads the array being sorted (the common
+        // `arr.sort((a,b) => arr.indexOf(a) - arr.indexOf(b))` idiom) would otherwise re-lock this same
+        // Mutex under send-values and self-deadlock the worker (or panic under RefCell) — the exact
+        // reentrant-lock class fixed for the captured-cell path in #218/#338. `mem::take` leaves the
+        // array empty for the duration of the sort; the final result is written back below.
+        let mut elements: Vec<Value> = std::mem::take(&mut *arr.borrow_mut());
+        let len = elements.len();
         let mut indices: Vec<usize> = (0..len).collect();
-        let mut elements: Vec<Value> = std::mem::take(&mut *arr_mut);
         let mut args_buf: [Value; 2] = [Value::Null, Value::Null];
 
         indices.sort_by(|&a, &b| {
@@ -704,17 +712,18 @@ pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
             }
         });
 
+        // Re-acquire the guard only to write the result back — no user code runs past this point.
         if tishlang_core::has_pending_throw() {
             // #303: the comparator threw — do NOT write the partial/bogus reordering back. Restore the
             // original element order (leave the array unmodified) and let the caller re-raise the throw.
-            *arr_mut = elements;
+            *arr.borrow_mut() = elements;
         } else {
-            *arr_mut = indices
+            let sorted: Vec<Value> = indices
                 .into_iter()
                 .map(|i| std::mem::replace(&mut elements[i], Value::Null))
                 .collect();
+            *arr.borrow_mut() = sorted;
         }
-        drop(arr_mut);
         Value::Array(arr.clone())
     } else {
         Value::Null
@@ -1240,5 +1249,85 @@ mod sort_by_keys_tests {
         let mut sorted = idxs.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(sorted, vec![0.0, 1.0, 2.0], "no element lost or duplicated");
+    }
+}
+
+#[cfg(test)]
+mod reentrancy_tests_382 {
+    //! #382: a boxed-array HOF / comparator must snapshot and DROP the array's borrow before running
+    //! any user callback, so a callback that re-enters the SAME array does not deadlock (Mutex, under
+    //! send-values) or panic "already borrowed" (RefCell, the default). Follow-up to #218/#338.
+    use super::*;
+    use tishlang_core::{native_fn, Value, VmRef};
+
+    fn arr3() -> Value {
+        Value::Array(VmRef::new(vec![
+            Value::Number(10.0),
+            Value::Number(20.0),
+            Value::Number(30.0),
+        ]))
+    }
+
+    #[test]
+    fn map_callback_can_mutate_same_array_without_panic() {
+        let arr = arr3();
+        let same = arr.clone(); // shares the VmRef → callback re-enters the same cell
+        let cb = Value::Function(native_fn(move |args| {
+            // borrow_mut() the array being mapped: pre-fix this panics ("already borrowed") because
+            // map still holds arr.borrow(); post-fix map has snapshotted+dropped, so this succeeds.
+            if let Value::Array(a) = &same {
+                a.borrow_mut().push(Value::Number(999.0));
+            }
+            args[0].clone()
+        }));
+        let out = map(&arr, &cb);
+        match out {
+            Value::Array(o) => assert_eq!(o.borrow().len(), 3, "map iterates the 3-element snapshot"),
+            _ => panic!("map should return an array"),
+        }
+    }
+
+    #[test]
+    fn foreach_callback_can_read_same_array_length() {
+        let arr = arr3();
+        let same = arr.clone();
+        let seen = VmRef::new(Vec::<f64>::new());
+        let seen_cb = seen.clone();
+        let cb = Value::Function(native_fn(move |args| {
+            if let Value::Array(a) = &same {
+                // read length from inside the callback (re-enters the same cell)
+                let len = a.borrow().len() as f64;
+                seen_cb.borrow_mut().push(len);
+            }
+            let _ = args;
+            Value::Null
+        }));
+        for_each(&arr, &cb);
+        assert_eq!(seen.borrow().len(), 3, "callback ran once per element without deadlock/panic");
+    }
+
+    #[test]
+    fn sort_comparator_can_read_same_array_without_panic() {
+        let arr = arr3();
+        let same = arr.clone();
+        let cmp = Value::Function(native_fn(move |args| {
+            // A comparator that reads the array being sorted (the arr.indexOf(a) idiom): pre-fix this
+            // re-locks the held guard (deadlock/panic); post-fix the guard is dropped during sorting.
+            if let Value::Array(a) = &same {
+                let _ = a.borrow().len();
+            }
+            match (&args[0], &args[1]) {
+                (Value::Number(x), Value::Number(y)) => Value::Number(x - y),
+                _ => Value::Number(0.0),
+            }
+        }));
+        let out = sort_with_comparator(&arr, &cmp);
+        match out {
+            Value::Array(o) => {
+                let got: Vec<f64> = o.borrow().iter().filter_map(|v| v.as_number()).collect();
+                assert_eq!(got, vec![10.0, 20.0, 30.0], "ascending sort completes, no element lost");
+            }
+            _ => panic!("sort should return an array"),
+        }
     }
 }
