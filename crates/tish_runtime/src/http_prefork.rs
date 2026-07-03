@@ -57,6 +57,8 @@
 use std::io;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicI32, AtomicUsize};
 use std::sync::Arc;
 
 /// Role of the current process in a prefork group.
@@ -142,28 +144,57 @@ pub fn install_parent_signal_handler(children: Vec<Child>) -> Arc<AtomicBool> {
     stop
 }
 
+/// Managed child PIDs, in a fixed atomic array (not a `Vec`/`OnceLock`): the signal handler may only
+/// do async-signal-safe work, so it reads plain atomics — never a lock or an allocation. Each
+/// `serve()` APPENDS its group here (#384), so a second `serve()` in the same parent no longer orphans
+/// its children on SIGINT/SIGTERM (the previous `OnceLock` silently dropped every group after the
+/// first). Ample for any realistic worker count; extra children beyond the cap simply aren't managed.
+#[cfg(unix)]
+const MAX_MANAGED_PIDS: usize = 4096;
+#[cfg(unix)]
+static CHILD_PIDS: [AtomicI32; MAX_MANAGED_PIDS] =
+    [const { AtomicI32::new(0) }; MAX_MANAGED_PIDS];
+#[cfg(unix)]
+static CHILD_PID_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Append a `serve()` group's child PIDs to the managed set. Stores land before the count is published
+/// (the SeqCst count store is the release), and the signal handler skips non-positive slots — so it
+/// never calls `kill(0, …)` (which would signal the whole process group). Installs are sequential (the
+/// parent's own thread), so no compare-exchange is needed.
+#[cfg(unix)]
+fn register_managed_pids(pids: &[u32]) {
+    let start = CHILD_PID_COUNT.load(Ordering::SeqCst);
+    for (i, pid) in pids.iter().enumerate() {
+        if let Some(slot) = CHILD_PIDS.get(start + i) {
+            slot.store(*pid as i32, Ordering::SeqCst);
+        }
+    }
+    CHILD_PID_COUNT.store((start + pids.len()).min(MAX_MANAGED_PIDS), Ordering::SeqCst);
+}
+
 #[cfg(unix)]
 fn install_shutdown_handler(stop: Arc<AtomicBool>, pids: Vec<u32>) {
-    // Store state in process-global statics so an `extern "C"` fn can reach
-    // them from inside a signal handler. This is the usual pattern for
-    // libc::signal callbacks — setting a flag + waking up listeners is the
-    // only async-signal-safe work we do here.
+    // A single process-global stop flag the handler sets. First `serve()` wins the slot; that is fine
+    // because the handler re-raises the signal with default disposition below, which terminates the
+    // parent regardless of which accept loop is polling — the flag only matters for the non-signal
+    // (max-requests) path, which each loop drives on its own returned `stop` handle.
     use std::sync::OnceLock;
     static STOP_FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
-    static CHILD_PIDS: OnceLock<Vec<u32>> = OnceLock::new();
-
     let _ = STOP_FLAG.set(stop);
-    let _ = CHILD_PIDS.set(pids);
+
+    register_managed_pids(&pids);
 
     extern "C" fn on_signal(sig: libc::c_int) {
         if let Some(flag) = STOP_FLAG.get() {
             flag.store(true, Ordering::Relaxed);
         }
-        if let Some(pids) = CHILD_PIDS.get() {
-            for pid in pids {
+        let count = CHILD_PID_COUNT.load(Ordering::SeqCst).min(MAX_MANAGED_PIDS);
+        for slot in CHILD_PIDS.iter().take(count) {
+            let pid = slot.load(Ordering::SeqCst);
+            if pid > 0 {
                 // codacy-disable-next-line
-        unsafe {
-                    libc::kill(*pid as libc::pid_t, libc::SIGTERM);
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGTERM);
                 }
             }
         }
@@ -186,4 +217,34 @@ fn install_shutdown_handler(stop: Arc<AtomicBool>, pids: Vec<u32>) {
 #[cfg(not(unix))]
 fn install_shutdown_handler(_stop: Arc<AtomicBool>, _pids: Vec<u32>) {
     // TODO: SetConsoleCtrlHandler on Windows.
+}
+
+#[cfg(all(test, unix))]
+mod prefork_pid_tests_384 {
+    use super::*;
+
+    /// Read the managed PID set the way the signal handler does (skipping empty slots).
+    fn managed_snapshot() -> Vec<i32> {
+        let count = CHILD_PID_COUNT.load(Ordering::SeqCst).min(MAX_MANAGED_PIDS);
+        CHILD_PIDS
+            .iter()
+            .take(count)
+            .map(|s| s.load(Ordering::SeqCst))
+            .filter(|&p| p > 0)
+            .collect()
+    }
+
+    #[test]
+    fn repeat_serve_appends_child_pids() {
+        // Reset the process-global set (this is the only test that touches it).
+        CHILD_PID_COUNT.store(0, Ordering::SeqCst);
+        for s in CHILD_PIDS.iter() {
+            s.store(0, Ordering::SeqCst);
+        }
+        // First serve() group, then a SECOND — the old OnceLock silently dropped the second, orphaning
+        // its children on shutdown. Now both groups are managed.
+        register_managed_pids(&[101, 102]);
+        register_managed_pids(&[201, 202, 203]);
+        assert_eq!(managed_snapshot(), vec![101, 102, 201, 202, 203]);
+    }
 }
