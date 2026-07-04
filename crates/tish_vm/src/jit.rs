@@ -422,6 +422,19 @@ struct JvFns {
     free: cranelift_module::FuncId,
 }
 
+/// Per-function-build handles for JV local arrays (#189): the `tish_jv_*` `FuncRef`s imported into
+/// *this* function, plus the set of slots classified as JV arrays. Passed to [`build_body_cfg`]; the
+/// deopt pointer is extracted from the function's trailing param inside the builder.
+struct JvCtx<'a> {
+    new: cranelift::codegen::ir::FuncRef,
+    push: cranelift::codegen::ir::FuncRef,
+    get: cranelift::codegen::ir::FuncRef,
+    set: cranelift::codegen::ir::FuncRef,
+    len: cranelift::codegen::ir::FuncRef,
+    free: cranelift::codegen::ir::FuncRef,
+    slots: &'a std::collections::HashSet<usize>,
+}
+
 /// Host entry point the JIT calls for `Math.<fn>` intrinsics it doesn't lower to a native op (#186):
 /// sin/cos/tan/exp/log/round/sign/… The single source of truth is [`MathUnaryFn::apply`], so JIT ≡
 /// VM ≡ interpreter bit-for-bit. `extern "C"` and registered as a JIT symbol; the id is the operand.
@@ -1508,6 +1521,60 @@ fn chunk_has_self_call(chunk: &Chunk) -> bool {
         ip += size;
     }
     false
+}
+
+/// #189 — identify function-LOCAL slots that hold non-escaping `f64` arrays (JV slots). A slot
+/// qualifies iff its ONLY definition is an empty array literal (`NewArray 0` immediately followed by
+/// `StoreLocal slot`) and it is never stored from anything else (which would alias/escape it). Any
+/// `NewArray` with a non-empty literal, or one not immediately stored to a slot, bails the WHOLE
+/// function (`None`) — such an array can't be JV-compiled and the function has array opcodes the JIT
+/// can't handle anyway. `Some(empty)` = "no local arrays" (the normal numeric path).
+///
+/// This is a cheap pass over STORES only; the [`build_body_cfg`] emission validates USES by bailing
+/// on any misuse of a JV ref (it reaching a numeric op, a return, a call arg, a block boundary, …),
+/// so a mis-shaped use never miscompiles — it just falls back to the interpreter.
+fn classify_jv_slots(chunk: &Chunk) -> Option<std::collections::HashSet<usize>> {
+    let code = &chunk.code;
+    let mut from_newarray: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut from_other: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut has_newarray = false;
+    let mut ip = 0usize;
+    let mut prev_newarray0 = false;
+    while ip < code.len() {
+        let op = Opcode::from_u8(*code.get(ip)?)?;
+        let size = op.instruction_size(code, ip)?;
+        let is_newarray0 = op == Opcode::NewArray && peek_u16(code, ip + 1)? == 0;
+        if op == Opcode::NewArray {
+            has_newarray = true;
+            if peek_u16(code, ip + 1)? != 0 {
+                return None; // non-empty array literal → not JV-compilable
+            }
+            // An empty `[]` must be stored straight into a slot (`let a = []`); anything else means
+            // the fresh array is used inline / escapes → bail.
+            if Opcode::from_u8(*code.get(ip + size)?)? != Opcode::StoreLocal {
+                return None;
+            }
+        }
+        if op == Opcode::StoreLocal {
+            let slot = peek_u16(code, ip + 1)? as usize;
+            if prev_newarray0 {
+                from_newarray.insert(slot);
+            } else {
+                from_other.insert(slot);
+            }
+        }
+        prev_newarray0 = is_newarray0;
+        ip += size;
+    }
+    if !has_newarray {
+        return Some(std::collections::HashSet::new());
+    }
+    // A NewArray-defined slot that is ALSO stored otherwise is aliased/polymorphic — bail the whole
+    // function (its array can't be JV-compiled, and it has `NewArray` the JIT otherwise rejects).
+    if from_newarray.iter().any(|s| from_other.contains(s)) {
+        return None;
+    }
+    Some(from_newarray)
 }
 
 /// Read a big-endian u16 operand at `off` without advancing (matches [`read_u16`]).
