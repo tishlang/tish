@@ -350,6 +350,8 @@ struct JitGlobal {
     /// `FuncId` of the imported `tish_math_call` host fn (#186), declared once at module init and
     /// re-imported into each compiled function via `declare_func_in_func`.
     math_call_id: cranelift_module::FuncId,
+    /// `FuncId`s of the imported `tish_jv_*` vector runtime (#189).
+    jv_fns: JvFns,
 }
 
 // SAFETY: `JITModule` is `!Send`, but the single instance lives behind the
@@ -358,6 +360,67 @@ struct JitGlobal {
 unsafe impl Send for JitGlobal {}
 
 static JIT: OnceLock<Option<Mutex<JitGlobal>>> = OnceLock::new();
+
+// #189 — a minimal C-ABI `f64` vector runtime for JIT-compiled function-LOCAL arrays that never
+// escape the frame. A qualifying local slot (only def = empty `[]`, only uses = push / `[i]` /
+// `[i]=v` / `.length`) becomes a raw `*mut Vec<f64>` in the JIT instead of a boxed `Value::Array`,
+// so its index math is pointer arithmetic + a bounds-checked call, not a per-op bound-method alloc.
+// SOUND because such arrays never escape: no `Value` ever references the `Vec`, so an OOB deopt can
+// discard the partially-mutated `Vec` (freed on the deopt exit) and re-run the interpreter with no
+// observable state change. Every exit (`Return`, deopt) frees every live JV slot — no leak.
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_jv_new(cap: u64) -> *mut Vec<f64> {
+    Box::into_raw(Box::new(Vec::with_capacity(cap as usize)))
+}
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_jv_push(v: *mut Vec<f64>, x: f64) {
+    // SAFETY: `v` is a live pointer from `tish_jv_new`, not freed until an exit block runs.
+    let vec = unsafe { &mut *v };
+    vec.push(x)
+}
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_jv_get(v: *mut Vec<f64>, i: u64, deopt: *mut u8) -> f64 {
+    // SAFETY: as above; OOB sets the deopt flag (caller discards + re-interprets) and returns NaN.
+    let vec = unsafe { &*v };
+    match vec.get(i as usize) {
+        Some(&x) => x,
+        None => {
+            unsafe { *deopt = 1 };
+            f64::NAN
+        }
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_jv_set(v: *mut Vec<f64>, i: u64, x: f64, deopt: *mut u8) {
+    // SAFETY: as above; OOB → deopt (no store performed).
+    let vec = unsafe { &mut *v };
+    match vec.get_mut(i as usize) {
+        Some(p) => *p = x,
+        None => unsafe { *deopt = 1 },
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_jv_len(v: *mut Vec<f64>) -> u64 {
+    // SAFETY: as above.
+    let vec = unsafe { &*v };
+    vec.len() as u64
+}
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_jv_free(v: *mut Vec<f64>) {
+    // SAFETY: `v` came from `tish_jv_new`, freed exactly once per compiled exit path.
+    drop(unsafe { Box::from_raw(v) })
+}
+
+/// Imported `FuncId`s of the `tish_jv_*` vector runtime (#189), declared once at module init.
+#[derive(Clone, Copy)]
+struct JvFns {
+    new: cranelift_module::FuncId,
+    push: cranelift_module::FuncId,
+    get: cranelift_module::FuncId,
+    set: cranelift_module::FuncId,
+    len: cranelift_module::FuncId,
+    free: cranelift_module::FuncId,
+}
 
 /// Host entry point the JIT calls for `Math.<fn>` intrinsics it doesn't lower to a native op (#186):
 /// sin/cos/tan/exp/log/round/sign/… The single source of truth is [`MathUnaryFn::apply`], so JIT ≡
@@ -370,8 +433,9 @@ extern "C" fn tish_math_call(id: i32, x: f64) -> f64 {
     }
 }
 
-/// Build the JIT module and declare the imported `tish_math_call` host function, returning both.
-fn new_module() -> Option<(JITModule, cranelift_module::FuncId)> {
+/// Build the JIT module and declare the imported host functions (`tish_math_call` #186, the
+/// `tish_jv_*` vector runtime #189), returning the module + their `FuncId`s.
+fn new_module() -> Option<(JITModule, cranelift_module::FuncId, JvFns)> {
     let mut flag_builder = settings::builder();
     // JIT code is loaded at a fixed address; no PIC / colocated libcalls needed.
     flag_builder.set("use_colocated_libcalls", "false").ok()?;
@@ -383,27 +447,69 @@ fn new_module() -> Option<(JITModule, cranelift_module::FuncId)> {
         .ok()?;
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     builder.symbol("tish_math_call", tish_math_call as *const u8);
+    builder.symbol("tish_jv_new", tish_jv_new as *const u8);
+    builder.symbol("tish_jv_push", tish_jv_push as *const u8);
+    builder.symbol("tish_jv_get", tish_jv_get as *const u8);
+    builder.symbol("tish_jv_set", tish_jv_set as *const u8);
+    builder.symbol("tish_jv_len", tish_jv_len as *const u8);
+    builder.symbol("tish_jv_free", tish_jv_free as *const u8);
     let mut module = JITModule::new(builder);
-    // Import signature: `(i32 fn-id, f64 x) -> f64`.
-    let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(types::I32));
-    sig.params.push(AbiParam::new(types::F64));
-    sig.returns.push(AbiParam::new(types::F64));
+    let ptr = module.target_config().pointer_type();
+
+    // `tish_math_call(i32 fn-id, f64 x) -> f64`.
+    let mut msig = module.make_signature();
+    msig.params.push(AbiParam::new(types::I32));
+    msig.params.push(AbiParam::new(types::F64));
+    msig.returns.push(AbiParam::new(types::F64));
     let math_id = module
-        .declare_function("tish_math_call", Linkage::Import, &sig)
+        .declare_function("tish_math_call", Linkage::Import, &msig)
         .ok()?;
-    Some((module, math_id))
+
+    // Helper to declare a `tish_jv_*` import from param/return abi lists.
+    let mut declare = |name: &str, params: &[AbiParam], rets: &[AbiParam]| {
+        let mut s = module.make_signature();
+        s.params.extend_from_slice(params);
+        s.returns.extend_from_slice(rets);
+        module.declare_function(name, Linkage::Import, &s).ok()
+    };
+    let jv = JvFns {
+        new: declare("tish_jv_new", &[AbiParam::new(types::I64)], &[AbiParam::new(ptr)])?,
+        push: declare(
+            "tish_jv_push",
+            &[AbiParam::new(ptr), AbiParam::new(types::F64)],
+            &[],
+        )?,
+        get: declare(
+            "tish_jv_get",
+            &[AbiParam::new(ptr), AbiParam::new(types::I64), AbiParam::new(ptr)],
+            &[AbiParam::new(types::F64)],
+        )?,
+        set: declare(
+            "tish_jv_set",
+            &[
+                AbiParam::new(ptr),
+                AbiParam::new(types::I64),
+                AbiParam::new(types::F64),
+                AbiParam::new(ptr),
+            ],
+            &[],
+        )?,
+        len: declare("tish_jv_len", &[AbiParam::new(ptr)], &[AbiParam::new(types::I64)])?,
+        free: declare("tish_jv_free", &[AbiParam::new(ptr)], &[])?,
+    };
+    Some((module, math_id, jv))
 }
 
 fn jit() -> Option<&'static Mutex<JitGlobal>> {
     JIT.get_or_init(|| {
-        new_module().map(|(module, math_call_id)| {
+        new_module().map(|(module, math_call_id, jv_fns)| {
             Mutex::new(JitGlobal {
                 module,
                 cache: HashMap::new(),
                 osr_cache: HashMap::new(),
                 counter: 0,
                 math_call_id,
+                jv_fns,
             })
         })
     })
