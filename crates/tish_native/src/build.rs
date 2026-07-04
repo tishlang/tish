@@ -294,7 +294,20 @@ tishlang_runtime = {{ path = {:?}{} }}
     };
     tishlang_build_utils::copy_binary_to_output(&artifact, &target)?;
 
+    cleanup_build_dir(&build_dir);
     Ok(())
+}
+
+/// Remove a finished build's per-PID source directory (#384). Called only on SUCCESS, after the
+/// binary is copied out — the dir is then disposable (it holds only the generated crate source;
+/// compiled artifacts live in the shared workspace `target/`). Left in place on any earlier error so a
+/// failed build can be inspected, and preserved entirely when `TISH_KEEP_BUILD_DIR=1` (e.g. to read the
+/// generated `main.rs`). Best-effort: a failed removal is ignored.
+pub(crate) fn cleanup_build_dir(build_dir: &Path) {
+    if std::env::var("TISH_KEEP_BUILD_DIR").as_deref() == Ok("1") {
+        return;
+    }
+    let _ = std::fs::remove_dir_all(build_dir);
 }
 
 /// Build several native binaries in **one** nested Cargo project (shared `tishlang_runtime` compile).
@@ -454,12 +467,40 @@ tishlang_runtime = {{ path = {:?}{} }}
         tishlang_build_utils::copy_binary_to_output(&binary, &target)?;
     }
 
+    cleanup_build_dir(&build_dir);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::runtime_features_for_cargo;
+
+    /// #384: `cleanup_build_dir` removes a finished build's dir by default, and preserves it under
+    /// `TISH_KEEP_BUILD_DIR=1`.
+    #[test]
+    fn cleanup_build_dir_removes_by_default_and_keeps_on_flag() {
+        use std::path::PathBuf;
+        // Scratch under the workspace target/ (never /tmp), unique per case.
+        let base: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp_cleanup_test");
+        let removed = base.join("to_remove");
+        let kept = base.join("to_keep");
+        for d in [&removed, &kept] {
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("src/main.rs"), "fn main(){}").unwrap();
+        }
+
+        std::env::remove_var("TISH_KEEP_BUILD_DIR");
+        super::cleanup_build_dir(&removed);
+        assert!(!removed.exists(), "default should remove the build dir");
+
+        std::env::set_var("TISH_KEEP_BUILD_DIR", "1");
+        super::cleanup_build_dir(&kept);
+        assert!(kept.exists(), "TISH_KEEP_BUILD_DIR=1 should preserve the build dir");
+        std::env::remove_var("TISH_KEEP_BUILD_DIR");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn runtime_features_full_expands() {
