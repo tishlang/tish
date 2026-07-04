@@ -1110,16 +1110,30 @@ where
     drop(tx);
 
     let mut count = 0usize;
-    while let Ok((req_prim, resp_tx)) = rx.recv() {
-        let req_value = req_prim.into_value();
-        let response_value = handler.call(&[req_value]);
-        let resp_prim = ResponsePrimitive::from_value(&response_value);
-        let _ = resp_tx.send(resp_prim);
+    // #384: `recv_timeout` (not a blocking `recv`) so a handler's scheduled timers still fire when the
+    // server is idle. Handler calls all run on this single VM thread, so the timer registry is here.
+    loop {
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok((req_prim, resp_tx)) => {
+                let req_value = req_prim.into_value();
+                let response_value = handler.call(&[req_value]);
+                crate::timers::drain_timers();
+                let resp_prim = ResponsePrimitive::from_value(&response_value);
+                let _ = resp_tx.send(resp_prim);
 
-        count += 1;
-        if max_requests.map(|m| count >= m).unwrap_or(false) {
-            stop.store(true, Ordering::Relaxed);
-            break;
+                count += 1;
+                if max_requests.map(|m| count >= m).unwrap_or(false) {
+                    stop.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                crate::timers::drain_timers();
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
@@ -1181,6 +1195,10 @@ fn worker_loop_direct(
             Ok(None) => {} // timeout; re-check stop flag
             Err(_) => break,
         }
+        // #384: fire any timers a handler scheduled. The handler runs on this accept thread, so its
+        // `setTimeout`/`setInterval` callbacks live in this thread's registry; the ≤250ms `recv_timeout`
+        // above means they fire within that window even when no new requests arrive.
+        crate::timers::drain_timers();
     }
 }
 
