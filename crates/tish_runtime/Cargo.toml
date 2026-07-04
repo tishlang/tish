@@ -94,3 +94,8 @@ core_affinity = { version = "0.8", optional = true }
 tokio-tungstenite = { version = "0.29", optional = true }
 futures-util = { version = "0.3", optional = true }
 lazy_static = { version = "1", optional = true }
+
+# #381 native-codegen recursion guard: stack-pressure probe for guarded self-recursive fns.
+# Non-wasm only — wasm traps on overflow inside its own sandbox, so the guard is a no-op there.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+stacker = "0.1"

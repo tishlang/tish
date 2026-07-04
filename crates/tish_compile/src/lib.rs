@@ -20,6 +20,15 @@ pub(crate) fn native_opts_enabled() -> bool {
     std::env::var("TISH_NATIVE_OPT").map(|v| v != "0").unwrap_or(true)
 }
 
+/// #381 — the native recursion guard: rotation copies for self/mutually-recursive typed fns plus a
+/// depth guard at boxed user-fn closure entry, so unbounded recursion raises a catchable
+/// `RangeError` instead of overflowing the stack (an uncatchable process abort). **Default ON**;
+/// `TISH_NATIVE_RECUR_GUARD=0` turns it off — mirrors the VM JIT tier's `TISH_JIT_RECUR_GUARD`
+/// (for bisection and code-size-sensitive builds; unbounded recursion then aborts again, as before).
+pub(crate) fn native_recur_guard_enabled() -> bool {
+    std::env::var("TISH_NATIVE_RECUR_GUARD").map(|v| v != "0").unwrap_or(true)
+}
+
 /// How generated Rust is linked (desktop binary vs embedded iOS staticlib).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NativeEmitMode {

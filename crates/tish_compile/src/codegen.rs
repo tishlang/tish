@@ -944,6 +944,14 @@ pub(crate) struct Codegen {
     native_fn_body_returned: bool,
     /// M5 LCG fns (`genRandom`): `fn -> (global, mul, add, modulus)` for single-`with` emission.
     native_lcg_fns: std::collections::HashMap<String, (String, f64, f64, f64)>,
+    /// #381 — M5 fns on a call-graph cycle (self- or mutually-recursive): `fn -> (scc_id, K)`.
+    /// Each gets K rotated copies (`f_native`, `f_native_r1`, …); only copy 0 carries the stack
+    /// check, and intra-SCC calls in copy `i` target the callee's copy `i+1` (wrapping to 0), so
+    /// the recursion re-checks the stack every K levels with zero per-call state.
+    native_recur_fns: std::collections::HashMap<String, (u32, usize)>,
+    /// #381 — set while emitting rotation copy `i` of `K` for a fn in SCC `scc_id`:
+    /// `(scc_id, i, K)`. Drives the intra-SCC call-target suffix in the M5 call arms.
+    native_recur_rotation: Option<(u32, usize, usize)>,
     /// `&/&mut Vec<f64|bool>` + `f64` params (`name -> sig`). Direct calls route to `name_nv(..)`
     /// passing array idents by reference; the boxed closure is suppressed. Empty unless the whole
     /// group lowers cleanly (scratch-buffer rollback), so it can never regress the boxed path.
@@ -1146,6 +1154,8 @@ impl Codegen {
             native_lcg_hoist_int: false,
             native_fn_body_returned: false,
             native_lcg_fns: std::collections::HashMap::new(),
+            native_recur_fns: std::collections::HashMap::new(),
+            native_recur_rotation: None,
             native_vec_fns: std::collections::HashMap::new(),
             native_vec_param_bounds: std::collections::HashMap::new(),
             inline_fns: std::collections::HashMap::new(),
@@ -2269,6 +2279,13 @@ impl Codegen {
                 Self::collect_native_fn_param_names(&program.statements, &self.native_fns);
             self.native_lcg_fns =
                 Self::collect_native_lcg_fns(&program.statements, &self.native_fns);
+            // #381 — fns on a call-graph cycle get guarded rotation copies (default ON;
+            // TISH_NATIVE_RECUR_GUARD=0 restores the plain unguarded emission).
+            self.native_recur_fns = if crate::native_recur_guard_enabled() {
+                Self::compute_native_recur_fns(&program.statements, &self.native_fns)
+            } else {
+                std::collections::HashMap::new()
+            };
             if !self.native_fns.is_empty() {
                 self.emit_native_fns(&program.statements)?;
                 self.writeln("");
@@ -5614,6 +5631,14 @@ impl Codegen {
                 let saved_try_depth = self.try_closure_depth;
                 self.try_closure_depth = 0;
                 self.indent += 1;
+                // #381 — boxed-call recursion guard: every user-fn closure counts one depth level
+                // (RAII: the guard's Drop decrements on any return path). Past TISH_MAX_CALL_DEPTH
+                // (default 20000) enter_call_guarded parks a catchable RangeError and the fn
+                // escapes with the dummy Value; the throw surfaces at the caller's pending-throw
+                // check. This bounds boxed recursion (incl. mutual/dynamic) exactly like the VM.
+                if crate::native_recur_guard_enabled() {
+                    self.writeln("let Some(_tish_depth) = tishlang_runtime::enter_call_guarded() else { return Value::Null; };");
+                }
                 // Mutable outer vars: capture the RefCell so assignments use borrow_mut
                 for outer_var in &mutable_outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
@@ -7146,8 +7171,8 @@ impl Codegen {
                         }
                         if ok {
                             return Ok(format!(
-                                "Value::Number({}_native({}))",
-                                Self::escape_ident(fname.as_ref()),
+                                "Value::Number({}({}))",
+                                self.native_call_target(fname.as_ref()),
                                 argc.join(", ")
                             ));
                         }
@@ -15774,6 +15799,142 @@ impl Codegen {
     }
 
     /// Emit `fn name_native(p: f64, ...) -> f64 { ... }` (top level) for each eligible fn.
+    /// #381 — find the M5 fns that can recurse (self-loops and mutual cycles) and size their guard
+    /// rotation. Builds the call graph restricted to `native_fns`, runs Tarjan's SCC, and maps every
+    /// fn on a cycle to `(scc_id, K)`. K rotated copies amortize the stack check to once per K
+    /// levels — and, because the copies are distinct symbols, LLVM inlines the chain like an
+    /// unrolled loop (self-recursion it would refuse to inline that deep), which measured *faster*
+    /// than the unguarded baseline on recursion_fib. K shrinks as bodies grow: big bodies amortize
+    /// the check by their own weight and duplicating them would just bloat the binary.
+    fn compute_native_recur_fns(
+        statements: &[Statement],
+        native_fns: &std::collections::HashSet<String>,
+    ) -> std::collections::HashMap<String, (u32, usize)> {
+        // Adjacency + a body-size proxy (exprs visited), in declaration order for determinism.
+        let mut names: Vec<String> = Vec::new();
+        let mut edges: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut sizes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for s in statements {
+            if let Statement::FunDecl { name, body, .. } = s {
+                if !native_fns.contains(name.as_ref()) {
+                    continue;
+                }
+                let mut called: Vec<String> = Vec::new();
+                let mut exprs = 0usize;
+                Self::for_each_stmt_expr(body, &mut |e| {
+                    Self::walk_subexprs(e, &mut |x| {
+                        exprs += 1;
+                        if let Expr::Call { callee, .. } = x {
+                            if let Expr::Ident { name: cn, .. } = callee.as_ref() {
+                                if native_fns.contains(cn.as_ref()) {
+                                    called.push(cn.to_string());
+                                }
+                            }
+                        }
+                    });
+                });
+                names.push(name.to_string());
+                edges.insert(name.to_string(), called);
+                sizes.insert(name.to_string(), exprs);
+            }
+        }
+        // Tarjan's SCC, iterative (explicit stack) so a pathological fn count can't recurse deep.
+        let idx_of: std::collections::HashMap<&str, usize> =
+            names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+        let n = names.len();
+        let mut index = vec![usize::MAX; n];
+        let mut low = vec![0usize; n];
+        let mut on_stack = vec![false; n];
+        let mut stack: Vec<usize> = Vec::new();
+        let mut next_index = 0usize;
+        let mut scc_of = vec![u32::MAX; n];
+        let mut scc_count = 0u32;
+        let mut scc_size: Vec<usize> = Vec::new();
+        for root in 0..n {
+            if index[root] != usize::MAX {
+                continue;
+            }
+            // Work item: (node, next child position).
+            let mut work: Vec<(usize, usize)> = vec![(root, 0)];
+            while let Some(&mut (v, ref mut child)) = work.last_mut() {
+                if *child == 0 {
+                    index[v] = next_index;
+                    low[v] = next_index;
+                    next_index += 1;
+                    stack.push(v);
+                    on_stack[v] = true;
+                }
+                let succ = edges[&names[v]]
+                    .iter()
+                    .filter_map(|c| idx_of.get(c.as_str()).copied())
+                    .nth(*child);
+                *child += 1;
+                match succ {
+                    Some(w) if index[w] == usize::MAX => work.push((w, 0)),
+                    Some(w) if on_stack[w] => low[v] = low[v].min(index[w]),
+                    Some(_) => {}
+                    None => {
+                        if low[v] == index[v] {
+                            let mut size = 0usize;
+                            while let Some(w) = stack.pop() {
+                                on_stack[w] = false;
+                                scc_of[w] = scc_count;
+                                size += 1;
+                                if w == v {
+                                    break;
+                                }
+                            }
+                            scc_count += 1;
+                            scc_size.push(size);
+                        }
+                        let (done, _) = work.pop().expect("work item");
+                        if let Some(&mut (parent, _)) = work.last_mut() {
+                            low[parent] = low[parent].min(low[done]);
+                        }
+                    }
+                }
+            }
+        }
+        // A fn needs the guard iff it sits on a cycle: |SCC| > 1, or a direct self-edge.
+        let mut out = std::collections::HashMap::new();
+        for (i, name) in names.iter().enumerate() {
+            let in_cycle = scc_size[scc_of[i] as usize] > 1
+                || edges[name].iter().any(|c| c == name);
+            if !in_cycle {
+                continue;
+            }
+            let k = match sizes[name] {
+                0..=16 => 32,
+                17..=64 => 16,
+                65..=256 => 8,
+                _ => 2,
+            };
+            out.insert(name.clone(), (scc_of[i], k));
+        }
+        out
+    }
+
+    /// #381 — the emitted name a call to M5 fn `fname` should target. Outside a rotation (or for a
+    /// non-recursive callee / different SCC) that is the plain `{fname}_native` — which for a
+    /// guarded fn is copy 0, the one with the stack check, so every entry from outside the cycle is
+    /// checked. Inside rotation copy `i`, an intra-SCC call targets the callee's copy `i+1` (the
+    /// checked copy 0 again after K levels).
+    fn native_call_target(&self, fname: &str) -> String {
+        let base = format!("{}_native", Self::escape_ident(fname));
+        if let (Some((cur_scc, i, k)), Some(&(callee_scc, _))) =
+            (self.native_recur_rotation, self.native_recur_fns.get(fname))
+        {
+            if callee_scc == cur_scc {
+                let next = (i + 1) % k;
+                if next != 0 {
+                    return format!("{}_r{}", base, next);
+                }
+            }
+        }
+        base
+    }
+
     fn emit_native_fns(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
         for s in statements {
             if let Statement::FunDecl { name, params, body, .. } = s {
@@ -15789,14 +15950,35 @@ impl Codegen {
                         _ => None,
                     })
                     .collect();
+                // #381 — a fn on a call-graph cycle is emitted K times (rotation copies): copy 0
+                // (`{name}_native`, the entry every external call targets) opens with the stack
+                // check; copies 1..K-1 (`{name}_native_r{i}`) are check-free, and intra-SCC calls
+                // rotate through them so the recursion re-checks every K levels. See
+                // [`Self::compute_native_recur_fns`] for why this is also a speedup.
+                let (scc_id, copies) = self
+                    .native_recur_fns
+                    .get(name.as_ref())
+                    .copied()
+                    .map(|(scc, k)| (scc, k))
+                    .unwrap_or((0, 1));
+                for copy_idx in 0..copies {
                 self.type_context.push_scope();
                 for p in params {
                     if let FunParam::Simple(tp) = p {
                         self.type_context.define(tp.name.as_ref(), RustType::F64);
                     }
                 }
-                self.writeln(&format!("fn {}_native({}) -> f64 {{", Self::escape_ident(name.as_ref()), plist.join(", ")));
+                let copy_suffix = if copy_idx == 0 { String::new() } else { format!("_r{}", copy_idx) };
+                self.writeln(&format!("fn {}_native{}({}) -> f64 {{", Self::escape_ident(name.as_ref()), copy_suffix, plist.join(", ")));
                 self.indent += 1;
+                if copies > 1 {
+                    self.native_recur_rotation = Some((scc_id, copy_idx, copies));
+                    if copy_idx == 0 {
+                        // The guard: one thread-local read + pointer compare; the cold bail parks
+                        // the catchable RangeError and unwinds via the NaN sentinel (#381).
+                        self.writeln("if tishlang_runtime::stack_low() { return tishlang_runtime::recursion_tripped_f64(); }");
+                    }
+                }
                 if let Some((global, mul, add, modulus)) = self.native_lcg_fns.get(name.as_ref()) {
                     let max_name = params
                         .iter()
@@ -15873,6 +16055,8 @@ impl Codegen {
                 self.indent -= 1;
                 self.writeln("}");
                 self.type_context.pop_scope();
+                self.native_recur_rotation = None;
+                } // rotation copies (#381)
             }
         }
         Ok(())
@@ -21132,8 +21316,8 @@ impl Codegen {
                             }
                             return Ok((
                                 format!(
-                                    "{}_native({})",
-                                    Self::escape_ident(fname.as_ref()),
+                                    "{}({})",
+                                    self.native_call_target(fname.as_ref()),
                                     argc.join(", ")
                                 ),
                                 RustType::F64,
@@ -22305,5 +22489,115 @@ mod tests_176 {
             "fib_native must use param n, not call-site literal"
         );
         assert!(nv.contains("fib_native((n -"), "expected recursive n-1 call");
+    }
+
+    // #381 — a self-recursive M5 fn gets guard rotation: copy 0 (`fib_native`) opens with the
+    // stack check and its self-calls target copy 1; the copies rotate back to the guarded copy 0,
+    // so the recursion re-checks the stack every K levels with zero per-call state.
+    #[test]
+    fn recursive_native_fn_gets_guard_rotation() {
+        use std::path::PathBuf;
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest.join("../../tests/perf/recursion_fib.tish");
+        let (rust, _, _, _) =
+            crate::compile_project_full(&path, path.parent(), &[], true).unwrap();
+        let copy0 = rust
+            .split("fn fib_native(")
+            .nth(1)
+            .expect("fib_native")
+            .split("\nfn ")
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(
+            copy0.contains("tishlang_runtime::stack_low()")
+                && copy0.contains("tishlang_runtime::recursion_tripped_f64()"),
+            "guarded copy 0 must open with the stack check:\n{copy0}"
+        );
+        assert!(
+            copy0.contains("fib_native_r1((n -"),
+            "copy 0's self-calls must rotate to copy 1:\n{copy0}"
+        );
+        assert!(rust.contains("fn fib_native_r1("), "rotation copies must exist");
+        let r1 = rust
+            .split("fn fib_native_r1(")
+            .nth(1)
+            .unwrap()
+            .split("\nfn ")
+            .next()
+            .unwrap();
+        assert!(
+            !r1.contains("stack_low"),
+            "non-zero copies are check-free (the check amortizes across the rotation)"
+        );
+        // The top-level call site must enter through the guarded copy 0 (no rotation suffix).
+        assert!(
+            rust.contains("fib_native(35_f64"),
+            "external calls target the guarded copy"
+        );
+    }
+
+    // #381 — mutual recursion is a cycle too: both fns are guarded and intra-SCC calls rotate.
+    #[test]
+    fn mutually_recursive_native_fns_get_guard_rotation() {
+        let src = r#"
+fn even(n) { if (n <= 0) { return 1 } return odd(n - 1) }
+fn odd(n) { if (n <= 0) { return 0 } return even(n - 1) }
+console.log(even(10))
+"#;
+        let program = parse(src).unwrap();
+        let rust = super::compile(&program).unwrap();
+        for f in ["even", "odd"] {
+            let copy0 = rust
+                .split(&format!("fn {f}_native("))
+                .nth(1)
+                .unwrap_or_else(|| panic!("{f}_native missing"))
+                .split("\nfn ")
+                .next()
+                .unwrap()
+                .to_string();
+            assert!(
+                copy0.contains("tishlang_runtime::stack_low()"),
+                "{f}_native copy 0 must carry the stack check:\n{copy0}"
+            );
+        }
+        assert!(
+            rust.contains("odd_native_r1((n -") || rust.contains("odd_native_r1( (n -"),
+            "even's copy 0 must call odd's copy 1 (intra-SCC rotation)"
+        );
+    }
+
+    // #381 — a non-recursive M5 fn pays nothing: no stack check, no rotation copies.
+    #[test]
+    fn non_recursive_native_fn_has_no_guard() {
+        let src = r#"
+fn add(a, b) { return a + b }
+console.log(add(2, 3))
+"#;
+        let program = parse(src).unwrap();
+        let rust = super::compile(&program).unwrap();
+        assert!(rust.contains("fn add_native("), "add should be M5-eligible");
+        assert!(
+            !rust.contains("fn add_native_r1(") && !rust.contains("stack_low"),
+            "non-recursive fns must stay unguarded and un-rotated"
+        );
+    }
+
+    // #381 — every boxed user-fn closure opens with the depth guard (RAII: Drop decrements), so
+    // boxed recursion — including through `value_call` — raises a catchable RangeError.
+    #[test]
+    fn boxed_closure_opens_with_depth_guard() {
+        let src = r#"
+fn rec(n) { return { v: rec(n + 1) } }
+rec(0)
+"#;
+        let program = parse(src).unwrap();
+        let rust = super::compile(&program).unwrap();
+        assert!(
+            rust.contains(
+                "let Some(_tish_depth) = tishlang_runtime::enter_call_guarded() else { return Value::Null; };"
+            ),
+            "boxed user-fn closures must enter through the depth guard"
+        );
     }
 }

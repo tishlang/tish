@@ -101,3 +101,82 @@ pub fn inc_call_depth() -> usize {
 pub fn dec_call_depth() {
     CALL_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
 }
+
+/// Default recursion ceiling shared by every backend that counts call depth (#381). Chosen with the
+/// interpreter: comfortably deep for real programs, but reached long before counted recursion can
+/// exhaust memory or the stack.
+pub const DEFAULT_MAX_CALL_DEPTH: usize = 20_000;
+
+thread_local! {
+    // The recursion ceiling, lazily initialized from `TISH_MAX_CALL_DEPTH` (0 = uninitialized). A
+    // thread-local Cell (not OnceLock) so tests can override it per-thread without racing the
+    // process-wide env. Shared by the VM's guard and the native backend's boxed-call guard. #381
+    static MAX_CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The recursion ceiling for depth-counting guards: user-fn calls deeper than this raise a catchable
+/// `RangeError` instead of overflowing the native stack. `TISH_MAX_CALL_DEPTH` overrides (default
+/// [`DEFAULT_MAX_CALL_DEPTH`]). #381
+pub fn max_call_depth() -> usize {
+    MAX_CALL_DEPTH.with(|c| {
+        let v = c.get();
+        if v != 0 {
+            return v;
+        }
+        let init = std::env::var("TISH_MAX_CALL_DEPTH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MAX_CALL_DEPTH);
+        c.set(init);
+        init
+    })
+}
+
+/// Test hook: pin the ceiling for the current thread (bypasses the env read).
+pub fn set_max_call_depth_for_test(n: usize) {
+    MAX_CALL_DEPTH.with(|c| c.set(n));
+}
+
+/// The catchable `RangeError` raised when a recursion guard trips. Built by hand (`tishlang_core`
+/// sits below `tishlang_builtins`) but shape-identical to `construct_builtin::error_object`:
+/// a `{ name, message }` object — keep the two in lock-step.
+pub fn stack_overflow_error() -> Value {
+    let mut e = ObjectMap::default();
+    e.insert(
+        std::sync::Arc::from("name"),
+        Value::String("RangeError".into()),
+    );
+    e.insert(
+        std::sync::Arc::from("message"),
+        Value::String("Maximum call stack size exceeded".into()),
+    );
+    Value::object(e)
+}
+
+/// RAII frame for the depth-counting recursion guard: holding one means the depth was incremented;
+/// dropping it decrements, so early returns in generated code can't leak a level. #381
+pub struct CallDepthGuard(());
+
+impl Drop for CallDepthGuard {
+    #[inline]
+    fn drop(&mut self) {
+        dec_call_depth();
+    }
+}
+
+/// Enter a counted user-fn call frame, or trip the recursion guard: past [`max_call_depth`] this
+/// parks the catchable stack-overflow `RangeError` in the pending-throw slot and returns `None` —
+/// the caller just returns its frame's dummy value (`Value::Null`) and the throw surfaces at the
+/// next pending-throw checkpoint. The native backend emits this at the top of every boxed user-fn
+/// closure. #381
+#[inline]
+pub fn enter_call_guarded() -> Option<CallDepthGuard> {
+    let depth = inc_call_depth();
+    if depth > max_call_depth() {
+        dec_call_depth();
+        set_pending_throw(stack_overflow_error());
+        return None;
+    }
+    Some(CallDepthGuard(()))
+}
