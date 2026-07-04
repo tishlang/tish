@@ -1159,6 +1159,10 @@ impl Printer {
     /// Print JSX children inline and verbatim. JSX whitespace is significant in tish, so text is
     /// emitted exactly as written and there is no reflow/indentation. A nested element/fragment is
     /// printed bare (as a child element); any other expression child gets `{ }`.
+    ///
+    /// Do NOT re-indent children by structural depth here: any injected newline/space becomes a
+    /// real `JsxChild::Text` node and changes the rendered output (and breaks idempotency). The
+    /// source's own layout inside the children is preserved as-is via the verbatim text nodes.
     fn jsx_children(&mut self, children: &[JsxChild]) {
         for ch in children {
             match ch {
@@ -1434,9 +1438,12 @@ impl Printer {
                             }
                         }
                         JsxProp::Spread(e) => {
+                            // A leading space separates this prop from the tag/prior prop; the
+                            // closing brace must NOT carry a trailing space, or a following attr
+                            // (which prepends its own space) would render as a double space.
                             self.buf.push_str(" {...");
                             self.expr(e);
-                            self.buf.push_str("} ");
+                            self.buf.push('}');
                         }
                     }
                 }
@@ -1915,6 +1922,41 @@ mod tests {
             assert_eq!(structure(src), structure(&out), "JSX structure changed: {src:?} -> {out:?}");
             assert_eq!(out, out2, "JSX not idempotent: {src:?} -> {out:?} -> {out2:?}");
         }
+    }
+
+    #[test]
+    fn multiline_jsx_children_are_bare_and_verbatim() {
+        // #157: multi-line JSX nested inside an arrow body must print element children BARE (not
+        // `{<child>}`-wrapped), must NOT emit stray blank `  ` lines, and must NOT re-indent to a
+        // hardcoded 2-space depth — JSX whitespace is significant, so the source layout is kept
+        // verbatim. This golden string locks the corrected output.
+        let src = "const x = () => {\n  return <div>\n    <span>hello</span>\n    <span>world</span>\n  </div>\n}\n";
+        let out = format_source(src).unwrap();
+        assert_eq!(
+            out,
+            "const x = () => {\n  return <div>\n    <span>hello</span>\n    <span>world</span>\n  </div>\n}\n",
+            "multi-line JSX corrupted: {out:?}"
+        );
+        // No curly-wrapped element children, and no blank two-space line.
+        assert!(!out.contains("{<"), "element child was brace-wrapped: {out:?}");
+        assert!(!out.contains("\n  \n"), "stray blank two-space line: {out:?}");
+        // Idempotent.
+        assert_eq!(format_source(&out).unwrap(), out, "not idempotent: {out:?}");
+    }
+
+    #[test]
+    fn multiline_jsx_fragment_children_are_bare_and_verbatim() {
+        // #157: the JsxFragment path shares the same layout logic as JsxElement; verify a
+        // multi-line fragment keeps its children bare and its source layout verbatim.
+        let src = "const y = () => {\n  return <>\n    <span>a</span>\n    <span>b</span>\n  </>\n}\n";
+        let out = format_source(src).unwrap();
+        assert_eq!(
+            out,
+            "const y = () => {\n  return <>\n    <span>a</span>\n    <span>b</span>\n  </>\n}\n",
+            "multi-line JSX fragment corrupted: {out:?}"
+        );
+        assert!(!out.contains("{<"), "fragment element child was brace-wrapped: {out:?}");
+        assert_eq!(format_source(&out).unwrap(), out, "not idempotent: {out:?}");
     }
 
     #[test]
